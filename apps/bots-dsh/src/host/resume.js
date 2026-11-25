@@ -19,6 +19,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { syncDirectory, syncFile } from './files.js'
+import { recordedModelOf, replyModel } from './solver-progress.js'
 import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
 import { rawTextOf, textOf } from './text.js'
 import { startUpdateRecovery } from './self-update-recovery.js'
@@ -60,13 +61,15 @@ export const resumeText = record => [
 export function turnsOf(events) {
   const turns = []
   let current
+  let model
   for (const event of events) {
+    if (event.type === 'request/header' || event.type === 'request/context') model = recordedModelOf(event)
     if (event.type === 'turn/start') {
-      current = { turn: event.data?.turn, took: [], texts: [], rawTexts: [], reason: undefined }
+      current = { turn: event.data?.turn, took: [], texts: [], rawTexts: [], textModels: [], reason: undefined }
       turns.push(current)
       continue
     }
-    if (current === undefined) continue
+    if (current === undefined || current.reason !== undefined) continue
     if (event.type === 'step/start') {
       current.stepFrom = current.texts.length
       continue
@@ -83,6 +86,7 @@ export function turnsOf(events) {
       if (text !== '') {
         current.texts.push(text)
         current.rawTexts.push(raw)
+        current.textModels.push(model)
       }
       continue
     }
@@ -112,12 +116,13 @@ export function turnOf(events, exchangeId) {
       const kept = finished(found)
       found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts],
         rawTexts: [...found.rawTexts.slice(0, kept.length), ...follow.rawTexts],
+        textModels: [...found.textModels.slice(0, kept.length), ...follow.textModels],
         stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length), firstLine: kept.length > 0 ? found.firstLine : follow.firstLine }
       next += 1
     }
     if (!steerCut(found)) return found
     const kept = finished(found)
-    return { ...found, texts: kept, rawTexts: found.rawTexts.slice(0, kept.length), reason: undefined }
+    return { ...found, texts: kept, rawTexts: found.rawTexts.slice(0, kept.length), textModels: found.textModels.slice(0, kept.length), reason: undefined }
   }
   return undefined
 }
@@ -1337,7 +1342,9 @@ export function install(rt) {
         sessionId,
       })
     }
-    const reply = { text: cutOff ? cutOffText(said) : said, reviewText: turn.rawTexts.join('\n\n'), firstLine: turn.firstLine ?? '' }
+    const firstLine = turn.firstLine ?? ''
+    const model = reason.kind === 'completed' ? replyModel(turn.rawTexts, turn.textModels, firstLine) : undefined
+    const reply = { text: cutOff ? cutOffText(said) : said, reviewText: turn.rawTexts.join('\n\n'), firstLine, model }
     // The turn ended with what it said: the answer goes up the way a finished turn's
     // does, with the results that came back for it and the text it held. A work that
     // still waits for what it handed on keeps its part until that comes back.
@@ -1348,7 +1355,7 @@ export function install(rt) {
     const selected = rt.workReply(workId, reply)
     const text = rt.answerText(workId, selected.text, name)
     const long = text.length > MESSAGE_INLINE_MAX ? await rt.attachLong(text, `Answer from ${name}.txt`) : undefined
-    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, undefined, selected)
+    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, selected.model, selected, sent)
   }
 
   // Report the same durable notes the resume pass works from, without exposing their payloads.

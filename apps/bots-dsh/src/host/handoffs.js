@@ -22,8 +22,6 @@ export function install(rt) {
   const works = () => (state.works ??= {})
   // What came back, whole; state.json keeps the start of each.
   const whole = new Map()
-  // Model proof belongs to the live turn that wrote this held reply.
-  const heldModels = new WeakMap()
   const save = (durable = false) => void rt.save(durable ? { durable } : undefined).catch(() => {})
   const nameOf = id => rt.botOf(id)?.name
 
@@ -241,11 +239,12 @@ export function install(rt) {
     if (work.room === undefined && work.fromRoom === undefined && work.to === rt.botOf(work.from)?.reviewerId) {
       work.heldReviewText = reviewText
       work.heldFirstLine = firstLine
+      work.heldModel = model
     } else {
       delete work.heldReviewText
+      delete work.heldModel
       work.heldFirstLine = firstLine.length <= TEXT_KEPT ? firstLine : ''
     }
-    heldModels.set(work, model)
     save()
   }
   // Who asked for the work, as the turn that answers a request sees its trigger.
@@ -260,7 +259,7 @@ export function install(rt) {
     const text = work?.held ?? ''
     const firstLine = work?.heldFirstLine
     const reviewText = work?.heldReviewText
-    const model = heldModels.get(work)
+    const model = work?.heldModel
     if (typeof reviewText === 'string' && typeof firstLine === 'string') return { text, reviewText, firstLine, model }
     // Old display copies can drop a surrogate pair at the cap. Only a shorter
     // copy is known to be complete, and a staged opening also needs its raw line.

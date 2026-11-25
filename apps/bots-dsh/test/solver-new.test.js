@@ -514,3 +514,57 @@ test('D2 a role install or attach refusal shows its own status and Done keeps th
     assert.deepEqual(ui.created.map(bot => bot.id), ['s-new'])
   }
 })
+
+test('New Solver can create on every offered agent and model with an independent reviewer', async () => {
+  const opus = 'acp-claude/claude-opus-5-5'
+  const alias = 'acp-claude/opus'
+  const rawAlias = 'acp-claude/haiku'
+  const sonnet = 'acp-claude/sonnet'
+  const nativeOpus = 'anthropic/claude-opus-5-5'
+  const hermes = 'acp-hermes/vendor/model'
+  const rows = [
+    { ref: CLAUDE, solverRef: opus },
+    { ref: alias, solverRef: opus },
+    { ref: opus },
+    { ref: rawAlias, solverRef: 'acp-claude/claude-haiku-5-5' },
+    { ref: sonnet },
+    ...[CODEX, AGY, OMP, FLASH, nativeOpus, hermes].map(ref => ({ ref })),
+  ]
+  const reviewer = { id: 'reviewer', name: 'Reviewer', model: nativeOpus }
+  const roster = rosterOf({ bots: [reviewer], models: rows, prefs: { defaultBotModel: CLAUDE } })
+  const rendered = dialog({ roster })
+  assert.equal(rendered.modelMenu('new-bot').props.bot.model, CLAUDE)
+  const offered = rows.filter(row => row.ref !== alias).map(row => row.ref)
+  assert.deepEqual(rendered.modelMenu('new-bot').props.roster.models.map(row => row.ref), offered)
+  rendered.pickModel(opus)
+  assert.ok(rendered.modelMenu('new-reviewer').props.roster.models.some(row => row.ref === nativeOpus))
+  for (const model of offered) {
+    const ui = dialog({ roster })
+    ui.pickModel(model)
+    if (model !== nativeOpus) ui.choose('bot:reviewer')
+    assert.equal(Boolean(ui.go().props.disabled), false, model)
+    await ui.create()
+    assert.equal(ui.actions.calls.find(([, payload]) => payload?.reviewerId)?.[1].model, model)
+  }
+})
+
+test('both New Solver pickers exclude equal identities and Create refuses a stale equal pick', () => {
+  const alias = 'acp-claude/opus'
+  const pin = 'acp-claude/claude-opus-5-5'
+  const dated = 'anthropic/model-20261001'
+  const datedLater = 'anthropic/model-20261101'
+  const context = dated + '[1m]'
+  const rows = [alias, pin, dated, datedLater, context, CODEX].map(ref => ({ ref }))
+  for (const [solver, equal] of [[pin, alias], [dated, dated], [dated, context]]) {
+    const ui = dialog({ roster: rosterOf({ bots: [{ id: 'reviewer', name: 'Reviewer', model: equal }], models: rows }) })
+    ui.pickModel(CODEX)
+    ui.choose('new')
+    ui.modelMenu('new-reviewer').props.onPick(equal)
+    ui.pickModel(solver)
+    assert.ok(!ui.modelMenu('new-reviewer').props.roster.models.some(row => row.ref === equal))
+    assert.ok(ui.modelMenu('new-reviewer').props.roster.models.some(row => row.ref === datedLater))
+    assert.ok(!all(ui.tree(), node => node.type === 'option').some(node => node.props.value === 'bot:reviewer'))
+    assert.equal(ui.go().props.disabled, true)
+    assert.match(ui.text(), /Choose a different model for the reviewer/)
+  }
+})

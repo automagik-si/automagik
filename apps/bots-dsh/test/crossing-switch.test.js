@@ -1751,11 +1751,11 @@ test('Rebase R2 delivers the consumed RESULT once after a restart switch rollbac
   progress.plan = { revision: 0, checks: ['test'], accepted: true }
   progress.passed = ['test']
   progress.snapshot = resultSnapshot(workspace)
-  progress.review = { exchangeId: 'result-work', reviewerId: 'reviewer', revision: 0, solverModel: 'v4' }
+  progress.review = { exchangeId: 'result-work', reviewerId: 'reviewer', revision: 0, solverModel: 'deepseek/v4' }
   const workAt = Date.now()
   const info = { kind: SOURCE_KIND, role: 'reply', exchangeId: 'result-reply', replyTo: 'result-work',
     senderSessionId: 'reviewer', reviewReceipt: 'host-receipt' }
-  b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', workAt, info, 'independent')()
+  b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', workAt, info, 'other/independent')()
   const original = message(SOURCE_KIND, 'SHIP', info)
   b.ctx.emit('agent/inbox/claimed', { agent: fresh, message: original, turn: 3 })
   const { consumedResult } = b.rt.takeReviewReply(fresh.id, original, 3)
@@ -1776,7 +1776,7 @@ test('Rebase R2 delivers the consumed RESULT once after a restart switch rollbac
   const resumed = b.rt.takeReviewContinuation('s1', input)
   assert.deepEqual(resumed, consumedResult)
   const finish = consumedResult => b.rt.reviewTurnEnd('b1', {
-    completed: true, wroteText: true, model: 'v4', request: undefined, consumedResult,
+    completed: true, wroteText: true, model: 'deepseek/v4', request: undefined, consumedResult,
   })
   finish(resumed)
   const mark = b.bot.reviewTrack.last

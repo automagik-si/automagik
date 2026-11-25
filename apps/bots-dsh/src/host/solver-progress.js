@@ -1,9 +1,9 @@
-import { concreteModel } from '../shared/solver-model.js'
+import { chosenIdentity, chosenIdentityOf } from '../shared/solver-model.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, readdirSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { SOLVER_FIX_LIMIT, SOLVER_REPLAN_LIMIT, isSolverBot, isWrittenSolverMethod, solverAutoOn } from '../shared/solver-method.js'
-import { readableRoute } from './session-route.js'
+import { guardVerdictOf } from '../shared/review-guard.js'
 import { normalizeCheckCommand } from './solver-check-command.js'
 
 const MAX_CHECKS = 20
@@ -117,20 +117,35 @@ export function resultSnapshot(folder) {
   }
 }
 
-export function modelOf(rt, agent, session = agent?.session, answeringTurn) {
-  // Only the generation's route and the ACP option the live agent actually selected.
+export function modelOf(session) {
   try {
-    const route = readableRoute(session?.requestHeader?.()?.config)
-    if (!route) return undefined
-    const acp = route.provider.startsWith('acp-')
-    const model = acp
-      ? rt.ctx.get?.('acpAgents')?.effectiveModelOf?.(session?.id ?? agent?.id, route.provider, route.model, answeringTurn, concreteModel)
-      : route.model
-    return concreteModel(route.provider, model)
+    const route = session?.requestHeader?.()?.config
+    return chosenIdentity(route?.provider, route?.model)
   } catch {
     return undefined
   }
 }
+
+// The log records the generation's route before its output. The header and
+// context are repeated only on change, so each applies until the next one.
+export function recordedModelOf(event) {
+  const route = event.type === 'request/header' ? event.data?.header?.config : event.data
+  return chosenIdentity(route?.provider, route?.model)
+}
+
+export function replyModel(texts, models, firstLine) {
+  const model = models[0]
+  if (models.every(route => route === model)) return model
+  // A steer can join text from two turns. Find the part that supplied SHIP
+  // while retaining the previous lines for the strict verdict parser.
+  for (let end = 1; end <= models.length; end++) {
+    if (end < models.length && models[end] === models[end - 1]) continue
+    if (guardVerdictOf(texts.slice(0, end).join('\n\n'), undefined, 'result', firstLine) === 'SHIP') return models[end - 1]
+  }
+}
+
+export const legacyResultReview = review => review !== undefined
+  && (!chosenIdentityOf(review.solverModel) || (review.reviewer && !chosenIdentityOf(review.reviewer.model)))
 
 export function normalizedAutoInstruction(text) {
   if (typeof text !== 'string') return undefined
@@ -151,8 +166,9 @@ export function solverOutcome(bot, track, review, pending, model, snapshot) {
   if (limit) return { reason: 'limit', limit: { kind: limit.kind, ...(limit.check ? { check: limit.check } : {}) } }
   if (!progress || !passes(progress, snapshot)) return notDone('checks')
   const result = progress.review
-  if (review !== 'bot' || pending || result?.revision !== progress.revision || result.verdict !== 'SHIP'
-    || result.solverModel !== model || result.reviewer?.id !== bot.reviewerId || !result.reviewer.model) return notDone('review')
+  if (legacyResultReview(result) || review !== 'bot' || pending || result?.revision !== progress.revision || result.verdict !== 'SHIP'
+    || chosenIdentityOf(result.solverModel) !== model || result.reviewer?.id !== bot.reviewerId
+    || !result.reviewer.model || chosenIdentityOf(result.reviewer.model) === model) return notDone('review')
   return { done: true, reviewer: result.reviewer, exchangeId: result.exchangeId }
 }
 
@@ -177,14 +193,17 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
   }
   const result = progress.review
   if (result?.exchangeId === exchangeId && result.reviewerId === reviewer.id && result.revision === progress.revision) {
-    const independent = model && model !== result.solverModel
+    const solverIdentity = chosenIdentityOf(result.solverModel)
+    const reviewerIdentity = chosenIdentityOf(model)
+    const comparable = solverIdentity && reviewerIdentity
+    const independent = comparable && reviewerIdentity !== solverIdentity
     const reason = ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? undefined
-      : !model ? 'model' : !independent ? 'same' : verdict === undefined ? 'verdict' : undefined
+      : !comparable ? 'model' : !independent ? 'same' : verdict === undefined ? 'verdict' : undefined
     const { unverified: _previous, reviewer: _reviewer, receipt: _receipt, ...designated } = result
     progress.review = {
       ...designated,
       verdict: reason ? 'unverified' : verdict,
-      ...(independent ? { reviewer: { id: reviewer.id, name: reviewer.name, model } } : {}),
+      ...(independent ? { reviewer: { id: reviewer.id, name: reviewer.name, model: reviewerIdentity } } : {}),
       ...(reason ? { unverified: reason } : {}),
       ...(receipt ? { receipt } : {}),
     }

@@ -17,7 +17,6 @@ import { callArguments } from '../../acp-dsh/src/host/tool.js'
 import { apply } from '../index.js'
 import { ROUTE, STEER_CUT } from '../src/host/constants.js'
 import { questionReply } from '../src/host/parts.js'
-import { modelOf } from '../src/host/solver-progress.js'
 import { answerSender } from '../src/host/turns.js'
 import { DICTIONARY, installLocale } from '../src/client/i18n.js'
 import { reviewMarkText, solverAutoView } from '../src/client/solver-draft.js'
@@ -32,6 +31,7 @@ import { NewSolver, mount, all, text } from './fixtures/solver-dialog.mjs'
 
 const solverModel = { provider: 'fake', model: 'solver-model' }
 const reviewerModel = { provider: 'fake', model: 'reviewer-model' }
+const refOf = ({ provider, model }) => `${provider}/${model}`
 const content = text => [{ type: 'text', text }]
 
 function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { liveTurn, configure } = {}) {
@@ -165,7 +165,7 @@ async function reviewedPlan(h, checks, commands, { legacyPlan } = {}) {
   const exchange = (kind, text = 'Verify the evidence.') => h.tool('message_bot', {
     to: 'reviewer', message: text, solver_review: kind, solver_request: request, reply_to: 'me',
   })
-  const verdict = (exchangeId, model = reviewerModel.model) => answerSender(h.rt, 'reviewer', {
+  const verdict = (exchangeId, model = refOf(reviewerModel)) => answerSender(h.rt, 'reviewer', {
     exchangeId, senderSessionId: 'solver',
   }, 'SHIP', undefined, undefined, model)
   const delivered = []
@@ -203,7 +203,7 @@ async function reviewReplyFixture(t, averageCommand = 'node --test average.test.
       solver_review: kind, solver_request: request, reply_to: 'me' })
     return deliveries.at(-1).message.exchangeId
   }
-  const answer = (exchangeId, shouldSend, model = reviewerModel.model) => {
+  const answer = (exchangeId, shouldSend, model = refOf(reviewerModel)) => {
     const input = h.agentOf('reviewer').message
     assert.equal(input.source.exchangeId, exchangeId)
     h.takeInput('reviewer', input)
@@ -329,13 +329,13 @@ for (const release of ['consumption', 'abandonment', 'delivery failure', 'discar
       h.finish('solver', 'Both reviews approved and both checks passed.')
     } else {
       // Test terminal release on the same request, without a new person message overriding the hold.
-      h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: solverModel.model, request })
+      h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request })
     }
     const mark = track().last
     assert.equal(track().delivered, true)
     assert.equal(mark.done, true)
     assert.equal(mark.resultExchangeId, exchange)
-    assert.equal(mark.reviewer.model, reviewerModel.model)
+    assert.equal(mark.reviewer.model, refOf(reviewerModel))
     h.event('solver', 'turn/start', { turn: 6 })
     h.finish('solver', 'Already delivered.')
     assert.deepEqual(track().last, mark)
@@ -435,7 +435,7 @@ test('Stage 6 review reply stays pending in the delivery notes across restart', 
 
   const next = fixture(t, h.home)
   await next.rt.load()
-  const boundEnd = () => next.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: solverModel.model, request })
+  const boundEnd = () => next.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request })
   boundEnd()
   assert.equal(await requestOf(next), request)
   // The boot replay timer is unref'ed by the plugin. Keep the fake test alive until it finishes.
@@ -477,7 +477,7 @@ test('Stage 6 round 2 keeps a review reply through an ordinary inbox move and re
   const edited = { ...original, id: `${original.id}-edited` }
   assert.equal(inbox.replace(original.id, edited), true)
   await immediate()
-  const closeRequest = () => h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: solverModel.model, request })
+  const closeRequest = () => h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request })
   closeRequest()
   assert.equal(await requestOf(h), request, 'ordinary move and replacement keep the queued reply unread')
 
@@ -552,7 +552,7 @@ test('Stage 6 round 2 keeps an accepted reply after a later delivery failure', a
       const [input] = inbox
       h.event('solver', 'turn/start', { turn: 3 })
       h.takeInput('solver', { ...input, source: { ...input.source, reviewReceipt: 'stale' } })
-      h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: solverModel.model, request })
+      h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request })
       assert.equal(await requestOf(h), request)
       h.takeInput('solver', inbox.shift())
       assert.equal(h.rt.deliveryNote(reply.message.exchangeId), undefined)
@@ -759,7 +759,6 @@ async function nativeMirror(t, h, provider = 'acp-codex') {
   agent.session.append('request/header', { header: { config: { provider, model: 'default' } } })
   const codex = provider === 'acp-codex'
   const name = codex ? 'Codex fixture' : 'Claude fixture'
-  h.ctx.acpAgents.effectiveModelOf = id => id === 'solver' ? (codex ? 'gpt-6.2-sol' : 'claude-sonnet-5-5') : undefined
   const scope = createScope(agents, agent)
   agent.ctx = scope.ctx
   const adapter = new AcpAdapter(ctx, new Map([[provider, { name }]]))
@@ -1002,10 +1001,11 @@ test('stage verdict correction: a stopped joined request receives a notice witho
 })
 
 const reviewSteerCut = { kind: 'aborted', reason: { kind: 'hook', reason: STEER_CUT } }
-const acknowledgedReviewer = 'claude-sonnet-5-5'
+const heldReviewer = { provider: 'acp-claude', model: 'sonnet' }
+const heldReviewerIdentity = 'acp-claude/claude-sonnet-5-5'
 
 async function heldReviewReply(t, heldText, {
-  kind = 'plan', acknowledgedTurn, displayText = heldText.trim(), childText = 'The fixture is present.', writtenRetry = false,
+  kind = 'plan', missingHeldRoute = false, displayText = heldText.trim(), childText = 'The fixture is present.', writtenRetry = false,
 } = {}) {
   const { h, request, review, track, openReply, deliveries } = await reviewReplyFixture(t)
   if (kind === 'result') {
@@ -1018,11 +1018,8 @@ async function heldReviewReply(t, heldText, {
     assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
     assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
   }
-  if (acknowledgedTurn !== undefined) {
-    h.agentOf('reviewer').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: acknowledgedReviewer } })
-    h.ctx.acpAgents.effectiveModelOf = (id, provider, model, turn) => {
-      if (id === 'reviewer' && provider === 'acp-claude' && model === acknowledgedReviewer && turn === acknowledgedTurn) return model
-    }
+  if (kind === 'result') {
+    h.agentOf('reviewer').session.requestHeader = () => missingHeldRoute ? undefined : { config: heldReviewer }
   }
   const exchange = await review(kind)
   h.finish('solver', 'Waiting for review.')
@@ -1042,6 +1039,8 @@ async function heldReviewReply(t, heldText, {
   await h.tool('message_bot', { to: 'other', message: 'Check the fixture.', reply_to: 'me', when: 'queue' }, 'reviewer')
   assert.equal(h.rt.waitsWork(exchange), true)
   h.finish('reviewer', heldText)
+  // The silent turn uses a different route, equal to the Solver's.
+  h.agentOf('reviewer').session.requestHeader = () => ({ config: solverModel })
   assert.equal(h.rt.state.works[exchange].held, displayText)
   h.event('other', 'turn/start', { turn: 1 })
   h.takeInput('other', h.agentOf('other').message)
@@ -1094,16 +1093,16 @@ test('stage verdict correction: a silent continuation uses the held reviewer fir
     await h.close()
   }
   const result = 'RESULT SHIP\nVerdict: SHIP'
-  for (const [acknowledgedTurn, expected] of [[3, 'unverified'], [2, 'SHIP']]) {
-    const { h, exchange, track, deliveries } = await heldReviewReply(t, result, { kind: 'result', acknowledgedTurn })
+  for (const [missingHeldRoute, expected] of [[true, 'unverified'], [false, 'SHIP']]) {
+    const { h, exchange, track, deliveries } = await heldReviewReply(t, result, { kind: 'result', missingHeldRoute })
     h.finish('reviewer', '')
     const { message, sent } = deliveries.at(-1)
     assert.equal(await sent, message.exchangeId)
     const input = h.agentOf('solver').message
     assertHeldDelivery(input, exchange, result)
     const review = track().solver.review
-    assert.equal(review.verdict, expected, 'RESULT uses the model proof from the run that wrote the held reply')
-    assert.equal(review.reviewer?.model, expected === 'SHIP' ? acknowledgedReviewer : undefined)
+    assert.equal(review.verdict, expected, 'RESULT uses the route of the turn that wrote the held reply')
+    assert.equal(review.reviewer?.model, expected === 'SHIP' ? heldReviewerIdentity : undefined)
     assert.equal(review.unverified, expected === 'SHIP' ? undefined : 'model')
     assert.equal(modelWarningCount(input), expected === 'SHIP' ? 0 : 1)
     await h.close()
@@ -1114,14 +1113,14 @@ test('stage verdict exception: a held RESULT veto beyond the display cap withhol
   const reply = readFileSync(new URL('./fixtures/held-result-2329.txt', import.meta.url), 'utf8')
   const displayText = reply.slice(0, 2000)
   const { h, exchange, track, deliveries, openReply } = await heldReviewReply(t, reply, {
-    kind: 'result', acknowledgedTurn: 2, displayText,
+    kind: 'result', displayText,
   })
   h.finish('reviewer', '')
   await openReply(4, deliveries.at(-1))
   const input = h.agentOf('solver').message
   assertHeldDelivery(input, exchange, displayText)
   assert.ok(!input.content[0].text.includes('Verdict: BLOCKED'))
-  assert.equal(track().solver.review.reviewer?.model, acknowledgedReviewer)
+  assert.equal(track().solver.review.reviewer?.model, heldReviewerIdentity)
   assert.equal(track().solver.review.exchangeId, exchange)
   assert.equal(track().solver.review.revision, track().solver.revision)
   h.finish('solver', 'Finished the agreed checks and received the review.')
@@ -1133,14 +1132,14 @@ test('stage verdict exception: a written-tool retry preserves the veto hidden fr
   const reply = 'RESULT SHIP\n<tool_call><function=read>\nVerdict: BLOCKED'
   const displayText = 'RESULT SHIP'
   const { h, exchange, track, deliveries, openReply } = await heldReviewReply(t, reply, {
-    kind: 'result', acknowledgedTurn: 3, displayText, writtenRetry: true,
+    kind: 'result', displayText, writtenRetry: true,
   })
   h.finish('reviewer', '')
   await openReply(4, deliveries.at(-1))
   const input = h.agentOf('solver').message
   assertHeldDelivery(input, exchange, displayText)
   assert.doesNotMatch(input.content[0].text, /<tool_call>|Verdict: BLOCKED/)
-  assert.equal(track().solver.review.reviewer?.model, acknowledgedReviewer)
+  assert.equal(track().solver.review.reviewer?.model, heldReviewerIdentity)
   assert.equal(track().solver.review.exchangeId, exchange)
   assert.equal(track().solver.review.revision, track().solver.revision)
   h.finish('solver', 'Finished the agreed checks and received the review.')
@@ -1156,7 +1155,7 @@ test('stage verdict exception: complete held evidence governs bound verdicts onl
     ['RESULT SHIP\n~~~\nVerdict: BLOCKED\n~~~', 'SHIP', 'Verdict: BLOCKED'],
   ]) {
     const { h, track, deliveries, openReply } = await heldReviewReply(t, reply, {
-      kind: 'result', acknowledgedTurn: 2, childText,
+      kind: 'result', childText,
     })
     h.finish('reviewer', '')
     await openReply(4, deliveries.at(-1))
@@ -1174,9 +1173,12 @@ test('stage verdict exception: recovery keeps the full veto and refuses a legacy
   const displayText = reply.slice(0, 2000)
   for (const older of [false, true]) {
     const { h, child, exchange } = await heldReviewReply(t, reply, {
-      kind: 'result', acknowledgedTurn: 2, displayText,
+      kind: 'result', displayText,
     })
-    if (older) delete h.rt.state.works[exchange].heldReviewText
+    if (older) {
+      delete h.rt.state.works[exchange].heldReviewText
+      delete h.rt.state.works[exchange].heldModel
+    }
     await h.rt.save({ required: true, durable: true })
     assert.equal(await h.rt.flushUpdateNotes(), true)
     const state = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8'))
@@ -1197,40 +1199,59 @@ test('stage verdict exception: recovery keeps the full veto and refuses a legacy
     const track = next.rt.botOf('solver').reviewTrack
     assert.equal(track.solver.review.verdict, older ? 'unverified' : 'BLOCKED')
     assert.equal(track.verdicts.at(-1)?.verdict, older ? 'SHIP' : 'BLOCKED')
-    assert.equal(track.solver.review.reviewer, undefined)
+    assert.equal(track.solver.review.reviewer?.model, older ? undefined : heldReviewerIdentity)
     await next.close()
   }
 })
 
 test('stage verdict correction: recovery uses the held line for the reply reconciled from the log', async t => {
-  for (const [heldText, expected, { steer, older, kind = 'plan' } = {}] of [
+  for (const [heldText, expected, { steer, older, recorded, legacy, kind = 'plan' } = {}] of [
     ['RESULT SHIP\nVerdict: SHIP', heldPlanUnverified, { steer: true }],
     ['PLAN SHIP', heldPlanApproved],
     ['PLAN SHIP\nVerdict: SHIP', heldPlanUnverified, { older: true }],
     ['Verdict: SHIP', heldPlanApproved, { older: true }],
-    ['RESULT SHIP', undefined, { kind: 'result' }],
+    ['RESULT SHIP', 'SHIP', { kind: 'result' }],
+    ['RESULT SHIP', 'SHIP', { kind: 'result', legacy: true }],
+    ['Waiting for evidence.', 'SHIP', { kind: 'result', recorded: true }],
   ]) {
-    const { h, child, exchange } = await heldReviewReply(t, heldText, { kind, acknowledgedTurn: 2 })
+    const { h, child, exchange } = await heldReviewReply(t, heldText, { kind })
     if (older) delete h.rt.state.works[exchange].heldFirstLine
+    const progress = h.rt.botOf('solver').reviewTrack.solver
+    const workAt = h.rt.state.works[exchange].at
+    if (legacy) progress.review.solverModel = solverModel.model
+    const context = route => ({ type: 'request/context', data: route })
+    const recordedRoute = { provider: 'acp-omp', model: 'default' }
+    const solverLog = legacy ? [
+      { type: 'turn/start', data: { turn: 3 } },
+      context(solverModel),
+      { type: 'tool/call', time: workAt, data: { name: 'mcp__dsh__message_bot',
+        arguments: JSON.stringify({ solver_review: 'result', solver_request: progress.request }) } },
+      { type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } },
+      { type: 'turn/start', data: { turn: 4 } },
+      context({ provider: 'acp-omp', model: 'default' }),
+    ] : []
     // Omni closes while the reviewer's continuation is running. Only DSH sees it finish.
     const end = { type: 'turn/end', data: { turn: steer ? 4 : 3, reason: { kind: 'completed' } } }
-    const log = [{ type: 'turn/start', data: { turn: 3 } }, { type: 'user/message', data: child }]
+    const log = [{ type: 'turn/start', data: { turn: 3 } }, { type: 'user/message', data: child },
+      context(recorded ? recordedRoute : solverModel)]
+    if (recorded) log.push({ type: 'assistant/message', data: { message: { content: content('RESULT SHIP') } } })
     if (steer) log.push({ type: 'step/start' },
       { type: 'assistant/message', data: { message: { content: content('PLAN SHIP') } } },
       { type: 'turn/end', data: { turn: 3, reason: reviewSteerCut } }, { type: 'turn/start', data: { turn: 4 } })
-    log.push(end)
+    log.push(end, { type: 'turn/start', data: { turn: 5 } }, context(solverModel))
     await h.rt.save({ required: true, durable: true })
     assert.equal(await h.rt.flushUpdateNotes(), true)
     const state = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8'))
     const notes = JSON.parse(readFileSync(join(h.home, 'inflight.json'), 'utf8'))
     assert.equal(state.works[exchange].held, heldText)
+    if (kind === 'result') assert.equal(state.works[exchange].heldModel, heldReviewerIdentity)
     assert.equal(notes.turns.reviewer.trigger.exchangeId, child.source.exchangeId)
     await h.close()
     const inspected = []
     const next = fixture(t, h.home, { configure(ctx) {
       ctx.sessionController.inspect = async id => {
         inspected.push(id)
-        return { events: id === 'reviewer' ? log : [] }
+        return { events: id === 'reviewer' ? log : solverLog }
       }
     } })
     await next.rt.load()
@@ -1241,15 +1262,20 @@ test('stage verdict correction: recovery uses the held line for the reply reconc
     const solver = next.agentOf('solver')
     await until(() => solver.message?.source.replyTo === exchange)
     assert.equal(next.rt.state.works[exchange], undefined)
-    assertHeldDelivery(solver.message, exchange, heldText)
+    assertHeldDelivery(solver.message, exchange, recorded ? 'RESULT SHIP' : heldText)
     const track = next.rt.botOf('solver').reviewTrack
     if (kind === 'plan') {
       assertHeldPlanVerdict(track, expected)
     } else {
-      assert.equal(track.solver.review.verdict, 'unverified')
-      assert.equal(track.solver.review.unverified, 'model')
-      assert.equal(track.solver.review.reviewer, undefined)
-      assert.equal(modelWarningCount(solver.message), 1)
+      assert.equal(track.solver.review.verdict, expected)
+      assert.equal(track.solver.review.solverModel, refOf(solverModel))
+      assert.equal(track.solver.review.reviewer?.model, recorded ? refOf(recordedRoute) : heldReviewerIdentity)
+      assert.equal(track.solver.review.receipt, solver.message.source.reviewReceipt)
+      assert.equal(modelWarningCount(solver.message), 0)
+      next.event('solver', 'turn/start', { turn: 6 })
+      next.takeInput('solver', solver.message)
+      next.finish('solver', 'Delivered after recovering RESULT.')
+      assert.equal(next.rt.botOf('solver').reviewTrack.last?.done, true)
     }
     await next.close()
   }
@@ -1613,7 +1639,6 @@ test('Stage 6 full chain keeps native check and review evidence through unchange
   const exchangeId = h.delivered.at(-1).exchangeId
   const { host } = h
   host.agentOf('reviewer').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'default' } })
-  host.ctx.acpAgents.effectiveModelOf = id => id === 'reviewer' ? 'claude-sonnet-5-5' : 'gpt-6.2-sol'
   host.event('reviewer', 'user/message', { content: content('Review the result.'), source: {
     kind: 'bot', role: 'request', senderSessionId: 'solver', exchangeId,
   } })
@@ -1621,8 +1646,8 @@ test('Stage 6 full chain keeps native check and review evidence through unchange
   host.finish('reviewer', 'Verdict: SHIP\nEvidence verified.')
   const review = h.bot().reviewTrack.solver.review
   assert.equal(review.verdict, 'SHIP')
-  assert.equal(review.solverModel, 'gpt-6.2-sol')
-  assert.equal(review.reviewer.model, 'claude-sonnet-5-5')
+  assert.equal(review.solverModel, 'acp-codex/default')
+  assert.equal(review.reviewer.model, 'acp-claude/default')
 
   const diff = await h.mirror('diff', { command: "/bin/bash -lc 'git diff'", beforeExit: churn(h.cwd) })
   assert.equal(diff.isError, false)
@@ -1737,23 +1762,6 @@ test('LA-1 rejects a pass that contradicts the executed check', async t => {
   assert.match(await h.progress('checks', { request, run: 'nonzero', results: results() }), /contradicts.*outcome/i)
   assert.match(await h.progress('checks', { request, run: 'nonzero', results: results('check-a', false) }), /Recorded/)
   await assert.rejects(send('result'), /every agreed check/)
-})
-
-test('LA-2 a Claude ACP alias cannot establish independent model identity', async t => {
-  const h = await setup(t)
-  const { request, send, delivered } = await reviewedPlan(h, ['check-a'])
-  const direct = { provider: 'anthropic', model: 'claude-sonnet-5-5' }
-  h.agentOf('solver').session.requestHeader = () => ({ config: direct })
-  h.agentOf('reviewer').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'sonnet' } })
-  h.ctx.acpAgents.effectiveModelOf = () => 'sonnet'
-  await checked(h, request, 'current')
-  await send('result')
-  h.event('reviewer', 'user/message', { content: content('Check the result.'), source: {
-    kind: 'bot', role: 'request', senderSessionId: 'solver', exchangeId: delivered.at(-1).exchangeId,
-  } })
-  h.event('reviewer', 'turn/start', { turn: 1 })
-  h.finish('reviewer', 'SHIP')
-  assert.equal(h.rt.botOf('solver').reviewTrack.solver.review.verdict, 'unverified')
 })
 
 test('LA-2 an undelivered designation can be retried after restart', async t => {
@@ -2053,7 +2061,7 @@ test('Only current complete checks and an independent designated SHIP mark Done'
       solver_review: kind, solver_request: request, reply_to: 'me' })
     return deliveries.at(-1).exchangeId
   }
-  const verdict = (exchangeId, text, model = reviewerModel.model) => answerSender(h.rt, 'reviewer', {
+  const verdict = (exchangeId, text, model = refOf(reviewerModel)) => answerSender(h.rt, 'reviewer', {
     exchangeId, senderSessionId: 'solver',
   }, text, undefined, undefined, model)
   await plan(h, request)
@@ -2093,8 +2101,9 @@ test('Only current complete checks and an independent designated SHIP mark Done'
   h.rt.openWork('late-plan', { from: 'solver', to: 'reviewer' })
   verdict('late-plan', 'SHIP')
   assert.equal(bot.reviewTrack.solver.review.verdict, undefined)
-  verdict(exchange, 'SHIP', solverModel.model)
+  verdict(exchange, 'SHIP', refOf(solverModel))
   assert.equal(bot.reviewTrack.solver.review.verdict, 'unverified')
+  assert.equal(bot.reviewTrack.solver.review.unverified, 'same')
   exchange = await review('result')
   verdict(exchange, '> SHIP')
   assert.equal(bot.reviewTrack.solver.review.verdict, 'unverified')
@@ -2117,7 +2126,7 @@ test('Only current complete checks and an independent designated SHIP mark Done'
   h.finish('solver', 'Reviewed delivery.')
   const mark = bot.reviewTrack.last
   assert.equal(mark.done, true)
-  assert.deepEqual(mark.reviewer, { id: 'reviewer', name: 'reviewer', model: reviewerModel.model })
+  assert.deepEqual(mark.reviewer, { id: 'reviewer', name: 'reviewer', model: refOf(reviewerModel) })
   h.rt.botOf('reviewer').name = 'Renamed'
   const displayed = reviewMarkText({ ...bot, reviewMark: mark }, { byId: h.rt.state.bots })
   assert.match(displayed, /every check passed and reviewer approved/)
@@ -2210,8 +2219,9 @@ async function pickDialogModel(node, provider, label, withLevel) {
   return rows[0].props.title
 }
 
-function wireHost(t, home, acknowledgement = 'selected', configure, codexAcknowledgement = 'selected') {
+function wireHost(t, home = mkdtempSync(join(tmpdir(), 'solver-pin-wire-')), acknowledgement = 'selected', configure, codexAcknowledgement = 'selected') {
   const traces = Object.fromEntries(['acp-claude', 'acp-codex'].map(provider => [provider, join(home, provider + '.jsonl')]))
+  for (const path of Object.values(traces)) writeFileSync(path, '')
   const connector = (provider, ack) => {
     const path = join(home, provider + '.mjs')
     writeFileSync(path, `process.argv.splice(2, Infinity, ...${JSON.stringify([traces[provider], provider, ack])}); await import(${JSON.stringify(wireFixture)});\n`)
@@ -2251,11 +2261,13 @@ function wireHost(t, home, acknowledgement = 'selected', configure, codexAcknowl
     ctx.acpAgents.botIdentity = () => () => {}
     configure?.(ctx, agentOf)
   } })
-  const wire = provider => readFileSync(traces[provider], 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  const wire = provider => readFileSync(traces[provider], 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
   return { h, adapter, wire, selections }
 }
 
-async function dialogWire(t, acknowledgement) {
+async function dialogWire(t, acknowledgement, reviewerLabel = 'Sonnet 5.5', {
+  solverRef = configuredSolver, solverLabel = 'GPT-6 Sol', existingReviewer,
+} = {}) {
   const home = mkdtempSync(join(tmpdir(), 'solver-dialog-wire-'))
   const cwd = mkdtempSync(join(tmpdir(), 'solver-dialog-project-'))
   t.after(() => rmSync(cwd, { recursive: true, force: true }))
@@ -2267,10 +2279,13 @@ async function dialogWire(t, acknowledgement) {
   // Keep bootstrap from creating an unrelated Main Bot.
   h.rt.state.mainBotIds = ['main']
   h.rt.state.bots.main = { id: 'main', name: 'Main', createdAt: 1 }
+  if (existingReviewer) {
+    h.rt.state.bots.reviewer = { id: 'reviewer', name: 'Existing reviewer', role: 'Reviewer', model: existingReviewer, createdAt: 1 }
+  }
   await h.rt.save({ required: true })
   const rows = await h.rt.catalog({ fresh: true })
-  assert.ok(rows.some(row => row.ref === configuredSolver), JSON.stringify(rows))
-  const roster = { bots: [h.rt.botOf('main')], mainBotIds: ['main'], models: rows, prefs: { roles: false } }
+  assert.ok(rows.some(row => row.ref === solverRef), JSON.stringify(rows))
+  const roster = { bots: Object.values(h.rt.state.bots), mainBotIds: ['main'], models: rows, prefs: { roles: false } }
   const creates = []
   const failures = []
   let solver
@@ -2297,34 +2312,39 @@ async function dialogWire(t, acknowledgement) {
   const picker = id => find(node => node.props?.bot?.id === id && typeof node.props.onPick === 'function')
   // Keep the project on a real scratch directory so the agreed check can verify its snapshot.
   find(node => node.type?.name === 'FolderMenu').props.onPick(cwd)
-  const solverRow = await pickDialogModel(picker('new-bot'), 'acp-codex', 'GPT-6 Sol', true)
-  find(node => node.type === 'select').props.onChange({ target: { value: 'new' } })
-  const reviewerRow = await pickDialogModel(picker('new-reviewer'), 'acp-claude', 'Sonnet 5.5', false)
-  find(node => node.type === 'button' && node.props.className?.includes('bt-create-go')).props.onClick()
+  const solverRow = await pickDialogModel(picker('new-bot'), solverRef.split('/')[0], solverLabel, true)
+  find(node => node.type === 'select').props.onChange({ target: { value: existingReviewer ? 'bot:reviewer' : 'new' } })
+  const reviewerRow = existingReviewer ? undefined : await pickDialogModel(picker('new-reviewer'), 'acp-claude', reviewerLabel, false)
+  const create = find(node => node.type === 'button' && node.props.className?.includes('bt-create-go'))
+  assert.equal(Boolean(create.props.disabled), false, text(dialog.render()))
+  create.props.onClick()
   await until(() => solver || failures.length || find(node => node.props?.role === 'alert') || find(node => node.type === 'button' && text(node) === 'Done'))
   assert.deepEqual(failures, [])
   if (!solver) find(node => node.type === 'button' && text(node) === 'Done')?.props.onClick()
   assert.ok(solver, text(dialog.render()))
-  const reviewer = creates.find(entry => entry.payload.role === 'Reviewer').bot
+  const reviewer = existingReviewer ? h.rt.botOf('reviewer') : creates.find(entry => entry.payload.role === 'Reviewer').bot
   const bot = h.rt.botOf(solver.id)
   const agent = id => h.agentOf(id)
   const progress = (kind, args = {}) => h.progress(kind, args, solver.id)
-  const prompt = async (id, input) => {
-    const [provider, model] = h.rt.botOf(id).model.split('/')
+  const prompt = async (id, input, reasoningEffort) => {
+    const ref = h.rt.botOf(id).model
+    const slash = ref.indexOf('/')
+    const provider = ref.slice(0, slash)
+    const model = ref.slice(slash + 1)
     agent(id).session.requestHeader = () => ({ config: { provider, model } })
     const messages = [{ role: 'user', content: input.content, source: input.source }]
     const chunks = []
-    for await (const chunk of adapter.stream({ provider, model, sessionId: id, messages, signal: AbortSignal.timeout(5000) })) chunks.push(chunk)
+    for await (const chunk of adapter.stream({ provider, model, sessionId: id, messages, reasoningEffort, signal: AbortSignal.timeout(5000) })) chunks.push(chunk)
     return { chunks, text: chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block.text ?? '').join('') }
   }
-  return { h, bot, solver, reviewer, solverRow, reviewerRow, creates, wire, agent, progress, prompt, adapter, cwd }
+  return { h, bot, solver, reviewer, solverRow, reviewerRow, creates, wire, agent, progress, prompt, adapter, cwd, solverRef }
 }
 
-async function dialogResult(f, { beforeReply, takeResult = true } = {}) {
+async function dialogResult(f, { beforeReply, takeResult = true, resultEffort } = {}) {
   const { h, bot, solver, reviewer, progress, agent } = f
   h.event(solver.id, 'turn/start', { turn: 2 })
   const opening = await f.prompt(solver.id, { content: content('Do the task.'), source: { kind: 'user' } })
-  assert.equal(bot.model, configuredSolver)
+  assert.equal(bot.model, f.solverRef)
   assert.match(opening.text, /SHIP/, JSON.stringify({ model: bot.model, row: f.solverRow, chunks: opening.chunks }))
   const request = /^Request: ([\w-]+)/.exec(await progress('status'))?.[1]
   assert.ok(request)
@@ -2347,7 +2367,7 @@ async function dialogResult(f, { beforeReply, takeResult = true } = {}) {
     h.finish(solver.id, `Waiting for ${kind} review.`)
     h.event(reviewer.id, 'turn/start', { turn })
     h.takeInput(reviewer.id, input)
-    const answer = await f.prompt(reviewer.id, input)
+    const answer = await f.prompt(reviewer.id, input, kind === 'result' ? resultEffort : undefined)
     assert.equal(answer.text, reviewShip, JSON.stringify(answer.chunks))
     const release = kind === 'result' ? await beforeReply?.(request) : undefined
     h.finish(reviewer.id, answer.text)
@@ -2371,6 +2391,80 @@ async function dialogResult(f, { beforeReply, takeResult = true } = {}) {
   assert.match(await progress('checks', { request, run: 'observed', results: [{ check, pass: true }] }), /^Recorded\./)
   return review('result', 3)
 }
+
+test('Owner LA-2 delivers once from the dialog with a raw Solver alias and an existing alias reviewer', async t => {
+  const f = await dialogWire(t, 'selected', undefined, {
+    solverRef: 'acp-claude/opus', solverLabel: 'Opus', existingReviewer: 'acp-claude/sonnet',
+  })
+  const { h, bot, solver, reviewer } = f
+  assert.deepEqual(f.creates.map(entry => entry.payload.model), ['acp-claude/opus'])
+  assert.equal(bot.model, 'acp-claude/opus')
+  assert.equal(bot.reviewerId, reviewer.id)
+  assert.equal(reviewer.model, 'acp-claude/sonnet')
+  const { exchangeId, actual } = await dialogResult(f)
+  assert.equal(actual.source.reviewFeedback, undefined)
+  assert.ok(actual.source.reviewReceipt)
+  const result = bot.reviewTrack.solver.review
+  assert.equal(result.receipt, actual.source.reviewReceipt)
+  assert.equal(result.verdict, 'SHIP')
+  assert.equal(result.solverModel, 'acp-claude/claude-opus-5-5')
+  assert.equal(result.reviewer.model, heldReviewerIdentity)
+  assert.deepEqual(new Set(f.wire('acp-claude').filter(row => row.method === 'session/prompt').map(row => row.selected)),
+    new Set(['opus', 'sonnet']))
+  h.finish(solver.id, 'Delivered after the designated RESULT.')
+  const mark = bot.reviewTrack.last
+  assert.equal(mark?.done, true)
+  assert.equal(mark.resultExchangeId, exchangeId)
+  assert.equal(bot.reviewTrack.delivered, true)
+  h.event(solver.id, 'turn/start', { turn: 5 })
+  h.finish(solver.id, 'Already delivered.')
+  assert.equal(bot.reviewTrack.last, mark)
+})
+
+test('RESULT independence uses the chosen provider and full model ID', async t => {
+  for (const [name, solver, reviewer, same = false] of [
+    ['Antigravity and omp', ['acp-antigravity', 'default'], ['acp-omp', 'default']],
+    ['native DSH', ['anthropic', 'claude-opus-5-5'], ['deepseek', 'deepseek-v4']],
+    ['ACP Hermes', ['acp-hermes', 'vendor/remote/model'], ['acp-hermes', 'vendor/local/model']],
+    ['same model across agents', ['acp-claude', 'opus'], ['anthropic', 'claude-opus-5-5']],
+    ['different dated IDs', ['anthropic', 'model-20261001'], ['anthropic', 'model-20261101']],
+    ['identical native refs', ['deepseek', 'deepseek-v4'], ['deepseek', 'deepseek-v4'], true],
+    ['context suffix', ['anthropic', 'model-20261001'], ['ANTHROPIC', 'model-20261001[1m]'], true],
+    ['an alias and its pin', ['acp-claude', 'sonnet'], ['acp-claude', 'claude-sonnet-5-5'], true],
+  ]) {
+    await t.test(name, async t => {
+      const { h, request, review, answer, track, openReply, deliveries } = await reviewReplyFixture(t)
+      const route = ([provider, model]) => () => ({ config: { provider, model } })
+      h.agentOf('solver').session.requestHeader = route(solver)
+      h.agentOf('reviewer').session.requestHeader = route(reviewer)
+      const planExchange = await review('plan')
+      h.finish('solver', 'Waiting for the plan.')
+      await openReply(3, answer(planExchange))
+      assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+      assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+      const exchange = await review('result')
+      h.finish('solver', 'Waiting for the result.')
+      h.event('reviewer', 'turn/start', { turn: 2 })
+      h.takeInput('reviewer', h.agentOf('reviewer').message)
+      h.event('reviewer', 'assistant/message', { message: { content: content('RESULT SHIP') } })
+      // The answering text is already recorded when the picker changes.
+      h.rt.botOf('reviewer').model = 'later/picker'
+      h.agentOf('reviewer').session.requestHeader = route(same ? ['later', 'picker'] : solver)
+      h.event('reviewer', 'turn/end', { reason: { kind: 'completed' } })
+      const reply = deliveries.at(-1)
+      await openReply(4, reply)
+      const result = track().solver.review
+      assert.equal(result.verdict, same ? 'unverified' : 'SHIP')
+      assert.equal(result.unverified, same ? 'same' : undefined)
+      assert.equal(h.agentOf('solver').message.source.reviewFeedback, same ? 'same' : undefined)
+      if (same) assert.match(h.agentOf('solver').message.content.at(-1).text, /same model as the Solver/)
+      else assert.equal(result.reviewer.model, reviewer[0] === 'acp-claude' ? 'acp-claude/claude-opus-5-5' : reviewer.join('/'))
+      h.finish('solver', 'Reviewed the RESULT.')
+      assert.equal(track().last?.done, same ? undefined : true)
+      if (!same) assert.equal(track().last.resultExchangeId, exchange)
+    })
+  }
+})
 
 test('New Solver picks the live Claude option and delivers Done once for that RESULT exchange', async t => {
   const f = await dialogWire(t)
@@ -2402,45 +2496,22 @@ test('New Solver requires Claude wire acknowledgement in its answering session',
       if (outcome === 'already-current') {
         assert.equal(answer.text, reviewShip)
         assert.ok(wire.some(row => row.method === 'session/prompt' && row.selected === 'sonnet'))
-        assert.equal(f.h.ctx.acpAgents.effectiveModelOf(f.reviewer.id, 'acp-claude'), 'claude-sonnet-5-5')
+        assert.equal(f.adapter.live.get(f.reviewer.id).run.acknowledgedModel(), 'claude-sonnet-5-5')
       } else {
         assert.match(answer.chunks.at(-1).reason.failure.message, /did not acknowledge the pinned Sonnet/)
         assert.equal(wire.filter(row => row.method === 'session/prompt').length, 0)
-        assert.equal(f.h.ctx.acpAgents.effectiveModelOf(f.reviewer.id, 'acp-claude'), undefined)
+        assert.equal(f.adapter.live.get(f.reviewer.id).run.acknowledgedModel(), undefined)
         assert.equal(f.adapter.live.get(f.reviewer.id).run.option('model').currentValue, outcome === 'echo-only' ? 'sonnet' : 'default')
       }
     })
   }
 })
 
-test('conflicting ACP model fields keep the reviewer pin routed and leave RESULT unverified', async t => {
-  const f = await dialogWire(t, 'dual-field-conflict')
-  const { h, bot, solver, reviewer } = f
-  let identity
-  const { exchangeId, actual } = await dialogResult(f, { beforeReply() {
-    identity = modelOf(h.rt, f.agent(reviewer.id), undefined, 3)
-  } })
-  const wire = f.wire('acp-claude')
-  const prompt = wire.filter(entry => entry.method === 'session/prompt').at(-1)
-  const pin = wire.find(entry => entry.method === 'session/set_config_option' && entry.sessionId === prompt?.sessionId)
-  assert.equal(pin?.value, 'sonnet')
-  assert.equal(prompt?.selected, 'sonnet')
-  assert.equal(f.adapter.live.get(reviewer.id).run.option('model').currentValue, 'sonnet')
-  const result = bot.reviewTrack.solver.review
-  assert.equal(result.exchangeId, exchangeId)
-  assert.equal(result.verdict, 'unverified')
-  assert.equal(result.unverified, 'model')
-  assert.equal(result.reviewer, undefined)
-  assert.equal(identity, undefined)
-  assert.match(actual.content.at(-1).text, /RESULT review is unverified/)
-  h.finish(solver.id, 'Delivered after the RESULT reply.')
-  assert.equal(bot.reviewTrack.last?.done, undefined)
-})
-
-test('an invalidated live pin gives the exact RESULT input a durable unverified notice', async t => {
-  const f = await dialogWire(t, 'conflict')
+test('a missing answering route gives the exact RESULT input a durable unverified notice', async t => {
+  const f = await dialogWire(t)
   const { h, bot, solver, reviewer } = f
   const result = await dialogResult(f, { takeResult: false, async beforeReply(request) {
+    f.agent(reviewer.id).session.requestHeader = () => undefined
     h.person('Work alone until delivered.', solver.id)
     const atCommit = Promise.withResolvers()
     const releaseProgress = Promise.withResolvers()
@@ -2483,7 +2554,6 @@ test('an invalidated live pin gives the exact RESULT input a durable unverified 
   assert.match(actual.content[0].text, /Verdict: SHIP\nEvidence verified\./)
   assert.equal(actual.source.replyTo, exchangeId)
   assert.ok(actual.source.reviewReceipt)
-  assert.equal(h.ctx.acpAgents.effectiveModelOf(reviewer.id, 'acp-claude'), undefined)
   const disk = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots[solver.id].reviewTrack.solver.review
   assert.equal(disk.verdict, 'unverified')
   assert.equal(disk.unverified, 'model')
@@ -2536,93 +2606,6 @@ test('an invalidated live pin gives the exact RESULT input a durable unverified 
   await next.close()
 })
 
-test('startup upgrades only referenced aliases once, and keeps later owner choices and verdicts', async t => {
-  const seed = fixture(t)
-  t.after(() => rmSync(seed.home, { recursive: true, force: true, maxRetries: 5 }))
-  await seed.rt.load()
-  const record = (id, fields) => ({ id, name: id, role: 'Helper', createdAt: 1, ...fields })
-  const unresolved = 'acp-claude/opus'
-  const verdict = { request: 'a-kept-request', origin: 'person', revision: 1,
-    review: { exchangeId: 'kept-exchange', reviewerId: 'reviewer', revision: 1, verdict: 'unverified' } }
-  Object.assign(seed.rt.state.bots, {
-    reviewer: record('reviewer', { model: aliasReviewer, appliedModel: aliasReviewer }),
-    unresolved: record('unresolved', { model: unresolved, appliedModel: unresolved }),
-    unrelated: record('unrelated', { model: aliasReviewer, appliedModel: aliasReviewer }),
-    solver: record('solver', { role: 'Solver', reviewerId: 'reviewer', reviewTrack: { requested: true, requestAt: 1, verdicts: [], solver: verdict } }),
-    second: record('second', { role: 'Solver', reviewerId: 'reviewer' }),
-    third: record('third', { role: 'Solver', reviewerId: 'unresolved' }),
-  })
-  seed.rt.state.mainBotIds = ['solver']
-  await seed.rt.save({ required: true, durable: true })
-  await seed.close()
-
-  let available = false
-  const { h, selections } = wireHost(t, seed.home, 'selected', (ctx, agentOf) => {
-    agentOf('reviewer').status = 'running'
-    agentOf('reviewer').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'sonnet' } })
-    const resolve = ctx.acpAgents.resolveModelIdentity
-    ctx.acpAgents.resolveModelIdentity = async (...args) => available ? resolve(...args) : { status: 'unavailable' }
-  })
-  await h.rt.load()
-  await h.rt.upgradeReviewerModels()
-  assert.deepEqual(selections, [])
-  assert.equal(h.rt.botOf('unresolved').reviewerModelChoices, undefined)
-  available = true
-  await h.rt.upgradeReviewerModels()
-  assert.deepEqual(selections, [], 'an active turn defers the model switch')
-  h.agentOf('reviewer').status = 'idle'
-  const saveCopy = h.rt.saveCopy
-  h.rt.saveCopy = (change, options) => {
-    h.rt.saveCopy = saveCopy
-    h.agentOf('reviewer').status = 'running'
-    return saveCopy(change, options)
-  }
-  await h.rt.upgradeReviewerModels()
-  assert.equal(h.rt.botOf('reviewer').model, aliasReviewer, 'a turn that starts before commit fences the write')
-  assert.equal(h.rt.botOf('reviewer').reviewerModelChoices, undefined)
-  assert.deepEqual(selections.splice(0).map(row => row.model), ['claude-sonnet-5-5', 'sonnet'], 'restore the prior Session selection')
-  h.agentOf('reviewer').status = 'idle'
-  await h.rt.upgradeReviewerModels()
-  assert.deepEqual(selections, [{ sessionId: 'reviewer', provider: 'acp-claude', model: 'claude-sonnet-5-5' }])
-  const disk = () => JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots
-  assert.equal(disk().reviewer.model, configuredReviewer)
-  assert.equal(disk().reviewer.appliedModel, configuredReviewer)
-  assert.equal(disk().unresolved.model, unresolved)
-  assert.equal(disk().unrelated.model, aliasReviewer)
-  assert.deepEqual(disk().solver.reviewTrack.solver.review, verdict.review)
-  assert.equal(h.rt.solverStatusOf(h.rt.botOf('third')).solverStatus.reviewerModelChoice, true)
-
-  await h.rt.updateBot('reviewer', { model: aliasReviewer })
-  assert.equal(disk().reviewer.model, aliasReviewer)
-  await h.close()
-  const restarted = wireHost(t, seed.home)
-  await restarted.h.rt.load()
-  await restarted.h.rt.upgradeReviewerModels()
-  assert.equal(restarted.h.rt.botOf('reviewer').model, aliasReviewer)
-  assert.equal(restarted.h.rt.botOf('reviewer').reviewerModelChoices[aliasReviewer], 'applied')
-  assert.equal(restarted.h.rt.botOf('unresolved').reviewerModelChoices[unresolved], 'unresolved')
-  assert.deepEqual(restarted.selections, [])
-  assert.deepEqual(disk().solver.reviewTrack.solver.review, verdict.review)
-})
-
-test('New Solver host refuses an alias payload and the same concrete model across routes', async t => {
-  const { h, solver, reviewer } = await dialogWire(t)
-  const aliased = await h.call('create-bot', { name: 'Unpinned', role: 'Reviewer', model: aliasReviewer, solverModelChoice: true })
-  assert.equal(aliased.ok, false)
-  assert.match(aliased.error.message, /Choose a specific model/)
-  const original = h.rt.botOf(reviewer.id).model
-  const list = h.ctx.llm.listProviders
-  const models = h.ctx.llm.listModels
-  h.ctx.llm.listProviders = () => [...list(), { id: 'anthropic', name: 'Anthropic' }]
-  h.ctx.llm.listModels = provider => provider === 'anthropic' ? [{ id: 'claude-sonnet-5-5-20261001', name: 'Sonnet' }] : models(provider)
-  const refusal = await h.call('create-bot', { name: 'Same reviewer model', role: 'Solver',
-    model: 'anthropic/claude-sonnet-5-5-20261001', reviewerId: reviewer.id, solverModelChoice: true })
-  assert.equal(refusal.ok, false)
-  assert.match(refusal.error.message, /Choose a different model for the reviewer/)
-  assert.equal(h.rt.botOf(reviewer.id).model, original)
-  assert.equal(h.rt.botOf(solver.id).model, configuredSolver)
-})
-
 async function pendingResultReview(t) {
   const f = await reviewReplyFixture(t)
   const { h, request, review, answer, openReply } = f
@@ -2639,6 +2622,48 @@ async function pendingResultReview(t) {
   h.finish('solver', 'Waiting for result review.')
   return { ...f, exchange }
 }
+
+test('Owner LA-2 replaces a legacy pending RESULT without discarding passing evidence or delivery history', async t => {
+  const { h, request, exchange, track } = await pendingResultReview(t)
+  const progress = track().solver
+  progress.review.solverModel = solverModel.model
+  const evidence = structuredClone({ snapshot: progress.snapshot, passed: progress.passed, passRuns: progress.passRuns })
+  const history = { review: 'bot', done: true, resultExchangeId: 'older-result', reviewer: { id: 'reviewer', model: 'old-model' } }
+  h.rt.botOf('other').reviewTrack = {
+    requested: true, delivered: true, requestAt: 1, last: history,
+    solver: { request: 'older-request', origin: 'person', review: { solverModel: 'old-solver', verdict: 'SHIP' } },
+  }
+  await h.rt.save({ required: true, durable: true })
+  assert.equal(await h.rt.flushUpdateNotes(), true)
+  await h.close()
+
+  const next = fixture(t, h.home)
+  await next.rt.load()
+  const bot = next.rt.botOf('solver')
+  assert.equal(bot.reviewTrack.solver.review.exchangeId, exchange)
+  assert.equal(bot.reviewTrack.solver.review.solverModel, solverModel.model)
+  assert.deepEqual(next.rt.reviewMarkOf(next.rt.botOf('other')).reviewMark, history)
+  await next.tool('message_bot', {
+    to: 'reviewer', message: 'Review the current result again.', solver_review: 'result', solver_request: request, reply_to: 'me',
+  })
+  const input = next.agentOf('reviewer').message
+  const current = bot.reviewTrack.solver
+  assert.notEqual(current.review.exchangeId, exchange)
+  assert.equal(input.source.exchangeId, current.review.exchangeId)
+  assert.equal(current.review.solverModel, refOf(solverModel))
+  assert.deepEqual({ snapshot: current.snapshot, passed: current.passed, passRuns: current.passRuns }, evidence)
+  assert.equal(next.rt.state.works[exchange], undefined)
+  next.event('reviewer', 'turn/start', { turn: 5 })
+  next.takeInput('reviewer', input)
+  next.finish('reviewer', 'RESULT SHIP')
+  await until(() => next.agentOf('solver').message?.source.replyTo === current.review.exchangeId)
+  next.event('solver', 'turn/start', { turn: 6 })
+  next.takeInput('solver', next.agentOf('solver').message)
+  next.finish('solver', 'Delivered after the fresh RESULT.')
+  assert.equal(bot.reviewTrack.last?.done, true)
+  assert.equal(bot.reviewTrack.last.resultExchangeId, current.review.exchangeId)
+  assert.deepEqual(next.rt.reviewMarkOf(next.rt.botOf('other')).reviewMark, history)
+})
 
 const modelWarningCount = message => message?.content.filter(block =>
   block.type === 'text' && block.text.includes('The reviewer’s effective model could not be verified.')).length
@@ -2734,7 +2759,7 @@ test('identity round 2 keeps only the current RESULT warning on deferred hand-ba
       } else {
         solver.followup = message => inputs.push(message)
         if (path === 'replaced request') {
-          h.rt.reviewTurnEnd('solver', { request, completed: true, wroteText: true, model: solverModel.model })
+          h.rt.reviewTurnEnd('solver', { request, completed: true, wroteText: true, model: refOf(solverModel) })
           assert.equal(await requestOf(h), undefined)
           h.person('A new task has replaced the review.')
           assert.notEqual(await requestOf(h), request)
@@ -2755,92 +2780,70 @@ test('identity round 2 keeps only the current RESULT warning on deferred hand-ba
   }
 })
 
-test('identity round 2 trusts only the requested ACP model in the answering turn', async t => {
-  for (const [provider, model, acknowledgement, expected] of [
-    ['acp-codex', 'gpt-6-sol', 'echo-only', undefined],
-    ['acp-codex', 'gpt-6-sol', 'already-current', 'gpt-6-sol'],
-    ['acp-codex', 'gpt-6-sol', 'conflict', undefined],
-    ['acp-claude', 'claude-opus-5-5', 'different-concrete', undefined],
-    ['acp-claude', 'claude-sonnet-5-5', 'selected', 'claude-sonnet-5-5'],
+test('Claude Code pins the three live aliases and selects the Opus wire from the answering session', async t => {
+  const { h, adapter, wire, selections } = wireHost(t, undefined, 'opus-alias')
+  const provider = 'acp-claude'
+  await adapter.agents.get(provider).catalog.probeIdentityModels()
+  const model = 'claude-opus-5-5'
+  const id = 'reviewer'
+  await h.ctx.sessionController.selectModel({ sessionId: id, provider, model })
+  assert.deepEqual(selections.at(-1), { sessionId: id, provider, model })
+  h.event(id, 'turn/start', { turn: 21 })
+  const messages = [{ role: 'user', content: content('Review this.') }]
+  const chunks = []
+  for await (const chunk of adapter.stream({ provider, model, sessionId: id, messages, signal: AbortSignal.timeout(5000) })) chunks.push(chunk)
+  const reports = wire(provider)
+  const prompt = reports.find(row => row.method === 'session/prompt')
+  assert.ok(prompt, JSON.stringify(chunks))
+  assert.equal(reports.find(row => row.method === 'session/set_config_option' && row.sessionId === prompt.sessionId)?.value, 'opus')
+  assert.equal(prompt.selected, 'opus')
+  assert.equal(adapter.live.get(id).run.acknowledgedModel(), model)
+
+  const models = await adapter.listModels(provider)
+  for (const [alias, pin, name] of [
+    ['opus', model, 'Opus 5.5'], ['fable', 'claude-fable-5-2', 'Fable 5.2'], ['haiku', 'claude-haiku-5-5', 'Haiku 5.5'],
   ]) {
-    await t.test(`${provider}/${model}: ${acknowledgement}`, async t => {
-      const home = mkdtempSync(join(tmpdir(), 'solver-answering-acp-'))
-      t.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5 }))
-      const { h, adapter, wire } = wireHost(t, home, acknowledgement, undefined, acknowledgement)
-      const id = 'reviewer'
-      const session = h.agentOf(id).session
-      h.event(id, 'turn/start', { turn: 21 })
-      const messages = [{ role: 'user', content: content('Review this.') }]
-      const prompt = async () => {
-        let answer = ''
-        for await (const chunk of adapter.stream({ provider, model, sessionId: id, messages, signal: AbortSignal.timeout(5000) })) {
-          if (chunk.type === 'block-end') answer += chunk.block.text ?? ''
-        }
-        assert.equal(answer, reviewShip)
-      }
-      await prompt()
-      const current = wire(provider).find(row => row.method === 'session/prompt')
-      assert.ok(current)
-      const identity = turn => h.ctx.acpAgents.effectiveModelOf(id, provider, model, turn)
-      assert.equal(identity(21), expected, 'only a live acknowledgement of the requested pin can identify the answer')
-      if (expected) {
-        h.event(id, 'turn/start', { turn: 22 })
-        assert.equal(identity(22), undefined, 'a reused ACP session has not prompted this turn yet')
-        assert.equal(identity(21), undefined, 'starting a new turn retires the previous turn proof')
-        await prompt()
-        assert.equal(wire(provider).at(-1).sessionId, current.sessionId)
-        assert.equal(identity(22), expected)
-        adapter.noteEvent(session, { type: 'model/selection', data: { provider } })
-        assert.equal(identity(22), undefined)
-      }
-    })
+    assert.deepEqual(adapter.modelIdentityOf(provider, alias), { status: 'offered', model: pin })
+    assert.deepEqual(adapter.modelIdentityOf(provider, pin), { status: 'offered', model: pin })
+    assert.deepEqual(models.filter(row => row.id === pin).map(row => row.name), [name])
+    assert.equal((await adapter.resolveModel(provider, pin)).name, name)
   }
+  assert.deepEqual(adapter.modelIdentityOf(provider, 'default'), { status: 'offered', model: 'default' })
+  assert.equal((await h.rt.catalog({ fresh: true })).find(row => row.ref === 'acp-claude/default')?.solverIdentity, 'acp-claude/default')
 })
 
-async function checkCodexReviewerUpgrade(t, acknowledgement) {
-  const defaultRef = 'acp-codex/default'
-  const resolved = acknowledgement === 'own-model'
-  const seed = fixture(t)
-  t.after(() => rmSync(seed.home, { recursive: true, force: true, maxRetries: 5 }))
-  await seed.rt.load()
-  const kept = { exchangeId: 'old-exchange', reviewerId: 'reviewer', revision: 1, verdict: 'SHIP' }
-  const put = (id, fields) => seed.rt.state.bots[id] = { id, name: id, createdAt: 1, ...fields }
-  put('reviewer', { model: defaultRef, appliedModel: defaultRef, role: 'Reviewer' })
-  put('solver', { role: 'Solver', reviewerId: 'reviewer', reviewTrack: { requested: true, requestAt: 1,
-    verdicts: [], solver: { request: 'kept-request', origin: 'person', revision: 1, review: kept } } })
-  put('second', { role: 'Solver', reviewerId: 'reviewer' })
-  seed.rt.state.mainBotIds = ['solver']
-  await seed.rt.save({ required: true, durable: true })
-  await seed.close()
+test('the live Claude alias relabel refuses an explicit pin and an offered concrete row does not prove a raw alias', async t => {
+  const provider = 'acp-claude'
+  const model = 'claude-opus-5-5'
+  const id = 'reviewer'
+  const messages = [{ role: 'user', content: content('Review this.') }]
+  const stream = async (adapter, model) => {
+    const chunks = []
+    for await (const chunk of adapter.stream({ provider, model, sessionId: id, messages, signal: AbortSignal.timeout(5000) })) chunks.push(chunk)
+    return chunks
+  }
+  const home = mkdtempSync(join(tmpdir(), 'solver-relabel-wire-'))
+  const relabel = wireHost(t, home, 'opus-relabelled')
+  await relabel.adapter.agents.get(provider).catalog.probeIdentityModels()
+  assert.deepEqual(relabel.adapter.modelIdentityOf(provider, model), { status: 'offered', model })
+  writeFileSync(join(home, provider + '.jsonl.relabelled'), '')
+  const chunks = await stream(relabel.adapter, model)
+  assert.match(chunks.at(-1).reason.failure?.message ?? '', /the pinned Opus model is not offered/)
+  const answering = relabel.adapter.live.get(id).run
+  assert.equal(answering.option('model').options.find(row => row.value === 'opus')?.name, 'Opus 5.6')
+  assert.equal(relabel.wire(provider).some(row => row.sessionId === answering.sessionId), false,
+    'the answering run sent neither a model selection nor a prompt')
 
-  let available = false
-  const resolutions = []
-  const { h, selections } = wireHost(t, seed.home, 'selected', ctx => {
-    const resolve = ctx.acpAgents.resolveModelIdentity
-    ctx.acpAgents.resolveModelIdentity = async (...args) => {
-      resolutions.push(args)
-      return available ? resolve(...args) : { status: 'unavailable' }
-    }
-  }, acknowledgement)
-  await h.rt.load()
-  await h.rt.upgradeReviewerModels()
-  assert.equal(h.rt.botOf('reviewer').reviewerModelChoices, undefined)
-  available = true
-  resolutions.length = 0
-  await h.rt.upgradeReviewerModels()
-  await h.rt.upgradeReviewerModels()
-  const disk = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots
-  assert.equal(disk.reviewer.reviewerModelChoices?.[defaultRef], resolved ? 'applied' : 'unresolved',
-    'the supported Codex alias needs a durable disposition')
-  assert.deepEqual(resolutions, [['acp-codex', 'default']])
-  assert.equal(disk.reviewer.model, resolved ? configuredSolver : defaultRef)
-  assert.deepEqual(disk.solver.reviewTrack.solver.review, kept)
-  assert.deepEqual(selections, resolved ? [{ sessionId: 'reviewer', provider: 'acp-codex', model: 'gpt-6-sol' }] : [])
-  assert.equal(h.rt.solverStatusOf(h.rt.botOf('second')).solverStatus.reviewerModelChoice, resolved ? undefined : true)
-  await h.close()
-}
+  const concrete = wireHost(t)
+  await concrete.adapter.agents.get(provider).catalog.probeIdentityModels()
+  assert.deepEqual(concrete.adapter.modelIdentityOf(provider, model), { status: 'offered', model })
+  assert.deepEqual(concrete.adapter.modelIdentityOf(provider, 'opus'), { status: 'unresolved' })
+  const wrong = wireHost(t, undefined, 'different-concrete')
+  const unacknowledged = await stream(wrong.adapter, model)
+  assert.match(unacknowledged.at(-1).reason.failure?.message ?? '', /did not acknowledge the pinned Opus model/)
+  assert.equal(wrong.wire(provider).some(row => row.method === 'session/prompt'), false)
+  assert.equal(wrong.adapter.live.get(id).run.acknowledgedModel(), undefined)
 
-test('identity round 2 disposes the Codex default once for a shared reviewer', async t => {
-  await t.test('provider Default remains unresolved', t => checkCodexReviewerUpgrade(t, 'selected'))
-  await t.test('host Default resolves from the live choice', t => checkCodexReviewerUpgrade(t, 'own-model'))
+  await stream(concrete.adapter, 'opus')
+  assert.equal(concrete.wire(provider).find(row => row.method === 'session/prompt')?.selected, 'opus')
 })

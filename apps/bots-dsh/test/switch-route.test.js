@@ -229,12 +229,12 @@ test('Limits + Auto switch moves designated PLAN and RESULT claims by exchange a
       const progress = b.bot.reviewTrack.solver
       const designation = { exchangeId: 'review-work', reviewerId: 'reviewer' }
       progress.plan = { revision: 0, checks: ['test'], ...(phase === 'plan' ? { review: designation } : {}) }
-      if (phase === 'result') progress.review = { ...designation, revision: 0, solverModel: 'v4' }
+      if (phase === 'result') progress.review = { ...designation, revision: 0, solverModel: 'deepseek/v4' }
       const work = { from: 'b1', to: 'reviewer', at: Date.now() }
       assert.equal(b.rt.designatedReplyRequest('b1', 'reviewer', 'review-work', work), progress.request)
       const source = { kind: SOURCE_KIND, role: 'reply', exchangeId: 'review-reply', replyTo: 'review-work',
         senderSessionId: 'reviewer', reviewReceipt: 'host-receipt' }
-      b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', work.at, source, 'independent')()
+      b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', work.at, source, 'other/independent')()
       const message = { id: 'original-inbox-id', content: [{ type: 'text', text: 'SHIP' }], source }
       const fresh = await switchWithReview(b, { message, carried })
       const waiting = fresh.inbox.nextTurn.filter(input => input.source?.exchangeId === source.exchangeId)
@@ -280,12 +280,12 @@ test('Limits + Auto switch continues a consumed RESULT on its original request o
   writeFileSync(join(workspace, 'result.txt'), 'Verified result.')
   b.bot.workDir = workspace
   progress.snapshot = resultSnapshot(workspace)
-  progress.review = { exchangeId: 'result-work', reviewerId: 'reviewer', revision: 0, solverModel: 'v4' }
+  progress.review = { exchangeId: 'result-work', reviewerId: 'reviewer', revision: 0, solverModel: 'deepseek/v4' }
   const workAt = Date.now()
   const source = { kind: SOURCE_KIND, role: 'reply', exchangeId: 'result-reply', replyTo: 'result-work',
     senderSessionId: 'reviewer', reviewReceipt: 'host-receipt' }
   const input = { id: 'result-input', source }
-  b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', workAt, source, 'independent')()
+  b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', workAt, source, 'other/independent')()
   b.ctx.emit('agent/inbox/claimed', { agent: b.agent, message: input, turn: 3 })
   const { consumedResult } = b.rt.takeReviewReply('s1', input, 3)
   assert.equal(consumedResult.request, progress.request)
@@ -299,7 +299,7 @@ test('Limits + Auto switch continues a consumed RESULT on its original request o
   const resumed = b.rt.takeReviewContinuation(fresh.id, handoff)
   assert.deepEqual(resumed, consumedResult)
   assert.equal(b.rt.deliveryNote(source.exchangeId), undefined)
-  const finish = consumedResult => b.rt.reviewTurnEnd('b1', { completed: true, wroteText: true, model: 'v4', request: undefined, consumedResult })
+  const finish = consumedResult => b.rt.reviewTurnEnd('b1', { completed: true, wroteText: true, model: 'deepseek/v4', request: undefined, consumedResult })
   finish(resumed)
   const mark = b.bot.reviewTrack.last
   assert.equal(mark.done, true)

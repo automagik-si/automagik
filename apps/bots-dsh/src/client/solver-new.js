@@ -18,9 +18,9 @@ import { nameProblem } from '../shared/mentions.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import {
   SOLVER_LOOKS, createSolver, guardLevelOf, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
-  reviewerPayload, solverAutoHint, solverCandidate, solverCatalog, solverIdentity, solverLook, solverPayload, solverStartModel, uncertain,
+  reviewerPayload, solverAutoHint, solverCandidate, solverCatalog, solverLook, solverPayload, solverStartModel, uncertain,
 } from './solver-draft.js'
-import { CHOOSE_CONCRETE, CHOOSE_DIFFERENT } from '../shared/solver-model.js'
+import { CHOOSE_DIFFERENT, chosenIdentityOf } from '../shared/solver-model.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 import { DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from './characters.js'
 
@@ -75,14 +75,10 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const shownView = native ? nativeSwitchView(solverCandidate(roster, model, true), roster) : unticked
   const hermes = isHermesRemote(model) || (choice.kind === 'new' && isHermesRemote(newModel))
   const permission = roster.newBotPermission ?? roster.prefs?.permission ?? roster.permissions?.defaultPreset
-  const hasProofCatalog = roster.models?.some(row => Object.hasOwn(row, 'solverIdentity')) === true
   const designated = choice.kind !== 'fresh'
-  const solverIdentityNow = solverIdentity(roster, model)
-  const reviewerIdentity = solverIdentity(roster, choice.kind === 'new' ? newModel : choice.model)
-  const modelProblem = hasProofCatalog && designated
-    ? !solverIdentityNow || !reviewerIdentity ? CHOOSE_CONCRETE
-      : solverIdentityNow === reviewerIdentity ? CHOOSE_DIFFERENT : undefined
-    : undefined
+  const solverIdentity = chosenIdentityOf(model)
+  const reviewerIdentity = chosenIdentityOf(choice.kind === 'new' ? newModel : choice.model)
+  const modelProblem = designated && solverIdentity && solverIdentity === reviewerIdentity ? CHOOSE_DIFFERENT : undefined
   const blocked = Boolean(modelProblem) || busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes
   const intendsInstall = rolesOn(roster.prefs) && !Object.hasOwn(roster.roles ?? {}, SOLVER_ROLE_ID)
   const create = async () => {
@@ -100,10 +96,10 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
         actions, before, reviewer, native, prefs: roster.prefs,
         reviewerPayload: choice.kind === 'new' ? reviewerPayload({
           name: reviewerName(roster, finalName), look: { shape: pick(DEFAULT_SHAPES), color: pick(DEFAULT_COLORS) }, model: newModel, workDir,
-          solverModelChoice: hasProofCatalog,
+          solverModelChoice: true,
         }) : undefined,
         solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
-          name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, guard, auto, solverModelChoice: hasProofCatalog && designated,
+          name: finalName, look, model, effort, workDir, brief, sectionId, reviewer: reviewerBot, dedicated, reviewerId, guard, auto, solverModelChoice: designated,
         }),
       })
       if (result.solver && !result.sendError && !result.roleNote) { onCreated(result.solver); return }
