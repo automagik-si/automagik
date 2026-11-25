@@ -12,17 +12,23 @@ const SHEET_EXIT_MS = 220
 
 export function ExchangeDialog({ pair, roster, actions }) {
   const [entries, setEntries] = useState(null)
-  const [leaving, setLeaving] = useState(false)
+  const [leavingPair, setLeavingPair] = useState(null)
+  const exitTimer = useRef(undefined)
   const log = useRef(null)
   const atEnd = useRef(true)
   useLayoutEffect(() => {
     if (entries !== null && atEnd.current && log.current) log.current.scrollTop = log.current.scrollHeight
   }, [entries])
   // The sheet slides back down before it unmounts.
+  useLayoutEffect(() => () => {
+    clearTimeout(exitTimer.current)
+    exitTimer.current = undefined
+  }, [pair])
+  const leaving = leavingPair === pair
   const close = () => {
-    if (leaving) return
-    setLeaving(true)
-    setTimeout(() => actions.closeOverlay(), SHEET_EXIT_MS)
+    if (exitTimer.current !== undefined) return
+    setLeavingPair(pair)
+    exitTimer.current = setTimeout(() => actions.closeExchange(pair), SHEET_EXIT_MS)
   }
   useEscape(close)
   useEffect(() => {

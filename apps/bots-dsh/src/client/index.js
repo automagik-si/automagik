@@ -780,6 +780,10 @@ function applyOwner(ctx, { gated = false } = {}) {
   }
   // Without the Desktop bridge these stay undefined, and no browser control renders.
   if (browsers) {
+    const browserPanel = (state, id) => ({
+      ...state, details: id, view: 'browser', panelYield: yieldBrowser(state),
+      panelInstance: state.details === id && state.view === 'browser' ? state.panelInstance ?? {} : {},
+    })
     Object.assign(actions, {
       // The globe button: the Bot's active tab in the browser view, or a new tab.
       openBrowser: (id) => {
@@ -787,7 +791,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         if (!bot) return
         browsers.ensureTabs(bot.id)
         if (browsers.tabs.getSnapshot()[bot.id]?.active == null) browsers.openTab(bot.id)
-        ui.set(state => ({ ...state, details: id, view: 'browser', renaming: false, tab: null, panelYield: yieldBrowser(state) }))
+        ui.set(state => ({ ...browserPanel(state, id), renaming: false, tab: null }))
       },
       // '+' on the strip or the drawer's new-tab card: a blank tab in the browser view.
       browserNewTab: (id) => {
@@ -795,7 +799,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         if (!bot) return null
         browsers.ensureTabs(bot.id)
         const tabId = browsers.openTab(bot.id)
-        ui.set(state => ({ ...state, details: id, view: 'browser', renaming: false, tab: null, panelYield: yieldBrowser(state) }))
+        ui.set(state => ({ ...browserPanel(state, id), renaming: false, tab: null }))
         return tabId
       },
       // A drawer card: its tab active, the panel on the browser view.
@@ -803,7 +807,7 @@ function applyOwner(ctx, { gated = false } = {}) {
         const bot = roster.getSnapshot().byId[id]
         if (!bot) return
         browsers.activate(bot.id, tabId)
-        ui.set(state => ({ ...state, details: id, view: 'browser', panelYield: yieldBrowser(state) }))
+        ui.set(state => browserPanel(state, id))
       },
       browserEnsure: botId => browsers.ensureTabs(botId),
       browserCloseTab: (botId, tabId) => browsers.closeTab(botId, tabId),
