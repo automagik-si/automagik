@@ -20,6 +20,7 @@ const REVIEW_TEXT_MAX = 16_000
 const REVIEW_USER_LINE_MAX = 3_000
 const REVIEW_OTHER_LINE_MAX = 800
 const REVIEW_PASSES_MAX = 4
+const QUOTA_DELAYS = [5, 15, 60].map(minutes => minutes * 60_000)
 
 export function installReview(rt, memory) {
   const { ctx, config } = rt
@@ -53,7 +54,8 @@ export function installReview(rt, memory) {
   // A failed save is warned, never thrown: the deletion goes on.
   /** @type {Map<string, number>} */
   const forgetGen = new Map()
-  const forgetCursors = (keys) => {
+  const forgetCursors = (keys, holder) => {
+    failures.delete(holder)
     try {
       let present = false
       for (const key of keys) {
@@ -273,6 +275,25 @@ export function installReview(rt, memory) {
   // group's review follows the team's setting alone.
   const chatReviewEnabled = botId => reviewOn && rt.botOf(botId) !== undefined && rt.botOf(botId).memoryReview !== false
   const reviewEnabled = seen => seen?.roomId !== undefined ? reviewOn : seen !== undefined && chatReviewEnabled(seen.botId)
+  const holderOf = seen => seen.roomId === undefined ? `bot:${seen.botId}` : seen.key
+  const modelOf = (seen) => {
+    if (seen.roomId === undefined) return rt.botOf(seen.botId)?.model
+    const room = rt.roomOf(seen.roomId)
+    return room === undefined ? undefined : keeperOf(room)?.model
+  }
+  const failures = new Map()
+  const liftMemoryHolds = () => {
+    for (const [holder, failure] of failures) {
+      if (failure.reason === 'quota') failures.delete(holder)
+    }
+  }
+  const lastFailure = (holder, model) => {
+    const failure = failures.get(holder)
+    if (failure?.model === model) return failure
+    failures.delete(holder)
+    return undefined
+  }
+  const held = seen => lastFailure(holderOf(seen), modelOf(seen))?.retryAt > Date.now()
   async function reviewChat(seen) {
     const bot = rt.botOf(reviewOf(seen.sessionId)?.botId ?? seen.botId)
     // A Bot being deleted has had its places forgotten; no review of it starts.
@@ -337,6 +358,7 @@ export function installReview(rt, memory) {
       await saveCursors()
     }
     // Only the user's words are kept, so lines without any need no model call.
+    let route
     if (read.some(line => line.who === 'user')) {
       const { homeFiles, teamFiles } = await settled(() => ({ homeFiles: loadScope(home), teamFiles: loadScope(TEAM) }))
       const said = read.filter(line => line.who === 'user').map(line => line.text).join('\n')
@@ -345,13 +367,23 @@ export function installReview(rt, memory) {
       const sizes = { home: bodySize(homeFiles[0]), homeLimit: mainLimit(home), team: bodySize(teamFiles[0]), teamLimit: mainLimit(TEAM) }
       const earlier = batch.earlier.map(line => reviewLine(line.who, line.text, keeper))
       const language = writtenIn(read.filter(line => line.who === 'user').map(line => line.text.replace(/^User: /, '')), languageNow())
-      const reply = await botShot(keeper, reviewSystem({ teamWrites: teamWrites(), group, routes: !group && rt.isMain(keeper.id), rooms: group || !teamWrites() ? [] : roomsOf(keeper).map(room => room.name) }), reviewRequest({ who, tag: tagged, numbered, left, sizes, where: batch.where, earlier, fresh: fresh.texts, more, language }), tag)
+      const instructions = reviewSystem({ teamWrites: teamWrites(), group,
+        routes: !group && rt.isMain(keeper.id),
+        rooms: group || !teamWrites() ? [] : roomsOf(keeper).map(room => room.name),
+      })
+      const prompt = reviewRequest({ who, tag: tagged, numbered, left, sizes,
+        where: batch.where, earlier, fresh: fresh.texts, more, language,
+      })
+      const reply = await botShot(keeper, instructions, prompt, tag, {
+        onAnswer: ({ provider, model }, via) => { route = { provider, model, via } },
+      })
       if (!alive()) return
       const parsed = parseReview(reply)
       // An answer that is no list of changes keeps nothing of the batch; the miss
       // is said, and the place moves on — the same lines are not read again. A
       // change that is not well formed is set aside and said, one by one.
       if (parsed === undefined) {
+        route = undefined
         rt.warn('omni-ui: memory review of %s got no list of changes from the model', name)
       } else {
         const { changes, leftOut } = parsed
@@ -383,6 +415,9 @@ export function installReview(rt, memory) {
       cursorsNow()[key] = through
       await saveCursors()
     }
+    if (route && placeKept()) ctx.logger?.info?.(
+      'omni-ui: memory review completed via %s (%s/%s)', route.via, route.provider, route.model,
+    )
     if (again) next()
   }
   /** @type {Map<string, {since: number | undefined, passes: number}>} */
@@ -397,10 +432,15 @@ export function installReview(rt, memory) {
   const runningReviews = new Map()
   const memoryReviews = () => reviewTimers.size + reviewQueue.size + reviewsRunning
   const memoryReviewStatus = (botId) => {
-    if (rt.botOf(botId) === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
+    const bot = rt.botOf(botId)
+    if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
     // Own-chat state only: a group review belongs to the group, not its keeper.
     const owns = seen => seen?.roomId === undefined && seen?.botId === botId
-    return { enabled: chatReviewEnabled(botId), allowed: reviewOn,
+    const last = lastFailure(`bot:${botId}`, bot.model)
+    const failure = last ? { reason: last.reason, at: last.at,
+      ...(last.retryAt === undefined ? {} : { retryAt: last.retryAt }),
+    } : null
+    return { enabled: chatReviewEnabled(botId), allowed: reviewOn, failure,
       pending: [...reviewTimers.keys()].some(id => owns(reviewOf(id))) || [...reviewQueue.values()].some(owns),
       running: [...runningReviews.values()].some(owns),
     }
@@ -408,7 +448,7 @@ export function installReview(rt, memory) {
   // A conversation waits in the line once: a later turn's copy of a group log joins
   // the one that already waits.
   function queueReview(seen) {
-    if (!reviewEnabled(seen)) return
+    if (!reviewEnabled(seen) || held(seen)) return
     const prior = reviewQueue.get(seen.key)
     if (prior !== undefined) {
       if (seen.room !== undefined) reviewQueue.set(seen.key, { ...seen, room: joinLogs(prior.room, seen.room) })
@@ -418,12 +458,34 @@ export function installReview(rt, memory) {
     reviewChain = reviewChain.then(async () => {
       const waited = reviewQueue.get(seen.key)
       reviewQueue.delete(seen.key)
+      if (!reviewEnabled(waited) || held(waited) || rt.readOnly() !== undefined) return
+      const holder = holderOf(waited)
+      const model = modelOf(waited)
+      const gen = forgetGen.get(waited.key)
       reviewsRunning += 1
       runningReviews.set(waited.key, waited)
       try {
-        if (rt.readOnly() === undefined && reviewEnabled(waited)) await (waited.roomId === undefined ? reviewChat(waited) : reviewGroup(waited))
+        await (waited.roomId === undefined ? reviewChat(waited) : reviewGroup(waited))
+        failures.delete(holder)
       } catch (error) {
-        rt.warn('omni-ui: memory review of %s failed: %s', waited.key, failureCode(error))
+        if (forgetGen.get(waited.key) !== gen || modelOf(waited) !== model
+          || error?.code === 'bot/stale') return
+        const last = lastFailure(holder, model)
+        const at = Date.now()
+        if (error?.quota || error?.retryAt !== undefined) {
+          const count = (last?.count ?? 0) + Number(error.quota === true)
+          const delay = QUOTA_DELAYS[Math.min(Math.max(count - 1, 0), QUOTA_DELAYS.length - 1)]
+          const retryAt = Math.max(error.retryAt ?? 0, error.quota ? at + delay : last?.retryAt ?? 0)
+          failures.set(holder, { reason: 'quota', at: error.quota ? at : last?.at ?? at,
+            retryAt, count, model })
+          if (!error.quota) return
+        } else {
+          const reason = error?.code === 'memory/no-model' ? 'no-model' : 'error'
+          failures.set(holder, { reason, at, count: 0, model })
+        }
+        rt.warn('omni-ui: memory review of %s failed: %s%s', waited.key, failureCode(error),
+          error?.quota ? ' (QUOTA)' : '',
+        )
       } finally {
         runningReviews.delete(waited.key)
         reviewsRunning -= 1
@@ -450,7 +512,7 @@ export function installReview(rt, memory) {
       const started = turnOwners.get(id)
       turnOwners.delete(id)
       const seen = reviewOf(id) ?? started
-      if (seen === undefined || !reviewEnabled(seen)) return
+      if (seen === undefined || !reviewEnabled(seen) || held(seen)) return
       const timer = setTimeout(() => {
         reviewTimers.delete(id)
         queueReview(seen)
@@ -465,5 +527,5 @@ export function installReview(rt, memory) {
     }, 'omni-ui: memory review')
   }
 
-  return { memoryReviews, memoryReviewStatus, forgetCursors }
+  return { memoryReviews, memoryReviewStatus, forgetCursors, liftMemoryHolds }
 }

@@ -88,8 +88,13 @@ export function install(rt, reservationDeps) {
       }
     })()
   })
+  ctx.on('acp-dsh/login-ready', ({ id } = {}) => {
+    if (typeof id !== 'string') return
+    rt.clearAsideQuota?.(id)
+    rt.liftMemoryHolds?.()
+    check?.loginReady(id)
+  })
   if (!check) return
-  ctx.on('acp-dsh/login-ready', payload => check.loginReady(payload?.id))
   ctx.on('session/event', (session, event) => {
     if (event?.type === 'turn/end') check.turnEnded(session?.id)
   })
