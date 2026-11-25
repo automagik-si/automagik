@@ -75,6 +75,8 @@ export function wakeAutomationName(botId, projectKey) {
  * main bot's alone, derived from its kind.
  */
 export const RANKS = ["captain", "dev", "tester", "reviewer", "fixer", "integrator", "pm", "owner"];
+export const SEND_GRANT_ROLES = Object.freeze(["reviewer", "fixer"]);
+export const isSendGrantRole = (value) => SEND_GRANT_ROLES.includes(value);
 /** A category id: a lowercase slug, as it goes into a pane's `category=` label (A16). */
 export const CATEGORY_ID = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
@@ -718,6 +720,33 @@ export function effectiveLead(file, botId, { project = null, projects = null } =
     cur = byId.get(leadOf(cur));
   }
   return { lead: first };
+}
+
+/**
+ * A bot pane's `role=` (A16): the main bot is `main`; a member that leads another bot (by
+ * effective lead) is `captain`; else its rank. No rank: null (no label).
+ */
+export function roleOf(file, botOrId, opts = {}) {
+  const botId = typeof botOrId === "string" ? botOrId : botOrId?.id;
+  const bot = file.bots.find((b) => b.id === botId);
+  if (!bot) return null;
+  if (bot === mainBotOf(file)) return "main";
+  if (file.bots.some((b) => {
+    if (b.id === botId || b.kind !== "member") return false;
+    const eff = effectiveLead(file, b.id, opts);
+    return !eff.leadProject && eff.lead === botId;
+  })) return "captain";
+  if (opts?.projects) {
+    for (const [otherKey, otherFile] of projectEntriesOf(opts.projects)) {
+      if (opts.project && otherKey === opts.project) continue;
+      for (const b of otherFile?.bots ?? []) {
+        if (!b?.leadProject) continue;
+        const eff = effectiveLead(otherFile, b.id, { project: otherKey, projects: opts.projects });
+        if (eff.lead === botId && (!opts.project || eff.leadProject === opts.project)) return "captain";
+      }
+    }
+  }
+  return bot.rank || null;
 }
 
 /**

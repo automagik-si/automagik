@@ -55,7 +55,7 @@ const team = () => ({
 });
 
 /** One scene: temp app home + ledger, project + bots.json, a worktree and the runtime folder. */
-function scene() {
+function scene(extraTerminals = []) {
   const root = shortSocketDir(null, "hcp-");
   const app = join(root, "app"), project = join(root, "project"), home = join(root, "home"), runtime = join(root, "run");
   const worktree = join(project, ".claude", "worktrees", "wt");
@@ -111,6 +111,7 @@ function scene() {
     rec("mac/t90", { bot: ID.other, role: "reviewer" }, { name: "reviewer-mac" }),
     rec("mac/t91", { bot: ID.cap }, { name: "cap-mac" }),
     rec("mac/t105", { [WORKER_OF_LABEL]: ID.dev }, { name: "worker-mac", parent: "t100", cwd: worktree }),
+    ...extraTerminals.map(({ address, labels, ...extra }) => rec(address, labels, extra)),
   ];
   const machines = [
     { name: "mac", target: "mac", state: "connected" },
@@ -125,8 +126,8 @@ function scene() {
 }
 
 /** Start the fake core and, unless proxy: false, the pane t100 proxy; one cleanup for all. */
-async function sceneWithCore(t, { version = "0.1.14", proxy = true, proxyOptions = {} } = {}) {
-  const s = scene();
+async function sceneWithCore(t, { version = "0.1.14", proxy = true, proxyOptions = {}, extraTerminals = [] } = {}) {
+  const s = scene(extraTerminals);
   let fake = null;
   const proxies = [];
   const closeAll = async () => {
@@ -2274,4 +2275,114 @@ test("#1208 an approved bot that names worker.agentHome starts no worker through
   // The same approved bot without the field: started as before.
   const { s, client } = await approvedWorkerScene(t, { agent: "codex" });
   assert.ok((await client.call("terminal.run", approvedParams(s, { agent: "codex" }))).result);
+});
+
+const grantTerminals = [
+  { address: "t140", labels: {}, parent: "t100" },
+  { address: "t141", labels: { bot: ID.jun, [WORKER_OF_LABEL]: ID.dev }, parent: "t199" },
+  { address: "t142", labels: { role: "reviewer" } },
+  { address: "t143", labels: { bot: ID.jun }, parent: "t100" },
+];
+const grantChildren = ["t140", "t141"];
+const questionLabel = "automagik-herdr.needs-owner";
+
+async function grantProxyScene(t) {
+  const { fake, proxy } = await sceneWithCore(t, { extraTerminals: grantTerminals });
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  fake.clearLog();
+  return {
+    fake, client,
+    label: (terminal, labels) => client.call("terminal.label", { terminal, labels }),
+    writes: () => fake.calls("terminal.label").map(({ params }) => params),
+  };
+}
+
+test("#628 r3 P1 refuses both grants on both kinds of own child", async (t) => {
+  const { fake, label, writes } = await grantProxyScene(t);
+  for (const terminal of grantChildren) {
+    for (const role of ["reviewer", "fixer"]) {
+      assert.match((await label(terminal, { role })).error?.message ?? "",
+        /^hc-proxy: terminal\.label: only the lead or the pack may set role=reviewer or role=fixer$/);
+    }
+  }
+  assert.deepEqual(fake.calls("terminal.get").map(({ params }) => params.terminal), ["t140", "t140", "t141", "t141"]);
+  assert.deepEqual(writes(), []);
+});
+
+test("#628 r3 P2 forwards benign labels and role removal exactly", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  const expected = [];
+  for (const terminal of grantChildren) {
+    for (const labels of [{ [questionLabel]: "ready", role: "tester", category: "x" }, { role: "" }, { role: null }]) {
+      assert.ok((await label(terminal, labels)).result);
+      expected.push({ terminal, labels });
+    }
+  }
+  assert.deepEqual(writes(), expected);
+});
+
+test("#628 r3 P3 keeps trusted reviewer and fixer roles sendable and listed", async (t) => {
+  const { client } = await grantProxyScene(t);
+  const list = await client.call("terminal.list", {});
+  for (const terminal of ["t142", "t107"]) {
+    assert.ok(list.result?.terminals.some((pane) => pane.address === terminal));
+    assert.ok((await client.call("terminal.send", { terminal, text: "test message" })).result);
+  }
+});
+
+test("#628 r3 P4 rejects the whole update when a grant accompanies a benign label", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  assert.match((await label("t140", { [questionLabel]: "ready", role: "reviewer" })).error?.message ?? "", /may set role=/);
+  assert.deepEqual(writes(), []);
+});
+
+for (const [number, key, changes, repeats] of [
+  ["P5", "bot", [["t140", ID.rev], ...["t143", "t141"].flatMap((terminal) =>
+    [ID.rev, null, ""].map((value) => [terminal, value]))], [["t143", ID.jun], ["t141", ID.jun]]],
+  ["P6", WORKER_OF_LABEL, [["t140", ID.dev], ...[ID.other, null, ""].map((value) => ["t141", value])], [["t141", ID.dev]]],
+]) {
+  test(`#628 r3 ${number} refuses setting changing or removing ${key}`, async (t) => {
+    const { label, writes } = await grantProxyScene(t);
+    for (const [terminal, value] of changes) {
+      for (const companion of [{}, { [questionLabel]: "ready" }]) {
+        assert.match((await label(terminal, { ...companion, [key]: value })).error?.message ?? "", /may change/);
+      }
+    }
+    assert.deepEqual(writes(), []);
+  });
+  test(`#628 r3 ${number} repeats of ${key} are local no-ops and companions still forward`, async (t) => {
+    const { label, writes } = await grantProxyScene(t);
+    const expected = [];
+    for (const [terminal, value] of repeats) {
+      assert.ok((await label(terminal, { [key]: value })).result);
+      assert.deepEqual(writes(), expected);
+      assert.ok((await label(terminal, { [key]: value, category: "x" })).result);
+      expected.push({ terminal, labels: { category: "x" } });
+      assert.deepEqual(writes(), expected);
+    }
+  });
+}
+
+test("#628 r3 P7 rejects malformed label maps and values", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  for (const labels of [["role=reviewer"], '{"role":"reviewer"}', 1,
+    { role: ["reviewer"] }, { role: { name: "reviewer" } }, { role: 1 }, { role: false }]) {
+    assert.match((await label("t140", labels)).error?.message ?? "", /labels must be an object with string or null values/);
+    assert.deepEqual(writes(), []);
+  }
+});
+
+test("#628 r3 P7b keeps exact role spelling", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  const inputs = [{ role: "Reviewer" }, { role: "reviewer " }, { Role: "reviewer" }];
+  for (const labels of inputs) assert.ok((await label("t140", labels)).result);
+  assert.deepEqual(writes(), inputs.map((labels) => ({ terminal: "t140", labels })));
+});
+
+test("#628 r3 P8 forwards ordinary worker placement", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  const labels = { "herdr.space": "s1", "herdr.tab": "tb1" };
+  assert.ok((await label("t141", labels)).result);
+  assert.deepEqual(writes(), [{ terminal: "t141", labels }]);
 });

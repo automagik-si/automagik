@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 
 import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, stableRootOf, workerArgs } from "../mods/am-sidebar/workers.js";
 import { startArgs } from "../mods/am-sidebar/launchArgs.js";
-import { hcVerbOf, launchHomeOf } from "../mods/am-sidebar/hcGuard.mjs";
+import { hcVerbOf, launchHomeOf, sharedSendAllowed } from "../mods/am-sidebar/hcGuard.mjs";
 import { STABLE_FILES, STABLE_FOLDERS, stableFilesCurrent, stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
 import { observe } from "../mods/am-sidebar/agyScan.js";
 import { SYNTHETIC, trustScreen, fileScreen, capture } from "./agy-prompt-fixture.mjs";
@@ -2657,4 +2657,12 @@ test("the guard and proxy docs say what RFC 0044 decided for keys, attach, event
   }
   assert.match(row, /linked-machine row[^|]*left out, and the `machines` inventory is empty/, "the row keeps machines out");
   assert.match(list, /as the core answered it, nested fields included/, "hcProxy.md: only the envelope is reviewed");
+});
+
+test("#628 r3 G1 shared send grants require the exact role key and value", () => {
+  const caller = { bot: ID.dev, worker: false };
+  for (const role of ["reviewer", "fixer"]) assert.equal(sharedSendAllowed(team(), caller, { role }), true);
+  for (const labels of [{ role: "Reviewer" }, { role: "reviewer " }, { Role: "reviewer" }]) {
+    assert.equal(sharedSendAllowed(team(), caller, labels), false);
+  }
 });

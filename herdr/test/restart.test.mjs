@@ -831,3 +831,12 @@ test("#1418 helperArgs: keep puts --keep before --parent, and the words after --
   assert.deepEqual(helperArgs({ ...base, keep: true }),
     ["run", "--bg", "--json", "--name", "h", "--cwd", "/w", "--label", "a=1", "--keep", "--parent", "t100", "--", "/usr/bin/env", "PATH=/p", "claude", "--resume", SID]);
 });
+
+test("#628 r3 R1 helper restart carries ordinary labels without carrying grants", () => {
+  for (const role of ["reviewer", "fixer", "tester"]) {
+    const labels = { role, category: "eng", squad: "ops", "herdr.space": "s1" };
+    const get = { ...kh, labels, argv: ["claude"], foreground: { argv: ["claude"] } };
+    const plan = helperPlan({ get, agents: AGENTS });
+    assert.deepEqual(plan.labels, role === "tester" ? labels : { category: "eng", squad: "ops", "herdr.space": "s1" });
+  }
+});

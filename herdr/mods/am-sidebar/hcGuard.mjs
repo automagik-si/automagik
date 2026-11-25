@@ -62,7 +62,8 @@ import { fileURLToPath } from "node:url";
 
 import { readApprovedRecord } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
-import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
+import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, isSendGrantRole, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
+export { isSendGrantRole, SEND_GRANT_ROLES } from "./model.js";
 import { agentKeyOfArgv, resolveAgent } from "./models.js";
 import { pendingDialog, rateLimitDialog } from "./dialog.js";
 import { agyCandidate, agyPromptOf } from "./agyPrompt.js";
@@ -739,7 +740,7 @@ export function sharedSendAllowed(file, caller, labels) {
     if (self.rank === "captain" && target.rank === "captain") return true;
   }
   // Keep the existing reviewer/fixer label path; tester access requires a roster rank.
-  if (labels.role === "reviewer" || labels.role === "fixer") return true;
+  if (isSendGrantRole(labels.role)) return true;
   return Boolean(target && SHARED_ROLES.includes(target.rank));
 }
 

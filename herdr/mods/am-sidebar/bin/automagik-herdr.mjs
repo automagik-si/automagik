@@ -22,12 +22,12 @@ import { coreSocketDiscovery, coreSockets, coreStatus, inTestRoots, inTestRootsR
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId, rateLimitModeOf,
-  botsText, parseBots, plannedOf, projectKeyOf, projectOf, squadOf, wakeAutomationName, wakeCron, wakeProblem, withListedProject, workerHomeOf, writeFolderOf } from "../model.js";
+  botsText, isSendGrantRole, parseBots, plannedOf, projectKeyOf, projectOf, squadOf, wakeAutomationName, wakeCron, wakeProblem, withListedProject, workerHomeOf, writeFolderOf } from "../model.js";
 import { AGENT_HOME_VARS, agentHomeAgent, agentHomeFor, agentHomePathProblem, agentHomeRunProblem, agentHomeSettingsFiles, agentHomeSettingsProblem,
   chosenHomeOfArgv, chosenHomeWords, LAUNCH_VAR } from "../agentHome.js";
 import { UNANSWERED, agentInForeground, attachRefusal, attachWords, detachWords, hcName, isClaude, leadIdOf, leadPane, newest,
   paneLabels, paneOf, parentArgs, placementFrom, relabel, relabelPlan, relabelWarning, relabelWords, rowsOf, spaceOnly, spacePlace,
-  freshSpare, roleOf, shellIdle, spareTab, startArgs, startRefusal, unwrapKeep } from "../launchArgs.js";
+  freshSpare, grantWords, ROLE_LABEL, roleOf, shellIdle, spareTab, startArgs, startRefusal, unwrapKeep } from "../launchArgs.js";
 import { tabSteps, workerSpace, workerTabName } from "../workerTab.js";
 import { addressOf, attachKey, attachLine, attachPath, attachRow, BOT_SHAPE, closingRow, confirmBindings, foldAttach, heldIn, machinesById, modeProblem, placeOf as placeOfRow, readAttach, validRow, verdictOf } from "../attach.js";
 import { isHcTerminalId } from "../hcProxy.mjs";
@@ -85,13 +85,14 @@ import { paneLogin } from "../loginProbe.js";
 import { DIRECT_LOGIN_PROBLEM, VENDORS, botLoginWords, directLoginVendor, loginLaunchHome, loginLaunchProblem, loginPolicyActive, loginPolicyEnv, loginPolicyForward, loginReadIo, resolveLogin } from "../loginRecord.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
+import { SHARED_ROLES, SHARED_SEND_RANKS } from "../hcGuard.mjs";
 import { isInstalledGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
-import { APPROVAL_REVIEW, approvalProjectWord, approvedProxyEnabled, approvedProxyState, approvedSettingsDir,
-  approvedWorkerHome, commitApproval, escapeForTerminal, parseApprovedRecord, previewApproval, proxyStateFor,
-  shellWord } from "../approved.js";
+import { APPROVAL_REVIEW, approvalProjectWord, approvedGrant, approvedProxyEnabled, approvedProxyState, approvedSettingsDir,
+  approvedRootOf, approvedWorkerHome, canonicalProject, commitApproval, escapeForTerminal, MissingApprovedRecord, parseApprovedRecord,
+  previewApproval, proxyStateFor, readApprovedRecord, shellWord } from "../approved.js";
 import { hooksNotice } from "../migrateHooks.mjs";
 import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
 import { fixNonVisual, readState, spacesOf } from "./state.mjs";
@@ -183,8 +184,11 @@ const commandKeyOf = async (opts) => {
   return key;
 };
 
-let localLockSocket;
-const localHcEnv = () => localLockSocket && !process.env.HC_SOCKET ? { ...process.env, HC_SOCKET: localLockSocket } : process.env;
+let discoveredCoreSocket;
+let pinnedCoreSocket;
+const localHcEnv = () => {
+  return pinnedCoreSocket && !process.env.HC_SOCKET ? { ...process.env, HC_SOCKET: pinnedCoreSocket } : process.env;
+};
 
 async function hc(args, { timeout } = {}) {
   const r = await runProgram(hcExecutable(programPath("hc")), args, { timeout, env: localHcEnv() });
@@ -1013,7 +1017,10 @@ export function unlistProjects(keys, dir = appHome()) {
 export function findBot(file, ref) {
   if (!ref) throw new CliError("Name a bot (its id or its name).", 2);
   const byId = file.bots.find((b) => b.id === ref);
-  if (byId) return byId;
+  return byId ?? findBotByName(file, ref);
+}
+
+function findBotByName(file, ref) {
   for (const same of [(b) => b.name === ref, (b) => b.name.toLowerCase() === String(ref).toLowerCase()]) {
     const hits = file.bots.filter(same);
     if (hits.length === 1) return hits[0];
@@ -1089,8 +1096,8 @@ async function localCoreStatus(timeoutMs) {
   const env = localHcEnv();
   const { sockets, lockSocket } = coreSocketDiscovery(env);
   const result = await coreStatus(env, { sockets, timeoutMs });
-  // hc does not follow the lock. Use the endpoint that actually supplied the identity.
-  if (lockSocket && result.socket === lockSocket) localLockSocket = lockSocket;
+  // hc does not follow the lock. Pin it only when discovery fell back to it.
+  if (lockSocket && result.socket === lockSocket) pinnedCoreSocket = lockSocket;
   return result;
 }
 let coreOnce = null;
@@ -1105,6 +1112,7 @@ function coreId() {
       const r = await localCoreStatus();
       if (r.none) throw new CliError(`hc server status failed: herdr-core isn't answering on this computer (tried ${r.tried.join(", ") || "no socket"}); nothing was started.`);
       if (r.error !== undefined) throw new CliError(`hc server status failed: ${r.error}`);
+      discoveredCoreSocket = r.socket;
       status = r.status;
     }
     const id = status?.core?.id;
@@ -1112,6 +1120,12 @@ function coreId() {
     return id;
   });
   return coreOnce;
+}
+
+/** Route pane reads and writes that rely on core identity through its verified endpoint. */
+async function pinIdentityCore() {
+  await coreId();
+  if (discoveredCoreSocket) pinnedCoreSocket = discoveredCoreSocket;
 }
 
 /** Verify the transport without starting hc, then pin every child call to that core. */
@@ -1160,6 +1174,14 @@ async function pinLocalStartCore() {
   process.env.AUTOMAGIK_HERDR_CORE_SOCKET = r.socket;
   delete process.env.HC_SESSION;
   coreOnce = Promise.resolve(id);
+  discoveredCoreSocket = pinnedCoreSocket = r.socket;
+}
+
+/** Read the core again on the same endpoint used for the pane operations. */
+async function freshCoreId() {
+  if (!discoveredCoreSocket) return null;
+  const { status } = await coreStatus(localHcEnv(), { sockets: [discoveredCoreSocket] });
+  return status?.core?.id ?? null;
 }
 
 /** The ledger's rows, or null when there is no file. A group- or world-writable file is refused. */
@@ -3367,40 +3389,45 @@ function proxyEnabled(state, platform = process.platform, warn = reportProxyWarn
   catch (e) { throw new CliError(e.message); }
 }
 
-// Read approval on the target, never from this computer's data root. Only Linux launches
-// use the switch, so a linked non-Linux launch needs no approval probe.
-async function proxyStateOn(project, bot) {
-  const { key, machine } = project;
+/** Read the approved roster on the target. An absent record returns null. */
+async function readApprovedOn({ key, machine }) {
   let path;
   try {
     const location = await remoteIo.exec("sh", ["-c",
-      'CDPATH= cd -- "$1" || exit 1; pwd -P; '
-      + 'printf "%s\\n" "${XDG_DATA_HOME:-$HOME/.local/share}/automagik-herdr/approved"',
+      'CDPATH= cd -- "$1" && pwd -P && printf "%s\\n" "${XDG_DATA_HOME-}" "${HOME-}"',
       "sh", key], machine, { timeout: AGENT_WAIT_S });
     if (location.code !== 0) throw new Error("cannot locate the target's approved roster");
-    const [canonical, root, extra] = location.stdout.trimEnd().split("\n");
-    if (!canonical?.startsWith("/") || !root?.startsWith("/") || extra !== undefined) {
+    const [canonical, XDG_DATA_HOME, HOME, end, extra] = location.stdout.split("\n");
+    if (!canonical?.startsWith("/") || end !== "" || extra !== undefined) {
       throw new Error("the target's approval location is invalid");
     }
+    const root = approvedRootOf({ XDG_DATA_HOME, HOME });
+    if (!isAbsolute(root)) throw new Error("the target's approval location is invalid");
     const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 32);
     // Same canonical key and suffix as approved.js recordFileOf; fixture test pins both.
     path = `${root}/${hash}.json`;
     const mode = await remoteIo.exec("sh", ["-c",
-      'if [ ! -e "$1" ] && [ ! -L "$1" ]; then exit 3; fi; '
+      'if ! entry=$(LC_ALL=C ls -d -- "$1" 2>&1); then '
+      + 'case "$entry" in *": No such file or directory") exit 3;; *) exit 1;; esac; fi; '
       + '[ -f "$1" ] && [ ! -L "$1" ] || exit 1; stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1"',
       "sh", path], machine, { timeout: AGENT_WAIT_S });
-    if (mode.code === 3) return proxyStateFor(bot);
+    if (mode.code === 3) return null;
     if (mode.code !== 0 || !/^[0-7]{3,4}\s*$/.test(mode.stdout)
       || (parseInt(mode.stdout, 8) & 0o077) !== 0) {
       throw new Error("the target's approved record is unreadable or not private");
     }
     const text = await readRemoteText(remoteIo, machine, path);
     if (text === null) throw new Error("the target's approved record disappeared");
-    return proxyStateFor(bot, parseApprovedRecord(text, canonical).file);
+    return parseApprovedRecord(text, canonical).file;
   } catch (e) {
-    return proxyStateFor(bot, null,
-      `invalid approved record ${path ?? `for project ${key}`}: ${e?.message ?? e}`);
+    throw new Error(`invalid approved record ${path ?? `for project ${key}`}: ${e?.message ?? e}`);
   }
+}
+
+// Only Linux launches use the switch, so a linked non-Linux launch needs no approval probe.
+async function proxyStateOn(project, bot) {
+  try { return proxyStateFor(bot, await readApprovedOn(project)); }
+  catch (e) { return proxyStateFor(bot, null, e.message); }
 }
 
 async function checkLinkedProxy(project, bot, agent, warn = reportProxyWarning) {
@@ -3499,7 +3526,13 @@ async function liveRows(botId, view) {
   const get = await attachedGet(botId, view);
   return get ? [get] : [];
 }
-const labelIo = { rows: liveRows, label: async (address, words) => (await hc(["label", address, ...words])).code === 0 };
+const labelIo = {
+  rows: async (botId) => {
+    await pinIdentityCore();
+    return liveRows(botId);
+  },
+  label: async (address, words) => (await hc(["label", address, ...words])).code === 0,
+};
 
 /**
  * After a write, the live local panes of every bot whose labels the edit changed (rank, lead
@@ -3507,9 +3540,16 @@ const labelIo = { rows: liveRows, label: async (address, words) => (await hc(["l
  * the sidebar does. The file is saved already, so a failure only warns. Resolves with the
  * terminals relabelled.
  */
-async function relabelAfter(beforeFile, afterRaw) {
+async function relabelAfter(beforeFile, afterRaw, editedId) {
   let afterFile;
   try { afterFile = parseBots(JSON.stringify(afterRaw)).file; } catch { return []; }
+  if (editedId) {
+    const before = beforeFile.bots.find((b) => b.id === editedId);
+    const after = afterFile.bots.find((b) => b.id === editedId);
+    if (isSendGrantRole(after?.rank) && after.rank !== before?.rank) {
+      report([`${after.name}: role=${after.rank} takes effect at its next start (it needs the approved roster)`]);
+    }
+  }
   const out = await relabel(relabelPlan(beforeFile, afterFile), labelIo);
   const warning = relabelWarning(out);
   if (warning) report([warning]);
@@ -3575,7 +3615,7 @@ async function cmdEdit(opts, [ref]) {
     for (const m of crossMembersOf(entry)) listProject(m.project);
   }
   warnCrossLinkAfterSave(project, raw, bot.id);
-  const relabelled = project.machine ? [] : await relabelAfter(project.file, raw);
+  const relabelled = project.machine ? [] : await relabelAfter(project.file, raw, bot.id);
   const wake = await saveWake(project, bot.id, opts);
   return opts.json ? { id: bot.id, ...placeOf(project), bot: entry, relabelled, ...wake } : `${entry.name} (${bot.id}) saved.`;
 }
@@ -3790,6 +3830,47 @@ async function relabelPane(terminal, words, prefix, warnedRelabels) {
   try { result = await hc(["label", terminal, ...words]); }
   catch (error) { return relabelFailureWarning({ terminal, words, error }, prefix, warnedRelabels); }
   return result.code === 0 ? null : relabelFailureWarning({ terminal, words, result }, prefix, warnedRelabels);
+}
+
+/** A pane read by its bare address on the verified transport must still be the same live pane. */
+function sameLivePane(get, terminal, createdMs) {
+  return Boolean(get && get.address === terminal && get.state === "live"
+    && Number.isSafeInteger(createdMs) && get.created_ms === createdMs);
+}
+
+function seatGrant(project, bot, ref) {
+  const role = roleOf(project.file, bot.id);
+  if (!isSendGrantRole(role)) return null;
+  const matches = ref && ref !== bot.id ? (file) => findBot(file, ref).id === bot.id : undefined;
+  const decision = { project: project.key, botId: bot.id, matches };
+  const approved = approvedGrant({ ...decision, workingFile: project.file });
+  return { role, approved, decision };
+}
+
+/** Return a warning when the grant cannot be made. Other seat operations have already succeeded. */
+async function grantSeat(bot, grant, { terminal, createdMs, core, late = false, launchSession = null, writeRole = relabelPane }) {
+  if (!grant) return null;
+  const withheld = (reason) => `${bot.name}: role=${grant.role} withheld: ${reason}`;
+  if (!grant.approved) return withheld("the approved roster and working roster do not agree on this grant");
+  if (!local(terminal) || !core || (late && !launchSession)) return withheld("no verified local launch or attach identity");
+  try {
+    const get = await hcGet(terminal);
+    if (!sameLivePane(get, terminal, createdMs) || get.labels?.[BOT_LABEL] !== bot.id
+        || (late && get.labels?.[SESSION_LABEL] !== launchSession)) {
+      return withheld("the pane identity changed or could not be verified");
+    }
+    if (await freshCoreId() !== core) return withheld("the core identity changed or could not be verified");
+    const project = canonicalProject(grant.decision.project);
+    const current = approvedGrant({ ...grant.decision, workingFile: loadProject(grant.decision.project).file });
+    if (!current || current.project !== project || current.project !== grant.approved.project
+        || current.sha256 !== grant.approved.sha256 || current.role !== grant.approved.role) {
+      return withheld("the approved roster or working roster changed");
+    }
+    const words = grantWords(current.role, get.labels);
+    return words.length ? await writeRole(terminal, words, withheld("hc label failed:")) : null;
+  } catch {
+    return withheld("the pane, core or roster could not be verified");
+  }
 }
 
 /** The row uses the launch's own Bot login resolution because the panel may switch it meanwhile. */
@@ -5029,6 +5110,8 @@ async function cmdStart(opts, [ref], warnedRelabels, repairCliLinks) {
     repairCliLinks?.();
     await pinLocalStartCore();
   }
+  const grant = seatGrant(project, bot);
+  if (grant?.approved) await pinIdentityCore();
   // #1432: a pool with more than one holder puts the new pane on the least loaded one; the
   // holder is a local hc session exposed as a linked machine, so its launch is the pack's own
   // linked-machine start, delegated to a child CLI. One holder (the default) places exactly as
@@ -5072,7 +5155,7 @@ async function cmdStart(opts, [ref], warnedRelabels, repairCliLinks) {
       if (out) return out;
     }
     const seat = await launchSeat(project, bot, {
-      warnedRelabels, localOnly, view: localView,
+      grant, warnedRelabels, localOnly, view: localView,
       place: opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : undefined,
     });
     if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
@@ -5737,6 +5820,8 @@ async function seatOnMachine(project, bot, over = {}) {
   const paneWarnings = managed?.warning && (paneEnv.refused || paneEnv.unread) ? [] : paneEnv.warnings;
   const warnings = [...paneWarnings, ...(managed?.warning ? [managed.warning] : []), ...there.warnings, ...guardWarnings, ...briefingHome.warnings, ...briefed.warnings, ...hook.warnings,
     ...(agySettings?.warnings ?? []), ...codexNotes];
+  const role = roleOf(file, bot.id);
+  if (isSendGrantRole(role)) warnings.push(`${bot.name}: role=${role} withheld: the pane is on a linked machine`);
   const launch = async () => {
     const seat = { machine, core, argv, labels, place, hookWritten: hook.written, warnings };
     if (deadlineLeft() < DEADLINE_MARGIN_MS) throw tooLate(bot, machine, key, DEADLINE_MARGIN_MS, place?.spare ? place.space : null);
@@ -6613,7 +6698,8 @@ const seatJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, parent: 
 /**
  * Starts a bot's pane on this computer (Start, and Restart's replacement): the agent and its
  * model pin, the A1 parent, the A16 labels, the place in Herdr's window, the briefing hook, the
- * attach row (by "start", under the ledger's lock) and the seat row. `over` (Restart): `argv`
+ * attach row (by "start", under the ledger's lock) and the seat row. The caller supplies
+ * `over.grant` after choosing the route for the launch and its grant checks. `over` (Restart): `argv`
  * (the whole command, checked by the caller), `agent`, `model`, `cwd`, `place` (undefined:
  * placementOf the project), `carry` (labels kept from the old pane), `replacing` (the old pane's
  * binding: hc run alone, past the "already running" check; the attach rows are restart's, once
@@ -6631,6 +6717,7 @@ const seatJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, parent: 
 async function launchSeat(project, bot, over = {}) {
   const ledgerOpts = { local: over.localOnly };
   const { file, key } = project;
+  const { grant } = over;
   const agentKey = over.agent ?? bot.agent;
   const model = over.argv ? (over.model ?? null) : bot.model;
   // A12: a pin that isn't one of the agent's listed models (an old free-text model) is refused.
@@ -6757,7 +6844,9 @@ async function launchSeat(project, bot, over = {}) {
         throw new CliError(`${address} runs, but its attach row wasn't written (${e?.message ?? e}): attach it with am attach ${bot.id} ${address}`);
       }
     }
-    return { terminal: address, created_ms: get?.created_ms ?? null, pid: get?.foreground?.pid ?? get?.pid ?? null, homeEnv: loginLaunchHome(homeEnv, freshLogin) };
+    return { terminal: address, created_ms: get?.created_ms ?? null, pid: get?.foreground?.pid ?? get?.pid ?? null,
+      core: ledger?.core ?? null, late, launchSession: chosen && get?.labels?.[SESSION_LABEL] === chosen ? chosen : null,
+      homeEnv: loginLaunchHome(homeEnv, freshLogin) };
   };
   // Start: under the ledger's lock, still unattached, then hc run and the attach row (by
   // "start"). Restart: hc run alone (the old pane still holds the bot).
@@ -6778,19 +6867,34 @@ async function launchSeat(project, bot, over = {}) {
       ...tags, core: await rowCore(), createdMs, env: started.homeEnv, session: agentKey === "claude" ? session : null, ...ledgerLogin }));
     if (unlogged) { hook.warnings.push(unlogged); report([unlogged]); }
   };
-  if (!over.replacing) await logSeat();
+  const writeGrant = (core, createdMs = started.created_ms) => grantSeat(bot, grant, {
+    terminal, createdMs: createdMs === started.created_ms ? createdMs : null, core,
+    late: started.late, launchSession: started.launchSession,
+  });
+  if (!over.replacing) {
+    await logSeat();
+    const warning = await writeGrant(started.core);
+    if (warning) { hook.warnings.push(warning); report([warning]); }
+  }
   if (place?.spare && TAB_WAIT_MS > 0 && (!over.localOnly || isHcTerminalId(place.spare.terminal))) {
     const why = await closeSpare(place.spare, terminal, null, { localOnly: over.localOnly });
     if (why) { hook.warnings.push(why); report([why]); }
   }
   listProject(key);
   // An edit that landed while this Start ran: the file read again, its role and category
-  // put on the new pane (relabelWords against the labels it started with).
+  // applied to the same pane's current labels, including any grant written since launch.
   let words = [];
   try {
     const fresh = loadProject(key).file;
     if (fresh.bots.some((b) => b.id === bot.id && !b.planned)) {
-      words = relabelWords(labels, paneLabels(fresh, bot.id), labels);
+      const wanted = paneLabels(fresh, bot.id);
+      if (relabelWords(labels, wanted, labels).length) {
+        await pinIdentityCore();
+        const current = await hcGet(terminal);
+        if (sameLivePane(current, terminal, started.created_ms) && current.labels?.[BOT_LABEL] === bot.id) {
+          words = relabelWords(labels, wanted, current.labels);
+        }
+      }
     }
   } catch { /* the file can't be read now: the labels it started with stand */ }
   if (words.length) {
@@ -6805,7 +6909,7 @@ async function launchSeat(project, bot, over = {}) {
       + `Watch it with hc attach ${terminal}. To give the next start a pane, open a space on ${key} first, or pass --space <id> (herdr-app ls lists the ids).`);
     report(hook.warnings.slice(-1));
   }
-  return { terminal, created_ms: started.created_ms, parent, argv, labels, place, hook, logSeat, session };
+  return { terminal, created_ms: started.created_ms, parent, argv, labels, place, hook, logSeat, writeGrant, session };
 }
 
 /**
@@ -7182,7 +7286,7 @@ function discoveredSession(agentKey, get, ledger, panes, seat) {
  * is never looked at again, so nothing found later can replace what it holds. Never fails: what
  * it couldn't do is left for the next run. Resolves how many it recorded.
  */
-async function recordSessions({ localOnly = false } = {}) {
+async function recordSessions({ localOnly = false, skipRelabels } = {}) {
   let recorded = 0;
   resetSessionDiscovery();
   const ledger = workerLedgerRows();
@@ -7190,8 +7294,10 @@ async function recordSessions({ localOnly = false } = {}) {
   if (!sessionsOnDisk() && !seatHomesRecorded(ledger)) return recorded;
   try {
     const agents = agentTable();
+    await pinIdentityCore().catch(() => null);
     const gets = await livePanes({ localOnly });
     for (const get of gets ?? []) {
+      if (skipRelabels?.has(get.address)) continue;
       if (!get.labels?.[BOT_LABEL] && !get.labels?.[WORKER_OF_LABEL]) continue;
       const start = ledger.findLast((r) => r?.event === "start" && r.terminal === get.address && r.created_ms === get.created_ms) ?? null;
       // Its agent: the program in front, else its start row's, else its launch command's (a bare shell hc kept).
@@ -7269,7 +7375,7 @@ async function attachMoved(bot, oldBinding, terminal, created_ms, key, beforeWri
     rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal, core, created_ms, by: "start" }));
     beforeWrite?.();
     write(rows);
-    return { lost: undefined };
+    return { lost: undefined, core };
   });
 }
 
@@ -9738,7 +9844,7 @@ async function commitAdoption(bot, adoption, terminal, created_ms, key, beforeWr
       }
       beforeWrite?.();
       appendAttach(path, rows);
-      return { lost: undefined };
+      return { lost: undefined, core: adoption.core };
     });
   } catch (e) { throw asCliError(e); }
 }
@@ -9889,6 +9995,8 @@ async function cmdRestart(opts, [ref], _warnedRelabels, repairCliLinks) {
   const queued = opts._queuedTarget;
   const pin = queued ?? opts._targetPin;
   if (pin && project.machine) throw new CliError("A pinned restart must run on the seat's local core.");
+  const grant = project.machine ? null : seatGrant(project, bot);
+  if (grant?.approved) await pinIdentityCore();
   if (!project.machine && !pin && readHolders().holders.length > 1) {
     const caller = process.env.HC_TERMINAL_ID;
     const held = holderHeld(await attachView({ readOnly: Boolean(caller) }), bot.id, key);
@@ -9931,7 +10039,7 @@ async function cmdRestart(opts, [ref], _warnedRelabels, repairCliLinks) {
     viewOnce = null;
   }
   try {
-    return await restartResolved(opts, project, bot, wanted, swap, target, recovered, queueDirs);
+    return await restartResolved(opts, project, bot, wanted, swap, target, recovered, queueDirs, grant);
   } finally {
     if (recovered) {
       if (explicit === undefined) delete process.env.HERDR_APP_HOME;
@@ -9952,7 +10060,7 @@ async function pinnedRestartTarget(project, bot, pin) {
   return { held: { binding, get }, dir: pin.ownerHome };
 }
 
-async function restartResolved(opts, project, bot, wanted, swap, target, recovered, queueDirs) {
+async function restartResolved(opts, project, bot, wanted, swap, target, recovered, queueDirs, grant) {
   const { file, key } = project;
   // A swap's agent and model are checked as an edit checks them (entryFrom); a new agent
   // without --model drops the old agent's pin. bots.json changes only with --save.
@@ -10163,7 +10271,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   checkHelperLogins(plans);
   // A queued restart claims its entry only once every check passed and the seat is about to
   // start: a cancel between the watcher's read and here wins, and nothing is launched.
-  const launch = () => launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
+  const launch = () => launchSeat(project, bot, { grant, agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
     carry: { ...carry, ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, resumeId),
     replacing: old ? held.binding : null, granted: plan.granted, login });
   const targetRow = opts._queuedTarget;
@@ -10262,7 +10370,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
       checkHelperLogins(plans);
       resumeId = null;
       say(`${bot.name} starts on a new conversation: ${note}.`);
-      const again = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
+      const again = await launchSeat(project, bot, { grant, agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
         carry: { ...carriedLabels(old), ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}),
           ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, null), replacing: held.binding,
         granted: plan.granted });
@@ -10310,6 +10418,8 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
       }
     }
     await seat.logSeat(created);
+    const grantWarning = await seat.writeGrant(moved.core, created);
+    if (grantWarning) say(grantWarning);
     // A session id carried onto the new pane, any harness (RFC 0021 (f) 5): a session row too.
     if (resumeId) {
       const unlogged = appendLedger(sessionRow({ terminal: seat.terminal, session: resumeId, transcript: known?.transcript ?? null,
@@ -10430,15 +10540,77 @@ async function terminalPlace(terminal, project) {
   return { machine, core: m.id, address: `${machine}/${bare}`, bare };
 }
 
-async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
+/** Extract a proxy refusal before formatting or deduplicating the label warning. */
+function proxyLabelReason(result) {
+  const raw = String(result.rawStderr || result.stderr || result.stdout || "").trim();
+  let message = raw;
+  try { message = JSON.parse(raw)?.error?.message; } catch { /* plain diagnostic */ }
+  return typeof message === "string" && message.startsWith("hc-proxy: terminal.label:")
+    ? printableHcMessage(message).slice(0, HC_FAILURE_MAX) : null;
+}
+
+function pendingLabelsText(pending) {
+  const operations = pending.map(({ terminal, words, action, core, created_ms, bot }) =>
+    `${terminal} (${action}, core ${core ?? "unknown"}, created_ms ${created_ms ?? "unknown"}, bot=${bot ?? ""}) ${words.join(" ")}`);
+  return `saved in the ledger; labels pending: ${operations.join(" | ")}. `
+    + "Verify each target's current core, address, creation time, bot and role before repairing from an unsandboxed terminal or the sidebar.";
+}
+
+async function freshCoreFor(machine) {
+  if (!machine) return freshCoreId();
+  const result = await hc(["machine", "ls", "--json"]);
+  if (result.code === 0) {
+    for (const [id, row] of machinesById(result.stdout)) if (row.name === machine && row.connected) return id;
+  }
+  return null;
+}
+
+function privilegedSeat(file, id) {
+  const entry = file.bots.find((b) => b.id === id);
+  return entry?.kind === "main" || entry?.rank === "captain" || SHARED_ROLES.includes(entry?.rank) || SHARED_SEND_RANKS.includes(entry?.rank);
+}
+
+function importMayRestoreBot(project, bot) {
+  if (privilegedSeat(project.file, bot.id)) return false;
+  try { return !privilegedSeat(readApprovedRecord({ project: project.key }).file, bot.id); }
+  catch (error) { return error instanceof MissingApprovedRecord; }
+}
+
+/** The bot label itself can confer access from the approved roster. */
+async function verifyAttachName(project, bot, name) {
+  let approved;
+  try {
+    approved = project.machine ? await readApprovedOn(project) : readApprovedRecord({ project: project.key }).file;
+  } catch (e) {
+    if (e instanceof MissingApprovedRecord) return;
+    throw new CliError(`Attach cannot verify the approved roster: ${e.message}`);
+  }
+  if (!name || !approved || !privilegedSeat(approved, bot.id)) return;
+  const working = project.machine ? await loadRemoteProject(project.key, project.machine) : loadProject(project.key);
+  try {
+    if (findBotByName(approved, name).id === bot.id && findBotByName(working.file, name).id === bot.id) return;
+  } catch { /* missing or ambiguous name */ }
+  throw new CliError(`The approved and working rosters do not agree on "${name}" for ${bot.id}.`);
+}
+
+async function cmdAttach(opts, [ref, terminal], warnedRelabels, { grantAllowed = true, importTarget = null, skipRelabels } = {}) {
   if (!terminal) throw new CliError("attach needs a bot and a terminal: am attach <bot> <terminal> [--move].", 2);
   if (terminal.startsWith("-")) throw new CliError(`"${terminal}" isn't a terminal; name one like t7.`, 2);
+  if (opts.machine !== undefined) await pinIdentityCore();
   const project = await projectFor(opts);
   const { file, key } = project;
   const at = await terminalPlace(terminal, project);
   const bot = await botIn(project, ref, opts);
+  const selectedName = importTarget ? importTarget.name : ref === bot.id ? null : ref;
+  const grant = grantAllowed && !at.machine ? seatGrant(project, bot, ref) : null;
   if (bot.planned) throw new CliError(`${bot.name} is planned (wave ${bot.planned.wave}); clear "planned" before attaching it.`);
+  // Pane and ledger checks can reconcile old rows, so refuse invalid approval first.
+  await verifyAttachName(project, bot, selectedName);
+  await pinIdentityCore();
   const get = await hcGet(at.address);
+  if (importTarget && !sameLivePane(get, importTarget.address, importTarget.created_ms)) {
+    throw new CliError(`${importTarget.address} changed after the import plan was made; nothing was attached there.`);
+  }
   const address = get?.address ?? at.address;
   // A pane attached outside its own checkout still has its own worker ledger.
   const proof = await paneProof({ get, project: await paneProject(get?.cwd, project) });
@@ -10479,42 +10651,94 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
   const decided = await underLedger(async ({ core, machines, heldBy, byKey, holds, write }) => {
     const here = await holds(byKey.get(attachKey({ core: at.core ?? core, terminal: bareId, created_ms: get.created_ms })));
     if (here && here.binding.bot !== bot.id) throw playsAnother(here.binding);
-    if (here) return { already: true, movedFrom: null };
+    const writtenCore = at.core ?? core;
+    if (here) return { already: true, movedFrom: null, core: writtenCore };
     const mine = await holds(heldBy(bot.id, at.core));
     if (mine && !opts.move) {
       throw new CliError(`${bot.name} (${bot.id}) is attached to ${heldAt(mine.binding)}; nothing was attached. `
         + `Move it with: am attach ${bot.id} ${address} --move (or detach it first).`);
     }
     const rows = mine ? [closingRow(mine.binding, "detach", "attach", "moved")] : [];
-    rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal: bareId, core: at.core ?? core, created_ms: get.created_ms,
+    rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal: bareId, core: writtenCore, created_ms: get.created_ms,
       machine: at.machine, by: "attach" }));
+    await verifyAttachName(project, bot, selectedName);
     write(rows);
-    return { already: false, movedFrom: mine ? addressOf(mine.binding, machines) : null };
+    return { already: false, movedFrom: mine ? addressOf(mine.binding, machines) : null, old: mine?.binding, core: writtenCore };
   });
   const warnings = [];
-  const label = async (t, words) => {
+  const pending = [];
+  const label = async (t, words, identity, action, message = `the ledger has it, but hc label ${t} ${words.join(" ")} failed:`) => {
     if (!words.length) return;
-    const message = `the ledger has it, but hc label ${t} ${words.join(" ")} failed:`;
-    if (warnedRelabels) {
-      const warning = await relabelPane(t, words, message, warnedRelabels);
-      if (warning) warnings.push(warning);
-      return;
-    }
-    const r = await hc(["label", t, ...words]);
-    if (r.code !== 0) warnings.push(`${message} ${(r.stderr || r.stdout).trim()}`);
+    let result, error;
+    try { result = await hc(["label", t, ...words]); }
+    catch (e) { error = e; }
+    if (result?.code === 0) return;
+    const reason = result && proxyLabelReason(result);
+    if (reason) pending.push({ terminal: t, words, reason, action, ...identity });
+    const warning = warnedRelabels || error
+      ? relabelFailureWarning({ terminal: t, words, result, error }, message, warnedRelabels)
+      : `${message} ${(result.stderr || result.stdout).trim()}`;
+    if (warning) warnings.push(warning);
   };
-  // The labels follow as a display hint: off the old pane, then bot, role, category and a
-  // squad copied from the lead (A16) on this one. A label failure only warns.
+  // A moved binding identifies the old pane to check. The live core must confirm it before any cleanup.
+  let targetVerified = true;
   if (decided.movedFrom) {
+    // Reconciliation must leave the old address alone, even if it now shows another bot.
+    skipRelabels?.add(decided.movedFrom);
     const old = await hcGet(decided.movedFrom).catch(() => null);
-    if (old?.state === "live") await label(decided.movedFrom, detachWords(old.labels ?? {}));
+    const { core, created_ms, bot: oldBot } = decided.old;
+    if (sameLivePane(old, decided.movedFrom, created_ms) && old.labels?.[BOT_LABEL] === oldBot) {
+      const words = detachWords(old.labels, { preserveGrant: true });
+      const identity = { core, created_ms, bot: oldBot };
+      if (core && await freshCoreFor(at.machine).catch(() => null) === core) {
+        await label(decided.movedFrom, words, identity, "clear-old-holder");
+      } else {
+        targetVerified = false;
+        pending.push({ terminal: decided.movedFrom, words, reason: "the old holder's core could not be verified",
+          action: "clear-old-holder", ...identity });
+      }
+    }
   }
   const have = get.labels ?? {};
-  if (have[BOT_LABEL] !== bot.id) await label(address, [`${BOT_LABEL}=${bot.id}`]);
+  const identity = { core: decided.core, created_ms: get.created_ms, bot: have[BOT_LABEL] ?? null };
+  const restoreBot = !importTarget || !decided.already || importMayRestoreBot(project, bot);
+  if (have[BOT_LABEL] !== bot.id && restoreBot) {
+    const words = [`${BOT_LABEL}=${bot.id}`];
+    const current = await hcGet(address).catch(() => null);
+    let reason;
+    if (targetVerified && sameLivePane(current, address, get.created_ms) && current.labels?.[BOT_LABEL] === have[BOT_LABEL]
+        && await freshCoreFor(at.machine).catch(() => null) === decided.core) {
+      const refusal = await verifyAttachName(project, bot, selectedName).then(() => null, asCliError);
+      if (refusal) {
+        reason = refusal.message;
+        warnings.push(reason);
+      } else await label(address, words, identity, "set-bot");
+    } else {
+      reason = "the attach target could not be verified";
+    }
+    if (reason) {
+      targetVerified = false;
+      pending.push({ terminal: address, words, reason, action: "set-bot", ...identity });
+    }
+  }
   const lead = leadIdOf(file, bot.id);
   let leadRows = [];
   try { leadRows = lead ? await liveRows(lead) : []; } catch { leadRows = []; }
-  await label(address, attachWords(file, bot.id, { ...have, [BOT_LABEL]: bot.id }, leadRows));
+  if (targetVerified) {
+    const current = await hcGet(address).catch(() => null);
+    const currentBot = current?.labels?.[BOT_LABEL];
+    if (sameLivePane(current, address, get.created_ms) && (currentBot === bot.id || currentBot === have[BOT_LABEL])) {
+      const displayWords = attachWords(file, bot.id, { ...current.labels, [BOT_LABEL]: bot.id }, leadRows);
+      await label(address, displayWords, { ...identity, bot: current.labels?.[BOT_LABEL] ?? null }, "update-seat-labels");
+    }
+  }
+  if (targetVerified && !decided.already && grantAllowed) {
+    const role = roleOf(file, bot.id);
+    const writeRole = (t, words, message) => label(t, words, { ...identity, bot: bot.id }, "set-role", message);
+    const warning = at.machine && isSendGrantRole(role) ? `${bot.name}: role=${role} withheld: the pane is on a linked machine`
+      : await grantSeat(bot, grant, { terminal: bareId, createdMs: get.created_ms, core: decided.core, writeRole });
+    if (warning) warnings.push(warning);
+  }
   let hook = claude && !at.machine ? await writeBriefingHook(bot, sessionFolder) : { written: false, warnings: [] };
   if (claude && at.machine) {
     try {
@@ -10544,9 +10768,11 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
   report(hook.warnings);
   if (!project.machine) listProject(key);
   const movedFrom = decided.movedFrom ? [decided.movedFrom] : [];
+  if (pending.length) exitAfter.code = 1;
   // A linked machine's terminal goes as its bare id beside `machine`, as the ledger holds it.
-  if (opts.json) return { id: bot.id, terminal: at.machine ? bareId : address, ...(at.machine ? { machine: at.machine } : {}),
-    already: decided.already, movedFrom, hookWritten: hook.written, warnings: hook.warnings };
+  if (opts.json || pending.length) return { id: bot.id, terminal: at.machine ? bareId : address, ...(at.machine ? { machine: at.machine } : {}),
+    already: decided.already, movedFrom, hookWritten: hook.written, warnings: hook.warnings,
+    ...(pending.length ? { partial: true, pending } : {}) };
   if (decided.already) return `${bot.name} is already ${address}.`;
   return `${bot.name} is now ${address}${movedFrom.length ? ` (moved from ${movedFrom[0]})` : ""}.`;
 }
@@ -10554,12 +10780,14 @@ async function cmdAttach(opts, [ref, terminal], warnedRelabels) {
 async function cmdDetach(opts, [ref]) {
   // A bare id needs no definition: a bot removed with rm can still be detached.
   const bareId = BOT_ID_SHAPE.test(ref ?? "");
+  if (opts.machine !== undefined) await pinIdentityCore();
   let bot = null;
   try { bot = findBot((await projectFor(opts)).file, ref); } catch (e) { if (!bareId || !(e instanceof CliError)) throw e; }
   const id = bot?.id ?? ref;
   const name = bot?.name ?? `bot ${id}`;
   const place = opts.machine !== undefined ? (await connectedMachine(opts.machine, "nothing was detached")).id : null;
   const key = opts.machine !== undefined && bot ? (await projectFor(opts)).key : null;
+  await pinIdentityCore();
   const held = await underLedger(async ({ machines, heldBy, holds, write }) => {
     const mine = await holds(heldBy(id, place));
     if (mine && key && mine.binding.project !== key) return null;
@@ -10571,16 +10799,22 @@ async function cmdDetach(opts, [ref]) {
   // The labels, a display hint, come off the detached pane and any other local pane carrying
   // them. A16: role= and category= go with bot=; squad= only when this pack copied it there.
   // The row is written already: a failure here only warns.
-  const cleared = [];
+  const cleared = [], pending = [];
   try {
     // --machine: that machine's pane only; this computer's panes carrying the id are another bot.
     const { addresses, gets } = place ? { addresses: [], gets: [] } : await paneOf(id, hcJson, { localOnly: true });
     for (const t of new Set([...(from ? [from] : []), ...addresses])) {
-      const have = gets.find((g) => g?.address === t)?.labels ?? (await hcGet(t).catch(() => null))?.labels ?? {};
-      if (have[BOT_LABEL] !== id) continue;
+      const get = gets.find((g) => g?.address === t) ?? await hcGet(t).catch(() => null);
+      const have = get?.labels ?? {};
+      if (!sameLivePane(get, t, t === from ? held.binding.created_ms : get?.created_ms) || have[BOT_LABEL] !== id) continue;
       const words = detachWords(have);
       const r = await hc(["label", t, ...words]);
-      if (r.code !== 0) report([`${name} is detached, but hc label ${t} ${words.join(" ")} failed: ${(r.stderr || r.stdout).trim()}`]);
+      if (r.code !== 0) {
+        const reason = proxyLabelReason(r);
+        if (reason) pending.push({ terminal: t, words, reason, action: "clear-seat-labels",
+          core: t === from ? held.binding.core : await rowCore(), created_ms: get.created_ms, bot: id });
+        report([`${name} is detached, but hc label ${t} ${words.join(" ")} failed: ${reason ?? (r.stderr || r.stdout).trim()}`]);
+      }
       else cleared.push(t);
     }
   } catch (e) {
@@ -10589,8 +10823,10 @@ async function cmdDetach(opts, [ref]) {
   }
   const detached = held ? [held.binding.terminal] : [];
   const machine = held?.binding.machine ?? null;
-  return opts.json ? { id, defined: Boolean(bot), detached, ...(machine ? { machine } : {}), labelsCleared: cleared }
-    : from ? `${name} detached from ${from}.` : `${name} has no pane on this computer.`;
+  if (pending.length) exitAfter.code = 1;
+  return opts.json ? { id, defined: Boolean(bot), detached, ...(machine ? { machine } : {}), labelsCleared: cleared,
+    ...(pending.length ? { partial: true, pending } : {}) }
+    : pending.length ? pendingLabelsText(pending) : from ? `${name} detached from ${from}.` : `${name} has no pane on this computer.`;
 }
 
 // ---- import (#232): a running hc team as bots ----
@@ -10666,7 +10902,8 @@ async function importPlan(project, label, { readOnly = false } = {}) {
         const lead = leadIdOf(file, named.id);
         let leadRows = [];
         try { leadRows = lead ? await liveRows(lead) : []; } catch { leadRows = []; }
-        const relabel = [...(have[BOT_LABEL] !== named.id ? [`${BOT_LABEL}=${named.id}`] : []),
+        const restoreBot = have[BOT_LABEL] !== named.id && importMayRestoreBot(project, named);
+        const relabel = [...(restoreBot ? [`${BOT_LABEL}=${named.id}`] : []),
           ...attachWords(file, named.id, { ...have, [BOT_LABEL]: named.id }, leadRows)];
         seats.push({ ...seat, action: "already", id: named.id, bot: named, relabel });
         continue;
@@ -10807,6 +11044,7 @@ async function cmdImport(opts) {
     throw new CliError(`Run the import in ${project.key}: attach reads ${under(project.key, BOTS_PATH)}, and from this worktree the bots `
       + `would go to ${under(project.dir, BOTS_PATH)}. Nothing was changed.`);
   }
+  if (opts.apply) await pinIdentityCore();
   const plan = await importPlan(project, label, { readOnly: !opts.apply });
   const apply = Boolean(opts.apply) && !plan.conflicts.length;
   const todo = plan.seats.filter(importTodo);
@@ -10826,8 +11064,17 @@ async function cmdImport(opts) {
     }
     for (const s of todo) {
       try {
-        const r = await cmdAttach({ project: opts.project, json: true }, [s.id, s.terminal]);
+        const r = await cmdAttach({ project: opts.project, json: true }, [s.id, s.terminal], undefined,
+          { grantAllowed: false, importTarget: { address: s.get.address, created_ms: s.get.created_ms, name: s.name } });
         out.attached.push({ id: s.id, name: s.name, terminal: s.terminal, created: s.action === "create", already: r.already, warnings: r.warnings });
+        if (r.partial) {
+          out.partial = true;
+          out.pending = r.pending;
+          out.stopped = { terminal: s.terminal, name: s.name, error: "labels pending" };
+          exitAfter.code = 1;
+          report([`import stopped at ${s.terminal} (${s.name}): ${pendingLabelsText(r.pending)}`]);
+          break;
+        }
         const now = s.action === "already" ? "is" : "is now";
         if (!opts.json) process.stdout.write(`  ${s.name} (${s.id}) ${now} ${s.terminal}${s.action === "create" ? ", created" : s.action === "already" ? ", its labels back" : ""}.\n`);
       } catch (e) {
@@ -10839,7 +11086,7 @@ async function cmdImport(opts) {
       }
     }
     out.seats = plan.seats.map((s) => seatOut(s, true));
-    await tidyQuietly();
+    if (!out.partial) await tidyQuietly();
   }
   if (opts.json) process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
   return PRINTED;
@@ -12971,7 +13218,9 @@ function autoSetting(opts, io) {
 
 // ---- tidy (sidebar-rules Group 2) ----
 
-const tidyIo = () => ({ run: runProgram, home: home(), appHome: appHome(), prune: (keys) => unlistProjects(keys),
+const tidyIo = () => ({
+  run: (command, args, options) => runProgram(command, args, command === "hc" ? { ...options, env: localHcEnv() } : options),
+  home: home(), appHome: appHome(), prune: (keys) => unlistProjects(keys),
   // Read the file again after a command writes it, without importing labels or ending rows.
   ledger: async () => {
     const rows = readAttachFile();
@@ -12996,7 +13245,7 @@ async function cmdTidy(opts) {
  * prune's note only when the command succeeded: a failed one's last stderr line stays its own
  * error (the sidebar shows that line, restart.js restartAnswer).
  */
-async function tidyQuietly(warnedRelabels, { localOnly = false } = {}) {
+async function tidyQuietly(warnedRelabels, { localOnly = false, skipRelabels } = {}) {
   const warnings = [];
   const onRelabelFailure = warnedRelabels ? (failure) => {
     const { terminal, words } = failure;
@@ -13004,9 +13253,11 @@ async function tidyQuietly(warnedRelabels, { localOnly = false } = {}) {
     if (warning) warnings.push(warning);
   } : undefined;
   try {
+    await pinIdentityCore().catch(() => null);
     const io = tidyIo();
     const actions = tidyPlan(await readState(io, { window: false, localOnly }), { now: Date.now(), home: io.home, appHome: io.appHome });
-    report(await fixNonVisual(actions.filter((a) => !a.visual), io, { notes: exitAfter.code === 0, onRelabelFailure }));
+    const fixes = actions.filter((a) => !a.visual && (a.kind !== "relabel" || !skipRelabels?.has(a.terminal)));
+    report(await fixNonVisual(fixes, io, { notes: exitAfter.code === 0, onRelabelFailure }));
   } catch (e) { report([`tidy: ${e?.message ?? e}`]); }
   report(warnings);
   return warnings;
@@ -15261,8 +15512,8 @@ async function dispatch(argv, io) {
   const transportEnv = opts["local-only"] || (command === "start" && opts.machine !== undefined && process.env.HC_TERMINAL_ID)
     ? ["HC_SOCKET", "AUTOMAGIK_HERDR_CORE_SOCKET", "HC_SESSION"].map((name) => [name, process.env[name]])
     : [];
-  const transportCache = [workerTransportOnce, coreOnce, machinesOnce, viewOnce];
-  workerTransportOnce = coreOnce = machinesOnce = viewOnce = null;
+  const transportCache = [workerTransportOnce, coreOnce, machinesOnce, viewOnce, discoveredCoreSocket, pinnedCoreSocket];
+  workerTransportOnce = coreOnce = machinesOnce = viewOnce = discoveredCoreSocket = pinnedCoreSocket = null;
   try {
     if (command === "main") checkMainArgs(rest, tokens);
     if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"] || opts.due))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
@@ -15273,21 +15524,24 @@ async function dispatch(argv, io) {
     // Tidy is this computer's window and labels: never after a command on a linked machine.
     const tidy = !preview && TIDIES.has(command) && opts.machine === undefined;
     const warnedRelabels = tidy && (command === "start" || command === "attach") ? new Set() : undefined;
+    const skipRelabels = tidy && command === "attach" ? new Set() : undefined;
     const out = command === "proxy" ? await run(opts, rest, io)
       : linkedInstall ? await run(opts, rest, { ...io, machineCount: tokens.filter((t) => t.kind === "option" && t.name === "machine").length })
+      : command === "attach" ? await run(opts, rest, warnedRelabels, { skipRelabels })
       : await run(opts, rest, warnedRelabels, callerAction ? io.repairCliLinks : undefined);
     if (out === PRINTED) return exitAfter.code;
-    const tidyBeforeJson = warnedRelabels !== undefined && opts.json;
-    const locality = { localOnly: opts["local-only"] };
+    const tidyBeforeJson = warnedRelabels !== undefined && opts.json && !out?.partial;
+    const tidyOptions = { localOnly: opts["local-only"], skipRelabels };
     if (tidyBeforeJson) {
-      const warnings = await tidyQuietly(warnedRelabels, locality);
+      const warnings = await tidyQuietly(warnedRelabels, tidyOptions);
       if (warnings.length && !(opts["local-only"] && out.running)) (out.warnings ??= []).push(...warnings);
     }
     if (opts.json) process.stdout.write(unprinted(`${JSON.stringify(out, null, 2)}\n`));
+    else if (command === "attach" && out?.partial) process.stdout.write(unprinted(`${pendingLabelsText(out.pending)}\n`));
     else if (out) process.stdout.write(unprinted(`${out}\n`));
-    if (tidy) {
-      if (!tidyBeforeJson) await tidyQuietly(warnedRelabels, locality);
-      await recordSessions(locality);
+    if (tidy && !out?.partial) {
+      if (!tidyBeforeJson) await tidyQuietly(warnedRelabels, tidyOptions);
+      await recordSessions(tidyOptions);
     }
     return exitAfter.code;
   } catch (e) {
@@ -15311,7 +15565,7 @@ async function dispatch(argv, io) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
-    [workerTransportOnce, coreOnce, machinesOnce, viewOnce] = transportCache;
+    [workerTransportOnce, coreOnce, machinesOnce, viewOnce, discoveredCoreSocket, pinnedCoreSocket] = transportCache;
   }
 }
 

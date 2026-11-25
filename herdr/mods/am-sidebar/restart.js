@@ -5,7 +5,8 @@
 
 import { AGENTS, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
   modelArgs, ownsSession, resumeArgs, resumesById, seatSettingsArgs, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
-import { SQUAD_LABEL, SQUAD_MARK, unwrapKeep } from "./launchArgs.js";
+import { ROLE_LABEL, SQUAD_LABEL, SQUAD_MARK, unwrapKeep } from "./launchArgs.js";
+import { isSendGrantRole } from "./model.js";
 import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, codexCommandCheck,
   codexTemplateRefusal, codexTemplateWarning, templateAgent } from "./workers.js";
 import { CONFIG_VAR, envWords } from "./logins.js";
@@ -581,6 +582,7 @@ export function helperPlan({ directLogin = false, get, worker = null, session = 
   const replaced = get?.address ?? null;
   const cwd = helperCwd({ get, worker, realpath: agy?.realpath });
   const labels = { ...(get?.labels ?? {}) };
+  if (isSendGrantRole(labels[ROLE_LABEL])) delete labels[ROLE_LABEL];
   // #1418: hc's keep wrapper around the helper's own command (keptLaunch); off under the login policy.
   const kept = keptLaunch(get, agents, { keepAware: !directLogin, launchAgent, workerAgent: worker?.agent ?? null });
   // `launchAgent` (#939, revive: the pane is a bare shell hc kept): its agent by its launch command.

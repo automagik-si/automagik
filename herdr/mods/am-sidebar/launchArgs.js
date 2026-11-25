@@ -2,10 +2,12 @@
 // rule (DESIGN Decision 3), which terminal counts among duplicates, the labels of a pane and
 // the attach refusal message. Pure: no `herdr`, so `node --test` runs it. Apache-2.0.
 
-import { BOT_LABEL, effectiveCategory, effectiveLead, mainBotOf, projectEntriesOf } from "./model.js";
+import { BOT_LABEL, effectiveCategory, effectiveLead, isSendGrantRole, mainBotOf, roleOf } from "./model.js";
 import { ENV, guardPathWith, paneArgs, paneGuardOf, stableGuardDir, stableRootOf } from "./workers.js";
 import { envWords } from "./logins.js";
 import { hermesPairProblem, hermesPairConflict } from "./hermesPair.js";
+
+export { roleOf } from "./model.js";
 
 const SHELLS = new Set(["sh", "zsh", "bash", "fish", "dash", "ksh", "tcsh", "csh", "nu", "login"]);
 const base = (p) => String(p ?? "").split("/").pop().replace(/^-/, "");
@@ -153,33 +155,6 @@ export function leadIdOf(file, botOrId, opts = {}) {
 }
 
 /**
- * A bot pane's `role=` (A16): the main bot is `main`; a member that leads another bot (by
- * effective lead) is `captain`; else its rank. No rank: null (no label).
- */
-export function roleOf(file, botOrId, opts = {}) {
-  const botId = typeof botOrId === "string" ? botOrId : botOrId?.id;
-  const bot = file.bots.find((b) => b.id === botId);
-  if (!bot) return null;
-  if (bot === mainBotOf(file)) return "main";
-  if (file.bots.some((b) => {
-    if (b.id === botId || b.kind !== "member") return false;
-    const eff = effectiveLead(file, b.id, opts);
-    return !eff.leadProject && eff.lead === botId;
-  })) return "captain";
-  if (opts?.projects) {
-    for (const [otherKey, otherFile] of projectEntriesOf(opts.projects)) {
-      if (opts.project && otherKey === opts.project) continue;
-      for (const b of otherFile?.bots ?? []) {
-        if (!b?.leadProject) continue;
-        const eff = effectiveLead(otherFile, b.id, { project: otherKey, projects: opts.projects });
-        if (eff.lead === botId && (!opts.project || eff.leadProject === opts.project)) return "captain";
-      }
-    }
-  }
-  return bot.rank || null;
-}
-
-/**
  * The lead's pane whose labels a bot copies its squad from: of the panes carrying the lead's
  * label on this computer (terminals() rows or hc get answers), the live ones with an agent in
  * front (Decision 3), the newest by created_ms. Null when none. Used by Start, Attach and an
@@ -198,7 +173,7 @@ export function leadPane(rows) {
  * `existing` (the pane's labels now) has one, it isn't listed; else the lead's pane's squad
  * (`leadLabels`) is copied, with SQUAD_MARK holding the copied value.
  */
-export function paneLabels(file, botId, existing = {}, leadLabels = null) {
+function rosterLabels(file, botId, existing = {}, leadLabels = null) {
   const out = { [BOT_LABEL]: botId };
   const role = roleOf(file, botId);
   if (role) out[ROLE_LABEL] = role;
@@ -207,6 +182,17 @@ export function paneLabels(file, botId, existing = {}, leadLabels = null) {
   const squad = leadLabels?.[SQUAD_LABEL];
   if (!existing?.[SQUAD_LABEL] && squad) { out[SQUAD_LABEL] = squad; out[SQUAD_MARK] = squad; }
   return out;
+}
+
+/** Launch and reconciliation labels omit roles that need a verified grant. */
+export function paneLabels(file, botId, existing, leadLabels) {
+  const labels = rosterLabels(file, botId, existing, leadLabels);
+  if (isSendGrantRole(labels[ROLE_LABEL])) delete labels[ROLE_LABEL];
+  return labels;
+}
+
+export function grantWords(role, have = {}) {
+  return isSendGrantRole(role) && !isSendGrantRole(have[ROLE_LABEL]) ? [`${ROLE_LABEL}=${role}`] : [];
 }
 
 /** `hc label` K=V words that bring a pane's labels (`have`) up to `want` (paneLabels): set only. */
@@ -224,6 +210,7 @@ export function labelWords(want, have = {}) {
 export function attachWords(file, botId, have, leadRows) {
   const leadSquad = leadPane(leadRows)?.labels?.[SQUAD_LABEL] ?? null;
   const want = paneLabels(file, botId, have, leadPane(leadRows)?.labels ?? null);
+  if (isSendGrantRole(have?.[ROLE_LABEL])) want[ROLE_LABEL] = have[ROLE_LABEL];
   const words = labelWords(want, have);
   for (const k of [ROLE_LABEL, CATEGORY_LABEL]) if (have?.[k] && !want[k]) words.push(`${k}=`);
   if (copiedSquad(have) && have[SQUAD_LABEL] !== leadSquad) {
@@ -243,6 +230,7 @@ export function attachWords(file, botId, have, leadRows) {
 export function relabelWords(before, after, have = {}, { leadChanged = false, leadSquad = null } = {}) {
   const words = [];
   for (const k of [ROLE_LABEL, CATEGORY_LABEL]) {
+    if (k === ROLE_LABEL && (isSendGrantRole(have?.[k]) || isSendGrantRole(after[k]))) continue;
     if (after[k] && have?.[k] !== after[k]) words.push(`${k}=${after[k]}`);
     else if (!after[k] && before[k] && have?.[k] === before[k]) words.push(`${k}=`);
   }
@@ -258,9 +246,10 @@ export function relabelWords(before, after, have = {}, { leadChanged = false, le
  * The words Detach sends: bot, role and category off (any value: nothing else sets them
  * today); the squad only while it is the one this pack copied, and the mark always.
  */
-export function detachWords(have = {}) {
+export function detachWords(have = {}, { preserveGrant = false } = {}) {
   const words = [`${BOT_LABEL}=`];
-  for (const k of [ROLE_LABEL, CATEGORY_LABEL]) if (have?.[k]) words.push(`${k}=`);
+  if (have?.[ROLE_LABEL] && !(preserveGrant && isSendGrantRole(have[ROLE_LABEL]))) words.push(`${ROLE_LABEL}=`);
+  if (have?.[CATEGORY_LABEL]) words.push(`${CATEGORY_LABEL}=`);
   if (copiedSquad(have)) words.push(`${SQUAD_LABEL}=`);
   if (have?.[SQUAD_MARK]) words.push(`${SQUAD_MARK}=`);
   return words;
@@ -270,15 +259,15 @@ export function detachWords(have = {}) {
  * The bots whose pane labels an edit changes (A16): every bot of the new file whose role or
  * category differs from the old file's, or whose effective lead changed (a squad to copy or
  * move). Planned bots have no pane. Returns [{ id, lead, before, after, leadChanged }]
- * (before/after: paneLabels with no pane labels known; `lead`: its lead in the new file).
+ * (before/after: roster labels before filtering grants; `lead`: its lead in the new file).
  */
 export function relabelPlan(beforeFile, afterFile) {
   const plan = [];
   for (const b of afterFile?.bots ?? []) {
     if (b.planned) continue;
     const had = beforeFile?.bots?.some((x) => x.id === b.id);
-    const before = had ? paneLabels(beforeFile, b.id) : { [BOT_LABEL]: b.id };
-    const after = paneLabels(afterFile, b.id);
+    const before = had ? rosterLabels(beforeFile, b.id) : { [BOT_LABEL]: b.id };
+    const after = rosterLabels(afterFile, b.id);
     const lead = leadIdOf(afterFile, b.id);
     const leadChanged = Boolean(had) && leadIdOf(beforeFile, b.id) !== lead;
     if (before[ROLE_LABEL] !== after[ROLE_LABEL] || before[CATEGORY_LABEL] !== after[CATEGORY_LABEL] || leadChanged) {
