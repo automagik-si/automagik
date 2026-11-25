@@ -11,6 +11,7 @@ import { SOLVER_NOTES, isSolverBot } from '../shared/solver-method.js'
 import { VERDICTS_KEPT, deliveryMark, verdictOf } from '../shared/review-mark.js'
 import { guardVerdictOf } from '../shared/review-guard.js'
 import { teamToolOf } from './approvals.js'
+import { SOURCE_KIND } from './constants.js'
 import { reachesShell } from './tool-deny.js'
 
 // The tools that change files by name (as private-bots.js and auto-judge.js read them), after
@@ -123,6 +124,9 @@ export function cleanTrack(track) {
 
 export function install(rt) {
   const save = () => void rt.save?.({ durable: true }).catch?.(() => {})
+  // Unread host exchanges for each Bot's current request. A part switch can give
+  // the inbox message a new id while keeping its exchange id and replyTo.
+  const unread = new WeakMap()
   // A guarded Bot stays tracked whatever its role says: the guard never reads the marker.
   const tracked = bot => bot !== undefined && (isSolverBot(bot) || bot.reviewGuard === true)
   // The record of the request in progress: { requested, requestAt, personAt, firstWorkAt,
@@ -139,6 +143,7 @@ export function install(rt) {
     return bot.reviewTrack
   }
   const open = (bot, at) => {
+    unread.delete(bot)
     const last = cleanTrack(bot.reviewTrack)?.last
     bot.reviewTrack = { requested: true, requestAt: at, personAt: at, verdicts: [], ...(last ? { last } : {}) }
   }
@@ -193,7 +198,7 @@ export function install(rt) {
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
   // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
   // every tracked Bot, so a guard turned on mid-request reads a verdict that already came.
-  function reviewVerdict(fromId, toId, roomId, text, workAt) {
+  function reviewVerdict(fromId, toId, roomId, text, workAt, reply) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
@@ -206,6 +211,62 @@ export function install(rt) {
     if (planVerdict !== undefined) track.planVerdictAt ??= at
     if (verdict !== undefined) track.verdicts = [...track.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
     save()
+    if (reply === undefined || !track.requested || !isTime(workAt)) return
+    let replies = unread.get(bot)
+    if (replies === undefined) unread.set(bot, replies = new Map())
+    // Only the delivery that appends this exchange can start its hold.
+    return () => {
+      if (unread.get(bot) !== replies || bot.reviewTrack.delivered === true || bot.reviewerId !== fromId) return
+      const release = () => replies.delete(reply.exchangeId)
+      replies.set(reply.exchangeId, { reviewerId: fromId, replyTo: reply.replyTo, workAt, release })
+      return release
+    }
+  }
+
+  const replyAt = (sessionId, source) => {
+    if (source?.kind !== SOURCE_KIND || source.role !== 'reply') return
+    const past = rt.pastOwners.get(sessionId)
+    const bot = rt.botOf(rt.chatOwners.get(sessionId) ?? (past?.roomId === undefined ? past?.botId : undefined))
+    const reply = unread.get(bot)?.get(source.exchangeId)
+    if (reply !== undefined && reply.reviewerId === source.senderSessionId && reply.replyTo === source.replyTo) return reply
+  }
+
+  const agentSession = agent => agent?.session?.id ?? agent?.id
+  rt.ctx.on('session/event', (session, event) => {
+    if (event.type === 'user/message') replyAt(session.id, event.data?.source)?.release()
+  })
+  rt.ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+    const sessionId = agentSession(agent)
+    const reply = replyAt(sessionId, message?.source)
+    if (reply !== undefined) reply.claim = { sessionId, turn }
+  })
+  rt.ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+    const reply = replyAt(agentSession(agent), message?.source)
+    if (reply === undefined) return
+    reply.claim = undefined
+    reply.withdrawal = undefined
+  })
+  rt.ctx.on('agent/inbox/discarded', ({ agent, message }) => {
+    if (rt.wakeLog?.movingInbox || rt.updateShuttingDown?.()) return
+    const reply = replyAt(agentSession(agent), message?.source)
+    if (reply === undefined) return
+    // DSH edit and steer remove and reinsert in one operation. Give the matching
+    // insertion a chance to cancel the withdrawal before treating it as final.
+    const withdrawal = {}
+    reply.withdrawal = withdrawal
+    queueMicrotask(() => { if (reply.withdrawal === withdrawal) reply.release() })
+  })
+
+  function reviewReplyTurnEnd(sessionId, data) {
+    const bot = rt.botOf(rt.chatOwners.get(sessionId))
+    const replies = unread.get(bot)
+    if (!replies?.size || rt.carriesBotInput?.(sessionId) || rt.updateHold?.closed || rt.updateShuttingDown?.()
+      || rt.cutByRestart?.(data?.reason) || data?.reason?.reason?.kind === 'disposed') return
+    // A claim without a user/message was dropped when its turn ended, unless
+    // the host is still carrying those proposed inputs through a part change.
+    for (const reply of replies.values()) {
+      if (reply.claim?.sessionId === sessionId && reply.claim.turn === data?.turn) reply.release()
+    }
   }
 
   // Another Bot's message_bot request in a guarded Solver's own chat (turns.js, first arrival
@@ -249,6 +310,8 @@ export function install(rt) {
     const review = reviewOf(bot)
     const works = Object.values(rt.state?.works ?? {})
     if (review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && !(typeof track.personAt === 'number' && typeof work.at === 'number' && work.at < track.personAt))) return
+    if (review === 'bot' && [...(unread.get(bot)?.values() ?? [])].some(reply =>
+      reply.reviewerId === bot.reviewerId && !(typeof track.personAt === 'number' && reply.workAt < track.personAt))) return
     // Reviewer work this request opened, still out when the person asked: delivered before its
     // verdict (Run 3). Work left from an earlier request is not this one's.
     const pending = review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && typeof work.at === 'number' && work.at >= track.requestAt)
@@ -265,5 +328,5 @@ export function install(rt) {
     return last ? { reviewMark: { ...last } } : {}
   }
 
-  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewTurnEnd, reviewMarkOf })
+  Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewTurnEnd, reviewMarkOf })
 }

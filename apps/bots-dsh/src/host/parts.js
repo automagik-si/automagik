@@ -4630,6 +4630,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, heldBackFor, newPart, switchPart, startFresh, freshPinnedText: bot => pinnedText(bot, 'fresh'), switchRoute, routeAttempt, assertRouteAllowed, routeUnavailable, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(),
+    carriesBotInput: id => switches.has(id) || checkpoints.has(id) || reverting.has(id),
     // A Bot's own chat moving to another route. `crossing: true` asks only about an agent
     // switch the person picked and answers its `{ to, since }` (the chat's lock), else false.
     switchingChat: (id, { crossing = false } = {}) => {

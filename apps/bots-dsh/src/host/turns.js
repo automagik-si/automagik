@@ -105,19 +105,23 @@ export function answerSender(rt, id, source, text, long, shouldSend) {
   const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
   // When the work this answers was opened, read before closeWork deletes it: a Solver's review
   // mark counts a verdict only for work its current request opened (review-mark.js).
-  const workAt = rt.state?.works?.[source.exchangeId]?.at
+  const answered = rt.state?.works?.[source.exchangeId]
   const work = rt.closeWork?.(source.exchangeId, name, text)
+  const fromId = rt.selfOf(id)
+  const exchangeId = randomUUID()
+  const reply = answered && answered.from === source.senderSessionId && answered.to === fromId
+    && answered.room === undefined && answered.fromRoom === undefined
+    ? { exchangeId, replyTo: source.exchangeId } : undefined
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
-  rt.reviewVerdict?.(rt.selfOf(id), source.senderSessionId, source.senderRoomId, text, workAt)
+  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
   const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
   const marker = late === undefined ? '' : LATE_ANSWER
   const body = marker === '' ? (long?.text ?? text) : `${marker}${long?.text ?? text}`
   const length = long === undefined ? undefined : late === undefined ? long.length : (long.length ?? text.length) + marker.length
-  const exchangeId = randomUUID()
   void rt.deliver({
-    fromId: rt.selfOf(id),
+    fromId,
     toId: source.senderSessionId,
     ...(back ? { sessionId: back } : {}),
     text: body,
@@ -126,7 +130,7 @@ export function answerSender(rt, id, source, text, long, shouldSend) {
     replyTo: source.exchangeId,
     exchangeId,
     ...(work ? { work } : {}),
-  }, { shouldSend }).catch((error) => {
+  }, { shouldSend, onReplyRecorded }).catch((error) => {
     if (shouldSend?.() === false) return
     rt.warn('omni-ui: reply delivery failed: %s', error)
     // The reply never reached the asker: its note goes — the notice below carries
@@ -1146,6 +1150,7 @@ export function install(rt) {
         break
       }
       case 'turn/end': {
+        rt.reviewReplyTurnEnd?.(id, event.data)
         setActivity(id, undefined)
         // A steer cut leaves the turn's routing state for the fresh turn that
         // claims the steer: nothing is answered or delivered for the cut one.

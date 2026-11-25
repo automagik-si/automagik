@@ -11,6 +11,7 @@ import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { isNotesPath, isNotesWrite, isWorkCall } from '../src/host/review-mark.js'
 import { answerSender } from '../src/host/turns.js'
+import { guardVerdictOf } from '../src/shared/review-guard.js'
 import { deliveryMark, verdictOf } from '../src/shared/review-mark.js'
 import { CALLER_BOT_KEYS } from '../src/host/caller-view.js'
 import { fakeContext } from './fake-ctx.js'
@@ -65,6 +66,32 @@ function bench(t) {
   const event = (sessionId, type, data) => {
     for (const listener of ctx.listeners.get('session/event') ?? []) listener({ id: sessionId }, { type, seq: ++seq, time: Date.now(), data })
   }
+  const recordedReplies = new Set()
+  // The mark unit cases simulate verdicts the Solver has already read. The race
+  // cases opt into real host delivery and control when their fake agent reads it.
+  const verdictOnly = { __proto__: rt, deliver: async () => {} }
+  const replyInbox = (sessionId) => {
+    const agent = agents.get(sessionId)
+    recordedReplies.add(sessionId)
+    const nextTurn = []
+    agent.followup = (message) => {
+      const start = nextTurn.length
+      nextTurn.push(message)
+      event(sessionId, 'agent/inbox/spliced', { target: 'next-turn', start, inserted: [message] })
+      ctx.emit('agent/inbox/inserted', { agent, message })
+    }
+    return nextTurn
+  }
+  const takeReply = (sessionId, inbox, replyTo, { admitted = true } = {}) => {
+    const message = inbox.shift()
+    assert.equal(message?.source.replyTo, replyTo)
+    assert.equal(message.source.role, 'reply')
+    const turn = seq + 1
+    event(sessionId, 'turn/start', { turn })
+    event(sessionId, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    ctx.emit('agent/inbox/claimed', { agent: agents.get(sessionId), message, turn })
+    if (admitted) event(sessionId, 'user/message', { id: message.id, content: message.content, source: message.source })
+  }
   const text = value => [{ type: 'text', text: value }]
   // A person's message in the chat, and a turn that ends with `reply` (or nothing).
   const person = (sessionId, value) => {
@@ -73,13 +100,14 @@ function bench(t) {
   }
   const endTurn = (sessionId, reply, reason = { kind: 'completed' }) => {
     if (reply) event(sessionId, 'assistant/message', { message: { content: text(reply) } })
-    event(sessionId, 'turn/end', { turn: seq, reason })
+    event(sessionId, 'turn/end', { turn: rt.live.get(sessionId)?.turn ?? seq, reason })
   }
   // The reviewer answering the Solver's request (the path every reply takes, turns.js), on the work
   // message_bot opened for it now (`opened: false`: a reply whose work is gone; `exchangeId`: a given one).
   const reply = (fromId, toId, value, { opened = true, exchangeId = `x${++seq}`, ...extra } = {}) => {
     if (opened && rt.state.works?.[exchangeId] === undefined) rt.openWork(exchangeId, { from: toId, to: fromId })
-    return answerSender(rt, fromId, { exchangeId, senderSessionId: toId, ...extra }, value)
+    const host = recordedReplies.has(toId) ? rt : verdictOnly
+    return answerSender(host, fromId, { exchangeId, senderSessionId: toId, ...extra }, value)
   }
   // A Solver as the dialog makes it, through the person's create-bot route.
   const solver = async ({ reviewerId, brief = '' } = {}) => {
@@ -88,7 +116,7 @@ function bench(t) {
     return rt.botOf(answer.value.id)
   }
   const reviewer = async () => rt.createBot({ name: `Reviewer ${++created}`, role: 'Reviewer', instructions: 'Review.', pickModel: true })
-  return { ctx, rt, home, call, guard, person, endTurn, reply, solver, reviewer, sessions }
+  return { ctx, rt, home, call, guard, person, endTurn, reply, solver, reviewer, sessions, event, replyInbox, takeReply }
 }
 
 // F9 (APP-TEST "Recheck on 262488524"): a Codex reviewer's replies, word for word with every name
@@ -798,4 +826,174 @@ test('D2 G2 a pin-only Solver is tracked through delivery', async t => {
   b.endTurn(solver.id, 'Review: fresh session. Done.')
   const roster = (await b.call('state')).value
   assert.equal(roster.bots.find(bot => bot.id === solver.id).reviewMark?.review, 'fresh')
+})
+
+// ---- Track 1 (#2056 combined-2 stage 6): the RESULT verdict is never recorded when the
+// reviewer's PLAN SHIP arrives before the Solver's plan-wait turn ends. Real order from
+// /tmp/automagik-2056-combined2-stage6/EXCHANGE.json and SOLVER-CHAT-RAW.json (turns 4-6).
+
+const PLAN_REPLY = 'SHIP\n\nPLAN approved. Dividing the sum by `values.length` after the existing empty-input guard gives `12 / 3 = 4` and preserves empty-input rejection. Delivery still requires an explicit RESULT SHIP verdict from this reviewer.'
+const RESULT_REPLY = 'SHIP\n\nExplicit RESULT SHIP verdict. PLAN approval preceded the edit. The submitted diff changes only the return line in `average.mjs`.\n\nThe Solver reports that the exact requested command exited `0` with one test passed and zero failed.'
+
+test('TRACK1 PARSE: both stage-6 replies read as SHIP by verdictOf and guardVerdictOf', () => {
+  assert.equal(verdictOf(PLAN_REPLY), 'SHIP')
+  assert.equal(verdictOf(RESULT_REPLY), 'SHIP')
+  assert.equal(guardVerdictOf(PLAN_REPLY, 'R'), 'SHIP')
+  assert.equal(guardVerdictOf(RESULT_REPLY, 'R'), 'SHIP')
+})
+
+// Wait for the actual host exchange to be recorded. The fake agent keeps followups
+// in its inbox until the test lets DSH's next turn take them as input.
+async function until(predicate) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (predicate()) return
+    await step()
+  }
+  assert.ok(predicate(), 'host reply did not reach the expected boundary')
+}
+
+async function run(t, { planAnsweredInsideTurn, resultAnsweredInsideTurn = false }) {
+  const { rt, guard, person, endTurn, reply, solver, reviewer, replyInbox, takeReply } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  await rt.resolveAgent(bot.id)
+  const inbox = replyInbox(bot.id)
+  const record = exchange => rt.ledger.records(`pair-${[ada.id, bot.id].sort().join('-')}`)
+    .find(row => row.role === 'reply' && row.replyTo === exchange)
+  const waitForReply = async (exchange) => {
+    await until(() => inbox.length === 1)
+    assert.equal(inbox[0].source.exchangeId, record(exchange)?.id)
+  }
+  const marks = []
+  const finish = (text) => {
+    endTurn(bot.id, text)
+    const mark = bot.reviewTrack.last
+    if (mark !== undefined && mark !== marks.at(-1)) marks.push(mark)
+  }
+  // Turn 4: the person's request; the Solver sends the PLAN (message_bot opens the work).
+  person(bot.id, 'Fix average.mjs so average([2,4,6]) returns 4.')
+  await step()
+  rt.openWork('x-plan', { from: bot.id, to: ada.id })
+  await step()
+  if (planAnsweredInsideTurn) {
+    reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' })
+    await until(() => record('x-plan'))
+    assert.equal(inbox.length, 0, 'a recorded answer waits until the active turn ends')
+  }
+  await step()
+  finish('PLAN review sent. I am waiting for its verdict before editing.')
+  const afterTurn4 = { delivered: bot.reviewTrack.delivered === true, last: bot.reviewTrack.last && { ...bot.reviewTrack.last, at: 0 } }
+  if (!planAnsweredInsideTurn) { await step(); reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' }) }
+  await step()
+  // Turn 5: opened by the PLAN reply; edit, test, then the RESULT review goes out and the turn ends.
+  await waitForReply('x-plan')
+  takeReply(bot.id, inbox, 'x-plan')
+  await guard({ name: 'write', arguments: { file_path: 'average.mjs' }, agent: { id: bot.id } })
+  await step()
+  await guard({ name: 'mcp__dsh__bash', arguments: { command: 'node --test average.test.mjs' }, agent: { id: bot.id } })
+  await step()
+  rt.openWork('x-result', { from: bot.id, to: ada.id })
+  await step()
+  const resultVerdictAt = Date.now()
+  const answerResult = () => reply(ada.id, bot.id, RESULT_REPLY, { exchangeId: 'x-result' })
+  if (resultAnsweredInsideTurn) {
+    answerResult()
+    await until(() => record('x-result'))
+  }
+  finish('The fix and checks are complete. I am waiting for the RESULT verdict before delivery.')
+  const afterTurn5 = bot.reviewTrack.delivered === true
+  if (!resultAnsweredInsideTurn) {
+    // The recorded run received RESULT SHIP after turn 5 ended.
+    await step()
+    answerResult()
+  }
+  await step()
+  // Turn 6: opened by the RESULT reply; the real delivery.
+  await waitForReply('x-result')
+  takeReply(bot.id, inbox, 'x-result')
+  finish('Reviewer Bot: PLAN SHIP; RESULT SHIP. Updated average.mjs.')
+  const last = bot.reviewTrack.last
+  return { afterTurn4, afterTurn5, last, marks, verdicts: bot.reviewTrack.verdicts.map(v => v.verdict), resultVerdictAt }
+}
+
+test('TRACK1 RACE: PLAN SHIP inside the plan-wait turn, then edit, RESULT SHIP: marked plan and result reviewed', async (t) => {
+  const { afterTurn4, afterTurn5, last, marks, verdicts, resultVerdictAt } = await run(t, { planAnsweredInsideTurn: true })
+  t.diagnostic(JSON.stringify({ afterTurn4, verdicts, last, markedBeforeResult: last?.at < resultVerdictAt }))
+  assert.equal(afterTurn4.delivered, false, `the plan-wait turn was marked as the delivery: ${JSON.stringify(afterTurn4.last)}`)
+  assert.equal(afterTurn5, false)
+  assert.deepEqual(verdicts, ['SHIP', 'SHIP'])
+  assert.ok(last.at >= resultVerdictAt)
+  assert.deepEqual({ ...last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+  assert.deepEqual(marks, [last])
+})
+
+test('TRACK1 RESULT: a RESULT SHIP inside the result-wait turn holds delivery until its reply is taken', async (t) => {
+  const { afterTurn4, afterTurn5, last, marks } = await run(t, { planAnsweredInsideTurn: false, resultAnsweredInsideTurn: true })
+  assert.equal(afterTurn4.delivered, false)
+  assert.equal(afterTurn5, false)
+  assert.deepEqual({ ...last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+  assert.deepEqual(marks, [last])
+})
+
+test('TRACK1 CONTROL: PLAN SHIP after the plan-wait turn ends: marked plan and result reviewed', async (t) => {
+  const { afterTurn4, afterTurn5, last, marks } = await run(t, { planAnsweredInsideTurn: false })
+  assert.equal(afterTurn4.delivered, false)
+  assert.equal(afterTurn5, false)
+  assert.deepEqual({ ...last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
+  assert.deepEqual(marks, [last])
+})
+
+test('TRACK1 LIFECYCLE: a queued reply survives a failed flush and inbox moves until the exact input is read or withdrawn', async (t) => {
+  const { ctx, rt, person, endTurn, event, reply, solver, reviewer, replyInbox, takeReply } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  const agent = await rt.resolveAgent(bot.id)
+  const inbox = replyInbox(bot.id)
+  const unread = new Set()
+  const enqueue = agent.followup
+  agent.followup = (message) => {
+    unread.add(message.source.exchangeId)
+    enqueue(message)
+  }
+  ctx.sessions.flush = async () => {
+    if (unread.size === 1) throw new Error('injected flush failure after accepting the reply')
+  }
+
+  person(bot.id, 'Review a change.')
+  endTurn(bot.id)
+  reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' })
+  // The fallback notice proves the flush failed after the original reply was queued.
+  await until(() => inbox.length === 2)
+  const exact = inbox.shift()
+  ctx.emit('agent/inbox/discarded', { agent, message: exact })
+  agent.followup(exact)
+  await step()
+  takeReply(bot.id, inbox, 'x-plan') // The fallback notice has a different exchange ID.
+  endTurn(bot.id, 'Still waiting for the review.')
+  assert.equal(bot.reviewTrack.delivered, undefined)
+
+  // Definitive withdrawal has no matching reinsertion.
+  assert.equal(inbox.shift(), exact)
+  ctx.emit('agent/inbox/discarded', { agent, message: exact })
+  await step()
+  event(bot.id, 'turn/start', { turn: 1000 })
+  endTurn(bot.id, 'Delivered after the review reply was withdrawn.')
+  assert.equal(bot.reviewTrack.delivered, true)
+})
+
+test('TRACK1 REJECTED: a claimed reply whose turn rejects the input releases the hold', async (t) => {
+  const { rt, person, endTurn, event, reply, solver, reviewer, replyInbox, takeReply } = bench(t)
+  const ada = await reviewer()
+  const bot = await solver({ reviewerId: ada.id })
+  await rt.resolveAgent(bot.id)
+  const inbox = replyInbox(bot.id)
+  person(bot.id, 'Review a change.')
+  endTurn(bot.id)
+  reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' })
+  await until(() => inbox.length === 1)
+  takeReply(bot.id, inbox, 'x-plan', { admitted: false })
+  endTurn(bot.id, undefined, { kind: 'blocked' })
+  event(bot.id, 'turn/start', { turn: 1000 })
+  endTurn(bot.id, 'Delivered after the rejected step.')
+  assert.equal(bot.reviewTrack.delivered, true)
 })
