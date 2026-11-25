@@ -22,6 +22,10 @@ export function whyText(why) {
 
 export function stopLine(entry) {
   const why = whyText(entry.why)
+  if (entry.mayHaveRun === true) {
+    return entry.count > 1 ? t('{count} steps may already have run ({why})', { count: entry.count, why })
+      : t('{tool} may already have run ({why})', { tool: entry.tool, why })
+  }
   return entry.count > 1 ? t('{count} steps did not run: {why}', { count: entry.count, why })
     : entry.child ? t('A subagent step did not run: {why}', { why })
       : entry.tool ? t('{tool} did not run: {why}', { tool: entry.tool, why }) : t('A step did not run: {why}', { why })

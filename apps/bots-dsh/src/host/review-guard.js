@@ -155,8 +155,13 @@ export function install(rt) {
     if (relevant && (rt.solverProgressBusy?.(bot) || (pending && (!checkCommand || !call || pending.call) && !sameNativeCall))) {
       return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Finish recording the current Solver progress before doing more work.` }
     }
-    if (checkCommand && track?.requested && !track.delivered && track.solver?.plan?.accepted === true && !pending) {
-      return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
+    if ((name === 'acp_tool' || checkCommand) && track?.requested && !track.delivered && track.solver?.plan?.accepted === true && !pending) {
+      // Admission can use the ACP mirror's input even though it cannot prove a check result.
+      const input = name === 'acp_tool' ? args?.input : args
+      const command = input?.command ?? input?.cmd
+      if (typeof command === 'string' && Object.values(track.solver.plan.commands ?? {}).includes(command.trim())) {
+        return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
+      }
     }
     if (bot.reviewGuard !== true) return undefined
     if (typeof track?.planVerdictAt === 'number') return undefined

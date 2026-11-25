@@ -652,6 +652,8 @@ const pack = createPack({
     "{name} stopped on a permission: {why}": "{name} parou por uma restrição de permissão: {why}",
     "{tool} did not run: {why}": "{tool} não foi executada: {why}",
     "{count} steps did not run: {why}": "{count} etapas não foram executadas: {why}",
+    "{tool} may already have run ({why})": "{tool} pode já ter sido executada ({why})",
+    "{count} steps may already have run ({why})": "{count} etapas podem já ter sido executadas ({why})",
     "A subagent step did not run: {why}": "Uma etapa de subagente não foi executada: {why}",
     "A step did not run: {why}": "Uma etapa não foi executada: {why}",
     "approvals are off here, so you were not asked": "as aprovações estão desativadas aqui, então ninguém perguntou a você",

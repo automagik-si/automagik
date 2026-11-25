@@ -1963,6 +1963,8 @@ const ZH = {
   "{name} stopped on a permission: {why}": "{name} 因权限限制而停止：{why}",
   "{tool} did not run: {why}": "{tool} 未执行：{why}",
   "{count} steps did not run: {why}": "{count} 个步骤未执行：{why}",
+  "{tool} may already have run ({why})": "{tool} 可能已执行（{why}）",
+  "{count} steps may already have run ({why})": "{count} 个步骤可能已执行（{why}）",
   "A subagent step did not run: {why}": "一个子代理步骤未执行：{why}",
   "A step did not run: {why}": "一个步骤未执行：{why}",
   "approvals are off here, so you were not asked": "这里关闭了审批，所以没有询问你",

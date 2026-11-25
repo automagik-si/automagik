@@ -544,7 +544,7 @@ export function install(rt) {
       if (solverTracked(bot)) {
         const { sessionId, base, own, definition, held, call } = reviewGuardOf(exec, bot, name)
         if (held !== undefined) {
-          rt.noteStop?.(sessionId, { why: held.why, tool: name, callId: exec.callId, text: held.text }, exec.agent)
+          rt.noteStop?.(sessionId, { why: held.why, tool: name, callId: exec.callId, text: held.text, mayHaveRun: name === 'acp_tool' }, exec.agent)
           throw refusal(held.text)
         }
         const observed = own ? rt.solverCall?.(bot, name, exec.arguments, definition, base) : undefined

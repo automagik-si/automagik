@@ -7,7 +7,9 @@ import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { questionReply } from '../src/host/parts.js'
 import { answerSender } from '../src/host/turns.js'
+import { DICTIONARY, installLocale } from '../src/client/i18n.js'
 import { reviewMarkText, solverAutoView } from '../src/client/solver-draft.js'
+import { stopLine } from '../src/client/stops.js'
 import { solverInstructions } from '../src/shared/solver-method.js'
 import { fakeContext } from './fake-ctx.js'
 
@@ -255,11 +257,70 @@ test('LA-5 mediated retries require an open run and ordinary plan work stays ava
   const h = await setup(t)
   const { request } = await reviewedPlan(h, ['check-a'])
   assert.equal(await h.execute('write', { file_path: 'out' }), 'ran')
-  await assert.rejects(h.execute('bash', { command: 'fake retry' }), /start.*run/i)
+  await assert.rejects(h.execute('bash', { command: 'fake check-a' }), /start.*run/i)
   assert.match(await checked(h, request, 'first', { exitCode: 1 }), /Recorded/)
   assert.match(await h.progress('checks', { request, run: 'first', results: results('check-a', false) }), /Recorded/)
   assert.equal(h.rt.botOf('solver').reviewTrack.solver.attempts['check-a'], 1)
-  await assert.rejects(h.execute('bash', { command: 'fake retry' }), /start.*run/i)
+  await assert.rejects(h.execute('bash', { command: 'fake check-a' }), /start.*run/i)
+})
+
+test('Stage 6 ACP requires an open run for an exact agreed command after trimming', async t => {
+  const h = await setup(t, { reviewGuard: true })
+  await reviewedPlan(h, ['check-a'])
+  await assert.rejects(h.execute('bash', { command: '  fake check-a\n' }), /start.*run/i)
+  await assert.rejects(h.execute('acp_tool', { kind: 'execute', title: 'Run tests', input: { command: '  fake check-a\n' } }), /start.*run/i)
+  assert.equal(await h.execute('acp_tool', { kind: 'execute', input: { command: 'fake  check-a' } }), 'ran')
+})
+
+test('Stage 6 ACP allows ordinary commands after plan SHIP', async t => {
+  const h = await setup(t, { reviewGuard: true })
+  await reviewedPlan(h, ['check-a'])
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.plan.accepted, true)
+  assert.equal(await h.execute('bash', { command: 'git status' }), 'ran')
+  assert.equal(await h.execute('acp_tool', { kind: 'execute', title: 'fake check-a', input: { cmd: 'git status' } }), 'ran')
+  assert.equal(await h.execute('acp_tool', { kind: 'execute', title: 'fake check-a', input: null }), 'ran')
+})
+
+test('Stage 6 ACP says the native command may already have run and keeps confirmed refusal counts separate', async t => {
+  const h = await setup(t, { reviewGuard: true })
+  await reviewedPlan(h, ['check-a'])
+  h.event('solver', 'turn/start', { turn: 1 })
+  const mirror = { kind: 'execute', title: 'Run tests', input: { cmd: 'fake check-a' } }
+  await assert.rejects(h.execute('acp_tool', mirror), /start.*run/i)
+  const [single] = h.rt.stopsView()
+  assert.equal(single.why, 'rule')
+  assert.equal(single.mayHaveRun, true)
+  await assert.rejects(h.execute('bash', { command: 'fake check-a' }), /start.*run/i)
+  await assert.rejects(h.execute('acp_tool', mirror), /start.*run/i)
+  await assert.rejects(h.execute('bash', { command: 'fake check-a' }), /start.*run/i)
+  const stops = h.rt.stopsView()
+  assert.deepEqual(stops.map(({ why, count, mayHaveRun }) => [why, count, mayHaveRun === true]), [
+    ['rule', 2, true], ['rule', 2, false],
+  ])
+  const english = [
+    'acp_tool may already have run (a rule here refused it)',
+    '2 steps may already have run (a rule here refused it)',
+    '2 steps did not run: a rule here refused it',
+  ]
+  assert.equal(h.rt.stopLineOfTurn('solver', 1), english.slice(1).join(' · '))
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const [dictionary, expected] of [[{}, english], [pt, [
+    'acp_tool pode já ter sido executada (uma regra aqui recusou)',
+    '2 etapas podem já ter sido executadas (uma regra aqui recusou)',
+    '2 etapas não foram executadas: uma regra aqui recusou',
+  ]], [DICTIONARY.zh, [
+    'acp_tool 可能已执行（这里的一条规则拒绝了它）',
+    '2 个步骤可能已执行（这里的一条规则拒绝了它）',
+    '2 个步骤未执行：这里的一条规则拒绝了它',
+  ]]]) {
+    const dispose = installLocale({ register: () => () => {}, bind: () => (key, params) =>
+      (dictionary[key] ?? key).replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match) })
+    try {
+      assert.deepEqual([single, ...stops].map(stopLine), expected)
+    } finally {
+      dispose()
+    }
+  }
 })
 
 test('LA-5 a person message during durable progress preserves its count', async t => {
