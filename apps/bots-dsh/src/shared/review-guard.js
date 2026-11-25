@@ -30,17 +30,22 @@ const GLUED = new RegExp(`${LEAD}${MD}${WORD}${MD}(?:\\s*[.!]*$|\\s+[-\u2013\u20
  * @returns {'SHIP'|'FIX-FIRST'|'BLOCKED'|undefined} the verdict.
  */
 export function guardVerdictOf(text, reviewerName, stage, firstLine) {
+  return guardVerdictMatch(text, reviewerName, stage, firstLine)?.verdict
+}
+
+// Keep the source line for replies assembled from more than one model route.
+export function guardVerdictMatch(text, reviewerName, stage, firstLine) {
   if (typeof text !== 'string') return undefined
   let lines = text.split(/\r?\n/)
   const explicit = stageVerdictOf(firstLine ?? lines[0])
-  if (explicit) return explicit.stage === stage ? explicit.verdict : undefined
+  if (explicit) return explicit.stage === stage ? { verdict: explicit.verdict, line: 0 } : undefined
   if (typeof reviewerName === 'string' && reviewerName !== '') {
     const cut = lines.indexOf(`[Handed back to ${reviewerName} for this work]`)
     if (cut >= 0) lines = lines.slice(0, cut)
   }
   let fenced = false
   let first = true
-  for (const raw of lines) {
+  for (const [index, raw] of lines.entries()) {
     if (FENCE.test(raw)) {
       if (raw.split(/```|~~~/).length % 2 === 0) fenced = !fenced
       first = false
@@ -52,11 +57,11 @@ export function guardVerdictOf(text, reviewerName, stage, firstLine) {
       first = false
       if (!line.startsWith('>')) {
         const found = AT_START.exec(line)
-        if (found) return found[1]
+        if (found) return { verdict: found[1], line: index }
       }
     }
     const label = LABEL.exec(line)
-    if (label) return label[1]
+    if (label) return { verdict: label[1], line: index }
   }
   return gluedFirstLine(lines)
 }
@@ -64,12 +69,14 @@ export function guardVerdictOf(text, reviewerName, stage, firstLine) {
 // (iii): the first non-empty line, as rule (i) finds it, read with GLUED; only `#`, `*`, `_` and
 // spaces are stripped, so a backtick or a quote before the sentence keeps it unread.
 function gluedFirstLine(lines) {
-  for (const raw of lines) {
+  for (const [index, raw] of lines.entries()) {
     if (FENCE.test(raw)) return undefined
     const line = raw.replace(/^[\s#*_`]+/, '')
     if (line === '') continue
     if (line.startsWith('>') || LIST_ITEM.test(raw) || INDENTED.test(raw)) return undefined
-    return GLUED.exec(raw.replace(/^[\s#*_]+/, ''))?.[1]
+    const found = GLUED.exec(raw.replace(/^[\s#*_]+/, ''))
+    if (found) return { verdict: found[1], line: index }
+    return undefined
   }
   return undefined
 }

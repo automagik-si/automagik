@@ -1343,7 +1343,7 @@ export function install(rt) {
       })
     }
     const firstLine = turn.firstLine ?? ''
-    const model = reason.kind === 'completed' ? replyModel(turn.rawTexts, turn.textModels, firstLine) : undefined
+    const model = reason.kind === 'completed' ? replyModel(turn.rawTexts, turn.textModels, firstLine, name) : undefined
     const reply = { text: cutOff ? cutOffText(said) : said, reviewText: turn.rawTexts.join('\n\n'), firstLine, model }
     // The turn ended with what it said: the answer goes up the way a finished turn's
     // does, with the results that came back for it and the text it held. A work that

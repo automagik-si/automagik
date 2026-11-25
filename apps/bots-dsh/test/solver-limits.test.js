@@ -2606,9 +2606,10 @@ test('a missing answering route gives the exact RESULT input a durable unverifie
   await next.close()
 })
 
-async function pendingResultReview(t) {
+async function pendingResultReview(t, route = solverModel) {
   const f = await reviewReplyFixture(t)
   const { h, request, review, answer, openReply } = f
+  h.agentOf('solver').session.requestHeader = () => ({ config: route })
   const planExchange = await review('plan')
   h.finish('solver', 'Waiting for plan review.')
   await openReply(3, answer(planExchange))
@@ -2622,6 +2623,42 @@ async function pendingResultReview(t) {
   h.finish('solver', 'Waiting for result review.')
   return { ...f, exchange }
 }
+
+test('PR B mixed-route RESULT credits the controlling verdict writer', async t => {
+  const own = { provider: 'acp-codex', model: 'default' }
+  const independent = { provider: 'acp-omp', model: 'default' }
+  for (const [name, first, second, verdict, reason] of [
+    ['label beats the glued fallback', 'Evidence checked.SHIP', 'Verdict: SHIP', 'unverified', 'same'],
+    ['explicit RESULT keeps precedence', 'RESULT SHIP', 'Verdict: SHIP', 'SHIP'],
+    ['wrong stage cannot borrow a label', 'PLAN SHIP', 'Verdict: SHIP', 'unverified'],
+    ['later veto still wins', 'Evidence checked.SHIP', 'Verdict: BLOCKED', 'BLOCKED'],
+    ['handed-back label stays outside the guard', 'Evidence checked.SHIP',
+      '[Handed back to reviewer for this work]\nVerdict: SHIP', 'SHIP'],
+  ]) {
+    await t.test(name, async t => {
+      const { h, exchange, track, deliveries, openReply } = await pendingResultReview(t, own)
+      const reviewer = h.agentOf('reviewer')
+      h.event('reviewer', 'turn/start', { turn: 4 })
+      h.takeInput('reviewer', reviewer.message)
+      reviewer.session.requestHeader = () => ({ config: independent })
+      h.event('reviewer', 'assistant/message', { message: { content: content(first) } })
+      reviewer.session.requestHeader = () => ({ config: own })
+      h.finish('reviewer', second)
+      await openReply(5, deliveries.at(-1))
+      const result = track().solver.review
+      assert.equal(result.exchangeId, exchange)
+      assert.equal(result.receipt, h.agentOf('solver').message.source.reviewReceipt)
+      assert.equal(result.verdict, verdict)
+      if (reason === 'same') {
+        assert.equal(result.unverified, 'same')
+        assert.match(h.agentOf('solver').message.content.at(-1).text, /same model as the Solver/)
+      }
+      if (verdict === 'SHIP') assert.equal(result.reviewer.model, 'acp-omp/default')
+      h.finish('solver', 'Delivered after review.')
+      assert.equal(track().last?.done, verdict === 'SHIP' ? true : undefined)
+    })
+  }
+})
 
 test('Owner LA-2 replaces a legacy pending RESULT without discarding passing evidence or delivery history', async t => {
   const { h, request, exchange, track } = await pendingResultReview(t)

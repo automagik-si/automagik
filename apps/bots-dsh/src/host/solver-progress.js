@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, readdirSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { SOLVER_FIX_LIMIT, SOLVER_REPLAN_LIMIT, isSolverBot, isWrittenSolverMethod, solverAutoOn } from '../shared/solver-method.js'
-import { guardVerdictOf } from '../shared/review-guard.js'
+import { guardVerdictMatch } from '../shared/review-guard.js'
 import { normalizeCheckCommand } from './solver-check-command.js'
 
 const MAX_CHECKS = 20
@@ -133,14 +133,16 @@ export function recordedModelOf(event) {
   return chosenIdentity(route?.provider, route?.model)
 }
 
-export function replyModel(texts, models, firstLine) {
+export function replyModel(texts, models, firstLine, reviewerName) {
   const model = models[0]
   if (models.every(route => route === model)) return model
-  // A steer can join text from two turns. Find the part that supplied SHIP
-  // while retaining the previous lines for the strict verdict parser.
-  for (let end = 1; end <= models.length; end++) {
-    if (end < models.length && models[end] === models[end - 1]) continue
-    if (guardVerdictOf(texts.slice(0, end).join('\n\n'), undefined, 'result', firstLine) === 'SHIP') return models[end - 1]
+  const match = guardVerdictMatch(texts.join('\n\n'), reviewerName, 'result', firstLine)
+  if (match?.verdict !== 'SHIP') return undefined
+  let line = match.line
+  for (const [index, text] of texts.entries()) {
+    const lines = text.split(/\r?\n/).length
+    if (line < lines) return models[index]
+    line -= lines + 1
   }
 }
 

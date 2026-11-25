@@ -21782,17 +21782,20 @@ var AT_START2 = new RegExp(`^${WORD}`);
 var LABEL2 = new RegExp(`^(?:Verdict|verdict|VERDICT)[*_\`]*\\s*:\\s*[*_\`]*\\s*${WORD}`);
 var GLUED = new RegExp(`${LEAD}${MD}${WORD}${MD}(?:\\s*[.!]*$|\\s+[-–—]\\s+\\S)`);
 function guardVerdictOf(text2, reviewerName2, stage, firstLine) {
+  return guardVerdictMatch(text2, reviewerName2, stage, firstLine)?.verdict;
+}
+function guardVerdictMatch(text2, reviewerName2, stage, firstLine) {
   if (typeof text2 !== "string") return void 0;
   let lines = text2.split(/\r?\n/);
   const explicit = stageVerdictOf(firstLine ?? lines[0]);
-  if (explicit) return explicit.stage === stage ? explicit.verdict : void 0;
+  if (explicit) return explicit.stage === stage ? { verdict: explicit.verdict, line: 0 } : void 0;
   if (typeof reviewerName2 === "string" && reviewerName2 !== "") {
     const cut = lines.indexOf(`[Handed back to ${reviewerName2} for this work]`);
     if (cut >= 0) lines = lines.slice(0, cut);
   }
   let fenced = false;
   let first = true;
-  for (const raw of lines) {
+  for (const [index, raw] of lines.entries()) {
     if (FENCE3.test(raw)) {
       if (raw.split(/```|~~~/).length % 2 === 0) fenced = !fenced;
       first = false;
@@ -21804,21 +21807,23 @@ function guardVerdictOf(text2, reviewerName2, stage, firstLine) {
       first = false;
       if (!line.startsWith(">")) {
         const found = AT_START2.exec(line);
-        if (found) return found[1];
+        if (found) return { verdict: found[1], line: index };
       }
     }
     const label = LABEL2.exec(line);
-    if (label) return label[1];
+    if (label) return { verdict: label[1], line: index };
   }
   return gluedFirstLine(lines);
 }
 function gluedFirstLine(lines) {
-  for (const raw of lines) {
+  for (const [index, raw] of lines.entries()) {
     if (FENCE3.test(raw)) return void 0;
     const line = raw.replace(/^[\s#*_`]+/, "");
     if (line === "") continue;
     if (line.startsWith(">") || LIST_ITEM.test(raw) || INDENTED.test(raw)) return void 0;
-    return GLUED.exec(raw.replace(/^[\s#*_]+/, ""))?.[1];
+    const found = GLUED.exec(raw.replace(/^[\s#*_]+/, ""));
+    if (found) return { verdict: found[1], line: index };
+    return void 0;
   }
   return void 0;
 }

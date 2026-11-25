@@ -1369,7 +1369,8 @@ export function install(rt) {
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
         // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
         const model = reason?.kind === 'completed' ? modelOf(session) : undefined
-        const answerModel = reason?.kind === 'completed' ? replyModel(rawTexts, textModels, reviewFirstLine) : undefined
+        const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
+        const answerModel = reason?.kind === 'completed' ? replyModel(rawTexts, textModels, reviewFirstLine, name) : undefined
         if (owner !== undefined && !retry) {
           const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
           const mark = request => rt.reviewTurnEnd?.(owner, {
@@ -1402,7 +1403,6 @@ export function install(rt) {
         const groupReply = () => rt.withRoomSteps?.(held, reply.text) ?? reply.text
         // Whoever the turn answers gets the same three-way rule: a failure notice,
         // the turn's text (or a stopped-before-answer line), or nothing.
-        const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
         const answer = (source, response) => {
           if (!expectsReply(source) || answersUser(source) || goesOn) return
           if (failure !== undefined) {
