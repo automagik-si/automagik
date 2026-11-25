@@ -16,7 +16,7 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // word, and where the rest is. Input that arrives meanwhile waits and moves along.
 // read_own_chat searches every part, the condensed messages included.
 import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
-import { projectRoomContent } from './skill-library-call.js'
+import { legacySkillHistory, projectRoomContent } from './skill-library-call.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
 import { randomUUID } from 'node:crypto'
@@ -181,7 +181,7 @@ export function replyText(text) {
   }).join('\n\n')
 }
 
-export function historyEntry(event, group) {
+export function historyEntry(event, group, projectInput) {
   if (event.type === 'assistant/message') {
     const text = textOf(event.data?.message?.content)
     return text === '' ? undefined : { answer: true, text }
@@ -197,10 +197,11 @@ export function historyEntry(event, group) {
     return { answer: false, who: 'user', text: replyText(textOf(event.data.content)), keepAnswers: true }
   }
   if (event.type !== 'user/message' || (source?.kind !== 'user' && source?.kind !== SOURCE_KIND)) return undefined
+  const input = projectInput?.(event.data) ?? event.data.content
   // Group handoff text survives a later assignment change. Carry the ordinary
   // transcript without making past skill calls part of the handoff instructions.
   const content = group && source.skillRoomLines?.length
-    ? projectRoomContent(event.data.content, source.skillRoomLines) : event.data.content
+    ? projectRoomContent(input, source.skillRoomLines) : input
   const text = textOf(personParts(content))
   const ours = source.kind === SOURCE_KIND
   // The outgoing agent's handoff-note request (an agent switch) is Omni's, and so is its answer.
@@ -416,7 +417,7 @@ export function install(rt) {
     const text = handoffPackage({
       room,
       segment: { fallback: 'overflow', ...(previous?.note ? { note: previous.note, noteFrom: previous.noteFrom ?? previous.number } : {}) },
-      lines: await handoffLines(agent.id, { budget, group: room !== undefined, number: parts.length }),
+      lines: await handoffLines(session, { budget, group: room !== undefined, number: parts.length }),
       number: parts.length + 1,
       resume: true,
       overflow: true,
@@ -594,11 +595,11 @@ export function install(rt) {
   }
 
   // What was said in one part, newest first: the user, other Bots, and the Bot itself.
-  async function* partLines(sessionId, signal, { group = false, pages } = {}) {
+  async function* partLines(sessionId, signal, { group = false, pages, projectInput } = {}) {
     // Read backwards, a Bot's answers come before the message they answer.
     let answers = []
     for await (const event of rt.eventsBackwards(sessionId, signal, pages)) {
-      const entry = historyEntry(event, group)
+      const entry = historyEntry(event, group, projectInput)
       if (entry === undefined) continue
       if (entry.answer) {
         answers.push({ text: `You: ${entry.text}`, time: event.time, seq: event.seq, who: 'you' })
@@ -615,7 +616,7 @@ export function install(rt) {
   // messages word for word, and before them, in the Bot's own chat, every message to
   // the Bot (from the user or another Bot) as an anchored list. A group turn message
   // holds the whole round, so a group part carries only its latest messages.
-  async function handoffLines(sessionId, { budget, group, number }) {
+  async function handoffLines(session, { budget, group, number }) {
     const recent = []
     const earlier = []
     let used = 0
@@ -628,7 +629,8 @@ export function install(rt) {
     // reads as the package's own structure (a heading, a stamp, a closing line).
     const indent = text => text.replace(/\r?\n/g, '\n  ')
     try {
-      for await (const line of partLines(sessionId, AbortSignal.timeout(HANDOFF_READ_MS), { group, pages: Infinity })) {
+      const projectInput = legacySkillHistory(session)
+      for await (const line of partLines(session.id, AbortSignal.timeout(HANDOFF_READ_MS), { group, pages: Infinity, projectInput })) {
         if (!full) {
           const text = clip(line.text, RECENT_LINE_MAX, group ? 'the full text is in the saved record' : `read_own_chat around "part ${number} #${line.seq}" shows all of it`)
           const cost = estimateTokens(text)
@@ -654,7 +656,7 @@ export function install(rt) {
       // The latest messages matter most; what could not be read is only noted.
       if (recent.length === 0) throw error
       complete = false
-      rt.warn('omni-ui: reading %s for its handoff stopped early: %s', sessionId, error)
+      rt.warn('omni-ui: reading %s for its handoff stopped early: %s', session.id, error)
     }
     // `whole`: every message of the part is in `recent`.
     return { recent: recent.reverse(), earlier: earlier.reverse(), unlisted, complete, whole: complete && !full }
@@ -2694,7 +2696,7 @@ export function install(rt) {
       written = undefined
     }
     const noted = written !== undefined ? { note: written.note } : { fallback: 'recent' }
-    const carried = await handoffLines(agent.id, { budget, group: room !== undefined, number })
+    const carried = await handoffLines(session, { budget, group: room !== undefined, number })
     if (signal.aborted) throw signal.reason
     const noCommands = job.noCommands || rt.botRunnerRequired?.(session.id, agent) === true
     if (noCommands && commandCapableAgent(job.target)) throw noBotRunner()
@@ -3002,7 +3004,7 @@ export function install(rt) {
       job.noteFailed = true
       return
     }
-    const readLines = () => (job.bare ? { recent: [], earlier: [], unlisted: 0, complete: true } : handoffLines(agent.id, { budget, group: room !== undefined, number }))
+    const readLines = () => (job.bare ? { recent: [], earlier: [], unlisted: 0, complete: true } : handoffLines(session, { budget, group: room !== undefined, number }))
     let carried = job.folder ? await readLines() : undefined
     // A short part with no tool work goes over word for word, so it needs no note.
     const whole = carried?.whole === true && !session.deriveMessages().some(message => message.role === 'tool')

@@ -10,11 +10,13 @@ import { boundContextSummary, createAssistantMessage, createUserMessage } from '
 import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { Backchannel } from '../../acp-dsh/src/host/backchannel.js'
 import { createRuntime } from '../index.js'
+import { install as installParts } from '../src/host/parts.js'
 import { rowsOf } from '../src/host/pocket-chat.js'
 import { install, skillTool } from '../src/host/skill-library-call.js'
 import { chatPersonParts, SKILL_NOTICE } from '../src/host/skill-message.js'
 import { install as installClock } from '../src/host/time-context.js'
 import { fakeContext } from './fake-ctx.js'
+import { appendLegacyRefusal, nativeText, ordinaryText, rawText, refusedName, replyText, saveModelInput } from './support/legacy-skill-refusal.js'
 import { immediate, until } from './until.js'
 
 const fake = new URL('../../acp-dsh/dev/fake-agent.mjs', import.meta.url).pathname
@@ -153,7 +155,7 @@ test('round 2 clock: due Bot time context leaves a pure inactive call host-only'
   assert.match(prompts[0].text, /Keep this genuine queued work/)
 })
 
-test('round 2 group: relay and later reads project human lines for each recipient', { timeout: 20_000 }, async t => {
+async function groupFixture(t) {
   const f = await fixture(t, 'acp-codex')
   const second = await f.secondAgent()
   const roomId = 'fixture-room'
@@ -184,7 +186,9 @@ test('round 2 group: relay and later reads project human lines for each recipien
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true })
   })
-  host.skillLibrary.active = f.rt.skillLibrary.active
+  const savedActive = host.skillLibrary.active
+  const active = f.rt.skillLibrary.active
+  f.rt.skillLibrary.active = host.skillLibrary.active = id => id === 'bot-b' ? savedActive(id) : active(id)
   f.rt.roomSkillNotice = host.roomSkillNotice
   f.rt.roomSkillHandled = host.roomSkillHandled
   const tool = (name, args, id, extra) => host.teamTools.find(entry => entry.name === name)
@@ -210,7 +214,13 @@ test('round 2 group: relay and later reads project human lines for each recipien
       emit(recipient.id, event.type, event.data)
     }
     await until(() => host.roomProgress.size === 0 && host.roomWaiters.size === 0, { poll: immediate })
+    assert.deepEqual(records.at(-1)?.data.reason, { kind: 'completed' })
   }
+  return { f, second, roomId, host, room, tool, relay }
+}
+
+test('round 2 group: relay and later reads project human lines for each recipient', { timeout: 20_000 }, async t => {
+  const { f, second, roomId, host, room, tool, relay } = await groupFixture(t)
   const pure = '/' + manual.name
   await relay(second, user(pure))
   assert.deepEqual(f.events('prompt'), [], 'a group envelope alone must not dispatch an inactive-only turn')
@@ -250,6 +260,96 @@ test('round 2 group: relay and later reads project human lines for each recipien
   const archived = await tool('read_group_chat', { group: roomId, seq: original.seq }, 'bot-b')
   assert.match(archived, /Keep the group report/)
   assert.doesNotMatch(archived, /mint-fixture|amber-fixture/)
+})
+
+test('owner exception group: a manual Add cannot reopen a recorded refusal', { timeout: 20_000 }, async t => {
+  const { f, second, roomId, host, room, tool, relay } = await groupFixture(t)
+  const gesture = '/' + manual.name
+  const ordinary = 'Keep the previous group report.'
+  const mixed = `${ordinary} ${gesture}`
+  await relay(second, user(mixed))
+  await relay(second, user(gesture))
+  assert.equal(f.events('prompt').length, 1, 'the pure refusal ended on the host')
+  const original = room.log.find(line => line.text === mixed)
+  const pure = room.log.find(line => line.text === gesture)
+  assert.ok(original && pure)
+  const notices = () => host.groupRows(roomId, 0, room.seq).filter(row => row.kind === SKILL_NOTICE)
+  assert.deepEqual(notices().map(row => row.botId), ['bot-b', 'bot-b'])
+
+  const owner = { role: 'owner' }
+  assert.deepEqual(await host.skillLibrary.endpoint('skill-library-save', manual, owner), { saved: true })
+  assert.deepEqual(await host.skillLibrary.endpoint('bot-skill-add', { id: 'bot-b', name: manual.name }, owner), { saved: true })
+  assert.deepEqual((await host.skillLibrary.endpoint('skill-library', {}, owner)).active['bot-b'], [{ name: manual.name, mode: 'manual' }])
+
+  await relay(second, user('Continue the work in the next group round.'))
+  const later = f.events('prompt').at(-1)
+  assert.match(later.text, /Earlier in the group[\s\S]*Continue the work in the next group round/)
+  const reads = []
+  for (const args of [{}, { seq: original.seq }, { seq: pure.seq }, { query: ordinary }]) {
+    const read = id => tool('read_group_chat', { group: roomId, ...args }, id)
+    reads.push({ args, refused: await read('bot-b'), other: await read('bot-a') })
+  }
+  room.log = room.log.filter(line => line !== original)
+  const archived = await tool('read_group_chat', { group: roomId, seq: original.seq }, 'bot-b')
+  assert.equal(host.ledger.record(`group-${roomId}`, original.seq).text, mixed)
+  assert.equal(host.ledger.record(`group-${roomId}`, pure.seq).text, gesture)
+
+  await relay(second, user(`Use it now ${gesture}`))
+  const valid = f.events('prompt').at(-1)
+  assert.match(valid.text, /Use it now/)
+  assert.equal(valid.text.split(manual.content).length - 1, 1, 'a fresh call applies the newly added skill once')
+  assert.deepEqual(notices().map(row => row.botId), ['bot-b', 'bot-b'])
+  saveModelInput('group', { later: later.prompt, reads, archived, valid: valid.prompt })
+  assert.doesNotMatch(JSON.stringify(later.prompt), /mint-fixture|is not active on this Bot|under Skills/)
+  for (const { args, refused, other } of reads) {
+    if (args.seq !== pure.seq) assert.ok(refused.includes(ordinary))
+    assert.doesNotMatch(refused, /mint-fixture|is not active on this Bot|under Skills/)
+    assert.ok(other.includes(gesture), 'the refusal does not alter another recipient’s projection')
+  }
+  assert.ok(archived.includes(ordinary))
+  assert.doesNotMatch(archived, /mint-fixture|is not active on this Bot/)
+})
+
+test('owner exception handoff: a new part carries only the ordinary legacy history', { timeout: 15_000 }, async t => {
+  const f = await fixture(t, 'acp-codex')
+  const { agent } = f
+  const fresh = await f.secondAgent()
+  appendLegacyRefusal(agent.session, { provider: 'acp-codex', model: 'default' })
+  const ctx = fakeContext()
+  ctx.sessions = { flush: async () => {} }
+  ctx.workspaceRegistry = { archiveSession: async () => {} }
+  ctx.llm = { resolveModelInfo: async () => ({}) }
+  const bot = { id: 'writer', sessionId: agent.id, name: 'Writer', createdAt: 1, model: 'acp-codex/default' }
+  const warnings = []
+  const rt = {
+    ctx, config: {}, state: { switching: {}, bots: { writer: bot }, questions: {}, views: {} },
+    warn: (...args) => warnings.push(args.map(value => value instanceof Error ? value.stack : value)),
+    load: async () => {}, save: async () => {}, readOnly: () => undefined,
+    selfOf: () => bot.id, botOf: id => id === bot.id ? bot : undefined, roomOf: () => undefined, chatOf: () => bot.sessionId,
+    chatOwners: new Map([[agent.id, bot.id]]), groupOwners: new Map(), pastOwners: new Map(),
+    resolveAgent: async id => id === agent.id ? agent : fresh,
+    async* eventsBackwards() { yield* [...agent.session.snapshotEvents()].reverse() },
+    teamFolder: () => agent.session.header.cwd, workDirOf: () => undefined,
+    desiredModel: async () => bot.model, cachedCatalog: () => [{ ref: bot.model }],
+    resolveModel: async ref => ref, resolveEffort: async () => undefined, desiredEffort: async () => undefined,
+    createSession: async () => fresh.id, selectSessionModel: async () => {},
+    applyPermission: async () => {}, applyToolDeny: async () => {}, ensureCapabilities: async () => {},
+    moveSchedules: async () => {}, renewMemory() {},
+  }
+  installParts(rt)
+  assert.equal(await rt.newPart(agent.id), true)
+  await until(() => [...rt.switchJobs()].length === 0, { poll: immediate })
+  assert.equal(bot.sessionId, fresh.id, JSON.stringify(warnings))
+  assert.equal(bot.segments.at(-1).sessionId, agent.id)
+  await fresh.whenIdle()
+  assert.deepEqual(fresh.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason, { kind: 'completed' })
+  const [handoff] = f.events('prompt')
+  assert.equal(f.events('prompt').length, 1)
+  const wire = JSON.stringify(handoff.prompt)
+  saveModelInput('handoff', handoff.prompt)
+  for (const text of [ordinaryText, nativeText, replyText]) assert.ok(wire.includes(text), wire)
+  assert.ok(agent.session.deriveMessages().some(row => row.content.some(part => part.text === rawText)))
+  assert.doesNotMatch(wire, new RegExp(`${refusedName}|is not active on this Bot|under Skills`))
 })
 
 test('round 2 replay: a cold ACP request projects a matching parent-format refusal', { timeout: 15_000 }, async t => {

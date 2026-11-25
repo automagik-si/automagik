@@ -17,6 +17,7 @@
 // turn keeps running in its group Session, and what it ends with is posted to the group,
 // where the member that asked for it answers.
 import { emptyAfterSkillCall, groupSkillRequests, projectGroupSkillText, requestedSkills } from './skill-library-call.js'
+import { SKILL_NOTICE } from './skill-message.js'
 import { isBotGroupPost, NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -74,7 +75,7 @@ export const isIdleRelayText = (text, everyone, priorBodies) => {
 // Rows only the group chat draws: members read who is at work from the round itself.
 // 'switched': a member's conversation here followed its agent switch (parts.js); the member
 // itself reads that in its handoff.
-const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched', 'automagik-skill-notice'])
+const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched', SKILL_NOTICE])
 const memberLine = record => record !== undefined && !SHOWN_ONLY.has(record.kind)
 
 // A member's own lines are already in its Session, so only the others' are news.
@@ -334,11 +335,25 @@ export function install(rt) {
   const activeSkills = botId => new Set((rt.skillLibrary?.active(botId) ?? []).map(({ name }) => name))
   const wholeMemberText = (room, line) => line.length === undefined ? line.text : rt.ledger.record(bookOf(room.id), line.seq)?.text
 
+  // Keep the room's answer on the same ledger row as the human-facing notice.
+  // Its scope is the original person line and the member who received the refusal.
+  function skillRefusals(room, botId) {
+    const byLine = new Map()
+    for (const record of rt.ledger.records(bookOf(room.id))) {
+      if (record.kind !== SKILL_NOTICE || record.botId !== botId || !Array.isArray(record.skillLineSeqs)) continue
+      for (const seq of record.skillLineSeqs) {
+        if (!byLine.has(seq)) byLine.set(seq, new Set())
+        byLine.get(seq).add(record.skillName)
+      }
+    }
+    return byLine
+  }
+
   // Project the whole person line before applying the reader's text limit.
-  const memberText = (room, active, { limit = GROUP_LINE_READ, latest = false } = {}) => (line) => {
+  const memberText = (room, active, refused, { limit = GROUP_LINE_READ, latest = false } = {}) => (line) => {
     const whole = wholeMemberText(room, line)
     if (line.text === undefined) return ''
-    const projected = projectGroupSkillText(line, whole ?? line.text, active)
+    const projected = projectGroupSkillText(line, whole ?? line.text, active, refused.get(line.seq))
     const shown = headOf(projected, limit)
     if (whole === undefined && !latest) return `${shown}… (cut; ${line.length} characters in all, the rest was not kept)`
     const length = whole === undefined ? line.length : projected.length
@@ -397,7 +412,7 @@ export function install(rt) {
       if (record.botId === undefined) return { kind: 'user', text: record.text, time, ...(record.via ? { via: record.via } : {}) }
       return { ...who, text: record.text, time, ...(record.duration === undefined ? {} : { duration: record.duration }) }
     }
-    if (record.kind === 'automagik-skill-notice') return { kind: record.kind, ...who, text: record.text, time }
+    if (record.kind === SKILL_NOTICE) return { kind: record.kind, ...who, text: record.text, time }
     if (record.kind === 'lookup') return { kind: 'lookup', ...who, text: record.text, time }
     if (record.kind === 'permission-stop') return { kind: 'permission-stop', ...who, why: record.why, count: record.count, time }
     if (record.kind === 'switched') return { kind: 'switched', ...who, agent: record.agent ?? record.to, time }
@@ -441,9 +456,10 @@ export function install(rt) {
 
   Object.assign(rt, {
     keepGroupLine, dropGroupLines, groupRows, groupRowsView: rowsView, roomHistory,
-    roomSkillNotice(roomId, botId, text) {
+    roomSkillNotice(roomId, botId, text, skill) {
       const room = rt.roomOf(roomId)
-      if (room) say(room, { kind: 'automagik-skill-notice', botId, text })
+      if (room) say(room, { kind: SKILL_NOTICE, botId, text,
+        ...(skill?.lineSeqs?.length && { skillName: skill.name, skillLineSeqs: skill.lineSeqs }) })
     },
     roomSkillHandled(roomId, botId, exchangeId) {
       const waiter = rt.roomWaiters.get(exchangeId)
@@ -599,8 +615,10 @@ export function install(rt) {
     const working = workingIn(room).filter(item => item.bot.id !== member.id && !answering.has(item.bot.id))
       .map(item => ({ ...item, unread: unreadCount(room, item.bot.id) }))
     const active = activeSkills(member.id)
-    const read = memberText(room, active)
-    const render = line => ({ text: lineText(line, read(line)), names: groupSkillRequests(line).filter(({ name }) => active.has(name)).map(({ name }) => name) })
+    const refused = skillRefusals(room, member.id)
+    const read = memberText(room, active, refused)
+    const remainingRequests = line => groupSkillRequests(line).filter(({ name }) => !refused.get(line.seq)?.has(name))
+    const render = line => ({ text: lineText(line, read(line)), names: remainingRequests(line).filter(({ name }) => active.has(name)).map(({ name }) => name) })
     const references = round.shown?.includes(member.id) ? '' : referenceNote(round.references)
     const paragraphs = [
       brief,
@@ -633,7 +651,13 @@ export function install(rt) {
       }
     }
     const shown = [...earlier, ...owed.flatMap(result => result.line ?? []), ...current]
-    const skillRequests = current.flatMap(groupSkillRequests)
+    const requests = new Map()
+    for (const line of current) for (const { name, slash } of remainingRequests(line)) {
+      const lineSeqs = requests.get(name)?.lineSeqs ?? []
+      lineSeqs.push(line.seq)
+      requests.set(name, { name, slash, lineSeqs })
+    }
+    const skillRequests = [...requests.values()]
     const mentioned = room.members.map(rt.botOf).filter(Boolean)
     const skillOnly = skillRequests.length > 0 && !slot.fromBot && !slot.by && !round.goalNudge && !round.goalResume &&
       !owed.length && !quiet.length && !references &&
@@ -1811,7 +1835,8 @@ export function install(rt) {
       if (error) return error
       ensureRoomLog(room)
       const active = activeSkills(self)
-      const read = memberText(room, active)
+      const refused = skillRefusals(room, self)
+      const read = memberText(room, active, refused)
       if (args.seq !== undefined) {
         const line = room.log.find(entry => entry.seq === Number(args.seq))
         if (line !== undefined) return lineText(line, read(line))
@@ -1819,12 +1844,12 @@ export function install(rt) {
         return kept === undefined ? `"${room.name}" has no message ${args.seq}.` : lineText(kept, read(kept))
       }
       if (typeof args.query === 'string' && args.query.trim() !== '') {
-        const projected = line => memberLine(line) ? projectGroupSkillText(line, line.text, active) : undefined
+        const projected = line => memberLine(line) ? projectGroupSkillText(line, line.text, active, refused.get(line.seq)) : undefined
         const found = await rt.searchGroupLog(room.id, args.query, projected).catch(() => [])
         return found.length === 0 ? `Nothing said in "${room.name}" has "${args.query}".` : `In "${room.name}" (newest first):\n${found.map(line => `#${line.seq} ${lineText(line, headOf(projected(line), TEXT_KEPT))}`).join('\n')}`
       }
       // Thirty whole lines could fill the context, so a long one shows its start.
-      const short = memberText(room, active, { limit: TEXT_KEPT, latest: true })
+      const short = memberText(room, active, refused, { limit: TEXT_KEPT, latest: true })
       const lines = room.log.slice(-ROOM_READ_MAX)
       return lines.length === 0 ? `"${room.name}" has no messages yet.` : `Latest in "${room.name}" (oldest first):\n${transcript(lines, short)}`
     },

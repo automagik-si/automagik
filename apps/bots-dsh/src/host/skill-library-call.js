@@ -124,7 +124,34 @@ function pendingSkillProgram(session, entries, pending) {
   return history[parentIndex]
 }
 
-// DSH experimental Auto review serializes one typed history entry per user message.
+function reviewRefusals(entries, session) {
+  const refusals = sessionLedger(session)?.refused
+  const matches = new Map()
+  if (!refusals?.size) return matches
+  // The typed reviewer omits message IDs. It emits one entry per person text
+  // block, in surface order. Verify that correspondence before using a refusal.
+  const personTexts = entries.filter(entry => entry?.kind === 'user-message' &&
+    entry.source?.kind === 'user' && entry.content?.[0]?.type === 'text')
+  let index = 0
+  for (const seq of session.surface.nodes) {
+    const event = session.eventAt(seq)
+    if (event?.type !== 'user/message' || event.data.source?.kind !== 'user') continue
+    for (const part of event.data.content) {
+      if (part.type !== 'text') continue
+      const entry = personTexts[index++]
+      if (JSON.stringify(entry?.source) !== JSON.stringify(event.data.source) ||
+          JSON.stringify(entry?.content) !== JSON.stringify([part])) {
+        throw new Error('Auto review cannot match recorded Skills refusals to its history')
+      }
+      const refusal = refusals.get(event.data.id)
+      if (refusal) matches.set(entry, refusal)
+    }
+  }
+  if (index !== personTexts.length) throw new Error('Auto review cannot match recorded Skills refusals to its history')
+  return matches
+}
+
+// DSH experimental Auto review serializes typed history entries from the Session.
 // Its final entry and matching schema are the pending action. Keep that envelope
 // even for a Skills read, with no private arguments; the executor keeps the real call.
 function projectReview(options, session) {
@@ -133,6 +160,7 @@ function projectReview(options, session) {
   const environment = messages[0]?.content?.[0]?.text
   if (typeof environment !== 'string' || !environment.startsWith('ENVIRONMENT\n')) return options
   const entries = messages.map((message, index) => index === 0 ? undefined : reviewEntry(message))
+  const refusals = reviewRefusals(entries, session)
   const pending = entries.at(-1)
   const privatePrograms = skillPrograms(entries)
   if (pending?.kind === 'tool-call' && pending.mode === 'ptc-inner' && skillToolName(pending.name)) {
@@ -153,12 +181,14 @@ function projectReview(options, session) {
     const drop = () => { changed = true; return [] }
     if (entry?.kind === 'user-message' && entry.source && Array.isArray(entry.content)) {
       if ([SKILL_SOURCE, SKILL_NOTICE].includes(entry.source.kind)) return drop()
+      const refusal = refusals.get(entry)
       const ordinary = entry.source.skillRoomLines?.length
-        ? projectRoomContent(entry.content, entry.source.skillRoomLines, emptySet) : entry.content
+        ? projectRoomContent(entry.content, entry.source.skillRoomLines, emptySet) : projectLegacyContent(entry.content, refusal)
       const content = personParts(ordinary)
+      if (refusal && onlyGesture(content)) return drop()
       if (content.length === 0 && entry.content.length > 0) return drop()
       const fields = REVIEW_SOURCE_FIELDS.filter(key => Object.hasOwn(entry.source, key))
-      if (fields.length === 0 && content.length === entry.content.length) return [message]
+      if (fields.length === 0 && ordinary === entry.content && content.length === entry.content.length) return [message]
       const source = { ...entry.source }
       for (const key of fields) delete source[key]
       return replace({ ...entry, source, content })
@@ -220,8 +250,8 @@ export function groupSkillRequests(line) {
     ? line.skillRequests : []
 }
 
-export function projectGroupSkillText(line, text, active = emptySet) {
-  const inactive = new Set(groupSkillRequests(line).filter(({ name }) => !active.has(name)).map(({ name }) => name))
+export function projectGroupSkillText(line, text, active = emptySet, refused = emptySet) {
+  const inactive = new Set(groupSkillRequests(line).filter(({ name }) => refused.has(name) || !active.has(name)).map(({ name }) => name))
   if (inactive.size === 0 || typeof text !== 'string') return text
   const ordinary = withoutInactiveGestures(text, inactive, emptySet)
   return ordinary !== text && emptyAfterSkillCall(ordinary) ? '' : ordinary
@@ -250,6 +280,57 @@ function rememberRefusedInputs(state) {
       refusal.names.add(name)
       if (!slashRefused) refusal.keepSlashes.add(name)
     }
+  }
+}
+
+// The Session records injected blocks before dispatch. A permission change in that gap
+// must take effect before the current batch leaves the host. Blocks already sent belong
+// to the same conversation's history, including when it reopens.
+const ledgers = new WeakMap()
+
+function sessionLedger(session) {
+  if (!session?.eventAt) return
+  let state = ledgers.get(session)
+  if (!state) ledgers.set(session, state = { seq: 0, rows: new Map(), delivered: new Set(), refused: new Map() })
+  for (; state.seq < session.seq; state.seq++) {
+    const event = session.eventAt(state.seq)
+    if (event.type === 'turn/start') state.turn = event.data.turn
+    else if (event.type === 'turn/end') state.turn = undefined
+    else if (event.type === 'step/start') state.batch = { rows: [], notices: new Map() }
+    else if (event.type === 'step/end' && state.batch) {
+      rememberRefusedInputs(state)
+      state.batch = undefined
+    } else if (event.type === 'assistant/attempt') state.attempt = { seq: event.seq, turn: event.data.turn }
+    else if (event.type === 'user/message') {
+      const row = event.data
+      state.rows.set(row.id, { seq: event.seq, turn: state.turn })
+      if (state.batch && row.source?.kind === 'user' && !row.source.automagikSkillOriginalText) state.batch.rows.push(row)
+      if (state.batch && row.source?.kind === SKILL_NOTICE && row.source.form === 'notice' && row.content?.length === 1) {
+        const part = row.content[0]
+        const name = part.type === 'text' ? /^The skill ([a-z0-9-]+) is not active/.exec(part.text)?.[1] : undefined
+        if (name && skillName(name) && part.text === noticeText(name)) state.batch.notices.set(name, (state.batch.notices.get(name) ?? 0) + 1)
+      }
+    } else if (event.type === 'tool/result') state.rows.set(event.data.message.id, { seq: event.seq, turn: event.data.turn })
+    else if (event.type === DELIVERY_RECORD && Array.isArray(event.data)) {
+      for (const id of event.data) state.delivered.add(id)
+    }
+  }
+  return state
+}
+
+function projectLegacyContent(content, refusal) {
+  if (!refusal) return content
+  return content.map(part => part.type === 'text' && part.automagikSkill === undefined
+    ? { ...part, text: withoutInactiveGestures(part.text, refusal.names, refusal.keepSlashes) } : part)
+}
+
+export function legacySkillHistory(session) {
+  const refused = sessionLedger(session)?.refused
+  if (!refused?.size) return
+  return row => {
+    const refusal = refused.get(row.id)
+    const content = projectLegacyContent(row.content, refusal)
+    return refusal && onlyGesture(content) ? [] : content
   }
 }
 
@@ -303,42 +384,8 @@ export function skillTool(rt) {
 
 export function install(rt) {
   const { ctx } = rt
-  // The Session records injected blocks before dispatch. A permission change in that gap
-  // must take effect before the current batch leaves the host. Blocks already sent belong
-  // to the same conversation's history, including when it reopens.
-  const ledgers = new WeakMap()
   const sessionOf = id => ctx.get?.('sessions')?.get?.(id) ?? ctx.get?.('agents')?.get?.(id)?.session
   const auxiliaryRequest = options => options.purpose !== undefined || rt.ownRequest?.(options) === true
-
-  function ledger(session) {
-    if (!session?.eventAt) return
-    let state = ledgers.get(session)
-    if (!state) ledgers.set(session, state = { seq: 0, rows: new Map(), delivered: new Set(), refused: new Map() })
-    for (; state.seq < session.seq; state.seq++) {
-      const event = session.eventAt(state.seq)
-      if (event.type === 'turn/start') state.turn = event.data.turn
-      else if (event.type === 'turn/end') state.turn = undefined
-      else if (event.type === 'step/start') state.batch = { rows: [], notices: new Map() }
-      else if (event.type === 'step/end' && state.batch) {
-        rememberRefusedInputs(state)
-        state.batch = undefined
-      } else if (event.type === 'assistant/attempt') state.attempt = { seq: event.seq, turn: event.data.turn }
-      else if (event.type === 'user/message') {
-        const row = event.data
-        state.rows.set(row.id, { seq: event.seq, turn: state.turn })
-        if (state.batch && row.source?.kind === 'user' && !row.source.automagikSkillOriginalText) state.batch.rows.push(row)
-        if (state.batch && row.source?.kind === SKILL_NOTICE && row.source.form === 'notice' && row.content?.length === 1) {
-          const part = row.content[0]
-          const name = part.type === 'text' ? /^The skill ([a-z0-9-]+) is not active/.exec(part.text)?.[1] : undefined
-          if (name && skillName(name) && part.text === noticeText(name)) state.batch.notices.set(name, (state.batch.notices.get(name) ?? 0) + 1)
-        }
-      } else if (event.type === 'tool/result') state.rows.set(event.data.message.id, { seq: event.seq, turn: event.data.turn })
-      else if (event.type === DELIVERY_RECORD && Array.isArray(event.data)) {
-        for (const id of event.data) state.delivered.add(id)
-      }
-    }
-    return state
-  }
 
   function project(options, { catalog = true, turnStart, historyOnly = false,
     session = sessionOf(options.sessionId), auxiliary = auxiliaryRequest(options) } = {}) {
@@ -349,7 +396,7 @@ export function install(rt) {
     const records = auxiliary ? [] : activeOf(rt, options.sessionId)
     const automatic = automaticOf(records)
     const current = new Map(records.map(record => [record.name, record]))
-    const state = ledger(session)
+    const state = sessionLedger(session)
     const retry = messages.findLastIndex(row => row.source?.kind === 'retry' || row.source?.resumed === true)
     const start = turnStart ?? messages.findLastIndex(row => row.role === 'assistant' || row.role === 'tool') + 1
     const lastAnswer = messages.findLastIndex(row => row.role === 'assistant' && row.source?.synthetic !== 'acp-bridge')
@@ -364,9 +411,7 @@ export function install(rt) {
       const load = row.role === 'tool' && skillCalls.has(row.toolCallId)
       const { automagikSkillParts, automagikSkillOriginalText, skillRoom, skillRoomLines, skillRequests, ...source } = row.source ?? {}
       const legacyRefusal = state?.refused.get(row.id)
-      let ordinary = row.content
-      if (legacyRefusal) ordinary = ordinary.map(part => part.type === 'text' && part.automagikSkill === undefined
-        ? { ...part, text: withoutInactiveGestures(part.text, legacyRefusal.names, legacyRefusal.keepSlashes) } : part)
+      let ordinary = projectLegacyContent(row.content, legacyRefusal)
       if (skillRoomLines?.length) ordinary = projectRoomContent(ordinary, skillRoomLines, current)
       const parts = Array.isArray(automagikSkillParts)
         ? [...ordinary, ...automagikSkillParts.filter(marker)] : ordinary
@@ -417,7 +462,7 @@ export function install(rt) {
   }
 
   function admit(options, session = sessionOf(options.sessionId)) {
-    const state = ledger(session)
+    const state = sessionLedger(session)
     if (!state) return
     const delivered = new Set()
     for (const row of options.messages) for (const part of row.content ?? []) {
@@ -496,13 +541,13 @@ export function install(rt) {
     for (const { row, requests } of pending) {
       const parts = []
       const inactive = new Set()
-      for (const { name, slash: isSlash } of requests) {
+      for (const { name, slash: isSlash, lineSeqs } of requests) {
         if (!skillName(name) || served.has(name) || (isSlash && row.source.kind === 'user' && existing.has(name))) continue
         const record = records.get(name)
         if (record) parts.push(skillPart(botId, record))
         else {
           inactive.add(name)
-          notices.push({ name, roomId: row.source.roomId })
+          notices.push({ name, roomId: row.source.roomId, lineSeqs })
         }
       }
       if (parts.length === 0 && inactive.size === 0) continue
@@ -530,9 +575,9 @@ export function install(rt) {
     }
     if (!modified.size && !notices.length) return decision
     const privateRows = []
-    for (const { name, roomId } of notices) {
+    for (const { name, roomId, lineSeqs } of notices) {
       const text = noticeText(name)
-      if (roomId !== undefined) rt.roomSkillNotice?.(roomId, botId, text)
+      if (roomId !== undefined) rt.roomSkillNotice?.(roomId, botId, text, { name, lineSeqs })
       else privateRows.push(createUserMessage({
         content: [{ type: 'text', text }],
         source: { kind: SKILL_NOTICE, form: 'notice', summary: boundContextSummary(text) },

@@ -11,6 +11,7 @@ import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { crossed } from '../../acp-dsh/src/host/switch.js'
 import { install, requestedSkills, skillPart, skillTool } from '../src/host/skill-library-call.js'
 import { SKILL_NOTICE } from '../src/host/skill-message.js'
+import { appendLegacyRefusal, nativeText, ordinaryText, rawText, refusedName, saveModelInput } from './support/legacy-skill-refusal.js'
 
 const route = { provider: 'deepseek-fixture', model: 'fixture-model' }
 const user = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
@@ -106,6 +107,28 @@ async function fixture(t, { program, siblingProgram, review = false } = {}) {
   }
   return { root, rt, active, roomNotices, requests, run, probed, afterProgram: hook => { afterProgram = hook } }
 }
+
+test('owner exception reviewer: typed DSH Auto history projects the recorded legacy refusal', { timeout: 15_000 }, async t => {
+  const f = await fixture(t, { review: true })
+  const agent = await f.root.agentLoop.create('a', route)
+  appendLegacyRefusal(agent.session, route)
+  const fresh = 'Review this fresh ordinary action.'
+  const { sent } = await f.run(agent.id, user(fresh), 'probe')
+  assert.deepEqual(f.probed, ['ordinary pending argument'])
+  assert.deepEqual(agent.session.snapshotEvents().at(-1).data.reason, { kind: 'completed' })
+  const [review] = sent.filter(request => request.purpose === 'auto-review')
+  assert.equal(sent.filter(request => request.purpose === 'auto-review').length, 1)
+  saveModelInput('reviewer', { purpose: review.purpose, messages: review.messages })
+  const [environment, ...history] = review.messages.map(message => message.content[0].text)
+  assert.match(environment, /^ENVIRONMENT\n\{/)
+  const entries = history.map(JSON.parse)
+  assert.equal(entries.at(-1).name, 'review_probe')
+  assert.equal(entries.at(-1).kind, 'tool-call')
+  for (const text of [nativeText, fresh]) assert.ok(entries.some(entry => entry.kind === 'user-message' && entry.content[0].text === text))
+  assert.ok(agent.session.deriveMessages().some(row => row.content.some(part => part.text === rawText)))
+  assert.doesNotMatch(JSON.stringify(review.messages), new RegExp(`${refusedName}|is not active on this Bot|under Skills`))
+  assert.ok(entries.some(entry => entry.kind === 'user-message' && entry.content[0].text === ordinaryText))
+})
 
 test('Skills row 5: the separate DSH Auto reviewer receives ordinary typed history and no Skills data', { timeout: 15_000 }, async t => {
   const f = await fixture(t, { review: true })
