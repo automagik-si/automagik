@@ -21,15 +21,19 @@ export function chosenIdentityOf(ref) {
   if (slash > 0) return chosenIdentity(ref.slice(0, slash), ref.slice(slash + 1))
 }
 
+const MODEL_UNVERIFIED = 'The reviewer’s effective model could not be verified.'
 export const RESULT_UNVERIFIED = Object.freeze({
-  model: 'The reviewer’s effective model could not be verified.',
+  model: MODEL_UNVERIFIED,
+  held: MODEL_UNVERIFIED,
   same: 'The reviewer used the same model as the Solver.',
   verdict: 'The reviewer did not give a strict verdict.',
 })
 
 export const unverifiedReason = reason => typeof reason === 'string' && Object.hasOwn(RESULT_UNVERIFIED, reason) ? reason : undefined
 export const unverifiedNotice = reason => unverifiedReason(reason)
-  ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.]` : undefined
+  ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.`
+    + (reason === 'held' ? ' Ask the designated reviewer once more on the same checked work.]' : ']')
+  : undefined
 
 // Host feedback is its own input block. Keep the reviewer’s original message for
 // records and rebuild the block only while the matching request still owns it.

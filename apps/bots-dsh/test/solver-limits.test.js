@@ -1025,7 +1025,8 @@ async function heldReviewReply(t, heldText, {
   h.finish('solver', 'Waiting for review.')
   let turn = 2
   h.event('reviewer', 'turn/start', { turn })
-  h.takeInput('reviewer', h.agentOf('reviewer').message)
+  const reviewInput = h.agentOf('reviewer').message
+  h.takeInput('reviewer', reviewInput)
   if (writtenRetry) {
     h.finish('reviewer', '<tool_call><function=read>')
     assert.equal(await deliveries.at(-1).sent, exchange)
@@ -1051,7 +1052,7 @@ async function heldReviewReply(t, heldText, {
   h.event('reviewer', 'turn/start', { turn: turn + 1 })
   h.takeInput('reviewer', child)
   assert.equal(h.rt.waitsWork(exchange), false)
-  return { h, child, exchange, track, deliveries, openReply }
+  return { h, child, exchange, track, deliveries, openReply, request, reviewInput }
 }
 
 function assertHeldDelivery(input, exchange, heldText) {
@@ -1278,6 +1279,104 @@ test('stage verdict correction: recovery uses the held line for the reply reconc
       assert.equal(next.rt.botOf('solver').reviewTrack.last?.done, true)
     }
     await next.close()
+  }
+})
+
+test('PR B recovers a base-format held RESULT or asks once more after restart', async t => {
+  const held = JSON.parse(readFileSync(new URL('./fixtures/legacy-held-result.json', import.meta.url), 'utf8'))
+  const start = turn => ({ type: 'turn/start', data: { turn } })
+  const end = turn => ({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+  const route = data => ({ type: 'request/context', data })
+  const input = data => ({ type: 'user/message', data })
+  for (const [name, originalCount, live] of [
+    ['unique original route', 1, false],
+    ['unique original route in a live continuation', 1, true],
+    ['missing original route', 0, false],
+    ['ambiguous original route', 2, false],
+  ]) {
+    await t.test(name, async t => {
+      const { h, child, exchange, track, request, reviewInput } = await heldReviewReply(t, held.held, { kind: 'result' })
+      const workAt = h.rt.state.works[exchange].at
+      h.rt.state.works[exchange] = { ...structuredClone(held), at: workAt }
+      // The old designation stored only the model, without its provider.
+      track().solver.review.solverModel = solverModel.model
+      const checkedWork = ({ revision, snapshot, passed, passRuns }) => ({ revision, snapshot, passed, passRuns })
+      const evidence = structuredClone(checkedWork(track().solver))
+      const history = { review: 'bot', done: true, resultExchangeId: 'earlier-result' }
+      const priorVerdicts = structuredClone(track().verdicts)
+      track().last = history
+      const original = (turn, model) => [start(turn), input(reviewInput), route(model),
+        { type: 'assistant/message', data: { message: { content: content(held.heldReviewText) } } }, end(turn)]
+      const reviewerLog = [
+        ...(originalCount > 0 ? original(1, heldReviewer) : []),
+        ...(originalCount > 1 ? original(2, { provider: 'acp-omp', model: 'default' }) : []),
+        start(3), input(child), route(solverModel), end(3),
+      ]
+      const solverLog = [start(3), route(solverModel), { type: 'tool/call', time: workAt,
+        data: { name: 'mcp__dsh__message_bot', arguments: JSON.stringify({ solver_review: 'result', solver_request: request }) } },
+      end(3)]
+      await h.rt.save({ required: true, durable: true })
+      assert.equal(await h.rt.flushUpdateNotes(), true)
+      const stored = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).works[exchange]
+      assert.equal(Object.hasOwn(stored, 'heldModel'), false)
+      assert.equal(stored.heldReviewText, held.heldReviewText)
+      assert.equal(stored.heldFirstLine, held.heldFirstLine)
+      await h.close()
+
+      const next = fixture(t, h.home, { configure(ctx) {
+        ctx.sessionController.inspect = async id => ({ events: id === 'reviewer' ? reviewerLog : solverLog })
+      } })
+      const deliveries = []
+      const deliver = next.rt.deliver
+      next.rt.deliver = (message, options) => {
+        deliveries.push(message)
+        return deliver(message, options)
+      }
+      await next.rt.load()
+      if (live) {
+        // A new turn took over before the recovery pass. Only the live path sees it end.
+        next.event('reviewer', 'turn/start', { turn: 3 })
+        next.takeInput('reviewer', child)
+      }
+      next.event('reviewer', end(3).type, end(3).data)
+      const keepAlive = setInterval(() => {}, 1000)
+      try { await next.rt.resumesDone } finally { clearInterval(keepAlive) }
+      const solver = next.agentOf('solver')
+      const bot = next.rt.botOf('solver')
+      await until(() => solver.message?.source.replyTo === exchange)
+      assertHeldDelivery(solver.message, exchange, held.held)
+      assert.equal(next.rt.state.works[exchange], undefined)
+      assert.deepEqual(bot.reviewTrack.last, history)
+      assert.deepEqual(checkedWork(bot.reviewTrack.solver), evidence)
+      next.event('solver', 'turn/start', { turn: 6 })
+      next.takeInput('solver', solver.message)
+      if (originalCount === 1) {
+        assert.equal(bot.reviewTrack.solver.review.verdict, 'SHIP')
+        assert.equal(bot.reviewTrack.solver.review.reviewer.model, heldReviewerIdentity)
+        assert.equal(bot.reviewTrack.solver.review.solverModel, refOf(solverModel))
+        next.finish('solver', 'Delivered after recovering the original RESULT.')
+        assert.equal(bot.reviewTrack.last.resultExchangeId, exchange)
+        assert.equal(bot.reviewTrack.last.done, true)
+      } else {
+        assert.equal(bot.reviewTrack.solver.review.verdict, 'unverified')
+        assert.equal(bot.reviewTrack.solver.review.reviewer, undefined)
+        assert.deepEqual(bot.reviewTrack.verdicts, priorVerdicts)
+        assert.notEqual(bot.reviewTrack.delivered, true)
+        // The fake Solver acts on the host feedback through the normal review tool.
+        assert.match(solver.message.content.at(-1).text, /Ask the designated reviewer once more on the same checked work/)
+        const askAgain = () => next.tool('message_bot', { to: 'reviewer', message: 'Review the same checked result.',
+          solver_review: 'result', solver_request: request, reply_to: 'me' })
+        await askAgain()
+        await assert.rejects(askAgain(), /already waiting/)
+        assert.deepEqual(checkedWork(bot.reviewTrack.solver), evidence)
+        assert.deepEqual(bot.reviewTrack.last, history)
+        assert.equal(bot.reviewTrack.solver.review.verdict, undefined)
+        assert.notEqual(bot.reviewTrack.solver.review.exchangeId, exchange)
+      }
+      assert.equal(deliveries.filter(message => message.role === 'request' && message.toId === 'reviewer').length,
+        originalCount === 1 ? 0 : 1)
+      await next.close()
+    })
   }
 })
 

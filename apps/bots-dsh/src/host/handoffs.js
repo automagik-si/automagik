@@ -239,7 +239,7 @@ export function install(rt) {
     if (work.room === undefined && work.fromRoom === undefined && work.to === rt.botOf(work.from)?.reviewerId) {
       work.heldReviewText = reviewText
       work.heldFirstLine = firstLine
-      work.heldModel = model
+      work.heldModel = model ?? null
     } else {
       delete work.heldReviewText
       delete work.heldModel
@@ -259,8 +259,11 @@ export function install(rt) {
     const text = work?.held ?? ''
     const firstLine = work?.heldFirstLine
     const reviewText = work?.heldReviewText
-    const model = work?.heldModel
-    if (typeof reviewText === 'string' && typeof firstLine === 'string') return { text, reviewText, firstLine, model }
+    const model = work?.heldModel ?? undefined
+    if (typeof reviewText === 'string' && typeof firstLine === 'string') {
+      const legacyHeld = work.name === 'solver-review-result' && !Object.hasOwn(work, 'heldModel')
+      return { text, reviewText, firstLine, model, ...(legacyHeld ? { legacyHeld } : {}) }
+    }
     // Old display copies can drop a surrogate pair at the cap. Only a shorter
     // copy is known to be complete, and a staged opening also needs its raw line.
     if (text.length >= TEXT_KEPT - 1) return { text }

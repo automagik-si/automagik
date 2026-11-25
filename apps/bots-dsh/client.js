@@ -33809,13 +33809,15 @@ function chosenIdentityOf(ref) {
   const slash = typeof ref === "string" ? ref.indexOf("/") : -1;
   if (slash > 0) return chosenIdentity(ref.slice(0, slash), ref.slice(slash + 1));
 }
+var MODEL_UNVERIFIED = "The reviewer’s effective model could not be verified.";
 var RESULT_UNVERIFIED = Object.freeze({
-  model: "The reviewer’s effective model could not be verified.",
+  model: MODEL_UNVERIFIED,
+  held: MODEL_UNVERIFIED,
   same: "The reviewer used the same model as the Solver.",
   verdict: "The reviewer did not give a strict verdict."
 });
 var unverifiedReason = (reason) => typeof reason === "string" && Object.hasOwn(RESULT_UNVERIFIED, reason) ? reason : void 0;
-var unverifiedNotice = (reason) => unverifiedReason(reason) ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.]` : void 0;
+var unverifiedNotice = (reason) => unverifiedReason(reason) ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.` + (reason === "held" ? " Ask the designated reviewer once more on the same checked work.]" : "]") : void 0;
 function originalReviewContent(message) {
   const { content, source } = message;
   const notice = unverifiedNotice(source?.reviewFeedback);

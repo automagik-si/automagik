@@ -187,7 +187,7 @@ export function designateReview(progress, { kind, exchangeId, reviewerId, model,
   progress.review = { exchangeId, reviewerId, revision: progress.revision, solverModel: model }
 }
 
-export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, model, receipt) {
+export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, model, receipt, legacyHeld) {
   if (!progress || typeof exchangeId !== 'string') return
   const plan = progress.plan
   if (plan?.review?.exchangeId === exchangeId && plan.review.reviewerId === reviewer.id) {
@@ -199,12 +199,14 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
     const reviewerIdentity = chosenIdentityOf(model)
     const comparable = solverIdentity && reviewerIdentity
     const independent = comparable && reviewerIdentity !== solverIdentity
-    const reason = ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? undefined
-      : !comparable ? 'model' : !independent ? 'same' : verdict === undefined ? 'verdict' : undefined
+    const veto = verdict === 'FIX-FIRST' || verdict === 'BLOCKED'
+    const reason = legacyHeld && !comparable ? 'held'
+      : veto ? undefined
+        : !comparable ? 'model' : !independent ? 'same' : verdict === undefined ? 'verdict' : undefined
     const { unverified: _previous, reviewer: _reviewer, receipt: _receipt, ...designated } = result
     progress.review = {
       ...designated,
-      verdict: reason ? 'unverified' : verdict,
+      verdict: reason && !veto ? 'unverified' : verdict,
       ...(independent ? { reviewer: { id: reviewer.id, name: reviewer.name, model: reviewerIdentity } } : {}),
       ...(reason ? { unverified: reason } : {}),
       ...(receipt ? { receipt } : {}),

@@ -100,31 +100,46 @@ export function turnsOf(events) {
 // that counts is the continuation's.
 export function turnOf(events, exchangeId) {
   const turns = turnsOf(events)
+  const at = turns.findLastIndex(turn => turn.took.some(source => source.exchangeId === exchangeId))
+  if (at >= 0) return followedTurn(turns, at)
+}
+
+function followedTurn(turns, at) {
   const steerCut = turn => turn?.reason?.kind === 'aborted'
     && turn.reason.reason?.kind === 'hook'
     && turn.reason.reason?.reason === STEER_CUT
-  for (let at = turns.length - 1; at >= 0; at -= 1) {
-    if (!turns[at].took.some(source => source.exchangeId === exchangeId)) continue
-    let found = turns[at]
-    let next = at + 1
-    // A steer cut lands inside a step's model call, so the cut turn's last step left
-    // an interrupted draft: texts before the last step/start stay, the rest is a
-    // fragment the continuation replaces.
-    const finished = turn => turn.texts.slice(0, turn.stepFrom ?? turn.texts.length)
-    while (steerCut(found) && next < turns.length) {
-      const follow = turns[next]
-      const kept = finished(found)
-      found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts],
-        rawTexts: [...found.rawTexts.slice(0, kept.length), ...follow.rawTexts],
-        textModels: [...found.textModels.slice(0, kept.length), ...follow.textModels],
-        stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length), firstLine: kept.length > 0 ? found.firstLine : follow.firstLine }
-      next += 1
-    }
-    if (!steerCut(found)) return found
+  let found = turns[at]
+  let next = at + 1
+  // A steer cut lands inside a step's model call, so the cut turn's last step left
+  // an interrupted draft: texts before the last step/start stay, the rest is a
+  // fragment the continuation replaces.
+  const finished = turn => turn.texts.slice(0, turn.stepFrom ?? turn.texts.length)
+  while (steerCut(found) && next < turns.length) {
+    const follow = turns[next]
     const kept = finished(found)
-    return { ...found, texts: kept, rawTexts: found.rawTexts.slice(0, kept.length), textModels: found.textModels.slice(0, kept.length), reason: undefined }
+    found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts],
+      rawTexts: [...found.rawTexts.slice(0, kept.length), ...follow.rawTexts],
+      textModels: [...found.textModels.slice(0, kept.length), ...follow.textModels],
+      stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length), firstLine: kept.length > 0 ? found.firstLine : follow.firstLine }
+    next += 1
   }
-  return undefined
+  if (!steerCut(found)) return found
+  const kept = finished(found)
+  return { ...found, texts: kept, rawTexts: found.rawTexts.slice(0, kept.length), textModels: found.textModels.slice(0, kept.length), reason: undefined }
+}
+
+function heldReviewModel(events, exchangeId, reply, reviewerName) {
+  const turns = turnsOf(events ?? [])
+  let matchingTurn
+  for (const [index, turn] of turns.entries()) {
+    if (!turn.took.some(source => source.exchangeId === exchangeId || source.work === exchangeId)) continue
+    const original = followedTurn(turns, index)
+    if (original.reason?.kind !== 'completed' || original.firstLine !== reply.firstLine
+      || original.rawTexts.join('\n\n') !== reply.reviewText) continue
+    if (matchingTurn) return undefined
+    matchingTurn = original
+  }
+  if (matchingTurn) return replyModel(matchingTurn.rawTexts, matchingTurn.textModels, reply.firstLine, reviewerName)
 }
 
 // Whether a Session already holds the answer to an exchange.
@@ -1248,6 +1263,16 @@ export function install(rt) {
     }
   }
 
+  // A silent continuation on an older record must recover the held answer's
+  // route from the original reviewer work. Its own request route is unrelated.
+  rt.recoverHeldReview = async (sessionId, source, reply, name) => {
+    const [reviewerLog, solverLog] = await Promise.all([
+      logOf(sessionId),
+      logOf(rt.chatOf(source.senderSessionId)),
+    ])
+    return { model: heldReviewModel(reviewerLog, source.exchangeId, reply, name), solverEvents: solverLog }
+  }
+
   // A turn that ended while Omni was not watching it: its answer may exist and never
   // have gone to the Bot that waits for it. The Session's durable log says what it did;
   // the work it was for is settled once, the way a finished turn settles it.
@@ -1353,9 +1378,12 @@ export function install(rt) {
       return
     }
     const selected = rt.workReply(workId, reply)
+    const selectedModel = selected.legacyHeld ? heldReviewModel(events, workId, selected, name) : selected.model
     const text = rt.answerText(workId, selected.text, name)
     const long = text.length > MESSAGE_INLINE_MAX ? await rt.attachLong(text, `Answer from ${name}.txt`) : undefined
-    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, selected.model, selected, sent)
+    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, selectedModel, selected, {
+      solverEvents: sent, heldRouteResolved: true,
+    })
   }
 
   // Report the same durable notes the resume pass works from, without exposing their payloads.

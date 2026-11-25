@@ -550,7 +550,7 @@ export function install(rt) {
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
   // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
   // every tracked Bot, so a guard turned on mid-request reads a verdict that already came.
-  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model, firstLine, solverEvents) {
+  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model, firstLine, solverEvents, legacyHeld) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
@@ -576,9 +576,7 @@ export function install(rt) {
       const verdict = verdictOf(text, stage, firstLine, { veto: stage !== undefined })
       const planVerdict = guardVerdictOf(text, reviewer?.name, stage, firstLine)
       if (verdict === undefined && planVerdict === undefined && reply === undefined) return
-      const at = Date.now()
-      if (planVerdict !== undefined) current.planVerdictAt ??= at
-      if (verdict !== undefined) current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+      let retryHeld = false
       if (reviewer) {
         const result = current.solver?.review
         if (stage === 'result' && legacyResultReview(result) && result.verdict === undefined) {
@@ -586,7 +584,13 @@ export function install(rt) {
           if (original) current.solver = { ...current.solver, review: { ...result, solverModel: original } }
         }
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
-        recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt)
+        retryHeld = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt,
+          stage === 'result' && legacyHeld) === 'held'
+      }
+      const at = Date.now()
+      if (planVerdict !== undefined && (!retryHeld || planVerdict !== 'SHIP')) current.planVerdictAt ??= at
+      if (verdict !== undefined && (!retryHeld || verdict !== 'SHIP')) {
+        current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
       }
       bot.reviewTrack = current
       if (decision) return rt.save({ durable: true, required: true })
@@ -747,7 +751,8 @@ export function install(rt) {
       ? { ...reply, toId } : undefined)
     const result = track?.solver?.review
     const reason = binding && resultReplyRequest(bot, track, binding)
-      && result?.revision === track.solver.revision && result?.receipt === binding.receipt && result.verdict === 'unverified'
+      && result?.revision === track.solver.revision && result?.receipt === binding.receipt
+      && (result.verdict === 'unverified' || result.unverified === 'held')
       && unverifiedReason(result.unverified)
     const notice = unverifiedNotice(reason)
     if (!notice && !source.reviewFeedback) return message
@@ -812,7 +817,8 @@ export function install(rt) {
     if (deferIngress(bot, () => reviewTurnEnd(botId, turn))) return
     const track = cleanTrack(bot.reviewTrack)
     if (track?.requested !== true || track.delivered === true) return
-    if (activeSolverLimit(bot, track) || runningWork.has(bot) || legacyResultReview(track.solver?.review)) return
+    const result = track.solver?.review
+    if (activeSolverLimit(bot, track) || runningWork.has(bot) || legacyResultReview(result) || result?.unverified === 'held') return
     if (Object.hasOwn(turn, 'request') && track.solver) {
       const progress = track.solver
       const botRequest = progress.origin === 'bot' && typeof track.openerExchange === 'string' && trigger?.exchangeId === track.openerExchange

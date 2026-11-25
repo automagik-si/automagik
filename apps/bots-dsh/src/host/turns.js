@@ -106,7 +106,22 @@ const closingReviews = new WeakSet()
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
-export function answerSender(rt, id, source, text, long, shouldSend, model, review = { reviewText: text }, solverEvents) {
+export function answerSender(rt, id, source, text, long, shouldSend, model, review = { reviewText: text }, {
+  solverEvents, heldRouteResolved = false,
+} = {}) {
+  if (!review?.legacyHeld || heldRouteResolved) return sendAnswer(rt, id, source, text, long, shouldSend, model, review, solverEvents)
+  const work = rt.state.works[source.exchangeId]
+  if (work === undefined) return
+  const generation = rt.teamGeneration?.()
+  const name = rt.botOf(rt.selfOf(id))?.name
+  void rt.recoverHeldReview(id, source, review, name).then(recovered => {
+    if (shouldSend?.() === false || rt.sameTeam?.(generation) === false || rt.state.works[source.exchangeId] !== work
+      || work.heldReviewText !== review.reviewText || work.heldFirstLine !== review.firstLine) return
+    sendAnswer(rt, id, source, text, long, shouldSend, recovered.model, review, recovered.solverEvents)
+  }).catch(error => rt.warn('omni-ui: could not settle held reviewer work: %s', error))
+}
+
+function sendAnswer(rt, id, source, text, long, shouldSend, model, review, solverEvents) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const fromId = rt.selfOf(id)
   const name = rt.botOf(fromId)?.name ?? 'The other Bot'
@@ -124,7 +139,7 @@ export function answerSender(rt, id, source, text, long, shouldSend, model, revi
   // The verdict uses the selected reviewer's own reply. Notices and child results
   // still travel with the answer and receipt, without supplying verdict evidence.
   const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, review?.reviewText,
-    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine, solverEvents)
+    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine, solverEvents, review?.legacyHeld)
   const durableResult = onReplyRecorded?.ready !== undefined
   if (durableResult) closingReviews.add(answered)
   const generation = rt.teamGeneration?.()
