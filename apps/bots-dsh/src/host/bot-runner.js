@@ -22,7 +22,7 @@ export { NO_BOT_RUNNER }
 const FILE_TOOLS = new Set(['read', 'write', 'edit', 'apply_patch'])
 const TEAM_TOOLS = new Set([
   'list_bots', 'message_bot', 'post_to_group', 'group_relay', 'read_own_chat', 'read_group_chat',
-  'remember', 'forget', 'recall',
+  'remember', 'forget', 'recall', 'solver_progress',
 ])
 
 const readiness = () => inspect({ maxAgeMs: 250 })

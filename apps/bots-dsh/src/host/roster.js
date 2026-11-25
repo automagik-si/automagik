@@ -11,6 +11,7 @@ import { osBlocked } from './folder-access.js'
 import { refusal } from './refusal.js'
 import { instructionsDigest, unchangedSolverWaiter } from './roles.js'
 import { packageAttachment } from '../shared/roles.js'
+import { CHOOSE_CONCRETE } from '../shared/solver-model.js'
 import { SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isWrittenSolverMethod, solverInstructions } from '../shared/solver-method.js'
 import { DRAFT_SWEEP_MAX, MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
 import { currentColor, isColor, normalize, unquote } from './text.js'
@@ -372,7 +373,7 @@ export function install(rt) {
   }
 
   async function buildBot(cleanName, options, readScopeSource) {
-    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy } = options
+    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy, solverAuto, solverModelChoice } = options
     if (existingSessionId !== undefined && (createdBy !== undefined || reviewerId !== undefined || reviewGuard !== undefined)) {
       throw refusal('An adopted Session takes no creator or reviewer.')
     }
@@ -387,7 +388,18 @@ export function install(rt) {
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
     // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
     // its Session exists.
-    const modelRef = model ? await rt.resolveModel(model, { remember: false }) : pickModel ? undefined : await rt.defaultBotModel()
+    const strictChoice = solverModelChoice || (waitingRole === SOLVER_ROLE_ID && reviewerId !== undefined
+      && options.role === SOLVER_DESCRIPTION && isWrittenSolverMethod(options.instructions))
+    if (strictChoice && !model) throw refusal(CHOOSE_CONCRETE)
+    const modelRef = model ? await rt.resolveModel(model, { remember: false }).catch(error => {
+      if (strictChoice && error?.modelUnavailable) throw refusal(CHOOSE_CONCRETE)
+      throw error
+    }) : pickModel ? undefined : await rt.defaultBotModel()
+    const linkedReviewer = reviewerId === undefined ? undefined : rt.botOf(reviewerId)
+    if (strictChoice) {
+      if ((reviewerId !== undefined && !linkedReviewer) || model !== modelRef) throw refusal(CHOOSE_CONCRETE)
+      await rt.checkSolverModel(modelRef, linkedReviewer)
+    }
     if (model) {
       rt.assertRouteAllowed({ name: cleanName, kind }, modelRef, 'create-bot')
       await rt.assertModelAccess(modelRef)
@@ -465,6 +477,7 @@ export function install(rt) {
       }
       sectionsBefore = new Set((state.sections ?? []).map(sec => sec.id))
       assertCaller(createdBy)
+      if (strictChoice) await rt.checkSolverModel(modelRef, linkedReviewer)
       const { next, avatar: checkedAvatar } = createLook(options, id)
       const savedAvatar = copyOf !== undefined ? copyAvatar
         : checkedAvatar ?? (isSolverLooks(next) ? { shape: solverDefaultShape(id) } : undefined)
@@ -502,6 +515,9 @@ export function install(rt) {
         // The person's review guard (review-guard.js): only with that reviewer kept, and only from the
         // person's create-bot (the New Solver tick) or a copy of a guarded Solver.
         ...(reviewGuard === true && next.reviewerId !== undefined ? { reviewGuard: true } : {}),
+        ...(solverAuto === true && createdBy === undefined
+          && (next.role === SOLVER_DESCRIPTION || solverCopy || (copyOf && rt.botOf(copyOf)?.solverAuto === true))
+          ? { solverAuto: true } : {}),
         instructions: next.instructions,
         ...(next.roles ? { roles: next.roles } : {}),
         ...(waitForSolver ? { waitingRole: {
@@ -738,6 +754,7 @@ export function install(rt) {
       ...(typeof bot.reviewerId === 'string' ? { reviewerId: bot.reviewerId } : {}),
       // And its review guard: a copy only narrows, and copying is the person's.
       ...(bot.reviewGuard === true ? { reviewGuard: true } : {}),
+      ...(bot.solverAuto === true ? { solverAuto: true } : {}),
       // A copy keeps a shell the original was denied: the copy is new, but taking a
       // capability away here would not be the user's choice either.
       ...(bot.shell === false ? { shell: false } : {}),
@@ -834,6 +851,7 @@ export function install(rt) {
   async function updateBot(id, patch, actorId, fromSessionId, options) {
     if (Object.hasOwn(patch, 'nativeTools')) return rt.setNativeTools(id, patch, actorId)
     if (Object.hasOwn(patch, 'reviewGuard')) return rt.setReviewGuard(id, patch, actorId)
+    if (Object.hasOwn(patch, 'solverAuto')) return rt.setSolverAuto(id, patch, actorId)
     // While the review guard is on, only the person moves the Bot to another model (H5-1).
     if (patch.model !== undefined && actorId !== undefined && rt.botOf(id)?.reviewGuard === true) {
       throw refusal(`Only the person can move ${rt.botOf(id).name} to another model while its review guard is on.`)

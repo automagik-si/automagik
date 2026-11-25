@@ -35,8 +35,8 @@ import { SOLVER_WEARS } from '../shared/solver-looks.js'
 import { isGuardGroupRefusal, refusal } from './refusal.js'
 
 const publicBot = bot => {
-  if (!bot || (!Object.hasOwn(bot, 'waitingRole') && !Object.hasOwn(bot, 'reviewerMade'))) return bot
-  const { waitingRole, reviewerMade, ...view } = bot
+  if (!bot || (!Object.hasOwn(bot, 'waitingRole') && !Object.hasOwn(bot, 'reviewerMade') && !Object.hasOwn(bot, 'reviewerModelChoices'))) return bot
+  const { waitingRole, reviewerMade, reviewerModelChoices, ...view } = bot
   return view
 }
 
@@ -119,7 +119,10 @@ export function install(rt) {
   // Photos staged by `stage-image`, kept until the message that names them is sent.
   const staged = new Map()
   const ok = value => ({ ok: true, value })
-  const okBot = bot => ok(publicBot(bot))
+  const okBot = bot => {
+    const { reviewTrack, ...view } = publicBot(bot)
+    return ok(view)
+  }
   const fail = (message, code = 'bot/error', reason) => ({
     ok: false,
     error: { code, message, details: {},
@@ -272,6 +275,7 @@ export function install(rt) {
         ...rt.reviewMarkOf?.(bot, reviewTrack),
         // A guarded Solver waiting for its plan's verdict: since when (review-guard.js).
         ...rt.reviewGuardViewOf?.(bot, reviewTrack),
+        ...rt.solverStatusOf?.(bot, reviewTrack),
         ...(tail ? { lastAt: tail.lastAt, preview: tail.preview } : {}),
       }
     }),
@@ -850,7 +854,8 @@ export function install(rt) {
           // `private` and `shell` are the user's own create fields (no acting Bot here):
           // a Bot created private starts without a shell unless `shell` says otherwise.
           const options = { name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell, reviewerId: body.reviewerId, reviewGuard: body.reviewGuard,
-            waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true }
+            waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true,
+            solverAuto: body.solverAuto === true, solverModelChoice: body.solverModelChoice === true }
           await rt.load()
           rt.checkCreateLook(options)
           await rt.bootstrap()
@@ -1611,7 +1616,15 @@ export function install(rt) {
   // How a user message reaches a Session: a Bot id, a group chat's id, or an earlier
   // part of either resolves to its current part. `content` is the prompt blocks DSH
   // takes (text, image, file receipts); `requestId` lands on the message's source.
-  async function sendUser({ sessionId: ref, content, requestId = randomUUID(), voicePane }) {
+  const imAuthors = new Map()
+  const questionAnswers = new WeakSet()
+  function takeImAuthor(sessionId, requestId) {
+    if (imAuthors.get(requestId) !== sessionId) return false
+    imAuthors.delete(requestId)
+    return true
+  }
+
+  async function sendUser({ sessionId: ref, content, requestId = randomUUID(), voicePane, trustedImAuthor }) {
     const past = rt.pastOwners.get(ref)
     const room = rt.roomOf(ref)
     const sessionId = rt.botOf(ref) ? rt.chatOf(ref)
@@ -1620,12 +1633,16 @@ export function install(rt) {
           : past !== undefined ? rt.sessionOfRoom(rt.roomOf(past.roomId)) : ref
     await rt.ensureCapabilities(sessionId)
     if (voicePane !== undefined && ref === sessionId) rt.roleRuntime.voice.originate(sessionId, voicePane, requestId)
-    await ctx.sessionController.prompt({
-      requestId,
-      sessionId,
-      mode: 'queue',
-      content,
-    }, AbortSignal.timeout(30_000))
+    if (trustedImAuthor) {
+      imAuthors.set(requestId, sessionId)
+      if (imAuthors.size > 1000) imAuthors.delete(imAuthors.keys().next().value)
+    }
+    try {
+      await ctx.sessionController.prompt({ requestId, sessionId, mode: 'queue', content }, AbortSignal.timeout(30_000))
+    } catch (error) {
+      imAuthors.delete(requestId)
+      throw error
+    }
   }
 
   // The user's answer to an ask_user card, from the web or an IM chat. A Bot id or an
@@ -1637,22 +1654,33 @@ export function install(rt) {
     if (question === undefined || question.id !== questionId) throw Object.assign(new Error('This question is no longer open'), { code: 'bot/stale' })
     const reply = questionReply(question, answer)
     if (reply === undefined) throw Object.assign(new Error('Nothing to send'), { code: 'bot/invalid' })
-    // Claim the question before queueing so a second answer is refused.
-    delete state.questions[sessionId]
+    if (questionAnswers.has(question)) throw Object.assign(new Error('This question is already being answered'), { code: 'bot/stale' })
+    questionAnswers.add(question)
     try {
       await rt.ensureCapabilities(sessionId)
       const agent = await rt.resolveAgent(sessionId)
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: reply.text }], source: reply.source }))
-      await ctx.sessions.flush(agent.session)
-    } catch (error) {
-      state.questions[sessionId] ??= question
-      throw error
+      if (state.questions[sessionId] !== question) throw Object.assign(new Error('This question is no longer open'), { code: 'bot/stale' })
+      const owner = rt.chatOwners.get(sessionId)
+      const solverRequest = owner === undefined ? undefined
+        : await rt.reviewRequest?.(owner, { question: reply.source.callId, text: answer?.custom })
+      if (state.questions[sessionId] !== question) throw Object.assign(new Error('This question is no longer open'), { code: 'bot/stale' })
+      delete state.questions[sessionId]
+      const source = solverRequest ? { ...reply.source, solverRequest } : reply.source
+      try {
+        agent.followup(createUserMessage({ content: [{ type: 'text', text: reply.text }], source }))
+        await ctx.sessions.flush(agent.session)
+      } catch (error) {
+        state.questions[sessionId] ??= question
+        throw error
+      }
+      await rt.save()
+      return true
+    } finally {
+      questionAnswers.delete(question)
     }
-    await rt.save()
-    return true
   }
 
-  Object.assign(rt, { sendUser, answerQuestion })
+  Object.assign(rt, { sendUser, takeImAuthor, answerQuestion })
 
   // An exact Fetch route on the shared /api channel; the browser authenticates with its session cookie.
   ctx.effect(() => ctx.connection.fetch.register({

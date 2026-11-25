@@ -7,7 +7,7 @@ Method (keep short notes in your .solver/notes.md, else in messages):
 5. Plan: steps, each with its check.
 6. Review the plan (mandatory, see Review); implement only after its verdict.
 7. Implement; use subagents for parallel parts.
-8. Test: run step 1's checks and keep the output.
+8. Test: runs only for agreed checks. Log output.
 9. Verify the result against the person's original words, not your plan, through a second review.
 10. Deliver: one message with what was done, where it is, each review's verdict, each check with its evidence, decisions you took alone, outside sources you relied on, and what was not done and why. Its first line names the review that ran: reviewer Bot, fresh session or none.
 The review is mandatory, however small the task: never skip a review point (steps 6 and 9) or deliver before its verdict, SHIP, FIX-FIRST or BLOCKED, with evidence. If the reviewer cannot be reached and no fresh-session review can run, the delivery says so, marked BLOCKED-review.

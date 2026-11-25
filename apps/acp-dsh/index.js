@@ -282,6 +282,10 @@ export function apply(ctx, config = {}, {
     images: () => imageKeeper,
     hostStopping: () => hostStopping.now,
     botIdentity: identityReaders.read,
+    solverIdentity: id => {
+      const identity = identityReaders.read(id)
+      if (typeof identity?.solverLimitsPrompt === 'string') return { name: identity.name, solverLimitsPrompt: identity.solverLimitsPrompt }
+    },
     teamManaged: identityReaders.everRegistered,
     // The raw tri-state: an absent setting takes each agent's own switch in AcpAdapter.
     dshTools: () => flagOf(config.dshTools),
@@ -584,12 +588,14 @@ export function apply(ctx, config = {}, {
       : typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, cliDetails.get(id)) } : {}),
     ...(spec.modeFor === undefined ? { levelNotice: true } : {}),
     cli,
+    ...(id === 'acp-claude' ? { concreteClaude: true } : {}),
     // The agent's own models and efforts, read from the adapter release installed now.
     catalog: new Catalog({
       id,
       name: spec.name,
       defaultName: spec.defaultName,
       fallback: spec.fallback,
+      announceIdentity: true,
       onChange: catalog => {
         if (!disposed && agents.get(id)?.catalog === catalog) publish()
       },
@@ -2235,6 +2241,10 @@ export function apply(ctx, config = {}, {
     },
     /** Read only the Bot that owns this Session. Returns this registration's disposer. */
     botIdentity: identityReaders.register,
+    modelIdentityOf: (provider, model) => adapter.modelIdentityOf(provider, model),
+    resolveModelIdentity: (provider, model) => adapter.resolveModelIdentity(provider, model),
+    /** The live ACP acknowledgement for the answering DSH turn. A canonical resolver also checks for conflicting reports. */
+    effectiveModelOf: (sessionId, provider, model, turn, canonicalModel) => adapter.effectiveModelOf(sessionId, provider, model, turn, canonicalModel),
     /**
      * Where an image an agent makes in a chat goes (agent-image.js): `keeper` is
      * { start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) ->

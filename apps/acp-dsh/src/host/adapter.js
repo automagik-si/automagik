@@ -5,6 +5,7 @@
 // reasoning, and each of its tool calls ends the model step with a call to the mirror tool
 // (tool.js), so DSH shows the card and asks for approval. The next step drains what the agent
 // said since. DSH keeps the Session, its history and the sidebar.
+import { SONNET_PIN, sonnetWire } from './model-identity.js'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -578,21 +579,22 @@ export function aside(providers, ctx, sideModel = () => SIDE_MODEL, redact = tex
  * @param {string} model
  * @param {string | undefined} effort
  * @param {(id: string) => string | undefined} [ownEffort]
- * @param {{ signal?: AbortSignal, standIns?: string[] }} [options] the turn's Stop and the agent's stand-in ids
+ * @param {{ signal?: AbortSignal, standIns?: string[], pinWire?: string, bindModel?: boolean }} [options]
  */
-export async function choose(run, model, effort, ownEffort, { signal, standIns = [] } = {}) {
+export async function choose(run, model, effort, ownEffort, { signal, standIns = [], pinWire, bindModel = false } = {}) {
   const option = run.option('model')
   const offered = valuesOf(option).map(choice => choice.value)
   const ownModel = offered.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : run.startModel
   // A stand-in that has disappeared can use the agent's own model if it is still offered.
   const substituted = model !== DEFAULT_MODEL && standIns.includes(model) && !offered.includes(model)
     && (option === undefined || offered.includes(ownModel))
-  const target = substituted || model === DEFAULT_MODEL ? ownModel : model
+  const target = pinWire ?? (substituted || model === DEFAULT_MODEL ? ownModel : model)
   if (option === undefined) {
     if (!substituted && model !== DEFAULT_MODEL) throw new Error(`it offers no choice of model, so not ${model}`)
   } else if (target !== undefined) {
-    await run.setOption('model', target, { signal })
+    await run.setOption('model', target, { signal, ...(pinWire ? { requireReported: true } : {}) })
   }
+  if (bindModel && !substituted && model !== DEFAULT_MODEL) run.bindModel(model, target, pinWire !== undefined)
   if (!substituted && effort !== undefined) {
     await run.setOption('thought_level', effort, { signal })
   } else {
@@ -600,7 +602,7 @@ export async function choose(run, model, effort, ownEffort, { signal, standIns =
     const levels = valuesOf(levelOption).map(choice => choice.value)
     if (levels.includes(DEFAULT_MODEL)) await run.setOption('thought_level', DEFAULT_MODEL, { signal })
     else if (levelOption !== undefined) {
-      const own = ownEffort?.(substituted ? target ?? DEFAULT_MODEL : model)
+      const own = ownEffort?.(pinWire ?? (substituted ? target ?? DEFAULT_MODEL : model))
       if (levels.includes(own)) await run.setOption('thought_level', own, { signal })
     }
   }
@@ -631,7 +633,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, teamManaged = () => false, access, holds, ownMode = () => undefined, hostStopping = () => false,
+    botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, access, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
@@ -669,11 +671,13 @@ export class AcpAdapter extends LlmAdapter {
     // booleans. Read at each turn's start by `nativeOn`.
     this.nativeTools = nativeTools
     this.botIdentity = botIdentity
+    this.solverIdentity = solverIdentity
     this.teamManaged = teamManaged
     this.backchannel = backchannel
     this.redact = redactor ?? (text => text)
     this.live = new Map()
     this.roleTurns = new Map()
+    this.modelAnswers = new WeakMap()
     this.sessionFiles = new SessionFiles({
       agent: id => this.ctx.agents?.get?.(id), live: id => this.live.get(id),
       level: session => levelOf(ctx.get?.('approval'), session, ctx.get?.('sandboxPolicy'), ctx.get?.('permissionPresets')),
@@ -1415,7 +1419,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   noteEvent(session, event) {
     if (event?.type === 'turn/start' && typeof session?.id === 'string') {
-      this.roleTurns.set(session.id, (this.roleTurns.get(session.id) ?? 0) + 1)
+      this.roleTurns.set(session.id, { turn: event.data?.turn })
     }
     // Every observed crossing invalidates this owner's epoch, including away and back and
     // sessions kept by the ordinary bridge-off path. No transcript can recreate authority.
@@ -1439,6 +1443,7 @@ export class AcpAdapter extends LlmAdapter {
     if (event?.type !== 'model/selection') return
     const live = this.live.get(session?.id)
     if (live === undefined) return
+    this.modelAnswers.delete(live.run)
     // Off is the old path, byte for byte: the agent session is kept across a turn on another
     // provider, so switching back resumes the same ACP session. The default is per agent.
     if (!this.bridgeOn(this.agents.get(live.provider), session?.id)) return
@@ -1462,7 +1467,54 @@ export class AcpAdapter extends LlmAdapter {
   async listModels(provider) {
     const agent = this.agents.get(provider)
     if (agent === undefined || agent.installed?.() === false) return []
-    return (await agent.catalog.models()).map(model => ({ provider, id: model.id, name: model.name, ...(model.description ? { description: model.description } : {}) }))
+    if (agent.concreteClaude) agent.catalog.kick({ requireLive: true })
+    const models = await agent.catalog.models()
+    const wire = agent.concreteClaude && this.sonnetIn(agent.catalog.identityModels())
+    const pinned = wire && wire !== SONNET_PIN ? models.find(row => row.id === wire) : undefined
+    return [...models, ...(pinned ? [{ ...pinned, id: SONNET_PIN }] : [])]
+      .map(model => ({ provider, id: model.id, name: model.name, ...(model.description ? { description: model.description } : {}) }))
+  }
+
+  sonnetIn(models) {
+    return models && sonnetWire(models.map(({ id, name }) => ({ value: id, name })))
+  }
+
+  async resolveModelIdentity(provider, model) {
+    const agent = this.agents.get(provider)
+    if (agent?.installed?.() === false || !agent?.catalog) return { status: 'unavailable' }
+    await agent.catalog.probeIdentityModels()
+    return this.modelIdentityOf(provider, model)
+  }
+
+  modelIdentityOf(provider, model) {
+    const agent = this.agents.get(provider)
+    if (agent?.installed?.() === false || !agent?.catalog) return { status: 'unavailable' }
+    agent.catalog.kick({ requireLive: true })
+    const models = agent.catalog.identityModels()
+    if (models === undefined) return { status: 'unavailable' }
+    // When ACP offers no Default row, the router uses the model the live probe
+    // reported at session start. An agent's own Default row makes no such claim.
+    const own = model === DEFAULT_MODEL ? agent.catalog.identityDefault() : undefined
+    if (own) model = own
+    if (agent.concreteClaude && (model === 'sonnet' || model === SONNET_PIN)) {
+      const wire = this.sonnetIn(models)
+      // A raw alias alongside a concrete row still needs its own exact affiliation.
+      const alias = this.sonnetIn(models.filter(row => row.id !== SONNET_PIN))
+      if (wire && (model === SONNET_PIN || alias === 'sonnet')) return { status: 'offered', model: SONNET_PIN }
+      return { status: 'unresolved' }
+    }
+    return models.filter(row => row.id === model).length === 1
+      ? { status: 'offered', model } : { status: 'unresolved' }
+  }
+
+  effectiveModelOf(sessionId, provider, model, turn, canonicalModel) {
+    const state = this.live.get(sessionId)
+    const answer = this.modelAnswers.get(state?.run)
+    if (state?.provider !== provider || !state?.run?.alive || state.archived || state.held
+      || !answer || answer.session !== state.run.sessionId
+      || (model !== undefined && model !== answer.model)) return undefined
+    if (turn !== undefined && (answer.turn?.turn !== turn || answer.turn !== this.roleTurns.get(sessionId))) return undefined
+    return state.run.acknowledgedModel(canonicalModel)
   }
 
   // A model's efforts are the ones the agent offers for it; DSH turns down any other before the
@@ -1472,6 +1524,11 @@ export class AcpAdapter extends LlmAdapter {
     const agent = this.agents.get(provider)
     const models = agent?.catalog ? await agent.catalog.models() : []
     let found = models.find(entry => entry.id === model)
+    if (found === undefined && agent?.concreteClaude && model === SONNET_PIN) {
+      const wire = this.sonnetIn(agent.catalog.identityModels())
+      const row = models.find(entry => entry.id === wire)
+      if (row) found = { ...row, id: SONNET_PIN }
+    }
     if (found === undefined) {
       found = agent?.catalog?.spec?.fallback?.find(entry => entry.id === model)
       if (found && model !== DEFAULT_MODEL) found = withOfferedEfforts(found, models)
@@ -1512,7 +1569,8 @@ export class AcpAdapter extends LlmAdapter {
     const fileOwner = this.sessionFiles.owners.get(sessionId)
     // Latch durable membership at admission, before the first await. Undo can remove
     // the id before this step resumes, but only a fresh entry may start afterward.
-    const entry = { held: undefined, archived: this.isArchived(sessionId), fileOwner, fileLive: this.live.get(sessionId) }
+    const entry = { held: undefined, archived: this.isArchived(sessionId), fileOwner, fileLive: this.live.get(sessionId),
+      modelTurn: this.roleTurns.get(sessionId) }
     if (!entry.archived && fileOwner?.grant && this.starting.has(sessionId)) {
       return yield finish('error', 'The image session is already starting. Wait for that message to finish.')
     }
@@ -1607,6 +1665,7 @@ export class AcpAdapter extends LlmAdapter {
     })()
     const continuing = mirrorAnswered && live?.provider === options.provider && live.open
     if (continuing) started()
+    else if (live) this.modelAnswers.delete(live.run)
     if (!continuing) {
       if (live !== undefined) live.substitution = undefined
       if (options.messages.findLast(message => !bridgeRow(message))?.role === 'tool') {
@@ -1639,7 +1698,9 @@ export class AcpAdapter extends LlmAdapter {
       const ompNativeAllowed = () => permitsNative(levelAtStart())
         && this.savedNativeOn(sessionId, options.provider)
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
-      const identityRead = takesIdentity ? readIdentity(this.botIdentity, sessionId) : undefined
+      const botIdentity = takesIdentity || options.provider === 'acp-omp' ? readIdentity(this.botIdentity, sessionId)
+        : readIdentity(this.solverIdentity, sessionId)
+      const identityRead = takesIdentity ? botIdentity : undefined
       // Whether the Details switch could turn this turn's Codex ON, read when the text is made: any
       // Session of a Bot it is not blocked for.
       const switchHere = () => {
@@ -1717,7 +1778,10 @@ export class AcpAdapter extends LlmAdapter {
       const asks = hardAsks(native, turnLevel)
       const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true) && this.bridgeOn(agent, sessionId)
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
-      const role = takesIdentity ? rolePromptOf(identityRead) : { digest: '' }
+      // Other ACP agents can receive the Solver's method supplement through the
+      // existing identity prompt delivery, without adopting the whole Bot role.
+      const role = takesIdentity ? rolePromptOf(identityRead)
+        : rolePromptOf({ name: botIdentity?.name, rolePrompt: botIdentity?.solverLimitsPrompt })
       const turn = this.roleTurns.get(sessionId)
       const sameTurn = live !== undefined && turn !== undefined && live.roleTurn === turn
       const roleChanged = live !== undefined && !sameTurn && (live.roleDigest ?? '') !== role.digest
@@ -1809,7 +1873,7 @@ export class AcpAdapter extends LlmAdapter {
               `acp-dsh: ${agent.name} Bot role prompt refused (${role.refused})`)
           } catch {}
         }
-        const text = takesIdentity ? identityText(identityRead, role.part) : undefined
+        const text = takesIdentity ? identityText(identityRead, role.part) : role.part
         // A Codex OFF check that measured this turn's model with no tool block (B1-4): the turn
         // runs again from its start as a kept one (today's launch), with no notice. Nothing of the
         // OFF attempt was started. Once per turn.
@@ -2163,12 +2227,16 @@ export class AcpAdapter extends LlmAdapter {
       }
       // The Session's model and effort, then its level as the agent's own permission mode, before every prompt.
       let substitution
+      const sonnetPin = agent.concreteClaude && options.model === SONNET_PIN
+      const wire = sonnetPin && sonnetWire(valuesOf(live.run.option('model')))
+      live.run.modelProof = undefined
       const standIns = (agent.catalog?.spec?.fallback ?? []).map(entry => entry.id).filter(id => id !== DEFAULT_MODEL)
       try {
+        if (sonnetPin && !wire) throw new Error('the pinned Sonnet model is not offered')
         substitution = await choose(
           live.run, options.model, options.reasoningEffort,
           id => agent.catalog?.ownEffort(id),
-          { signal: options.signal, standIns },
+          { signal: options.signal, standIns, bindModel: true, ...(sonnetPin ? { pinWire: wire } : {}) },
         )
       } catch (error) {
         if (archived()) return yield finish('stop')
@@ -2399,6 +2467,9 @@ export class AcpAdapter extends LlmAdapter {
           return yield finish('error', AGY_NOT_LOADED_TEXT)
         }
       }
+      if (sonnetPin && live.run.acknowledgedModel() !== SONNET_PIN) {
+        return yield finish('error', `${agent.name} did not acknowledge the pinned Sonnet model.`)
+      }
       started()
       live.replay = undefined
       live.owed = undefined
@@ -2412,6 +2483,7 @@ export class AcpAdapter extends LlmAdapter {
       live.calls.clear()
       live.confinedReason = undefined
       live.toolIds?.clear()
+      this.modelAnswers.set(live.run, { model: options.model, turn: entry.modelTurn, session: live.run.sessionId })
       live.run.prompt(prompt).catch(() => {})
       // The notice belongs to this prompt, including any step after a mirror result.
       if (substitution !== undefined) live.substitution = { ...substitution, signal: options.signal }

@@ -2,15 +2,17 @@
 // triggered, the waiters and inboxes of group rounds, and routing a finished turn's reply.
 //
 // Turn tracking: which turns were triggered by another Bot, and what they said.
+import { originalReviewContent } from '../shared/solver-model.js'
 import { randomUUID } from 'node:crypto'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import { closesPart } from './caller-view.js'
 import { HANDOFF_ACK, LATE_ANSWER, MESSAGE_INLINE_MAX, REFERENCE_KIND, REPLY_KIND, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
-import { splitRef, textOf } from './text.js'
+import { rawTextOf, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { reminderText } from './schedules.js'
+import { modelOf } from './solver-progress.js'
 
 // What a running tool call is about, for an approval card.
 export const detailOfArgs = raw => {
@@ -97,26 +99,46 @@ export function turnFailure(error) {
 
 export const failureLine = failure => `${failure.code}${failure.status ? ` ${failure.status}` : ''}${failure.message ? `: ${failure.message.slice(0, 200)}` : ''}`
 
+const closingReviews = new WeakSet()
+
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
-export function answerSender(rt, id, source, text, long, shouldSend) {
+export function answerSender(rt, id, source, text, long, shouldSend, model, review = { reviewText: text }) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
-  const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
+  const fromId = rt.selfOf(id)
+  const name = rt.botOf(fromId)?.name ?? 'The other Bot'
   // When the work this answers was opened, read before closeWork deletes it: a Solver's review
   // mark counts a verdict only for work its current request opened (review-mark.js).
   const answered = rt.state?.works?.[source.exchangeId]
-  const work = rt.closeWork?.(source.exchangeId, name, text)
-  const fromId = rt.selfOf(id)
+  if (closingReviews.has(answered)) return
   const exchangeId = randomUUID()
+  const request = source.senderRoomId === undefined
+    ? rt.designatedReplyRequest?.(source.senderSessionId, fromId, source.exchangeId, answered) : undefined
+  const reviewReceipt = request === undefined ? undefined : randomUUID()
   const reply = answered && answered.from === source.senderSessionId && answered.to === fromId
     && answered.room === undefined && answered.fromRoom === undefined
-    ? { exchangeId, replyTo: source.exchangeId } : undefined
-  // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
-  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply)
+    ? { exchangeId, replyTo: source.exchangeId, reviewReceipt } : undefined
+  // The verdict uses the selected reviewer's own reply. Notices and child results
+  // still travel with the answer and receipt, without supplying verdict evidence.
+  const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, review?.reviewText,
+    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine)
+  const durableResult = onReplyRecorded?.ready !== undefined
+  if (durableResult) closingReviews.add(answered)
+  const generation = rt.teamGeneration?.()
+  let closed = false
+  const close = () => {
+    if (durableResult && (rt.sameTeam?.(generation) === false || rt.state?.works?.[source.exchangeId] !== answered)) {
+      throw new Error('The reviewer work changed before its reply was saved.')
+    }
+    const parent = rt.closeWork?.(source.exchangeId, name, text)
+    closed = true
+    return parent
+  }
+  const work = durableResult ? answered.parent : close()
   // A reply that arrives after the user gave up the wait is a late answer: it closes
   // nothing, opens nothing, and says on it that the wait was already over.
-  const late = work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
+  const late = !durableResult && work === undefined ? rt.abandonedWork?.(source.exchangeId) : undefined
   const marker = late === undefined ? '' : LATE_ANSWER
   const body = marker === '' ? (long?.text ?? text) : `${marker}${long?.text ?? text}`
   const length = long === undefined ? undefined : late === undefined ? long.length : (long.length ?? text.length) + marker.length
@@ -129,10 +151,15 @@ export function answerSender(rt, id, source, text, long, shouldSend) {
     role: 'reply',
     replyTo: source.exchangeId,
     exchangeId,
+    ...(reviewReceipt ? { reviewReceipt } : {}),
     ...(work ? { work } : {}),
-  }, { shouldSend, onReplyRecorded }).catch((error) => {
+  }, { shouldSend, onReplyRecorded, ...(durableResult ? { closeReviewWork: close } : {}) }).then(sent => {
+    if (sent === undefined && durableResult && !closed) closingReviews.delete(answered)
+  }).catch((error) => {
+    if (durableResult && !closed) closingReviews.delete(answered)
     if (shouldSend?.() === false) return
     rt.warn('omni-ui: reply delivery failed: %s', error)
+    if (!closed) return
     // The reply never reached the asker: its note goes — the notice below carries
     // what it answered — the result kept with the work is marked, and the failure
     // reaches the asker the way the reply would have, so the work goes on and its
@@ -148,8 +175,9 @@ export function answerSender(rt, id, source, text, long, shouldSend) {
       ...(long?.length === undefined ? {} : { files: long.files, length: said.length + long.length }),
       role: 'reply',
       replyTo: source.exchangeId,
+      ...(reviewReceipt ? { reviewReceipt } : {}),
       ...(work ? { work } : {}),
-    }, { shouldSend }).catch(again => rt.warn('omni-ui: reply failure notice not delivered: %s', again))
+    }, { shouldSend, ...(reviewReceipt ? { onReplyRecorded } : {}) }).catch(again => rt.warn('omni-ui: reply failure notice not delivered: %s', again))
   })
 }
 
@@ -257,6 +285,7 @@ export const promisesWork = text => typeof text === 'string' && text.trim().leng
 
 export function install(rt) {
   const { ctx, state } = rt
+  rt.reviewWorkClosing = work => closingReviews.has(work)
   rt.turnCutSnapshot = (id) => {
     const entry = rt.live.get(id)
     return { info: entry?.info, joined: entry?.joined ?? [], later: entry?.later ?? [] }
@@ -421,6 +450,8 @@ export function install(rt) {
       const entry = liveOf(sessionId)
       if (entry.turn !== undefined) continue
       entry.turn = RECOVERED_TURN
+      entry.adoptedTurn = rt.liveSessionTurn?.(agent)
+      entry.consumedResult = rt.consumedReviewResultForLiveTurn?.(agent, entry.adoptedTurn)
       // Its input was consumed before the reload; a later request joins this turn.
       entry.opened = true
       entry.since ??= Date.now()
@@ -465,7 +496,7 @@ export function install(rt) {
 
   const liveOf = id => {
     let entry = live.get(id)
-    if (entry === undefined) live.set(id, entry = { texts: [], shown: 0 })
+    if (entry === undefined) live.set(id, entry = { texts: [], rawTexts: [], shown: 0 })
     return entry
   }
 
@@ -553,7 +584,7 @@ export function install(rt) {
   // reply in its Session there while it is still a member. A sender that asked for it
   // while working on another Bot's request goes on with that work when it reads it.
   // `long`: the text as attachLong sends it, when it went as a file.
-  const tellSender = (id, source, text, long) => answerSender(rt, id, source, text, long)
+  const tellSender = (id, source, text, long, review) => answerSender(rt, id, source, text, long, undefined, review?.model, review)
 
   // Runs before a deleted Bot leaves the team. Its Sessions stop with it, and the
   // turn/end that follows is no longer the team's, so their activity and turn records go
@@ -580,7 +611,7 @@ export function install(rt) {
     for (const source of rt.forgetBotWork?.(botId) ?? []) {
       if (!waiting.has(source.exchangeId)) waiting.set(source.exchangeId, [rt.chatOf(botId), source])
     }
-    for (const [id, source] of waiting.values()) tellSender(id, source, text)
+    for (const [id, source] of waiting.values()) tellSender(id, source, text, undefined, null)
   }
 
   // A group Session is hidden as a whole, so its turns need no marking. A handoff
@@ -897,8 +928,11 @@ export function install(rt) {
         setActivity(id, 'thinking')
         setFailed(id, undefined)
         entry.turn = event.data.turn
+        entry.adoptedTurn = undefined
         entry.since = event.time ?? Date.now()
         entry.texts = []
+        entry.rawTexts = []
+        entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
         entry.info = undefined
@@ -908,10 +942,13 @@ export function install(rt) {
         entry.switched = false
         entry.answers = false
         entry.opened = false
+        entry.reviewReplyRequest = undefined
+        entry.consumedResult = undefined
         entry.joined = []
         entry.later = []
         entry.steeredAt = undefined
         entry.carried = false
+        entry.carriedTexts = 0
         let claimedPending
         let claimedPendingText
         if (entry.pending !== undefined) {
@@ -925,6 +962,8 @@ export function install(rt) {
           const carry = entry.carry
           entry.carry = undefined
           entry.texts = carry.texts
+          entry.rawTexts = carry.rawTexts
+          entry.firstLine = carry.firstLine
           entry.shown = carry.shown
           entry.answers = carry.answers
           entry.joined = carry.joined
@@ -932,6 +971,7 @@ export function install(rt) {
           entry.toolCount = carry.toolCount ?? 0
           entry.opened = true
           entry.carried = true
+          entry.carriedTexts = carry.texts.length
           if (carry.info !== undefined) claimTrigger(id, entry, carry.info)
           entry.joined = carry.joined
           // A request the carry displaced as this turn's trigger keeps its deferred
@@ -945,6 +985,15 @@ export function install(rt) {
         break
       case 'user/message': {
         const source = event.data?.source
+        let consumedResult
+        // A batch can include the review reply after the turn's first input.
+        if (entry.turn !== undefined && source?.kind === SOURCE_KIND) {
+          const turn = entry.turn === RECOVERED_TURN ? entry.adoptedTurn : entry.turn
+          const review = source.role === 'reply' && turn !== undefined ? rt.takeReviewReply?.(id, event.data, turn) : undefined
+          entry.reviewReplyRequest = review?.request ?? entry.reviewReplyRequest
+          consumedResult = review?.consumedResult ?? rt.takeReviewContinuation?.(id, event.data)
+          entry.consumedResult = consumedResult ?? entry.consumedResult
+        }
         if (source?.kind === 'subagent-settled' || source?.kind === 'agent-message') {
           if (typeof source.senderSessionId === 'string') {
             noteSubagentEnd(source.senderSessionId)
@@ -1029,17 +1078,20 @@ export function install(rt) {
           // resumed or retried one was counted then, H7-3), may open a new review (review-mark.js).
           if (source.role === 'request' && rt.chatOwners.get(id) !== undefined && source.deferred !== true && source.resumed !== true
             && source.resumedByUpdate !== true && source.retried !== true) {
-            rt.reviewBotRequest?.(rt.chatOwners.get(id), source.senderSessionId, { noReply: source.noReply === true })
+            rt.reviewBotRequest?.(rt.chatOwners.get(id), source.senderSessionId, { noReply: source.noReply === true, exchangeId: source.exchangeId })
           }
           if (entry.turn === undefined) {
             entry.pending = source
-            entry.pendingText = textOf(event.data.content).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
+            entry.pendingText = textOf(originalReviewContent(event.data)).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
           }
           else if (!opened) claimTrigger(id, entry, source)
           else if (source.work !== undefined && source.work !== rt.workOf?.(entry.info) && !expectsReply(source)) {
             // A result for other work than this turn's informs it, and comes back in a
             // turn of its own once this one ends, which goes on with that work.
-            entry.later = [...(entry.later ?? []), { info: source, text: textOf(event.data.content).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '') }]
+            entry.later = [...(entry.later ?? []), {
+              info: source, text: textOf(originalReviewContent(event.data)).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, ''),
+              ...(consumedResult ? { consumedResult } : {}),
+            }]
           } else if ((expectsReply(source) || source.role === 'room') && !answersUser(source)
             && source.exchangeId !== entry.info?.exchangeId
             && !(entry.joined ?? []).some(joined => joined.info.exchangeId === source.exchangeId)) {
@@ -1101,14 +1153,44 @@ export function install(rt) {
           const own = rt.chatOwners.get(id)
           if (own !== undefined) rt.userWrote(own)
           // A person's request to a Solver opens the review its delivery is marked with (review-mark.js).
-          if (own !== undefined && source.kind === 'user' && source.handoff !== true) rt.reviewRequest?.(own)
-          // Any user message answers or supersedes the open question card and view card.
-          let dropped = false
-          if (state.questions[id] !== undefined) {
-            rt.closeCard(id, state.questions[id], 'replied')
+          const human = source.kind === 'user'
+            && !source.handoff && !source.resumed && !source.resumedByUpdate && !source.forwarded && !source.generated
+          const question = state.questions[id]
+          const closesQuestion = question !== undefined && (human || source.callId === (question.callId ?? question.id))
+          const closeQuestion = () => {
+            if (!closesQuestion || state.questions[id] !== question) return
+            rt.closeCard(id, question, 'replied')
             delete state.questions[id]
-            dropped = true
+            void rt.save().catch(() => {})
           }
+          let accepted
+          if (own !== undefined && human) {
+            const plain = event.data.content
+            accepted = rt.reviewRequest?.(own, {
+              text: plain?.length === 1 && plain[0]?.type === 'text' ? plain[0].text : undefined,
+              trustedAuto: viaOf(source) === undefined || rt.takeImAuthor?.(id, source.rpcId) === true,
+            })
+          } else if (own !== undefined && source.kind === REPLY_KIND && typeof source.callId === 'string' && source.outcome === 'answered') {
+            let card
+            try { card = JSON.parse(textOf(event.data.content)) } catch {}
+            if (card?.kind === 'answer_to_pending_question' && card.tool === 'ask_user' && card.callId === source.callId) {
+              accepted = source.solverRequest ?? rt.reviewRequest?.(own, { text: card.answers?.[0]?.custom, question: source.callId })
+            }
+          }
+          if (human || accepted !== undefined) entry.solverRequest = accepted
+          if (accepted?.then) {
+            const pending = accepted.then(request => {
+              if (entry.solverRequest === pending) entry.solverRequest = request
+              closeQuestion()
+              return request
+            }, error => {
+              if (entry.solverRequest === pending) entry.solverRequest = undefined
+              rt.warn('omni-ui: Solver decision could not be saved: %s', error)
+              return undefined
+            })
+            entry.solverRequest = pending
+          } else closeQuestion()
+          let dropped = false
           if (state.views?.[id] !== undefined) {
             rt.closeCard(id, state.views[id], 'replied')
             delete state.views[id]
@@ -1137,11 +1219,14 @@ export function install(rt) {
         break
       case 'assistant/message': {
         const content = event.data?.message?.content
-        const text = textOf(content)
+        const raw = rawTextOf(content)
+        const text = raw.trim()
         const called = Array.isArray(content) && content.some(block => block?.type === 'tool-call')
+        if (raw !== '' && text !== HANDOFF_ACK) entry.firstLine ??= raw.split(/\r?\n/, 1)[0]
         if (text !== '' && text !== HANDOFF_ACK) {
           // What a turn says goes on to the group or the sender, read from other folders.
           entry.texts.push(absoluteLinks(text, rt.sessionFolder?.(session)))
+          entry.rawTexts.push(raw)
           if (entry.turn !== undefined) showSteps(id, entry, called ? entry.texts.length : entry.texts.length - 1)
         }
         entry.lastText = text
@@ -1150,7 +1235,7 @@ export function install(rt) {
         break
       }
       case 'turn/end': {
-        rt.reviewReplyTurnEnd?.(id, event.data)
+        rt.reviewReplyTurnEnd?.(id, { ...event.data, turn: event.data?.turn ?? entry.adoptedTurn ?? entry.turn })
         setActivity(id, undefined)
         // A steer cut leaves the turn's routing state for the fresh turn that
         // claims the steer: nothing is answered or delivered for the cut one.
@@ -1164,16 +1249,22 @@ export function install(rt) {
         // Read before the turn is cleared below: the outgoing agent's handoff-note turn.
         const noteTurn = rt.handoffNoteTurn?.(id, entry.turn ?? event.data?.turn) === true
         if (steerCut) {
-          entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0 }
+          entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0,
+            rawTexts: entry.rawTexts.slice(0, cut.texts), firstLine: cut.texts > 0 ? entry.firstLine : undefined }
         }
         const info = entry.info
         const joined = entry.joined ?? []
         // What the group already saw of the turn is not posted again.
         const texts = entry.texts.slice(entry.shown)
+        const rawTexts = entry.rawTexts.slice(entry.shown)
         // Whether the turn wrote any text, also text the group already saw.
         const wroteText = entry.texts.length > 0
         const shown = entry.shown > 0 || (info?.retried === true && promisedOpenings.delete(info.exchangeId))
         const { lastText, lastCalled } = entry
+        // Exact stage verdicts use the reviewer's own first line, before reply formatting.
+        const reviewFirstLine = entry.shown === 0 ? entry.firstLine ?? '' : ''
+        const carriesReplyText = entry.shown < (entry.carriedTexts ?? 0)
+        const answeringTurn = event.data?.turn ?? entry.adoptedTurn ?? entry.turn
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
         // A turn stopped for a switch goes on in the next part, which answers instead.
@@ -1185,8 +1276,11 @@ export function install(rt) {
         // that joined it, so that request still goes back for a turn of its own.
         const recovered = entry.turn === RECOVERED_TURN
         entry.turn = undefined
+        entry.adoptedTurn = undefined
         entry.info = undefined
         entry.texts = []
+        entry.rawTexts = []
+        entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
         entry.toolCount = 0
@@ -1220,6 +1314,7 @@ export function install(rt) {
             replyTo: result.info.replyTo,
             work: result.info.work,
             ...(result.info.roomId ? { roomId: result.info.roomId } : {}),
+            ...(result.consumedResult ? { consumedResult: result.consumedResult } : {}),
             deferred: true,
           }).catch(error => rt.warn('omni-ui: handing back a result failed: %s', error))
         }
@@ -1267,7 +1362,18 @@ export function install(rt) {
           && promisesWork(lastText) && !rt.callsRoomMember?.(id, info, lastText)
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
         // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
-        if (owner !== undefined && !retry) rt.reviewTurnEnd?.(owner, { completed: failure === undefined && reason?.kind === 'completed', wroteText })
+        const model = reason?.kind === 'completed' ? modelOf(rt, undefined, session) : undefined
+        // A reply that still contains text from the cut turn cannot use this turn's model proof.
+        const answerModel = reason?.kind === 'completed' && !carriesReplyText
+          ? modelOf(rt, undefined, session, typeof answeringTurn === 'number' ? answeringTurn : null) : undefined
+        if (owner !== undefined && !retry) {
+          const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
+          const mark = request => rt.reviewTurnEnd?.(owner, {
+            completed: failure === undefined && reason?.kind === 'completed', wroteText, model, request, trigger: info, consumedResult: entry.consumedResult,
+          })
+          if (request?.then) void request.then(mark)
+          else mark(request)
+        }
         if (retry) {
           if (promisedOnly) {
             const opening = stripWrittenCalls(lastText ?? '')
@@ -1287,35 +1393,40 @@ export function install(rt) {
           if (cutOff) return reply === '' && wroteText ? CUT_OFF_NOTE : cutOffText(reply)
           return reply
         }
-        const groupReply = () => rt.withRoomSteps?.(held, replyText()) ?? replyText()
+        const reply = { text: replyText(), reviewText: rawTexts.join('\n\n'),
+          firstLine: reviewFirstLine, model: answerModel }
+        const groupReply = () => rt.withRoomSteps?.(held, reply.text) ?? reply.text
         // Whoever the turn answers gets the same three-way rule: a failure notice,
         // the turn's text (or a stopped-before-answer line), or nothing.
         const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
-        const answer = (source, reply) => {
+        const answer = (source, response) => {
           if (!expectsReply(source) || answersUser(source) || goesOn) return
           if (failure !== undefined) {
             // The sender was told a reply comes later; without this it would wait forever.
-            tellSender(id, source, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`)
-          } else if (reply !== '' || reason?.kind === 'aborted') {
+            tellSender(id, source, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`, undefined, null)
+          } else if (response?.text) {
+            tellSender(id, source, response.text, undefined, response)
+          } else if (reason?.kind === 'aborted') {
             // A turn stopped before it could answer still owes the sender a line,
             // or it would wait forever for a reply that never comes.
-            tellSender(id, source, reply !== '' ? reply : `${name} was stopped before it could answer your message.`)
+            tellSender(id, source, `${name} was stopped before it could answer your message.`, undefined, null)
           }
         }
         // Work a Bot asked for, also when what came back for it opens the turn: while
         // anything handed on for it is still out, the answer waits; then it goes up with
         // what came back. A failed or stopped turn answers at once.
-        const finish = (source, reply) => {
+        const finish = source => {
           const work = rt.workOf?.(source)
           if (!rt.ownsWork?.(rt.selfOf(id), work)) return answer(source, reply)
           const asker = rt.workAsker(work)
           if (failure !== undefined || reason?.kind === 'aborted') return answer(asker, reply)
           if (rt.waitsWork(work)) return rt.holdWork(work, reply)
           // With what came back, the answer may pass what one message carries.
-          const text = rt.answerText(work, reply, name)
-          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text)
+          const selected = rt.workReply?.(work, reply) ?? reply
+          const text = rt.answerText(work, selected.text, name)
+          if (text.length <= MESSAGE_INLINE_MAX) return tellSender(id, asker, text, undefined, selected)
           void rt.attachLong(text, `Answer from ${name}.txt`)
-            .then(long => tellSender(id, asker, text, long))
+            .then(long => tellSender(id, asker, text, long, selected))
             .catch(error => rt.warn('omni-ui: answer from %s not sent: %s', name, error))
         }
         // A retried turn answers the same waiter or sender, so this one passes nothing on.
@@ -1340,13 +1451,12 @@ export function install(rt) {
           if (failure !== undefined) { if (!inRound) void rt.lateRoomFailure?.(id, info ?? {}, failure) }
           else if (reason?.kind !== 'aborted') void rt.lateRoomReply?.(id, info ?? {}, groupReply(), { shown })
         } else if (!retry && info !== undefined) {
-          finish(info, replyText())
+          finish(info)
         }
         // What the turn read mid-work is answered by this turn's own text: one answer
         // covers it, and every request it read gets that answer. A turn with nothing to
         // say hands the requests it read back as one turn, never one turn each. A group
         // call still goes back to the Bot for a turn in its own chat, as it did before.
-        const reply = replyText()
         const handedBack = []
         // A turn that answers handed-back requests together (or picks such a turn up
         // after a restart) closes all of them as it closes its trigger, also when it
@@ -1361,18 +1471,18 @@ export function install(rt) {
           if (failure !== undefined || reason?.kind === 'aborted') {
             if (request.info.role === 'room') {
               if (failure !== undefined) void rt.lateRoomFailure?.(id, request.info, failure)
-            } else answer(request.info, '')
+            } else answer(request.info)
             continue
           }
           if (request.info.role !== 'room' && !recovered && !retry && batch.has(request.info.exchangeId)) {
-            finish(request.info, reply)
+            finish(request.info)
             continue
           }
-          if (request.info.role === 'room' || recovered || retry || reply === '') {
+          if (request.info.role === 'room' || recovered || retry || reply.text === '') {
             handedBack.push(request)
             continue
           }
-          finish(request.info, reply)
+          finish(request.info)
         }
         void handBackRequests(rt, id, rt.selfOf(id), handedBack)
         if (rt.groupOwners.has(id)) void rt.goalSettled?.(rt.roomOf(rt.groupOwners.get(id).roomId)).catch(error => rt.warn('omni-ui: goal settle in %s failed: %s', id, error))

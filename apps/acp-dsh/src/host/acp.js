@@ -15,6 +15,8 @@ import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
 import { usageLimitOf } from './usage-limit.js'
+import { SONNET_PIN, sonnetWire } from './model-identity.js'
+import { observeTerminal } from './terminal-evidence.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -314,7 +316,7 @@ export class AgentRun {
       })
       this.sessionId = session.sessionId
       this.modes = session.modes
-      this.options = withModels(session.configOptions ?? [], session.models)
+      this.takeOptions(session.configOptions ?? [], session.models)
       // The model the agent started on: DSH's `default` model goes back to it.
       this.startModel = optionOf(this.options, 'model')?.currentValue
       // The session exists (the spike's ordering rule for the bridge's first announcement) and
@@ -364,8 +366,13 @@ export class AgentRun {
       ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
     }))
     this.sessionId = answer.sessionId
+    this.modelProof = undefined
+    this.reportedModel = undefined
+    this.reportedModelFields = undefined
     if (answer.modes !== undefined && answer.modes !== null) this.modes = answer.modes
-    if (Array.isArray(answer.configOptions)) this.options = withModels(answer.configOptions, answer.models ?? modelStateOf(this.options))
+    if (Array.isArray(answer.configOptions) || answer.models) {
+      this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+    }
     for (const tool of this.tools.values()) tool.permission?.answer(CANCELLED)
     this.tools.clear()
     this.turn.clear()
@@ -551,6 +558,53 @@ export class AgentRun {
     this.modes = { ...this.modes, currentModeId: modeId }
   }
 
+  takeOptions(options, models, fallback) {
+    const option = optionOf(options, 'model')
+    const sessionModel = optionOf(withModels([], models), 'model')
+    const reported = option ?? sessionModel
+    // The legacy session model list can be separate from an effort option update.
+    if (reported || models !== undefined || !fallback || this.reportedModel?.id !== MODEL_STATE) {
+      this.reportedModel = reported
+      // Preserve both live reports from the same message for model verification.
+      this.reportedModelFields = option && typeof models?.currentModelId === 'string'
+        ? { option, sessionModelId: models.currentModelId, sessionModel } : undefined
+    }
+    this.options = withModels(options, models ?? fallback)
+    if (this.modelProof && !this.confirmsModel(this.modelProof)) this.modelProof = undefined
+  }
+
+  confirmsModel({ wire, sonnetPin }) {
+    const confirms = option => option?.currentValue === wire && (sonnetPin
+      ? sonnetWire(valuesOf(option)) === wire
+      : valuesOf(option).filter(choice => choice.value === wire).length === 1)
+    return confirms(this.reportedModel) && confirms(this.option('model'))
+  }
+
+  bindModel(model, wire, sonnetPin) {
+    const proof = { session: this.sessionId, model, wire, sonnetPin }
+    if (wire !== undefined && this.confirmsModel(proof)) this.modelProof = proof
+  }
+
+  acknowledgedModel(canonicalModel) {
+    const proof = this.modelProof
+    if (!proof || proof.session !== this.sessionId || !this.confirmsModel(proof)) return undefined
+    if (canonicalModel && this.modelReportsConflict(proof, canonicalModel)) return undefined
+    return proof.model
+  }
+
+  modelReportsConflict(proof, canonicalModel) {
+    const fields = this.reportedModelFields
+    if (!fields) return false
+    const { option, sessionModel, sessionModelId } = fields
+    const { provider } = this.spec
+    const configured = canonicalModel(provider, proof.sonnetPin ? SONNET_PIN : option.currentValue)
+    // The session list must establish its own affiliation for the Sonnet wire alias.
+    const sessionSonnet = provider === 'acp-claude' && sessionModelId === 'sonnet'
+      && sonnetWire(valuesOf(sessionModel).filter(choice => choice.value !== SONNET_PIN)) === sessionModelId
+    const session = canonicalModel(provider, sessionSonnet ? SONNET_PIN : sessionModelId)
+    return configured !== undefined && session !== undefined && configured !== session
+  }
+
   /** The agent's own option of `category` (`model`, `thought_level`), as it last said. */
   option(category) {
     return optionOf(this.options, category)
@@ -562,19 +616,25 @@ export class AgentRun {
    * or effort than the person chose.
    * @param {string} category
    * @param {string} value
-   * @param {{ signal?: AbortSignal }} [options] the turn's Stop
+   * @param {{ signal?: AbortSignal, requireReported?: boolean }} [options]
    */
-  async setOption(category, value, { signal } = {}) {
+  async setOption(category, value, { signal, requireReported = false } = {}) {
     const option = this.option(category)
     if (option === undefined) throw new Error(`it has no ${category} setting`)
     const values = valuesOf(option)
     if (!values.some(choice => choice.value === value)) throw new Error(`it offers no ${category} ${value} (it offers ${values.map(choice => choice.value).join(', ') || 'none'})`)
-    if (option.currentValue === value) return
+    if (option.currentValue === value && (!requireReported || this.reportedModel?.currentValue === value)) return
+    if (category === 'model') {
+      this.reportedModel = undefined
+      this.reportedModelFields = undefined
+      this.modelProof = undefined
+    }
     if (option.id === MODEL_STATE) {
       // The session's own model list (`session/set_model`), for an agent with no model option.
       const params = { sessionId: this.sessionId, modelId: value }
+      let answer
       try {
-        await this.held(() => this.conn.setSessionModel(params), { signal, what: `taking its ${category}` })
+        answer = await this.held(() => this.conn.setSessionModel(params), { signal, what: `taking its ${category}` })
       } catch (error) {
         // A request nobody answered, or one the turn's Stop ended, goes up as it is: the turn
         // ends the session on it (adapter.js `abandoned`), which a wrapped error would hide.
@@ -584,12 +644,20 @@ export class AgentRun {
         const details = typeof error?.data?.details === 'string' && /^[\w .:-]{1,80}$/.test(error.data.details) ? ` (${error.data.details})` : ''
         throw new Error(`it could not switch to ${value}: ${error?.message ?? error}${details}`, { cause: error })
       }
-      this.options = this.options.map(other => (other.id === MODEL_STATE ? { ...other, currentValue: value } : other))
+      if (Array.isArray(answer?.configOptions) || answer?.models) {
+        this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+      } else if (!this.reportedModel) {
+        this.options = this.options.map(other => (other.id === MODEL_STATE ? { ...other, currentValue: value } : other))
+      }
       return
     }
     const answer = await this.held(() => this.conn.setSessionConfigOption({ sessionId: this.sessionId, configId: option.id, value }), { signal, what: `taking its ${category}` })
     // The answer is the whole set: a new model may bring other efforts.
-    this.options = answer?.configOptions ? withModels(answer.configOptions, modelStateOf(this.options)) : this.options.map(other => (other.id === option.id ? { ...other, currentValue: value } : other))
+    if (Array.isArray(answer?.configOptions) || answer?.models) {
+      this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+    } else if (category !== 'model' || !this.reportedModel) {
+      this.options = this.options.map(other => (other.id === option.id ? { ...other, currentValue: value } : other))
+    }
   }
 
   async cancel() {
@@ -761,6 +829,7 @@ export class AgentRun {
       }
       if (this.tools.get(update.toolCallId)?.retired === true) return
     }
+    const observedAt = isTool ? performance.now() : undefined
     switch (update?.sessionUpdate) {
       case 'agent_message_chunk': {
         const text = contentText(update.content)
@@ -775,15 +844,17 @@ export class AgentRun {
         break
       }
       case 'tool_call':
-        this.seeTool(update)
+        this.seeTool(update, observedAt)
         break
       case 'tool_call_update': {
-        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update)
+        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update, observedAt)
         if (tool !== undefined) this.changeTool(tool, update)
         break
       }
       case 'config_option_update':
-        if (Array.isArray(update.configOptions)) this.options = withModels(update.configOptions, modelStateOf(this.options))
+        if (typeof sessionId === 'string' && sessionId === this.sessionId && (Array.isArray(update.configOptions) || update.models)) {
+          this.takeOptions(update.configOptions ?? [], update.models, modelStateOf(this.options))
+        }
         break
       case 'current_mode_update':
         if (this.modes) this.modes = { ...this.modes, currentModeId: update.currentModeId }
@@ -791,9 +862,13 @@ export class AgentRun {
       default:
         break
     }
+    if (isTool && isToolId(sessionId) && sessionId === this.sessionId) {
+      const tool = this.tools.get(update.toolCallId)
+      if (tool !== undefined) observeTerminal(tool, update, sessionId, observedAt)
+    }
   }
 
-  seeTool(update) {
+  seeTool(update, observedAt = performance.now()) {
     if (!isToolId(update?.toolCallId)) {
       this.ignored('a tool update', update)
       return undefined
@@ -811,7 +886,7 @@ export class AgentRun {
       return undefined
     }
     if (this.reviews?.last) this.reviews.after = true
-    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now() }
+    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now(), observedAt }
     // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
     const parent = parentToolOf(update)
     if (parent !== undefined && parent !== tool.id) tool.parent = parent

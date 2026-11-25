@@ -7,7 +7,7 @@ import { build } from 'esbuild'
 
 const { outputFiles } = await build({
   stdin: { contents: [
-    "export { ReviewGuardRow } from './src/client/details-drawer.js'",
+    "export { ReviewGuardRow, SolverAutoRow } from './src/client/details-drawer.js'",
     "export { upgradeNoticeOf, noticeAfterTurn, noticeBeforeTurn } from './src/client/cells.js'",
   ].join('\n'), resolveDir: import.meta.dirname + '/..' },
   bundle: true, platform: 'browser', logLevel: 'silent',
@@ -22,7 +22,7 @@ runInNewContext(outputFiles[0].text, {
   require: name => (name === 'react' ? { createContext: () => ({}), createElement: (type, props, ...children) => ({ type, props, children }), Fragment: 'fragment' }
     : name === 'react-dom' ? { createPortal: node => node } : new Proxy({}, { get: (_, key) => key })),
 })
-const { ReviewGuardRow, upgradeNoticeOf, noticeAfterTurn, noticeBeforeTurn } = module.exports
+const { ReviewGuardRow, SolverAutoRow, upgradeNoticeOf, noticeAfterTurn, noticeBeforeTurn } = module.exports
 
 const roster = { byId: { rev: { id: 'rev', name: 'Ada reviewer' } }, permissions: { defaultPreset: 'workspace-write' } }
 const updates = []
@@ -33,6 +33,21 @@ const render = (bot, extra = {}) => ReviewGuardRow({
 const switchOf = row => row?.children?.[0]?.props
 const hard = "Work waits for Ada reviewer's verdict on the plan: file changes, commands and messages to other Bots are refused until it answers."
 const scope = "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held."
+
+test('Solver Details keeps the saved Auto switch separate from the active request and its limit', () => {
+  const actions = { updateBot: (id, patch) => { updates.push([id, { ...patch }]) } }
+  const renderAuto = solverStatus => SolverAutoRow({
+    bot: { id: 's1', role: 'Solver', model: 'acp-codex/default', nativeToolsBlock: 'model-kept', solverStatus },
+    roster, actions, run: value => value,
+  }).props
+  const requestAuto = renderAuto({ auto: true })
+  assert.equal(requestAuto.on, false)
+  assert.match(requestAuto.hint, /Auto is on for this request.*prompt-only/)
+  requestAuto.onChange(true)
+  assert.deepEqual(updates.at(-1), ['s1', { solverAuto: true }])
+  const held = renderAuto({ auto: false, limit: { kind: 'fix', check: 'lint' } })
+  assert.match(held.hint, /Waiting for your answer after the attempt limit for lint/)
+})
 
 test('the row: shown with a reviewer id, the guard on, or the marker; its line follows the route; toggling sends it alone', () => {
   const on = switchOf(render({ reviewGuard: true }))

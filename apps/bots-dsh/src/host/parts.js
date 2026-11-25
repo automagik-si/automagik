@@ -1207,6 +1207,9 @@ export function install(rt) {
 
   // A turn stopped for a switch goes on with its own source, so its reply still
   // reaches whoever asked.
+  const reviewContinuation = (sessionId, message, binding) =>
+    rt.notePartReviewContinuation?.(sessionId, message, binding) ?? message
+
   const handoffSource = (job, resume) => ({
     ...(resume && job.info ? job.info : { kind: SOURCE_KIND, form: 'relay', role: 'handoff', senderName: 'Omni' }),
     exchangeId: job.info?.exchangeId ?? randomUUID(),
@@ -1269,6 +1272,9 @@ export function install(rt) {
     return place !== undefined && place.roomId === undefined && rt.botOf(place.botId)?.sessionPinned === true
   }
 
+  const currentReviewInput = (sessionId, message, botId = rt.chatOwners.get(sessionId)) =>
+    rt.withReviewFeedback?.(message, botId, rt.reviewContinuationBinding?.(sessionId, message)) ?? message
+
   // Input for an earlier part goes on in the current one: a browser may still show the
   // old part, and a turn stopped for a switch hands on what it claimed. Answers how many
   // messages it sent with followup, the sends that wake the part. `handed` collects the ids
@@ -1297,7 +1303,8 @@ export function install(rt) {
           continue
         }
         if (kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, target)
-        const copy = createUserMessage({ content: message.content, ...(message.source ? { source: message.source } : {}) })
+        const input = currentReviewInput(target, message, owner.botId)
+        const copy = createUserMessage({ content: input.content, ...(input.source ? { source: input.source } : {}) })
         if (opensTurn(message)) {
           agent.followup(copy)
           woke += 1
@@ -1338,7 +1345,7 @@ export function install(rt) {
         continue
       }
       if (message.source?.kind === SOURCE_KIND) rt.wakeLog?.moved(exchangeId, agent.session.id)
-      agent.inbox.prepend(inboxTargetOf(message), message)
+      agent.inbox.prepend(inboxTargetOf(message), currentReviewInput(agent.session.id, message))
       rt.wakeLog?.retireClaim(from, message)
     }
   }
@@ -1350,7 +1357,7 @@ export function install(rt) {
   const wake = (agent) => {
     const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
     quietly(() => { for (const message of pending) agent.inbox.remove(message.id) })
-    pending.forEach((message, index) => agent.send(message, inboxTargetOf(message), index === 0))
+    pending.forEach((message, index) => agent.send(currentReviewInput(agent.session.id, message), inboxTargetOf(message), index === 0))
   }
   // Wakes a part and, if a send throws, puts back only what no send took: messages a send
   // queued or the running driver claimed stay where DSH put them; the rest go back behind
@@ -1360,7 +1367,7 @@ export function install(rt) {
     quietly(() => { for (const message of pending) agent.inbox.remove(message.id) })
     let at = 0
     try {
-      for (; at < pending.length; at += 1) agent.send(pending[at], inboxTargetOf(pending[at]), at === 0)
+      for (; at < pending.length; at += 1) agent.send(currentReviewInput(agent.session.id, pending[at]), inboxTargetOf(pending[at]), at === 0)
     } catch (error) {
       const queued = new Set([...agent.inbox.nextStep, ...agent.inbox.nextTurn].map(message => message.id))
       quietly(() => { for (const message of pending.slice(at)) if (!queued.has(message.id)) agent.inbox.append(inboxTargetOf(message), message) })
@@ -1373,7 +1380,7 @@ export function install(rt) {
     const queued = new Set([...agent.inbox.nextStep, ...agent.inbox.nextTurn].map(message => message.id))
     for (const message of messages) {
       if (queued.has(message.id)) continue
-      agent.inbox.append(inboxTargetOf(message), message)
+      agent.inbox.append(inboxTargetOf(message), currentReviewInput(agent.session.id, message))
       queued.add(message.id)
     }
   }
@@ -1526,10 +1533,11 @@ export function install(rt) {
           const queued = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
           if (exchangeId === undefined || !queued.some(message => message.source?.exchangeId === exchangeId)) {
             const joined = Array.isArray(cut.joined) && cut.joined.length > 0 ? { joined: cut.joined } : {}
-            agent.inbox.prepend('next-turn', createUserMessage({
+            const message = createUserMessage({
               content: [{ type: 'text', text: PAUSE_NOTE }],
               source: cut.info ? { ...cut.info, ...joined } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...joined },
-            }))
+            })
+            agent.inbox.prepend('next-turn', reviewContinuation(sessionId, message, cut.consumedResult))
           }
         }
         try { wakeKept(agent) } catch (error) { rt.warn('omni-ui: part %s could not be woken for its kept input: %s', sessionId, error) }
@@ -1660,6 +1668,7 @@ export function install(rt) {
         crossing: owner.group === true ? { group: true, from: owner.from, previous: {}, note: () => {} }
           : owner.back === undefined ? undefined : { previous: owner.back, note: () => {} },
         resume: owner.cut !== undefined, info: owner.cut?.info, joined: owner.cut?.joined,
+        consumedResult: owner.cut?.consumedResult,
       },
     }
     if (reverting.has(freshId)) return
@@ -1798,10 +1807,11 @@ export function install(rt) {
             const noted = [...agent.inbox.nextStep, ...agent.inbox.nextTurn].some(message => textOf(message.content) === PAUSE_NOTE)
             if (job.resume && !back.some(message => textOf(message.content) === PAUSE_NOTE) && !noted) {
               const carried = job.joined?.length ? { joined: job.joined } : {}
-              back.unshift(createUserMessage({
+              const message = createUserMessage({
                 content: [{ type: 'text', text: PAUSE_NOTE }],
                 source: job.info ? { ...job.info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
-              }))
+              })
+              back.unshift(reviewContinuation(agent.id, message, job.consumedResult))
             }
             await forward(job, back, agent.session.id).then(() => {
               delete state.switching[agent.id]
@@ -2149,7 +2159,7 @@ export function install(rt) {
     job.cutEnd = event.data?.reason?.kind
     if (job.cutEnd !== 'completed') return
     job.resume = false
-    job.info = job.joined = undefined
+    job.info = job.joined = job.consumedResult = undefined
     const marker = state.switching?.[id]
     if (marker?.cut !== undefined) {
       delete marker.cut
@@ -2338,7 +2348,7 @@ export function install(rt) {
             const fresh = await rt.resolveAgent(freshId).catch(() => undefined)
             const late = entry.job.carry.splice(0)
             if (fresh !== undefined && late.length > 0) quietly(() => appendById(fresh, late))
-            const ran = await rerunHandoff(freshId, bot.name)
+            const ran = await rerunHandoff(freshId, bot.name, entry.job?.consumedResult)
             // In the job a rerun that failed leaves the marker to the restart pass; after a
             // restart this is the last try: the handoff waits for the next message (MH-5).
             if (ran !== true && !restart) return false
@@ -2352,7 +2362,7 @@ export function install(rt) {
           await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
             .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
           // The reply the switch stopped still goes on: here, once more, from its handoff.
-          if (entry.job?.resume === true && await rerunHandoff(freshId, bot.name) !== true) answerCut(freshId, entry, failure)
+          if (entry.job?.resume === true && await rerunHandoff(freshId, bot.name, entry.job?.consumedResult) !== true) answerCut(freshId, entry, failure)
           return false
         }
       }
@@ -2487,16 +2497,17 @@ export function install(rt) {
   // The stopped reply of an agent switch that went back: its resume line goes into the old
   // part, as handOnPart's not-moved branch builds it, unless its request already waits
   // there; then the part wakes once.
-  function resumeCut(agent, { info, joined }, name) {
+  function resumeCut(agent, { info, joined, consumedResult }, name) {
     try {
       const exchangeId = info?.exchangeId
       const queued = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
       if (exchangeId === undefined || !queued.some(message => message.source?.exchangeId === exchangeId)) {
         const carried = Array.isArray(joined) && joined.length > 0 ? { joined } : {}
-        agent.inbox.prepend('next-turn', createUserMessage({
+        const message = createUserMessage({
           content: [{ type: 'text', text: PAUSE_NOTE }],
           source: info ? { ...info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
-        }))
+        })
+        agent.inbox.prepend('next-turn', reviewContinuation(agent.id, message, consumedResult))
       }
       wakeKept(agent)
     } catch (error) { rt.warn('ds-bot: the stopped reply of %s could not go on in the part it came from: %s', name, error) }
@@ -2506,7 +2517,7 @@ export function install(rt) {
   // more, so the reply the switch stopped goes on there. Its first failure no longer takes
   // the switch back (the part is no longer awaited).
   // Answers true when its wake ran.
-  async function rerunHandoff(freshId, name) {
+  async function rerunHandoff(freshId, name, consumedResult) {
     const fresh = await rt.resolveAgent(freshId).catch(() => undefined)
     if (fresh === undefined) return false
     try {
@@ -2518,7 +2529,8 @@ export function install(rt) {
           rt.warn('ds-bot: the handoff of the fresh part of %s was not found; its stopped reply does not go on', name)
           return false
         }
-        fresh.inbox.prepend('next-turn', createUserMessage({ content: handoff.content, ...(handoff.source ? { source: handoff.source } : {}) }))
+        const message = createUserMessage({ content: handoff.content, ...(handoff.source ? { source: handoff.source } : {}) })
+        fresh.inbox.prepend('next-turn', reviewContinuation(freshId, message, consumedResult))
       }
       wakeKept(fresh)
       return true
@@ -2745,7 +2757,8 @@ export function install(rt) {
       const text = routeOfRef(job.target).route === 'acp' ? capForAcp(build, carried) : build(carried)
       freshParts.set(freshId, estimateTokens(text))
       // Prepending the handoff does not wake the fresh part.
-      fresh.inbox.prepend('next-turn', createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
+      const message = createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) })
+      fresh.inbox.prepend('next-turn', reviewContinuation(freshId, message, resume ? job.consumedResult : undefined))
       await ctx.sessions.flush(fresh.session)
       // Watched from here, before anything can start the fresh part's first turn.
       awaiting.set(freshId, { oldId: agent.id, botId: job.botId, ...(room === undefined ? {} : { roomId: room.id }), expected: job.target, job })
@@ -4317,7 +4330,11 @@ export function install(rt) {
         job.cutPending = true
         job.info = live?.info
         job.joined = [...(live?.joined ?? [])]
-        state.switching[sessionId] = { ...(state.switching[sessionId] ?? { botId }), cut: { exchangeId: live?.info?.exchangeId, info: live?.info, joined: job.joined } }
+        job.consumedResult = live?.consumedResult
+        state.switching[sessionId] = { ...(state.switching[sessionId] ?? { botId }), cut: {
+          exchangeId: live?.info?.exchangeId, info: live?.info, joined: job.joined,
+          ...(job.consumedResult ? { consumedResult: job.consumedResult } : {}),
+        } }
       }
       // A time-boxed Auto grant ends at the pick and stays ended if the switch rolls back;
       // the fresh part waits for it before it takes the Bot's level.

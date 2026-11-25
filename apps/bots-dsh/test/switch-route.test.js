@@ -15,6 +15,8 @@ import { install as installFallback } from '../src/host/fallback.js'
 import { install as installMemory } from '../src/host/memory.js'
 import { install, saidSomething } from '../src/host/parts.js'
 import { install as installReviewMark } from '../src/host/review-mark.js'
+import { install as installResume } from '../src/host/resume.js'
+import { resultSnapshot } from '../src/host/solver-progress.js'
 import { SOLVER_DESCRIPTION } from '../src/shared/solver-method.js'
 import { textOf } from '../src/host/text.js'
 import { install as installClock } from '../src/host/time-context.js'
@@ -146,6 +148,40 @@ async function crossesWithHandoff(b, result, { target = 'acp-claude/default', fr
   return handoff
 }
 
+async function switchWithReview(b, { message, carried, live } = {}) {
+  const turn = 3
+  b.rt.live = new Map([['s1', { turn, ...live }]])
+  const idle = Promise.withResolvers()
+  b.agent.status = 'running'
+  b.agent.whenIdle = () => idle.promise
+  let cancelled
+  b.agent.cancel = reason => { cancelled = reason }
+  if (message !== undefined) b.ctx.emit('agent/inbox/claimed', { agent: b.agent, message, turn })
+
+  const fresh = b.freshAgent('s2')
+  const enqueue = fresh.followup
+  fresh.followup = queued => {
+    enqueue.call(fresh, queued)
+    b.ctx.emit('agent/inbox/inserted', { agent: fresh, message: queued })
+  }
+  const switched = await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
+  const [job] = b.rt.switchJobs()
+  assert.equal(switched.status, 'switching')
+  assert.ok(cancelled)
+  if (carried) {
+    const preStep = b.ctx.listeners.get('agent/pre-step')[0]
+    await preStep({ agent: b.agent, step: 1, messages: [message] }, () => assert.fail('switch let the old step run'))
+  }
+  b.rt.reviewReplyTurnEnd('s1', { turn, reason: { kind: 'aborted', reason: cancelled } })
+  b.rt.live.delete('s1')
+  b.agent.status = 'idle'
+  idle.resolve()
+  await job.finished
+  await crossesWithHandoff(b, switched)
+  b.rt.chatOwners.set('s2', 'b1')
+  return fresh
+}
+
 test('TRACK1 SWITCH: a route switch preserves a carried review claim and retires a lost one', async t => {
   const dispositions = []
   for (const carried of [true, false]) {
@@ -162,36 +198,7 @@ test('TRACK1 SWITCH: a route switch preserves a carried review claim and retires
     }
     const record = b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', Date.now(), message.source)
     record()
-    const turn = 3
-    b.rt.live = new Map([['s1', { turn }]])
-    const idle = Promise.withResolvers()
-    b.agent.status = 'running'
-    b.agent.whenIdle = () => idle.promise
-    let cancelled
-    b.agent.cancel = reason => { cancelled = reason }
-    b.ctx.emit('agent/inbox/claimed', { agent: b.agent, message, turn })
-
-    const fresh = b.freshAgent('s2')
-    const enqueue = fresh.followup
-    fresh.followup = queued => {
-      enqueue.call(fresh, queued)
-      b.ctx.emit('agent/inbox/inserted', { agent: fresh, message: queued })
-    }
-    const switched = await b.rt.switchRoute('b1', 'acp-claude/default', undefined, { stopReply: true })
-    const [job] = b.rt.switchJobs()
-    assert.equal(switched.status, 'switching')
-    assert.ok(cancelled)
-    if (carried) {
-      const preStep = b.ctx.listeners.get('agent/pre-step')[0]
-      await preStep({ agent: b.agent, step: 1, messages: [message] }, () => assert.fail('switch let the old step run'))
-    }
-    b.rt.reviewReplyTurnEnd('s1', { turn, reason: { kind: 'aborted', reason: cancelled } })
-    b.rt.live.delete('s1')
-    b.agent.status = 'idle'
-    idle.resolve()
-    await job.finished
-    await crossesWithHandoff(b, switched)
-    b.rt.chatOwners.set('s2', 'b1')
+    const fresh = await switchWithReview(b, { message, carried })
     const awaiting = fresh.inbox.nextTurn.filter(item => item.source?.replyTo === 'review-work')
     assert.equal(awaiting.length, Number(carried))
     b.rt.reviewTurnEnd('b1', { completed: true, wroteText: true })
@@ -208,6 +215,98 @@ test('TRACK1 SWITCH: a route switch preserves a carried review claim and retires
     }
   }
   assert.deepEqual(dispositions, [false, true], 'only the carried claim still holds delivery after settlement')
+})
+
+test('Limits + Auto switch moves designated PLAN and RESULT claims by exchange and releases a lost claim', async t => {
+  for (const phase of ['plan', 'result']) {
+    for (const carried of [true, false]) await t.test(`${phase} ${carried ? 'moved' : 'lost'}`, async t => {
+      const b = bench()
+      t.after(() => b.ctx.dispose())
+      b.rt.state.bots.reviewer = { id: 'reviewer', name: 'Reviewer' }
+      Object.assign(b.bot, { role: SOLVER_DESCRIPTION, reviewerId: 'reviewer' })
+      installReviewMark(b.rt)
+      b.rt.reviewCreated(b.bot, 'Review this change.')
+      const progress = b.bot.reviewTrack.solver
+      const designation = { exchangeId: 'review-work', reviewerId: 'reviewer' }
+      progress.plan = { revision: 0, checks: ['test'], ...(phase === 'plan' ? { review: designation } : {}) }
+      if (phase === 'result') progress.review = { ...designation, revision: 0, solverModel: 'v4' }
+      const work = { from: 'b1', to: 'reviewer', at: Date.now() }
+      assert.equal(b.rt.designatedReplyRequest('b1', 'reviewer', 'review-work', work), progress.request)
+      const source = { kind: SOURCE_KIND, role: 'reply', exchangeId: 'review-reply', replyTo: 'review-work',
+        senderSessionId: 'reviewer', reviewReceipt: 'host-receipt' }
+      b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', work.at, source, 'independent')()
+      const message = { id: 'original-inbox-id', content: [{ type: 'text', text: 'SHIP' }], source }
+      const fresh = await switchWithReview(b, { message, carried })
+      const waiting = fresh.inbox.nextTurn.filter(input => input.source?.exchangeId === source.exchangeId)
+      assert.equal(waiting.length, Number(carried))
+      const finish = request => b.rt.reviewTurnEnd('b1', { completed: true, wroteText: true, request })
+      finish(progress.request)
+      assert.equal(b.bot.reviewTrack.delivered === true, !carried)
+      if (!carried) return
+      const [input] = waiting
+      assert.notEqual(input.id, message.id)
+      assert.deepEqual(input.source, source)
+      assert.equal(b.rt.takeReviewReply(fresh.id, input, 4), undefined, 'the moved reply is not yet input')
+      b.ctx.emit('agent/inbox/claimed', { agent: fresh, message: input, turn: 4 })
+      assert.equal(b.rt.takeReviewReply(fresh.id, message, 4), undefined, 'the original ID cannot consume the moved reply')
+      const consumed = b.rt.takeReviewReply(fresh.id, input, 4)
+      assert.equal(consumed.request, progress.request)
+      assert.equal(consumed.consumedResult?.replyTo, phase === 'result' ? 'review-work' : undefined)
+      finish(consumed.request)
+      assert.equal(b.bot.reviewTrack.delivered, true)
+    })
+  }
+})
+
+test('Limits + Auto switch continues a consumed RESULT on its original request once', async t => {
+  const b = bench()
+  const home = mkdtempSync(join(tmpdir(), 'switch-result-'))
+  t.after(async () => {
+    await b.ctx.dispose()
+    rmSync(home, { recursive: true, force: true })
+  })
+  Object.assign(b.rt, { home, lockTerm: () => 1, holdsLock: () => true })
+  b.rt.state.bots.reviewer = { id: 'reviewer', name: 'Reviewer' }
+  Object.assign(b.bot, { role: SOLVER_DESCRIPTION, reviewerId: 'reviewer' })
+  installReviewMark(b.rt)
+  installResume(b.rt)
+  b.rt.live = new Map([['s1', { turn: 3 }]])
+  b.rt.reviewCreated(b.bot, 'Review this change.')
+  const progress = b.bot.reviewTrack.solver
+  progress.plan = { revision: 0, checks: ['test'], accepted: true }
+  progress.passed = ['test']
+  const workspace = mkdtempSync(join(tmpdir(), 'switch-result-files-'))
+  t.after(() => rmSync(workspace, { recursive: true, force: true }))
+  writeFileSync(join(workspace, 'result.txt'), 'Verified result.')
+  b.bot.workDir = workspace
+  progress.snapshot = resultSnapshot(workspace)
+  progress.review = { exchangeId: 'result-work', reviewerId: 'reviewer', revision: 0, solverModel: 'v4' }
+  const workAt = Date.now()
+  const source = { kind: SOURCE_KIND, role: 'reply', exchangeId: 'result-reply', replyTo: 'result-work',
+    senderSessionId: 'reviewer', reviewReceipt: 'host-receipt' }
+  const input = { id: 'result-input', source }
+  b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', workAt, source, 'independent')()
+  b.ctx.emit('agent/inbox/claimed', { agent: b.agent, message: input, turn: 3 })
+  const { consumedResult } = b.rt.takeReviewReply('s1', input, 3)
+  assert.equal(consumedResult.request, progress.request)
+  const fresh = await switchWithReview(b, { live: { info: source, consumedResult } })
+  const handoff = fresh.inbox.nextTurn.find(message => message.source?.handoff)
+  assert.equal(handoff.source.exchangeId, source.exchangeId)
+  assert.ok(b.rt.deliveryNote(source.exchangeId))
+  assert.equal(b.rt.takeReviewContinuation(fresh.id, structuredClone(handoff)), undefined)
+  b.ctx.emit('agent/inbox/claimed', { agent: fresh, message: handoff, turn: 4 })
+  b.rt.noteUpdateInbox({ agent: fresh, message: handoff }, true)
+  const resumed = b.rt.takeReviewContinuation(fresh.id, handoff)
+  assert.deepEqual(resumed, consumedResult)
+  assert.equal(b.rt.deliveryNote(source.exchangeId), undefined)
+  const finish = consumedResult => b.rt.reviewTurnEnd('b1', { completed: true, wroteText: true, model: 'v4', request: undefined, consumedResult })
+  finish(resumed)
+  const mark = b.bot.reviewTrack.last
+  assert.equal(mark.done, true)
+  assert.equal(mark.resultExchangeId, source.replyTo)
+  assert.equal(b.rt.takeReviewContinuation(fresh.id, handoff), undefined)
+  finish(resumed)
+  assert.equal(b.bot.reviewTrack.last, mark)
 })
 
 // A goal is the Session's, so the part that takes over starts with none: an active one moves

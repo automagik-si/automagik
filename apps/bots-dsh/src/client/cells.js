@@ -1399,8 +1399,8 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
   }
 }
 
-// The review guard's stop reasons (K10, K14), the ones a hidden turn still draws.
-const GUARD_WHYS = new Set(['guard', 'guard-request', 'guard-launch'])
+// Solver stops still draw in a hidden turn.
+const GUARD_WHYS = new Set(['guard', 'guard-request', 'guard-launch', 'limit'])
 
 export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions }) {
   const roster = useRoster(value => value)

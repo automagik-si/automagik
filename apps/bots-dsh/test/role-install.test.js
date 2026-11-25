@@ -1170,7 +1170,7 @@ test('concurrent readers share the first health check for the same install recor
   assert.equal(reads, 1)
 })
 
-const BUNDLED_DIGEST = '4065d77560a7159f7537079e1c5d58e18683ef5b3f600f4def30a9e82b639dfc'
+const BUNDLED_DIGEST = '27b4087c9725cc225d6b574d2c5a5d2129e17943cdf8d8cfbd410d2ac7d560e8'
 const BUNDLE_NAMES = ['prompt.md', 'role.json', 'role.mjs']
 const bundleSource = new URL('../roles/solver/', import.meta.url)
 const installedSolverDir = (f, version = PLUGIN_VERSION) => join(f.rolesDir, 'solver', version)

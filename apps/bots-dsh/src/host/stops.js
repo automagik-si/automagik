@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { approvalPolicyOf } from './approval-policy.js'
 
-export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request', 'guard-launch']
+export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request', 'guard-launch', 'limit']
 export const STOP_KEEP_MS = 6 * 60 * 60 * 1000
 export const STOPS_MAX = 50
 export const CALLS_MAX = 20
@@ -20,10 +20,14 @@ export const WHY_EN = {
   guard: 'the review guard waits for the reviewer\'s verdict on the plan; you can turn it off in Details',
   'guard-request': 'the review guard waits for the reviewer\'s verdict on a new plan, because another Bot sent a new request; you can turn it off in Details',
   'guard-launch': 'the review guard is on and prevents starting tasks; you can turn it off in Details',
+  limit: 'the Solver reached an attempt limit and is waiting for your answer',
 }
 
 export function stopLineEn(entry) {
   const why = WHY_EN[entry.why] ?? WHY_EN.rule
+  if (entry.mayHaveRun === true) {
+    return entry.count > 1 ? `${entry.count} steps may already have run (${why})` : `${entry.tool} may already have run (${why})`
+  }
   return entry.count > 1 ? `${entry.count} steps did not run: ${why}`
     : entry.child ? `A subagent step did not run: ${why}`
       : entry.tool ? `${entry.tool} did not run: ${why}` : `A step did not run: ${why}`
@@ -119,7 +123,7 @@ export function install(rt) {
     const owner = teamOwnerOf(sessionId, agent)
     if (!owner) return undefined
     const turn = sessions.get(owner.sessionId)?.turn ?? 0
-    return { owner, turn, key: `${owner.sessionId}:${turn}:${detail.why}`, sessionId, detail }
+    return { owner, turn, key: `${owner.sessionId}:${turn}:${detail.why}:${detail.mayHaveRun === true}`, sessionId, detail }
   }
   function noteResolved({ owner, turn, key, sessionId, detail }) {
     prune()
@@ -133,6 +137,7 @@ export function install(rt) {
       // A step refused at its approval question (a native subagent's, review-guard.js) is a child's.
       if (detail.child === true) place.child = true
       const entry = { id: randomUUID(), ...place, why: detail.why, tool: line(detail.tool, 64), count: 0, calls: [], text: line(detail.text, 200), at: now, last: now, open: true }
+      if (detail.mayHaveRun === true) entry.mayHaveRun = true
       if (inRound(owner)) entry.inRound = true
       record = { entry, turn, seen: new Set() }
       entries.set(key, record)
@@ -155,7 +160,7 @@ export function install(rt) {
       if (stop) noteResolved(stop)
       // A subagent's step the review guard held: its parent is told so (who-refused.js), and never
       // to run that step itself.
-      if (stop && (detail.why === 'guard' || detail.why === 'guard-request')) noteUnasked(sessionId, detail, agent)
+      if (stop && ['guard', 'guard-request', 'limit'].includes(detail.why)) noteUnasked(sessionId, detail, agent)
     } catch {}
   }
   const stopsView = () => { prune(); return [...entries.values()].filter(({ entry }) => entry.count > 0).map(({ entry }) => copy(entry)) }

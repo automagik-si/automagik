@@ -130,6 +130,9 @@ export default {
           chat: { key: String(chat.id), kind, title: chat.title ?? nameOf(from) },
           sender: { id: String(from.id ?? ''), name: nameOf(from) },
           text: kind === 'group' ? strip(raw) : raw,
+          origin: ['forward_origin', 'forward_date', 'forward_from', 'forward_from_chat', 'forward_sender_name', 'is_automatic_forward']
+            .some(key => Object.hasOwn(message, key)) ? 'forwarded'
+            : from.id != null && from.is_bot !== true && message.sender_chat === undefined && message.via_bot === undefined ? 'original' : 'unverified',
           images,
           files,
           mentioned,

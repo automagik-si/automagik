@@ -11,6 +11,7 @@
 // mid-sentence, never asked ("SHIP? no."), never as one of a list of options ("SHIP, FIX-FIRST
 // or BLOCKED.", SR5-2).
 const ANY = '(?:SHIP|FIX-FIRST|BLOCKED)'
+const STAGE_VERDICT = new RegExp(`^(PLAN|RESULT) (${ANY})$`)
 export const MD = '[*_\\`]*'
 export const WORD = `(SHIP|FIX-FIRST|BLOCKED)(?![A-Za-z0-9-]|${MD}\\s*\\?|${MD}\\s*[,;/|]\\s*${MD}${ANY}|${MD}\\s+(?:or|and|nor|vs\\.?|versus)\\s+${MD}${ANY}|${MD}\\s*[-–—(]\\s*(?:or\\s+)?${MD}${ANY})`
 const AT_START = new RegExp(`^${WORD}`)
@@ -39,19 +40,34 @@ const GLUED_DASH = new RegExp(`${LEAD}${MD}${WORD}${MD}\\s+[-\u2013\u2014]\\s+\\
 // `#`, `*`, `_` and spaces are stripped first, so a quoted line keeps its `>`.
 const gluedDash = raw => (INDENTED.test(raw) ? null : GLUED_DASH.exec(raw.replace(/^[\s#*_]+/, '')))
 
+// Only the literal first line can carry an explicit stage. The callers check
+// the stage before trying any legacy form elsewhere in the reply.
+export function stageVerdictOf(firstLine) {
+  const match = STAGE_VERDICT.exec(firstLine)
+  if (match) return { stage: match[1].toLowerCase(), verdict: match[2] }
+}
+
 /**
- * The reviewer's verdict in a reply, or undefined: the last line that holds one (WORD's four
+ * The reviewer's verdict in a reply, or undefined. An explicit stage on the first line
+ * requires a matching designated stage. Otherwise read the last line that holds one (WORD's four
  * places), each line read with any leading Markdown (`#`, `>`, `*`, `_`, backticks) and spaces
  * stripped; case-sensitive. A verdict word inside a word or mid-sentence is no verdict, nor is
  * one in a fenced code block; a list item counts only after "Verdict:".
  * @param {unknown} text - the reply as the reviewer sent it.
+ * @param {'plan'|'result'} [stage] - the stage of the current host-bound exchange.
+ * @param {string} [firstLine] - the original first line when the host formats the reply for delivery.
+ * @param {{veto?: boolean}} [options] - keep the first negative verdict for a bound review.
  * @returns {'SHIP'|'FIX-FIRST'|'BLOCKED'|undefined} the verdict.
  */
-export function verdictOf(text) {
+export function verdictOf(text, stage, firstLine, { veto = false } = {}) {
   if (typeof text !== 'string') return undefined
-  let verdict
+  const lines = text.split(/\r?\n/)
+  const explicit = stageVerdictOf(firstLine ?? lines[0])
+  if (explicit && explicit.stage !== stage) return undefined
+  if (explicit && explicit.verdict !== 'SHIP') return explicit.verdict
+  let verdict = explicit?.verdict
   let fenced = false
-  for (const raw of text.split(/\r?\n/)) {
+  for (const raw of lines) {
     if (FENCE.test(raw)) {
       // "```SHIP```" on one line opens and closes its block.
       if (raw.split(/```|~~~/).length % 2 === 0) fenced = !fenced
@@ -62,7 +78,10 @@ export function verdictOf(text) {
     const found = LIST_ITEM.test(raw)
       ? AFTER_LABEL.exec(line)
       : AT_START.exec(line) ?? AFTER_LABEL.exec(line) ?? ENDS_LINE.exec(line) ?? gluedDash(raw)
-    if (found) verdict = found[1]
+    if (found) {
+      verdict = found[1]
+      if ((veto || explicit) && verdict !== 'SHIP') return verdict
+    }
   }
   return verdict
 }

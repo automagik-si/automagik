@@ -652,6 +652,8 @@ const pack = createPack({
     "{name} stopped on a permission: {why}": "{name} parou por uma restrição de permissão: {why}",
     "{tool} did not run: {why}": "{tool} não foi executada: {why}",
     "{count} steps did not run: {why}": "{count} etapas não foram executadas: {why}",
+    "{tool} may already have run ({why})": "{tool} pode já ter sido executada ({why})",
+    "{count} steps may already have run ({why})": "{count} etapas podem já ter sido executadas ({why})",
     "A subagent step did not run: {why}": "Uma etapa de subagente não foi executada: {why}",
     "A step did not run: {why}": "Uma etapa não foi executada: {why}",
     "approvals are off here, so you were not asked": "as aprovações estão desativadas aqui, então ninguém perguntou a você",
@@ -3814,7 +3816,24 @@ const pack = createPack({
     "{groups} and {count} more": "{groups} e mais {count}",
     "The review guard is on: change the model in Settings, not here.": "A trava de revisão está ligada: troque o modelo em Configurações, não aqui.",
     "Waiting for {reviewer}'s verdict on the plan since {time}.": "Esperando o veredito de {reviewer} sobre o plano desde {time}.",
-    "the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details": "a trava de revisão espera o veredito do revisor sobre um novo plano, porque outro Bot mandou um novo pedido; dá para desligar em Detalhes"
+    "the review guard waits for the reviewer's verdict on a new plan, because another Bot sent a new request; you can turn it off in Details": "a trava de revisão espera o veredito do revisor sobre um novo plano, porque outro Bot mandou um novo pedido; dá para desligar em Detalhes",
+    "Auto: work until delivered": "Auto: trabalhar até entregar",
+    "Attempt limits are prompt-only for actions this route runs outside the host.": "Para ações executadas fora do host nesta rota, os limites de tentativas valem só como instrução.",
+    "Auto is on for this request.": "O modo Auto está ligado neste pedido.",
+    "This request follows the saved Auto setting.": "Este pedido segue a configuração salva do modo Auto.",
+    "Waiting for your answer after the attempt limit for {check}.": "Aguardando sua resposta após atingir o limite de tentativas de {check}.",
+    "Waiting for your answer after the re-plan limit.": "Aguardando sua resposta após atingir o limite de replanejamentos.",
+    "Done: every check passed and {name} approved.": "Concluído: todas as verificações passaram e {name} aprovou.",
+    "Not marked done: current passing results are missing for agreed checks.": "Conclusão pendente: há verificações combinadas sem resultado atual de aprovação.",
+    "Not marked done: {name} has not approved the current result on a different model.": "Conclusão pendente: {name} ainda não aprovou o resultado atual com outro modelo.",
+    "Choose a specific model for the Solver and its reviewer.": "Escolha um modelo específico para o Solver e para o revisor.",
+    "Choose a different model for the reviewer.": "Escolha um modelo diferente para o revisor.",
+    "Choose a specific model in the reviewer’s Details to verify its reviews.": "Escolha um modelo específico nos Detalhes do revisor para verificar as revisões.",
+    "RESULT review unverified. {reason}": "Revisão do RESULTADO sem verificação. {reason}",
+    "The reviewer’s effective model could not be verified.": "Não foi possível verificar o modelo usado pelo revisor.",
+    "The reviewer used the same model as the Solver.": "O revisor usou o mesmo modelo que o Solver.",
+    "The reviewer did not give a strict verdict.": "O revisor não deu um veredito no formato exigido.",
+    "the Solver reached an attempt limit and is waiting for your answer": "o Solver chegou a um limite de tentativas e aguarda sua resposta"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

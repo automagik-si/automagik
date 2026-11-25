@@ -9,6 +9,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { contentImages, contentText, isTerminal } from './acp.js'
 import { agentImageOf, isImageCall, isPng, KEPT_TEXT } from './agent-image.js'
 import { openStepOf } from './backchannel.js'
+import { terminalResult } from './terminal-evidence.js'
 
 export const TOOL_NAME = 'acp_tool'
 const DSH_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'fetch', 'other'])
@@ -52,6 +53,7 @@ function resultText(tool) {
   if (tool.sessionFileResult !== undefined) return tool.sessionFileResult
   if (tool.confinedReason !== undefined) return tool.confinedReason
   if (tool.lastingReason !== undefined) return tool.lastingReason
+  if (tool.refusedReason !== undefined) return tool.refusedReason
   if (typeof tool.judgeReason === 'string') return judgedText(tool)
   const text = contentText(tool.content) || tool.output || (tool.rawOutput === undefined ? '' : typeof tool.rawOutput === 'string' ? tool.rawOutput : JSON.stringify(tool.rawOutput))
   return text.length > OUTPUT_LIMIT ? `${text.slice(0, OUTPUT_LIMIT)}…` : text
@@ -120,7 +122,7 @@ async function imageResult(host, live, tool, exec) {
   if (exec.signal?.aborted) return failed('The image was stopped before it was finished.')
   const base64 = agentImageOf(tool)
   if (base64 === undefined) {
-    return failed(tool.confinedReason ?? tool.lastingReason ?? (typeof tool.judgeReason === 'string' ? judgedText(tool) : tool.status === 'failed'
+    return failed(tool.confinedReason ?? tool.lastingReason ?? tool.refusedReason ?? (typeof tool.judgeReason === 'string' ? judgedText(tool) : tool.status === 'failed'
       ? `${live.name} could not make this image. Try again, or describe it differently.`
       : `${live.name} ended without an image. Try again.`))
   }
@@ -201,6 +203,8 @@ export function mirrorTool(host) {
           text: { type: 'string', required: true },
           diffs: { type: 'json' },
           images: { type: 'json' },
+          terminalOutcome: { type: 'json' },
+          terminalStart: { type: 'json' },
         },
       },
       render: (_args, value) => [
@@ -280,7 +284,9 @@ export function mirrorTool(host) {
         // Only an image-generation call is answered as a kept image; any other call that answers
         // with an image (a Read, a screenshot) keeps its own result, image blocks included.
         if (isImageCall(tool)) return await imageResult(host, live, tool, exec)
-        return await resultOf(tool, host.attachments?.())
+        const result = await resultOf(tool, host.attachments?.())
+        if (tool.kind === 'execute') Object.assign(result, terminalResult(live, tool, args, exec))
+        return result
       } finally { live.mirrorBodies -= 1 }
     },
     presentCall(args) {
@@ -407,6 +413,7 @@ async function ask(host, live, tool, exec, permission, { review = true } = {}) {
   if (review) reviewed.delete(exec)
   tool.confinedReason = undefined
   tool.lastingReason = undefined
+  tool.refusedReason = undefined
   const options = permission?.options ?? []
   const mode = live.run?.modes?.currentModeId
   const call = permission?.call
@@ -448,17 +455,19 @@ async function ask(host, live, tool, exec, permission, { review = true } = {}) {
   const reason = `${live.name}: ${asking && asking !== tool.title ? `${asking.replace(/\?$/, '')}: ` : ''}${tool.title}`
   let mirrorCall
   try {
-    const { title, kind, input, locations } = callArguments(tool)
+    const { id, title, kind, input, locations } = callArguments(tool)
     // Plain JSON: DSH passes an approval nobody here answers on to its remote approval card only as lossless JSON (dsh-api-gateway
     // projectRemoteEventRequest), and a member left undefined (`locations` of a call that has none) fails that dispatch: the call
     // would be cancelled with no card.
-    mirrorCall = JSON.parse(JSON.stringify({ title, kind, input, locations, allowOnce: tool.permission?.options?.some(option => option.kind === 'allow_once') === true }))
+    mirrorCall = JSON.parse(JSON.stringify({ id, title, kind, input, locations, allowOnce: tool.permission?.options?.some(option => option.kind === 'allow_once') === true }))
   } catch {
     // Unreadable call details leave the question for the person.
   }
   try {
-    const outcome = await approval.request({ agent: exec.agent, toolName: TOOL_NAME, callId: exec.callId, reason, displayReason: { en: reason }, signal: exec.signal, ...(mirrorCall === undefined ? {} : { mirrorCall }) })
+    const callId = review ? exec.callId : `${exec.callId}:child:${tool.id}`
+    const outcome = await approval.request({ agent: exec.agent, toolName: TOOL_NAME, callId, reason, displayReason: { en: reason }, signal: exec.signal, ...(mirrorCall === undefined ? {} : { mirrorCall }) })
     // Auto's judge refused it (bots-dsh auto-judge.js sets `mirrorCall.judged`): the call's result says so (section 4).
+    tool.refusedReason = outcome === 'rejected' && typeof mirrorCall?.refused?.reason === 'string' ? mirrorCall.refused.reason : undefined
     tool.judgeReason = outcome === 'rejected' && typeof mirrorCall?.judged?.reason === 'string' ? mirrorCall.judged.reason : undefined
     return outcome
   } catch {

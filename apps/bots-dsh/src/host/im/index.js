@@ -561,7 +561,8 @@ export function install(rt) {
       }
     }
     if (content.length === 0) return
-    await rt.sendUser({ sessionId, content, requestId: `im:${conn.platform}:${randomUUID()}` })
+    await rt.sendUser({ sessionId, content, requestId: `im:${conn.platform}:${randomUUID()}`,
+      trustedImAuthor: msg.origin === 'original' && msg.chat.kind === 'direct' })
   }
 
   const onAction = (conn) => async (action) => {

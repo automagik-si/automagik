@@ -11,6 +11,7 @@
 // is settled from the Session's durable log: an answer that was produced goes to the Bot
 // that waits for it, and an outcome that cannot be read is said to be unknown. The
 // request itself is never sent again there.
+import { originalReviewContent } from '../shared/solver-model.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, renameSync } from 'node:fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -19,7 +20,7 @@ import { join } from 'node:path'
 import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { syncDirectory, syncFile } from './files.js'
 import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
-import { textOf } from './text.js'
+import { rawTextOf, textOf } from './text.js'
 import { startUpdateRecovery } from './self-update-recovery.js'
 
 // Long enough for DSH to finish opening its workspaces after a start.
@@ -61,7 +62,7 @@ export function turnsOf(events) {
   let current
   for (const event of events) {
     if (event.type === 'turn/start') {
-      current = { turn: event.data?.turn, took: [], texts: [], reason: undefined }
+      current = { turn: event.data?.turn, took: [], texts: [], rawTexts: [], reason: undefined }
       turns.push(current)
       continue
     }
@@ -76,8 +77,13 @@ export function turnsOf(events) {
       continue
     }
     if (event.type === 'assistant/message') {
-      const text = textOf(event.data?.message?.content)
-      if (text !== '') current.texts.push(text)
+      const raw = rawTextOf(event.data?.message?.content)
+      const text = raw.trim()
+      if (raw !== '') current.firstLine ??= raw.split(/\r?\n/, 1)[0]
+      if (text !== '') {
+        current.texts.push(text)
+        current.rawTexts.push(raw)
+      }
       continue
     }
     if (event.type === 'turn/end') current.reason = event.data?.reason
@@ -104,10 +110,14 @@ export function turnOf(events, exchangeId) {
     while (steerCut(found) && next < turns.length) {
       const follow = turns[next]
       const kept = finished(found)
-      found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts], stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length) }
+      found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts],
+        rawTexts: [...found.rawTexts.slice(0, kept.length), ...follow.rawTexts],
+        stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length), firstLine: kept.length > 0 ? found.firstLine : follow.firstLine }
       next += 1
     }
-    return steerCut(found) ? { ...found, texts: finished(found), reason: undefined } : found
+    if (!steerCut(found)) return found
+    const kept = finished(found)
+    return { ...found, texts: kept, rawTexts: found.rawTexts.slice(0, kept.length), reason: undefined }
   }
   return undefined
 }
@@ -527,29 +537,130 @@ export function install(rt) {
 
   const noteDelivery = (sessionId, args) => {
     const list = queued[sessionId] ?? []
-    if (list.some(item => item.args.exchangeId === args.exchangeId)) return
+    const existing = list.find(item => item.args.exchangeId === args.exchangeId)
+    if (existing !== undefined && args.resumeMessageId === undefined) return
     // Note it before sending: a turn may take it up before the send returns.
     const item = { at: Date.now(), args }
     if (notesFenced()) {
       localNotes.set(args.exchangeId, { sessionId, item })
     }
-    queued = { ...queued, [sessionId]: [...list, item] }
+    queued = { ...queued, [sessionId]: existing === undefined ? [...list, item]
+      : list.map(previous => previous === existing ? item : previous) }
     persist()
   }
+  rt.noteConsumedReviewResult = (id, consumedResult) => {
+    const entry = rt.live.get(id)
+    const turn = entry?.adoptedTurn ?? entry?.turn
+    const bind = record => record === undefined ? record : {
+      ...record, consumedResult, ...(typeof turn === 'number' ? { turn } : {}),
+    }
+    if (heldStarts.has(id)) heldStarts.set(id, bind(heldStarts.get(id)))
+    else update(id, record => bind(record ?? (entry?.adoptedTurn !== undefined
+      ? pendingTurns[id] ?? interrupted.turns[id] : undefined)))
+  }
+
+  rt.liveSessionTurn = agent => {
+    // A running Session may have a turn that started before the recovery scan window.
+    const start = lastTurnOf(agent, Infinity)
+    if (start?.type === 'turn/start' && Number.isInteger(start.data?.turn)) return start.data.turn
+  }
+  rt.consumedReviewResultForLiveTurn = (agent, turn = rt.liveSessionTurn(agent)) => {
+    const id = agent.session?.id
+    if (id === undefined) return
+    const record = turns[id] ?? pendingTurns[id] ?? interrupted.turns[id]
+    if (typeof record?.turn !== 'number' || !record.consumedResult || !rt.resultReplyRequest?.(record.consumedResult)) return
+    if (turn === record.turn && rt.chatOwners.get(id) === record.botId) {
+      return record.consumedResult
+    }
+  }
+  const reviewInputNote = exchangeId => {
+    if (typeof exchangeId !== 'string') return
+    for (const list of Object.values(queued)) {
+      if (!Array.isArray(list)) continue
+      const note = list.find(item => item?.args?.exchangeId === exchangeId
+        && (typeof item.args.reviewReply?.receipt === 'string' || item.args.consumedResult))
+      if (note !== undefined) return note.args
+    }
+  }
+  const matchesContinuation = (id, message, args) => {
+    const source = message?.source
+    if (!args?.consumedResult || rt.chatOwners.get(id) !== args.toId
+      || source?.kind !== SOURCE_KIND || source.exchangeId !== args.exchangeId) return false
+    if (args.role === 'reply') {
+      const binding = args.consumedResult
+      return args.deferred === true && source.deferred === true && source.role === 'reply'
+        && source.senderSessionId === binding.reviewerId && source.replyTo === binding.replyTo
+        && source.reviewReceipt === binding.receipt
+    }
+    if (args.role !== 'resume') return false
+    if (typeof args.reviewContinuation === 'string') return source.reviewContinuation === args.reviewContinuation
+    return source.role === 'resume' && source.resumed === true && source.resumedByUpdate === args.resumedByUpdate
+      && typeof args.resumeMessageId === 'string' && message.id === args.resumeMessageId
+  }
+  rt.reviewContinuationBinding = (id, message) => {
+    const args = reviewInputNote(message.source?.exchangeId)
+    if (matchesContinuation(id, message, args)) return args.consumedResult
+  }
+  const noteReviewContinuation = (sessionId, message, args) => {
+    const binding = args.consumedResult
+    if (!binding || binding.toId !== args.toId || !rt.resultReplyRequest?.(binding)) return message
+    const { source } = message
+    const prior = reviewInputNote(source.exchangeId)
+    // A switch can forward the same continuation under a new inbox ID.
+    const reviewContinuation = prior?.consumedResult?.receipt === binding.receipt && prior.reviewContinuation
+      || randomUUID()
+    if (prior !== undefined) forgetQueued(source.exchangeId)
+    noteDelivery(sessionId, { ...args, reviewContinuation, resumeMessageId: message.id })
+    const continuation = { ...message, source: { ...source, reviewContinuation } }
+    return rt.withReviewFeedback?.(continuation, args.toId, binding) ?? continuation
+  }
+  rt.notePartReviewContinuation = (sessionId, message, binding) => !binding ? message
+    : noteReviewContinuation(sessionId, message, { toId: binding.toId, role: 'resume', resumed: true,
+      exchangeId: message.source.exchangeId, text: textOf(originalReviewContent(message)), consumedResult: binding })
+  rt.takeReviewContinuation = (id, message) => {
+    const args = reviewInputNote(message?.source?.exchangeId)
+    if (!args?.consumedResult || (args.role === 'resume' && args.resumeMessageId !== message.id) || !matchesContinuation(id, message, args)
+      || !matchesContinuation(id, claims.get(id)?.get(message.id), args)) return
+    const binding = args.consumedResult
+    const valid = binding.toId === args.toId && rt.resultReplyRequest?.(binding)
+    if (valid) rt.noteConsumedReviewResult(id, binding)
+    forgetQueued(args.exchangeId)
+    if (valid) return binding
+  }
+
   const deliver = rt.deliver
   rt.deliver = async (args, options) => {
-    const adoption = adoptIfNeeded()
-    if (adoption !== undefined) await adoption
     const noted = { ...args, exchangeId: args.exchangeId ?? randomUUID() }
-    const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
-    noteDelivery(sessionId, noted)
+    const releasePending = options?.onReplyRecorded?.begin?.(noted.exchangeId)
     try {
-      return await deliver(noted, options)
+      const adoption = adoptIfNeeded()
+      if (adoption !== undefined) await adoption
+      const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
+      const record = options?.onReplyRecorded
+      // The batch waits for the durable RESULT decision before recording its recoverable reply.
+      // Work can close once both writes have landed.
+      if (record?.ready) {
+        const close = options.closeReviewWork
+        let notedReply = false
+        options = { ...options, onReplyRecorded: Object.assign(exchangeId => {
+          noteDelivery(sessionId, close ? { ...noted, durableResult: true, reviewReply: record.recovery } : noted)
+          notedReply = true
+          return record(exchangeId)
+        }, { ready: record.ready }), ...(close ? { closeReviewWork: async () => {
+          if (!notedReply || !await persist(true)) throw new Error('The reviewer reply could not be saved.')
+          close()
+        } } : {}) }
+      } else noteDelivery(sessionId, noted)
+      const sent = await deliver(noted, options)
+      if (noted.reviewReceipt !== undefined && sent === undefined) rt.retireReviewReply?.(noted.toId, noted.exchangeId)
+      return sent
     } catch (error) {
-      // A delivery that never reached the inbox stays noted: the next start sends
-      // it again. One whose Bot is gone is dropped, since it can never be sent.
-      if (rt.botOf(noted.toId) === undefined) forgetQueued(noted.exchangeId)
+      // A designated review reply that definitively failed has no input to recover.
+      if (noted.reviewReceipt !== undefined) rt.retireReviewReply?.(noted.toId, noted.exchangeId)
+      else if (rt.botOf(noted.toId) === undefined) forgetQueued(noted.exchangeId)
       throw error
+    } finally {
+      releasePending?.()
     }
   }
 
@@ -585,9 +696,19 @@ export function install(rt) {
   // while Omni runs: the user stopped the Bot, or Omni moved or withdrew it.
   ctx.on('agent/inbox/discarded', ({ agent, message } = {}) => {
     if (stopped || rt.updateShuttingDown?.()) return
-    rt.forgetHeldInput(agent?.session?.id ?? agent?.id, message?.id)
+    const id = agent?.session?.id ?? agent?.id
+    const continuation = reviewInputNote(message?.source?.exchangeId)
+    rt.forgetHeldInput(id, message?.id)
+    if (continuation?.consumedResult && !rt.wakeLog?.movingInbox && matchesContinuation(id, message, continuation)) {
+      queueMicrotask(() => {
+        if (stopped || rt.updateShuttingDown?.() || reviewInputNote(continuation.exchangeId) !== continuation) return
+        const pending = [...(agent.inbox?.nextStep ?? []), ...(agent.inbox?.nextTurn ?? [])]
+        if (!pending.some(input => matchesContinuation(id, input, continuation))) forgetQueued(continuation.exchangeId)
+      })
+      return
+    }
     if (message?.source?.kind === SOURCE_KIND && message.source.exchangeId
-      && !rt.reviewReplyDiscarded?.(agent, message)) forgetQueued(message.source.exchangeId)
+      && !rt.reviewReplyDiscarded?.(agent, message) && !reviewInputNote(message.source.exchangeId)) forgetQueued(message.source.exchangeId)
   })
   // Exchanges a turn took up since this start, until the resends are done, so a resend
   // never repeats one.
@@ -608,12 +729,15 @@ export function install(rt) {
     if ((event.type === 'turn/start' || finished) && firstTurn?.has(id) === false) {
       firstTurn.set(id, { type: event.type, turn: event.data?.turn, reason: event.data?.reason })
     }
-    if (event.type === 'user/message' && event.data?.source?.kind === SOURCE_KIND && event.data.source.exchangeId) {
+    const source = event.data?.source
+    const unconsumedReview = event.type === 'user/message' && source?.kind === SOURCE_KIND
+      && source.exchangeId && reviewInputNote(source.exchangeId)
+    if (event.type === 'user/message' && source?.kind === SOURCE_KIND && source.exchangeId && !unconsumedReview) {
       taken?.add(event.data.source.exchangeId)
       for (const report of recoveryReports) report.resumed('delivery', event.data.source.exchangeId)
       forgetQueued(event.data.source.exchangeId)
     }
-    if (event.type === 'user/message' && typeof event.data?.id === 'string') {
+    if (event.type === 'user/message' && typeof event.data?.id === 'string' && !unconsumedReview) {
       const messageId = event.data.id
       claims.get(id)?.delete(messageId)
       for (const report of recoveryReports) report.resumed('input', messageId)
@@ -623,6 +747,15 @@ export function install(rt) {
       }
     }
     if (event.type === 'turn/end') {
+      const reason = event.data?.reason
+      if (finished && !switchCutBy(reason) && (reason?.kind === 'error'
+        || (reason?.kind === 'blocked' && rt.shellHoldOf?.(rt.chatOwners.get(id)) !== undefined)
+        || (reason?.kind === 'aborted' && reason.reason?.reason !== STEER_CUT))) {
+        for (const message of claims.get(id)?.values() ?? []) {
+          const args = reviewInputNote(message.source?.exchangeId)
+          if (args?.consumedResult && matchesContinuation(id, message, args)) forgetQueued(args.exchangeId)
+        }
+      }
       if (cutClaimEnds.has(id)) {
         for (const message of claims.get(id)?.values() ?? []) {
           if (message.source?.kind === SOURCE_KIND) rt.wakeLog?.retireClaim(id, message)
@@ -755,11 +888,12 @@ export function install(rt) {
   }
 
   async function handBackResults(id, record, ownsTeam) {
-    const sent = await Promise.all((record.later ?? []).map(({ info, text }) => {
+    const sent = await Promise.all((record.later ?? []).map(({ info, text, consumedResult }) => {
       if (!ownsTeam()) return false
       return handBack(id, record, {
         fromId: info.senderSessionId, toId: record.botId, text, role: info.role, exchangeId: info.exchangeId,
         replyTo: info.replyTo, work: info.work, ...(info.roomId ? { roomId: info.roomId } : {}),
+        ...(consumedResult ? { consumedResult } : {}),
         deferred: true,
       }, ownsTeam)
     }))
@@ -797,6 +931,14 @@ export function install(rt) {
     if (claimed) {
       if (!claims.has(id)) claims.set(id, new Map())
       claims.get(id).set(message.id, message)
+    } else if (typeof message.source?.reviewContinuation === 'string') {
+      // DSH confirmed the forwarded input under its new ID. A claim alone cannot
+      // rebind the continuation to an ID that was never put in the inbox.
+      const args = reviewInputNote(message.source.exchangeId)
+      if (args?.consumedResult && args.resumeMessageId !== message.id && matchesContinuation(id, message, args)) {
+        forgetQueued(args.exchangeId)
+        noteDelivery(id, { ...args, resumeMessageId: message.id })
+      }
     }
     if (rt.updateHoldView?.() === true) void rt.noteHeldInput(id, [message])
   }
@@ -843,7 +985,10 @@ export function install(rt) {
         ...continuation, text }
     }
     // A turn that went on with work another Bot asked for still owes that Bot its answer.
-    return { toId: bot.id, sessionId: target, role: 'resume', ...continuation, text, exchangeId, ...(trigger?.work ? { work: trigger.work } : {}) }
+    return { toId: bot.id, sessionId: target, role: 'resume', ...continuation, text, exchangeId,
+      ...(trigger?.work ? { work: trigger.work } : {}),
+      ...(record.consumedResult?.toId === bot.id && rt.resultReplyRequest?.(record.consumedResult)
+        ? { consumedResult: record.consumedResult } : {}) }
   }
 
   const sessionFor = (sessionId, args) => rt.sessionNow(sessionId, args?.toId, args?.roomId)
@@ -879,12 +1024,18 @@ export function install(rt) {
     // before waiting, and let the other roles use their own single wake.
     const replies = items.filter(item => item.args.role === 'reply').map(async item => {
       let deliveredTo = target
-      const sent = await deliver({ ...item.args, sessionId: target, steer: false, resent: true }, {
-        shouldSend(agent, destination) {
-          deliveredTo = destination
-          return sendable(agent, item, destination)
-        },
-      })
+      let sent
+      try {
+        sent = await deliver({ ...item.args, sessionId: target, steer: false, resent: true }, {
+          shouldSend(agent, destination) {
+            deliveredTo = destination
+            return sendable(agent, item, destination)
+          },
+        })
+      } catch (error) {
+        if (item.args.reviewReply && ownsTeam()) rt.retireReviewReply?.(item.args.toId, item.args.exchangeId)
+        throw error
+      }
       if (sent !== undefined) {
         resent.add(deliveredTo)
         received(item)
@@ -937,11 +1088,12 @@ export function install(rt) {
           for (const [index, { item, message }] of batch.entries()) {
             if (!ownsTeam()) throw new Error('The team changed before the resumed turn could be sent')
             rt.assertShellChoice?.(target, item.args.toId)
-            if (item.recordId !== undefined) noteDelivery(target, item.args)
+            const input = item.args.consumedResult ? noteReviewContinuation(target, message, item.args) : message
+            if (!item.args.consumedResult && item.recordId !== undefined) noteDelivery(target, item.args)
             if (!item.args.resumed && (item.args.role === 'request' || item.args.role === 'stopped')) rt.lateWork?.(item.args.exchangeId)
             // DSH claims next-step injections before the waking next-turn followup.
-            if (inject && index < batch.length - 1) agent.inject(message)
-            else agent.followup(message)
+            if (inject && index < batch.length - 1) agent.inject(input)
+            else agent.followup(input)
           }
           if (await ctx.sessions.flush(agent.session) === false) throw new Error('Could not flush the resumed turn')
           if (batch.some(({ item }) => !item.args.resumed)) resent.add(target)
@@ -961,9 +1113,9 @@ export function install(rt) {
   // itself. Its last turn ended as DSH ends a cut turn and nothing ran since, so it goes on,
   // with DSH's own repair telling the model which tool calls have unknown outcomes. `skip`:
   // Sessions already picked up from the notes.
-  function lastTurnOf(agent) {
+  function lastTurnOf(agent, scan = EVENTS_SCANNED) {
     const latest = (agent.session?.seq ?? 0) - 1
-    for (let seq = latest; seq >= Math.max(0, latest - EVENTS_SCANNED); seq -= 1) {
+    for (let seq = latest; seq >= Math.max(0, latest - scan); seq -= 1) {
       const event = agent.session.eventAt?.(seq)
       if (event?.type === 'turn/end' || event?.type === 'turn/start') return event
     }
@@ -1122,7 +1274,7 @@ export function install(rt) {
         where: room === undefined ? 'own chat' : `group "${room.name}"`,
         sessionId,
       })
-      answerSender(rt, sessionId, asker, text, undefined, ownsTeam)
+      answerSender(rt, sessionId, asker, text, undefined, ownsTeam, undefined, null)
       return
     }
     const turn = turnOf(events, exchangeId)
@@ -1155,13 +1307,13 @@ export function install(rt) {
     if (!ownsTeam()) return
     if (reason.kind === 'error') {
       const failure = turnFailure(reason.error)
-      answerSender(rt, sessionId, asker, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`, undefined, ownsTeam)
+      answerSender(rt, sessionId, asker, `${name} could not answer your message: its model call failed (${failureLine(failure)}). Tell the user if it matters; do not retry right away.`, undefined, ownsTeam, undefined, null)
       return
     }
     if (reason.kind === 'aborted') {
       // The turn was stopped before it could answer: the sender is told, as it is told
       // when Omni watches the turn end.
-      answerSender(rt, sessionId, asker, `${name} was stopped before it could answer your message.`, undefined, ownsTeam)
+      answerSender(rt, sessionId, asker, `${name} was stopped before it could answer your message.`, undefined, ownsTeam, undefined, null)
       return
     }
     // A turn cut off at the output limit is not a finish: the answer says so, and the
@@ -1185,17 +1337,18 @@ export function install(rt) {
         sessionId,
       })
     }
-    const answer = cutOff ? cutOffText(said) : said
+    const reply = { text: cutOff ? cutOffText(said) : said, reviewText: turn.rawTexts.join('\n\n'), firstLine: turn.firstLine ?? '' }
     // The turn ended with what it said: the answer goes up the way a finished turn's
     // does, with the results that came back for it and the text it held. A work that
     // still waits for what it handed on keeps its part until that comes back.
     if (rt.waitsWork(workId)) {
-      rt.holdWork(workId, answer)
+      rt.holdWork(workId, reply)
       return
     }
-    const text = rt.answerText(workId, answer, name)
+    const selected = rt.workReply(workId, reply)
+    const text = rt.answerText(workId, selected.text, name)
     const long = text.length > MESSAGE_INLINE_MAX ? await rt.attachLong(text, `Answer from ${name}.txt`) : undefined
-    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam)
+    if (ownsTeam()) answerSender(rt, sessionId, asker, text, long, ownsTeam, undefined, selected)
   }
 
   // Report the same durable notes the resume pass works from, without exposing their payloads.
@@ -1374,12 +1527,25 @@ export function install(rt) {
     const seen = new Set()
     for (const item of notes) {
       const { args, oldId } = item
+      // The reply may have reached disk just before its work closed. Settle that
+      // work before considering the old reviewer's turn or waking the reply.
+      if (ownsTeam() && args.durableResult === true && args.role === 'reply' && typeof args.reviewReceipt === 'string'
+        && args.reviewReply?.receipt === args.reviewReceipt) {
+        const work = rt.state?.works?.[args.replyTo]
+        if (work && work.from === args.toId && work.to === args.fromId && work.at === args.reviewReply.workAt
+          && work.room === undefined && work.fromRoom === undefined) {
+          rt.closeWork?.(args.replyTo, rt.botOf(args.fromId)?.name ?? 'The other Bot', args.text)
+        }
+      }
       if (pendingBack.has(args.exchangeId) || (liveClaims && !liveClaims.has(args.exchangeId))) continue
       if (taken?.has(args.exchangeId)) recovery?.resumed('delivery', args.exchangeId)
       if (args.wake === true && rt.wakeLog?.accountsFor(args.exchangeId)) continue
       if (rt.botOf(args.toId) === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
       const target = sessionFor(oldId, args)
-      if (target === undefined) continue
+      if (target === undefined) {
+        if (args.reviewReply && ownsTeam()) rt.retireReviewReply?.(args.toId, args.exchangeId)
+        continue
+      }
       seen.add(args.exchangeId)
       add(target, liveClaims ? { ...item, liveClaim: true } : item)
     }
@@ -1500,7 +1666,8 @@ export function install(rt) {
           // A restart can target the current part instead of the one that took
           // this input. Close that destination to callers before sending it.
           rt.closePart?.(target, 'held input')
-          agent.followup(message)
+          const binding = rt.reviewContinuationBinding(target, message)
+          agent.followup(rt.withReviewFeedback?.(message, rt.chatOwners.get(target), binding) ?? message)
           // A flush can include a claim before its user/message. Keep the note until that event.
           if (await ctx.sessions.flush(agent.session) !== true) break
           recovery?.resumed('input', message.id)

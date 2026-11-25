@@ -2,6 +2,8 @@
 // record, so the prefix stays byte-stable across turns and roster changes.
 import { OMNI_KIND } from './roster.js'
 import { nativeAgentOf } from '../shared/native-tools.js'
+import { solverLimitsPart } from '../shared/solver-method.js'
+import { solverTracked } from './solver-progress.js'
 
 const TEAM_RULES = [
   '## How your Bot team works',
@@ -73,10 +75,13 @@ export function install(rt) {
       const { name, role } = bot
       const instructions = rt.roleRuntime?.instructionsFor?.(sessionId, bot) ?? bot.instructions
       const rolePrompt = rt.roleRuntime?.acpPrompt?.(sessionId, owner)
+      const solverLimitsPrompt = solverTracked(bot) && rt.chatOwners?.get(sessionId) === bot.id
+        ? `<role-prompt id="solver">\n${solverLimitsPart(bot)}\n</role-prompt>` : undefined
       const needsDshTools = roleToolsInDsh(bot, sessionId)
       const identity = {
         name, role, instructions,
         ...(typeof rolePrompt === 'string' ? { rolePrompt } : {}),
+        ...(solverLimitsPrompt ? { solverLimitsPrompt } : {}),
         ...(needsDshTools ? { needsDshTools: true } : {}),
       }
       // Identity also supplies the role on every turn. ACP asks for the switch

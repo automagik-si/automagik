@@ -320,7 +320,9 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
     entry.action = definition.name
     const args = body.params?.arguments ?? {}
     entry.target = typeof args?.id === 'string' ? args.id : null
-    if (!validArgs(args, definition.inputSchema)) return error(-32602, 'Invalid tool arguments')
+    const botAuto = ['create-bot', 'update-bot'].includes(definition.endpoint) && Object.hasOwn(args, 'solverAuto')
+    const { solverAuto: _solverAuto, ...otherArgs } = botAuto ? args : {}
+    if (!validArgs(botAuto ? otherArgs : args, definition.inputSchema)) return error(-32602, 'Invalid tool arguments')
     if (definition.read) {
       const current = await authenticate(candidate)
       if (!current || current.revokedAt !== undefined) return refuse(401, 'Invalid agent token')
@@ -340,10 +342,10 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
         await rt.refresh()
         // While a Bot's review guard is on, only the person moves it to another model (H5-1),
         // read after the refresh, inside this transaction (H6-9).
-        if (definition.endpoint === 'update-bot' && Object.hasOwn(args, 'model') && rt.botOf(args.id)?.reviewGuard === true) {
+        if (botAuto || (definition.endpoint === 'update-bot' && Object.hasOwn(args, 'model') && rt.botOf(args.id)?.reviewGuard === true)) {
           await audit({ ...entry, outcome: 'refused' })
           return reply({ isError: true, content: [
-            { type: 'text', text: JSON.stringify(clean({ error: 'Action refused', code: 'bot/review-guard' })) },
+            { type: 'text', text: JSON.stringify(clean({ error: 'Action refused', code: botAuto ? 'bot/solver-auto' : 'bot/review-guard' })) },
           ] })
         }
         const before = snapshot()
