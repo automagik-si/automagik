@@ -103,16 +103,18 @@ export const failureLine = failure => `${failure.code}${failure.status ? ` ${fai
 // answer comes from; `source` is the trigger the turn answered.
 export function answerSender(rt, id, source, text, long, shouldSend, model) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
-  const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
+  const fromId = rt.selfOf(id)
+  const name = rt.botOf(fromId)?.name ?? 'The other Bot'
   // When the work this answers was opened, read before closeWork deletes it: a Solver's review
   // mark counts a verdict only for work its current request opened (review-mark.js).
   const answered = rt.state?.works?.[source.exchangeId]
   const work = rt.closeWork?.(source.exchangeId, name, text)
-  const fromId = rt.selfOf(id)
   const exchangeId = randomUUID()
+  const request = rt.designatedReplyRequest?.(source.senderSessionId, fromId, source.exchangeId, answered)
+  const reviewReceipt = request === undefined ? undefined : randomUUID()
   const reply = answered && answered.from === source.senderSessionId && answered.to === fromId
     && answered.room === undefined && answered.fromRoom === undefined
-    ? { exchangeId, replyTo: source.exchangeId } : undefined
+    ? { exchangeId, replyTo: source.exchangeId, request, reviewReceipt } : undefined
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
   const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply, reply === undefined ? undefined : model)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
@@ -130,6 +132,7 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
     role: 'reply',
     replyTo: source.exchangeId,
     exchangeId,
+    ...(reviewReceipt ? { reviewReceipt } : {}),
     ...(work ? { work } : {}),
   }, { shouldSend, onReplyRecorded }).catch((error) => {
     if (shouldSend?.() === false) return
@@ -909,6 +912,7 @@ export function install(rt) {
         entry.switched = false
         entry.answers = false
         entry.opened = false
+        entry.reviewReplyRequest = undefined
         entry.joined = []
         entry.later = []
         entry.steeredAt = undefined
@@ -946,6 +950,10 @@ export function install(rt) {
         break
       case 'user/message': {
         const source = event.data?.source
+        // A batch can include the review reply after the turn's first input.
+        if (entry.turn !== undefined && source?.kind === SOURCE_KIND && source.role === 'reply') {
+          entry.reviewReplyRequest = rt.takeReviewReply?.(id, event.data, entry.turn) ?? entry.reviewReplyRequest
+        }
         if (source?.kind === 'subagent-settled' || source?.kind === 'agent-message') {
           if (typeof source.senderSessionId === 'string') {
             noteSubagentEnd(source.senderSessionId)
@@ -1300,7 +1308,7 @@ export function install(rt) {
         // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
         const model = reason?.kind === 'completed' ? modelOf(rt, undefined, session) : undefined
         if (owner !== undefined && !retry) {
-          const request = info === undefined || info.role === 'continue' ? entry.solverRequest : undefined
+          const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
           const mark = request => rt.reviewTurnEnd?.(owner, {
             completed: failure === undefined && reason?.kind === 'completed', wroteText, model, request, trigger: info,
           })

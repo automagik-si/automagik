@@ -76,6 +76,10 @@ function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-'))) {
     }
   }
   const person = (text, id = 'solver') => event(id, 'user/message', { content: content(text), source: { kind: 'user' } })
+  const takeInput = (id, message) => {
+    ctx.emit('agent/inbox/claimed', { agent: agentOf(id), message })
+    event(id, 'user/message', message)
+  }
   const botMessage = () => event('solver', 'user/message', { content: content('New Bot work.'), source: {
     kind: 'bot', role: 'request', senderSessionId: 'other',
   } })
@@ -94,12 +98,12 @@ function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-'))) {
     method: 'POST', body: JSON.stringify({ endpoint, payload }),
   }))).json()
   const progress = (action, args = {}, id = 'solver') => tool('solver_progress', { action, ...args }, id)
-  return { ctx, rt, home, agentOf, event, person, execute, tool, call, progress, botMessage, finish, close,
+  return { ctx, rt, home, agentOf, event, person, takeInput, execute, tool, call, progress, botMessage, finish, close,
     identity: id => identity?.(id),
   }
 }
 
-async function setup(t, extra = {}) {
+async function setup(t, extra = {}, turn) {
   const h = fixture(t)
   t.after(() => rmSync(h.home, { recursive: true, force: true, maxRetries: 5 }))
   await h.rt.load()
@@ -112,6 +116,7 @@ async function setup(t, extra = {}) {
   put('reviewer', {})
   put('other', {})
   await h.rt.save({ required: true })
+  if (turn !== undefined) h.event('solver', 'turn/start', { turn })
   h.person('Do the task.')
   return h
 }
@@ -153,6 +158,203 @@ async function reviewedPlan(h, checks, commands) {
   verdict(delivered.at(-1).exchangeId)
   return { request, send: exchange, verdict, delivered }
 }
+
+const reviewShip = 'Verdict: SHIP\nEvidence verified.'
+const noSolverRequest = 'There is no active Solver request in this chat.'
+
+async function reviewReplyFixture(t) {
+  const h = await setup(t, { reviewGuard: true }, 2)
+  const request = await requestOf(h)
+  assert.ok(request, 'turn 2 has an active request')
+  assert.match(await plan(h, request, ['average-test', 'diff-check'], [
+    { check: 'average-test', command: 'node --test average.test.mjs' },
+    { check: 'diff-check', command: 'git diff --check' },
+  ]), /^Recorded\./)
+  const deliver = h.rt.deliver
+  const deliveries = []
+  h.rt.deliver = (message, options) => {
+    const sent = deliver(message, options)
+    deliveries.push({ message, sent })
+    return sent
+  }
+  const review = async kind => {
+    await h.tool('message_bot', { to: 'reviewer', message: `Review the ${kind}.`,
+      solver_review: kind, solver_request: request, reply_to: 'me' })
+    return deliveries.at(-1).message.exchangeId
+  }
+  const answer = (exchangeId, shouldSend) => {
+    const input = h.agentOf('reviewer').message
+    assert.equal(input.source.exchangeId, exchangeId)
+    h.takeInput('reviewer', input)
+    answerSender(h.rt, 'reviewer', { exchangeId, senderSessionId: 'solver' },
+      reviewShip, undefined, shouldSend, reviewerModel.model)
+    return deliveries.at(-1)
+  }
+  const track = () => h.rt.botOf('solver').reviewTrack
+  const openReply = async (turn, { message, sent }) => {
+    assert.equal(await sent, message.exchangeId)
+    const input = h.agentOf('solver').message
+    assert.equal(input.source.exchangeId, message.exchangeId)
+    h.event('solver', 'turn/start', { turn })
+    h.takeInput('solver', input)
+  }
+  return { h, request, review, answer, track, openReply, deliveries }
+}
+
+for (const timing of ['before', 'after']) {
+  test(`Stage 6 review reply PLAN answers ${timing} the waiting turn ends`, async t => {
+    const { h, request, review, answer, track, openReply } = await reviewReplyFixture(t)
+    const exchange = await review('plan')
+    let reply
+    if (timing === 'before') reply = answer(exchange)
+    assert.equal(await requestOf(h), request)
+    h.finish('solver', 'The plan is with the designated reviewer. I am waiting for its verdict.')
+    const { delivered, last } = track()
+    if (timing === 'after') reply = answer(exchange)
+    await openReply(3, reply)
+    const start = await h.progress('start', { request, run: 'run-1', checks: ['average-test'] })
+    const status = await h.progress('status')
+    t.diagnostic(`turn 2 delivered=${delivered === true} mark=${JSON.stringify(last ?? null)}; turn 3 start=${start}; status=${status.split('\n')[0]}`)
+    assert.match(start, /^Recorded\./, 'the next turn can start a check for the same request')
+    assert.equal(status.split('\n')[0], `Request: ${request}`)
+    assert.notEqual(delivered, true, 'the waiting turn did not deliver')
+  })
+}
+
+for (const release of ['consumption', 'abandonment', 'delivery failure', 'discard', 'input failure']) {
+  test(`Stage 6 review reply RESULT waits for ${release}`, async t => {
+    const { h, request, review, answer, track, openReply, deliveries } = await reviewReplyFixture(t)
+    const planExchange = await review('plan')
+    h.finish('solver', 'Waiting for plan review.')
+    await openReply(3, answer(planExchange))
+    const oldReply = h.agentOf('solver').message
+    assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+    assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+    const exchange = await review('result')
+    const solver = h.agentOf('solver')
+    if (release === 'delivery failure') {
+      const followup = solver.followup
+      let failed = false
+      t.mock.method(solver, 'followup', message => {
+        if (message.source.replyTo === exchange && !failed) {
+          failed = true
+          throw new Error('Fixture reply delivery failed')
+        }
+        followup.call(solver, message)
+      })
+    }
+    const reply = answer(exchange, release === 'abandonment' ? () => false : undefined)
+    h.finish('solver', 'Waiting for result review.')
+    assert.notEqual(track().delivered, true, 'the waiting turn did not deliver')
+    if (release === 'consumption') {
+      assert.equal(await reply.sent, reply.message.exchangeId)
+      h.event('solver', 'turn/start', { turn: 4 })
+      const input = solver.message
+      const forged = { ...input, source: { ...input.source, reviewReceipt: 'forged' } }
+      h.ctx.emit('agent/inbox/discarded', { agent: solver, message: forged })
+      h.rt.wakeLog.quiet(() => h.ctx.emit('agent/inbox/discarded', { agent: solver, message: input }))
+      // Even a copied source and message ID require the actual inbox claim.
+      h.event('solver', 'user/message', structuredClone(input))
+      h.takeInput('solver', forged)
+      h.takeInput('solver', oldReply)
+      h.finish('solver', 'The genuine reply is still in the inbox.')
+      assert.notEqual(track().delivered, true, 'forged inputs, older exchanges and an inbox move keep the hold')
+      const unrelated = await h.rt.deliver({ fromId: 'other', toId: 'solver', role: 'reply',
+        replyTo: 'other-work', text: 'A reply for different work.' })
+      assert.equal(solver.message.source.exchangeId, unrelated)
+      h.event('solver', 'turn/start', { turn: 5 })
+      h.takeInput('solver', solver.message)
+      h.takeInput('solver', input)
+    } else if (release === 'delivery failure') {
+      await assert.rejects(reply.sent, /Fixture reply delivery failed/)
+      const failureNotice = deliveries.at(-1)
+      assert.notEqual(failureNotice.message.exchangeId, reply.message.exchangeId)
+      await failureNotice.sent
+      assert.match(solver.message.content[0].text, /could not send its reply/)
+      h.event('solver', 'turn/start', { turn: 4 })
+      h.takeInput('solver', solver.message)
+    } else {
+      if (release === 'abandonment') {
+        assert.equal(await reply.sent, undefined)
+      } else {
+        assert.equal(await reply.sent, reply.message.exchangeId)
+        if (release === 'discard') h.ctx.emit('agent/inbox/discarded', { agent: solver, message: solver.message })
+        else {
+          h.event('solver', 'turn/start', { turn: 4 })
+          h.ctx.emit('agent/inbox/claimed', { agent: solver, message: solver.message })
+          h.event('solver', 'turn/end', { reason: { kind: 'error', error: { code: 'UNKNOWN' } } })
+        }
+      }
+    }
+    assert.equal(await requestOf(h), request)
+    if (release === 'consumption' || release === 'delivery failure') {
+      h.finish('solver', 'Both reviews approved and both checks passed.')
+    } else {
+      // Test terminal release on the same request, without a new person message overriding the hold.
+      h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: solverModel.model, request })
+    }
+    const mark = track().last
+    assert.equal(track().delivered, true)
+    assert.equal(mark.done, true)
+    assert.equal(mark.resultExchangeId, exchange)
+    h.event('solver', 'turn/start', { turn: 6 })
+    h.finish('solver', 'Already delivered.')
+    assert.deepEqual(track().last, mark)
+    assert.equal(await h.progress('status'), noSolverRequest)
+  })
+}
+
+test('Stage 6 review reply preserves person interruption and request replacement', async t => {
+  const { h, request, review, answer, track, openReply } = await reviewReplyFixture(t)
+  const exchange = await review('plan')
+  const time = t.mock.method(Date, 'now', () => h.rt.state.works[exchange].at + 1)
+  h.person('Deliver now, please.')
+  time.mock.restore()
+  const reply = answer(exchange)
+  h.finish('solver', 'Delivered at the person’s request.')
+  assert.equal(track().delivered, true)
+
+  h.event('solver', 'turn/start', { turn: 3 })
+  h.person('This is a new request.')
+  const replacement = await requestOf(h)
+  assert.ok(replacement && replacement !== request)
+  h.event('solver', 'turn/end', { reason: { kind: 'completed' } })
+  await openReply(4, reply)
+  h.finish('solver', 'Finished reading the earlier review.')
+  assert.equal(await requestOf(h), replacement)
+  assert.notEqual(track().delivered, true)
+})
+
+test('Stage 6 review reply stays pending in the delivery notes across restart', async t => {
+  const { h, request, review, answer, track } = await reviewReplyFixture(t)
+  const exchange = await review('plan')
+  const reply = answer(exchange)
+  h.finish('solver', 'Waiting for plan review.')
+  assert.notEqual(track().delivered, true)
+  assert.equal(await reply.sent, reply.message.exchangeId)
+  await h.rt.save({ required: true, durable: true })
+  assert.equal(await h.rt.flushUpdateNotes(), true)
+  await h.close()
+
+  const next = fixture(t, h.home)
+  await next.rt.load()
+  const boundEnd = () => next.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: solverModel.model, request })
+  boundEnd()
+  assert.equal(await requestOf(next), request)
+  // The boot replay timer is unref'ed by the plugin. Keep the fake test alive until it finishes.
+  const keepAlive = setInterval(() => {}, 1000)
+  try {
+    assert.deepEqual((await next.rt.resumesDone).resent, ['solver'])
+  } finally {
+    clearInterval(keepAlive)
+  }
+  const input = next.agentOf('solver').message
+  assert.equal(input.source.exchangeId, reply.message.exchangeId)
+  next.event('solver', 'turn/start', { turn: 3 })
+  next.takeInput('solver', input)
+  next.finish('solver', 'Delivered after reading the saved review reply.')
+  assert.equal(await next.progress('status'), noSolverRequest)
+})
 
 const codexCapture = JSON.parse(readFileSync(new URL(
   '../../acp-dsh/test/fixtures/permission-payloads/codex-acp-2.6.0.json', import.meta.url)))

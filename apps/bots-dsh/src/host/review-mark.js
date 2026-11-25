@@ -135,6 +135,8 @@ export function isNotesWrite(name, args, folder, base) {
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isTime = value => typeof value === 'number' && Number.isFinite(value)
+const designatedReview = (progress, reviewerId, exchangeId) => typeof exchangeId === 'string'
+  && [progress?.plan?.review, progress?.review].some(review => review?.exchangeId === exchangeId && review.reviewerId === reviewerId)
 
 /**
  * A stored review track, kept as the host writes it, or undefined when it is not one. Fields of
@@ -490,10 +492,10 @@ export function install(rt) {
     await saveProgress(bot, before, progress)
   }
 
-  function rememberReply(bot, exchangeId, reviewerId, replyTo, workAt) {
+  function rememberReply(bot, exchangeId, reviewerId, replyTo, { workAt, request, receipt }) {
     let replies = unread.get(bot)
     if (replies === undefined) unread.set(bot, replies = new Map())
-    const reply = { exchangeId, reviewerId, replyTo, workAt, release: () => replies.delete(exchangeId) }
+    const reply = { exchangeId, reviewerId, replyTo, workAt, request, receipt, release: () => replies.delete(exchangeId) }
     replies.set(exchangeId, reply)
     return reply
   }
@@ -507,7 +509,7 @@ export function install(rt) {
       const { requestAt, workAt } = args.reviewReply
       if (requestAt === track.requestAt && isTime(workAt) && workAt >= requestAt
         && args.fromId === bot.reviewerId && !unread.get(bot)?.has(args.exchangeId)) {
-        rememberReply(bot, args.exchangeId, args.fromId, args.replyTo, workAt)
+        rememberReply(bot, args.exchangeId, args.fromId, args.replyTo, args.reviewReply)
       }
     }
     return unread.get(bot)
@@ -554,14 +556,16 @@ export function install(rt) {
     return () => {
       if (rt.botOf(toId) !== bot || bot.reviewTrack?.requestAt !== requestAt || bot.reviewTrack.delivered === true
         || bot.reviewerId !== fromId) return
-      const recorded = rememberReply(bot, reply.exchangeId, fromId, reply.replyTo, workAt)
-      rt.noteReviewReply?.(reply.exchangeId, { requestAt, workAt })
+      const binding = { requestAt, workAt, ...(reply.reviewReceipt ? { request: reply.request, receipt: reply.reviewReceipt } : {}) }
+      const recorded = rememberReply(bot, reply.exchangeId, fromId, reply.replyTo, binding)
+      rt.noteReviewReply?.(reply.exchangeId, binding)
       return () => retire(recorded)
     }
   }
 
   const matches = (reply, source) => source?.kind === SOURCE_KIND && source.role === 'reply'
-    && source.exchangeId === reply.exchangeId && source.senderSessionId === reply.reviewerId && source.replyTo === reply.replyTo
+    && source.exchangeId === reply.exchangeId && source.senderSessionId === reply.reviewerId
+    && source.replyTo === reply.replyTo && source.reviewReceipt === reply.receipt
 
   const replyAt = (sessionId, source) => {
     if (source?.kind !== SOURCE_KIND || source.role !== 'reply') return
@@ -573,12 +577,14 @@ export function install(rt) {
 
   const agentSession = agent => agent?.session?.id ?? agent?.id
   rt.ctx.on('session/event', (session, event) => {
-    if (event.type === 'user/message') replyAt(session.id, event.data?.source)?.release()
+    if (event.type !== 'user/message') return
+    const reply = replyAt(session.id, event.data?.source)
+    if (reply?.receipt === undefined) reply?.release()
   })
   rt.ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
     const sessionId = agentSession(agent)
     const reply = replyAt(sessionId, message?.source)
-    if (reply !== undefined) reply.claim = { sessionId, turn }
+    if (reply !== undefined) reply.claim = { sessionId, turn, messageId: message.id }
   })
   rt.ctx.on('agent/inbox/inserted', ({ agent, message }) => {
     const reply = replyAt(agentSession(agent), message?.source)
@@ -605,7 +611,7 @@ export function install(rt) {
       || rt.cutByRestart?.(data?.reason) || data?.reason?.reason?.kind === 'disposed') return
     for (const reply of replies.values()) {
       const claim = reply.claim
-      if (claim?.sessionId !== sessionId || claim.turn !== data?.turn) continue
+      if (claim?.sessionId !== sessionId || (claim.turn !== undefined && claim.turn !== data?.turn)) continue
       // The switch may have taken the proposed input in pre-step. Wait for it
       // to finish moving input before retiring the claim that ended unread.
       const switching = rt.afterBotInputSwitch?.(sessionId, (messages) => {
@@ -615,6 +621,33 @@ export function install(rt) {
       })
       if (!switching && !rt.carriesBotInput?.(sessionId)) retire(reply)
     }
+  }
+
+  function requestOfReply(bot, track, { request, workAt, reviewerId, replyTo }) {
+    if (typeof request === 'string' && track?.requested && !track.delivered
+      && track.solver?.request === request && isTime(workAt) && workAt >= track.requestAt
+      && bot.reviewerId === reviewerId && reviewerId !== bot.id && rt.botOf(reviewerId)
+      && designatedReview(track.solver, reviewerId, replyTo)) return request
+  }
+
+  function designatedReplyRequest(toId, reviewerId, replyTo, work) {
+    if (work?.from !== toId || work?.to !== reviewerId || work.room !== undefined || work.fromRoom !== undefined) return
+    const bot = rt.botOf(toId)
+    const track = bot?.reviewTrack
+    return requestOfReply(bot, track, { request: track?.solver?.request, workAt: work.at, reviewerId, replyTo })
+  }
+
+  function takeReviewReply(sessionId, message, turn) {
+    const id = rt.chatOwners.get(sessionId)
+    if (id === undefined || typeof message?.id !== 'string') return
+    const reply = replyAt(sessionId, message.source)
+    const claim = reply?.claim
+    if (reply?.receipt === undefined || claim?.sessionId !== sessionId || claim.messageId !== message.id
+      || (claim.turn !== undefined && claim.turn !== turn)) return
+    const bot = rt.botOf(id)
+    const request = requestOfReply(bot, bot?.reviewTrack, reply)
+    retire(reply)
+    return request
   }
 
   // Another Bot's message_bot request in a guarded Solver's own chat (turns.js, first arrival
@@ -672,7 +705,7 @@ export function install(rt) {
     if (activeSolverLimit(bot, track) || runningWork.has(bot)) return
     if (Object.hasOwn(turn, 'request') && track.solver) {
       const progress = track.solver
-      const ownReview = trigger?.role === 'reply' && trigger.senderSessionId === bot.reviewerId
+      const ownReview = trigger?.role === 'reply' && trigger.reviewReceipt === undefined && trigger.senderSessionId === bot.reviewerId
         && typeof trigger.replyTo === 'string'
         && [progress.plan?.review?.exchangeId, progress.review?.exchangeId].includes(trigger.replyTo)
       const botRequest = progress.origin === 'bot' && typeof track.openerExchange === 'string' && trigger?.exchangeId === track.openerExchange
@@ -682,9 +715,11 @@ export function install(rt) {
     bot.reviewTrack = track
     const review = reviewOf(bot)
     const works = Object.values(rt.state?.works ?? {})
-    if (review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && !(typeof track.personAt === 'number' && typeof work.at === 'number' && work.at < track.personAt))) return
+    const beforePerson = at => typeof track.personAt === 'number' && typeof at === 'number' && at < track.personAt
+    if (review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && !beforePerson(work.at))) return
     if (review === 'bot' && [...(unreadReplies(bot)?.values() ?? [])].some(reply =>
-      reply.reviewerId === bot.reviewerId && !(typeof track.personAt === 'number' && reply.workAt < track.personAt))) return
+      reply.reviewerId === bot.reviewerId && !beforePerson(reply.workAt)
+      && (reply.receipt === undefined || requestOfReply(bot, track, reply)))) return
     // Reviewer work this request opened, still out when the person asked: delivered before its
     // verdict (Run 3). Work left from an earlier request is not this one's.
     const pending = review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && typeof work.at === 'number' && work.at >= track.requestAt)
@@ -715,7 +750,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf,
-    solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork,
+    solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork, designatedReplyRequest, takeReviewReply,
     solverReviewSent: exchangeId => reviewSends.delete(exchangeId),
     solverProgressBusy: bot => progressWrites.has(bot) })
 }

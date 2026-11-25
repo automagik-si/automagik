@@ -567,6 +567,8 @@ export function install(rt) {
       && args.roomId === undefined && args.fromRoomId === undefined && args.reviewReply != null
       && typeof args.exchangeId === 'string' && typeof args.replyTo === 'string')
     : [])
+  const designatedReplyNoted = exchangeId => Object.values(queued).some(list => list.some(item =>
+    item?.args?.exchangeId === exchangeId && typeof item.args.reviewReply?.receipt === 'string'))
   rt.deliveryNote = (id) => {
     let marked
     for (const [sessionId, list] of Object.entries(queued)) {
@@ -587,7 +589,7 @@ export function install(rt) {
     if (stopped || rt.updateShuttingDown?.()) return
     rt.forgetHeldInput(agent?.session?.id ?? agent?.id, message?.id)
     if (message?.source?.kind === SOURCE_KIND && message.source.exchangeId
-      && !rt.reviewReplyDiscarded?.(agent, message)) forgetQueued(message.source.exchangeId)
+      && !rt.reviewReplyDiscarded?.(agent, message) && !designatedReplyNoted(message.source.exchangeId)) forgetQueued(message.source.exchangeId)
   })
   // Exchanges a turn took up since this start, until the resends are done, so a resend
   // never repeats one.
@@ -608,12 +610,15 @@ export function install(rt) {
     if ((event.type === 'turn/start' || finished) && firstTurn?.has(id) === false) {
       firstTurn.set(id, { type: event.type, turn: event.data?.turn, reason: event.data?.reason })
     }
-    if (event.type === 'user/message' && event.data?.source?.kind === SOURCE_KIND && event.data.source.exchangeId) {
+    const source = event.data?.source
+    const unconsumedReview = event.type === 'user/message' && source?.kind === SOURCE_KIND
+      && source.exchangeId && designatedReplyNoted(source.exchangeId)
+    if (event.type === 'user/message' && source?.kind === SOURCE_KIND && source.exchangeId && !unconsumedReview) {
       taken?.add(event.data.source.exchangeId)
       for (const report of recoveryReports) report.resumed('delivery', event.data.source.exchangeId)
       forgetQueued(event.data.source.exchangeId)
     }
-    if (event.type === 'user/message' && typeof event.data?.id === 'string') {
+    if (event.type === 'user/message' && typeof event.data?.id === 'string' && !unconsumedReview) {
       const messageId = event.data.id
       claims.get(id)?.delete(messageId)
       for (const report of recoveryReports) report.resumed('input', messageId)
