@@ -473,6 +473,7 @@ const implementation = {
     session.cancelled = false
     session.turns++
     const said = prompt.filter(block => block.type === 'text').map(block => block.text).join(' ')
+    const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
@@ -615,12 +616,25 @@ const implementation = {
       return { stopReason: 'end_turn' }
     }
     // codex-acp's own shapes (#1564 PR B), each checked before the generic "bridge" trigger.
-    const codexBridge = /codex-bridge (\S+)(?: (\{.*\}))?/.exec(said)
+    const codexBridge = /\b(agy-bridge) (\S+)(?: (\{.*\}))?/.exec(current)
+      ?? /\b(codex-bridge) (\S+)(?: (\{.*\}))?/.exec(said)
     if (codexBridge !== null) {
-      const name = codexBridge[1]
-      const args = codexBridge[2] === undefined ? {} : JSON.parse(codexBridge[2])
+      const [, style, name, raw] = codexBridge
+      const args = raw === undefined ? {} : JSON.parse(raw)
       const toolCallId = `codex-bridge-${session.turns}`
-      await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.dsh.${name}`, kind: 'execute', status: 'in_progress', rawInput: { server: 'dsh', tool: name, arguments: args }, _meta: { is_mcp_tool_call: true } })
+      if (style === 'agy-bridge') {
+        const toolCall = { toolCallId, name: `mcp_dsh_${name}`, title: `mcp_dsh_${name}`, kind: 'execute',
+          rawInput: { server: 'dsh', tool: name, arguments: args } }
+        await update({ sessionUpdate: 'tool_call', ...toolCall, status: 'pending' })
+        const { outcome } = await conn.requestPermission({ sessionId, toolCall, options: [
+          { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'agy-reject', name: 'Reject', kind: 'reject_once' },
+        ] })
+        trace({ event: 'permission-answer', answer: outcome })
+        if (outcome.optionId !== 'agy-allow') return { stopReason: 'end_turn' }
+      } else {
+        await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.dsh.${name}`, kind: 'execute', status: 'in_progress', rawInput: { server: 'dsh', tool: name, arguments: args }, _meta: { is_mcp_tool_call: true } })
+      }
       let text = 'the bridge is not connected'
       const connection = session.mcp.get('dsh')
       if (connection !== undefined) {
@@ -742,7 +756,6 @@ const implementation = {
     // A tool call on the `dsh` bridge, by the name Claude Code puts on the wire. With "permit"
     // the call first asks session/request_permission, as Claude Code does in Manual; without it
     // the call runs with no ACP-level request at all, as it would in Auto.
-    const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
     const respawn = /\bbridge(-respawn) (\S+)/.exec(current)
     const drop = /\bbridge-drop\b/.test(current)
     if (respawn !== null || drop) {

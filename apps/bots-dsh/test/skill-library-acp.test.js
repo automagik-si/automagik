@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { Backchannel, offeredTools } from '../../acp-dsh/src/host/backchannel.js'
+import { AGY_TOOLS_OFF_TEXT } from '../../acp-dsh/src/host/agy-off.js'
+import { AGY_OFF_ARGS, agyWorld, unixOnly } from '../../acp-dsh/test/fixtures/agy-world.js'
 import { createUserMessage, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { Session } from '@deepseek-ai/dsh-session'
 import { install, skillPart, skillTool } from '../src/host/skill-library-call.js'
@@ -18,6 +20,98 @@ const user = (value, ...parts) => createUserMessage({
 const answer = provider => ({
   role: 'assistant', source: { kind: 'model', provider, model: 'default' },
   content: [{ type: 'text', text: 'Earlier answer remains' }],
+})
+
+test('Skills row 8: production Antigravity OFF admits only the Session skill read', { ...unixOnly, timeout: 15_000 }, async t => {
+  const h = agyWorld(t)
+  const assigned = new Set(['eligible', 'other-eligible'])
+  const rt = {
+    ctx: { on() {} }, load: async () => {}, selfOf: id => id,
+    botOf: id => ['eligible', 'other-eligible', 'ordinary'].includes(id) ? { id } : undefined,
+    skillLibrary: { active: id => assigned.has(id) ? [{ ...skill, mode: 'automatic' }] : [] },
+  }
+  install(rt)
+  h.services.omniTeam = rt
+  h.service.botIdentity(id => rt.botOf(id) && { name: id })
+  const tool = skillTool(rt)
+  const unrelated = { name: 'other_fixture_tool' }
+  const executions = []
+  h.services.tools = {
+    definitions: () => [tool, unrelated],
+    async execute({ calls, agent }) {
+      const [{ id, name, arguments: input }] = calls
+      assert.equal(name, tool.name)
+      executions.push(agent.session.id)
+      const args = JSON.parse(input)
+      const value = await tool.execute(args, { agent: { id: agent.session.id } })
+      return { results: [{ callId: id, result: { content: tool.output.render(args, value), isError: false } }] }
+    },
+  }
+  const a = h.chat('eligible')
+  await a.turn('plain eligible launch')
+  const profile = 'automagik-native-off-skills'
+  const { args, pid, prompt } = h.conversation('eligible launch')
+  assert.deepEqual(args, ['acp', '--agent', profile, '--cli_dir_name', profile])
+  const child = h.events().filter(event => event.pid === pid)
+  const agent = readFileSync(join(h.home(), '.gemini', 'config', 'agents', `${profile}.md`), 'utf8')
+  assert.match(agent, /^tools: \["mcp_dsh_load_skill"\]$/m)
+  assert.match(agent, /^excludeDefaultComponents: true$/m)
+  assert.match(agent, /^commandExecutionPolicy: "off"$/m)
+  assert.equal(agent.split('---').at(-1).trim(), '')
+  const policy = JSON.parse(readFileSync(join(h.home(), '.gemini', 'antigravity-cli', profile, 'settings.json'), 'utf8'))
+  assert.deepEqual(policy.permissions, {
+    deny: ['read_file(*)', 'write_file(*)', 'read_url(*)', 'execute_url(*)', 'download_url(*)', 'command(*)'],
+    allow: ['mcp(dsh/load_skill)'],
+  })
+  const launch = child.find(event => event.event === 'new-session')
+  assert.deepEqual(launch.servers, ['dsh'])
+  assert.deepEqual(launch.meta?.antigravity?.eagerMcpServers, ['dsh'])
+  assert.equal(launch.systemPrompt, undefined)
+  assert.deepEqual(child.find(event => event.event === 'mcp-list').tools, ['load_skill'])
+  assert.match(prompt, /marker: Adds the file marker/)
+  assert.doesNotMatch(prompt, /CHECKED-ACP-BODY|load_skill/)
+
+  const loaded = await a.turn('agy-bridge load_skill {"name":"marker"}')
+  assert.match(loaded.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), /The bridge said: CHECKED-ACP-BODY/)
+  assert.deepEqual(h.events('permission-answer').at(-1).answer, { outcome: 'selected', optionId: 'agy-allow' })
+
+  const b = h.chat('other-eligible')
+  const previous = user('plain second eligible launch', skillPart(b.session.id, skill))
+  b.session.append('user/message', previous, { surfaceOp: 'append' })
+  await b.turn(previous)
+  assert.match(h.conversation('second eligible launch').prompt, /CHECKED-ACP-BODY/)
+  const ordinary = h.chat('ordinary')
+  const plain = await ordinary.turn('plain ordinary launch')
+  assert.equal(plain.at(-1).reason.kind, 'stop')
+  assert.deepEqual(h.conversation('ordinary launch').args, AGY_OFF_ARGS)
+  assert.deepEqual(h.events('new-session').find(event => event.pid === h.conversation('ordinary launch').pid).servers, [])
+
+  const bridge = h.adapter.backchannel
+  const first = h.adapter.live.get(a.session.id).bridge
+  const second = h.adapter.live.get(b.session.id).bridge
+  const call = (record, path, name) => fetch(bridge.urlFor(path), { method: 'POST',
+    headers: { authorization: `Bearer ${record.credential}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ op: 'call', name, arguments: { name: skill.name } }),
+  })
+  const cross = await call(first, second, 'load_skill')
+  assert.equal(cross.status, 401)
+  assert.deepEqual(await cross.json(), { error: 'refused' })
+  const unrelatedCall = await call(first, first, unrelated.name)
+  assert.equal((await unrelatedCall.json()).isError, true)
+  assigned.delete(b.session.id)
+  const afterRemoval = await b.turn('plain after last Automatic assignment')
+  assert.equal(afterRemoval.at(-1).reason.kind, 'stop')
+  const replaced = h.conversation('after last Automatic assignment')
+  assert.deepEqual(replaced.args, AGY_OFF_ARGS)
+  assert.match(replaced.prompt, /second eligible launch\nCHECKED-ACP-BODY/)
+  assert.doesNotMatch(replaced.prompt, /Adds the file marker/)
+  assert.equal(h.adapter.live.get(b.session.id).bridge, undefined)
+  assert.equal((await call(second, second, 'load_skill')).status, 401)
+  const blocked = await a.turn('omp-first-tool_call')
+  assert.equal(blocked.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), AGY_TOOLS_OFF_TEXT)
+  assert.equal(h.adapter.live.has(a.session.id), false)
+  assert.deepEqual(executions, ['eligible'])
+  assert.deepEqual(h.approvals.map(request => request.toolName), ['load_skill'])
 })
 
 function fixture(t, provider, { reforks = false, earlierTurns = 0 } = {}) {
@@ -135,18 +229,25 @@ for (const provider of ['acp-claude', 'acp-codex', 'acp-antigravity', 'acp-omp']
     assert.match(f.events('prompt').at(-1).text, /\/marker plain\s+CHECKED-ACP-BODY/)
     f.setMode('manual')
     const denied = await f.run([personCall, answer(provider), called])
-    assert.match(denied.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''),
-      /The bridge said: \(no text\)/)
+    const deniedText = denied.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
+    if (provider === 'acp-antigravity') {
+      assert.ok(deniedText.endsWith(AGY_TOOLS_OFF_TEXT))
+      assert.equal(live.bridge.closed, true)
+    } else {
+      assert.match(deniedText, /The bridge said: \(no text\)/)
+    }
     assert.doesNotMatch(f.events('prompt').at(-1).text, /Adds the file marker|CHECKED-ACP-BODY/)
     await f.run([answer(provider), user('/marker plain', skillPart('owner-a', skill))])
     assert.match(f.events('prompt').at(-1).text, /\/marker plain\s+CHECKED-ACP-BODY/)
     assert.doesNotMatch(f.events('prompt').at(-1).text, /Adds the file marker/)
+    const manual = f.adapter.live.get(f.agent.id)
+    if (provider === 'acp-antigravity') assert.equal(manual.bridge, undefined)
     f.active.clear()
     const notice = createUserMessage({ source: { kind: SKILL_NOTICE, form: 'notice', summary: 'Private notice' },
       content: [{ type: 'text', text: 'Private notice' }] })
     const continuation = user('/marker plain', skillPart('owner-a', skill))
     await f.run([personCall, answer(provider), continuation, notice])
-    assert.equal(f.adapter.live.get(f.agent.id), live, 'Remove keeps the provider session')
+    assert.equal(f.adapter.live.get(f.agent.id), provider === 'acp-antigravity' ? manual : live, 'Remove keeps the call-only provider session')
     assert.doesNotMatch(f.events('prompt').at(-1).text, /CHECKED-ACP-BODY|Adds the file marker|Private notice/)
     assert.deepEqual(await skillTool(f.rt).execute({ name: skill.name }, { agent: f.agent }), {})
 

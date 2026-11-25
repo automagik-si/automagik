@@ -38,7 +38,7 @@ import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNA
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { writeOmpOverlay } from './src/host/omp-overlay.js'
-import { AGY_OFF_CHECKED, agyExtensions, agyExtensionRefusal, agyOffCheck, writeAgyOff } from './src/host/agy-off.js'
+import { AGY_OFF_CHECKED, AGY_OFF_SKILLS_NAME, agyExtensions, agyExtensionRefusal, agyOffCheck, writeAgyOff } from './src/host/agy-off.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
 import { retiredLine } from './src/host/retired-home.js'
 import { callbackOf, checkCallback, deliverCallback } from './src/host/sign-in-callback.js'
@@ -659,10 +659,13 @@ export function apply(ctx, config = {}, {
         if (typeof home !== 'string' || env.HOME !== home) throw new Error(`${spec.defaultName} could not start with its tools off: its home did not match.`)
         const refused = agyExtensionRefusal(home, { platform })
         if (refused !== undefined) throw new Error(refused)
-        writeAgyOff(home, { platform, live: agyOffLive })
-        const check = agyOffCheck(home, { spawnedAt: Date.now(), warn: line => warn(ctx, line) })
+        const skills = context.skillBridge === true
+        writeAgyOff(home, { platform, live: agyOffLive, skills })
+        const profile = skills ? AGY_OFF_SKILLS_NAME : undefined
+        const check = agyOffCheck(home, { profile, spawnedAt: Date.now(), warn: line => warn(ctx, line) })
+        const offArgs = skills ? ['--agent', profile, '--cli_dir_name', profile] : spec.offArgs
         return {
-          command, args: [...args, ...spec.offArgs], env,
+          command, args: [...args, ...offArgs], env,
           agyReady: async run => { trackAgyOff(run); recordAgyVersion(run, true); check.start(run) },
           offRecheck: run => check.again(run),
         }

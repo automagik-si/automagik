@@ -10,7 +10,7 @@ import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { batchSafe } from './batch-spawn.js'
 import { HOME_ENV, releaseRun, trackRun } from './cli-homes.js'
-import { BRIDGE_NAME, isBridgeName, mcpName } from './names.js'
+import { AGY_SKILL_TOOL, BRIDGE_NAME, isBridgeName, mcpName } from './names.js'
 import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
@@ -45,21 +45,28 @@ export function structuredNameOf(update) {
 
 const SKILL_OPERATION = mcpName(BRIDGE_NAME, 'load_skill')
 
-function skillIdentity(tool, update) {
+function skillIdentity(tool, update, provider) {
+  const agy = provider === 'acp-antigravity'
+  const exact = name => name === SKILL_OPERATION || (agy && name === AGY_SKILL_TOOL)
   const names = [tool.structuredName, update?.name, update?._meta?.claudeCode?.toolName]
     .filter(name => typeof name === 'string' && name !== '')
-  const { server, tool: operation } = update?.rawInput ?? {}
+  const { server, serverName, tool: operation, toolName } = update?.rawInput ?? {}
   const raw = server === BRIDGE_NAME && operation === 'load_skill'
-  const named = names.includes(SKILL_OPERATION)
+  const named = names.some(exact)
   const claimsSkill = named || raw || tool.skillBridge === true
-  const disagrees = names.some(name => name !== SKILL_OPERATION) ||
+  const disagrees = !names.every(exact) ||
     (typeof server === 'string' && server !== BRIDGE_NAME) ||
-    (typeof update?.rawInput?.serverName === 'string' && update.rawInput.serverName !== BRIDGE_NAME) ||
-    (typeof operation === 'string' && operation !== 'load_skill')
+    (typeof serverName === 'string' && serverName !== BRIDGE_NAME) ||
+    (typeof operation === 'string' && operation !== 'load_skill') ||
+    (agy && typeof toolName === 'string' && toolName !== 'load_skill')
   if (tool.skillConflict === true || (claimsSkill && disagrees)) return 'conflict'
   // Codex's MCP updates omit the name. Its adapter labels this RPC as MCP and
   // supplies the server and operation outside the tool's own arguments.
-  if (named || (raw && update?._meta?.is_mcp_tool_call === true) || tool.skillBridge === true) return 'verified'
+  // Antigravity's flat MCP name can collide with a different server/tool pair.
+  // Require the exact pair alongside that spelling, or a previously verified call.
+  const agyPair = raw || (serverName === BRIDGE_NAME && toolName === 'load_skill')
+  if (names.includes(SKILL_OPERATION) || (named && agy && agyPair) ||
+      (raw && update?._meta?.is_mcp_tool_call === true) || tool.skillBridge === true) return 'verified'
 }
 
 /**
@@ -936,7 +943,7 @@ export class AgentRun {
       if (known.retired !== true) this.changeTool(known, update)
       return known
     }
-    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity({}, update) === 'verified')) {
+    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity({}, update, this.spec.provider) === 'verified')) {
       if (!this.forbiddenToolSeen) {
         this.forbiddenToolSeen = true
         this.spec.onForbiddenTool?.(update)
@@ -973,7 +980,7 @@ export class AgentRun {
   /** What an update says the call is: its structured name, whether it is MCP, the bridge's. */
   markCall(tool, update) {
     if (this.spec.skillBridge) {
-      const identity = skillIdentity(tool, update)
+      const identity = skillIdentity(tool, update, this.spec.provider)
       tool.skillConflict = identity === 'conflict'
       tool.skillBridge = identity === 'verified'
     }
@@ -1068,7 +1075,7 @@ export class AgentRun {
   onPermission(params, signal) {
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
     const known = this.tools.get(params.toolCall?.toolCallId)
-    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity(known ?? {}, params.toolCall) === 'verified')) {
+    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity(known ?? {}, params.toolCall, this.spec.provider) === 'verified')) {
       if (known && known.retired !== true) this.markCall(known, params.toolCall)
       return Promise.resolve(refusal('rejected', params.options ?? []))
     }

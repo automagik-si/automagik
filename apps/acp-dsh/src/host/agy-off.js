@@ -1,10 +1,7 @@
 // Antigravity (`agy`) with its own tools off (#1564, RFC 0003 "Amendment: Antigravity native
-// tools"). Two agy-side layers, both per process: L1, a main agent of ours with no tools
-// (`agy acp --agent automagik-native-off`, the agent file below), and L2, a settings folder of
-// ours whose `permissions.deny` names every tool action agy documents (`--cli_dir_name
-// automagik-native-off`; the flag is listed by `agy acp --help` but not on agy's documentation
-// pages). Under both, acp-dsh's own guard (L3, acp.js `refuseTools`) ends the answer at the
-// first tool call agy reports and refuses every ask. agy has no DSH bridge, so OFF is chat only.
+// tools"). Two agy-side layers, both per process: our main agent's tool list (--agent) and our
+// settings folder's permission rules (--cli_dir_name). Eligible Sessions use a separate profile
+// with the exact Skills operation. The host guard (acp.js `refuseTools`) refuses other calls.
 //
 // Everything here is written to, and read from, the home the child itself runs in
 // (`AUTOMAGIK_BOT_CLI_HOME`, cli-homes.js), never the person's. Only our own files and our own
@@ -21,32 +18,39 @@ import {
   renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { AGY_SKILL_TOOL, BRIDGE_NAME } from './names.js'
 
 export const AGY_OFF_NAME = 'automagik-native-off'
+export const AGY_OFF_SKILLS_NAME = `${AGY_OFF_NAME}-skills`
 
 // The agy version native tools off was checked on (stage 6 of #1564). It moves only in a
 // reviewed commit that a stage 6 on the new version then passes before its pull request;
 // another version still starts OFF and warns (the host log, and Details).
 export const AGY_OFF_CHECKED = '1.5.16'
 
-export const AGY_OFF_AGENT = `---
-name: ${AGY_OFF_NAME}
+const offAgent = (profile, tools) => `---
+name: ${profile}
 description: Written by Automagik for Antigravity with native tools off. Rewritten at each start; never edit.
-tools: []
+tools: ${JSON.stringify(tools)}
 excludeDefaultComponents: true
 mainAgent: true
 subagent: false
 hidden: true
 commandExecutionPolicy: "off"
 ---
-# ${AGY_OFF_NAME}
+`
+
+const denied = ['read_file(*)', 'write_file(*)', 'read_url(*)', 'execute_url(*)', 'download_url(*)', 'command(*)']
+const offSettings = permissions => `${JSON.stringify({ permissions })}\n`
+export const AGY_OFF_AGENT = `${offAgent(AGY_OFF_NAME, [])}# ${AGY_OFF_NAME}
 
 You have no tools in this chat. Answer in text only.
 `
-
-export const AGY_OFF_SETTINGS = `${JSON.stringify({ permissions: { deny: [
-  'read_file(*)', 'write_file(*)', 'read_url(*)', 'execute_url(*)', 'download_url(*)', 'command(*)', 'mcp(*)',
-] } })}\n`
+export const AGY_OFF_SETTINGS = offSettings({ deny: [...denied, 'mcp(*)'] })
+const SKILLS_AGENT = offAgent(AGY_OFF_SKILLS_NAME, [AGY_SKILL_TOOL])
+// Antigravity evaluates deny before allow. The Skills profile's exact tool list
+// and the one-tool Session bridge bound the exception to this permission target.
+const SKILLS_SETTINGS = offSettings({ deny: denied, allow: [`mcp(${BRIDGE_NAME}/load_skill)`] })
 
 export const AGY_TOOLS_OFF_TEXT = 'Antigravity tried to use a tool while native tools are off, so this answer stopped.'
 export const AGY_HOOKS_TEXT = "Antigravity can't start with native tools off while its settings hold a hooks.json file. Remove hooks.json to use it with native tools off."
@@ -63,12 +67,12 @@ const MAX_BYTES = 256 * 1024
 const FRESH_MS = 10 * 60_000
 const PRUNE_MS = 24 * 60 * 60_000
 
-export const agyOffPaths = home => {
+export const agyOffPaths = (home, profile = AGY_OFF_NAME) => {
   const gemini = join(home, '.gemini')
-  const settingsDir = join(gemini, 'antigravity-cli', AGY_OFF_NAME)
+  const settingsDir = join(gemini, 'antigravity-cli', profile)
   return {
     agentDir: join(gemini, 'config', 'agents'),
-    agentFile: join(gemini, 'config', 'agents', `${AGY_OFF_NAME}.md`),
+    agentFile: join(gemini, 'config', 'agents', `${profile}.md`),
     settingsDir,
     settingsFile: join(settingsDir, 'settings.json'),
     logDir: join(settingsDir, 'log'),
@@ -101,12 +105,13 @@ function writeVerified(dir, file, text, posix) {
  * removes our own log folder's old files (pruneAgyLog), keeping those of the live OFF children
  * whose pids are in `live`; this never fails the start.
  */
-export function writeAgyOff(home, { platform = process.platform, now = Date.now(), live = [] } = {}) {
+export function writeAgyOff(home, { platform = process.platform, now = Date.now(), live = [], skills = false } = {}) {
   const posix = platform !== 'win32'
-  const paths = agyOffPaths(home)
-  writeVerified(paths.agentDir, paths.agentFile, AGY_OFF_AGENT, posix)
-  writeVerified(paths.settingsDir, paths.settingsFile, AGY_OFF_SETTINGS, posix)
-  pruneAgyLog(home, now, live)
+  const profile = skills ? AGY_OFF_SKILLS_NAME : AGY_OFF_NAME
+  const paths = agyOffPaths(home, profile)
+  writeVerified(paths.agentDir, paths.agentFile, skills ? SKILLS_AGENT : AGY_OFF_AGENT, posix)
+  writeVerified(paths.settingsDir, paths.settingsFile, skills ? SKILLS_SETTINGS : AGY_OFF_SETTINGS, posix)
+  pruneAgyLog(home, now, live, profile)
   return paths
 }
 
@@ -119,10 +124,10 @@ export function writeAgyOff(home, { platform = process.platform, now = Date.now(
  * turn's check (#1564 AK-1). A `log` that is not a real folder (a link) is left alone (AK-2).
  * Reads at most 4096 entries; any error is ignored.
  */
-export function pruneAgyLog(home, now = Date.now(), live = []) {
+export function pruneAgyLog(home, now = Date.now(), live = [], profile = AGY_OFF_NAME) {
   let dir
   try {
-    const folder = agyOffPaths(home).logDir
+    const folder = agyOffPaths(home, profile).logDir
     if (!lstatSync(folder).isDirectory()) return
     const kept = new Set(Array.from(live, String))
     dir = opendirSync(folder)
@@ -178,10 +183,10 @@ const NAME = /^acp-server-\d{8}_\d{6}-(\d+)\.log$/
  * through a link, never blocking on a FIFO. `open` is for tests: the file opened must be the one
  * `lstat` saw (same device and inode).
  */
-export function readAgyLog(home, pid, spawnedAt, { open = openSync } = {}) {
+export function readAgyLog(home, pid, spawnedAt, { open = openSync, profile = AGY_OFF_NAME } = {}) {
   const own = String(pid)
   if (!/^\d+$/.test(own)) return 'unchecked'
-  const folder = agyOffPaths(home).logDir
+  const folder = agyOffPaths(home, profile).logDir
   let folderStat
   try { folderStat = lstatSync(folder) } catch (error) { return error?.code === 'ENOENT' ? 'unchecked' : 'failed' }
   // Never through a link (#1564 AK-2): a `log` that is not a real folder could not be checked.
@@ -242,10 +247,10 @@ export function readAgyLog(home, pid, spawnedAt, { open = openSync } = {}) {
  * covered against a failure line written after its `session/new` answer; the next turn's check
  * catches it.
  */
-export function agyOffCheck(home, { spawnedAt, warn = () => {}, read = readAgyLog }) {
+export function agyOffCheck(home, { spawnedAt, warn = () => {}, read = readAgyLog, profile = AGY_OFF_NAME }) {
   let warned = false
   const check = (run) => {
-    const seen = read(home, run?.child?.pid, spawnedAt)
+    const seen = read(home, run?.child?.pid, spawnedAt, { profile })
     if (seen === 'failed') throw new Error(AGY_NOT_LOADED_TEXT)
     if (seen === 'unchecked' && !warned) {
       warned = true

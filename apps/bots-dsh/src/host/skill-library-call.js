@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto'
 import { boundContextSummary, createSystemMessage, createUserMessage, isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { AUTOMATIC_SKILL_MODE } from '../shared/skill-mode.js'
 import { routeOf } from '../shared/routes.js'
 import { reservedCommandOf } from '../shared/reserved-commands.js'
 import { freezeLoopRequest } from './secrets.js'
 import { skillName } from './skill-library-rules.js'
 
-import { SKILL_SOURCE, SKILL_NOTICE, SKILL_TOOL } from './skill-message.js'
+import { personParts, SKILL_SOURCE, SKILL_NOTICE, SKILL_TOOL } from './skill-message.js'
 export { SKILL_TOOL } from './skill-message.js'
 
 const GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)|\b(?:use the skill|use a skill)\s+([a-z0-9-]+)\b|使用技能\s*([a-z0-9-]+)/gi
@@ -22,6 +22,81 @@ const noticeText = name => `The skill ${name} is not active on this Bot. Add it 
 const SKILLS_PROJECTED = Symbol('Skills projected')
 const DELIVERY_RECORD = 'plugin:automagik/skill-delivery'
 const marker = part => part?.automagikSkill?.kind === SKILL_SOURCE ? part.automagikSkill : undefined
+const REVIEW_SOURCE_FIELDS = ['automagikSkill', 'automagikSkillParsed', 'automagikSkillParts', 'skillRequests']
+const skillToolName = name => name === SKILL_TOOL || name === `mcp__dsh__${SKILL_TOOL}`
+
+function reviewEntry(message) {
+  const part = message?.content?.[0]
+  if (message?.role !== 'user' || message.content?.length !== 1 || part?.type !== 'text') return
+  try { return JSON.parse(part.text) } catch { return undefined }
+}
+
+// A PTC wrapper can include the same private arguments in its program. The
+// reviewer history lists completed inner dispatches after their native wrapper.
+function skillPrograms(entries) {
+  const privatePrograms = new Set()
+  let program
+  for (const entry of entries) {
+    if (entry?.kind === 'user-message') program = undefined
+    if (entry?.kind !== 'tool-call') continue
+    if (entry.mode === 'native') {
+      program = entry.name === RUN_CODE_NAME ? entry : undefined
+      if (program) {
+        let code
+        try { code = JSON.parse(program.arguments)?.code } catch {}
+        if (typeof code === 'string' && /\btools\s*(?:\.\s*load_skill\b|\[\s*(['"`])load_skill\1\s*\])/.test(code)) {
+          privatePrograms.add(program)
+        }
+      }
+    } else if (entry.mode === 'ptc-inner' && entry !== entries.at(-1) && program && skillToolName(entry.name)) {
+      privatePrograms.add(program)
+    }
+  }
+  return privatePrograms
+}
+
+// DSH experimental Auto review serializes one typed history entry per user message.
+// Its final entry and matching schema are the pending action. Keep that envelope
+// even for a Skills read, with no private arguments; the executor keeps the real call.
+function projectReview(options) {
+  const { messages } = options
+  if (!Array.isArray(messages)) return options
+  const environment = messages[0]?.content?.[0]?.text
+  if (typeof environment !== 'string' || !environment.startsWith('ENVIRONMENT\n')) return options
+  const entries = messages.map((message, index) => index === 0 ? undefined : reviewEntry(message))
+  const pending = entries.at(-1)
+  const privatePrograms = skillPrograms(entries)
+  let changed = false
+  const projected = messages.flatMap((message, index) => {
+    if (index === 0) return [message]
+    const entry = entries[index]
+    const replace = value => {
+      changed = true
+      return [{ ...message, content: [{ ...message.content[0], text: JSON.stringify(value, null, 2) }] }]
+    }
+    const drop = () => { changed = true; return [] }
+    if (entry?.kind === 'user-message' && entry.source && Array.isArray(entry.content)) {
+      if ([SKILL_SOURCE, SKILL_NOTICE].includes(entry.source.kind)) return drop()
+      const content = personParts(entry.content)
+      if (content.length === 0 && entry.content.length > 0) return drop()
+      const fields = REVIEW_SOURCE_FIELDS.filter(key => Object.hasOwn(entry.source, key))
+      if (fields.length === 0 && content.length === entry.content.length) return [message]
+      const source = { ...entry.source }
+      for (const key of fields) delete source[key]
+      return replace({ ...entry, source, content })
+    }
+    if (privatePrograms.has(entry) && entry.arguments !== '{}') return replace({ ...entry, arguments: '{}' })
+    if (!skillToolName(entry?.name)) return [message]
+    if (entry.kind === 'tool-call') {
+      if (index < messages.length - 1) return drop()
+      if (entry.arguments !== '{}') return replace({ ...entry, arguments: '{}' })
+    }
+    // A pending load's schema can first appear earlier, if DSH deduplicated it.
+    if (entry.kind === 'tool-schema' && (pending?.kind !== 'tool-call' || pending.name !== entry.name || pending.mode !== entry.mode)) return drop()
+    return [message]
+  })
+  return changed ? { ...options, messages: projected } : options
+}
 
 function receipt(row, part, ref) {
   return createHash('sha256').update(JSON.stringify([row.id, ref.botId, ref.name, ref.hash, ref.use, part.text])).digest('hex')
@@ -283,7 +358,8 @@ export function install(rt) {
     if (previous?.provider === options.provider && previous?.auxiliary === auxiliary) return next()
     const alternate = acp(options.provider)
     if (alternate && isAgentLoopRequest(options) && !auxiliary) return next()
-    const outgoing = project(options, { catalog: !alternate, auxiliary })
+    const input = options.purpose === 'auto-review' ? projectReview(options) : options
+    const outgoing = project(input, { catalog: !alternate, auxiliary })
     if (outgoing === options) return next()
     const request = { ...outgoing, [SKILLS_PROJECTED]: { provider: options.provider, auxiliary } }
     rt.carryUsageTag?.(options.messages, request.messages)

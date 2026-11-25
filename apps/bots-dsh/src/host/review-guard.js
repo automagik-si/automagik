@@ -19,7 +19,7 @@ import { nativeCheckDirectory, normalizeCheckCommand } from './solver-check-comm
 // `message_bot` are open only in part (heldCall).
 export const OPEN_TEAM_TOOLS = Object.freeze([
   'list_bots', 'list_bot_models', 'list_capabilities', 'list_connectors', 'list_secrets', 'read_own_chat',
-  'read_group_chat', 'read_browser', 'recall', 'remember', 'forget',
+  'read_group_chat', 'read_browser', 'recall', 'remember', 'forget', 'load_skill',
   'ask_user', 'request_secret', 'request_connector', 'show_view', 'show_settings', 'propose_bot_change',
   'update_bot', 'message_bot', 'solver_progress',
 ])
@@ -29,7 +29,6 @@ export const OPEN_TEAM_TOOLS = Object.freeze([
 export const HELD_TEAM_TOOLS = Object.freeze([
   'stop_bot', 'create_bot', 'delete_bot', 'create_group', 'update_group', 'delete_group', 'post_to_group',
   'group_relay', 'save_capability', 'delete_capability', 'attach_capability', 'detach_capability', 'group_goal',
-  'load_skill', // TODO(owner): May a guarded Solver read an active Automatic skill before a verdict?
   'find_chats', 'list_automations', 'save_automation', 'pause_automation', 'delete_automation', 'generate_image',
   'omni_endpoints', 'omni_call', 'omni_channels', 'omni_chats', 'omni_messages', 'omni_send', 'omni_react',
   'omni_media', 'omni_delete', 'omni_connect', 'show_canvas', 'start_task',

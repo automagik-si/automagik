@@ -1794,6 +1794,10 @@ export class AcpAdapter extends LlmAdapter {
       const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true)
         && (this.bridgeOn(agent, sessionId) || canMountSkills())
       const needsSkillBridge = live?.bridge === undefined && canMountSkills()
+      // Antigravity OFF selects its exact tool list at process launch. When
+      // eligibility flips, use the other profile and replay the delivered history.
+      const relaunchForSkills = live?.provider === 'acp-antigravity' && options.provider === 'acp-antigravity'
+        && live.nativeOff === true && (live.bridge !== undefined) !== canMountSkills()
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       // Other ACP agents can receive the Solver's method supplement through the
       // existing identity prompt delivery, without adopting the whole Bot role.
@@ -1804,7 +1808,7 @@ export class AcpAdapter extends LlmAdapter {
       const roleChanged = live !== undefined && !sameTurn && (live.roleDigest ?? '') !== role.digest
       // A new tool set or role needs a new agent session.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
-        || bridgeGone || needsSkillBridge || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
+        || bridgeGone || needsSkillBridge || relaunchForSkills || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
       if (remade) {
         if (roleChanged) {
           try {
@@ -1949,6 +1953,13 @@ export class AcpAdapter extends LlmAdapter {
             const codexOff = codexRow && !preOn
             const nativeOff = spawnOmpManaged ? !ompNativeAllowed() : codexRow ? codexOff : undefined
             entry.nativeOff = state.nativeOff = nativeOff
+            const agyOff = options.provider === 'acp-antigravity' && nativeOff === true
+            let agySkills = agyOff && canMountSkills()
+            if (agySkills) {
+              await this.backchannel.listen()
+              checkArchive()
+              agySkills = canMountSkills()
+            }
             if (codexOff) {
               // ON when the turn started, OFF now: a staged image grant cannot come with it.
               if (fileOwner !== undefined) {
@@ -1966,6 +1977,7 @@ export class AcpAdapter extends LlmAdapter {
               : {
                   ...(fileContext === undefined ? {} : { sessionFiles: fileContext }),
                   ...(nativeOff === true ? { nativeOff: true } : {}),
+                  ...(agySkills ? { skillBridge: true } : {}),
                 }
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
             // omp's launch spec is synchronous and it has no bridge to prepare.
@@ -2010,8 +2022,8 @@ export class AcpAdapter extends LlmAdapter {
             const decision = this.bridgeDecision(agent, sessionId, codexOff)
             const bridged = decision.on
             state.bridgeDefault = decision.setting === undefined ? bridged : undefined
-            const skillOnly = !bridged && canMountSkills()
-            if (bridged || skillOnly) {
+            const skillOnly = !bridged && (agyOff ? agySkills : canMountSkills())
+            if ((bridged || skillOnly) && !agySkills) {
               await this.backchannel.listen()
               checkArchive()
             }
@@ -2055,7 +2067,8 @@ export class AcpAdapter extends LlmAdapter {
               mcpServers: state.bridge === undefined ? [] : [this.bridgeServer(state.bridge)],
               // Native-tools mode: the built-in tools stay on (`disableBuiltInTools: false`), with
               // the hard ask rules unless the level is Full.
-              ...(spawnNative && !codexRow
+              ...(agySkills ? { sessionMeta: { antigravity: { eagerMcpServers: [BRIDGE_NAME] } } }
+                : spawnNative && !codexRow
                 ? { sessionMeta: { ...(spawnAsks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
                 : bridged && agent.disableBuiltInTools === true
                   ? { sessionMeta: { disableBuiltInTools: true } }
@@ -2183,7 +2196,13 @@ export class AcpAdapter extends LlmAdapter {
         }
         live = state
         fresh = true
-        if (crossing) {
+        if (relaunchForSkills) {
+          renewedForSkills = true
+          replaySource = durableHistory()
+          live.owed = { renewed: true, skills: true }
+          const blocks = replayOf(replaySource, live.owed)
+          live.replay = blocks.length > 1 ? blocks : undefined
+        } else if (crossing) {
           this.appendBoundary(dshAgent, agent, options.provider)
           live.owed = { from: this.agents.get(prior)?.name ?? 'DSH' }
           replaySource = history

@@ -2,12 +2,14 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { apply as applyAutoReview } from '@deepseek-ai/dsh-experimental-auto-review'
 import { createUserMessage, LlmAdapter, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import NodePtcRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { crossed } from '../../acp-dsh/src/host/switch.js'
-import { install, requestedSkills, skillTool } from '../src/host/skill-library-call.js'
+import { install, requestedSkills, skillPart, skillTool } from '../src/host/skill-library-call.js'
 import { SKILL_NOTICE } from '../src/host/skill-message.js'
 
 const route = { provider: 'deepseek-fixture', model: 'fixture-model' }
@@ -18,7 +20,7 @@ const privateSkill = doc('private-skill', 'PRIVATE-BODY')
 const testRows = requests => requests.flatMap(request => request.messages)
 const text = rows => rows.flatMap(row => row.content?.map(part => part.text) ?? []).join('\n')
 
-async function fixture(t, { program } = {}) {
+async function fixture(t, { program, review = false } = {}) {
   const root = new Context()
   t.after(() => root.fiber.dispose())
   if (program) {
@@ -40,10 +42,19 @@ async function fixture(t, { program } = {}) {
     }
     async *stream(options) {
       requests.push(options)
+      if (options.purpose === 'auto-review') {
+        yield { type: 'text-delta', index: 0, text: '{"risk":"low","decision":"allow"}' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       if (autoload) {
+        const probe = autoload === 'probe'
+        const code = probe ? 'return await tools.review_probe({ note: "ordinary pending argument" })' : program
         autoload = false
-        yield { type: 'tool-call-delta', index: 0, id: `fixture-${++call}`, name: program ? 'run_code' : 'load_skill',
-          argumentsDelta: program ? JSON.stringify({ code: program, description: 'Load the checked skill' }) : '{"name":"marker"}' }
+        yield { type: 'tool-call-delta', index: 0, id: `fixture-${++call}`,
+          name: program ? 'run_code' : probe ? 'review_probe' : 'load_skill',
+          argumentsDelta: program ? JSON.stringify({ code, description: probe ? 'Run the fixture tool' : 'Load the checked skill' })
+            : probe ? '{"note":"ordinary pending argument"}' : '{"name":"marker"}' }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
       } else {
         yield { type: 'text-delta', index: 0, text: 'fixture reply' }
@@ -69,6 +80,17 @@ async function fixture(t, { program } = {}) {
   }
   root.tools.register(skillTool(rt))
   install(rt)
+  const probed = []
+  if (review) {
+    root.provide('approval', { effectivePolicy: () => 'never', overrideOf: () => 'never' })
+    root.provide('permissionPresets', { current: () => 'auto', registerAuto: () => () => {} })
+    root.tools.register(defineTool({ name: 'review_probe', description: 'Record the fixture note',
+      parameters: { note: { type: 'string', required: true } },
+      output: { schema: { type: 'object', additionalProperties: false }, render: () => [] },
+      async execute({ note }) { probed.push(note); return {} },
+    }))
+    applyAutoReview(root)
+  }
   const run = async (id, message, load = false) => {
     const agent = root.get('agents')?.get(id) ?? await root.agentLoop.create(id, route)
     autoload = load
@@ -78,8 +100,53 @@ async function fixture(t, { program } = {}) {
     assert.ok(requests.length > before, 'a real DSH request was sent: ' + JSON.stringify(agent.session.snapshotEvents()))
     return { agent, sent: requests.slice(before) }
   }
-  return { root, rt, active, roomNotices, requests, run, afterProgram: hook => { afterProgram = hook } }
+  return { root, rt, active, roomNotices, requests, run, probed, afterProgram: hook => { afterProgram = hook } }
 }
+
+test('Skills row 5: the separate DSH Auto reviewer receives ordinary typed history and no Skills data', { timeout: 15_000 }, async t => {
+  const f = await fixture(t, { review: true })
+  await f.run('a', user('Use the skill marker. /not-active'), true)
+  const group = createUserMessage({
+    source: { kind: 'bot', role: 'room', roomId: 'fixture-room', skillRequests: [{ name: 'private-relay-name' }] },
+    content: [{ type: 'text', text: 'Ordinary group fact' }, skillPart('a', { ...x, content: 'MARKED-HISTORY-BODY' })],
+  })
+  await f.run('a', group)
+  const { sent } = await f.run('a', user('This is the ordinary review request'), 'probe')
+  assert.deepEqual(f.probed, ['ordinary pending argument'])
+  const reviews = f.requests.filter(request => request.purpose === 'auto-review')
+  assert.equal(reviews.length, 2)
+  const [environment, ...history] = reviews[1].messages.map(message => message.content[0].text)
+  assert.match(environment, /^ENVIRONMENT\n\{/)
+  assert.doesNotMatch(history.join('\n'), /CHECKED-BODY|MARKED-HISTORY-BODY|automagikSkill|automagik-skill|skillRequests|private-relay-name|is not active|load_skill/)
+  const entries = history.map(JSON.parse)
+  assert.ok(entries.some(entry => entry.role === 'user-instruction' && entry.source.kind === 'user'
+    && entry.content[0].text === 'Use the skill marker. /not-active'))
+  assert.ok(entries.some(entry => entry.role === 'fact' && entry.source.role === 'room'
+    && entry.source.roomId === 'fixture-room' && entry.content[0].text === 'Ordinary group fact'))
+  assert.equal(entries.at(-2).name, 'review_probe')
+  assert.equal(entries.at(-2).kind, 'tool-schema')
+  assert.deepEqual(entries.at(-1), { kind: 'tool-call', role: 'fact', mode: 'native', name: 'review_probe',
+    arguments: '{"note":"ordinary pending argument"}' })
+  const pendingLoad = reviews[0].messages.slice(-2).map(message => JSON.parse(message.content[0].text))
+  assert.equal(pendingLoad[0].kind, 'tool-schema')
+  assert.deepEqual(pendingLoad[1], { kind: 'tool-call', role: 'fact', mode: 'native', name: 'load_skill', arguments: '{}' })
+  assert.match(text(sent.filter(request => request.purpose === undefined).at(-1).messages), /CHECKED-BODY/)
+
+  const program = 'return await tools["load_skill"]({ name: "marker" })'
+  const ptc = await fixture(t, { program, review: true })
+  const loaded = await ptc.run('a', user('Do the programmatic read'), true)
+  await ptc.run('a', user('Run the ordinary program'), 'probe')
+  assert.deepEqual(ptc.probed, ['ordinary pending argument'])
+  const [ptcLoad, ptcProbe] = ptc.requests.filter(request => request.purpose === 'auto-review')
+    .map(request => request.messages.slice(1).map(message => JSON.parse(message.content[0].text)))
+  const firstWrapper = ptcLoad.find(entry => entry.kind === 'tool-call' && entry.name === 'run_code')
+  assert.equal(firstWrapper?.arguments, '{}')
+  assert.deepEqual(ptcLoad.at(-1), { kind: 'tool-call', role: 'fact', mode: 'ptc-inner', name: 'load_skill', arguments: '{}' })
+  assert.equal(ptcProbe.some(entry => entry.name === 'load_skill'), false)
+  const lastWrapper = ptcProbe.findLast(entry => entry.kind === 'tool-call' && entry.name === 'run_code')
+  assert.match(JSON.parse(lastWrapper.arguments).code, /tools\.review_probe/)
+  assert.match(text(loaded.sent.filter(request => request.purpose === undefined).at(-1).messages), /CHECKED-BODY/)
+})
 
 test('native request includes only the current catalog and checked calls, while refusals are private', { timeout: 10_000 }, async t => {
   const f = await fixture(t)
