@@ -12,6 +12,7 @@ import { teamToolOf } from './approvals.js'
 import { cleanTrack, isNotesWrite } from './review-mark.js'
 import { activeSolverLimit, limitWhat, solverTracked } from './solver-progress.js'
 import { reachesShell } from './tool-deny.js'
+import { nativeCheckDirectory, normalizeCheckCommand } from './solver-check-command.js'
 
 // The team tools (constants.js TEAM_TOOLS, each on exactly one list) open while the plan waits for
 // its verdict: they read the team, a chat or a memory, or ask the person. `update_bot` and
@@ -97,36 +98,9 @@ export function solverCallId(sessionId, name, args, callId) {
   return typeof callId === 'string' ? `${sessionId}:${callId}` : undefined
 }
 
-// Recognize a single command, optionally in one literal bash -lc and one leading cd.
-// Quotes in the command itself remain part of the exact comparison.
-const BASH_WRAPPER = /^(?:\/bin\/)?bash[ \t]+-lc(?=[ \t'"]|$)/
-const CD_PREFIX = /^cd(?=[ \t'"]|$)/
-const SINGLE_COMMAND = /^(?:'[^'\r\n]*'|"(?:\\[^\r\n]|[^"\\$\x60\r\n]|\$(?!\())*"|\\[^\r\n]|[^'"\\\x60;&|()<>\r\n\0])+$/
-
 function trimmedCommand(input) {
   const command = input?.command ?? input?.cmd
   return typeof command === 'string' ? command.trim() : undefined
-}
-
-function nativeCheckCommand(input) {
-  let command = trimmedCommand(input)
-  if (!command) return { reason: 'The ACP command input is missing or ambiguous.' }
-  if (BASH_WRAPPER.test(command)) {
-    const match = /^(?:\/bin\/)?bash[ \t]+-lc[ \t]+(?:'([^'\r\n]*)'|"([^"$\x60\\\r\n]*)")$/.exec(command)
-    if (!match) return { reason: 'The ACP shell wrapper is ambiguous.' }
-    command = (match[1] ?? match[2]).trim()
-  }
-  let directory
-  if (CD_PREFIX.test(command)) {
-    const match = /^cd[ \t]+(?:'([^'\r\n]+)'|"([^"$\x60\\\r\n]+)"|([A-Za-z0-9_./:-]+))[ \t]*&&[ \t]*(.+)$/.exec(command)
-    directory = match && (match[1] ?? match[2] ?? match[3])
-    if (!directory || directory.startsWith('-')) return { reason: 'The ACP cd directory is ambiguous.' }
-    command = match[4].trim()
-  }
-  if (BASH_WRAPPER.test(command) || CD_PREFIX.test(command) || !SINGLE_COMMAND.test(command)) {
-    return { reason: 'The ACP command boundaries are ambiguous.' }
-  }
-  return { command, directory }
 }
 
 export function install(rt) {
@@ -160,7 +134,7 @@ export function install(rt) {
       && (args.to === bot.reviewerId || rt.findBot?.(args.to)?.id === bot.reviewerId)
     const acpRead = name === 'acp_tool' && args?.kind !== 'think'
       && ACP_OPEN_KINDS.has(args?.kind) && !commandInput
-    const nativeCommand = name === 'acp_tool' ? nativeCheckCommand(args?.input) : undefined
+    const nativeCommand = name === 'acp_tool' ? normalizeCheckCommand(trimmedCommand(args?.input)) : undefined
     const shellCommand = ['bash', 'pwsh', 'powershell'].includes(team) && typeof args?.command === 'string'
       ? args.command.trim() : undefined
     // The broader admission guard also covers launches, computer use and unknown shell-capable tools.
@@ -197,9 +171,15 @@ export function install(rt) {
     }
     if ((name === 'acp_tool' || checkCommand) && track?.requested && !track.delivered && track.solver?.plan?.accepted === true && !pending) {
       const raw = trimmedCommand(name === 'acp_tool' ? args?.input : args)
-      const normalized = nativeCommand?.command
       const agreed = Object.values(track.solver.plan.commands ?? {})
-      if ((raw && agreed.includes(raw)) || (normalized && agreed.includes(normalized))) {
+      const exact = raw && agreed.includes(raw)
+      const folder = bot.workDir ?? rt.teamFolder?.()
+      const cwd = args?.input?.cwd ?? base ?? folder
+      const equivalent = !exact && nativeCommand?.command && agreed.some(command => {
+        const check = normalizeCheckCommand(command)
+        return check.command === nativeCommand.command && nativeCheckDirectory(check, nativeCommand, folder, cwd)
+      })
+      if (exact || equivalent) {
         return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
       }
     }

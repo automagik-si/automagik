@@ -3,6 +3,7 @@ import { lstatSync, readdirSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { SOLVER_FIX_LIMIT, SOLVER_REPLAN_LIMIT, isSolverBot, isWrittenSolverMethod, solverAutoOn } from '../shared/solver-method.js'
 import { readableRoute } from './session-route.js'
+import { normalizeCheckCommand } from './solver-check-command.js'
 
 const MAX_CHECKS = 20
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -229,6 +230,11 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
       const sameCommands = checks.every(check => commands?.[check] === progress.plan.commands?.[check])
       return { text: includesAll(progress.plan.checks, checks) && sameCommands
         ? recorded : 'Record a re-plan before replacing the agreed checks or commands.' }
+    }
+    // Keep the agreed text for the reviewer and DSH's exact command comparison.
+    for (const [check, command] of Object.entries(commands ?? {})) {
+      const { reason } = normalizeCheckCommand(command)
+      if (reason) return { text: `Cannot register check ${JSON.stringify(check)}. ${reason}` }
     }
     if (new Set([...Object.keys(progress.attempts), ...checks]).size > MAX_CHECKS) return { text: 'Use at most 20 check IDs per request.' }
     progress.plan = { revision: progress.revision, checks: [...checks], ...(commands ? { commands } : {}) }

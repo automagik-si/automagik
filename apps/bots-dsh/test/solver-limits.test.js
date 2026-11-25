@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -152,7 +152,7 @@ async function checked(h, request, run, { check = 'check-a', command = `fake ${c
   return h.progress('checks', { request, run, results: results(check, exitCode === 0) })
 }
 
-async function reviewedPlan(h, checks, commands) {
+async function reviewedPlan(h, checks, commands, { legacyPlan } = {}) {
   const request = await requestOf(h)
   const exchange = (kind, text = 'Verify the evidence.') => h.tool('message_bot', {
     to: 'reviewer', message: text, solver_review: kind, solver_request: request, reply_to: 'me',
@@ -162,7 +162,11 @@ async function reviewedPlan(h, checks, commands) {
   }, 'SHIP', undefined, undefined, model)
   const delivered = []
   h.rt.deliver = async message => { delivered.push(message); return true }
-  await plan(h, request, checks, commands)
+  assert.match(await plan(h, request, checks, legacyPlan ? undefined : commands), /^Recorded\./)
+  if (legacyPlan) {
+    // An older plan could already contain this raw command before registration checked its syntax.
+    h.rt.botOf('solver').reviewTrack.solver.plan.commands = Object.fromEntries(commands.map(({ check, command }) => [check, command]))
+  }
   await exchange('plan')
   verdict(delivered.at(-1).exchangeId)
   return { request, send: exchange, verdict, delivered }
@@ -171,12 +175,12 @@ async function reviewedPlan(h, checks, commands) {
 const reviewShip = 'Verdict: SHIP\nEvidence verified.'
 const noSolverRequest = 'There is no active Solver request in this chat.'
 
-async function reviewReplyFixture(t) {
+async function reviewReplyFixture(t, averageCommand = 'node --test average.test.mjs') {
   const h = await setup(t, { reviewGuard: true }, 2)
   const request = await requestOf(h)
   assert.ok(request, 'turn 2 has an active request')
   assert.match(await plan(h, request, ['average-test', 'diff-check'], [
-    { check: 'average-test', command: 'node --test average.test.mjs' },
+    { check: 'average-test', command: averageCommand },
     { check: 'diff-check', command: 'git diff --check' },
   ]), /^Recorded\./)
   const deliver = h.rt.deliver
@@ -232,14 +236,30 @@ for (const timing of ['before', 'after']) {
 
 for (const release of ['consumption', 'abandonment', 'delivery failure', 'discard', 'input failure']) {
   test(`Stage 6 review reply RESULT waits for ${release}`, async t => {
-    const { h, request, review, answer, track, openReply, deliveries } = await reviewReplyFixture(t)
+    const native = release === 'consumption'
+    const averageCommand = native ? stage6CommandIn(checkDirectory(t)) : 'node --test average.test.mjs'
+    const { h, request, review, answer, track, openReply, deliveries } = await reviewReplyFixture(t, averageCommand)
     const planExchange = await review('plan')
     const earlyPlan = release === 'consumption' ? answer(planExchange) : undefined
     h.finish('solver', 'Waiting for plan review.')
     await openReply(3, earlyPlan ?? answer(planExchange))
     const oldReply = h.agentOf('solver').message
-    assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
-    assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+    const checks = [
+      { run: 'test', check: 'average-test', command: averageCommand },
+      { run: 'diff', check: 'diff-check', command: 'git diff --check' },
+    ]
+    if (native) {
+      const { mirror } = await nativeMirror(t, h)
+      for (const { run, check, command } of checks) {
+        assert.match(await h.progress('start', { request, run, checks: [check] }), /^Recorded\./)
+        assert.equal((await mirror(run, { command: `/bin/bash -lc '${command}'` })).isError, false)
+        assert.match(await h.progress('checks', { request, run, results: results(check) }), /^Recorded\./)
+      }
+    } else {
+      for (const { run, check, command } of checks) {
+        assert.match(await checked(h, request, run, { check, command }), /^Recorded\./)
+      }
+    }
     const exchange = await review('result')
     const solver = h.agentOf('solver')
     if (release === 'delivery failure') {
@@ -307,6 +327,7 @@ for (const release of ['consumption', 'abandonment', 'delivery failure', 'discar
     assert.equal(track().delivered, true)
     assert.equal(mark.done, true)
     assert.equal(mark.resultExchangeId, exchange)
+    assert.equal(mark.reviewer.model, reviewerModel.model)
     h.event('solver', 'turn/start', { turn: 6 })
     h.finish('solver', 'Already delivered.')
     assert.deepEqual(track().last, mark)
@@ -716,9 +737,7 @@ const codexUpdates = codexCapture.cases.find(item => item.name === 'agent: write
 const codexExecute = codexUpdates.find(update => update.kind === 'execute')
 const codexExit = codexUpdates.find(update => update._meta?.terminal_exit)
 
-async function nativeCheck(t, agreed = 'fake check-a') {
-  const h = await setup(t)
-  const { request, send, delivered } = await reviewedPlan(h, ['check-a'], [{ check: 'check-a', command: agreed }])
+async function nativeMirror(t, h, provider = 'acp-codex') {
   const ctx = new Context()
   ctx.provide('systemPrompt', { tools() {}, section() {} })
   await ctx.plugin(ToolsService)
@@ -726,22 +745,21 @@ async function nativeCheck(t, agreed = 'fake check-a') {
   let agents
   await ctx.plugin({ name: 'solver-fixture-agents', inject: ['tools'], apply(child) { agents = child } })
   for (const listener of h.ctx.listeners.get('tools/execute')) ctx.on('tools/execute', listener)
-  const provider = 'acp-codex'
   const agent = h.agentOf('solver')
   const cwd = h.rt.botOf('solver').workDir
   agent.session = Session.create(agent.id)
   agent.session.append('request/header', { header: { config: { provider, model: 'default' } } })
-  h.ctx.acpAgents.effectiveModelOf = () => 'gpt-6.2-sol'
+  const codex = provider === 'acp-codex'
+  const name = codex ? 'Codex fixture' : 'Claude fixture'
+  h.ctx.acpAgents.effectiveModelOf = id => id === 'solver' ? (codex ? 'gpt-6.2-sol' : 'claude-sonnet-5-5') : undefined
   const scope = createScope(agents, agent)
   agent.ctx = scope.ctx
-  const adapter = new AcpAdapter(ctx, new Map([[provider, { name: 'Codex fixture' }]]))
+  const adapter = new AcpAdapter(ctx, new Map([[provider, { name }]]))
   adapter.registerMirror(agent)
   t.after(async () => { adapter.dispose(); await scope.dispose(); await ctx.fiber.dispose() })
   const signal = new AbortController().signal
   const resolve = () => ctx.tools.resolve({ agent, modelSelection: { provider, model: 'default' }, signal })
 
-  const report = (run, pass = true) => h.progress('checks', { request, run, results: results('check-a', pass) })
-  const start = run => h.progress('start', { request, run, checks: ['check-a'] })
   async function mirror(runId, { command = "/bin/bash -lc 'fake check-a'", exit = 0, adjust, beforeExit, beforeMirror } = {}) {
     const opened = structuredClone(codexExecute)
     const finished = structuredClone(codexExit)
@@ -750,7 +768,7 @@ async function nativeCheck(t, agreed = 'fake check-a') {
     finished._meta.terminal_exit.exit_code = exit
     if (exit !== 0) finished.status = 'failed'
     const exitSession = adjust?.(opened, finished)
-    const run = new AgentRun({ name: 'Codex fixture', cwd })
+    const run = new AgentRun({ name, cwd })
     run.sessionId = 'native-session'
     await run.onUpdate(opened, run.sessionId)
     const tool = run.tools.get(opened.toolCallId)
@@ -761,7 +779,7 @@ async function nativeCheck(t, agreed = 'fake check-a') {
     // The adapter's stream advertises this pairing when it ends a step at the mirror.
     assert.deepEqual(await run.next(signal), { type: 'tool', id: tool.id })
     const id = `acp-${runId}`
-    adapter.live.set(agent.id, { run, name: 'Codex fixture', native: true, calls: new Set([id]), toolIds: new Map([[id, tool.id]]) })
+    adapter.live.set(agent.id, { run, name, native: true, calls: new Set([id]), toolIds: new Map([[id, tool.id]]) })
     const toolSet = await resolve()
     try {
       const batch = await ctx.tools.execute({ calls: [{ id, name: 'acp_tool', arguments: JSON.stringify(args) }], agent, signal, toolSet })
@@ -770,9 +788,121 @@ async function nativeCheck(t, agreed = 'fake check-a') {
       toolSet.dispose()
     }
   }
+  return { cwd, mirror }
+}
+
+async function nativeCheck(t, agreed = 'fake check-a', { legacyPlan, provider } = {}) {
+  const h = await setup(t)
+  const { request, send, delivered } = await reviewedPlan(h, ['check-a'], [{ check: 'check-a', command: agreed }], { legacyPlan })
+  const { cwd, mirror } = await nativeMirror(t, h, provider)
+  const report = (run, pass = true) => h.progress('checks', { request, run, results: results('check-a', pass) })
+  const start = run => h.progress('start', { request, run, checks: ['check-a'] })
   const savedPending = () => JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots.solver.reviewTrack.solver.pending
   return { cwd, start, report, mirror, send, savedPending, bot: () => h.rt.botOf('solver'), host: h, delivered }
 }
+
+// Literal from the 5bb4badb6 investigation. Only the agreed directory is replaced
+// in portable cases, because the mirror checks that it exists and never executes the command.
+const stage6Directory = '/tmp/automagik-solver-combined-3-t422'
+const stage6Agreed = 'cd /tmp/automagik-solver-combined-3-t422 && scripts/capped-run -- /bin/bash /tmp/automagik-2056-limits-auto-5bb4badb-git-scratch/check.sh'
+const stage6CommandIn = directory => stage6Agreed.replace(stage6Directory, directory)
+const checkDirectory = t => {
+  const directory = mkdtempSync(join(tmpdir(), 'solver-agreed-cwd-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  return directory
+}
+const claudeBashInput = JSON.parse(readFileSync(new URL(
+  '../src/host/live-chat/fixtures/claude.jsonl', import.meta.url), 'utf8').split('\n')[3])
+  .message.content.find(block => block.type === 'tool_use' && block.name === 'Bash').input
+
+test('Ruling B records the agreed outside check in Codex, Claude and zsh literal forms', async t => {
+  const agreed = stage6CommandIn(checkDirectory(t))
+  const codex = await nativeCheck(t, agreed)
+  const variants = [
+    ['codex-bare', agreed],
+    ['codex-wrapped', `/bin/bash -lc '${agreed}'`],
+    ['zsh-bare', `zsh -lc '${agreed}'`],
+    ['zsh-bin', `/bin/zsh -lc "${agreed}"`],
+    ['zsh-usr-bin', `/usr/bin/zsh -lc '${agreed}'`],
+  ]
+  for (const [run, command] of variants) {
+    const held = await codex.mirror(`before-${run}`, { command })
+    assert.equal(held.isError, true, run)
+    assert.match(held.content[0].text, /Start a check run/)
+    assert.match(await codex.start(run), /^Recorded\./)
+    assert.equal((await codex.mirror(run, { command })).isError, false)
+    assert.match(await codex.report(run), /^Recorded\./)
+    assert.deepEqual(codex.bot().reviewTrack.solver.passed, ['check-a'])
+  }
+
+  const claude = await nativeCheck(t, agreed, { provider: 'acp-claude' })
+  const adjust = opened => { opened.rawInput = { ...claudeBashInput, command: agreed } }
+  assert.match(await claude.start('claude-bare'), /^Recorded\./)
+  assert.equal((await claude.mirror('claude-bare', { adjust })).isError, false)
+  assert.match(await claude.report('claude-bare'), /^Recorded\./)
+  assert.deepEqual(claude.bot().reviewTrack.solver.passed, ['check-a'])
+
+  const wrappedPlan = `/usr/bin/zsh -lc 'cd .. && fake check-a'`
+  const wrapped = await nativeCheck(t, wrappedPlan)
+  const absolute = `cd '${dirname(wrapped.cwd)}' && fake check-a`
+  assert.equal((await wrapped.mirror('relative-before-start', { command: absolute })).isError, true)
+  assert.match(await wrapped.start('relative-agreement'), /^Recorded\./)
+  await wrapped.mirror('relative-agreement', { command: absolute })
+  assert.match(await wrapped.report('relative-agreement'), /^Recorded\./)
+
+  const request = await requestOf(wrapped.host)
+  await assert.rejects(wrapped.host.execute('bash', { command: wrappedPlan }), /Start a check run/)
+  assert.match(await checked(wrapped.host, request, 'dsh-exact', { command: wrappedPlan }), /^Recorded\./)
+})
+
+test('Ruling B refuses ambiguous plans and native outcomes outside the exact agreement', async t => {
+  const directory = checkDirectory(t)
+  const agreed = stage6CommandIn(directory)
+  const bare = agreed.split(' && ')[1]
+  const ambiguous = [
+    ['chain', `${agreed} && true`],
+    ['pipe', `${agreed} | cat`],
+    ['redirect', `${agreed} > result.txt`],
+    ['second-cd', `cd ${directory} && cd . && ${bare}`],
+    ['nested', `zsh -lc "bash -lc '${agreed}'"`],
+    ['wrapper-args', `bash -lc '${agreed}' extra`],
+    ['malformed', `zsh -lc '${agreed}`],
+    ['cdpath', `cd relative && ${bare}`],
+  ]
+  const host = await setup(t)
+  const request = await requestOf(host)
+  for (const [run, command] of ambiguous) {
+    assert.match(await plan(host, request, ['check-a'], [{ check: 'check-a', command }]), /ambiguous|CDPATH/i, run)
+    assert.equal(host.rt.botOf('solver').reviewTrack.solver.plan, undefined)
+  }
+
+  const h = await nativeCheck(t, agreed)
+  const wrong = [
+    ...ambiguous,
+    ['extra-argument', `${agreed} extra`],
+    ['different-cd', stage6CommandIn(checkDirectory(t))],
+    ['no-cd', bare, opened => {
+      opened.rawInput.cwd = directory
+      opened._meta.terminal_info.cwd = directory
+    }],
+    ['missing-cwd', agreed, opened => {
+      delete opened.rawInput.cwd
+      delete opened._meta.terminal_info.cwd
+    }],
+    ['conflicting-cwd', agreed, opened => { opened.rawInput.cwd = directory }],
+  ]
+  for (const [run, command, adjust] of wrong) {
+    assert.match(await h.start(run), /^Recorded\./)
+    await h.mirror(run, { command, adjust })
+    assert.match(await h.report(run), /^No verified passing evidence/, run)
+    assert.deepEqual(h.bot().reviewTrack.solver.passed, [])
+  }
+  rmSync(directory, { recursive: true })
+  assert.match(await h.start('missing-directory'), /^Recorded\./)
+  await h.mirror('missing-directory', { command: agreed })
+  assert.match(await h.report('missing-directory'), /no verified passing evidence.*working directory/i)
+  await assert.rejects(h.send('result'), /every agreed check/)
+})
 
 test('MISSING_PASS records the Codex ACP check on the original result', async t => {
   const h = await nativeCheck(t)
@@ -892,7 +1022,7 @@ test('MISSING_PASS r2 requires a CDPATH-independent directory with only initial 
 test('MISSING_PASS r2 holds exact ACP commands before start', async t => {
   for (const [kind, command] of [['pipeline', 'fake check-a | cat'], ['wrapper', "/bin/bash -lc 'fake check-a'"]]) {
     await t.test(kind, async sub => {
-      const h = await nativeCheck(sub, command)
+      const h = await nativeCheck(sub, command, { legacyPlan: kind === 'pipeline' })
       const result = await h.mirror('without-start', { command: `  ${command}  ` })
       assert.equal(result.isError, true)
       assert.match(result.content[0].text, /Start a check run/)

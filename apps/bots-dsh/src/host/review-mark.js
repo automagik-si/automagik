@@ -6,7 +6,7 @@
 // reviewer id the New Solver dialog stores (`reviewerId`). Groups, tasks and scheduled runs of a
 // Solver are not marked: only its own chat (and the subagents under it).
 import { lstatSync, realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { SOLVER_NOTES } from '../shared/solver-method.js'
 import { VERDICTS_KEPT, deliveryMark, verdictOf } from '../shared/review-mark.js'
 import { guardVerdictOf } from '../shared/review-guard.js'
@@ -14,6 +14,7 @@ import { teamToolOf } from './approvals.js'
 import { SOURCE_KIND } from './constants.js'
 import { reachesShell } from './tool-deny.js'
 import { refusal } from './refusal.js'
+import { nativeCheckDirectory, normalizeCheckCommand, withinCheckRoot } from './solver-check-command.js'
 import {
   activeSolverLimit, cleanProgress, designateReview, invalidateResult, modelOf, newProgress,
   normalizedAutoInstruction, recordProgress, recordSolverVerdict, resultSnapshot, resumeProgress, solverOutcome, solverTracked,
@@ -45,18 +46,6 @@ function nativeStartProblem(opened, request, pending, start) {
   }
   if (start.startedAt <= opened.at) return 'The ACP native execution started before this Solver run was open.'
   if (start.observedAt <= opened.at) return 'The ACP execute call was queued before this Solver run was open.'
-}
-
-function effectiveCwd(cwd, directory) {
-  if (typeof cwd !== 'string' || !isAbsolute(cwd)) return undefined
-  try {
-    const base = realpathSync.native(cwd)
-    const path = directory === undefined ? base : isAbsolute(directory) ? directory : `${base}${sep}${directory}`
-    const target = realpathSync.native(path)
-    // A symlink and ".." can make logical and physical cd reach different directories.
-    if (directory !== undefined && realpathSync.native(resolve(cwd, directory)) !== target) return undefined
-    if (lstatSync(target).isDirectory()) return target
-  } catch {}
 }
 
 export function isExplicitWorkCall(name, args) {
@@ -461,32 +450,31 @@ export function install(rt) {
     if (progress?.request !== request || pending?.run !== run || pending.call !== call || pending.revision !== revision) return
     const value = result?.isError === false ? result.value : undefined
     const outcome = nativeCall ? nativeOutcome(nativeCall, value) : value
-    const command = nativeCommand ? nativeCommand.command : shellCommand
+    const parsedAgreed = nativeCall ? normalizeCheckCommand(agreed) : undefined
+    const matchesCommand = nativeCall ? nativeCommand?.command && nativeCommand.command === parsedAgreed.command
+      : shellCommand && shellCommand === agreed
     const startProblem = nativeCall && nativeStartProblem(nativeRunStarts.get(bot), request, pending, value?.terminalStart)
-    const directory = nativeCommand?.directory
-    // Bash can search CDPATH unless the operand is absolute or starts with a . or .. component.
-    const cdpathSensitive = directory !== undefined && !isAbsolute(directory) && !/^\.\.?(?:\/|$)/.test(directory)
-    const folder = nativeCall ? effectiveCwd(folderOf(bot)) : folderOf(bot)
-    const cwd = nativeCall ? (cdpathSensitive ? undefined : effectiveCwd(outcome?.cwd, directory)) : outcome?.cwd
-    const scope = typeof folder === 'string' && typeof cwd === 'string' && isAbsolute(cwd) ? relative(folder, cwd) : undefined
+    const folder = folderOf(bot)
+    const scoped = nativeCall ? matchesCommand && nativeCheckDirectory(parsedAgreed, nativeCommand, folder, outcome?.cwd)
+      : withinCheckRoot(folder, outcome?.cwd)
     const known = nativeCall ? Number.isInteger(outcome.exitCode)
       : outcome?.kind === 'foreground' && Number.isInteger(outcome.exitCode)
         && outcome.signal === null && outcome.timedOut === false && outcome.aborted === false
         && !outcome.stopped && !outcome.sandbox?.denied && !outcome.sandbox?.runnerFailed
-    const scoped = scope !== undefined && !isAbsolute(scope) && scope !== '..' && !scope.startsWith(`..${sep}`)
     const snapshot = snapshotOf(bot)
     let reason = nativeCommand?.reason
-    if (!reason && (!command || command !== agreed)) reason = 'The observed command does not match one agreed check.'
+    if (!reason && !matchesCommand) reason = 'The observed command does not match one agreed check.'
     if (!reason && !known) reason = outcome?.reason ?? 'A completed foreground check outcome is missing.'
     if (!reason && startProblem) reason = startProblem
-    if (!reason && cdpathSensitive) reason = 'The check working directory depends on CDPATH and only the initial directory is known.'
-    if (!reason && !scoped) reason = 'The check working directory could not be verified within the result root.'
+    if (!reason && !scoped) reason = parsedAgreed?.directory !== undefined
+      ? 'The check working directory could not be verified as the agreed directory.'
+      : 'The check working directory could not be verified within the result root.'
     if (!reason && !pending.startSnapshot) reason = 'The pre-run result snapshot is unavailable.'
     if (!reason && !snapshot) reason = 'The result snapshot at completion is unavailable.'
     if (!reason && pending.startSnapshot !== snapshot) reason = 'The result changed between the start and the outcome.'
     if (!reason && revision !== progress.revision) reason = 'The Solver revision changed during the run.'
     if (reason) invalidateResult(progress)
-    const verifiedOutcome = known && command && command === agreed && !startProblem && !cdpathSensitive
+    const verifiedOutcome = known && matchesCommand && !startProblem && (!nativeCall || scoped)
     progress.pending = { ...pending, evidence: { call, ...(verifiedOutcome ? { pass: outcome.exitCode === 0 } : {}),
       ...(reason ? { reason } : { snapshot }) } }
     await saveProgress(bot, before, progress)
