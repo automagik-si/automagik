@@ -361,8 +361,10 @@ export function registerSkillActivity(ctx) {
     update: context => context.state,
     buildViewNode({ key, id, start, state }) {
       if (!start || !state) return null
+      const placement = state.turn === undefined ? { location: { kind: 'session' } }
+        : { location: start.location, groupTree: 'turn' }
       return { key, id, kind: SKILL_ACTIVITY, target: 'chat', anchorSeq: start.event.seq,
-        location: start.location, visibility: 'visible', groupTree: 'turn', data: state }
+        ...placement, visibility: 'visible', data: state }
     },
   })
 }
@@ -1172,9 +1174,11 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
     const tick = async () => {
       const result = await actions.roomProgress(sessionId)
       if (stop) return
-      const entry = (result ?? []).find(item => item.callId === callId) ?? (result ?? [])[0]
-      const key = entry ? JSON.stringify([entry.replies, entry.speaking]) : ''
-      if (entry && key !== seen) { seen = key; setLive({ replies: entry.replies ?? [], speaking: [entry.speaking ?? []].flat() }) }
+      const own = result?.find(item => item.callId === callId)
+      const entry = own ?? result?.[0]
+      const replies = Array.isArray(entry?.replies) ? entry.replies.filter(reply => own !== undefined || reply?.kind !== SKILL_ACTIVITY) : []
+      const key = entry ? JSON.stringify([replies, entry.speaking]) : ''
+      if (entry && key !== seen) { seen = key; setLive({ replies, speaking: [entry.speaking ?? []].flat() }) }
       timer = setTimeout(tick, document.hidden ? 5000 : 1000)
     }
     void tick()

@@ -174,6 +174,9 @@ async function groupFixture(t) {
   writeFileSync(join(home, 'state.json'), JSON.stringify(state))
   const ctx = fakeContext()
   const pending = new Map()
+  let route
+  const register = ctx.connection.fetch.register
+  ctx.connection.fetch.register = options => { route = options; return register(options) }
   Object.assign(ctx, {
     llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}) },
     workspaceRegistry: { get: () => undefined },
@@ -204,6 +207,9 @@ async function groupFixture(t) {
       if (listener.length >= 2) listener({ id }, { type, seq: ++seq, data })
     }
   }
+  const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', {
+    method: 'POST', body: JSON.stringify({ endpoint, payload }),
+  }))).json()
   const relay = async (recipient, input, beforeRead) => {
     const signal = AbortSignal.timeout(5_000)
     emit(roomId, 'user/message', input)
@@ -220,8 +226,51 @@ async function groupFixture(t) {
     assert.deepEqual(records.at(-1)?.data.reason, { kind: 'completed' })
     return result
   }
-  return { f, second, roomId, host, room, tool, relay }
+  return { f, second, roomId, host, room, tool, relay, call, emit, pending }
 }
+
+test('round 2 activity: a queued recipient keeps relay A when relay B opens at the same sequence', { timeout: 20_000 }, async t => {
+  const { f, second, roomId, host, room, tool, call, emit, pending } = await groupFixture(t)
+  room.mode = 'all'
+  const reading = Promise.withResolvers()
+  const beganReading = Promise.withResolvers()
+  t.mock.method(host, 'imagesForGroup', () => { beganReading.resolve(); return reading.promise })
+  t.after(() => reading.resolve([]))
+  const firstCall = { callId: 'relay-a', signal: t.signal }
+  const secondCall = { callId: 'relay-b', signal: t.signal }
+  emit(roomId, 'user/message', user(`Finish this /${manual.name}`, { type: 'image', attachment: f.attachment }))
+  const first = JSON.parse(await tool('group_relay', {}, roomId, firstCall))
+  await beganReading.promise
+  const roomBook = `group-${roomId}`
+  const openingB = tool('group_relay', {}, roomId, secondCall)
+  await until(() => host.ledger.records(roomBook).filter(record => record.event === 'anchor').length === 2, { poll: immediate })
+  reading.resolve([])
+  const later = JSON.parse(await openingB)
+  assert.equal(later.from, first.from)
+  assert.notEqual(later.anchor, first.anchor)
+  await until(() => pending.has(second.id), { poll: immediate })
+  assert.equal(pending.has(f.agent.id), false, 'the writer is queued behind the admin')
+  const settle = (id, input, turn = 1) => {
+    emit(id, 'turn/start', { turn })
+    emit(id, 'user/message', input)
+    emit(id, 'turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  settle(second.id, pending.get(second.id))
+  await until(() => pending.has(f.agent.id), { poll: immediate })
+  const input = pending.get(f.agent.id)
+  const records = await f.turnFor(f.agent, input)
+  assert.equal(records.at(-1)?.data.reason.kind, 'completed')
+  const activity = rows => rows.filter(row => row.kind === 'skill-activity').map(row => [row.botId, row.skill])
+  const read = async range => activity((await call('group-rows', { roomId, ...range })).value.rows)
+  const progress = (await call('room-progress', { roomId })).value
+  const live = { a: activity(progress.find(item => item.callId === firstCall.callId).replies), b: await read(later) }
+  settle(f.agent.id, input)
+  await until(() => host.roomProgress.size === 0 && host.roomWaiters.size === 0, { poll: immediate })
+  assert.deepEqual({ live, history: { a: await read(first), b: await read(later) } }, {
+    live: { a: [[f.agent.id, manual.name]], b: [] },
+    history: { a: [[f.agent.id, manual.name]], b: [] },
+  })
+})
 
 test('a checked recipient load stays on its own relay after a second anchor opens', { timeout: 20_000 }, async t => {
   const { f, roomId, host, room, tool, relay } = await groupFixture(t)

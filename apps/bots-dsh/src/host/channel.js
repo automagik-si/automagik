@@ -843,7 +843,10 @@ export function install(rt) {
         case 'room-progress': {
           // Any part id of the group's own Session means the group itself.
           const room = rt.roomOf(body.roomId) ?? rt.roomOf(rt.pastOwners.get(body.roomId)?.roomId)
-          return ok([...rt.roomProgress.entries()].filter(([, entry]) => entry.roomId === (room?.id ?? body.roomId)).map(([callId, entry]) => ({ callId, replies: rt.groupRowsView(entry.roomId, entry.from).rows, speaking: entry.slots.filter(slot => slot.status === 'speaking').map(slot => slot.id) })))
+          return ok([...rt.roomProgress.entries()].filter(([, entry]) => entry.roomId === (room?.id ?? body.roomId)).map(([callId, entry]) => ({
+            callId, replies: rt.groupRowsView(entry.roomId, entry.from, undefined, entry.relayAnchor, true, { live: true }).rows,
+            speaking: entry.slots.filter(slot => slot.status === 'speaking').map(slot => slot.id),
+          })))
         }
         // The rows a settled round of a group chat shows, from its book.
         case 'group-rows': {

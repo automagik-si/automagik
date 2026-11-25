@@ -301,8 +301,10 @@ function sessionLedger(session) {
     if (event.type === 'turn/start') {
       state.turn = event.data.turn
       state.position = { turn: state.turn, step: 0 }
-    } else if (event.type === 'turn/end') state.turn = undefined
-    else if (event.type === 'step/start') {
+    } else if (event.type === 'turn/end') {
+      state.turn = undefined
+      state.position = undefined
+    } else if (event.type === 'step/start') {
       state.batch = { rows: [], notices: new Map() }
       state.position = { ...state.position, turn: event.data.turn, step: event.data.step }
     } else if (event.type === 'step/end' && state.batch) {
@@ -496,12 +498,13 @@ export function install(rt) {
   function recordActivity(session, state, id, ref, position) {
     try {
       if (!position || !skillName(ref.name) || state.activity.has(id) || ref.botId !== ownerOf(rt, session.id)) return
-      const { turn, step, source } = position
-      if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step)) return
+      const { turn, step, source, eventSeq } = position
+      if (eventSeq === undefined && (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step))) return
       const room = rt.skillRoomActivity?.(session.id, ref.botId, source)
       // A private exchange in a group member Session has no visible room relay.
       if (room === undefined && (source?.role === 'room' || rt.groupOwners?.has(session.id))) return
-      const seq = appendPluginRecord(session, SKILL_ACTIVITY_RECORD, { id, name: ref.name, turn, step,
+      const seq = appendPluginRecord(session, SKILL_ACTIVITY_RECORD, { id, name: ref.name,
+        ...(eventSeq === undefined ? { turn, step } : { eventSeq }),
         ...(room && { roomId: room.roomId }) })
       room?.record(id, ref.name, session.eventAt(seq).time)
     } catch (error) {
@@ -554,12 +557,24 @@ export function install(rt) {
       return { key: keyOf(records), text: catalogOf(records) }
     },
     project, admit,
-    bridgePosition: session => sessionLedger(session)?.position,
-    bridgeActivity(session, position, callId, part) {
+    bridgePosition(session, { turn, step }) {
+      const state = sessionLedger(session)
+      const position = state?.position
+      if (state?.turn === turn && position?.turn === turn && position.step === step) return position
+    },
+    bridgeActivity(session, position, callId, part, replay) {
       const state = sessionLedger(session)
       const ref = marker(part)
       if (state && position && ref?.use === 'load') {
-        recordActivity(session, state, JSON.stringify(['bridge', position.turn, position.step, callId]), ref, position)
+        const { eventSeq, turn, step } = position
+        if (eventSeq !== undefined) {
+          const event = session.eventAt(eventSeq)
+          if (event?.type !== 'plugin:acp-dsh/bridge-outside-step' || event.data?.callId !== callId ||
+              event.data.name !== SKILL_TOOL || event.data.outcome !== 'ran') return
+        }
+        const id = replay !== undefined ? ['bridge-request', replay]
+          : eventSeq !== undefined ? ['bridge-outside-step', callId] : ['bridge', turn, step, callId]
+        recordActivity(session, state, JSON.stringify(id), ref, position)
       }
     },
   }

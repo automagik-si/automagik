@@ -209,7 +209,7 @@ export function rowsOf(event, scope) {
   if (event.type === SKILL_ACTIVITY_RECORD) {
     const activity = skillActivityOf(event)
     return activity === undefined || activity.roomId !== undefined || scope.hidden?.(activity.turn)
-      ? [] : [{ ...base(), turn: activity.turn, kind: 'tool-call', tool: 'Skill', summary: activity.name, input: '', output: '' }]
+      ? [] : [{ ...base(), turn: activity.turn ?? 0, kind: 'tool-call', tool: 'Skill', summary: activity.name, input: '', output: '' }]
   }
   if (Number.isInteger(data.turn)) scope.turn = data.turn
   switch (event.type) {

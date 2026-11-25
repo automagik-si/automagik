@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createInterface } from 'node:readline'
 import { test } from 'node:test'
 import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { Backchannel, offeredTools } from '../../acp-dsh/src/host/backchannel.js'
@@ -16,6 +19,8 @@ import { callerItems } from '../src/host/caller-view.js'
 import { rowsOf } from '../src/host/pocket-chat.js'
 
 const script = new URL('../../acp-dsh/dev/fake-agent.mjs', import.meta.url).pathname
+const bridgeScript = new URL('../../acp-dsh/src/host/bridge.js', import.meta.url).pathname
+const activities = session => session.snapshotEvents().filter(event => event.type === 'plugin:automagik/skill-activity')
 const skill = { name: 'marker', description: 'Adds the file marker', content: 'CHECKED-ACP-BODY', hash: 'fixture-revision' }
 const manual = { name: 'mint-notes', description: 'Write a mint note.', content: 'Write exactly MINT-OK.', hash: 'mint', mode: 'manual' }
 const automatic = { ...skill, mode: 'automatic' }
@@ -159,7 +164,7 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
           const args = JSON.parse(input)
           offered = true
           const value = await tool.execute(args, { agent: actual })
-          afterLoad?.()
+          afterLoad?.(id)
           return { results: [{ callId: id, result: { content: tool.output.render(args, value), isError: false } }] }
         },
       }
@@ -245,17 +250,109 @@ test('Codex Automatic self-load receives the exact skill tool and catalog', { ti
   })
 })
 
+test('round 2 activity: ACP waits for a finished write and places a background load on its own event', { timeout: 15_000 }, async t => {
+  const f = fixture(t, 'acp-claude')
+  f.active.add('owner-a')
+  const { session } = f.agent
+  const finishTurn = (turn, row) => {
+    session.append('turn/start', { turn })
+    session.append('step/start', { turn, step: 0 })
+    session.append('user/message', row, { surfaceOp: 'append' })
+    session.append('step/end', { turn, step: 0 })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  const initial = user('Earlier ordinary chat.')
+  finishTurn(1, initial)
+  const previous = createUserMessage({ source: { kind: 'bot', form: 'relay', role: 'room', roomId: 'past-room', exchangeId: 'past-exchange' },
+    content: [text('An unrelated room exchange.')] })
+  const record = f.bridge.mint({ sessionId: session.id, agent: f.agent })
+  const send = async (callId, abandon) => {
+    const request = {
+      method: 'POST', url: record.path, headers: { authorization: `Bearer ${record.credential}` },
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from(JSON.stringify({ op: 'call', name: 'load_skill', arguments: { name: skill.name }, callId }))
+      },
+    }
+    const response = Object.assign(new EventEmitter(), {
+      writeHead(status) { this.status = status },
+      end(body) {
+        this.body = body
+        this.writableEnded = true
+        if (abandon) {
+          this.destroyed = true
+          this.emit('close')
+        }
+      },
+    })
+    await f.bridge.handle(request, response)
+    assert.equal(response.status, 200)
+    return response
+  }
+  await send('abandoned', true)
+  const afterAbandon = activities(session).length
+  finishTurn(2, previous)
+  const reply = await send('delivered', false)
+  const beforeFinish = activities(session).length
+  reply.writableFinished = true
+  reply.emit('finish')
+  assert.equal(reply.body, JSON.stringify({ content: [text(skill.content)], isError: false }))
+  const expectedEvent = session.snapshotEvents().find(event => event.type === 'plugin:acp-dsh/bridge-outside-step' && event.data.callId === 'delivered')
+  const placement = activities(session).map(({ data }) => ({ name: data.name, eventSeq: data.eventSeq,
+    turn: data.turn, step: data.step, roomId: data.roomId }))
+  const shared = callerItems(session.id, session.snapshotEvents(), undefined, { [session.id]: [2] })
+  assert.deepEqual({ afterAbandon, beforeFinish, placement, visible: shared.filter(row => row.kind === 'skill-activity').map(row => row.name) }, {
+    afterAbandon: 0, beforeFinish: 0,
+    placement: [{ name: skill.name, eventSeq: expectedEvent.seq, turn: undefined, step: undefined, roomId: undefined }],
+    visible: [skill.name],
+  })
+})
+
+test('round 2 activity: MCP replays without callId use the typed request ID', { timeout: 15_000 }, async t => {
+  const f = fixture(t, 'acp-codex')
+  f.active.add('owner-a')
+  await f.bridge.listen()
+  const { session } = f.agent
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 0 })
+  session.append('user/message', user('Earlier ordinary chat.'), { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 0 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  const record = f.bridge.mint({ sessionId: session.id, agent: f.agent })
+  const child = spawn(process.execPath, [bridgeScript], { env: { ...process.env,
+    DSH_BRIDGE_CREDENTIAL: record.credential, DSH_BRIDGE_URL: f.bridge.urlFor(record),
+  }, stdio: ['pipe', 'pipe', 'inherit'] })
+  const replies = createInterface({ input: child.stdout })
+  t.after(() => { replies.close(); child.kill() })
+  const receive = replies[Symbol.asyncIterator]()
+  const request = async (id, method, params) => {
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+    const message = JSON.parse((await receive.next()).value)
+    assert.equal(message.id, id)
+    return message.result
+  }
+  assert.ok((await request(0, 'tools/list')).tools.some(tool => tool.name === 'load_skill'))
+  const executionIds = []
+  f.onLoad(id => executionIds.push(id))
+  const counts = []
+  for (const id of [7, 7, '7', '7']) {
+    const result = await request(id, 'tools/call', { name: 'load_skill', arguments: { name: skill.name } })
+    assert.equal(JSON.stringify(result), JSON.stringify({ content: [text(skill.content)], isError: false }))
+    counts.push(activities(session).length)
+  }
+  assert.equal(new Set(executionIds).size, 4)
+  assert.deepEqual(counts, [1, 1, 2, 2])
+})
+
 test('confirmed Skills deliveries reach chat activity without changing provider bytes', { timeout: 30_000 }, async t => {
-  const recordType = 'plugin:automagik/skill-activity'
   const observed = []
   function checkChat(session, expected) {
     const events = session.snapshotEvents()
-    const records = events.filter(event => event.type === recordType)
+    const records = activities(session)
     const scope = { sessionId: session.id, turn: 0, calls: new Map() }
     const pocket = events.flatMap(event => rowsOf(event, scope)).filter(row => row.tool === 'Skill')
     const shared = callerItems(session.id, events, undefined, {}).filter(row => row.kind === 'skill-activity')
     const hidden = callerItems(session.id, events, undefined, { [session.id]: [1, 2] })
-    assert.equal(hidden.some(row => row.kind === 'skill-activity'), false)
+    assert.equal(hidden.some(row => row.kind === 'skill-activity' && row.turn !== undefined), false)
     assert.equal(callerItems(session.id, events, undefined, undefined).length, 0)
     assert.equal(JSON.stringify(records).includes('CHECKED-ACP-BODY'), false)
     assert.equal(JSON.stringify(records).includes('Write exactly MINT-OK.'), false)

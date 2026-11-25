@@ -20476,8 +20476,13 @@ var SKILL_ACTIVITY = "skill-activity";
 var SKILL_ACTIVITY_RECORD = "plugin:automagik/skill-activity";
 function skillActivityOf(event) {
   if (event?.type !== SKILL_ACTIVITY_RECORD || event.ignorable !== true) return;
-  const { name, id, turn, step: step2, roomId } = event.data ?? {};
-  if (typeof id !== "string" || typeof name !== "string" || name.length > 32 || !/^[a-z](?:[a-z0-9]|-(?=[a-z0-9]))*$/.test(name) || !Number.isSafeInteger(turn) || !Number.isSafeInteger(step2) || turn < 0 || step2 < 0) return;
+  const { name, id, turn, step: step2, roomId, eventSeq } = event.data ?? {};
+  if (typeof id !== "string" || typeof name !== "string" || name.length > 32 || !/^[a-z](?:[a-z0-9]|-(?=[a-z0-9]))*$/.test(name)) return;
+  if (eventSeq !== void 0) {
+    if (!Number.isSafeInteger(eventSeq) || eventSeq < 0 || eventSeq >= event.seq || turn !== void 0 || step2 !== void 0 || roomId !== void 0) return;
+    return { kind: SKILL_ACTIVITY, name, seq: event.seq, time: event.time };
+  }
+  if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step2) || turn < 0 || step2 < 0) return;
   return {
     kind: SKILL_ACTIVITY,
     name,
@@ -22412,15 +22417,15 @@ function registerSkillActivity(ctx) {
     update: (context) => context.state,
     buildViewNode({ key, id, start: start2, state: state2 }) {
       if (!start2 || !state2) return null;
+      const placement = state2.turn === void 0 ? { location: { kind: "session" } } : { location: start2.location, groupTree: "turn" };
       return {
         key,
         id,
         kind: SKILL_ACTIVITY,
         target: "chat",
         anchorSeq: start2.event.seq,
-        location: start2.location,
+        ...placement,
         visibility: "visible",
-        groupTree: "turn",
         data: state2
       };
     }
@@ -23197,11 +23202,13 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
     const tick = async () => {
       const result = await actions.roomProgress(sessionId);
       if (stop3) return;
-      const entry = (result ?? []).find((item) => item.callId === callId) ?? (result ?? [])[0];
-      const key = entry ? JSON.stringify([entry.replies, entry.speaking]) : "";
+      const own2 = result?.find((item) => item.callId === callId);
+      const entry = own2 ?? result?.[0];
+      const replies2 = Array.isArray(entry?.replies) ? entry.replies.filter((reply) => own2 !== void 0 || reply?.kind !== SKILL_ACTIVITY) : [];
+      const key = entry ? JSON.stringify([replies2, entry.speaking]) : "";
       if (entry && key !== seen) {
         seen = key;
-        setLive({ replies: entry.replies ?? [], speaking: [entry.speaking ?? []].flat() });
+        setLive({ replies: replies2, speaking: [entry.speaking ?? []].flat() });
       }
       timer = setTimeout(tick, document.hidden ? 5e3 : 1e3);
     };

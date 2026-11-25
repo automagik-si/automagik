@@ -438,13 +438,15 @@ export function install(rt) {
   // `to` undefined: up to the next anchor, or to the end while there is none (`open`).
   // `anchor` names the call, so the next call in the book ends its rows even when it starts
   // at the same seq.
-  const rowsView = (roomId, from, to, anchor, activity = true) => {
+  const rowsView = (roomId, from, to, anchor, activity = true, { live = false } = {}) => {
     const room = rt.roomOf(roomId)
     if (room !== undefined) ensureRoomLog(room)
     const records = rt.ledger.records(bookOf(roomId))
     let end = to
     if (end === undefined) {
-      const at = anchor === undefined ? -1 : records.findIndex(record => record.event === 'anchor' && record.id === anchor)
+      // Live progress keeps its sequence range for ordinary replies. Skill
+      // activity uses the relay anchor in both views.
+      const at = live || anchor === undefined ? -1 : records.findIndex(record => record.event === 'anchor' && record.id === anchor)
       const next = at === -1
         ? records.filter(record => record.event === 'anchor' && record.from > from).map(record => record.from)
         : [records.slice(at + 1).find(record => record.event === 'anchor')?.from].filter(seq => seq !== undefined)
@@ -463,7 +465,7 @@ export function install(rt) {
         const receipt = JSON.stringify([record.exchangeId, record.id])
         if (shown.has(receipt)) continue
         const belongs = anchor === undefined
-          ? record.after >= from - 1 && (end === undefined || record.after <= end)
+          ? record.anchor === undefined && record.after >= from - 1 && (end === undefined || record.after <= end)
           : record.anchor === anchor
         if (!belongs) continue
         shown.add(receipt)
@@ -960,17 +962,17 @@ export function install(rt) {
   // called it, which answers what the turn posts after the round moved on. What the
   // member writes before its last step is posted at once and collected in `said`, and
   // `heard` takes each such line once it is posted.
-  async function roomTurn(room, member, sessionId, prompt, note, signal, round, by, said = [], heard = () => {}, onWork = () => {}) {
+  async function roomTurn(room, member, sessionId, prompt, signal, round, slot, said, heard, onWork) {
     if (signal.aborted) return null
     const startedAt = Date.now()
     const exchangeId = randomUUID()
-    // A new relay can open while this recipient is still working. Keep the
-    // association made at dispatch, including for an ACP load after the reply.
+    // The relay that queued this slot owns its activity even if a newer one
+    // opens before dispatch.
+    const { by, note = 'your turn', relayAnchor } = slot
     try {
       const book = bookOf(room.id)
-      const anchor = rt.ledger.records(book).findLast(record => record.event === 'anchor')?.id
       rt.ledger.append(book, { kind: SKILL_ACTIVITY, event: 'scope', exchangeId, sessionId, botId: member.id,
-        after: room.seq, ...(anchor !== undefined && { anchor }) })
+        after: room.seq, ...(relayAnchor !== undefined && { anchor: relayAnchor }) })
     } catch (error) {
       try { rt.warn('Skills room activity could not be scoped: %s', error) } catch {}
     }
@@ -1091,7 +1093,7 @@ export function install(rt) {
   // it up the order, any other call lets it start at once. A call of another Bot stays
   // a call of its own, so that Bot is woken for its own work. `by` is the calling
   // member, if a member called.
-  function callIn(round, callees, note, by, { ordered = false } = {}) {
+  function callIn(round, callees, note, by, { ordered = false, relayAnchor = round.relayAnchor } = {}) {
     if (callees.length === 0) return
     round.batches = (round.batches ?? 0) + 1
     const batchKey = registerBatch(round.roomId, by, callees)
@@ -1102,6 +1104,7 @@ export function install(rt) {
       const slot = waiting === -1 ? { id: peer.id, name: peer.name, status: 'waiting' } : round.slots[waiting]
       if (moves && waiting !== -1) round.slots.splice(waiting, 1)
       slot.note = note
+      slot.relayAnchor = relayAnchor
       slot.batch = round.batches
       if (batchKey !== undefined) slot.batchKey = batchKey
       if (by === undefined) delete slot.by
@@ -1146,6 +1149,7 @@ export function install(rt) {
       round.batches = (round.batches ?? 0) + 1
       round.slots.push({
         id: entry.id, name: entry.name, status: 'waiting', batch: round.batches,
+        relayAnchor: entry.relayAnchor ?? round.relayAnchor,
         ...(batchKey !== undefined ? { batchKey } : {}),
         ...(entry.note !== undefined ? { note: entry.note } : {}),
         ...(entry.by !== undefined ? { by: entry.by } : {}),
@@ -1230,7 +1234,7 @@ export function install(rt) {
   // user's message, so a call is held back, never dropped: the members it named, the
   // members a "@all" called, and the members an automatic round would have called. The
   // group hears about the pause once.
-  function holdIdleCalls(room, round, member, callees, { named = [], all = false } = {}) {
+  function holdIdleCalls(room, round, member, callees, { named = [], all = false, relayAnchor = round.relayAnchor } = {}) {
     if (room.idlePaused === undefined && (room.idleRelays ?? 0) < ROOM_IDLE_RELAY_LIMIT) return false
     if (room.idlePaused === undefined) room.idlePaused = { from: member.id, count: room.idleRelays ?? ROOM_IDLE_RELAY_LIMIT, noticed: false }
     if (callees.length > 0) {
@@ -1238,7 +1242,8 @@ export function install(rt) {
       for (const peer of callees) {
         if (parked.some(entry => entry.id === peer.id)) continue
         const note = named.includes(peer) ? `${member.name} mentioned you` : all ? `${member.name} called everyone` : `${member.name} posted in the group`
-        parked.push({ id: peer.id, name: peer.name, note, by: member.id, idle: true })
+        parked.push({ id: peer.id, name: peer.name, note, by: member.id, idle: true,
+          ...(relayAnchor !== undefined && { relayAnchor }) })
       }
       room.paused = parked
     }
@@ -1259,7 +1264,7 @@ export function install(rt) {
   // Every 0-tool status step counts toward the room's idle rounds, also one that names
   // nobody: that step is what a group answering itself runs on. Once the room is paused
   // (or this step reaches the limit) the calls it would make wait for the user.
-  function callFrom(room, round, member, text, called, { worked = false, byBot = false } = {}) {
+  function callFrom(room, round, member, text, called, { worked = false, byBot = false, relayAnchor } = {}) {
     const everyone = room.members.map(rt.botOf).filter(Boolean)
     const others = everyone.filter(other => other.id !== member.id)
     const { all, found: named } = mentionsIn(text, everyone)
@@ -1282,9 +1287,9 @@ export function install(rt) {
       if (norm !== '') (round.botBodies ??= new Map()).set(member.id, [...(round.botBodies?.get(member.id) ?? []), norm])
     }
     for (const peer of callees) called.add(peer.id)
-    if (byBot && idleStep && holdIdleCalls(room, round, member, callees, { named, all })) return
+    if (byBot && idleStep && holdIdleCalls(room, round, member, callees, { named, all, relayAnchor })) return
     if (callees.length === 0) return
-    callIn(round, callees, `${member.name} mentioned you`, member.id)
+    callIn(round, callees, `${member.name} mentioned you`, member.id, { relayAnchor })
     // An @Name from the admin hands the member its goal task.
     if (rt.isAdminOf(room, member.id)) for (const peer of callees) rt.goalTaskWorking?.(room.id, peer.id)
   }
@@ -1372,6 +1377,7 @@ export function install(rt) {
     // A step answers a Bot when a Bot called it: by name, or the round a Bot's own post
     // opened (#853).
     const answeredBot = slot.by !== undefined || slot.fromBot === true
+    const { relayAnchor } = slot
     const onWork = () => {
       worked = true
       slot.worked = true
@@ -1379,10 +1385,10 @@ export function install(rt) {
       markSlotWorked(room.id, slot)
     }
     const reply = await roomTurn(
-      room, member, session.id, prompt, slot.note ?? 'your turn', signal, round, slot.by, said,
+      room, member, session.id, prompt, signal, round, slot, said,
       (line) => {
         posted.push(room.seq)
-        callFrom(room, round, member, line, called, { worked, byBot: answeredBot })
+        callFrom(room, round, member, line, called, { worked, byBot: answeredBot, relayAnchor })
       },
       onWork,
     )
@@ -1408,7 +1414,7 @@ export function install(rt) {
     } else if (subRunning) {
       if (final !== undefined) {
         postInRound(room, member, final, Date.now() - startedAt)
-        callFrom(room, round, member, final, called, { worked: true, byBot: answeredBot })
+        callFrom(room, round, member, final, called, { worked: true, byBot: answeredBot, relayAnchor })
       }
       slot.status = 'working'
       markSlotWorked(room.id, slot)
@@ -1417,7 +1423,7 @@ export function install(rt) {
       slot.status = 'posted'
       if (final !== undefined) {
         posted.push(postInRound(room, member, final, Date.now() - startedAt))
-        callFrom(room, round, member, final, called, { worked, byBot: answeredBot })
+        callFrom(room, round, member, final, called, { worked, byBot: answeredBot, relayAnchor })
       }
     } else if (reply?.skillHandled) {
       slot.status = 'passed'
@@ -1453,7 +1459,7 @@ export function install(rt) {
           // A caller still waiting in this round starts with the results. One still in its
           // own turn cannot see them, so it answers in a turn after that one.
           if (caller !== undefined && room.members.includes(caller.id)) {
-            if (!round.slots.some(other => other.id === caller.id && other.status === 'waiting')) callIn(round, [caller], finishedNote(wake.names), undefined)
+            if (!round.slots.some(other => other.id === caller.id && other.status === 'waiting')) callIn(round, [caller], finishedNote(wake.names), undefined, { relayAnchor })
             giveResults(round, caller.id, wake)
           }
         }
@@ -1537,7 +1543,7 @@ export function install(rt) {
       rt.goalUserMessage?.(room.id)
       const { all, found } = mentionsIn(post.text ?? '', members)
       const { speakers, ordered } = openingCall(room, { text: post.text ?? '' })
-      callIn(round, speakers, all || found.length > 0 ? 'the user mentioned you' : 'new message from the user', undefined, { ordered })
+      callIn(round, speakers, all || found.length > 0 ? 'the user mentioned you' : 'new message from the user', undefined, { ordered, relayAnchor: post.relayAnchor })
     }
     releaseParked(room, round)
     round.nudge?.()
@@ -1550,10 +1556,10 @@ export function install(rt) {
     for (const round of rt.roomProgress.values()) round.abort?.abort()
   }, 'omni-ui: group rounds')
 
-  function startRound(room, queued, agent, key = randomUUID()) {
+  function startRound(room, queued, agent, key = randomUUID(), relayAnchor) {
     const controller = new AbortController()
     // Taken at once, so a call that comes in while this one sets up joins it.
-    const holder = { roomId: room.id, slots: [], starting: true, abort: controller }
+    const holder = { roomId: room.id, slots: [], starting: true, abort: controller, relayAnchor }
     holder.ready = new Promise((resolve) => { holder.settle = resolve })
     rt.roomProgress.set(key, holder)
     const run = runRoundFrom(room, queued, agent, key, controller.signal, holder)
@@ -1656,10 +1662,12 @@ export function install(rt) {
     // A goal draft queued with another post still brings the admin in, on its note.
     const draftPost = posts.find(post => post.goal === 'draft' && post !== opener)
     if (draftPost !== undefined && admin !== undefined && !speakers.some(member => member.id === admin.id)) speakers.push(admin)
+    const openingAnchor = opener.relayAnchor ?? holder.relayAnchor
     const round = {
       roomId: room.id,
       members: room.members,
       startSeq,
+      relayAnchor: holder.relayAnchor ?? opener.relayAnchor,
       goalRevision: room.goal?.revision,
       ...(posts.some(userPost) ? { userMessage: true } : {}),
       ...(opener.kickoff ? { kickoff: true } : {}),
@@ -1669,6 +1677,7 @@ export function install(rt) {
       ...(references.length > 0 ? { references, shown: [] } : {}),
       slots: speakers.map(member => ({
         id: member.id, name: member.name, status: 'waiting', batch: 1,
+        relayAnchor: (member.id === admin?.id ? draftPost?.relayAnchor : undefined) ?? openingAnchor,
         ...(ordered ? { ordered: true } : {}),
         // A round a Bot's post opened: what its members answer is Bot-to-Bot, counted
         // by the idle guard even though no one is named (#853).
@@ -1692,7 +1701,8 @@ export function install(rt) {
     // A status post of its own is not an idle step: what its members answer is. A post
     // with work in it clears the streak, and a paused room holds the post back.
     if (!idlePost && poster !== undefined && !event(opener) && opener.quiet !== true) clearIdleStreak(room)
-    if (holdsPost) holdIdleCalls(room, round, poster, opened.speakers, { named, all: (mentionsOf(opener, everyone) ?? mentionsIn(opener.text ?? '', everyone)).all === true })
+    if (holdsPost) holdIdleCalls(room, round, poster, opened.speakers, { named, relayAnchor: openingAnchor,
+      all: (mentionsOf(opener, everyone) ?? mentionsIn(opener.text ?? '', everyone)).all === true })
     // A member's late failure is in the log already (noteFailure); the round names it.
     for (const post of posts.filter(item => item.failed && item.logged === undefined)) {
       round.failed.push(rt.botOf(post.botId)?.name ?? post.name)
@@ -1784,12 +1794,12 @@ export function install(rt) {
       ensureRoomLog(room)
       // Everything queued since the last relay is posted in order, so messages that the
       // Session folds into one turn are not lost.
-      const queued = rt.roomInbox.get(room.id) ?? []
+      const anchor = randomUUID()
+      const queued = (rt.roomInbox.get(room.id) ?? []).map(post => ({ ...post, relayAnchor: anchor }))
       rt.roomInbox.delete(room.id)
       // The chat shows this call's rows from here to the next call's.
       const from = Math.min(room.seq + 1, ...queued.map(post => post.logged).filter(seq => typeof seq === 'number'))
       // Its own id: two calls with nothing said between them start at the same seq.
-      const anchor = randomUUID()
       rt.ledger.append(bookOf(room.id), { event: 'anchor', id: anchor, from, time: Date.now() })
       const running = runningRound(room.id)
       if (running !== undefined) await joinRound(room, running, queued)
@@ -1798,7 +1808,7 @@ export function install(rt) {
         // What a stopped round left waiting goes first.
         const left = laterPosts.get(room.id) ?? []
         laterPosts.delete(room.id)
-        startRound(room, [...left, ...queued], exec.agent, exec.callId)
+        startRound(room, [...left, ...queued], exec.agent, exec.callId, anchor)
       }
       exec.concludeTurn?.()
       return JSON.stringify({ from, anchor })
@@ -1946,6 +1956,7 @@ export function install(rt) {
     if (extra.failed !== undefined && !extra.askedBy) return false
     if (extra.resumed || extra.stopped) return false
     const post = { ...extra, botId: sender.id, name: sender.name, text }
+    const { relayAnchor } = post
     const everyone = room.members.map(rt.botOf).filter(Boolean)
     const named = (mentionsOf(post, everyone) ?? mentionsIn(text, everyone)).found
     // A post that lands in a running round counts the same way: new work in it clears the
@@ -1954,15 +1965,16 @@ export function install(rt) {
     const idlePost = !extra.done && extra.progress !== true && extra.late !== true && isIdleRelayText(text, everyone, [])
     if (!idlePost) clearIdleStreak(room)
     const opened = openingCall(room, post)
-    if (idlePost && room.idlePaused !== undefined && holdIdleCalls(room, round, sender, opened.speakers, { named, all: (mentionsOf(post, everyone) ?? mentionsIn(text, everyone)).all === true })) return true
+    if (idlePost && room.idlePaused !== undefined && holdIdleCalls(room, round, sender, opened.speakers, { named,
+      all: (mentionsOf(post, everyone) ?? mentionsIn(text, everyone)).all === true, relayAnchor })) return true
     const { speakers, ordered } = opened
     if (speakers.length === 0) return false
     const by = speakers.filter(peer => named.includes(peer))
     const rest = speakers.filter(peer => !named.includes(peer))
     const wake = extra.batch === undefined ? undefined : wakeOf(extra.batch)
     const note = extra.done ? `${sender.name} finished the work you asked for` : undefined
-    callIn(round, by, note ?? `${sender.name} mentioned you`, sender.id, { ordered })
-    callIn(round, rest, wake === undefined ? note : finishedNote(wake.names), undefined, { ordered })
+    callIn(round, by, note ?? `${sender.name} mentioned you`, sender.id, { ordered, relayAnchor })
+    callIn(round, rest, wake === undefined ? note : finishedNote(wake.names), undefined, { ordered, relayAnchor })
     if (wake !== undefined) giveResults(round, extra.askedBy, wake)
     if (rt.isAdminOf(room, sender.id)) for (const peer of speakers) rt.goalTaskWorking?.(room.id, peer.id)
     if (extra.reportBack) {

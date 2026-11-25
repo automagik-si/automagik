@@ -11,7 +11,7 @@
 // use, minus the mirror tool. A preset, model or level change is a new signature, and the
 // bridge announces it (`notifications/tools/list_changed`) instead of the agent keeping a stale
 // list.
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { createAssistantMessage, createDeveloperMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
@@ -454,8 +454,8 @@ function skillRequest(ctx, record, name, requested) {
   }
 }
 
-function skillActivityPosition(skills, session) {
-  try { return skills?.bridgePosition?.(session) } catch { return undefined }
+function skillActivityPosition(skills, session, position) {
+  try { return skills?.bridgePosition?.(session, position) } catch { return undefined }
 }
 
 export class Backchannel {
@@ -658,10 +658,12 @@ export class Backchannel {
   }
 
   async handle(request, response) {
-    const reply = (status, value) => {
+    const reply = (status, value, onFinished) => {
       if (response.writableEnded || response.destroyed) return
+      const body = JSON.stringify(value)
       response.writeHead(status, { 'content-type': 'application/json' })
-      response.end(JSON.stringify(value))
+      if (onFinished !== undefined) response.once('finish', onFinished)
+      response.end(body)
     }
     if (request.method !== 'POST') return reply(405, { error: 'method' })
     const header = String(request.headers.authorization ?? '')
@@ -721,24 +723,27 @@ export class Backchannel {
       return reply(200, { tools: offeredTools(this.ctx, record.agent, { native: record.native, skillOnly: record.skillOnly }), generation: record.generation })
     }
     if (op === 'call') {
+      const attachment = record.attachment
       const attachmentSignal = record.attachmentAbort?.signal
       // The bridge puts no deadline on a call (a long wait, a slow command and an open approval
       // dialog are all legitimate), so the caller going away is what ends one: an MCP
       // `notifications/cancelled` or a dead bridge closes this request before its answer.
       const gone = new AbortController()
       response.once('close', () => {
-        if (!response.writableEnded) gone.abort(new Error('the caller went away'))
+        if (!response.writableFinished) gone.abort(new Error('the caller went away'))
       })
+      if (response.destroyed) gone.abort(new Error('the caller went away'))
       // Counted while it runs, its rows included: who ends this bridge with a call under way
       // (the adapter's endSession) keeps the Session's write guard until the last one is back.
       record.calls = (record.calls ?? 0) + 1
       let result
       let confirmSkill
+      const callId = typeof body.callId === 'string' ? body.callId : undefined
       try {
         result = await this.call(record, {
           name: typeof body.name === 'string' ? body.name : '',
           arguments: body.arguments ?? {},
-          callId: typeof body.callId === 'string' ? body.callId : undefined,
+          callId,
           signal: gone.signal,
           attachmentSignal,
           onSkillDelivered: confirm => { confirmSkill = confirm },
@@ -750,10 +755,16 @@ export class Backchannel {
       this.diagnostics?.bridgeCall(record, result)
       // A call that lost its authority while running answers with a refusal.
       if (record.closed || attachmentSignal?.aborted || result?.revoked === true) return reply(401, { error: 'refused' })
-      if (!gone.signal.aborted && result?.isError === false) {
-        try { confirmSkill?.() } catch { /* Activity cannot change the bridge answer. */ }
-      }
-      return reply(200, result)
+      if (confirmSkill === undefined || result?.isError !== false) return reply(200, result)
+      return reply(200, result, () => {
+        if (!response.writableFinished || response.destroyed || gone.signal.aborted || record.closed || attachmentSignal?.aborted) return
+        // The request ID is for activity replay only. The execution, approval and mirror
+        // still use the call ID. Scope request IDs to the authenticated bridge attachment.
+        const requestId = body.requestId
+        const replay = callId === undefined && (typeof requestId === 'string' || Number.isFinite(requestId) || requestId === null)
+          ? createHash('sha256').update(JSON.stringify([credential, attachment, requestId])).digest('hex') : undefined
+        try { confirmSkill(replay) } catch { /* Activity cannot change the bridge answer. */ }
+      })
     }
     if (op === 'wait') {
       const since = Number.isFinite(body.generation) ? body.generation : record.generation
@@ -973,7 +984,7 @@ export class Backchannel {
     }
     const { turn, step } = position
     const skills = skill && this.ctx?.get?.('omniTeam')?.skillCalls
-    const skillPosition = skillActivityPosition(skills, session)
+    const skillPosition = skillActivityPosition(skills, session, position)
     const route = review === undefined
       ? routeOf(session)
       : { provider: review.provider, model: review.model }
@@ -1080,7 +1091,7 @@ export class Backchannel {
       // The terminal sentence is an MCP result only. The durable row carries
       // an empty error, so a later replay never turns it into an instruction.
       if (skills && !isError && content.length > 0) {
-        onSkillDelivered?.(() => skills.bridgeActivity?.(session, skillPosition, id, content[0]))
+        onSkillDelivered?.(replay => skills.bridgeActivity?.(session, skillPosition, id, content[0], replay))
       }
       return terminal ?? {
         content: name === 'load_skill' ? content.map(({ text }) => ({ type: 'text', text }))
@@ -1267,9 +1278,8 @@ export class Backchannel {
     const approval = this.ctx?.get?.('approval')
     const id = bridgeCallId(callId)
     const skills = skill && this.ctx?.get?.('omniTeam')?.skillCalls
-    const skillPosition = skillActivityPosition(skills, session)
     const note = (outcome) => {
-      try { appendPluginRecord(session, 'plugin:acp-dsh/bridge-outside-step', { callId: id, name, outcome }) } catch {}
+      try { return appendPluginRecord(session, 'plugin:acp-dsh/bridge-outside-step', { callId: id, name, outcome }) } catch {}
     }
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
     if (level.auto) {
@@ -1333,9 +1343,9 @@ export class Backchannel {
         note('refused')
         return skill.refuse()
       }
-      note(result.isError === true ? 'failed' : 'ran')
-      if (skills && result.isError !== true && content.length > 0) {
-        onSkillDelivered?.(() => skills.bridgeActivity?.(session, skillPosition, id, content[0]))
+      const eventSeq = note(result.isError === true ? 'failed' : 'ran')
+      if (skills && eventSeq !== undefined && result.isError !== true && content.length > 0) {
+        onSkillDelivered?.(replay => skills.bridgeActivity?.(session, { eventSeq }, id, content[0], replay))
       }
       return {
         content: name === 'load_skill' ? content.map(({ text }) => ({ type: 'text', text }))
