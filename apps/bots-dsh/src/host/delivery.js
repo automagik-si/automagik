@@ -293,7 +293,7 @@ export function install(rt) {
     try {
       if (book !== undefined && (merged || !rt.ledger.records(book).some(record => record.event === undefined && record.id === exchangeId))) {
         rt.ledger.append(book, { id: exchangeId, from: fromId, to: toId, role, text, time: Date.now(), ...(length !== undefined ? { length, files } : {}), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}), ...(roomId ? { roomId } : {}) })
-        if (queued !== undefined) lost = onReplyRecorded?.()
+        if (queued !== undefined) lost = onReplyRecorded?.(exchangeId)
         await rt.ledger.written(book)
       }
       rt.assertShellChoice?.(targetSessionId, toId)
@@ -320,7 +320,7 @@ export function install(rt) {
         await ctx.sessions.flush(agent.session)
       }
     } catch (error) {
-      if (queued?.acceptedBy === undefined || lost === undefined) {
+      if (queued?.acceptedBy === undefined || (lost === undefined && reviewReceipt === undefined)) {
         queued?.fail(error)
         lost?.()
         throw error

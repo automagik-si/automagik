@@ -1207,6 +1207,9 @@ export function install(rt) {
 
   // A turn stopped for a switch goes on with its own source, so its reply still
   // reaches whoever asked.
+  const reviewContinuation = (sessionId, message, binding) =>
+    rt.notePartReviewContinuation?.(sessionId, message, binding) ?? message
+
   const handoffSource = (job, resume) => ({
     ...(resume && job.info ? job.info : { kind: SOURCE_KIND, form: 'relay', role: 'handoff', senderName: 'Omni' }),
     exchangeId: job.info?.exchangeId ?? randomUUID(),
@@ -1526,10 +1529,11 @@ export function install(rt) {
           const queued = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
           if (exchangeId === undefined || !queued.some(message => message.source?.exchangeId === exchangeId)) {
             const joined = Array.isArray(cut.joined) && cut.joined.length > 0 ? { joined: cut.joined } : {}
-            agent.inbox.prepend('next-turn', createUserMessage({
+            const message = createUserMessage({
               content: [{ type: 'text', text: PAUSE_NOTE }],
               source: cut.info ? { ...cut.info, ...joined } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...joined },
-            }))
+            })
+            agent.inbox.prepend('next-turn', reviewContinuation(sessionId, message, cut.consumedResult))
           }
         }
         try { wakeKept(agent) } catch (error) { rt.warn('omni-ui: part %s could not be woken for its kept input: %s', sessionId, error) }
@@ -1798,10 +1802,11 @@ export function install(rt) {
             const noted = [...agent.inbox.nextStep, ...agent.inbox.nextTurn].some(message => textOf(message.content) === PAUSE_NOTE)
             if (job.resume && !back.some(message => textOf(message.content) === PAUSE_NOTE) && !noted) {
               const carried = job.joined?.length ? { joined: job.joined } : {}
-              back.unshift(createUserMessage({
+              const message = createUserMessage({
                 content: [{ type: 'text', text: PAUSE_NOTE }],
                 source: job.info ? { ...job.info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
-              }))
+              })
+              back.unshift(reviewContinuation(agent.id, message, job.consumedResult))
             }
             await forward(job, back, agent.session.id).then(() => {
               delete state.switching[agent.id]
@@ -2149,7 +2154,7 @@ export function install(rt) {
     job.cutEnd = event.data?.reason?.kind
     if (job.cutEnd !== 'completed') return
     job.resume = false
-    job.info = job.joined = undefined
+    job.info = job.joined = job.consumedResult = undefined
     const marker = state.switching?.[id]
     if (marker?.cut !== undefined) {
       delete marker.cut
@@ -2338,7 +2343,7 @@ export function install(rt) {
             const fresh = await rt.resolveAgent(freshId).catch(() => undefined)
             const late = entry.job.carry.splice(0)
             if (fresh !== undefined && late.length > 0) quietly(() => appendById(fresh, late))
-            const ran = await rerunHandoff(freshId, bot.name)
+            const ran = await rerunHandoff(freshId, bot.name, entry.job?.consumedResult)
             // In the job a rerun that failed leaves the marker to the restart pass; after a
             // restart this is the last try: the handoff waits for the next message (MH-5).
             if (ran !== true && !restart) return false
@@ -2352,7 +2357,7 @@ export function install(rt) {
           await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
             .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
           // The reply the switch stopped still goes on: here, once more, from its handoff.
-          if (entry.job?.resume === true && await rerunHandoff(freshId, bot.name) !== true) answerCut(freshId, entry, failure)
+          if (entry.job?.resume === true && await rerunHandoff(freshId, bot.name, entry.job?.consumedResult) !== true) answerCut(freshId, entry, failure)
           return false
         }
       }
@@ -2487,16 +2492,17 @@ export function install(rt) {
   // The stopped reply of an agent switch that went back: its resume line goes into the old
   // part, as handOnPart's not-moved branch builds it, unless its request already waits
   // there; then the part wakes once.
-  function resumeCut(agent, { info, joined }, name) {
+  function resumeCut(agent, { info, joined, consumedResult }, name) {
     try {
       const exchangeId = info?.exchangeId
       const queued = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
       if (exchangeId === undefined || !queued.some(message => message.source?.exchangeId === exchangeId)) {
         const carried = Array.isArray(joined) && joined.length > 0 ? { joined } : {}
-        agent.inbox.prepend('next-turn', createUserMessage({
+        const message = createUserMessage({
           content: [{ type: 'text', text: PAUSE_NOTE }],
           source: info ? { ...info, ...carried } : { kind: SOURCE_KIND, form: 'relay', role: 'resume', exchangeId: randomUUID(), senderName: 'Omni', ...carried },
-        }))
+        })
+        agent.inbox.prepend('next-turn', reviewContinuation(agent.id, message, consumedResult))
       }
       wakeKept(agent)
     } catch (error) { rt.warn('ds-bot: the stopped reply of %s could not go on in the part it came from: %s', name, error) }
@@ -2506,7 +2512,7 @@ export function install(rt) {
   // more, so the reply the switch stopped goes on there. Its first failure no longer takes
   // the switch back (the part is no longer awaited).
   // Answers true when its wake ran.
-  async function rerunHandoff(freshId, name) {
+  async function rerunHandoff(freshId, name, consumedResult) {
     const fresh = await rt.resolveAgent(freshId).catch(() => undefined)
     if (fresh === undefined) return false
     try {
@@ -2518,7 +2524,8 @@ export function install(rt) {
           rt.warn('ds-bot: the handoff of the fresh part of %s was not found; its stopped reply does not go on', name)
           return false
         }
-        fresh.inbox.prepend('next-turn', createUserMessage({ content: handoff.content, ...(handoff.source ? { source: handoff.source } : {}) }))
+        const message = createUserMessage({ content: handoff.content, ...(handoff.source ? { source: handoff.source } : {}) })
+        fresh.inbox.prepend('next-turn', reviewContinuation(freshId, message, consumedResult))
       }
       wakeKept(fresh)
       return true
@@ -2745,7 +2752,8 @@ export function install(rt) {
       const text = routeOfRef(job.target).route === 'acp' ? capForAcp(build, carried) : build(carried)
       freshParts.set(freshId, estimateTokens(text))
       // Prepending the handoff does not wake the fresh part.
-      fresh.inbox.prepend('next-turn', createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
+      const message = createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) })
+      fresh.inbox.prepend('next-turn', reviewContinuation(freshId, message, resume ? job.consumedResult : undefined))
       await ctx.sessions.flush(fresh.session)
       // Watched from here, before anything can start the fresh part's first turn.
       awaiting.set(freshId, { oldId: agent.id, botId: job.botId, ...(room === undefined ? {} : { roomId: room.id }), expected: job.target, job })
@@ -4317,7 +4325,11 @@ export function install(rt) {
         job.cutPending = true
         job.info = live?.info
         job.joined = [...(live?.joined ?? [])]
-        state.switching[sessionId] = { ...(state.switching[sessionId] ?? { botId }), cut: { exchangeId: live?.info?.exchangeId, info: live?.info, joined: job.joined } }
+        job.consumedResult = live?.consumedResult
+        state.switching[sessionId] = { ...(state.switching[sessionId] ?? { botId }), cut: {
+          exchangeId: live?.info?.exchangeId, info: live?.info, joined: job.joined,
+          ...(job.consumedResult ? { consumedResult: job.consumedResult } : {}),
+        } }
       }
       // A time-boxed Auto grant ends at the pick and stays ended if the switch rolls back;
       // the fresh part waits for it before it takes the Bot's level.

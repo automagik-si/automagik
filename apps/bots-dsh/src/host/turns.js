@@ -110,11 +110,12 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
   const answered = rt.state?.works?.[source.exchangeId]
   const work = rt.closeWork?.(source.exchangeId, name, text)
   const exchangeId = randomUUID()
-  const request = rt.designatedReplyRequest?.(source.senderSessionId, fromId, source.exchangeId, answered)
+  const request = source.senderRoomId === undefined
+    ? rt.designatedReplyRequest?.(source.senderSessionId, fromId, source.exchangeId, answered) : undefined
   const reviewReceipt = request === undefined ? undefined : randomUUID()
   const reply = answered && answered.from === source.senderSessionId && answered.to === fromId
     && answered.room === undefined && answered.fromRoom === undefined
-    ? { exchangeId, replyTo: source.exchangeId, request, reviewReceipt } : undefined
+    ? { exchangeId, replyTo: source.exchangeId, reviewReceipt } : undefined
   // A Solver's reviewer answering it: its verdict marks the Solver's delivery (review-mark.js).
   const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, text, answered?.at, reply, reply === undefined ? undefined : model)
   // A reply that arrives after the user gave up the wait is a late answer: it closes
@@ -152,8 +153,9 @@ export function answerSender(rt, id, source, text, long, shouldSend, model) {
       ...(long?.length === undefined ? {} : { files: long.files, length: said.length + long.length }),
       role: 'reply',
       replyTo: source.exchangeId,
+      ...(reviewReceipt ? { reviewReceipt } : {}),
       ...(work ? { work } : {}),
-    }, { shouldSend }).catch(again => rt.warn('omni-ui: reply failure notice not delivered: %s', again))
+    }, { shouldSend, ...(reviewReceipt ? { onReplyRecorded } : {}) }).catch(again => rt.warn('omni-ui: reply failure notice not delivered: %s', again))
   })
 }
 
@@ -425,6 +427,7 @@ export function install(rt) {
       const entry = liveOf(sessionId)
       if (entry.turn !== undefined) continue
       entry.turn = RECOVERED_TURN
+      entry.consumedResult = rt.consumedReviewResultForLiveTurn?.(agent)
       // Its input was consumed before the reload; a later request joins this turn.
       entry.opened = true
       entry.since ??= Date.now()
@@ -913,6 +916,7 @@ export function install(rt) {
         entry.answers = false
         entry.opened = false
         entry.reviewReplyRequest = undefined
+        entry.consumedResult = undefined
         entry.joined = []
         entry.later = []
         entry.steeredAt = undefined
@@ -951,8 +955,10 @@ export function install(rt) {
       case 'user/message': {
         const source = event.data?.source
         // A batch can include the review reply after the turn's first input.
-        if (entry.turn !== undefined && source?.kind === SOURCE_KIND && source.role === 'reply') {
-          entry.reviewReplyRequest = rt.takeReviewReply?.(id, event.data, entry.turn) ?? entry.reviewReplyRequest
+        if (entry.turn !== undefined && source?.kind === SOURCE_KIND) {
+          const review = source.role === 'reply' ? rt.takeReviewReply?.(id, event.data, entry.turn) : undefined
+          entry.reviewReplyRequest = review?.request ?? entry.reviewReplyRequest
+          entry.consumedResult = review?.consumedResult ?? rt.takeReviewContinuation?.(id, event.data) ?? entry.consumedResult
         }
         if (source?.kind === 'subagent-settled' || source?.kind === 'agent-message') {
           if (typeof source.senderSessionId === 'string') {
@@ -1189,7 +1195,7 @@ export function install(rt) {
         break
       }
       case 'turn/end': {
-        rt.reviewReplyTurnEnd?.(id, event.data)
+        rt.reviewReplyTurnEnd?.(id, { ...event.data, turn: event.data?.turn ?? entry.turn })
         setActivity(id, undefined)
         // A steer cut leaves the turn's routing state for the fresh turn that
         // claims the steer: nothing is answered or delivered for the cut one.
@@ -1310,7 +1316,7 @@ export function install(rt) {
         if (owner !== undefined && !retry) {
           const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
           const mark = request => rt.reviewTurnEnd?.(owner, {
-            completed: failure === undefined && reason?.kind === 'completed', wroteText, model, request, trigger: info,
+            completed: failure === undefined && reason?.kind === 'completed', wroteText, model, request, trigger: info, consumedResult: entry.consumedResult,
           })
           if (request?.then) void request.then(mark)
           else mark(request)

@@ -527,15 +527,76 @@ export function install(rt) {
 
   const noteDelivery = (sessionId, args) => {
     const list = queued[sessionId] ?? []
-    if (list.some(item => item.args.exchangeId === args.exchangeId)) return
+    const existing = list.find(item => item.args.exchangeId === args.exchangeId)
+    if (existing !== undefined && args.resumeMessageId === undefined) return
     // Note it before sending: a turn may take it up before the send returns.
     const item = { at: Date.now(), args }
     if (notesFenced()) {
       localNotes.set(args.exchangeId, { sessionId, item })
     }
-    queued = { ...queued, [sessionId]: [...list, item] }
+    queued = { ...queued, [sessionId]: existing === undefined ? [...list, item]
+      : list.map(previous => previous === existing ? item : previous) }
     persist()
   }
+  rt.noteConsumedReviewResult = (id, consumedResult) => {
+    const turn = rt.live.get(id)?.turn
+    const bind = record => record === undefined ? record : {
+      ...record, consumedResult, ...(typeof turn === 'number' ? { turn } : {}),
+    }
+    if (heldStarts.has(id)) heldStarts.set(id, bind(heldStarts.get(id)))
+    else update(id, bind)
+  }
+
+  rt.consumedReviewResultForLiveTurn = agent => {
+    const id = agent.session?.id
+    if (id === undefined) return
+    const record = turns[id] ?? pendingTurns[id] ?? interrupted.turns[id]
+    if (typeof record?.turn !== 'number' || !record.consumedResult || !rt.resultReplyRequest?.(record.consumedResult)) return
+    const start = lastTurnOf(agent)
+    if (start?.type === 'turn/start' && start.data?.turn === record.turn && rt.chatOwners.get(id) === record.botId) {
+      return record.consumedResult
+    }
+  }
+  const reviewInputNote = exchangeId => {
+    if (typeof exchangeId !== 'string') return
+    for (const list of Object.values(queued)) {
+      if (!Array.isArray(list)) continue
+      const note = list.find(item => item?.args?.exchangeId === exchangeId
+        && (typeof item.args.reviewReply?.receipt === 'string' || item.args.consumedResult))
+      if (note !== undefined) return note.args
+    }
+  }
+  const matchesContinuation = (id, message, args) => {
+    const source = message?.source
+    if (args?.role !== 'resume' || rt.chatOwners.get(id) !== args.toId
+      || source?.kind !== SOURCE_KIND || source.exchangeId !== args.exchangeId) return false
+    if (typeof source.reviewContinuation === 'string') return source.reviewContinuation === args.reviewContinuation
+    return source.role === 'resume' && source.resumed === true && source.resumedByUpdate === args.resumedByUpdate
+      && typeof args.resumeMessageId === 'string' && message.id === args.resumeMessageId
+  }
+  rt.notePartReviewContinuation = (sessionId, message, binding) => {
+    if (!binding || !rt.resultReplyRequest?.(binding)) return message
+    const { source } = message
+    const prior = reviewInputNote(source.exchangeId)
+    // A switch can forward the same continuation under a new inbox ID.
+    const reviewContinuation = prior?.consumedResult?.receipt === binding.receipt && prior.reviewContinuation
+      || randomUUID()
+    if (prior !== undefined) forgetQueued(source.exchangeId)
+    noteDelivery(sessionId, { toId: binding.toId, role: 'resume', resumed: true, exchangeId: source.exchangeId,
+      text: textOf(message.content), consumedResult: binding, reviewContinuation, resumeMessageId: message.id })
+    return { ...message, source: { ...source, reviewContinuation } }
+  }
+  rt.takeReviewContinuation = (id, message) => {
+    const args = reviewInputNote(message?.source?.exchangeId)
+    if (!args?.consumedResult || !matchesContinuation(id, message, args)
+      || !matchesContinuation(id, claims.get(id)?.get(message.id), args)) return
+    const binding = args.consumedResult
+    const valid = binding.toId === args.toId && rt.resultReplyRequest?.(binding)
+    if (valid) rt.noteConsumedReviewResult(id, binding)
+    forgetQueued(args.exchangeId)
+    if (valid) return binding
+  }
+
   const deliver = rt.deliver
   rt.deliver = async (args, options) => {
     const adoption = adoptIfNeeded()
@@ -544,11 +605,13 @@ export function install(rt) {
     const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
     noteDelivery(sessionId, noted)
     try {
-      return await deliver(noted, options)
+      const sent = await deliver(noted, options)
+      if (noted.reviewReceipt !== undefined && sent === undefined) rt.retireReviewReply?.(noted.toId, noted.exchangeId)
+      return sent
     } catch (error) {
-      // A delivery that never reached the inbox stays noted: the next start sends
-      // it again. One whose Bot is gone is dropped, since it can never be sent.
-      if (rt.botOf(noted.toId) === undefined) forgetQueued(noted.exchangeId)
+      // A designated review reply that definitively failed has no input to recover.
+      if (noted.reviewReceipt !== undefined) rt.retireReviewReply?.(noted.toId, noted.exchangeId)
+      else if (rt.botOf(noted.toId) === undefined) forgetQueued(noted.exchangeId)
       throw error
     }
   }
@@ -567,8 +630,6 @@ export function install(rt) {
       && args.roomId === undefined && args.fromRoomId === undefined && args.reviewReply != null
       && typeof args.exchangeId === 'string' && typeof args.replyTo === 'string')
     : [])
-  const designatedReplyNoted = exchangeId => Object.values(queued).some(list => list.some(item =>
-    item?.args?.exchangeId === exchangeId && typeof item.args.reviewReply?.receipt === 'string'))
   rt.deliveryNote = (id) => {
     let marked
     for (const [sessionId, list] of Object.entries(queued)) {
@@ -587,9 +648,19 @@ export function install(rt) {
   // while Omni runs: the user stopped the Bot, or Omni moved or withdrew it.
   ctx.on('agent/inbox/discarded', ({ agent, message } = {}) => {
     if (stopped || rt.updateShuttingDown?.()) return
-    rt.forgetHeldInput(agent?.session?.id ?? agent?.id, message?.id)
+    const id = agent?.session?.id ?? agent?.id
+    const continuation = reviewInputNote(message?.source?.exchangeId)
+    rt.forgetHeldInput(id, message?.id)
+    if (continuation?.consumedResult && !rt.wakeLog?.movingInbox && matchesContinuation(id, message, continuation)) {
+      queueMicrotask(() => {
+        if (stopped || rt.updateShuttingDown?.() || reviewInputNote(continuation.exchangeId) !== continuation) return
+        const pending = [...(agent.inbox?.nextStep ?? []), ...(agent.inbox?.nextTurn ?? [])]
+        if (!pending.some(input => matchesContinuation(id, input, continuation))) forgetQueued(continuation.exchangeId)
+      })
+      return
+    }
     if (message?.source?.kind === SOURCE_KIND && message.source.exchangeId
-      && !rt.reviewReplyDiscarded?.(agent, message) && !designatedReplyNoted(message.source.exchangeId)) forgetQueued(message.source.exchangeId)
+      && !rt.reviewReplyDiscarded?.(agent, message) && !reviewInputNote(message.source.exchangeId)) forgetQueued(message.source.exchangeId)
   })
   // Exchanges a turn took up since this start, until the resends are done, so a resend
   // never repeats one.
@@ -612,7 +683,7 @@ export function install(rt) {
     }
     const source = event.data?.source
     const unconsumedReview = event.type === 'user/message' && source?.kind === SOURCE_KIND
-      && source.exchangeId && designatedReplyNoted(source.exchangeId)
+      && source.exchangeId && reviewInputNote(source.exchangeId)
     if (event.type === 'user/message' && source?.kind === SOURCE_KIND && source.exchangeId && !unconsumedReview) {
       taken?.add(event.data.source.exchangeId)
       for (const report of recoveryReports) report.resumed('delivery', event.data.source.exchangeId)
@@ -628,6 +699,15 @@ export function install(rt) {
       }
     }
     if (event.type === 'turn/end') {
+      const reason = event.data?.reason
+      if (finished && !switchCutBy(reason) && (reason?.kind === 'error'
+        || (reason?.kind === 'blocked' && rt.shellHoldOf?.(rt.chatOwners.get(id)) !== undefined)
+        || (reason?.kind === 'aborted' && reason.reason?.reason !== STEER_CUT))) {
+        for (const message of claims.get(id)?.values() ?? []) {
+          const args = reviewInputNote(message.source?.exchangeId)
+          if (args?.consumedResult && matchesContinuation(id, message, args)) forgetQueued(args.exchangeId)
+        }
+      }
       if (cutClaimEnds.has(id)) {
         for (const message of claims.get(id)?.values() ?? []) {
           if (message.source?.kind === SOURCE_KIND) rt.wakeLog?.retireClaim(id, message)
@@ -848,7 +928,10 @@ export function install(rt) {
         ...continuation, text }
     }
     // A turn that went on with work another Bot asked for still owes that Bot its answer.
-    return { toId: bot.id, sessionId: target, role: 'resume', ...continuation, text, exchangeId, ...(trigger?.work ? { work: trigger.work } : {}) }
+    return { toId: bot.id, sessionId: target, role: 'resume', ...continuation, text, exchangeId,
+      ...(trigger?.work ? { work: trigger.work } : {}),
+      ...(record.consumedResult?.toId === bot.id && rt.resultReplyRequest?.(record.consumedResult)
+        ? { consumedResult: record.consumedResult } : {}) }
   }
 
   const sessionFor = (sessionId, args) => rt.sessionNow(sessionId, args?.toId, args?.roomId)
@@ -884,12 +967,18 @@ export function install(rt) {
     // before waiting, and let the other roles use their own single wake.
     const replies = items.filter(item => item.args.role === 'reply').map(async item => {
       let deliveredTo = target
-      const sent = await deliver({ ...item.args, sessionId: target, steer: false, resent: true }, {
-        shouldSend(agent, destination) {
-          deliveredTo = destination
-          return sendable(agent, item, destination)
-        },
-      })
+      let sent
+      try {
+        sent = await deliver({ ...item.args, sessionId: target, steer: false, resent: true }, {
+          shouldSend(agent, destination) {
+            deliveredTo = destination
+            return sendable(agent, item, destination)
+          },
+        })
+      } catch (error) {
+        if (item.args.reviewReply && ownsTeam()) rt.retireReviewReply?.(item.args.toId, item.args.exchangeId)
+        throw error
+      }
       if (sent !== undefined) {
         resent.add(deliveredTo)
         received(item)
@@ -942,7 +1031,10 @@ export function install(rt) {
           for (const [index, { item, message }] of batch.entries()) {
             if (!ownsTeam()) throw new Error('The team changed before the resumed turn could be sent')
             rt.assertShellChoice?.(target, item.args.toId)
-            if (item.recordId !== undefined) noteDelivery(target, item.args)
+            if (item.args.consumedResult) {
+              // Bind the continuation to this concrete inbox message, including on replay.
+              noteDelivery(target, { ...item.args, resumeMessageId: message.id })
+            } else if (item.recordId !== undefined) noteDelivery(target, item.args)
             if (!item.args.resumed && (item.args.role === 'request' || item.args.role === 'stopped')) rt.lateWork?.(item.args.exchangeId)
             // DSH claims next-step injections before the waking next-turn followup.
             if (inject && index < batch.length - 1) agent.inject(message)
@@ -1384,7 +1476,10 @@ export function install(rt) {
       if (args.wake === true && rt.wakeLog?.accountsFor(args.exchangeId)) continue
       if (rt.botOf(args.toId) === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
       const target = sessionFor(oldId, args)
-      if (target === undefined) continue
+      if (target === undefined) {
+        if (args.reviewReply && ownsTeam()) rt.retireReviewReply?.(args.toId, args.exchangeId)
+        continue
+      }
       seen.add(args.exchangeId)
       add(target, liveClaims ? { ...item, liveClaim: true } : item)
     }

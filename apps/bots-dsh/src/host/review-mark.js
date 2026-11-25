@@ -508,6 +508,7 @@ export function install(rt) {
     for (const args of rt.unreadReviewReplies?.(bot.id) ?? []) {
       const { requestAt, workAt } = args.reviewReply
       if (requestAt === track.requestAt && isTime(workAt) && workAt >= requestAt
+        && (args.reviewReply.request === undefined || args.reviewReply.request === track.solver?.request)
         && args.fromId === bot.reviewerId && !unread.get(bot)?.has(args.exchangeId)) {
         rememberReply(bot, args.exchangeId, args.fromId, args.replyTo, args.reviewReply)
       }
@@ -552,13 +553,16 @@ export function install(rt) {
     if (!deferIngress(bot, applyVerdict)) applyVerdict()
     if (reply === undefined || !track.requested || !isTime(workAt)) return
     const { requestAt } = track
+    const request = track.solver?.request
     // Only the delivery that appends this exchange can start its hold.
-    return () => {
+    return (exchangeId = reply.exchangeId) => {
       if (rt.botOf(toId) !== bot || bot.reviewTrack?.requestAt !== requestAt || bot.reviewTrack.delivered === true
+        || bot.reviewTrack.solver?.request !== request
         || bot.reviewerId !== fromId) return
-      const binding = { requestAt, workAt, ...(reply.reviewReceipt ? { request: reply.request, receipt: reply.reviewReceipt } : {}) }
-      const recorded = rememberReply(bot, reply.exchangeId, fromId, reply.replyTo, binding)
-      rt.noteReviewReply?.(reply.exchangeId, binding)
+      const binding = { requestAt, workAt, ...(request ? { request } : {}),
+        ...(reply.reviewReceipt ? { receipt: reply.reviewReceipt } : {}) }
+      const recorded = rememberReply(bot, exchangeId, fromId, reply.replyTo, binding)
+      rt.noteReviewReply?.(exchangeId, binding)
       return () => retire(recorded)
     }
   }
@@ -642,12 +646,28 @@ export function install(rt) {
     if (id === undefined || typeof message?.id !== 'string') return
     const reply = replyAt(sessionId, message.source)
     const claim = reply?.claim
-    if (reply?.receipt === undefined || claim?.sessionId !== sessionId || claim.messageId !== message.id
+    if (claim?.sessionId !== sessionId || claim.messageId !== message.id
       || (claim.turn !== undefined && claim.turn !== turn)) return
     const bot = rt.botOf(id)
+    if (reply.receipt === undefined) {
+      // An ordinary review may complete work that predates the feature's explicit plan.
+      const progress = bot?.reviewTrack?.solver
+      const request = progress?.plan === undefined && reply.request === progress?.request ? reply.request : undefined
+      reply.release()
+      return { request }
+    }
     const request = requestOfReply(bot, bot?.reviewTrack, reply)
+    const binding = { toId: id, request, reviewerId: reply.reviewerId, replyTo: reply.replyTo,
+      workAt: reply.workAt, receipt: reply.receipt }
+    const consumedResult = resultReplyRequest(bot, bot?.reviewTrack, binding) ? binding : undefined
+    if (consumedResult !== undefined) rt.noteConsumedReviewResult?.(sessionId, consumedResult)
     retire(reply)
-    return request
+    return { request, consumedResult }
+  }
+
+  function resultReplyRequest(bot, track, binding) {
+    if (binding?.toId === bot?.id && typeof binding?.receipt === 'string'
+      && binding.replyTo === track?.solver?.review?.exchangeId) return requestOfReply(bot, track, binding)
   }
 
   // Another Bot's message_bot request in a guarded Solver's own chat (turns.js, first arrival
@@ -696,7 +716,7 @@ export function install(rt) {
   // opened before the person's last message does not hold it: a person who asks for the delivery
   // first gets it (SR3-3 (b)), and the late verdict on that work is dropped (SR4-1).
   function reviewTurnEnd(botId, turn) {
-    const { completed, wroteText, model, request, trigger } = turn
+    const { completed, wroteText, model, request, trigger, consumedResult } = turn
     const bot = rt.botOf(botId)
     if (!tracked(bot) || !completed || !wroteText) return
     if (deferIngress(bot, () => reviewTurnEnd(botId, turn))) return
@@ -705,12 +725,9 @@ export function install(rt) {
     if (activeSolverLimit(bot, track) || runningWork.has(bot)) return
     if (Object.hasOwn(turn, 'request') && track.solver) {
       const progress = track.solver
-      const ownReview = trigger?.role === 'reply' && trigger.reviewReceipt === undefined && trigger.senderSessionId === bot.reviewerId
-        && typeof trigger.replyTo === 'string'
-        && [progress.plan?.review?.exchangeId, progress.review?.exchangeId].includes(trigger.replyTo)
       const botRequest = progress.origin === 'bot' && typeof track.openerExchange === 'string' && trigger?.exchangeId === track.openerExchange
       const brief = track.brief === true && (trigger === undefined || trigger.role === 'kickoff')
-      if (!(request === progress.request || ownReview || botRequest || brief)) return
+      if (!(request === progress.request || resultReplyRequest(bot, track, consumedResult) || botRequest || brief)) return
     }
     bot.reviewTrack = track
     const review = reviewOf(bot)
@@ -751,6 +768,15 @@ export function install(rt) {
 
   Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf,
     solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork, designatedReplyRequest, takeReviewReply,
+    resultReplyRequest: binding => {
+      const bot = rt.botOf(binding.toId)
+      return resultReplyRequest(bot, bot?.reviewTrack, binding)
+    },
+    retireReviewReply: (toId, exchangeId) => {
+      const reply = unread.get(rt.botOf(toId))?.get(exchangeId)
+      if (reply !== undefined) retire(reply)
+      else rt.forgetDelivery?.(exchangeId)
+    },
     solverReviewSent: exchangeId => reviewSends.delete(exchangeId),
     solverProgressBusy: bot => progressWrites.has(bot) })
 }
