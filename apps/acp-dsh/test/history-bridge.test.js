@@ -1016,6 +1016,83 @@ test('D1 the restricted ACP permission boundary retires a conflicting Antigravit
   }
 })
 
+test('D1 Antigravity ON refuses a conflicting permission and keeps its history identity unavailable', { ...unixOnly, timeout: 15_000 }, async t => {
+  const h = agyHistory(t, true)
+  const chat = h.chat()
+  const marker = 'synthetic conflict history result'
+  h.services.tools.execute.mock.mockImplementation(async () => ({
+    results: [{ result: { content: [{ type: 'text', text: marker }], isError: false } }],
+  }))
+  assert.equal((await chat.turn('plain conflict control')).at(-1)?.reason.kind, 'stop')
+  assert.deepEqual(h.events('mcp-list').map(event => event.tools), [[HISTORY]])
+  const live = h.adapter.live.get(chat.session.id)
+  const { run, bridge } = live
+  assert.notEqual(run.spec.refuseTools, true)
+
+  const onUpdate = run.onUpdate
+  const onPermission = run.onPermission
+  const post = wire(h.adapter.backchannel, bridge, bridge.attachment)
+  let historyPermission
+  const replies = []
+  const assertRefused = outcome => assert.ok(outcome?.outcome === 'cancelled' ||
+    (outcome?.outcome === 'selected' && outcome.optionId === 'agy-reject'), 'ACP must refuse the history identity')
+  const reofferHistory = async signal => {
+    const { toolCall, sessionId } = historyPermission
+    const callId = toolCall.toolCallId
+    assert.equal(run.historySignal?.aborted, false)
+    await onUpdate.call(run, { sessionUpdate: 'tool_call', ...toolCall }, sessionId)
+    assertRefused((await onPermission.call(run, historyPermission, signal)).outcome)
+    assert.equal(run.restrictedCall(callId, HISTORY, run.historySignal), undefined)
+    replies.push(await post('call', { name: HISTORY, callId, arguments: toolCall.rawInput.arguments }))
+  }
+
+  // Defer the fake peer's matching announcement until after its conflicting permission arrives.
+  t.mock.method(run, 'onUpdate', (update, sessionId) => {
+    if (update.sessionUpdate === 'tool_call' && update.rawInput?.arguments?.query === 'conflict') return
+    return onUpdate.call(run, update, sessionId)
+  })
+  t.mock.method(run, 'onPermission', async (params, signal) => {
+    const { toolCall } = params
+    if (toolCall.rawInput?.arguments?.query === 'conflict') {
+      assert.equal(run.tools.has(toolCall.toolCallId), false)
+      historyPermission = params
+      const outcome = await onPermission.call(run, {
+        ...params, toolCall: { ...toolCall, rawInput: { ...toolCall.rawInput, tool: SKILL } },
+      }, signal)
+      assertRefused(outcome.outcome)
+      assert.equal(run.tools.get(toolCall.toolCallId)?.skillConflict, true)
+      await reofferHistory(signal)
+      return outcome
+    }
+    assert.equal(run.tools.get(historyPermission.toolCall.toolCallId)?.retired, true)
+    await reofferHistory(signal)
+    return onPermission.call(run, params, signal)
+  })
+
+  const refused = await chat.turn('agy-bridge read_own_chat {"query":"conflict"}')
+  assert.equal(refused.at(-1)?.reason.kind, 'stop')
+  assert.deepEqual(toolBlocks(refused), [])
+  const [permission] = h.events('permission-answer')
+  assertRefused(permission?.answer)
+  assert.deepEqual(h.events('mcp-history-result'), [])
+  assert.deepEqual(h.approvals, [])
+
+  const native = await chat.turn('native-bash')
+  const [mirror] = toolBlocks(native).map(chunk => chunk.block)
+  assert.equal(mirror?.name, 'acp_tool')
+  const result = await h.adapter.tool.execute(JSON.parse(mirror.arguments), {
+    agent: live.dshAgent, callId: mirror.id, signal: t.signal,
+  })
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(h.approvals.map(request => request.toolName), ['acp_tool'])
+  assert.deepEqual(h.events('native-tool-ran').map(event => event.name), ['Bash'])
+  assert.equal(h.adapter.live.get(chat.session.id), live)
+
+  assert.deepEqual(replies.map(({ status, body }) => [status, body.isError, body.content]), [[200, true, []], [200, true, []]])
+  assert.equal(h.services.tools.execute.mock.callCount(), 0)
+  assert.doesNotMatch(JSON.stringify([refused, native, chat.session.snapshotEvents()]), new RegExp(marker))
+})
+
 test('D1 the MCP allowlist boundary retires only the refused Antigravity identity', async t => {
   const h = await combined(t, { provider: AGY })
   const id = 'fixture-mcp-refusal'
