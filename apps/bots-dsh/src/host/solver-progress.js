@@ -308,7 +308,15 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   const progress = track.solver
   const limit = activeSolverLimit(bot, track)
   const recorded = `Recorded. ${Math.max(0, SOLVER_REPLAN_LIMIT - progress.replans)} re-plans left in Normal.`
-  const { action, run, checks } = args
+  const idFormat = 'An ID is 1 to 80 characters: letters, digits, "_", ".", ":" or "-", starting with a letter or digit; case does not matter.'
+  const key = value => typeof value === 'string' ? value.replace(/[A-Z]/g, letter => letter.toLowerCase()) : value
+  const { action } = args
+  const run = key(args.run)
+  const checks = Array.isArray(args.checks) ? args.checks.map(key) : args.checks
+  const results = Array.isArray(args.results)
+    ? args.results.map(item => record(item) ? { ...item, check: key(item.check) } : item) : args.results
+  const commands = Array.isArray(args.commands)
+    ? args.commands.map(item => record(item) ? { ...item, check: key(item.check) } : item) : args.commands
   if (action === 'auto') {
     if (progress.origin === 'bot') return { text: 'Only the person can turn Auto on, and this request came from a Bot.' }
     if (!authorizedAuto) return { text: "Auto needs the person's own words asking for it: quote them exactly." }
@@ -321,12 +329,12 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   }
   if (action === 'checks' && id(run) && Object.hasOwn(progress.runs, run)) {
     const prior = progress.runs[run]
-    if (JSON.stringify(args.results) !== (prior?.reported ?? prior)) return { text: 'This run ID already has different results.' }
-    if (!prior?.unverified && Array.isArray(args.results) && args.results.every(item => item?.pass === true)) {
+    if (JSON.stringify(results) !== (prior?.reported ?? prior)) return { text: 'This run ID already has different results.' }
+    if (!prior?.unverified && Array.isArray(results) && results.every(item => item?.pass === true)) {
       const snapshot = prior?.evidence?.snapshot
       // A legacy report without per-check ownership cannot establish a current replay.
       if (prior?.revision !== progress.revision || !snapshot || snapshot !== progress.snapshot
-        || args.results.some(({ check }) => progress.passRuns[check] !== run) || snapshot !== snapshotOf?.()) {
+        || results.some(({ check }) => progress.passRuns[check] !== run) || snapshot !== snapshotOf?.()) {
         return { text: 'This passing report is stale. Start a new run on the current result.' }
       }
     }
@@ -335,25 +343,25 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   if (limit) return { text: limitText(limit) }
   if (running) return { text: 'Wait for the current work to finish before updating Solver progress.' }
   if (action === 'plan') {
-    if (!listOfIds(checks)) return { text: 'Register 1 to 20 distinct, stable check IDs.' }
+    if (!listOfIds(checks)) return { text: `Register 1 to 20 distinct, stable check IDs. ${idFormat}` }
     if (progress.pending) return { text: 'Record the open run before replacing the plan.' }
-    const commands = checkCommands(args.commands, checks)
-    if (args.commands !== undefined && !commands) return { text: 'Give one command for each agreed check ID.' }
+    const byCheck = checkCommands(commands, checks)
+    if (commands !== undefined && !byCheck) return { text: 'Give one command for each agreed check ID.' }
     if (progress.plan && !progress.plan.superseded) {
-      const sameCommands = checks.every(check => commands?.[check] === progress.plan.commands?.[check])
+      const sameCommands = checks.every(check => byCheck?.[check] === progress.plan.commands?.[check])
       return { text: includesAll(progress.plan.checks, checks) && sameCommands
         ? recorded : 'Record a re-plan before replacing the agreed checks or commands.' }
     }
     // Keep the agreed text for the reviewer and DSH's exact command comparison.
-    for (const [check, command] of Object.entries(commands ?? {})) {
+    for (const [check, command] of Object.entries(byCheck ?? {})) {
       const { reason } = normalizeCheckCommand(command)
       if (reason) return { text: `Cannot register check ${JSON.stringify(check)}. ${reason}` }
     }
     if (new Set([...Object.keys(progress.attempts), ...checks]).size > MAX_CHECKS) return { text: 'Use at most 20 check IDs per request.' }
-    progress.plan = { revision: progress.revision, checks: [...checks], ...(commands ? { commands } : {}) }
+    progress.plan = { revision: progress.revision, checks: [...checks], ...(byCheck ? { commands: byCheck } : {}) }
     return { changed: true, text: recorded }
   }
-  if (!id(run)) return { text: 'Provide a stable run ID.' }
+  if (!id(run)) return { text: `Provide a stable run ID. ${idFormat}` }
   if (action === 'start') {
     if (!progress.plan || progress.plan.superseded || !listOfIds(checks) || !checks.every(check => progress.plan.checks.includes(check))) {
       return { text: 'Start a run with the IDs of its checks from the current plan.' }
@@ -384,7 +392,6 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   } else if (action === 'checks') {
     const pending = progress.pending
     if (!pending || pending.run !== run || running) return { text: 'Report the outcome of the current run after its checks finish.' }
-    const results = args.results
     if (!Array.isArray(results) || !results.every(item => record(item) && typeof item.pass === 'boolean')
       || !includesAll(pending.checks, results.map(item => item.check))) {
       return { text: 'Report one Boolean outcome for every check in this run.' }
@@ -427,7 +434,7 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   } else {
     return { text: 'Unknown progress action.' }
   }
-  const fixes = action === 'checks' ? checksLeft(progress, args.results) : ''
+  const fixes = action === 'checks' ? checksLeft(progress, results) : ''
   return { changed: true, text: progress.limit ? limitText(progress.limit) : recorded + fixes }
 }
 

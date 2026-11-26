@@ -189,6 +189,78 @@ async function reviewedPlan(h, checks, commands, { legacyPlan } = {}) {
 const reviewShip = 'Verdict: SHIP\nEvidence verified.'
 const noSolverRequest = 'There is no active Solver request in this chat.'
 
+test('#2131 plan accepts mixed-case check IDs and stores them lowercase', async t => {
+  const h = await setup(t)
+  const command = 'node --test ./C2.test.mjs'
+  const args = {
+    action: 'plan', request: await requestOf(h), checks: ['C1-arquivos', 'C2'],
+    commands: [{ check: 'C1-arquivos', command: 'git diff --check' }, { check: 'C2', command }],
+  }
+  const original = structuredClone(args)
+  assert.match(await h.tool('solver_progress', args), /^Recorded\./)
+  const { plan: agreed } = h.rt.botOf('solver').reviewTrack.solver
+  assert.deepEqual(agreed.checks, ['c1-arquivos', 'c2'])
+  assert.deepEqual(Object.keys(agreed.commands), ['c1-arquivos', 'c2'])
+  assert.equal(agreed.commands.c2, command)
+  assert.deepEqual(args, original)
+})
+
+test('#2131 start, checks and replays compare IDs without case', async t => {
+  const h = await setup(t)
+  const { request } = await reviewedPlan(h, ['C1'])
+  assert.equal(await h.progress('start', { request, run: 'R1', checks: ['c1'] }),
+    'Recorded. Run the check and report all its outcomes.')
+  assert.equal(await h.progress('start', { request, run: 'r1', checks: ['C1'] }),
+    'Recorded. This run is already open.')
+  const first = await h.progress('checks', { request, run: 'R1', results: results('C1', false) })
+  assert.match(first, /^Recorded\./)
+  assert.ok(first.includes('"c1" has 3 fix attempts left in Normal.'))
+  assert.equal(await h.progress('checks', { request, run: 'r1', results: results('c1', false) }),
+    'Recorded. 2 re-plans left in Normal.')
+  const { runs, attempts } = h.rt.botOf('solver').reviewTrack.solver
+  assert.deepEqual(Object.keys(runs), ['r1'])
+  assert.deepEqual(attempts, { c1: 1 })
+})
+
+test('#2131 case-only duplicates and malformed IDs stay refused', async t => {
+  const h = await setup(t)
+  const request = await requestOf(h)
+  const format = 'An ID is 1 to 80 characters: letters, digits, "_", ".", ":" or "-", starting with a letter or digit; case does not matter.'
+  for (const checks of [['C1', 'c1'], ['C 1'], ['-c1'], ['x'.repeat(81)], ['K1'], ['İd']]) {
+    assert.equal(await plan(h, request, checks), `Register 1 to 20 distinct, stable check IDs. ${format}`, JSON.stringify(checks))
+  }
+  for (const run of ['R 1', 'K1']) {
+    assert.equal(await h.progress('start', { request, run, checks: ['c1'] }), `Provide a stable run ID. ${format}`, run)
+  }
+})
+
+test('#2131 the same plan in another case is the same plan', async t => {
+  const h = await setup(t)
+  const request = await requestOf(h)
+  const command = 'fake c1'
+  assert.match(await plan(h, request, ['C1'], [{ check: 'C1', command }]), /^Recorded\./)
+  assert.match(await plan(h, request, ['c1'], [{ check: 'c1', command }]), /^Recorded\./)
+})
+
+test('#2131 verified-pass ownership replays without case', async t => {
+  const h = await setup(t)
+  const command = 'fake c1'
+  const { request } = await reviewedPlan(h, ['C1'], [{ check: 'C1', command }])
+  assert.match(await checked(h, request, 'P1', { check: 'C1', command }), /^Recorded\./)
+  assert.match(await h.progress('checks', { request, run: 'p1', results: results('c1') }), /^Recorded\./)
+})
+
+test('#2131 replan replay counts once without case', async t => {
+  const h = await setup(t)
+  const request = await requestOf(h)
+  const track = () => h.rt.botOf('solver').reviewTrack
+  const before = track().solver.replans
+  assert.equal(await h.progress('replan', { request, run: 'RP1' }), 'Recorded. 2 re-plans left in Normal.')
+  assert.equal(await h.progress('replan', { request, run: 'rp1' }), 'Recorded. 1 re-plans left in Normal.')
+  assert.equal(track().solver.replans, before + 1)
+  assert.deepEqual(Object.keys(track().solver.replanRuns), ['rp1'])
+})
+
 const progressName = 'solver_progress'
 const mcpNameOf = name => `mcp__dsh__${name}`
 const wantedCopy = {
@@ -853,13 +925,13 @@ test('T4 the installed Pocket listener opens ordinary cards, with Solver progres
   assert.match(auto.text, /needs the person's own words/)
 })
 
-async function reviewReplyFixture(t, averageCommand = 'node --test average.test.mjs') {
+async function reviewReplyFixture(t, averageCommand = 'node --test average.test.mjs', ids = ['average-test', 'diff-check']) {
   const h = await setup(t, { reviewGuard: true }, 2)
   const request = await requestOf(h)
   assert.ok(request, 'turn 2 has an active request')
-  assert.match(await plan(h, request, ['average-test', 'diff-check'], [
-    { check: 'average-test', command: averageCommand },
-    { check: 'diff-check', command: 'git diff --check' },
+  assert.match(await plan(h, request, ids, [
+    { check: ids[0], command: averageCommand },
+    { check: ids[1], command: 'git diff --check' },
   ]), /^Recorded\./)
   const deliver = h.rt.deliver
   const deliveries = []
@@ -1496,8 +1568,9 @@ const claudeBashInput = JSON.parse(readFileSync(new URL(
   '../src/host/live-chat/fixtures/claude.jsonl', import.meta.url), 'utf8').split('\n')[3])
   .message.content.find(block => block.type === 'tool_use' && block.name === 'Bash').input
 
-test('stage verdicts take a Claude native Solver through replan, admitted work and Done', async t => {
-  const { h, request, review, track, openReply, deliveries } = await reviewReplyFixture(t)
+async function claudeReviewFixture(t, ids) {
+  const fixture = await reviewReplyFixture(t, undefined, ids)
+  const { h, review, openReply, deliveries } = fixture
   const { cwd, mirrorUpdates } = await nativeMirror(t, h, 'acp-claude')
   const headers = []
   const answer = async (kind, turn, text) => {
@@ -1515,6 +1588,11 @@ test('stage verdicts take a Claude native Solver through replan, admitted work a
     await openReply(turn, reply)
     return exchangeId
   }
+  return { ...fixture, cwd, mirrorUpdates, headers, answer }
+}
+
+async function claudeSolverToDone(t, ids = ['average-test', 'diff-check']) {
+  const { h, request, track, cwd, mirrorUpdates, headers, answer } = await claudeReviewFixture(t, ids)
   const bash = id => {
     const toolCallId = `toolu_${id}`
     const command = 'cat average.mjs'
@@ -1537,8 +1615,8 @@ test('stage verdicts take a Claude native Solver through replan, admitted work a
   assert.equal(first.review.exchangeId, fix)
   assert.match(await h.progress('replan', { request, run: 'replan-1' }), /^Recorded\./)
   const checks = [
-    { check: 'average-test', command: 'node --test ./average.test.mjs' },
-    { check: 'diff-check', command: 'git diff --check' },
+    { check: ids[0], command: 'node --test ./average.test.mjs' },
+    { check: ids[1], command: 'git diff --check' },
   ]
   assert.match(await plan(h, request, checks.map(({ check }) => check), checks), /^Recorded\./)
   const ship = await answer('plan', 4, 'PLAN SHIP\nThe revised plan matches the request.')
@@ -1562,7 +1640,7 @@ test('stage verdicts take a Claude native Solver through replan, admitted work a
   for (const check of checks) {
     assert.match(await checked(h, request, check.check, check), /^Recorded\./)
   }
-  assert.deepEqual(track().solver.passed, checks.map(({ check }) => check))
+  assert.deepEqual(track().solver.passed, checks.map(({ check }) => check.toLowerCase()))
   const result = await answer('result', 5, 'RESULT SHIP\nBoth current checks pass.')
   const recorded = track().solver.review
   assert.equal(recorded.exchangeId, result)
@@ -1578,6 +1656,43 @@ test('stage verdicts take a Claude native Solver through replan, admitted work a
   for (const [stage, header] of headers) {
     assert.match(header, new RegExp(`First line: exactly one of \`${stage} SHIP\`, \`${stage} FIX-FIRST\`, or \`${stage} BLOCKED\`\\.`))
   }
+  return { h, track }
+}
+
+test('stage verdicts take a Claude native Solver through replan, admitted work and Done', claudeSolverToDone)
+
+function solverDeliveryText(h) {
+  const bot = h.rt.botOf('solver')
+  const view = { ...bot, ...h.rt.reviewMarkOf(bot), ...h.rt.solverStatusOf(bot) }
+  return reviewMarkText(view, { byId: h.rt.state.bots })
+}
+
+test('#2131 mixed-case check IDs take a Claude native Solver to Done', async t => {
+  const { h, track } = await claudeSolverToDone(t, ['C1-arquivos', 'C2'])
+  assert.deepEqual(track().solver.passed, ['c1-arquivos', 'c2'])
+  assert.doesNotMatch(solverDeliveryText(h), /not verified/i)
+})
+
+test('#2131 a mixed-case unverified run records no Done and shows not verified', async t => {
+  const { h, request, review, track, answer } = await claudeReviewFixture(t, ['C1-arquivos', 'C2'])
+  const ship = await answer('plan', 3, 'PLAN SHIP\nThe plan matches the request.')
+  assert.equal(track().solver.plan.review.exchangeId, ship)
+  assert.equal(track().solver.plan.review.verdict, 'SHIP')
+  assert.equal(await h.progress('start', { request, run: 'R1', checks: ['C1-arquivos'] }),
+    'Recorded. Run the check and report all its outcomes.')
+  const reason = 'No matching completed check was observed.'
+  assert.equal(await h.progress('checks', { request, run: 'r1', results: results('c1-ARQUIVOS') }),
+    `No verified passing evidence for this run. ${reason} Start a new run on the current result.`)
+  assert.equal(track().solver.runs.r1.unverified, true)
+  assert.equal(track().solver.runs.r1.reason, reason)
+  assert.deepEqual(track().solver.passed, [])
+  await assert.rejects(review('result'), /Record current passing runs for every agreed check/)
+  h.finish('solver', 'Delivered.')
+  assert.equal(track().delivered, true)
+  assert.equal(track().solver.review, undefined)
+  assert.notEqual(track().last.done, true)
+  assert.equal(track().outcome.reason, 'checks')
+  assert.match(solverDeliveryText(h), /Result not verified, so not marked done: current passing results are missing for agreed checks\./)
 })
 
 test('stage verdict parsers keep legacy forms and refuse wrong or unbound stages', () => {

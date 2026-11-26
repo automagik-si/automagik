@@ -3941,7 +3941,7 @@ const pack = createPack({
     "Waiting for your answer after the attempt limit for {check}.": "Aguardando sua resposta após atingir o limite de tentativas de {check}.",
     "Waiting for your answer after the re-plan limit.": "Aguardando sua resposta após atingir o limite de replanejamentos.",
     "Done: every check passed and {name} approved.": "Concluído: todas as verificações passaram e {name} aprovou.",
-    "Not marked done: current passing results are missing for agreed checks.": "Conclusão pendente: há verificações combinadas sem resultado atual de aprovação.",
+    "Result not verified, so not marked done: current passing results are missing for agreed checks.": "Resultado não verificado, por isso a conclusão fica pendente: há verificações combinadas sem resultado atual de aprovação.",
     "Not marked done: {name} has not independently approved the current result.": "Conclusão pendente: {name} ainda não aprovou o resultado atual de forma independente.",
     "Choose a specific model for the Solver and its reviewer.": "Escolha um modelo específico para o Solver e para o revisor.",
     "Choose a different model for the reviewer.": "Escolha um modelo diferente para o revisor.",

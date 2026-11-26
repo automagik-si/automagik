@@ -207,6 +207,17 @@ test('the review mark line: plan missing, result missing, both present, both mis
     'Plan unreviewed: Ada reviewer gave no verdict before the work started.')
 })
 
+test('#2131 an unverified delivery says the result was not verified', () => {
+  const roster = { byId: { r1: { id: 'r1', name: 'Ada reviewer' } } }
+  const bot = { id: 's1', role: 'Solver', reviewerId: 'r1', reviewMark: { review: 'bot', plan: true, result: false } }
+  const withOutcome = outcome => ({ ...bot, solverStatus: { outcome } })
+  assert.equal(reviewMarkText(withOutcome({ reason: 'checks' }), roster).split('\n')[1],
+    'Result not verified, so not marked done: current passing results are missing for agreed checks.')
+  const done = { ...withOutcome({ done: true }), reviewMark: { ...bot.reviewMark, result: true, done: true } }
+  assert.doesNotMatch(reviewMarkText(done, roster), /not verified/i)
+  assert.doesNotMatch(reviewMarkText(withOutcome({ reason: 'review' }), roster), /not verified/i)
+})
+
 // #2056 D1.5: the Review guard rides the Solver's own create-bot, only with a reviewer Bot.
 test('the Solver payload carries the Review guard only with a reviewer Bot and the tick', () => {
   const look = { shape: 'moon', color: 'red' }
