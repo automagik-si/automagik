@@ -535,7 +535,8 @@ that tool.
 
 **2026-11-26 amendment (#2061 D2d).** omp and Antigravity share the existing `dsh` bridge for
 `load_skill` and `read_own_chat`. Its restricted allowlist can contain either tool as eligibility
-permits. Antigravity offers history with Native tools ON. With Native tools OFF, history stays
+permits. Antigravity offers history with Native tools ON. Antigravity's history read is authorized
+on the bridge's own request (One dialog per call), by the Bot's level. With Native tools OFF, history stays
 silently unavailable and the handoff note still reaches the fresh part. Hermes keeps
 `needs-new-conversation` under RFC 0030.
 

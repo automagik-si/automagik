@@ -159,6 +159,7 @@ function connect(server, sessionId, { probe = false } = {}) {
   child.stdin.on('error', () => {})
   let seq = 0
   const pending = new Map()
+  const cancelled = new Set()
   let failure
   const exited = new Promise(resolve => {
     const end = error => {
@@ -187,6 +188,7 @@ function connect(server, sessionId, { probe = false } = {}) {
         continue
       }
       if (message.id === undefined) continue
+      if (cancelled.delete(message.id)) trace({ event: 'mcp-cancelled-reply', sessionId, message })
       const waiter = pending.get(message.id)
       if (waiter === undefined) continue
       pending.delete(message.id)
@@ -194,10 +196,22 @@ function connect(server, sessionId, { probe = false } = {}) {
       else waiter.reject(new Error(message.error.message))
     }
   })
-  const request = (method, params) => new Promise((resolve, reject) => {
+  const request = (method, params, signal) => new Promise((resolve, reject) => {
     if (failure !== undefined) return reject(failure)
+    if (signal?.aborted) return reject(signal.reason)
     const id = ++seq
-    pending.set(id, { resolve, reject })
+    const abort = () => {
+      pending.delete(id)
+      cancelled.add(id)
+      notify('notifications/cancelled', { requestId: id })
+      trace({ event: 'mcp-call-cancelled', sessionId })
+      reject(signal.reason)
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    pending.set(id, {
+      resolve: result => { signal?.removeEventListener('abort', abort); resolve(result) },
+      reject: error => { signal?.removeEventListener('abort', abort); reject(error) },
+    })
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
   })
   const notify = (method, params) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`)
@@ -485,6 +499,7 @@ const implementation = {
     const session = sessions.get(sessionId)
     if (session) {
       session.cancelled = true
+      session.historyRequest?.abort()
       session.wake?.()
     }
   },
@@ -710,6 +725,48 @@ const implementation = {
         }
       }
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+      return { stopReason: 'end_turn' }
+    }
+    const agyReal = /^agy-real (\[.*\])$/m.exec(current)
+    if (agyReal !== null) {
+      const connection = session.mcp.get('dsh')
+      for (const [index, step] of JSON.parse(agyReal[1]).entries()) {
+        const { query, meta, operation = 'read_own_chat', conflicting, retry, permission = true, includeQuery } = step
+        const toolCallId = `agy-real-${session.turns}-${index}`
+        if (permission) {
+          // Title, kind and summary reflect the observed ACP shape. The name value and
+          // every MCP id variant below are synthetic. The optional query was seen in 5a.
+          const toolCall = { toolCallId, name: conflicting ? 'mcp_other_read_own_chat' : 'mcp_dsh_read_own_chat',
+            title: 'Run mcp_dsh_read_own_chat', kind: 'other', status: 'pending',
+            rawInput: { toolSummary: 'Read this chat', ...(includeQuery && { query }) } }
+          await update({ sessionUpdate: 'tool_call', ...toolCall })
+          const { outcome } = await conn.requestPermission({ sessionId, toolCall, options: [
+            { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
+            { optionId: 'agy-reject', name: 'Reject', kind: 'reject_once' },
+          ] })
+          trace({ event: 'permission-answer', answer: outcome })
+          // The conflict control deliberately probes the bridge even after ACP refusal.
+          if (!conflicting && outcome.optionId !== 'agy-allow') continue
+        }
+        const callId = meta === 'matching' ? toolCallId : meta
+        const controller = new AbortController()
+        session.historyRequest = controller
+        try {
+          for (let attempt = 0; attempt < (retry ? 2 : 1); attempt++) {
+            const answer = await connection.request('tools/call', { name: operation, arguments: { query, name: query },
+              ...(callId !== undefined && { _meta: { callId } }) }, controller.signal)
+            trace({ event: 'agy-real-result', sessionId, toolCallId, query, operation, answer })
+            const text = (answer.content ?? []).map(block => block.text ?? '').join('\n')
+            if (text) await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) throw error
+          return { stopReason: 'cancelled' }
+        } finally {
+          session.historyRequest = undefined
+        }
+        if (permission) await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed' })
+      }
       return { stopReason: 'end_turn' }
     }
     // codex-acp's own shapes (#1564 PR B), each checked before the generic "bridge" trigger.

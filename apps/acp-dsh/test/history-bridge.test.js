@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session } from '@deepseek-ai/dsh-session'
@@ -161,7 +162,19 @@ test('C2 only the eligible omp Session gets one restricted dsh bridge', async t 
 function agyHistory(t, nativeTools, options) {
   const h = agyWorld(t, options)
   h.service.botIdentity(() => ({ name: 'Fixture Bot', needsDshTools: true, nativeTools, nativeToolsAgent: AGY }))
-  h.services.tools = { definitions: () => definitions, execute: t.mock.fn() }
+  h.executed = []
+  h.controls.body = () => 'synthetic marker [secret:fixture]'
+  h.services.tools = {
+    definitions: () => definitions,
+    execute: t.mock.fn(async ({ calls: [call], agent, signal }) => {
+      const exec = { agent, callId: call.id, name: call.name, signal }
+      const result = await h.execute(exec, async () => {
+        h.executed.push(call)
+        return { content: [{ type: 'text', text: await h.controls.body(call) }], isError: false }
+      })
+      return { results: [{ result }] }
+    }),
+  }
   return h
 }
 
@@ -172,7 +185,7 @@ function agySkills(h, available = () => true) {
 const textOf = chunks => chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
 const toolBlocks = chunks => chunks.filter(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
 
-test('D1 Antigravity ON lists history on dsh and authorizes one correlated, card-free read', { ...unixOnly, timeout: 15_000 }, async t => {
+test('D1 Antigravity ON lists history on dsh and keeps the exact-pair control', { ...unixOnly, timeout: 15_000 }, async t => {
   const h = agyHistory(t, true)
   agySkills(h, id => id === 'with-skills')
   const chat = h.chat()
@@ -236,10 +249,10 @@ test('D1 Antigravity ON lists history on dsh and authorizes one correlated, card
   const missing = await chat.turn('agy-bridge-without-id read_own_chat {"query":"missing"}')
   assert.deepEqual(bindings, [undefined])
   assert.equal(h.events('permission-answer').at(-1)?.answer.optionId, 'agy-allow')
-  assert.equal(h.events('mcp-history-result').at(-1)?.answer.isError, true)
-  assert.doesNotMatch(textOf(missing), /synthetic marker/)
-  assert.equal(h.services.tools.execute.mock.callCount(), 1)
-  assert.equal(h.approvals.length, 1)
+  assert.deepEqual(h.events('mcp-history-result').at(-1)?.answer, { content: [masked], isError: false })
+  assert.match(textOf(missing), /synthetic marker \[secret:fixture\]/)
+  assert.equal(h.services.tools.execute.mock.callCount(), 2)
+  assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY, HISTORY])
 
   const native = await chat.turn('native-read')
   assert.deepEqual(h.events('native-tool-ran').map(event => event.name), ['Read'])
@@ -335,6 +348,269 @@ for (const verified of [true, false]) {
     assert.deepEqual(h.approvals, [])
   })
 }
+
+const agyTest = { ...unixOnly, timeout: 15_000 }
+const agyRequest = (...steps) => `agy-real ${JSON.stringify(steps)}`
+const agyAllow = { outcome: 'selected', optionId: 'agy-allow' }
+const maskedLine = 'synthetic marker [secret:fixture]'
+
+function openAgyHistory(h) {
+  const chat = h.chat()
+  chat.session.append('request/header', { header: { config: { provider: AGY, model: 'default' }, tools: definitions }, reason: 'initial' })
+  return chat
+}
+
+function observeAgyBridge(t, h) {
+  const calls = []
+  const bridge = h.adapter.backchannel
+  const call = bridge.call
+  t.mock.method(bridge, 'call', async (record, request) => {
+    const observation = { request, pending: h.approvals.length, permission: h.events('permission-answer').at(-1)?.answer,
+      claim: h.adapter.live.get(record.sessionId)?.run.restrictedClaim?.(request.callId) }
+    calls.push(observation)
+    const result = await call.call(bridge, record, request)
+    observation.result = result
+    return result
+  })
+  return calls
+}
+
+const callRows = session => session.snapshotEvents().filter(row => row.type === 'tool/call' && row.data.name === HISTORY)
+const resultRows = session => session.snapshotEvents().filter(row => row.type === 'tool/result' &&
+  callRows(session).some(call => call.data.callId === row.data.message.toolCallId))
+
+function assertAgyRead(chunks, h, approvals) {
+  assert.deepEqual(toolBlocks(chunks), [], 'the ACP request must raise no mirror')
+  assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+  assert.deepEqual(h.approvals.map(request => request.toolName), Array(approvals).fill(HISTORY))
+  assert.equal(textOf(chunks).split(maskedLine).length - 1, 1)
+  assert.equal(h.executed.length, 1)
+}
+
+for (const level of ['workspace', 'manual']) {
+  for (const [label, meta] of [['T1 matching', 'matching'], ['T2 absent', undefined], ['T3 rejection', undefined]]) {
+    test(`D2d ${label} at ${level}`, agyTest, async t => {
+      const h = agyHistory(t, true, { level })
+      const chat = openAgyHistory(h)
+      const observed = observeAgyBridge(t, h)
+      const rejected = label.startsWith('T3')
+      if (rejected) h.controls.ask = () => 'rejected'
+      const chunks = await chat.turn(agyRequest({ query: label, meta, includeQuery: meta !== undefined }))
+      assert.deepEqual(toolBlocks(chunks), [], 'the ACP request must raise no mirror')
+      assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+      assert.deepEqual(observed.map(({ pending, permission }) => [pending, permission]), [[0, agyAllow]])
+      assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY])
+      const [result] = resultRows(chat.session)
+      assert.equal(resultRows(chat.session).length, 1)
+      if (rejected) {
+        assert.deepEqual(result.data.error, { name: 'ApprovalDeniedError', code: 'REJECTED' })
+        assert.deepEqual(observed[0].result.error, result.data.error)
+        assert.equal(h.executed.length, 0)
+        const [wire] = h.events('agy-real-result')
+        assert.equal(wire.answer.isError, true)
+        assert.deepEqual(wire.answer.content, observed[0].result.content)
+        assert.doesNotMatch(JSON.stringify([wire, result, chunks]), /synthetic marker/)
+      } else {
+        assertAgyRead(chunks, h, 1)
+        assert.deepEqual(h.events('agy-real-result').map(row => row.answer), [{ content: [{ type: 'text', text: maskedLine }], isError: false }])
+        assert.equal(result.data.error, undefined)
+        assert.equal(h.adapter.live.get(chat.session.id).bridge.approvalCalls.size, 0)
+      }
+    })
+  }
+
+  test(`D2d T1 duplicate MCP requests ask separately at ${level}`, agyTest, async t => {
+    const h = agyHistory(t, true, { level })
+    const chat = openAgyHistory(h)
+    const calls = observeAgyBridge(t, h)
+    const chunks = await chat.turn(agyRequest({ query: 'duplicate', meta: 'matching', retry: true }))
+    assert.deepEqual(toolBlocks(chunks), [])
+    assert.equal(h.events('permission-answer').length, 1)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].request.callId, calls[1].request.callId)
+    assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY, HISTORY])
+    assert.deepEqual(h.events('agy-real-result').map(({ answer }) => answer.content[0].text), [maskedLine, maskedLine])
+    assert.equal(h.executed.length, 2)
+    assert.equal(resultRows(chat.session).length, 2)
+  })
+}
+
+test('D2d T4a an unseen MCP id keeps its own card and row', agyTest, async t => {
+  const h = agyHistory(t, true)
+  const chat = openAgyHistory(h)
+  const observed = observeAgyBridge(t, h)
+  const chunks = await chat.turn(agyRequest({ query: 'unseen', meta: 'mcp-unseen-1', permission: false }))
+  assertAgyRead(chunks, h, 1)
+  assert.equal(observed[0].claim, 'unknown')
+  assert.equal(h.approvals[0].callId, 'mcp-unseen-1')
+  assert.equal(resultRows(chat.session)[0].data.message.toolCallId, 'mcp-unseen-1')
+})
+
+for (const [label, claim] of [['T4b', 'retired'], ['T4c', 'conflict']]) {
+  test(`D2d ${label} refuses a ${claim} id before the card`, agyTest, async t => {
+    const h = agyHistory(t, true)
+    const chat = openAgyHistory(h)
+    const observed = observeAgyBridge(t, h)
+    let request = { query: 'conflicting', meta: 'matching', conflicting: true }
+    if (claim === 'retired') {
+      await chat.turn('agy-bridge read_own_chat {"query":"seed"}')
+      request = { query: 'retired', meta: h.events('mcp-history-result')[0].toolCallId, permission: false }
+      h.executed.length = h.approvals.length = 0
+    }
+    const chunks = await chat.turn(agyRequest(request))
+    const last = observed.at(-1)
+    assert.deepEqual(toolBlocks(chunks), [])
+    assert.equal(h.adapter.live.get(chat.session.id).run.spec.refuseTools, undefined)
+    if (request.conflicting) assert.notEqual(last?.permission?.optionId, 'agy-allow')
+    assert.deepEqual(last?.result, { content: [], isError: true,
+      error: { name: 'BridgeCancelledError', code: 'BRIDGE_CANCELLED' } })
+    assert.deepEqual(h.approvals, [])
+    assert.deepEqual(h.executed, [])
+    assert.equal(last.claim, claim)
+    assert.equal(h.adapter.live.get(chat.session.id).run.restrictedClaim(last.request.callId), claim)
+  })
+}
+
+for (const conflicting of [true, false]) {
+  test(`D2d T4d ${conflicting ? 'conflicting' : 'rejected'} X leaves Y independently approvable`, agyTest, async t => {
+    const h = agyHistory(t, true)
+    const chat = openAgyHistory(h)
+    const observed = observeAgyBridge(t, h)
+    if (!conflicting) h.controls.ask = () => h.approvals.length === 1 ? 'rejected' : 'allowed-once'
+    const chunks = await chat.turn(agyRequest({ query: 'X', meta: 'matching', conflicting }, { query: 'Y' }))
+    assert.deepEqual(toolBlocks(chunks), [])
+    assert.deepEqual(observed.map(({ result }) => result.error?.code), [conflicting ? 'BRIDGE_CANCELLED' : 'REJECTED', undefined])
+    assert.deepEqual(h.approvals.map(request => request.toolName), conflicting ? [HISTORY] : [HISTORY, HISTORY])
+    assert.deepEqual(h.executed.map(call => JSON.parse(call.arguments).query), ['Y'])
+    assert.equal(textOf(chunks).split(maskedLine).length, 2)
+  })
+}
+
+test('D2d T4e a history grant leaves unbound Skills refused on the same bridge', agyTest, async t => {
+  const h = agyHistory(t, true)
+  agySkills(h)
+  const chat = openAgyHistory(h)
+  const observed = observeAgyBridge(t, h)
+  await chat.turn('agy-bridge read_own_chat {"query":"seed"}')
+  assert.deepEqual(h.events('mcp-list').map(row => row.tools), [[HISTORY, SKILL]])
+  assert.equal(observed[0].result.isError, false)
+  const record = h.adapter.live.get(chat.session.id).bridge
+  const chunks = await chat.turn(agyRequest(
+    { operation: SKILL, query: 'missing', permission: false },
+    { operation: SKILL, query: 'unknown', meta: 'mcp-unseen-skill', permission: false }))
+  assert.equal(h.adapter.live.get(chat.session.id).bridge, record)
+  assert.deepEqual(observed.slice(1).map(({ result }) => [result.error?.code, result.content]), [
+    ['BRIDGE_CANCELLED', []], ['BRIDGE_CANCELLED', []],
+  ])
+  assert.deepEqual(h.executed.map(call => call.name), [HISTORY])
+  assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY])
+  assert.doesNotMatch(textOf(chunks), /synthetic marker/)
+})
+
+for (const changed of ['Session', 'provider row']) {
+  test(`D2d T4f replacing the ${changed} with a result pending withholds history`, agyTest, async t => {
+    const h = agyHistory(t, true)
+    const chat = openAgyHistory(h)
+    const observed = observeAgyBridge(t, h)
+    h.controls.body = () => {
+      const live = h.adapter.live.get(chat.session.id)
+      if (changed === 'Session') live.dshAgent.session = Session.create(chat.session.id)
+      else h.adapter.agents.set(AGY, { ...live.providerRow })
+      return maskedLine
+    }
+    const chunks = await chat.turn('agy-bridge read_own_chat {"query":"replace"}')
+    assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY])
+    assert.equal(h.executed.length, 1)
+    assert.deepEqual(observed.map(({ result }) => [result.error?.code, result.content]), [['BRIDGE_CANCELLED', []]])
+    assert.doesNotMatch(JSON.stringify([chunks, chat.session.snapshotEvents(), h.events('mcp-history-result')]), /synthetic marker/)
+  })
+}
+
+test('D2d T4f omp still refuses an unknown id', async t => {
+  const h = await combined(t)
+  const end = h.p.begin()
+  try {
+    assert.equal((await h.call('mcp-unseen-omp')).isError, true)
+    assert.deepEqual(h.executed, [])
+    assert.deepEqual(h.requests, [])
+  } finally { await end() }
+})
+
+for (const started of [false, true]) {
+  test(`D2d ${started ? 'T5b Stop while the body waits' : 'T5a Stop while the card waits'}`, agyTest, async t => {
+    const h = agyHistory(t, true)
+    const chat = openAgyHistory(h)
+    const observed = observeAgyBridge(t, h)
+    const waiting = Promise.withResolvers()
+    const held = Promise.withResolvers()
+    if (started) h.controls.body = () => { waiting.resolve(); return held.promise }
+    else h.controls.ask = () => {
+      waiting.resolve()
+      return held.promise
+    }
+    assert.equal((await chat.turn('plain Stop setup')).at(-1)?.reason.kind, 'stop')
+    const stop = new AbortController()
+    const pending = chat.turn(agyRequest({ query: 'stop' }), [], stop.signal)
+    try {
+      const reached = await soon(Promise.race([waiting.promise.then(() => true), pending.then(() => false)]))
+      assert.equal(reached, true, 'the bridge card or its approved body must be reached')
+      assert.deepEqual(observed.map(({ pending, permission }) => [pending, permission]), [[0, agyAllow]])
+      assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY])
+      stop.abort()
+      assert.equal(h.approvals[0].signal.aborted, true)
+      for (let tries = 0; tries < 100 && h.events('mcp-call-cancelled').length === 0; tries++) await delay(10)
+      assert.equal(h.events('mcp-call-cancelled').length, 1)
+      // Let the real MCP cancellation close the HTTP request before the held layer settles.
+      const { signal } = observed[0].request
+      if (!signal.aborted) await soon(once(signal, 'abort'))
+    } finally {
+      stop.abort()
+      held.resolve(started ? maskedLine : 'cancelled')
+      await pending
+    }
+    for (let tries = 0; tries < 100 && observed[0]?.result === undefined; tries++) await delay(10)
+    assert.equal(h.approvals[0].signal.aborted, true)
+    assert.equal(h.executed.length, started ? 1 : 0)
+    const [result] = resultRows(chat.session)
+    const cancelled = { name: 'BridgeCancelledError', code: 'BRIDGE_CANCELLED' }
+    assert.deepEqual(observed[0].result, { content: [], isError: true, error: cancelled })
+    assert.deepEqual(result?.data.error, cancelled)
+    assert.equal((await pending).at(-1)?.reason.kind, 'aborted')
+    assert.deepEqual(h.events('agy-real-result'), [])
+    assert.deepEqual(h.events('mcp-cancelled-reply'), [])
+    assert.doesNotMatch(JSON.stringify([chat.session.snapshotEvents(), h.events()]), /synthetic marker/)
+  })
+}
+
+for (const level of ['auto', 'full']) {
+  test(`D2d ${level} allows one Antigravity ON read without a personal card`, agyTest, async t => {
+    const h = agyHistory(t, true, { level })
+    const chat = openAgyHistory(h)
+    const reviewed = []
+    if (level === 'auto') h.onExecute((call, next) => { reviewed.push(call.name); return next() })
+    const chunks = await chat.turn(agyRequest({ query: level }))
+    assertAgyRead(chunks, h, 0)
+    assert.deepEqual(reviewed, level === 'auto' ? [HISTORY] : [])
+    assert.equal(resultRows(chat.session).length, 1)
+  })
+}
+
+test('D2d Auto refusal reaches the reviewer and never invokes the history body', agyTest, async t => {
+  const h = agyHistory(t, true, { level: 'auto' })
+  const chat = openAgyHistory(h)
+  const reviewed = []
+  h.onExecute(call => {
+    reviewed.push(call.name)
+    return { content: [{ type: 'text', text: 'Fixture reviewer refused.' }], isError: true }
+  })
+  const chunks = await chat.turn('agy-bridge read_own_chat {"query":"review reject"}')
+  assert.deepEqual(reviewed, [HISTORY])
+  assert.deepEqual(h.executed, [])
+  assert.deepEqual(h.approvals, [])
+  assert.equal(h.events('mcp-history-result')[0].answer.isError, true)
+  assert.match(textOf(chunks), /Fixture reviewer refused/)
+  assert.doesNotMatch(JSON.stringify(chat.session.snapshotEvents()), /synthetic marker/)
+})
 
 test('C3 omp OFF admits its verified history call and rejects conflicting first or later claims', async t => {
   for (const kind of ['tool_call', 'tool_call_update', 'rename', 'raw-conflict']) {

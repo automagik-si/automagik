@@ -33,7 +33,7 @@ exec ${quote(process.execPath)} ${quote(FAKE)} "$@"
   return path
 }
 
-export function agyWorld(t, { sandbox = true, version, registry, platform = process.platform, cliHome: withHome = true, deps = {}, env = {} } = {}) {
+export function agyWorld(t, { sandbox = true, version, registry, platform = process.platform, cliHome: withHome = true, deps = {}, env = {}, level = 'workspace' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-agy-off-'))
   const cliHome = join(dir, 'acp', 'cli-homes')
   const trace = join(dir, 'agy-trace.jsonl')
@@ -48,12 +48,15 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
   })
   const agents = new Map()
   const approvals = []
+  const controls = { ask: () => 'allowed-once' }
   const logs = []
   const services = {
-    approval: { effectivePolicy: () => 'ask', request: async request => { approvals.push(request); return 'allowed-once' } },
+    approval: { effectivePolicy: () => level === 'full' ? 'never' : 'ask', request: async request => { approvals.push(request); return controls.ask(request) } },
+    permissionPresets: { current: () => level },
     ...(sandbox ? { sandboxPolicy: {
       defaultMode: 'workspace-write',
-      resolve: ({ session }) => ({ mode: session?.snapshotEvents().findLast(event => event.type === 'sandbox/mode')?.data.mode ?? 'workspace-write' }),
+      resolve: ({ session }) => ({ mode: session?.snapshotEvents().findLast(event => event.type === 'sandbox/mode')?.data.mode ??
+        (level === 'full' ? 'danger-full-access' : 'workspace-write') }),
     } } : {}),
   }
   const disposers = []
@@ -114,6 +117,9 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
     return { pid, args: child.find(row => row.event === 'start').args, prompt: prompts[0].text }
   }
   const startsAfter = count => events('start').slice(count).filter(row => row.args[0] === 'acp')
+  const onExecute = listener => ctx.on('tools/execute', listener)
+  const execute = (call, dispatch) => [...(listeners.get('tools/execute') ?? [])].reduceRight(
+    (next, listener) => () => listener(call, next), dispatch)()
   function chat(id = 'chat') {
     const session = Session.create(id, undefined, { version: 4, id, createdAt: 0, isSeeded: false, cwd: dir })
     session.append('turn/start', { turn: 1 })
@@ -136,7 +142,7 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
     return { session, turn, policyEvent }
   }
   return {
-    dir, cliHome, agy, control, logs, approvals, services, service, events, home, logDir, logOf, conversation, chat, startsAfter,
+    dir, cliHome, agy, control, controls, onExecute, execute, logs, approvals, services, service, events, home, logDir, logOf, conversation, chat, startsAfter,
     get adapter() { return adapter },
     envs: () => read(envFile),
     setLog: value => writeFileSync(control, JSON.stringify(value)),

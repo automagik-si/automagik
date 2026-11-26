@@ -80,6 +80,21 @@ function skillIdentity(spec, tool, update) {
 
 const verifiedSkill = identity => identity !== undefined && identity !== 'conflict'
 
+const AGY_HISTORY_NAME = agyBridgeName(HISTORY_TOOL_NAME)
+const AGY_HISTORY_TITLE = `Run ${AGY_HISTORY_NAME}`
+
+function agyHistoryClaim(spec, tool, update, title = update.title) {
+  if (spec.agyHistoryRequest !== true || !spec.skillTools?.has(HISTORY_TOOL_NAME) || title !== AGY_HISTORY_TITLE) return
+  const names = [update.name, update._meta?.claudeCode?.toolName, tool.structuredName]
+  const conflicts = raw => (raw?.server !== undefined && raw.server !== BRIDGE_NAME) ||
+    (raw?.serverName !== undefined && raw.serverName !== BRIDGE_NAME) ||
+    (raw?.tool !== undefined && raw.tool !== HISTORY_TOOL_NAME) ||
+    (raw?.toolName !== undefined && raw.toolName !== HISTORY_TOOL_NAME)
+  if (names.some(name => name !== undefined && name !== AGY_HISTORY_NAME) ||
+      conflicts(update.rawInput) || conflicts(tool.rawInput) || skillIdentity(spec, tool, update) === 'conflict') return 'conflict'
+  return HISTORY_TOOL_NAME
+}
+
 /**
  * The Agent/Task call a call ran inside, when the agent says so: Claude Code's adapter stamps
  * every call a native subagent makes, and its result, with `_meta.claudeCode.parentToolUseId`,
@@ -970,10 +985,19 @@ export class AgentRun {
       this.forbidTool(update)
       return undefined
     }
+    const agyClaim = this.currentHistoryPrompt(sessionId) ? agyHistoryClaim(this.spec, {}, update) : undefined
+    if (agyClaim === 'conflict') {
+      this.retireRestrictedCall(update.toolCallId, update.status)
+      return undefined
+    }
     if (this.reviews?.last) this.reviews.after = true
     const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now(), observedAt }
     if (this.historySignal !== undefined && isToolId(sessionId) && sessionId === this.sessionId) {
       tool.originPrompt = this.historySignal
+    }
+    if (agyClaim === HISTORY_TOOL_NAME) {
+      tool.agyHistoryClaim = true
+      tool.restrictedIdentity = true
     }
     // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
     const parent = parentToolOf(update)
@@ -1071,6 +1095,18 @@ export class AgentRun {
     return tool
   }
 
+  restrictedClaim(callId) {
+    const tool = this.tools.get(callId)
+    if (tool === undefined) return 'unknown'
+    if (tool.retired === true) return 'retired'
+    return tool.skillConflict === true ? 'conflict' : 'live'
+  }
+
+  currentHistoryPrompt(sessionId) {
+    return this.busy && !this.cancelled && !this.disposed && isToolId(sessionId) && sessionId === this.sessionId &&
+      this.historySignal !== undefined && !this.historySignal.aborted
+  }
+
   conflictSkill(tool) {
     tool.skillConflict = true
     tool.skillBridge = false
@@ -1078,6 +1114,11 @@ export class AgentRun {
   }
 
   checkSkillClaim(tool, update, notify = true) {
+    const agyTitle = tool.agyHistoryClaim === true ? AGY_HISTORY_TITLE : update.title ?? tool.title
+    if (agyHistoryClaim(this.spec, tool, update, agyTitle) === 'conflict') {
+      this.retireRestrictedCall(tool.id, update.status)
+      return false
+    }
     if (skillIdentity(this.spec, tool, update) !== 'conflict') return true
     this.conflictSkill(tool)
     if (notify && this.spec.refuseTools === true) this.forbidTool(update)
@@ -1183,12 +1224,23 @@ export class AgentRun {
       }
       return Promise.resolve(refusal('rejected', params.options ?? []))
     }
+    const agyClaim = this.currentHistoryPrompt(params.sessionId) ? agyHistoryClaim(this.spec, known ?? {}, toolCall) : undefined
+    if (agyClaim === 'conflict') {
+      this.retireRestrictedCall(toolCall.toolCallId, toolCall.status)
+      return Promise.resolve(refusal('rejected', params.options ?? []))
+    }
     const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall }, undefined, params.sessionId)
     if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
     const { title, ...details } = params.toolCall ?? {}
     if (tool.retired !== true && identity !== 'conflict') this.changeTool(tool, { ...details, status: undefined }, params.sessionId)
-    if (tool.restrictedIdentity && (!this.busy || this.cancelled || this.disposed ||
+    const agyHistory = agyClaim === HISTORY_TOOL_NAME && tool.originPrompt === this.historySignal &&
+      !tool.retired && !tool.skillConflict && !tool.unanswerable && !tool.mirrored && tool.refused === undefined
+    if (agyHistory) {
+      tool.agyHistoryClaim = true
+      tool.restrictedIdentity = true
+    }
+    if (tool.restrictedIdentity && !agyHistory && (!this.busy || this.cancelled || this.disposed ||
         params.sessionId !== this.sessionId || !this.restrictedCall(tool.id, tool.skillOperation, this.historySignal))) {
       return Promise.resolve(CANCELLED)
     }
@@ -1207,7 +1259,9 @@ export class AgentRun {
     // which would let the agent record a standing rule nobody approved (RFC 0039). The ACP
     // request raises no DSH dialog. The bridge's own `approval/request` is the one dialog the
     // person sees (RFC 0003, amendment, "One dialog per call").
-    if (tool.skillBridge === true || (!tool.skillConflict && this.spec.dshTools === true && tool.bridge === true)) {
+    // Antigravity's flat name can collide with a user-added MCP server (#2125). With no
+    // wire link, this ACP answer grants no bridge read. The actual bridge request is checked.
+    if (agyHistory || tool.skillBridge === true || (!tool.skillConflict && this.spec.dshTools === true && tool.bridge === true)) {
       const once = (params.options ?? []).find(option => option.kind === 'allow_once')
       return Promise.resolve(once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }

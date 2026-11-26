@@ -922,20 +922,25 @@ export class AcpAdapter extends LlmAdapter {
     const { provider, providerRow } = live
     const session = dshAgent?.session
     const sessionId = session?.id
+    const agyOff = provider === 'acp-antigravity' && live.nativeOff === true
+    const historyLive = () => live.open === true && live.run?.busy === true && live.held === undefined && !live.archived &&
+      this.live.get(sessionId) === live && live.bridge === record && this.agents.get(provider) === providerRow &&
+      this.ctx.agents?.get?.(sessionId) === dshAgent && dshAgent.session === session &&
+      (typeof this.ctx.sessions?.get !== 'function' || this.ctx.sessions.get(sessionId) === session) &&
+      this.historyWanted(providerRow, sessionId, provider, provider === 'acp-antigravity' && live.nativeOff === true)
     const record = this.backchannel.mint({
       sessionId, agent: dshAgent, name, only, skillRefusal, canList, native: live.twinsOff === true,
       promptRunning: () => live.open === true && live.run?.busy === true,
       promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
       ...(only?.has(HISTORY_TOOL_NAME) && {
         historyPrompt: () => live.run?.historySignal,
-        restrictedCall: (callId, name, prompt, claim) => {
-          if (live.open !== true || live.run?.busy !== true || live.held !== undefined || live.archived ||
-              this.live.get(sessionId) !== live || live.bridge !== record || this.agents.get(provider) !== providerRow ||
-              this.ctx.agents?.get?.(sessionId) !== dshAgent || dshAgent.session !== session ||
-              (typeof this.ctx.sessions?.get === 'function' && this.ctx.sessions.get(sessionId) !== session) ||
-              !this.historyWanted(providerRow, sessionId, provider, provider === 'acp-antigravity' && live.nativeOff === true)) return undefined
-          return live.run.restrictedCall(callId, name, prompt, claim)
-        },
+        restrictedCall: (callId, name, prompt, claim) => historyLive()
+          ? live.run.restrictedCall(callId, name, prompt, claim) : undefined,
+        ...(provider === 'acp-antigravity' && !agyOff && {
+          restrictedRequest: (name, prompt) => name === HISTORY_TOOL_NAME && prompt !== undefined &&
+            !prompt.aborted && historyLive() && prompt === live.run.historySignal,
+          restrictedClaim: callId => live.run.restrictedClaim(callId),
+        }),
       }),
     })
     return record
@@ -1453,6 +1458,7 @@ export class AcpAdapter extends LlmAdapter {
       run.spec.skillBridge = next !== undefined && SKILL_BRIDGE_PROVIDERS.has(live.provider)
       run.spec.skillTools = next?.only
       run.spec.skillRefusal = next?.skillRefusal
+      run.spec.agyHistoryRequest = next?.restrictedRequest !== undefined
     }
     // The source is done running tools before the fork starts.
     if (previous) this.backchannel.revoke(previous)
@@ -2293,6 +2299,7 @@ export class AcpAdapter extends LlmAdapter {
               dshTools: bridged,
               skillBridge: state.bridge !== undefined && SKILL_BRIDGE_PROVIDERS.has(options.provider),
               skillTools: state.bridge?.only,
+              agyHistoryRequest: state.bridge?.restrictedRequest !== undefined,
               ...(omp && nativeOff === true ? {
                 refuseTools: true,
                 onForbiddenTool: () => {

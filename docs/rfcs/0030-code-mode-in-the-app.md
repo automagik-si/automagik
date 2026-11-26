@@ -327,7 +327,8 @@ Otherwise:
    tool, omp and Antigravity over a one-tool `dsh-history` bridge (RFC 0003).
    **2026-11-26 amendment (#2061 D2d).** omp and Antigravity share the existing `dsh` bridge,
    whose restricted allowlist can contain `load_skill` and `read_own_chat` as eligibility permits.
-   Antigravity offers history with Native tools ON. With Native tools OFF, history stays silently
+   Antigravity offers history with Native tools ON. Antigravity's history read is authorized on
+   the bridge's own request (One dialog per call), by the Bot's level. With Native tools OFF, history stays silently
    unavailable and the handoff note still reaches the fresh part. Hermes keeps
    `needs-new-conversation`.
 7. If the switch cannot finish within 120 seconds, or the new route is not served, not signed in or

@@ -52,6 +52,17 @@ function historyCancelled() {
   return { content: [], isError: true, error: CANCELLED_INFO }
 }
 
+const requestHistory = (record, name) => name === HISTORY_TOOL_NAME && record.restrictedRequest !== undefined
+
+function historyRequestAllowed(record, name, callId, prompt) {
+  if (!record.restrictedRequest(name, prompt)) return false
+  if (!callId) return true
+  // A verified ACP call claiming the wrong operation becomes a conflict even on this route.
+  record.restrictedCall(callId, name, prompt)
+  const claim = record.restrictedClaim(callId)
+  return claim === 'unknown' || claim === 'live'
+}
+
 // Tools that only write files: a Session in DSH's read-only sandbox cannot run them, so they
 // are not offered. Shell tools stay (read-only commands are legitimate; the sandbox denies the
 // writes) and every other tool is DSH's own decision at execution time.
@@ -536,11 +547,13 @@ export class Backchannel {
    * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean,
    *   historyPrompt?: () => AbortSignal | undefined,
    *   restrictedCall?: (callId: string | undefined, name: string, prompt?: AbortSignal, claim?: { refused?: boolean }) => any,
+   *   restrictedRequest?: (name: string, prompt?: AbortSignal) => boolean,
+   *   restrictedClaim?: (callId: string) => 'unknown' | 'retired' | 'conflict' | 'live',
    *   promptSkillRefusals?: () => Set<string> | undefined,
    *   native?: boolean, only?: Set<string>, skillRefusal?: boolean, skillOnly?: boolean, canList?: () => boolean }} options
    */
-  mint({ sessionId, agent, name, promptRunning, historyPrompt, restrictedCall, promptSkillRefusals,
-    native = false, only, skillRefusal = false, skillOnly = false, canList }) {
+  mint({ sessionId, agent, name, promptRunning, historyPrompt, restrictedCall, restrictedRequest, restrictedClaim,
+    promptSkillRefusals, native = false, only, skillRefusal = false, skillOnly = false, canList }) {
     if (only === undefined && skillOnly) only = new Set(['load_skill'])
     const credential = randomBytes(32).toString('hex')
     const record = {
@@ -553,7 +566,10 @@ export class Backchannel {
       promptRunning,
       historyPrompt,
       restrictedCall,
+      restrictedRequest,
+      restrictedClaim,
       restrictedCalls: restrictedCall === undefined ? undefined : new WeakSet(),
+      historyCallIds: restrictedRequest === undefined ? undefined : new Set(),
       promptSkillRefusals,
       canList,
       native: native === true,
@@ -802,7 +818,9 @@ export class Backchannel {
       // A call that lost its authority while running answers with a refusal.
       if (record.closed || attachmentSignal?.aborted || result?.revoked === true) return reply(401, { error: 'refused' })
       if (record.only?.has(HISTORY_TOOL_NAME) &&
-          !record.restrictedCall?.(callId, body.name, historyPrompt)) {
+          !(requestHistory(record, body.name)
+            ? !gone.signal.aborted && historyRequestAllowed(record, body.name, callId, historyPrompt)
+            : record.restrictedCall?.(callId, body.name, historyPrompt))) {
         return reply(200, historyCancelled())
       }
       if (confirmSkill === undefined || result?.isError !== false) return reply(200, result)
@@ -976,19 +994,23 @@ export class Backchannel {
     const restricted = record.only?.has(HISTORY_TOOL_NAME) === true
     const restrictedHistory = restricted && name === HISTORY_TOOL_NAME
     const prompt = restricted ? historyRequest.prompt : undefined
+    const requestScoped = restrictedHistory && requestHistory(record, name)
     const binding = typeof callId === 'string' && callId !== '' && prompt !== undefined
       ? record.restrictedCall?.(callId, name, prompt) : undefined
     const claim = binding?.skillAbort?.signal
     const restrictedAllowed = () => !restricted || (
-      binding !== undefined && !prompt.aborted && !claim?.aborted && !callerGone?.aborted && !ended() &&
+      prompt !== undefined && !prompt.aborted && !claim?.aborted && !callerGone?.aborted && !ended() &&
       session?.id === record.sessionId && session === record.session && record.agent.session === session &&
-      binding === record.restrictedCall(callId, name, prompt)
+      (requestScoped ? historyRequestAllowed(record, name, callId, prompt)
+        : binding !== undefined && binding === record.restrictedCall(callId, name, prompt))
     )
     if (!restrictedAllowed()) return historyCancelled()
     if (restricted) {
-      // The verified ACP call owns one MCP execution, regardless of retries or attachment changes.
-      if (record.restrictedCalls.has(binding)) return historyCancelled()
-      record.restrictedCalls.add(binding)
+      // An Antigravity history decision covers this bridge request. Other restricted calls
+      // spend their verified ACP binding once, including across attachment changes.
+      const grant = requestScoped ? historyRequest : binding
+      if (record.restrictedCalls.has(grant)) return historyCancelled()
+      record.restrictedCalls.add(grant)
     }
     const tools = this.ctx?.get?.('tools')
     if (session === undefined || tools?.execute === undefined) return error(`DSH tools are not available to ${record.name}.`)
@@ -1047,7 +1069,9 @@ export class Backchannel {
         ? recordFailed('The bridge cannot record this call: the Session has no open step.', 'BRIDGE_NO_STEP')
         : unavailable('AUTO_REVIEW_NO_STEP', 'Auto review cannot see this call: the Session has no open step.')
     }
-    const id = bridgeCallId(callId)
+    const historyIds = requestScoped ? record.historyCallIds : undefined
+    // Concurrent requests may quote the same ACP id. Each needs its own open Session row.
+    const id = bridgeCallId(historyIds?.has(callId) ? undefined : callId)
     if (callId !== undefined && id !== callId) {
       let caller
       try { caller = JSON.stringify(callId) } catch { caller = thrownText(callId) }
@@ -1070,9 +1094,11 @@ export class Backchannel {
     if (callerGone?.aborted) onGone()
     else callerGone?.addEventListener('abort', onGone, { once: true })
     record.controllers.add(own)
+    historyIds?.add(id)
     const stopped = AbortSignal.any([authority, own.signal, prompt, claim].filter(Boolean))
     const cancelled = () => settle(restricted ? [] : [{ type: 'text', text: `${name} was stopped before it finished.` }], true, CANCELLED_INFO)
     const leave = () => {
+      historyIds?.delete(id)
       record.controllers.delete(own)
       callerGone?.removeEventListener('abort', onGone)
       if (record.closed && record.controllers.size === 0) record.guard?.release()
