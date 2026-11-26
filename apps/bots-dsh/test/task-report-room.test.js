@@ -16,6 +16,7 @@ import { fakeContext } from './fake-ctx.js'
 const FULL = 'danger-full-access'
 const WRITE = 'workspace-write'
 const READ_ONLY = 'read-only'
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const STOCK = {
   [WRITE]: { sandbox: 'workspace-write', approval: 'ask' },
   [FULL]: { sandbox: 'danger-full-access', approval: 'never' },
@@ -54,6 +55,7 @@ function team(t, { bots = {}, rooms = {}, tasks, defaultPreset = WRITE } = {}) {
   const allRooms = Object.fromEntries(Object.entries(TEAM.rooms).map(([id, base]) => [id, { ...base, ...rooms[id] }]))
   writeFileSync(join(home, 'state.json'), JSON.stringify({ ...TEAM, bots: { m1: { ...TEAM.bots.m1, ...bots.m1 }, b2: { ...TEAM.bots.b2, ...bots.b2 } }, rooms: allRooms, ...(tasks ? { tasks } : {}) }))
   const log = []
+  const instructions = new Map()
   const open = new Set()
   const presetOf = new Map()
   const service = {
@@ -93,7 +95,7 @@ function team(t, { bots = {}, rooms = {}, tasks, defaultPreset = WRITE } = {}) {
           for (const listener of ctx.listeners.get('session/created') ?? []) void listener(session)
         }
         await new Promise(resolve => setTimeout(resolve, 1))
-        return { agent: { session, followup() {} } }
+        return { agent: { session, followup(message) { instructions.set(sessionId, message.id) } } }
       },
       selectModel: async () => {},
     },
@@ -134,14 +136,31 @@ function team(t, { bots = {}, rooms = {}, tasks, defaultPreset = WRITE } = {}) {
     await settle()
     return delivered.filter(entry => entry.taskSessionId === sessionId)
   }
-  return { ctx, rt, home, made, call, presets, settle, toolCall, wish, finish, delivered, warnings, log }
+  return { ctx, rt, home, made, call, presets, settle, toolCall, wish, finish, delivered, warnings, log, instructions }
 }
 
 // A task record without the report group: what the same call without the field records.
 const withoutReport = ({ reportRoomId, at, ...rest }) => rest
 
-test('without the field a task is as today: same record, same level, report in the Bot\'s own chat', async (t) => {
-  const { rt, call, presets, settle, toolCall, wish, finish } = team(t, { bots: { m1: { permission: FULL } }, rooms: { r1: { permission: WRITE } } })
+function assertTaskInstructions(task, id, where) {
+  assert.match(task.skillsInstructionsId, UUID, where)
+  assert.equal(task.skillsInstructionsId, id, where)
+  assert.equal(task.skillsOwner, 'm1', where)
+  assert.deepEqual(task.skills, [], where)
+}
+
+function assertSameOwnedTaskExceptReport({ rt, instructions }, plain, reported, where) {
+  // Each launch queues its own instruction message. Compare every other field.
+  const { skillsInstructionsId: plainId, ...plainRecord } = withoutReport(rt.state.tasks[plain])
+  const { skillsInstructionsId: reportedId, ...reportedRecord } = withoutReport(rt.state.tasks[reported])
+  assertTaskInstructions(rt.state.tasks[plain], instructions.get(plain), where)
+  assertTaskInstructions(rt.state.tasks[reported], instructions.get(reported), where)
+  assert.notEqual(reportedId, plainId, where)
+  assert.deepEqual(reportedRecord, plainRecord, where)
+}
+
+test('without the field the task keeps its level and reports in the Bot\'s own chat', async (t) => {
+  const { rt, call, presets, settle, toolCall, wish, finish, instructions } = team(t, { bots: { m1: { permission: FULL } }, rooms: { r1: { permission: WRITE } } })
   await call('state', {})
   const direct = await wish()
   const grouped = await toolCall('g1', () => wish())
@@ -152,7 +171,13 @@ test('without the field a task is as today: same record, same level, report in t
   assert.deepEqual(Object.keys(rt.state.tasks[direct]).sort(), ['at', 'from', 'status', 'title'])
   for (const task of [grouped, nulled, undef]) {
     assert.deepEqual(presets(task), [WRITE], task)
-    assert.deepEqual(Object.keys(rt.state.tasks[task]).sort(), ['at', 'from', 'levelRoomId', 'status', 'title'], task)
+    const record = rt.state.tasks[task]
+    assertTaskInstructions(record, instructions.get(task), task)
+    assert.ok(Number.isFinite(record.at), task)
+    assert.deepEqual(record, {
+      at: record.at, from: 'm1', levelRoomId: 'r1', status: 'working', title: 'Wish',
+      skills: [], skillsInstructionsId: instructions.get(task), skillsOwner: 'm1',
+    }, task)
   }
   for (const task of [direct, grouped, nulled, undef]) {
     const [report] = await finish(task)
@@ -226,7 +251,13 @@ test('under any levels and any caller, the field gives the task the level and re
             const where = `${botLevel}/${callLevel}/${reportLevel} from ${caller} to ${reportRoomId}`
             assert.deepEqual(w.presets(reported), w.presets(plain), where)
             assert.equal(w.rt.taskLevelOf(reported), w.rt.taskLevelOf(plain), where)
-            assert.deepEqual(withoutReport(w.rt.state.tasks[reported]), withoutReport(w.rt.state.tasks[plain]), where)
+            if (caller === undefined) {
+              assert.deepEqual(Object.keys(w.rt.state.tasks[plain]).sort(), ['at', 'from', 'status', 'title'], where)
+              assert.deepEqual(Object.keys(w.rt.state.tasks[reported]).sort(), ['at', 'from', 'reportRoomId', 'status', 'title'], where)
+              assert.deepEqual(withoutReport(w.rt.state.tasks[reported]), withoutReport(w.rt.state.tasks[plain]), where)
+            } else {
+              assertSameOwnedTaskExceptReport(w, plain, reported, where)
+            }
             assert.equal(w.rt.state.tasks[reported].reportRoomId, reportRoomId, where)
           }
         }
@@ -266,7 +297,8 @@ test('a group that is unknown, foreign or not a group id is refused, and nothing
 })
 
 test('the same group as the roomId is the roomId alone, with no new key', async (t) => {
-  const { rt, call, presets, settle, toolCall, wish, finish } = team(t, { bots: { m1: { permission: WRITE } }, rooms: { r1: { permission: FULL } } })
+  const w = team(t, { bots: { m1: { permission: WRITE } }, rooms: { r1: { permission: FULL } } })
+  const { rt, call, presets, settle, toolCall, wish, finish } = w
   await call('state', {})
   // From the group's own Session, as the start_task tool does: the group's level.
   const plain = await toolCall('g1', () => wish('m1', { roomId: 'r1' }))
@@ -274,7 +306,7 @@ test('the same group as the roomId is the roomId alone, with no new key', async 
   await settle()
   assert.deepEqual(presets(same), presets(plain))
   assert.deepEqual(presets(same), [FULL])
-  assert.deepEqual(withoutReport(rt.state.tasks[same]), withoutReport(rt.state.tasks[plain]))
+  assertSameOwnedTaskExceptReport(w, plain, same)
   assert.equal(Object.hasOwn(rt.state.tasks[same], 'reportRoomId'), false)
   const [report] = await finish(same)
   assert.equal(report.sessionId, 'g1')
@@ -352,7 +384,8 @@ test('changing or deleting the report group leaves the level alone; the group of
 })
 
 test('a task started from inside a task with a report group is bound by its parent as without it', async (t) => {
-  const { rt, call, presets, settle, toolCall, wish, finish } = team(t, { bots: { m1: { permission: FULL } }, rooms: { r1: { permission: WRITE } } })
+  const w = team(t, { bots: { m1: { permission: FULL } }, rooms: { r1: { permission: WRITE } } })
+  const { rt, call, presets, settle, toolCall, wish, finish } = w
   await call('state', {})
   const parent = await toolCall('g1', () => wish())
   const plain = await toolCall(parent, () => wish())
@@ -360,7 +393,7 @@ test('a task started from inside a task with a report group is bound by its pare
   await settle()
   assert.deepEqual(presets(reported), presets(plain))
   assert.deepEqual(presets(reported), [WRITE])
-  assert.deepEqual(withoutReport(rt.state.tasks[reported]), withoutReport(rt.state.tasks[plain]))
+  assertSameOwnedTaskExceptReport(w, plain, reported)
   assert.equal(rt.state.tasks[reported].levelTaskId, parent)
   assert.equal(rt.state.tasks[reported].levelRoomId, 'r1')
   // Lowering the parent's group lowers both alike.

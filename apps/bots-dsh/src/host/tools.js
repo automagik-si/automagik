@@ -1422,7 +1422,7 @@ export function install(rt) {
     // Local tools bypass DSH masks. Lift the definition as soon as a
     // profile filter changes so the ACP bridge observes the same surface.
     dropUnavailableWorkerTools()
-    for (const [id, held] of scoped) {
+    for (const held of scoped.values()) {
       if (held.agent === undefined || held.skill) continue
       try { maskConnectorTools(held.agent, held) } catch (error) { rt.warn('omni-ui: connector mask failed: %s', error) }
       try { maskRoleTools(held.agent, held) } catch (error) { rt.warn('omni-ui: role mask failed: %s', error) }

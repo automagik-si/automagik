@@ -41,6 +41,7 @@ const match = (node, label) => walk(node, entry => entry.props?.['aria-label'] =
   (entry.type === 'button' && text(entry) === label))[0]
 const group = () => ({ skills: [], active: {} })
 const flush = () => new Promise(resolve => setImmediate(resolve))
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 
 function fixture(t, role, fetch) {
   let slots, position
@@ -322,6 +323,7 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   const stored = legacy.skills[name]
   assert.equal(stored.frontmatter, frontmatter)
   assert.equal(stored.accepted, stored.hash)
+  assert.match(stored.workerRevision, UUID)
   Object.assign(stored.check, { version: 1, fingerprint: SKILL_CHECK_HISTORY[1], findings: [] })
   delete legacy.reviews
   for (const key of ['review', 'reviewSeal', 'acceptedReview', 'acceptanceSeal']) delete stored[key]
@@ -426,16 +428,27 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   const durable = read()
   const confirmed = durable.skills[name]
   assert.deepEqual(durable.active, legacy.active)
-  const { check: _check, updatedAt: _updated, review, reviewSeal, acceptedReview, acceptanceSeal, ...savedFields } = confirmed
+  const { check: _check, updatedAt: _updated, review, reviewSeal, acceptedReview, acceptanceSeal, workerRevision, ...savedFields } = confirmed
   assert.equal(review.status, 'done')
   for (const seal of [reviewSeal, acceptedReview, acceptanceSeal]) assert.match(seal, /^[a-f0-9]{64}$/)
-  const { check: _legacyCheck, updatedAt: _legacyUpdated, ...legacyFields } = stored
+  const { check: _legacyCheck, updatedAt: _legacyUpdated, workerRevision: previousWorkerRevision, ...legacyFields } = stored
+  assert.match(workerRevision, UUID)
+  assert.notEqual(workerRevision, previousWorkerRevision)
   assert.deepEqual(savedFields, legacyFields)
   assert.equal(confirmed.check.version, SKILL_CHECK_VERSION)
   assert.equal(confirmed.check.fingerprint, SKILL_CHECK_FINGERPRINT)
   assert.deepEqual(confirmed.check.findings, first.findings)
   installLibrary(rt)
-  assert.equal((await call('skill-library-get', { name })).held, undefined)
+  const detail = await call('skill-library-get', { name })
+  assert.equal(detail.held, undefined)
+  const list = await call('skill-library', {})
+  for (const view of [heldView, detail, list.skills.find(skill => skill.name === name), rt.skillLibrary.active(auto)[0]]) {
+    assert.equal(Object.hasOwn(view, 'workerRevision'), false)
+    assert.equal(Object.hasOwn(view, 'revision'), false)
+  }
+  for (const id of [auto, manual]) {
+    assert.equal(rt.skillLibrary.active(id, { worker: true })[0].revision, workerRevision)
+  }
   const called = await turn(manual, '/notes')
   assert.ok(modelText(called).includes(content))
   assert.ok(!catalog(called[0]).includes(description))
