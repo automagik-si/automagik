@@ -512,6 +512,18 @@ export function install(rt) {
   /** Whether a `provider/model` ref can answer a job beside the chats (not an ACP agent). */
   const answersAsideRef = ref => typeof ref === 'string' && ref.includes('/') && !['acp', 'hermes-remote'].includes(routeOf(ref.split('/')[0]).connectedBy)
 
+  // An explicit reviewer must be usable as selected. Settings Default is the
+  // absence of a preference and uses the ordinary background selection once.
+  async function skillReviewModel() {
+    const chosen = state.prefs?.backgroundModel
+    const useDefault = chosen === undefined || chosen === null || chosen === ''
+    if (!useDefault && !answersAsideRef(chosen)) return
+    const entries = (await catalog({ fresh: true, remember: false, noCommands: true })).filter(answersAside)
+    const available = entry => !entry.needsKey && !entry.needsSignIn && !quotaUntil(entry.provider)
+    if (useDefault) return pickDefault(entries, available)
+    return entries.some(entry => entry.ref === chosen && available(entry)) ? chosen : undefined
+  }
+
   // A ChatGPT or Claude plan runs a Bot only through its CLI (D-a, D-c), whoever picks the model
   // (the menu, a tool, the API, Pocket): a covered sign-in route is read as the closest model on
   // that plan's agent (cliPeerOf, as the one-time move maps it), signed in or not, so the
@@ -1045,6 +1057,7 @@ export function install(rt) {
     quotaHeld: provider => quotaUntil(provider) !== undefined,
     noteAsideQuota: provider => asideQuota.set(provider, Date.now() + QUOTA_HOLD_MS),
     clearAsideQuota: provider => asideQuota.delete(provider),
+    skillReviewModel,
     selectSessionModel, reselectOwnRoute, keepsCarriedRoute, assertReadableRoute, storedRouteOf: storedRoute,
     applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => {

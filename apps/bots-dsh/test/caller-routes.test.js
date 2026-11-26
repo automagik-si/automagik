@@ -6,6 +6,7 @@ import { callerEndpoint } from '../src/host/caller-policy.js'
 import { REPLY_KIND } from '../src/host/constants.js'
 import { allowlist, fixture, guest, identity, member, serviceStub, stranger } from './caller-fixture.js'
 import inventory from './fixtures/caller-endpoints.json' with { type: 'json' }
+import { stubSkillReviewer } from './fixtures/skill-review-model.js'
 import rolePaths from '../../../server/test/fixtures/caller-role-paths.json' with { type: 'json' }
 
 const path = '/api/omni-ui'
@@ -268,6 +269,7 @@ test('the signed-in owner can manage Skills and members and guests get audited r
   const viewer = (await f.call('whoami', null, { headers })).value.viewer.id
   const options = { headers, viewer }
   const skill = { name: 'owner-skill', description: 'A private library description.', content: 'PRIVATE-LIBRARY-BODY' }
+  stubSkillReviewer(f.rt)
   assert.equal((await f.call('skill-library-save', skill, options)).ok, true)
   assert.equal((await f.call('skill-library-get', { name: skill.name }, options)).value.content, skill.content)
   for (const principal of [member, guest]) {

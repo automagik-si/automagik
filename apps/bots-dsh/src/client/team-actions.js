@@ -9,6 +9,33 @@ import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-mode
 // is done; `partFor` maps a Bot id, or any part of its chat, to its current part.
 export function teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession, loginState, panelFolded, work,
   storage = (() => { try { return globalThis.localStorage } catch { return null } })() }) {
+  const skillSaves = new Map()
+  async function saveSkill(skill) {
+    const key = JSON.stringify(skill)
+    let job = skillSaves.get(key)
+    if (!job) {
+      const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
+      job = { id: Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''), started: false }
+      skillSaves.set(key, job)
+    }
+    try {
+      let result = await call('skill-library-save', job.started ? { operation: job.id, poll: true } : { ...skill, operation: job.id })
+      while (result.pending) {
+        job.started = true
+        await new Promise(resolve => setTimeout(resolve, 750))
+        result = await call('skill-library-save', { operation: job.id, poll: true })
+      }
+      skillSaves.delete(key)
+      return result
+    } catch (error) {
+      // Keep the ID when it is unclear whether the host answered. The next
+      // click resumes that operation. A host refusal permits a fresh attempt.
+      if (error.code !== 'NETWORK' && !/^HTTP_50[234]$/.test(error.code ?? '') && !(error instanceof SyntaxError)) {
+        skillSaves.delete(key)
+      }
+      throw error
+    }
+  }
   // A deleted Bot's composer state (DSH's `dsh.conversation.<part>`), removed once the
   // host answered that it is deleted. The host's sweep list (draft-sweep.js) also covers
   // a key DSH writes again while the chat is still open.
@@ -444,7 +471,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     imLoginWait: payload => call('im-login-wait', payload),
     skillLibrary: signal => call('skill-library', {}, signal),
     getSkill: name => call('skill-library-get', { name }),
-    saveSkill: skill => after(call('skill-library-save', skill)),
+    saveSkill: skill => after(saveSkill(skill)),
     deleteSkill: name => after(call('skill-library-delete', { name })),
     setBotSkill: (id, name, attached, mode) => after(call(attached ? 'bot-skill-add' : 'bot-skill-remove', { id, name, mode })),
     setBotSkillMode: (id, name, mode) => after(call('bot-skill-mode', { id, name, mode })),

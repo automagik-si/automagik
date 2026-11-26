@@ -16,6 +16,7 @@ import { createRuntime } from '../index.js'
 import { createAgentAccess, agentBindAddress, AGENT_TOOLS } from '../src/host/agent-access.js'
 import { createDraftSweep } from '../src/client/draft-sweep.js'
 import { fakeContext } from './fake-ctx.js'
+import { stubSkillReviewer } from './fixtures/skill-review-model.js'
 import { solverInstructions } from '../src/shared/solver-method.js'
 
 async function fixture(t, { bots = {}, rooms = {}, empty = false } = {}) {
@@ -869,6 +870,7 @@ test('an authenticated agent can rename a Solver', async t => {
 test('the MCP agent cannot read or activate Skills or set them through update_bot', async t => {
   const f = await fixture(t)
   const form = { name: 'fixture-skill', description: 'A checked description.', content: 'CHECKED-FIXTURE-BODY' }
+  stubSkillReviewer(f.rt)
   assert.equal((await f.call('skill-library-save', form)).ok, true)
   const privateValue = 'private-untrusted-argument'
   for (const [name, args] of [

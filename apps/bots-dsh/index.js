@@ -167,15 +167,28 @@ function importTeam(home, from) {
   const sourceState = join(from, 'state.json')
   const destinationState = join(home, 'state.json')
   if (existsSync(destinationState) || !existsSync(sourceState)) return false
+  const skillNames = new Set(['skill-library', skillLibrary.SKILL_REVIEW_KEY, skillLibrary.SKILL_IMPORT_MARK])
+  const skillAlias = name => name.toLowerCase().replace(/[ .]+$/, '')
+  const skillSources = fs.readdirSync(from, { withFileTypes: true }).filter(entry => skillAlias(entry.name) === 'skill-library')
+  if (skillSources.some(entry => entry.name !== 'skill-library' || !entry.isDirectory()) ||
+      (existsSync(home) && fs.readdirSync(home).some(name => skillNames.has(skillAlias(name))))) {
+    throw new Error('The imported team has an ambiguous Skills library destination.')
+  }
   const copyHome = keyed => cpSync(from, home, { recursive: true, force: false, filter: source => {
     if (source.endsWith('state.lock') || /[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source)) return false
     if (dirname(source) !== from) return true
     const name = basename(source)
-    return !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && (!keyed || source !== sourceState)
+    const alias = skillAlias(name)
+    return alias !== skillLibrary.SKILL_REVIEW_KEY && alias !== skillLibrary.SKILL_IMPORT_MARK &&
+      !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && (!keyed || source !== sourceState)
   } })
   const stateBytes = fs.readFileSync(sourceState)
   const sourceKey = readConnectorKey(join(from, CONNECTOR_KEY))
   checkImportedCredentials(stateBytes, sourceKey)
+  if (skillSources.length) {
+    fs.mkdirSync(home, { recursive: true, mode: 0o700 })
+    writeBytesAtomic(join(home, skillLibrary.SKILL_IMPORT_MARK), 'unverified\n', { durable: true, exclusive: true })
+  }
   if (sourceKey.missing) {
     copyHome(false)
     return true

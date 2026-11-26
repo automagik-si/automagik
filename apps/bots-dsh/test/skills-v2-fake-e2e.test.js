@@ -7,6 +7,7 @@ import { setImmediate } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { CLEAN_REVIEW } from './fixtures/skill-review-model.js'
 import { apply } from '../index.js'
 
 const botId = 'b-aaaaaaaaaa'
@@ -45,16 +46,26 @@ test('Skills v2 owner and Bot flow from checked creation to removal', { timeout:
     version: 1, revision: 1, mainBotIds: [botId],
     bots: { [botId]: { id: botId, sessionId, name: 'Fixture Bot', createdAt: 1, role: 'Helper',
       model: `${route.provider}/${route.model}`, appliedModel: `${route.provider}/${route.model}` } },
-    rooms: {}, exchanges: [], exchangeTurns: {}, questions: {}, capabilities: { items: {} }, prefs: {},
+    rooms: {}, exchanges: [], exchangeTurns: {}, questions: {}, capabilities: { items: {} },
+    prefs: { backgroundModel: `${route.provider}/${route.model}` },
   }))
 
   const requests = []
   class FakeModel extends LlmAdapter {
+    async listModels(provider) {
+      return [await this.resolveModel(provider, route.model)]
+    }
+
     async resolveModel(provider, id) {
       return { provider, id, name: id, context: { contextWindow: 1_000_000 } }
     }
 
-    async *stream({ provider, model, sessionId, messages, tools }) {
+    async *stream({ provider, model, sessionId, messages, tools, system }) {
+      if (tools.length === 0 && system?.startsWith('Review the supplied skill')) {
+        yield { type: 'text-delta', index: 0, text: CLEAN_REVIEW }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       requests.push({ provider, model, sessionId, messages: structuredClone(messages), tools: tools.map(tool => tool.name) })
       const row = personRow(messages)
       const [prompt] = texts(row)
