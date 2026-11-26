@@ -1018,3 +1018,49 @@ test('privacy exception 3: Pocket approval closure keeps the receipt and leaves 
   assert.equal(closing.input ?? '', '', 'the closed frame carries no cached argument preview')
   assert.doesNotMatch(JSON.stringify(closing), /Synthetic approval details/)
 })
+
+test('Pocket Skill summaries omit a carried private turn after marker eviction', async t => {
+  const f = fixture(t)
+  await f.start()
+  const add = ({ type, data }) => f.event('b', type, data)
+  const addSkill = (turn, name) => ({
+    ...add(event(0, 'plugin:automagik/skill-activity', { id: name, name, turn, step: 0 })),
+    ignorable: true,
+  })
+  const cut = { kind: 'aborted', reason: { kind: 'hook', reason: STEER_CUT } }
+  const events = [add(turnStart(0)), add(privateOpener(0, 'fixture-exchange'))]
+  f.rt.markSteerCut('b')
+  events.push(add(event(0, 'turn/end', { turn: 1, reason: cut })), add(turnStart(0, 2)), add(personOpener(0)))
+  const privateSkill = addSkill(2, 'thyme')
+  events.push(privateSkill, add(turnEnd(0, 2)), add(turnStart(0, 3)), add(personOpener(0)))
+  const visibleSkill = addSkill(3, 'mint')
+  events.push(visibleSkill, add(turnEnd(0, 3)))
+
+  const hidden = (id, turn) => f.rt.state.exchangeTurns[id]?.includes(turn)
+  assert.equal(hidden('b', 2), true)
+  f.rt.state.exchangeTurns.b.push(...Array.from({ length: 398 }, (_, i) => i + 10))
+  for (const turn of [408, 409]) {
+    add(turnStart(0, turn))
+    add(privateOpener(0, 'fixture-exchange-' + turn))
+    add(turnEnd(0, turn))
+  }
+  assert.equal(f.rt.state.exchangeTurns.b.length, 400)
+  assert.equal(hidden('b', 2), false)
+
+  const adapter = { events: async (_id, { beforeSeq, maxMessages }) => {
+    const older = events.filter(event => event.seq < beforeSeq)
+    return { records: older.slice(-maxMessages).map(event => ({ event })), hasMore: older.length > maxMessages }
+  } }
+  const source = new DshChatSource({ adapter, bots: () => [{ id: 'b', sessionId: 'b' }], turnHidden: hidden })
+  const floor = events.at(-1).seq + 1
+  const entry = { botId: 'b', sessionId: 'b', cursor: floor, floorSeq: floor, rows: [], controller: new AbortController() }
+  const backfilled = await source.backfill(entry, rowIdOf('b', floor), floor - privateSkill.seq)
+  const skillOnlyPage = await source.backfill(entry, rowIdOf('b', visibleSkill.seq + 1), 1)
+  const resumed = await source.snapshotFor(entry, rowIdOf('b', 0))
+  assert.equal(resumed.reset, false)
+  const skills = rows => rows.filter(row => row.tool === 'Skill').map(({ turn, summary, input, output }) => [turn, summary, input, output])
+  const expected = [[3, 'mint', '', '']]
+  assert.deepEqual(skills(skillOnlyPage), expected, 'a Skill-only page retains the authorized row')
+  assert.deepEqual({ history: skills(backfilled), resume: skills(resumed.rows) },
+    { history: expected, resume: expected }, 'history and resume omit the carried private Skill name')
+})

@@ -217,13 +217,13 @@ export function rowsOf(event, scope) {
   const data = event?.data ?? {}
   if (!Number.isSafeInteger(event?.seq)) return []
   const base = part => ({ id: rowIdOf(scope.sessionId, event.seq, part), turn: scope.turn, at: Number.isFinite(event.time) ? event.time : null, source: 'session' })
+  const visible = turn => Number.isSafeInteger(turn) && scope.visibleTurns?.get(turn) === true && !scope.hidden?.(turn)
   if (event.type === SKILL_ACTIVITY_RECORD) {
     const activity = skillActivityOf(event)
-    return activity === undefined || activity.roomId !== undefined || scope.hidden?.(activity.turn)
+    return activity === undefined || activity.roomId !== undefined || (activity.turn !== undefined && !visible(activity.turn))
       ? [] : [{ ...base(), turn: activity.turn ?? 0, kind: 'tool-call', tool: 'Skill', summary: activity.name, input: '', output: '' }]
   }
   const explicitTurn = Number.isSafeInteger(data.turn) && data.turn >= 0 ? data.turn : undefined
-  const visible = turn => Number.isSafeInteger(turn) && scope.visibleTurns?.get(turn) === true && !scope.hidden?.(turn)
   const callRow = (activity, turn, input = '') => [{
     ...base(), turn, kind: 'tool-call', tool: activity.label === 'plugin' ? 'Plugin' : 'Tool',
     summary: activity.target ? activity.name + ' · ' + activity.target : activity.name, input,
@@ -645,7 +645,8 @@ export class DshChatSource {
     scope.carryPrivate = true
     const boundary = records.findIndex(({ event }) => event.type === 'turn/start')
     const initial = boundary < 0 ? records : records.slice(0, boundary)
-    if (boundary !== 0 && !initial.some(({ event }) => event.type === 'tool/call' || event.type === 'tool/result')) return
+    if (boundary !== 0 && !initial.some(({ event }) =>
+      event.type === 'tool/call' || event.type === 'tool/result' || event.type === SKILL_ACTIVITY_RECORD)) return
     // Read one contiguous preceding page to recover the opener and the preceding cut.
     // Its tool calls and text remain outside the returned window.
     const beforeSeq = records[0]?.event.seq
