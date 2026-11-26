@@ -11,5 +11,7 @@ export function assertSolverAssignment(rt, bot, ref) {
   assertSolverAgent(ref)
   assertSolverAgent(rt.switchingChat?.(bot.id, { crossing: true })?.to)
   assertSolverAgent(rt.crossingWayBack?.(bot.id))
-  if (bot.model !== undefined) assertSolverAgent(bot.previousModel)
+  assertSolverAgent(rt.savedCrossingWayBack?.(bot.id))
+  // Clearing the selection keeps the last answered model for the next pick's rollback.
+  assertSolverAgent(bot.previousModel)
 }

@@ -320,7 +320,7 @@ export function install(rt) {
   // `pickModel` leaves the model to the user: the chat opens on a model card, and the
   // greeting waits until a model is chosen. So does a Bot made when no model it can
   // run on is served.
-  async function createBot(options, { readScopeSource = rt.callerSessionId?.() } = {}) {
+  async function createBot(options, { readScopeSource = rt.callerSessionId?.(), preparedModel } = {}) {
     const leave = rt.enterOwnership?.() ?? (() => {})
     try {
       const cleanName = String(options.name ?? '').trim().slice(0, 40)
@@ -328,7 +328,7 @@ export function install(rt) {
       if (problem !== undefined) throw refusal(problem)
       if (botNameTaken(cleanName)) throw refusal(`A Bot named ${cleanName} already exists`)
       const existing = options.existingSessionId
-      if (existing === undefined) return await holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource))
+      if (existing === undefined) return await holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource, preparedModel))
       if (typeof existing !== 'string' || !existing.trim()) throw refusal('An existing Session needs its id')
       const readOnly = rt.readOnly()
       if (readOnly !== undefined) throw refusal(readOnly)
@@ -374,15 +374,40 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, options, readScopeSource) {
-    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy, solverAuto, solverModelChoice } = options
+  const waitsForSolver = (next, waitingRole) =>
+    next.instructions !== '' && ((waitingRole === SOLVER_ROLE_ID && next.role === SOLVER_DESCRIPTION)
+      || waitingRole?.hostCopy === true)
+
+  async function resolveCreateModel(next, { model, pickModel, waitingRole, reviewerId, solverModelChoice }) {
+    const strictChoice = solverModelChoice || (waitingRole === SOLVER_ROLE_ID && reviewerId !== undefined
+      && next.role === SOLVER_DESCRIPTION && isWrittenSolverMethod(next.instructions))
+    if (strictChoice && !model) throw refusal(CHOOSE_CONCRETE)
+    const modelRef = model ? await rt.resolveModel(model, { remember: false }).catch(error => {
+      if (strictChoice && error?.modelUnavailable) throw refusal(CHOOSE_CONCRETE)
+      throw error
+    }) : pickModel ? undefined : await rt.defaultBotModel()
+    return { modelRef, strictChoice }
+  }
+
+  // The first request can create the Main Bot before it creates the requested Bot.
+  // Resolve a Solver's model before either allocation and carry that choice through.
+  async function prepareCreate(options) {
+    const { next } = createLook(options)
+    if (state.mainBotIds.some(id => rt.botOf(id))) return undefined
+    if (!waitsForSolver(next, options.waitingRole) && !hasSolverSetup(next)) return undefined
+    const preparedModel = await resolveCreateModel(next, options)
+    assertSolverAgent(preparedModel.modelRef)
+    return preparedModel
+  }
+
+  async function buildBot(cleanName, options, readScopeSource, preparedModel) {
+    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy, solverAuto } = options
     if (existingSessionId !== undefined && (createdBy !== undefined || reviewerId !== undefined || reviewGuard !== undefined)) {
       throw refusal('An adopted Session takes no creator or reviewer.')
     }
     const { next } = createLook(options)
     const { kind } = next
-    const waitForSolver = next.instructions !== '' && ((waitingRole === SOLVER_ROLE_ID && next.role === SOLVER_DESCRIPTION)
-      || waitingRole?.hostCopy === true)
+    const waitForSolver = waitsForSolver(next, waitingRole)
     const solverCreate = waitForSolver || hasSolverSetup(next)
     const copyAvatar = copyOf === undefined ? undefined : cleanAvatar(avatar)
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
@@ -392,15 +417,7 @@ export function install(rt) {
     const shell = cleanShell(shellInput)
     const isPrivate = privateInput === true
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
-    // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
-    // its Session exists.
-    const strictChoice = solverModelChoice || (waitingRole === SOLVER_ROLE_ID && reviewerId !== undefined
-      && next.role === SOLVER_DESCRIPTION && isWrittenSolverMethod(next.instructions))
-    if (strictChoice && !model) throw refusal(CHOOSE_CONCRETE)
-    const modelRef = model ? await rt.resolveModel(model, { remember: false }).catch(error => {
-      if (strictChoice && error?.modelUnavailable) throw refusal(CHOOSE_CONCRETE)
-      throw error
-    }) : pickModel ? undefined : await rt.defaultBotModel()
+    const { modelRef, strictChoice } = preparedModel ?? await resolveCreateModel(next, options)
     const checkSolverAgent = () => {
       const source = copyOf === undefined ? undefined : rt.botOf(copyOf)
       const solverSource = hasSolverSetup(source)
@@ -2203,7 +2220,7 @@ export function install(rt) {
       const bot = rt.botOf(id)
       return bot === undefined ? 'Unknown Bot' : nameRefusal(bot, String(name).trim().slice(0, 40))
     },
-    ensureWorkspace, keepTeamFolder, createSession, createBot, checkCreateLook: options => createLook(options),
+    ensureWorkspace, keepTeamFolder, createSession, createBot, prepareCreate,
     newBotStoredPermission, duplicateBot, updateBot, setFlags,
     saveSection, reorderSections, deleteSection,
     roomBusy, autoRoomName, retitleRoom, createRoom, updateRoom, deleteRoom,

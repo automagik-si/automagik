@@ -4715,6 +4715,16 @@ export function install(rt) {
       }
       return undefined
     },
+    // Recovery can restore the preceding part without a live switch job. Only that part's
+    // own-chat marker can restore the Bot's model.
+    savedCrossingWayBack: (botId) => {
+      const oldId = rt.botOf(botId)?.segments?.at(-1)?.sessionId
+      const chatId = rt.chatOf(botId)
+      if (oldId === undefined || chatId === undefined || chatId === oldId) return undefined
+      const marker = state.switching?.[oldId]
+      if (marker?.botId !== botId || marker.roomId !== undefined || marker.group === true) return undefined
+      return marker.back?.model ?? marker.back?.appliedModel
+    },
     // Whether a reply runs in the Bot's own chat now (the same test as an agent switch's).
     replyRunning: (botId) => {
       const sessionId = rt.chatOf(botId)

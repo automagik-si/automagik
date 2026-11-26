@@ -10,6 +10,7 @@ import { allowlist, code, fixture, member, owners, serviceStub, stranger, worksp
 import { bench as grantBench } from './grants-fixture.js'
 import { AGY, CLAUDE, refusedSolverAgent, serve } from './fixtures/solver-agent-catalog.mjs'
 import { solverInstructions } from '../src/shared/solver-method.js'
+import { until } from './until.js'
 
 const TEAM = {
   version: 1,
@@ -151,6 +152,29 @@ test('AN-2 a grandfathered Solver permits unrelated edits and a switch away', as
   assert.equal(f.saved().bots.b.model, CLAUDE)
   assert.equal(f.saved().bots.b.instructions, written.instructions)
 })
+
+for (const previousModel of [AGY, 'deepseek/v4']) {
+  test(`round 2 a cleared selection with rollback to ${previousModel} checks Solver assignment before the next first turn`, async t => {
+    const f = await solverEditFixture(t, { model: CLAUDE, appliedModel: CLAUDE, previousModel })
+    const cleared = await f.call('update-bot', { id: 'b', model: null })
+    assert.equal(cleared.ok, true, JSON.stringify(cleared))
+    assert.deepEqual(
+      [f.saved().bots.b.model, f.saved().bots.b.appliedModel, f.saved().bots.b.previousModel],
+      [undefined, CLAUDE, previousModel],
+    )
+    const assignment = await f.call('update-bot', { id: 'b', ...written })
+    const picked = await f.call('update-bot', { id: 'b', model: CLAUDE })
+    assert.equal(picked.ok, true, JSON.stringify(picked))
+    f.event('b', 'turn/end', { reason: { kind: 'error', error: { code: 'MODEL_ACCESS_REQUIRED' } } })
+    await until(() => f.saved().bots.b.appliedModel === previousModel, { t, label: 'first turn rollback' })
+    const bot = f.saved().bots.b
+    assert.deepEqual([bot.model, bot.appliedModel, bot.role], [
+      previousModel, previousModel, previousModel === AGY ? 'Helper' : 'Solver',
+    ])
+    if (previousModel === AGY) assert.deepEqual(assignment, refusedSolverAgent)
+    else assert.equal(assignment.ok, true, JSON.stringify(assignment))
+  })
+}
 
 test('a group Session changes its own Bot; a Session outside the team changes nothing', async (t) => {
   const { tool, state, stop } = start()

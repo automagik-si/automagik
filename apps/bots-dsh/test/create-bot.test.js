@@ -125,6 +125,27 @@ for (const [name, fields, instructions] of [
   })
 }
 
+test('round 2 a supported first Solver create still bootstraps the Main Bot', async t => {
+  const f = fixture(t, { service: serviceStub({ multiuser: false }), seed: state => {
+    state.prefs.roles = false
+    state.bots = {}
+    state.mainBotIds = []
+  } })
+  serve(f.ctx, [CLAUDE, AGY])
+  await f.start()
+  assert.deepEqual(Object.keys(f.saved().bots), [])
+  assert.deepEqual(f.created, [])
+  const result = await f.call('create-bot', {
+    name: 'First Solver', role: 'Solver', instructions: solverInstructions(), model: CLAUDE,
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  const team = f.saved()
+  assert.equal(team.mainBotIds.length, 1)
+  assert.deepEqual(Object.keys(team.bots), [team.mainBotIds[0], result.value.id])
+  assert.deepEqual(f.created, [team.mainBotIds[0], result.value.id])
+  assert.equal(team.bots[result.value.id].model, CLAUDE)
+})
+
 test('T8 and T9 create an Antigravity reviewer, a cosmetic Solver description, and a supported Solver', async t => {
   const f = fixture(t, { service: serviceStub({ multiuser: false }), seed: state => { state.prefs.roles = false } })
   serve(f.ctx, [CLAUDE, AGY, 'deepseek/v4'])

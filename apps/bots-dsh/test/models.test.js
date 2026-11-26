@@ -462,6 +462,56 @@ test('a route refused for not being a model endpoint is chosen nowhere again', a
   await assert.rejects(rt.resolveModel('external/default'), /Model external\/default is not available/)
 })
 
+const antigravity = 'acp-antigravity/default'
+const solverSetup = { waitingRole: { id: 'solver' } }
+
+test('round 2 catalog loss recovers a Solver on a supported model and keeps ordinary and grandfathered routes', async () => {
+  const lost = 'deepseek/v4-lost'
+  const supported = 'deepseek/v4-flash'
+  const { rt, providers, selected } = bench({
+    providers: { deepseek: ['v4-lost', 'v4-flash'], 'acp-antigravity': ['default'] },
+    fallback: { provider: 'acp-antigravity', model: 'default' },
+  })
+  const solver = { id: 'solver', ...solverSetup, model: lost, appliedModel: lost }
+  const ordinary = { id: 'ordinary', model: lost, appliedModel: lost }
+  const grandfathered = { id: 'grandfathered', ...solverSetup, model: antigravity, appliedModel: antigravity }
+  const bots = [solver, ordinary, grandfathered]
+  rt.state.bots = Object.fromEntries(bots.map(bot => [bot.id, bot]))
+  assert.equal(await rt.desiredModel(solver), lost)
+  providers.deepseek = ['v4-flash']
+  await rt.catalog({ fresh: true })
+  for (const bot of bots) await rt.applyModel(bot, { force: true })
+  assert.deepEqual(bots.map(bot => [bot.model, bot.appliedModel]), [
+    [lost, supported], [lost, antigravity], [antigravity, antigravity],
+  ])
+  assert.deepEqual(selected, [`solver:${supported}`, `ordinary:${antigravity}`, `grandfathered:${antigravity}`])
+  // An applied model is another fallback. A stale Antigravity value cannot win even
+  // when it is the only model still offered.
+  solver.appliedModel = antigravity
+  delete providers.deepseek
+  await rt.catalog({ fresh: true })
+  assert.equal(await rt.applyModel(solver, { force: true }), undefined)
+  assert.equal(selected.length, 3)
+})
+
+test('round 2 a hosted route refusal repins Solvers and ordinary Bots to their eligible defaults', async () => {
+  const refused = 'external/default'
+  const supported = 'deepseek/v4-flash'
+  const { rt, selected } = bench({
+    providers: { external: ['default'], deepseek: ['v4-flash'], 'acp-antigravity': ['default'] },
+    fallback: { provider: 'acp-antigravity', model: 'default' },
+  })
+  const solver = { id: 'solver', ...solverSetup, model: refused, appliedModel: refused }
+  const ordinary = { id: 'ordinary', model: refused, appliedModel: refused }
+  rt.state.bots = { solver, ordinary }
+  assert.equal(await rt.desiredModel(solver), refused)
+  await rt.routeRefused(refused, solver)
+  assert.deepEqual([solver.model, solver.appliedModel, ordinary.model, ordinary.appliedModel], [
+    supported, supported, antigravity, antigravity,
+  ])
+  assert.deepEqual(selected, [`ordinary:${antigravity}`, `solver:${supported}`])
+})
+
 test('a Bot on a clean record but a poisoned Session re-selects its own model', async () => {
   const { rt, selected } = bench({ providers: { external: ['default'], deepseek: ['v4-flash'] }, fallback: { provider: 'external', model: 'default' } })
   // Its group Session ran on another Bot's route; its own record never named it.

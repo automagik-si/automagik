@@ -67,7 +67,7 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false, role
     await fs.writeFile(join(home, 'state.lock'), JSON.stringify({ pid: process.ppid, host: hostname(), token: 'fixture-holder' }))
   }
 
-  async function start() {
+  async function start(configure) {
     const ctx = fakeContext({ services: {
       sessionPersistence: { open: async () => ({ read: async () => ({ events: [{
         type: 'request/header', data: { header: { config: { provider: 'test-provider', model: 'fixture' } } },
@@ -89,6 +89,7 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false, role
         : { ...agent, id, session: { id }, followup() {}, inject() {}, steer() {} } }),
       ...(roleDeps ? { create: async () => ({ sessionId: `created-${++created}` }), selectModel: async () => {} } : {}),
     }
+    configure?.(ctx)
     apply(ctx, { home, memory: false, browser: false, updateCheck: false, mainName: BOT.name })
     const rt = ctx.provided.get('omniTeam')
     installRoles(rt, {
@@ -1307,6 +1308,67 @@ test('AN-4 a pending conversation switch to Antigravity prevents attaching a Sol
     await job?.finished
   }
 })
+
+for (const from of [AGY, 'deepseek/v3']) {
+  test(`round 2 a persisted restart rollback to ${from} checks Solver attachment until recovery finishes`, async t => {
+    const f = await catalogSolverFixture(t)
+    await officialSolver(f)
+    const oldId = 'earlier-part'
+    const freshId = 'fresh-part'
+    const target = 'deepseek/v4'
+    const team = await f.disk()
+    Object.assign(team.bots[BOT.id], {
+      sessionId: freshId, model: target, appliedModel: target,
+      segments: [{ sessionId: oldId, switchedTo: target, archivePending: true }],
+    })
+    team.switching = { [oldId]: {
+      botId: BOT.id, target, back: { model: from, appliedModel: from }, wakeTries: 2, wakeFailedAt: Date.now(),
+    } }
+    await f.close()
+    await fs.writeFile(f.statePath, JSON.stringify(team))
+    const release = Promise.withResolvers()
+    const archived = []
+    const restarted = await f.start(ctx => {
+      serve(ctx, [from, target])
+      const fakeAgent = (id, pending = []) => ({
+        id, session: { id }, ctx: { tools: { register: () => () => {}, restrict: () => () => {} } },
+        status: 'idle',
+        send() { throw new Error('Fixture fresh part cannot start') },
+        inbox: {
+          nextStep: [], nextTurn: pending,
+          remove(id) { const at = pending.findIndex(message => message.id === id); if (at >= 0) pending.splice(at, 1) },
+          append(_target, message) { pending.push(message) },
+        },
+      })
+      const old = fakeAgent(oldId)
+      const fresh = fakeAgent(freshId, [{ id: 'handoff', source: { handoff: true }, content: [] }])
+      const resolve = ctx.sessionController.resolveAgent
+      ctx.sessionController.resolveAgent = async id => {
+        if (id === oldId) { await release.promise; return { agent: old } }
+        return id === freshId ? { agent: fresh } : resolve(id)
+      }
+      ctx.workspaceRegistry.archiveSession = async id => { archived.push(id) }
+    })
+    const recovery = restarted.rt.heldBack()
+    let attached
+    try {
+      assert.deepEqual([...restarted.rt.switchJobs()], [])
+      assert.equal(restarted.rt.awaitingFirstAnswer(freshId), false)
+      assert.deepEqual((await f.disk()).switching[oldId].back, { model: from, appliedModel: from })
+      attached = await attachTo(restarted, BOT.id, 'solver')
+    } finally {
+      release.resolve()
+      await recovery
+    }
+    const finished = await f.disk()
+    const bot = finished.bots[BOT.id]
+    const expectedPin = from === AGY ? undefined : [pinOf('solver', PLUGIN_VERSION)]
+    assert.deepEqual([bot.sessionId, bot.model, bot.appliedModel, bot.roles], [oldId, from, from, expectedPin])
+    assert.equal(finished.switching[oldId], undefined)
+    assert.deepEqual(archived, [freshId])
+    assert.deepEqual(attached, from === AGY ? refusedSolverAgent : { ok: true, value: ['solver'] })
+  })
+}
 
 async function catalogSolverFixture(t, options = {}) {
   const bytes = packageOf(manifestOf({ id: 'solver', version: PLUGIN_VERSION, capabilities: [] }))

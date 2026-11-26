@@ -41,7 +41,8 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const [look, setLook] = useState(() => solverLook())
   const [name, setName] = useState('')
   const pickerRoster = solverCatalog(roster)
-  const [model, setModel] = useState(() => solverStartModel(solverOwnRoster(roster)))
+  const ownRoster = solverOwnRoster(pickerRoster)
+  const [model, setModel] = useState(() => solverStartModel(ownRoster))
   const [effort, setEffort] = useState(undefined)
   const [folder, setFolder] = useState('')
   const [choiceKey, setChoiceKey] = useState(null)
@@ -82,7 +83,8 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   const solverIdentity = chosenIdentityOf(model)
   const reviewerIdentity = chosenIdentityOf(choice.kind === 'new' ? newModel : choice.model)
   const modelProblem = designated && solverIdentity && solverIdentity === reviewerIdentity ? CHOOSE_DIFFERENT : undefined
-  const blocked = Boolean(modelProblem) || busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes
+  const modelOffered = ownRoster.models?.some(row => row.ref === model)
+  const blocked = Boolean(modelProblem) || busy || made !== null || clash || Boolean(problem) || !modelOffered || Boolean(roster.readOnly) || hermes
   const intendsInstall = rolesOn(roster.prefs) && !Object.hasOwn(roster.roles ?? {}, SOLVER_ROLE_ID)
   const create = async () => {
     if (blocked || inFlight.current) return
@@ -169,7 +171,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
             : clash ? h('span', { className: 'bt-note bt-danger' }, t('A Bot named {name} already exists', { name: finalName })) : null),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Model')),
-          h(ModelMenu, { bot: { id: 'new-bot', name: finalName, model: model || undefined, effort }, roster: solverOwnRoster(pickerRoster), actions, wide: true, onPick: (ref) => { setModel(ref); setEffort(undefined) }, onPickEffort: picked => setEffort(picked ?? null) }),
+          h(ModelMenu, { bot: { id: 'new-bot', name: finalName, model: model || undefined, effort }, roster: ownRoster, actions, wide: true, onPick: (ref) => { setModel(ref); setEffort(undefined) }, onPickEffort: picked => setEffort(picked ?? null) }),
           isHermesRemote(model) ? h('span', { className: 'bt-note bt-danger' }, t("This model uses its Hermes profile's own instructions.")) : null),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Project folder')),

@@ -613,6 +613,17 @@ test('AN-5 an Antigravity-only catalog leaves Create disabled', () => {
   assert.equal(only.go().props.disabled, true)
 })
 
+test('round 2 a live catalog refresh disables Create when the last eligible Solver model disappears', async () => {
+  const roster = rosterOf({ models: [{ ref: CODEX }, { ref: AGY }], defaultModel: CODEX })
+  const ui = dialog({ roster })
+  assert.equal(ui.modelMenu('new-bot').props.bot.model, CODEX)
+  assert.equal(ui.go().props.disabled, false)
+  ui.view.render({ ...ui.view.props, roster: { ...roster, models: [{ ref: AGY }], defaultModel: AGY } })
+  assert.equal(ui.go().props.disabled, true)
+  await ui.create()
+  assert.deepEqual(ui.actions.calls, [])
+})
+
 test('T3 the existing pending row expands to unavailable models when an agent has no catalog rows', () => {
   const ui = dialog({ roster: rosterOf({ models: [{ ref: CLAUDE }] }) })
   const { agent, models } = openAntigravity(ui.modelMenu('new-bot'))
@@ -665,9 +676,22 @@ for (const chat of [false, true]) {
 }
 
 test('AN-5 and AN-7 fake E2E saves a supported Solver linked to the Antigravity reviewer picked in the real menu', async t => {
-  const f = fixture(t, { service: serviceStub({ multiuser: false }), seed: state => { state.prefs.roles = false } })
+  const f = fixture(t, { service: serviceStub({ multiuser: false }), seed: state => {
+    state.prefs.roles = false
+    state.bots = {}
+    state.mainBotIds = []
+  } })
   serve(f.ctx, [CLAUDE, AGY, 'deepseek/v4'])
   await f.start()
+  const { payload } = solverPayload({
+    name: 'Stale Solver Fixture', look: { shape: 'frog', color: 'blue' }, model: AGY,
+  })
+  assert.deepEqual(Object.keys(f.saved().bots), [])
+  assert.deepEqual(f.created, [])
+  const first = await f.call('create-bot', payload)
+  assert.deepEqual(first, refusedSolverAgent)
+  assert.deepEqual(Object.keys(f.saved().bots), [], 'the first refused request leaves the team empty')
+  assert.deepEqual(f.created, [], 'the first refused request allocates no Session')
   const call = async (endpoint, payload) => {
     const result = await f.call(endpoint, payload)
     if (!result.ok) throw refusal(result.error.message, result.error.code)
@@ -694,15 +718,12 @@ test('AN-5 and AN-7 fake E2E saves a supported Solver linked to the Antigravity 
   assert.equal(saved.waitingRole.id, 'solver')
   assert.equal(before[saved.reviewerId].role, 'Reviewer')
   assert.equal(before[saved.reviewerId].model, AGY)
-  assert.equal(f.created.length, 2)
-  const { payload } = solverPayload({
-    name: 'Stale Solver Fixture', look: { shape: 'frog', color: 'blue' }, model: AGY,
-  })
+  assert.equal(f.created.length, 3) // Main Bot, reviewer, Solver
   const stale = await f.call('create-bot', payload)
   assert.deepEqual({ hint: own.agent.props['data-unavailable'], stale }, {
     hint: '', stale: refusedSolverAgent,
   })
-  assert.equal(f.created.length, 2)
+  assert.equal(f.created.length, 3)
   assert.deepEqual(f.saved().bots, before)
 })
 

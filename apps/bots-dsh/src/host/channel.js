@@ -870,9 +870,9 @@ export function install(rt) {
             waitingRole: body.waitingRole === SOLVER_ROLE_ID ? SOLVER_ROLE_ID : undefined, reviewerMade: body.reviewerMade === true,
             solverAuto: body.solverAuto === true, solverModelChoice: body.solverModelChoice === true }
           await rt.load()
-          rt.checkCreateLook(options)
+          const preparedModel = await rt.prepareCreate(options)
           await rt.bootstrap()
-          const bot = await rt.createBot(options)
+          const bot = await rt.createBot(options, { preparedModel })
           return okBot(bot)
         }
         case 'set-bot-auto':

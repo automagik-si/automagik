@@ -34150,7 +34150,8 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
   const [look, setLook] = (0, import_react78.useState)(() => solverLook());
   const [name, setName] = (0, import_react78.useState)("");
   const pickerRoster = solverCatalog(roster);
-  const [model, setModel] = (0, import_react78.useState)(() => solverStartModel(solverOwnRoster(roster)));
+  const ownRoster = solverOwnRoster(pickerRoster);
+  const [model, setModel] = (0, import_react78.useState)(() => solverStartModel(ownRoster));
   const [effort, setEffort] = (0, import_react78.useState)(void 0);
   const [folder, setFolder] = (0, import_react78.useState)("");
   const [choiceKey, setChoiceKey] = (0, import_react78.useState)(null);
@@ -34193,7 +34194,8 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
   const solverIdentity = chosenIdentityOf(model);
   const reviewerIdentity = chosenIdentityOf(choice.kind === "new" ? newModel : choice.model);
   const modelProblem = designated && solverIdentity && solverIdentity === reviewerIdentity ? CHOOSE_DIFFERENT : void 0;
-  const blocked = Boolean(modelProblem) || busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes;
+  const modelOffered = ownRoster.models?.some((row2) => row2.ref === model);
+  const blocked = Boolean(modelProblem) || busy || made !== null || clash || Boolean(problem) || !modelOffered || Boolean(roster.readOnly) || hermes;
   const intendsInstall = rolesOn(roster.prefs) && !Object.hasOwn(roster.roles ?? {}, SOLVER_ROLE_ID);
   const create = async () => {
     if (blocked || inFlight.current) return;
@@ -34322,7 +34324,7 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
           "div",
           { className: "bt-field" },
           (0, import_react78.createElement)("span", { className: "bt-field-label" }, t("Model")),
-          (0, import_react78.createElement)(ModelMenu, { bot: { id: "new-bot", name: finalName, model: model || void 0, effort }, roster: solverOwnRoster(pickerRoster), actions, wide: true, onPick: (ref) => {
+          (0, import_react78.createElement)(ModelMenu, { bot: { id: "new-bot", name: finalName, model: model || void 0, effort }, roster: ownRoster, actions, wide: true, onPick: (ref) => {
             setModel(ref);
             setEffort(void 0);
           }, onPickEffort: (picked) => setEffort(picked ?? null) }),
