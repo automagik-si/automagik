@@ -88,7 +88,8 @@ object Chat {
         val options: List<String> = emptyList(), val multi: Boolean = false,
         /** An assistant text row whose turn was interrupted (bots-dsh pocket-chat.js rowsOf): it reads [STOPPED]. */
         val interrupted: Boolean = false,
-        val blocks: List<Attach.Block>? = null, val name: String = "", val reason: String = ""
+        val blocks: List<Attach.Block>? = null, val name: String = "", val reason: String = "",
+        val fixedOptions: Boolean = false
     ) {
         companion object {
             fun parse(j: JSONObject?): Row? {
@@ -99,7 +100,7 @@ object Chat {
                     s("input"), s("output"), j.optBoolean("ok", true), s("call"), j.optJSONArray("choices").strings(),
                     j.optBoolean("open", false), j.optBoolean("answerable", true), s("prompt"), j.optBoolean("cut", false),
                     s("why"), s("state"), s("msg"), j.optJSONArray("options").strings(), j.optBoolean("multi", false),
-                    j.opt("interrupted") == true, Attach.blocks(j.opt("blocks")), s("name"), s("reason"))
+                    j.opt("interrupted") == true, Attach.blocks(j.opt("blocks")), s("name"), s("reason"), j.optBoolean("fixedOptions", false))
             }
         }
     }
@@ -673,8 +674,8 @@ object ChatActions {
         return row.options
     }
 
-    /** Whether the question also takes a typed answer: a single-select with options (a multi-select's was never probed). */
-    fun canType(s: Chat.State, row: Chat.Row?) = row != null && !row.multi && options(s, row).isNotEmpty()
+    /** Single-select questions can take a typed answer unless the sender requires one of the offered choices. */
+    fun canType(s: Chat.State, row: Chat.Row?) = row != null && !row.multi && !row.fixedOptions && options(s, row).isNotEmpty()
 
     /**
      * The chat.answer `choice` for the options picked, 0-based as drawn: one option on a single-select (its digit),

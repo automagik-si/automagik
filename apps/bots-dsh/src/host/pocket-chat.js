@@ -1021,6 +1021,7 @@ export class DshChatSource {
     const row = {
       id: requestRowId(sessionId, this.cursorOfSession(sessionId), 'question', callId), turn: this.turnOfSession(sessionId), at: this.now(), source: 'session', kind: 'question',
       prompt: prompt ?? ANSWER_ON_COMPUTER, options: prompt === null ? [] : options, multi: one?.multiSelect === true,
+      ...(isSandboxGrant(one) ? { fixedOptions: true } : {}),
       answerable: prompt !== null && typeof one?.id === 'string', open: true, call: typeof request.wait?.callId === 'string' ? request.wait.callId : null,
     }
     return this.hold(sessionId, row, request, next, (value) => {

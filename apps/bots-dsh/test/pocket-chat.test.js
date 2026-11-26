@@ -1048,6 +1048,7 @@ test('Pocket keeps the full Hermes grant on open, reconnect and close; incomplet
     const expected = fits ? title + '\n' + detail : ANSWER_ON_COMPUTER
     assert.equal(row.prompt, expected)
     assert.equal(row.answerable, fits)
+    assert.equal(row.fixedOptions, true)
     assert.deepEqual(row.options, fits ? [allow, 'Deny'] : [])
     const reconnected = await watching(source)
     assert.deepEqual(openRow(reconnected, 'question'), row)
@@ -1079,6 +1080,7 @@ test('questions: a single-select "other" text reaches DSH byte-for-byte as that 
   await settle()
   const row = openRow(w, 'question')
   assert.deepEqual([row.prompt, row.options, row.multi, row.answerable], ['Which one?', ['A', 'B'], false, true])
+  assert.equal(Object.hasOwn(row, 'fixedOptions'), false)
   const text = '  naïve — "C", tab\there  '
   assert.deepEqual(await w.handle.answer({ row: row.id, choice: 'other', text }), { ok: true, state: 'sent' })
   assert.deepEqual(await answer, { answers: [{ id: 'which', selected: [], custom: text }] })

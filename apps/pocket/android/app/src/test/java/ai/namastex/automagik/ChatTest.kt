@@ -195,6 +195,18 @@ class ChatTest {
         assertEquals(emptyList<String>(), ChatActions.choices(s, s.question))
     }
 
+    @Test fun fixedOptionsOnAQuestionHideTheTextFieldAndOnlySendTheNamedChoices() {
+        val grant = j(question()).put("fixedOptions", true)
+            .put("prompt", "Allow Remote Hermes to access this site until its sandbox is turned off?\nexample.test")
+            .put("options", JSONArray(listOf("Allow until sandbox is off", "Deny")))
+        val s = asked(state(), grant.toString())
+        assertEquals(listOf("Allow until sandbox is off", "Deny"), ChatActions.options(s, s.question))
+        assertFalse(ChatActions.canType(s, s.question))
+        assertNull(ChatActions.questionAnswer(s, s.question, emptyList(), "Allow until sandbox is off"))
+        assertEquals("1" to null, ChatActions.questionAnswer(s, s.question, listOf(0)))
+        assertEquals("2" to null, ChatActions.questionAnswer(s, s.question, listOf(1)))
+    }
+
     @Test fun multiSelectQuestionSubmitsTheTickedDigitsAndTakesNoTypedAnswer() {
         val s = asked(state(), question(multi = true))
         assertEquals(listOf("Postgres", "SQLite"), ChatActions.options(s, s.question))

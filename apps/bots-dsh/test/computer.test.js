@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
+import { remoteApproval } from '../src/host/remote-chat-adapter.js'
 import { fakeContext } from './fake-ctx.js'
 import { classify, levelAllows, isComputerTool } from '../src/host/computer/catalog.js'
 import { createLeases } from '../src/host/computer/leases.js'
@@ -35,6 +36,27 @@ function setup({ team = TEAM, services = {} } = {}) {
   const rt = createRuntime(ctx, { home })
   return { ctx, home, rt }
 }
+
+test('Hermes questions get independent local IDs and reach the human through computer consent', async t => {
+  const { ctx, home } = setup()
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
+  const computerConsent = ctx.listeners.get('user-questions/request').find(listener => listener.name === 'computerConsent')
+  const agent = { id: 'm1', session: { id: 'm1' } }
+  const ids = []
+  const services = { get: name => name === 'userQuestions' ? {
+    ask: request => computerConsent(request, () => {
+      const [card] = request.questions
+      ids.push(card.id)
+      return { answers: [{ id: card.id, selected: [card.intent.reject] }] }
+    }),
+  } : undefined }
+  for (const scope of [{}, { kind: 'network', host: 'example.test' }]) {
+    assert.equal(await remoteApproval(services, agent, { request_id: 'same-wire-id', choices: ['once', 'deny'], ...scope }), 'deny')
+  }
+  assert.equal(ids.length, 2)
+  assert.ok(ids.every(id => /^hermes-approval-[0-9a-f-]{36}$/.test(id)))
+  assert.notEqual(ids[0], ids[1])
+})
 
 const allowTool = async () => ({ kind: 'allow' })
 const runComputer = ctx => {

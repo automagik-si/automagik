@@ -1,5 +1,6 @@
 // A transport-neutral row adapter: a native transport supplies text/tool/done rows and
 // receives individual approval answers. DSH owns the visible tool cards and level policy.
+import { randomUUID } from 'node:crypto'
 import { types, isDeepStrictEqual } from 'node:util'
 import { LlmAdapter, isAgentLoopRequest, projectFilesToText } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -64,7 +65,9 @@ async function askInChat(ctx, agent, params, signal, card) {
   const questions = service(ctx, 'userQuestions')
   if (!questions?.ask) return 'deny'
   const { prompt, detail, allow } = card ?? { prompt: 'Remote Hermes asks before it runs this. Allow it?', detail: asked(params), allow: ALLOW }
-  const id = String(params?.request_id ?? 'remote-hermes-approval')
+  // Local answerers share this ID namespace. The transport owns wire correlation;
+  // a remote request never chooses the identity of a local authorization question.
+  const id = `hermes-approval-${randomUUID()}`
   try {
     const answer = await questions.ask({ agent, signal, questions: [{
       id, question: prompt, detail,
