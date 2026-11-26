@@ -1,32 +1,36 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { createConnection } from 'node:net'
+import { createInterface } from 'node:readline'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { fileURLToPath } from 'node:url'
 import { apply as applyAcp } from '../../acp-dsh/index.js'
 import { Session } from '@deepseek-ai/dsh-session'
 import * as native from '@deepseek-ai/dsh-tool-executor-native'
-import { ToolsService } from '@deepseek-ai/dsh-tools'
+import { ToolsService, defineTool } from '@deepseek-ai/dsh-tools'
 import { AgentRun } from '../../acp-dsh/src/host/acp.js'
 import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { callArguments } from '../../acp-dsh/src/host/tool.js'
 import { apply } from '../index.js'
 import { ROUTE, STEER_CUT } from '../src/host/constants.js'
 import { questionReply } from '../src/host/parts.js'
+import { socketPathOf } from '../src/host/pocket-socket.js'
 import { answerSender } from '../src/host/turns.js'
 import { DICTIONARY, installLocale } from '../src/client/i18n.js'
 import { reviewMarkText, solverAutoView } from '../src/client/solver-draft.js'
-import { stopLine } from '../src/client/stops.js'
+import { stopLine, whyText } from '../src/client/stops.js'
 import { guardVerdictOf } from '../src/shared/review-guard.js'
 import { verdictOf } from '../src/shared/review-mark.js'
 import { solverInstructions } from '../src/shared/solver-method.js'
 import { fakeContext } from './fake-ctx.js'
 import { immediate, until } from './until.js'
-import { ptBrLocale } from './fixtures/pt-br-locale.js'
+import { PT_BR, ptBrLocale } from './fixtures/pt-br-locale.js'
 import { NewSolver, mount, all, text } from './fixtures/solver-dialog.mjs'
 
 const solverModel = { provider: 'fake', model: 'solver-model' }
@@ -120,8 +124,8 @@ function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { live
   }
 }
 
-async function setup(t, extra = {}, turn) {
-  const h = fixture(t)
+async function setup(t, extra = {}, turn, configure) {
+  const h = fixture(t, undefined, { configure })
   t.after(() => rmSync(h.home, { recursive: true, force: true, maxRetries: 5 }))
   await h.rt.load()
   h.rt.state.reviewGuardMigrated = true
@@ -182,6 +186,441 @@ async function reviewedPlan(h, checks, commands, { legacyPlan } = {}) {
 
 const reviewShip = 'Verdict: SHIP\nEvidence verified.'
 const noSolverRequest = 'There is no active Solver request in this chat.'
+
+const progressName = 'solver_progress'
+const mcpNameOf = name => `mcp__dsh__${name}`
+const wantedCopy = {
+  start: 'the Solver needs to start a check run with solver_progress',
+  pending: 'the Solver needs to finish recording its current progress with solver_progress',
+}
+
+async function watchSolver(t, home) {
+  const path = socketPathOf(home)
+  await until(() => existsSync(path), { label: 'the installed Pocket source socket' })
+  const socket = createConnection(path)
+  t.after(() => socket.destroy())
+  const events = []
+  createInterface({ input: socket }).on('line', line => events.push(JSON.parse(line)))
+  socket.write('{"id":1,"method":"hello","params":{"write":1}}\n')
+  await until(() => events.some(line => line.id === 1 && line.result?.write === 1))
+  socket.write('{"id":2,"method":"subscribe","params":{"terminal":"dsh:solver","channel":1}}\n')
+  await until(() => events.some(line => line.channel === 1 && line.event?.type === 'snapshot'))
+  return events
+}
+
+async function bridgeFixture(t, { pocket = false, extra = {} } = {}) {
+  const root = new Context()
+  t.after(() => root.fiber.dispose())
+  root.provide('systemPrompt', { tools() {}, section() {}, context() {}, getContextOrder() { return 0 } })
+  root.provide('sessionProjections', {
+    register: async () => ({ stateOf: () => ({ turnOpen: true }) }),
+  })
+  await root.plugin(ToolsService)
+  await root.plugin(native)
+  await root.plugin(ApprovalService, { policy: 'ask' })
+  let scopeHost
+  await root.plugin({ name: 'solver-bridge-actors', inject: ['tools'], apply(ctx) { scopeHost = ctx } })
+  const agents = new Map()
+  const h = await setup(t, { reviewGuard: true, ...extra }, 2, (ctx, agentOf) => {
+    agents.set('solver', agentOf('solver'))
+    ctx.provided.set('agents', { get: id => agents.get(id), list: () => [...agents.values()] })
+    ctx.provided.set('tools', root.tools)
+    ctx.provided.set('approval', root.approval)
+    if (pocket) Object.assign(ctx.sessionController, {
+      async *follow(_request, signal) {
+        yield { type: 'snapshot', header: { id: 'solver', version: 4 }, cursor: 0, records: [],
+          hasMore: false, projections: { asOfSeq: 0, values: {} } }
+        if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))
+      },
+      async *observeState(_request, signal) {
+        yield { cursor: 0, pendingInput: [], running: true }
+        if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))
+      },
+      async events() { return { records: [] } },
+      async state() { return { cursor: 0, pendingInput: [], running: true } },
+      prompt() {}, cancel() {},
+    })
+  })
+  const desktop = []
+  const team = []
+  const audit = []
+  const bodies = []
+  let n = 0
+  const agentFor = (id, header = {}) => {
+    const agent = h.agentOf(id)
+    if (!agent.ctx.tools.register) {
+      const scope = createScope(scopeHost, agent)
+      agent.ctx = scope.ctx
+      agent.session.header = header
+      const events = []
+      agent.session.snapshotEvents = () => events.slice()
+      agent.session.append = (type, data) => {
+        const event = { type, data, seq: events.length }
+        events.push(event)
+        h.event(id, type, data)
+        if (type.startsWith('approval/')) audit.push({ id, type, ...data })
+        return event
+      }
+      agents.set(id, agent)
+      h.rt.hideBotUnusedTools(agent)
+    }
+    return agent
+  }
+  const solver = agentFor('solver')
+  const off = h.rt.onApproval((kind, row) => {
+    if (kind !== 'open') return
+    team.push(row)
+    // Group and child asks have no DSH card. The ordinary team answers still settle them.
+    if (row.child || row.roomId) queueMicrotask(() => h.rt.answerApproval(row.id, 'allow'))
+  })
+  t.after(off)
+  root.on('approval/request', (request) => {
+    desktop.push({ id: request.agent.session.id, name: request.toolName, callId: request.callId })
+    if (!request.toolName.endsWith(progressName) || request.reason === 'fixture person') return 'allowed-once'
+    return new Promise(resolve => request.signal.addEventListener('abort', () => resolve('cancelled'), { once: true }))
+  })
+  for (const hook of h.ctx.listeners.get('approval/request')) root.on('approval/request', hook, { prepend: true })
+  for (const hook of h.ctx.listeners.get('tools/execute')) root.on('tools/execute', hook)
+  root.on('tools/execute', (exec, next) => {
+    bodies.push([exec.name, exec.callId])
+    return next()
+  })
+  const cwd = h.rt.botOf('solver').workDir
+  const commandTool = defineTool({
+    name: 'bash', description: 'Fixture foreground check',
+    parameters: { command: { type: 'string', required: true } },
+    output: { schema: { type: 'object', additionalProperties: true }, render: () => content('fixture exit 0') },
+    execute: () => ({ kind: 'foreground', cwd, exitCode: 0, signal: null, timedOut: false, aborted: false }),
+  })
+  solver.ctx.tools.register(commandTool)
+
+  const start = (name, args, options = {}) => {
+    const agent = options.agent ?? solver
+    const callId = options.callId ?? `bridge-${++n}`
+    const abort = new AbortController()
+    const raw = JSON.stringify(args)
+    const record = options.record ?? name
+    if (record) agent.session.append('tool/call', { callId, name: record, arguments: raw })
+    options.beforeAsk?.(agent)
+    const request = {
+      agent, toolName: name, callId, reason: options.reason ?? `Claude Code (fixture): ${name}`,
+      bridgeCall: { agentAsked: false }, signal: abort.signal,
+    }
+    const approval = root.approval.request(request)
+    const run = async () => {
+      const outcome = await approval
+      if (outcome !== 'allowed-once') return { outcome, refused: request.bridgeCall.refused?.reason }
+      const batch = await root.tools.execute({ calls: [{ id: callId, name, arguments: raw }], agent, signal: abort.signal })
+      const result = batch.results[0].result
+      agent.session.append('tool/result', { callId, message: { toolCallId: callId, content: result.content } })
+      return { outcome, result, text: result.content[0]?.text }
+    }
+    return { approval, abort, callId, run }
+  }
+  const attempt = async (name, args, options) => {
+    const pending = start(name, args, options)
+    await immediate()
+    if (desktop.some(row => row.callId === pending.callId) && name.endsWith(progressName)
+      && options?.reason !== 'fixture person') {
+      pending.abort.abort()
+    }
+    return pending.run()
+  }
+  const phone = pocket ? await watchSolver(t, h.home) : []
+  const cardCounts = () => {
+    const byTool = names => names.reduce((out, name) => ({ ...out, [name]: (out[name] ?? 0) + 1 }), {})
+    return {
+      desktop: byTool(desktop.map(row => row.name)),
+      team: byTool(team.map(row => row.tool)),
+      pocket: byTool(phone.filter(line => line.event?.type === 'approval' && line.event.row.open).map(line => line.event.row.tool)),
+    }
+  }
+  const alias = name => {
+    const layer = root.tools.layers.peek(solver).tools
+    t.after(layer.insert(mcpNameOf(name), layer.get(name)))
+  }
+  return { ...h, root, agentFor, solver, start, attempt, desktop, team, audit, bodies, cardCounts, alias }
+}
+
+for (const prefixed of [false, true]) test(`T1 Claude Code bridge Solver reaches Done with no ${prefixed ? 'prefixed' : 'bare'} progress card`, async t => {
+  const h = await bridgeFixture(t, { pocket: true })
+  // ACP exposes the prefix and normally sends the bare name to the host.
+  // The literal-prefix fixture only admits an alias to the same registration.
+  if (prefixed) for (const name of [progressName, 'message_bot', 'bash']) h.alias(name)
+  const nameOf = prefixed ? mcpNameOf : name => name
+  t.after(() => t.diagnostic(JSON.stringify(h.cardCounts())))
+  const progress = async (action, args) => {
+    const call = await h.attempt(nameOf(progressName), { action, ...args })
+    assert.equal(call.outcome, 'allowed-once', action)
+    assert.equal(call.result.isError, false)
+    return call.text
+  }
+  const request = /^Request: ([\w-]+)/.exec(await progress('status'))?.[1]
+  assert.ok(request)
+  const commands = ['check-a', 'check-b'].map(check => ({ check, command: `fake ${check}` }))
+  assert.match(await progress('plan', { request, checks: commands.map(({ check }) => check), commands }), /^Recorded\./)
+  const deliveries = []
+  const deliver = h.rt.deliver
+  h.rt.deliver = (message, options) => {
+    const sent = deliver(message, options)
+    deliveries.push({ message, sent })
+    return sent
+  }
+  const track = () => h.rt.botOf('solver').reviewTrack
+  const review = async (kind, turn) => {
+    const call = await h.attempt(nameOf('message_bot'), {
+      to: 'reviewer', message: `Review the ${kind}.`, solver_review: kind, solver_request: request, reply_to: 'me',
+    })
+    assert.equal(call.outcome, 'allowed-once')
+    assert.equal(call.result.isError, false)
+    const input = h.agentOf('reviewer').message
+    const exchangeId = deliveries.at(-1).message.exchangeId
+    assert.equal(input.source.exchangeId, exchangeId)
+    h.takeInput('reviewer', input)
+    h.finish('solver', `Waiting for ${kind} review.`)
+    answerSender(h.rt, 'reviewer', { exchangeId, senderSessionId: 'solver' },
+      reviewShip, undefined, undefined, refOf(reviewerModel))
+    const reply = deliveries.at(-1)
+    assert.equal(await reply.sent, reply.message.exchangeId)
+    assert.equal(h.agentOf('solver').message.source.exchangeId, reply.message.exchangeId)
+    h.event('solver', 'turn/start', { turn })
+    h.takeInput('solver', h.agentOf('solver').message)
+    return exchangeId
+  }
+  await review('plan', 3)
+  assert.equal(track().solver.plan.accepted, true)
+  assert.equal(track().solver.plan.review.verdict, 'SHIP')
+  for (const { check, command } of commands) {
+    assert.match(await progress('start', { request, run: check, checks: [check] }), /^Recorded\./)
+    const shell = await h.attempt(nameOf('bash'), { command })
+    assert.equal(shell.outcome, 'allowed-once', 'the fake person answered the shell card')
+    assert.equal(shell.result.value?.kind, 'foreground')
+    assert.equal(shell.result.value.exitCode, 0)
+    assert.match(await progress('checks', { request, run: check, results: results(check) }), /^Recorded\./)
+    assert.deepEqual(JSON.parse(track().solver.runs[check].reported), results(check))
+    assert.equal(track().solver.passRuns[check], check)
+  }
+  const result = await review('result', 4)
+  assert.equal(track().solver.review.verdict, 'SHIP')
+  h.finish('solver', 'Both checks passed and the reviewer shipped the result.')
+  assert.equal(track().last?.resultExchangeId, result)
+  assert.equal(track().last?.done, true)
+  assert.equal(track().delivered, true)
+  assert.deepEqual(h.rt.stopsView(), [])
+  const ordinary = { [nameOf('message_bot')]: 2, [nameOf('bash')]: 2 }
+  await until(() => h.cardCounts().pocket[nameOf('bash')] === 2)
+  assert.deepEqual(h.cardCounts(), { desktop: ordinary, team: ordinary, pocket: ordinary })
+  const asked = h.audit.filter(event => event.type === 'approval/asked')
+  assert.deepEqual(h.bodies, asked.map(event => [event.toolName, event.callId]))
+  assert.equal(h.audit.filter(event => event.type === 'approval/decided' && event.outcome === 'allowed-once').length, asked.length)
+})
+
+test('T2 only the direct current Solver gets the exact scoped registration answer', async t => {
+  const h = await bridgeFixture(t)
+  const args = { action: 'status' }
+  const name = mcpNameOf(progressName)
+  h.alias(progressName)
+  const prefixed = await h.attempt(name, args)
+  const bot = h.rt.botOf('solver')
+  bot.reviewGuard = false
+  const bare = await h.attempt(progressName, args)
+  bot.reviewGuard = true
+  const track = bot.reviewTrack
+  delete bot.reviewTrack
+  const guardOnly = await h.attempt(progressName, args)
+  bot.reviewTrack = track
+  bot.sessionId = 'solver-part-2'
+  h.rt.state.tasks = { 'task-run': { status: 'working', title: 'Task', from: bot.id } }
+  await h.rt.save({ required: true })
+  h.rt.groupOwners.set('group-chat', { botId: bot.id, roomId: 'room' })
+  const current = h.agentFor(bot.sessionId)
+  const rotated = await h.attempt(progressName, args, { agent: current })
+  const rolesOnly = h.rt.botOf('reviewer')
+  rolesOnly.role = 'Solver'
+  rolesOnly.solverAuto = true
+  for (const [agent, expected] of [
+    [h.agentFor('child', { origin: 'subagent', parentSession: bot.sessionId }), 'team'],
+    [h.solver, 'desktop'],
+    [h.agentFor('group-chat'), 'team'],
+    [h.agentFor('task-run'), 'team-and-desktop'],
+    [h.agentFor('other'), 'team-and-desktop'],
+    [h.agentFor(rolesOnly.id), 'team-and-desktop'],
+  ]) {
+    const call = h.start(progressName, args, { agent })
+    await immediate()
+    const team = [...h.team, ...h.rt.approvalsView()]
+    assert.equal(team.some(row => row.callId === call.callId), expected !== 'desktop', agent.id)
+    assert.equal(h.desktop.some(row => row.callId === call.callId), expected !== 'team', agent.id)
+    call.abort.abort()
+    await call.approval
+  }
+  t.diagnostic(JSON.stringify(h.cardCounts()))
+  for (const call of [bare, prefixed, rotated]) {
+    assert.equal(call.outcome, 'allowed-once')
+    assert.match(call.text, /^Request: /)
+  }
+  assert.equal(guardOnly.outcome, 'allowed-once')
+  assert.equal(guardOnly.text, noSolverRequest)
+})
+
+test('H5 and AC-6 use the ordinary card when the registration or call proof is missing or changes', async t => {
+  const h = await bridgeFixture(t)
+  const args = { action: 'status' }
+  async function ordinary(options) {
+    const call = h.start(progressName, args, options)
+    await immediate()
+    assert.ok(h.desktop.some(row => row.callId === call.callId))
+    assert.ok(h.team.some(row => row.callId === call.callId))
+    call.abort.abort()
+    assert.equal(await call.approval, 'cancelled')
+  }
+  await ordinary({ record: false })
+  await ordinary({ record: 'list_bots' })
+  await ordinary({ agent: { ...h.solver, session: { ...h.solver.session } } })
+  const botOfSession = h.rt.botOfSession
+  h.rt.botOfSession = () => { throw new Error('fixture owner failed') }
+  await ordinary()
+  h.rt.botOfSession = botOfSession
+  const tools = h.root.tools.layers.peek(h.solver).tools
+  const actual = tools.get(progressName)
+  const entries = tools.data
+  try {
+    // A second registration of the same definition is still untrusted.
+    entries.set(progressName, { ...actual })
+    await ordinary()
+    entries.set(progressName, actual)
+    await ordinary({ beforeAsk: () => entries.set(progressName, { ...actual }) })
+    entries.set(progressName, actual)
+  } finally {
+    entries.set(progressName, actual)
+  }
+  assert.deepEqual(h.bodies, [])
+})
+
+test('AC-6 a replacement after the host answer still needs ordinary approval', async t => {
+  const h = await bridgeFixture(t)
+  const call = h.start(progressName, { action: 'status' })
+  await immediate()
+  if (h.desktop.some(row => row.callId === call.callId)) {
+    // The parent already awaits the person, so dispatch cannot have started.
+    call.abort.abort()
+    assert.equal(await call.approval, 'cancelled')
+    assert.deepEqual(h.bodies, [])
+    return
+  }
+  assert.equal(await call.approval, 'allowed-once')
+  const entries = h.root.tools.layers.peek(h.solver).tools.data
+  const actual = entries.get(progressName)
+  let executions = 0
+  entries.set(progressName, { ...actual, definition: {
+    ...actual.definition, execute() { executions += 1; return 'replacement ran' },
+  } })
+  const run = call.run()
+  try {
+    await until(() => h.desktop.some(row => row.callId === call.callId))
+    assert.equal(executions, 0, 'the old answer cannot release a different registration')
+    const row = h.rt.approvalsView().find(row => row.callId === call.callId)
+    assert.ok(row)
+    h.rt.answerApproval(row.id, 'reject')
+    assert.match((await run).text, /did not receive approval/)
+    assert.equal(executions, 0)
+    assert.equal(h.audit.filter(event => event.type === 'approval/asked' && event.callId === call.callId).length, 2)
+  } finally {
+    call.abort.abort()
+    entries.set(progressName, actual)
+    await run
+  }
+})
+
+test('H3 the registered Auto action still requires the exact words from the person', async t => {
+  const h = await bridgeFixture(t)
+  const request = h.rt.botOf('solver').reviewTrack.solver.request
+  const auto = async (request, quote) => (await h.attempt(progressName,
+    { action: 'auto', request, quote }, { reason: 'fixture person' })).text
+  assert.match(await auto(request, 'Turn Auto on.'), /needs the person's own words/)
+  h.person('Work alone until delivered.')
+  assert.match(await auto('wrong-request', 'Work alone until delivered.'), /active request ID/)
+  assert.match(await auto(request, 'Turn Auto on.'), /needs the person's own words/)
+  assert.match(await auto(request, 'Work alone until delivered.'), /Auto is on/)
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.auto, true)
+  h.finish('solver', 'Delivered.')
+  h.botMessage()
+  const botRequest = h.rt.botOf('solver').reviewTrack.solver.request
+  assert.match(await auto(botRequest, 'Work alone until delivered.'), /Only the person can turn Auto on/)
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.auto, undefined)
+})
+
+test('H2 and H4 accepted plan still refuses an agreed check until start executes', async t => {
+  const h = await bridgeFixture(t, { pocket: true })
+  const { request } = await reviewedPlan(h, ['check-a'])
+  assert.equal(h.rt.botOf('solver').reviewTrack.solver.plan.accepted, true)
+  const start = h.start(progressName, { action: 'start', request, run: 'check-a', checks: ['check-a'] })
+  let startOutcome
+  void start.approval.then(outcome => { startOutcome = outcome })
+  try {
+    await immediate()
+    const call = await h.attempt('bash', { command: 'fake check-a' })
+    assert.equal(call.outcome, 'rejected')
+    assert.match(call.refused, /Start a check run with solver_progress/)
+    assert.deepEqual(h.bodies, [], 'start and the agreed command have not executed')
+    await assert.rejects(h.execute('bash', { command: 'fake check-a' }), /Start a check run/)
+    for (const [name, args] of [['write', { file_path: 'out' }], ['bash', { command: 'git status' }]]) {
+      const ordinary = await h.attempt(name, args)
+      assert.equal(ordinary.outcome, 'allowed-once')
+      assert.ok(h.desktop.some(row => row.name === name))
+      assert.ok(h.team.some(row => row.tool === name))
+    }
+    await until(() => h.cardCounts().pocket.bash === 1)
+    t.diagnostic(JSON.stringify({ plan: 'SHIP', start: startOutcome ?? 'unanswered',
+      agreedCheck: call.outcome, refusal: call.refused, cards: h.cardCounts() }))
+  } finally {
+    start.abort.abort()
+    await start.approval
+  }
+})
+
+test('T4 the installed Pocket listener opens ordinary cards, with Solver progress ahead of Workspace Auto', async t => {
+  const route = { provider: 'acp-claude', model: 'default' }
+  const h = await bridgeFixture(t, { pocket: true })
+  h.solver.session.requestHeader = () => ({ config: route })
+  h.ctx.provided.set('permissionPresets', {
+    current: () => 'workspace-write', resolve: () => ({ sandbox: 'workspace-write', approval: 'ask' }),
+  })
+  h.ctx.acpAgents.ownModeIn = () => true
+  h.ctx.acpAgents.ownModeOf = () => ({ mode: 'agent', answerer: true })
+  const bot = h.rt.botOf('solver')
+  Object.assign(bot, { permission: 'workspace-write', permissionAuto: 'acp-claude', model: 'acp-claude/default' })
+  assert.equal(h.rt.autoWhy(bot, { sessionId: h.solver.id, session: h.solver.session, route: bot.model }), undefined)
+  assert.equal(h.rt.autoCounts(h.solver.session), true)
+  h.rt.backgroundModel = async () => 'fake/judge'
+  h.ctx.llm = {
+    resolveModelInfo: async () => ({}),
+    async *stream() {
+      yield { type: 'text-delta', index: 0, text: '{"decision":"ask","reason":"the person should decide"}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  const decide = t.mock.method(h.rt, 'autoDecide')
+  const guard = t.mock.method(h.rt, 'reviewGuardAsk')
+  const auto = await h.attempt(progressName, { action: 'auto', request: h.rt.botOf('solver').reviewTrack.solver.request,
+    quote: 'Turn Auto on.' })
+  const lookup = await h.attempt('list_bots', {})
+  assert.equal(lookup.outcome, 'allowed-once')
+  await reviewedPlan(h, ['check-a'])
+  const shell = await h.attempt('bash', { command: 'git status' })
+  assert.equal(shell.outcome, 'allowed-once')
+  assert.equal(shell.result.value.exitCode, 0)
+  await until(() => h.cardCounts().pocket.bash === 1)
+  const attempted = decide.mock.calls.map(call => call.arguments[0].toolName)
+  assert.deepEqual(guard.mock.calls.map(call => call.arguments[0].toolName), [progressName, 'list_bots', 'bash'])
+  t.diagnostic(JSON.stringify({ cards: h.cardCounts(), judge: attempted }))
+  assert.deepEqual(attempted, ['bash'])
+  assert.deepEqual(h.rt.autoAuditRows().map(({ tool, decision }) => [tool, decision]), [['bash', 'ask']])
+  const ordinary = { bash: 1 }
+  assert.deepEqual(h.cardCounts(), { desktop: ordinary, team: ordinary, pocket: ordinary })
+  assert.equal(auto.outcome, 'allowed-once')
+  assert.match(auto.text, /needs the person's own words/)
+})
 
 async function reviewReplyFixture(t, averageCommand = 'node --test average.test.mjs') {
   const h = await setup(t, { reviewGuard: true }, 2)
@@ -1964,37 +2403,37 @@ test('Stage 6 ACP allows ordinary commands after plan SHIP', async t => {
   assert.equal(await h.execute('acp_tool', { kind: 'execute', title: 'fake check-a', input: null }), 'ran')
 })
 
-test('Stage 6 ACP says the native command may already have run and keeps confirmed refusal counts separate', async t => {
+test('T3 Stage 6 ACP says the native command may already have run and keeps confirmed refusal counts separate', async t => {
   const h = await setup(t, { reviewGuard: true })
   await reviewedPlan(h, ['check-a'])
   h.event('solver', 'turn/start', { turn: 1 })
   const mirror = { kind: 'execute', title: 'Run tests', input: { cmd: 'fake check-a' } }
   await assert.rejects(h.execute('acp_tool', mirror), /start.*run/i)
   const [single] = h.rt.stopsView()
-  assert.equal(single.why, 'rule')
+  assert.equal(single.why, 'solver-run')
   assert.equal(single.mayHaveRun, true)
   await assert.rejects(h.execute('bash', { command: 'fake check-a' }), /start.*run/i)
   await assert.rejects(h.execute('acp_tool', mirror), /start.*run/i)
   await assert.rejects(h.execute('bash', { command: 'fake check-a' }), /start.*run/i)
   const stops = h.rt.stopsView()
   assert.deepEqual(stops.map(({ why, count, mayHaveRun }) => [why, count, mayHaveRun === true]), [
-    ['rule', 2, true], ['rule', 2, false],
+    ['solver-run', 2, true], ['solver-run', 2, false],
   ])
   const english = [
-    'acp_tool may already have run (a rule here refused it)',
-    '2 steps may already have run (a rule here refused it)',
-    '2 steps did not run: a rule here refused it',
+    `acp_tool may already have run (${wantedCopy.start})`,
+    `2 steps may already have run (${wantedCopy.start})`,
+    `2 steps did not run: ${wantedCopy.start}`,
   ]
   assert.equal(h.rt.stopLineOfTurn('solver', 1), english.slice(1).join(' · '))
   const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
   for (const [dictionary, expected] of [[{}, english], [pt, [
-    'acp_tool pode já ter sido executada (uma regra aqui recusou)',
-    '2 etapas podem já ter sido executadas (uma regra aqui recusou)',
-    '2 etapas não foram executadas: uma regra aqui recusou',
+    'acp_tool pode já ter sido executada (o Solver precisa iniciar uma rodada de verificação com solver_progress)',
+    '2 etapas podem já ter sido executadas (o Solver precisa iniciar uma rodada de verificação com solver_progress)',
+    '2 etapas não foram executadas: o Solver precisa iniciar uma rodada de verificação com solver_progress',
   ]], [DICTIONARY.zh, [
-    'acp_tool 可能已执行（这里的一条规则拒绝了它）',
-    '2 个步骤可能已执行（这里的一条规则拒绝了它）',
-    '2 个步骤未执行：这里的一条规则拒绝了它',
+    'acp_tool 可能已执行（Solver 需要用 solver_progress 启动检查）',
+    '2 个步骤可能已执行（Solver 需要用 solver_progress 启动检查）',
+    '2 个步骤未执行：Solver 需要用 solver_progress 启动检查',
   ]]]) {
     const dispose = installLocale({ register: () => () => {}, bind: () => (key, params) =>
       (dictionary[key] ?? key).replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match) })
@@ -2004,6 +2443,37 @@ test('Stage 6 ACP says the native command may already have run and keeps confirm
       dispose()
     }
   }
+})
+
+test('T3 progress-write and pending-run stops tell the Solver to finish recording', async t => {
+  const h = await setup(t, { reviewGuard: true }, 2)
+  const { request } = await reviewedPlan(h, ['check-a'])
+  h.rt.solverProgressBusy = () => true
+  await assert.rejects(h.execute('bash', { command: 'fake check-a' }), /Finish recording the current Solver progress/)
+  h.rt.solverProgressBusy = () => false
+  assert.match(await h.progress('start', { request, run: 'pending', checks: ['check-a'] }), /^Recorded\./)
+  await assert.rejects(h.execute('write', { file_path: 'out' }), /Finish recording the current Solver progress/)
+  const [stop] = h.rt.stopsView()
+  assert.equal(stop.why, 'solver-progress')
+  assert.equal(stop.count, 2)
+  assert.equal(h.rt.stopLineOfTurn('solver', 2), `2 steps did not run: ${wantedCopy.pending}`)
+  for (const [dictionary, expected] of [
+    [{}, `2 steps did not run: ${wantedCopy.pending}`],
+    [PT_BR, '2 etapas não foram executadas: o Solver precisa terminar de registrar o progresso atual com solver_progress'],
+    [DICTIONARY.zh, '2 个步骤未执行：Solver 需要用 solver_progress 完成当前进度记录'],
+  ]) {
+    const dispose = installLocale({ register: () => () => {}, bind: () => (key, params) =>
+      (dictionary[key] ?? key).replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match) })
+    try { assert.equal(stopLine(stop), expected) } finally { dispose() }
+  }
+})
+
+test('H6 generic rule stops keep their existing copy', async t => {
+  const h = await setup(t, {}, 2)
+  h.rt.noteStop('solver', { why: 'rule', tool: 'read' })
+  assert.equal(h.rt.stopsView()[0].why, 'rule')
+  assert.equal(h.rt.stopLineOfTurn('solver', 2), 'read did not run: a rule here refused it')
+  assert.equal(whyText('rule'), 'a rule here refused it')
 })
 
 test('LA-5 a person message during durable progress preserves its count', async t => {

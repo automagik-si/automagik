@@ -168,7 +168,7 @@ export function install(rt) {
     // A native ACP mirror and its later approval can describe the same action.
     const sameNativeCall = name === 'acp_tool' && !!call && pending?.call === call && !pending.evidence
     if (relevant && (rt.solverProgressBusy?.(bot) || (pending && (!checkCommand || !call || pending.call) && !sameNativeCall))) {
-      return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Finish recording the current Solver progress before doing more work.` }
+      return { why: 'solver-progress', text: `${bot.name} cannot use ${tool} yet. Finish recording the current Solver progress before doing more work.` }
     }
     if ((name === 'acp_tool' || checkCommand) && track?.requested && !track.delivered && track.solver?.plan?.accepted === true && !pending) {
       const raw = trimmedCommand(name === 'acp_tool' ? args?.input : args)
@@ -181,7 +181,7 @@ export function install(rt) {
         return check.command === nativeCommand.command && nativeCheckDirectory(check, nativeCommand, folder, cwd)
       })
       if (exact || equivalent) {
-        return { why: 'rule', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
+        return { why: 'solver-run', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
       }
     }
     if (bot.reviewGuard !== true) return undefined
@@ -389,15 +389,14 @@ export function install(rt) {
 }
 
 /**
- * The guard ahead of everyone who would answer an approval: createRuntime (index.js) calls this
- * right after Auto's judge, and cordis runs `prepend` listeners newest first, so a held question
- * is refused before Auto, a person's grant, Pocket or the card can allow it (H6-1).
+ * Cordis runs prepended listeners newest first, so a held question is refused before any answerer.
+ * The Solver progress answer runs here after the guard and before Auto, grants or cards.
  */
 export function installAhead(rt) {
   rt.ctx.on('approval/request', (request, next) => {
     let held
     try { held = rt.reviewGuardAsk?.(request) } catch {}
-    const answer = decision => decision === undefined ? next() : 'rejected'
+    const answer = decision => decision === undefined ? rt.answerSolverProgress?.(request) ?? next() : 'rejected'
     return held instanceof Promise ? held.then(answer) : answer(held)
   }, { prepend: true })
   installPreExecute(rt)

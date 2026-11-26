@@ -7,8 +7,11 @@
 // can say which task waits, and the task's thread waits in amber. A subagent child's
 // ask is held under its Bot, where the person can answer it.
 import { createHash, randomUUID } from 'node:crypto'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { bindTicketDesk } from './grant-ticket.js'
 import { bindGrantDecisions, grantInternals } from './grants.js'
+import { refusal } from './refusal.js'
+import { isTrustedToolRegistration } from './tool-registrations.js'
 
 const claimers = new WeakMap()
 const grantRefusal = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
@@ -37,6 +40,106 @@ const TOLD_MAX = 1000
 export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall', 'show_settings', 'propose_bot_change'])
 export const teamToolOf = name => String(name ?? '').replace(/^mcp__dsh__/, '')
 
+const SOLVER_PROGRESS = 'solver_progress'
+
+function bindSolverProgressApproval(rt) {
+  const { ctx } = rt
+  const shipped = rt.teamTools?.find(tool => tool.name === SOLVER_PROGRESS)
+  const recorded = new WeakMap()
+  const answered = new WeakMap()
+  const agentOf = id => ctx.get?.('agents')?.get(id)
+  const callOf = (session, id) => rt.live?.get(session?.id)?.calls?.get(id)
+  const toolsOf = () => ctx.get?.('tools') ?? ctx.tools
+  function registrationOf(agent, name) {
+    const tools = toolsOf()
+    const registration = tools?.view?.(agent).registrations?.get(name)
+    if (shipped === undefined || registration?.definition !== shipped || !isTrustedToolRegistration(registration)
+      || scopeOf(agent.ctx) !== agent || tools.layers?.peek(agent)?.tools.get(SOLVER_PROGRESS) !== registration
+      || tools.executable(name, agent) !== shipped) return undefined
+    return registration
+  }
+
+  function ownSolver(agent, session) {
+    const id = session?.id
+    if (typeof id !== 'string' || agent?.session !== session || agent.id !== id || agentOf(id) !== agent
+      || session.header?.origin === 'subagent' || rt.groupOwners.has(id)
+      || rt.state?.tasks?.[id] !== undefined || rt.taskOwners?.has(id)) return undefined
+    const bot = rt.botOfSession(id, agent, { followParents: false })
+    if (bot === undefined || rt.chatOwners.get(id) !== bot.id || rt.chatOf(bot.id) !== id) return undefined
+    const track = bot.reviewTrack
+    if (bot.reviewGuard === true || (track?.requested === true && typeof track.solver?.request === 'string'
+      && track.solver.request !== '')) return bot
+  }
+
+  function recordSolverProgressCall(session, call) {
+    if (teamToolOf(call.name) !== SOLVER_PROGRESS) return
+    try {
+      const agent = agentOf(session.id)
+      if (agent?.session !== session) return
+      const registration = registrationOf(agent, call.name)
+      if (registration !== undefined) recorded.set(call, { agent, session, registration })
+    } catch {}
+  }
+
+  // One answer, between the review guard and Auto. The live call, its Agent's
+  // exact registration and the current direct Solver owner must all agree.
+  function answerSolverProgress(request) {
+    try {
+      const { agent, callId, signal, toolName } = request
+      if (typeof toolName !== 'string' || teamToolOf(toolName) !== SOLVER_PROGRESS || typeof callId !== 'string'
+        || request.mirrorCall !== undefined || !signal || signal.aborted) return undefined
+      const session = agent?.session
+      const call = callOf(session, callId)
+      const binding = recorded.get(call)
+      if (binding?.agent !== agent || binding?.session !== session || call?.name !== toolName
+        || typeof call.args !== 'string' || registrationOf(agent, toolName) !== binding.registration) return undefined
+      const bot = ownSolver(agent, session)
+      if (bot === undefined) return undefined
+      const receipts = answered.get(signal) ?? new Map()
+      if (receipts.has(callId)) return undefined
+      receipts.set(callId, { ...binding, bot, call, request, args: JSON.stringify(JSON.parse(call.args)) })
+      answered.set(signal, receipts)
+      recorded.delete(call)
+      return 'allowed-once'
+    } catch { return undefined }
+  }
+
+  function dispatchSolverProgress(exec, next) {
+    const receipts = answered.get(exec.signal)
+    const receipt = receipts?.get(exec.callId)
+    if (receipt === undefined) return undefined
+    receipts.delete(exec.callId)
+    const { agent, session, bot, registration, call, request, args } = receipt
+    if (exec.agent !== agent || exec.agent?.session !== session || exec.parent !== undefined
+      || exec.name !== call.name || JSON.stringify(exec.arguments) !== args || callOf(session, exec.callId) !== call) {
+      throw refusal('The Solver progress call changed before it ran. Make the call again.')
+    }
+    const tools = toolsOf()
+    let sameBinding
+    try {
+      sameBinding = registrationOf(agent, exec.name) === registration && ownSolver(agent, session) === bot
+        && tools.executable(exec.name, agent, exec.toolSet) === shipped
+    } catch {}
+    if (sameBinding) return Promise.resolve(next())
+    // Approval and dispatch are separated by awaits. A replacement must go
+    // through DSH again, with no receipt left to answer the second ask.
+    const current = tools.view(agent).registrations.get(exec.name)
+    const definition = tools.executable(exec.name, agent, exec.toolSet)
+    const approval = ctx.get?.('approval')
+    return Promise.resolve(approval?.request({ ...request, signal: exec.signal })).then(outcome => {
+      if (outcome !== 'allowed-once' || exec.signal.aborted || agent.session !== session
+        || toolsOf() !== tools || callOf(session, exec.callId) !== call
+        || tools.view(agent).registrations.get(exec.name) !== current
+        || tools.executable(exec.name, agent, exec.toolSet) !== definition) {
+        throw refusal('The changed Solver progress call did not receive approval.')
+      }
+      return next()
+    })
+  }
+
+  Object.assign(rt, { recordSolverProgressCall, answerSolverProgress, dispatchSolverProgress })
+}
+
 export function answerableOwner(rt, owner) {
   return owner?.child === true && rt.botOf?.(owner.botId) !== undefined
     && (owner.kind === 'chat' || owner.kind === 'group' || (owner.kind === 'task' && rt.state?.tasks?.[owner.taskId]?.status === 'working'))
@@ -44,6 +147,7 @@ export function answerableOwner(rt, owner) {
 
 export function install(rt) {
   const { ctx } = rt
+  bindSolverProgressApproval(rt)
   /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string, decidedBy?:string, why?:string)=>boolean}>} */
   const pending = new Map()
   const grantContext = new WeakMap()

@@ -542,8 +542,12 @@ export function install(rt) {
     if (name !== undefined) setActivity(id, name === 'ask_user' || name === 'show_view' ? undefined : activityOf(name))
     else if (entry.turn !== undefined) setActivity(id, 'thinking')
   }
-  const startCall = (id, entry, callId, name, args) => {
-    if (typeof callId === 'string') (entry.calls ??= new Map()).set(callId, { name, args })
+  const startCall = (id, entry, callId, name, args, session) => {
+    if (typeof callId === 'string') {
+      const call = { name, args }
+      if (session !== undefined) rt.recordSolverProgressCall?.(session, call)
+      ;(entry.calls ??= new Map()).set(callId, call)
+    }
     showCall(id, entry)
   }
   const endCall = (id, entry, callId) => {
@@ -920,7 +924,7 @@ export function install(rt) {
       }
       case 'tool/call': {
         const name = String(event.data?.name ?? '')
-        startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''))
+        startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''), session)
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (name !== PROGRAM_TOOL) {
           entry.toolCount = (entry.toolCount ?? 0) + 1

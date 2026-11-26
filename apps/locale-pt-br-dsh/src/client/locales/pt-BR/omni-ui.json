@@ -692,6 +692,8 @@
   "Auto review refused it": "a Revisão automática recusou",
   "the sandbox blocked it": "o ambiente isolado bloqueou",
   "a rule here refused it": "uma regra aqui recusou",
+  "the Solver needs to start a check run with solver_progress": "o Solver precisa iniciar uma rodada de verificação com solver_progress",
+  "the Solver needs to finish recording its current progress with solver_progress": "o Solver precisa terminar de registrar o progresso atual com solver_progress",
   "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.": "Não foi possível definir o nível de permissão desta conversa, então o agente não está rodando aqui. Reiniciar o DeepSeek Harness, ou mudar o nível de permissão, tenta de novo.",
   "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.": "O DeepSeek Harness não conseguiu verificar de onde vem esta conversa, então o agente não está rodando aqui. Envie a mensagem de novo; se continuar assim, reinicie o DeepSeek Harness.",
   "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.": "Esta conversa está em espera enquanto o nível de permissão é verificado, então o agente não está rodando aqui. Envie a mensagem de novo daqui a pouco.",

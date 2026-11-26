@@ -2636,6 +2636,8 @@ var ZH2 = {
   "Auto review refused it": "自动审查拒绝了它",
   "the sandbox blocked it": "沙箱阻止了它",
   "a rule here refused it": "这里的一条规则拒绝了它",
+  "the Solver needs to start a check run with solver_progress": "Solver 需要用 solver_progress 启动检查",
+  "the Solver needs to finish recording its current progress with solver_progress": "Solver 需要用 solver_progress 完成当前进度记录",
   "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.": "无法为这个对话设置权限级别，所以代理没有在这里运行。重启 DeepSeek Harness 或更改权限级别会再试一次。",
   "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.": "DeepSeek Harness 无法确认这个对话来自哪里，所以代理没有在这里运行。请再发一次消息；如果一直这样，请重启 DeepSeek Harness。",
   "This conversation is on hold while its permission level is checked, so the agent is not running here. Send the message again in a moment.": "正在检查这个对话的权限级别，所以代理暂时没有在这里运行。请稍后再发一次消息。",
@@ -11118,6 +11120,10 @@ function whyText(why) {
       return t("the review guard is on and prevents starting tasks; you can turn it off in Details");
     case "limit":
       return t("the Solver reached an attempt limit and is waiting for your answer");
+    case "solver-run":
+      return t("the Solver needs to start a check run with solver_progress");
+    case "solver-progress":
+      return t("the Solver needs to finish recording its current progress with solver_progress");
     default:
       return t("a rule here refused it");
   }
