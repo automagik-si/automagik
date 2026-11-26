@@ -727,18 +727,20 @@ const implementation = {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
       return { stopReason: 'end_turn' }
     }
-    const agyReal = /^agy-real (\[.*\])$/m.exec(current)
+    const agyReal = /^agy-real(-parallel)? (\[.*\])$/m.exec(current)
     if (agyReal !== null) {
       const connection = session.mcp.get('dsh')
-      for (const [index, step] of JSON.parse(agyReal[1]).entries()) {
+      const parallel = agyReal[1] !== undefined
+      const runStep = async (step, index) => {
         const { query, meta, operation = 'read_own_chat', conflicting, retry, permission = true, includeQuery } = step
         const toolCallId = `agy-real-${session.turns}-${index}`
         if (permission) {
           // Title, kind and summary reflect the observed ACP shape. The name value and
           // every MCP id variant below are synthetic. The optional query was seen in 5a.
-          const toolCall = { toolCallId, name: conflicting ? 'mcp_other_read_own_chat' : 'mcp_dsh_read_own_chat',
-            title: 'Run mcp_dsh_read_own_chat', kind: 'other', status: 'pending',
-            rawInput: { toolSummary: 'Read this chat', ...(includeQuery && { query }) } }
+          const name = conflicting ? `mcp_other_${operation}` : `mcp_dsh_${operation}`
+          const toolCall = { toolCallId, name, title: `Run mcp_dsh_${operation}`, kind: 'other', status: 'pending',
+            rawInput: operation === 'read_own_chat' ? { toolSummary: 'Read this chat', ...(includeQuery && { query }) }
+              : { server: 'dsh', tool: operation } }
           await update({ sessionUpdate: 'tool_call', ...toolCall })
           const { outcome } = await conn.requestPermission({ sessionId, toolCall, options: [
             { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
@@ -746,14 +748,14 @@ const implementation = {
           ] })
           trace({ event: 'permission-answer', answer: outcome })
           // The conflict control deliberately probes the bridge even after ACP refusal.
-          if (!conflicting && outcome.optionId !== 'agy-allow') continue
+          if (!conflicting && outcome.optionId !== 'agy-allow') return false
         }
         const callId = meta === 'matching' ? toolCallId : meta
         const controller = new AbortController()
         session.historyRequest = controller
         try {
           for (let attempt = 0; attempt < (retry ? 2 : 1); attempt++) {
-            const answer = await connection.request('tools/call', { name: operation, arguments: { query, name: query },
+            const answer = await connection.request('tools/call', { name: operation, arguments: parallel ? { query } : { query, name: query },
               ...(callId !== undefined && { _meta: { callId } }) }, controller.signal)
             trace({ event: 'agy-real-result', sessionId, toolCallId, query, operation, answer })
             const text = (answer.content ?? []).map(block => block.text ?? '').join('\n')
@@ -761,11 +763,19 @@ const implementation = {
           }
         } catch (error) {
           if (!controller.signal.aborted) throw error
-          return { stopReason: 'cancelled' }
+          return true
         } finally {
           session.historyRequest = undefined
         }
         if (permission) await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed' })
+      }
+      const steps = JSON.parse(agyReal[2])
+      if (parallel) {
+        if ((await Promise.all(steps.map(runStep))).some(Boolean)) return { stopReason: 'cancelled' }
+      } else {
+        for (const [index, step] of steps.entries()) {
+          if (await runStep(step, index)) return { stopReason: 'cancelled' }
+        }
       }
       return { stopReason: 'end_turn' }
     }

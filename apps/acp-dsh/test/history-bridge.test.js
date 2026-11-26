@@ -19,7 +19,8 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { AcpAdapter, BRIDGE_PATH } from '../src/host/adapter.js'
 import { AGY_OFF_CHECKED, AGY_OFF_SKILLS_NAME, agyOffPaths } from '../src/host/agy-off.js'
 import { Backchannel, signatureOf } from '../src/host/backchannel.js'
-import { AGY, AGY_OFF_ARGS, agyWorld, unixOnly } from './fixtures/agy-world.js'
+import { AGY, AGY_OFF_ARGS, agyWorld, approvalTeam, unixOnly } from './fixtures/agy-world.js'
+import { answerGroup, groupApprovals } from '../../bots-dsh/src/client/approvals.js'
 import { codexWorld, scheduled, turnOn } from './fixtures/codex-native-world.js'
 import { CLAUDE, nativeWorld, person } from './fixtures/managed-native-world.js'
 import { ompWorld, OMP } from './fixtures/omp-world.js'
@@ -175,14 +176,39 @@ function agyHistory(t, nativeTools, options) {
     definitions: () => definitions,
     execute: t.mock.fn(async ({ calls: [call], agent, signal }) => {
       const exec = { agent, callId: call.id, name: call.name, signal }
-      const result = await h.execute(exec, async () => {
+      const body = () => h.execute(exec, async () => {
         h.executed.push(call)
         return { content: [{ type: 'text', text: await h.controls.body(call) }], isError: false }
       })
+      const result = options?.team === undefined ? await body() : await fakeDshTool(h, exec, body)
       return { results: [{ result }] }
     }),
   }
   return h
+}
+
+// The pinned pipeline services an ask emitted by pre-execute, then runs post-execute for
+// dispatch, deny and cancel. Its native request has no bridge fields.
+async function fakeDshTool(h, exec, body) {
+  const { agent, name, callId, signal } = exec
+  const abort = { kind: 'deny', reason: 'tool call aborted before dispatch', info: { name: 'AbortError', code: 'ABORTED_BEFORE_DISPATCH' } }
+  const deny = (reason, code) => ({ kind: 'deny', reason, info: { name: 'ApprovalError', code } })
+  let decision = await h.preExecute(exec)
+  if (decision.kind === 'ask') {
+    const outcome = await h.services.approval.request({ agent, toolName: name, callId,
+      reason: decision.reason, displayReason: decision.displayReason, signal })
+    if (outcome === 'allowed-once') decision = { kind: 'allow' }
+    else if (outcome === 'rejected') decision = deny(`the user rejected tool "${name}"`, 'APPROVAL_REJECTED')
+    else if (outcome === 'cancelled') decision = signal.aborted ? abort : deny(`approval for tool "${name}" was cancelled`, 'APPROVAL_CANCELLED')
+    else decision = deny(`tool "${name}" requires approval, but no approval channel is available`, 'APPROVAL_UNAVAILABLE')
+  }
+  if (decision.kind === 'cancel' || (decision.kind === 'allow' && signal.aborted)) decision = abort
+  const result = decision.kind === 'allow' ? await body() : {
+    content: [{ type: 'text', text: `Error: ${decision.reason}` }], isError: true, error: { info: decision.info },
+  }
+  const post = await h.postExecute(exec, result)
+  return post.kind === 'block' ? { content: post.feedback, isError: true, error: { info: post.info } }
+    : { ...result, content: post.content ?? result.content }
 }
 
 function agySkills(h, available = () => true) {
@@ -321,6 +347,7 @@ test('D1 Stop discards a pending Antigravity history result', { ...unixOnly, tim
   assert.equal(chunks.at(-1)?.reason.kind, 'aborted')
   assert.doesNotMatch(JSON.stringify([chunks, chat.session.snapshotEvents(), h.events('mcp-history-result')]), /synthetic stopped history/)
   assert.equal(h.approvals.length, 1)
+  assert.equal(h.requests.length, 1)
   assert.equal(h.services.tools.execute.mock.callCount(), 1)
 })
 
@@ -555,7 +582,7 @@ for (const [label, claim] of [['T4b', 'retired'], ['T4c', 'conflict']]) {
     if (claim === 'retired') {
       await chat.turn('agy-bridge read_own_chat {"query":"seed"}')
       request = { query: 'retired', meta: h.events('mcp-history-result')[0].toolCallId, permission: false }
-      h.executed.length = h.approvals.length = 0
+      h.executed.length = h.approvals.length = h.requests.length = 0
     }
     const chunks = await chat.turn(agyRequest(request))
     const last = observed.at(-1)
@@ -711,6 +738,264 @@ test('D2d Auto refusal reaches the reviewer and never invokes the history body',
   assert.match(textOf(chunks), /Fixture reviewer refused/)
   assert.doesNotMatch(JSON.stringify(chat.session.snapshotEvents()), /synthetic marker/)
 })
+
+const noCardCase = 'D2d no-card amendment'
+const productionOrder = ['review-guard', 'auto-judge', 'grants', 'pocket-chat', 'approvals']
+// dsh-experimental-auto-review's askUser result and localized presentation.
+const askOnDenial = {
+  kind: 'ask', reason: 'Auto review denied tool "read_own_chat": fixture decision',
+  displayReason: {
+    en: 'Auto review denied this call: fixture decision',
+    zh: 'Auto review 拒绝了此调用：fixture decision',
+    ja: '自動認可レビューがこの呼び出しを拒否しました：fixture decision',
+    es: 'Auto review ha denegado esta llamada: fixture decision',
+    fr: 'Auto review a refusé cet appel : fixture decision',
+    de: 'Auto review hat diesen Aufruf abgelehnt: fixture decision',
+    ru: 'Auto review отклонила этот вызов: fixture decision',
+    pt: 'Auto review negou esta chamada: fixture decision',
+  },
+}
+
+async function ownedAgyHistory(t, options) {
+  const team = await approvalTeam(t, options)
+  const h = agyHistory(t, true, { team })
+  const chat = openAgyHistory(h)
+  return { h, team, chat }
+}
+
+function approvalRows(session, callId) {
+  const rows = session.snapshotEvents()
+  const asks = rows.filter(row => row.type === 'approval/asked' && row.data.callId === callId)
+  assert.equal(asks.length, 1, `one ask for ${callId}`)
+  const [ask] = asks
+  const decisions = rows.filter(row => row.type === 'approval/decided' && row.data.id === ask.data.id)
+  assert.equal(decisions.length, 1, `one decision for ${callId}`)
+  const results = rows.filter(row => row.type === 'tool/result' && row.data.message.toolCallId === callId)
+  assert.equal(results.length, 1, `one result for ${callId}`)
+  return { outcome: decisions[0].data.outcome, result: results[0].data }
+}
+
+function assertCard(h, team, session, entry, outcome, decidedBy, bodies) {
+  assert.equal(entry.sessionId, session.id)
+  assert.equal(entry.tool, HISTORY)
+  assert.equal(entry.answerable, true)
+  const matches = team.settled.filter(settlement => settlement.id === entry.id)
+  assert.deepEqual(matches.map(row => [row.outcome, row.decidedBy]), [[outcome, decidedBy]])
+  assert.equal(h.executed.filter(call => call.id === entry.callId).length, bodies)
+  const rows = approvalRows(session, entry.callId)
+  assert.equal(rows.outcome, outcome)
+  return rows.result
+}
+
+test(`${noCardCase} N1/R2: the owned Workspace read reaches a real card in production order`, agyTest, async t => {
+  const { h, team, chat } = await ownedAgyHistory(t)
+  const chunks = await chat.turn(agyRequest({ query: 'N1' }))
+  t.diagnostic(`requests=${h.requests.length} cards=${h.approvals.length} answerer=${team.terminal.length} bodies=${h.executed.length}`)
+  assert.equal(h.requests.length, 1)
+  const [request] = h.requests
+  assert.deepEqual(team.order.get(request.callId), productionOrder)
+  assert.equal(h.approvals.length, 1, 'the real team card opens')
+  assert.deepEqual(team.terminal, [request.callId], 'the DSH card decides')
+  const result = assertCard(h, team, chat.session, h.approvals[0], 'allowed-once', 'dsh', 1)
+  assert.match(JSON.stringify(result.message), /synthetic marker \[secret:fixture\]/)
+  assert.equal(textOf(chunks).split(maskedLine).length - 1, 1)
+  assert.deepEqual(toolBlocks(chunks), [], 'the ACP mirror does not ask again')
+  assert.deepEqual(team.rt.approvalsView(), [])
+})
+
+test(`${noCardCase} N2: the Manual card refuses before the body`, agyTest, async t => {
+  const { h, team, chat } = await ownedAgyHistory(t, { level: 'manual' })
+  h.controls.ask = () => 'rejected'
+  const chunks = await chat.turn(agyRequest({ query: 'N2' }))
+  const [result] = resultRows(chat.session)
+  assert.deepEqual(result?.data.error, { name: 'ApprovalDeniedError', code: 'REJECTED' })
+  assert.equal(h.approvals.length, 1)
+  assertCard(h, team, chat.session, h.approvals[0], 'rejected', 'dsh', 0)
+  assert.doesNotMatch(JSON.stringify([chunks, chat.session.snapshotEvents()]), /synthetic marker/)
+  assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+})
+
+test(`${noCardCase} N3: only the Antigravity ON history request carries the marker`, agyTest, async t => {
+  const { h, chat } = await ownedAgyHistory(t)
+  agySkills(h)
+  await chat.turn(agyRequest({ query: 'N3' }, { operation: SKILL, query: 'fixture skill', meta: 'matching' }))
+  assert.deepEqual(h.requests.map(request => [request.toolName, request.bridgeCall?.personDecides]), [
+    [HISTORY, true], [SKILL, undefined],
+  ])
+  assert.deepEqual(h.approvals.map(entry => entry.tool), [HISTORY, SKILL])
+})
+
+test(`${noCardCase} ANC-1: identical simultaneous reads have independently answerable cards`, agyTest, async t => {
+  const { h, team, chat } = await ownedAgyHistory(t)
+  const ready = Promise.withResolvers()
+  const hold = Promise.withResolvers()
+  h.controls.ask = () => {
+    if (team.terminal.length === 2) ready.resolve(true)
+    return hold.promise
+  }
+  const turn = chat.turn('agy-real-parallel [{"query":"x"},{"query":"x"}]')
+  try {
+    const bothOpen = await soon(Promise.race([ready.promise, turn.then(() => false)]))
+    t.diagnostic(`requests=${h.requests.length} cards=${h.approvals.length} bodies before answering=${h.executed.length}`)
+    assert.equal(bothOpen, true, 'two visible reads wait together')
+    assert.deepEqual(callRows(chat.session).map(row => JSON.parse(row.data.arguments)), [{ query: 'x' }, { query: 'x' }])
+    for (const entry of h.approvals) assert.ok(team.rt.callCapability(chat.session.id, entry.callId, HISTORY))
+    assert.ok(h.approvals.every(entry => entry.capabilityKey === undefined))
+    const groups = groupApprovals(h.approvals)
+    assert.equal(groups.length, 2)
+    const [first, second] = h.approvals
+    const answer = (group, choice) => answerGroup(group.entries, choice, {
+      actions: { answerApproval: (id, value) => team.rt.answerApproval(id, value) }, statusMap: new Map(),
+    })
+    assert.deepEqual(await answer(groups[0], 'allow'), { answered: 1, skipped: 0 })
+    assert.deepEqual(team.rt.approvalsView().map(entry => entry.id), [second.id])
+    assert.deepEqual(team.settled.map(entry => entry.id), [first.id])
+    assert.deepEqual(await answer(groups[1], 'reject'), { answered: 1, skipped: 0 })
+    const chunks = await turn
+    assert.equal(textOf(chunks).split(maskedLine).length - 1, 1)
+    assertCard(h, team, chat.session, first, 'allowed-once', 'web', 1)
+    const refused = assertCard(h, team, chat.session, second, 'rejected', 'web', 0)
+    assert.deepEqual(refused.error, { name: 'ApprovalDeniedError', code: 'REJECTED' })
+    assert.doesNotMatch(JSON.stringify(refused.message), /synthetic marker/)
+  } finally {
+    hold.resolve('cancelled')
+    await turn
+  }
+})
+
+for (const reviewer of ['allow', 'deny', 'failure']) {
+  test(`${noCardCase} Bot Auto ${reviewer}`, agyTest, async t => {
+    const { h, team, chat } = await ownedAgyHistory(t, { botAuto: true, reviewer })
+    h.controls.ask = () => 'rejected'
+    const chunks = await chat.turn(agyRequest({ query: 'Bot Auto' }))
+    assert.equal(team.reviewers.length, 1, 'the Bot Auto reviewer receives the bridge read')
+    assert.equal(h.requests.length, 1)
+    const [request] = h.requests
+    const { outcome, result } = approvalRows(chat.session, request.callId)
+    assert.equal(outcome, reviewer === 'allow' ? 'allowed-once' : 'rejected')
+    assert.equal(h.executed.length, reviewer === 'allow' ? 1 : 0)
+    assert.equal(h.approvals.length, reviewer === 'failure' ? 1 : 0)
+    assert.equal(team.terminal.length, reviewer === 'failure' ? 1 : 0)
+    if (reviewer === 'failure') assertCard(h, team, chat.session, h.approvals[0], 'rejected', 'dsh', 0)
+    if (reviewer === 'deny') {
+      assert.deepEqual(result.error, { name: 'ApprovalDeniedError', code: 'REJECTED' })
+      assert.match(JSON.stringify(result.message), /Auto's judge refused.*fixture decision/)
+    }
+    assert.equal(textOf(chunks).includes(maskedLine), reviewer === 'allow')
+  })
+}
+
+for (const answer of ['allow', 'reject', 'cancel live caller', 'cancel aborted caller']) {
+  test(`${noCardCase} DSH Auto escalation: ${answer}`, agyTest, async t => {
+    const { h, team, chat } = await ownedAgyHistory(t, { level: 'auto' })
+    const dispose = h.adapter.ctx.on('tools/pre-execute', async (_exec, next) => {
+      const policy = await next()
+      return policy.kind === 'allow' ? askOnDenial : policy
+    }, { prepend: true })
+    t.after(dispose)
+    const outcome = answer === 'allow' ? 'allowed-once' : answer === 'reject' ? 'rejected' : 'cancelled'
+    h.controls.ask = () => {
+      if (answer === 'cancel aborted caller') h.adapter.backchannel.cancel(h.adapter.live.get(chat.session.id).bridge)
+      return outcome
+    }
+    const chunks = await chat.turn(agyRequest({ query: answer }))
+    assert.equal(h.requests.length, 1)
+    const [request] = h.requests
+    const { result } = approvalRows(chat.session, request.callId)
+    const error = {
+      reject: { name: 'ApprovalError', code: 'APPROVAL_REJECTED' },
+      'cancel live caller': { name: 'ApprovalError', code: 'APPROVAL_CANCELLED' },
+      'cancel aborted caller': { name: 'AbortError', code: 'ABORTED_BEFORE_DISPATCH' },
+    }[answer]
+    assert.deepEqual(result.error, error, 'the bridge keeps the pinned pre-dispatch outcome')
+    assert.equal(request.bridgeCall?.escalated, true, 'DSH did not mint an unmarked ask')
+    assert.equal(request.bridgeCall.personDecides, true)
+    assert.equal(request.reason, askOnDenial.reason)
+    assert.deepEqual(request.displayReason, askOnDenial.displayReason)
+    assert.equal(h.approvals.length, 1)
+    assertCard(h, team, chat.session, h.approvals[0], outcome, 'dsh', answer === 'allow' ? 1 : 0)
+    assert.equal(textOf(chunks).includes(maskedLine), answer === 'allow')
+    assert.equal(team.reviewers.length, 0)
+  })
+}
+
+for (const downstream of ['ask', 'deny']) {
+  test(`${noCardCase} R1 Workspace keeps one decision with downstream ${downstream}`, agyTest, async t => {
+    const { h, team, chat } = await ownedAgyHistory(t)
+    const refusal = { name: 'FixturePolicyError', code: 'FIXTURE_DENIED' }
+    const dispose = h.adapter.ctx.on('tools/pre-execute', () => downstream === 'ask' ? askOnDenial
+      : { kind: 'deny', reason: 'Fixture policy refused.', info: refusal })
+    t.after(dispose)
+    await chat.turn(agyRequest({ query: downstream }))
+    assert.equal(h.requests.length, 1)
+    assert.equal(h.approvals.length, 1)
+    const result = assertCard(h, team, chat.session, h.approvals[0], 'allowed-once', 'dsh', downstream === 'ask' ? 1 : 0)
+    assert.deepEqual(result.error, downstream === 'deny' ? refusal : undefined)
+  })
+}
+
+test(`${noCardCase} restack: restricted Antigravity ON replacement does not list after withdrawal`, agyTest, async t => {
+  const h = agyHistory(t, true)
+  const chat = openAgyHistory(h)
+  await chat.turn('plain warm restricted Antigravity')
+  const live = h.adapter.live.get(chat.session.id)
+  const previous = live.bridge
+  assert.deepEqual([...previous.only], [HISTORY])
+  assert.equal(typeof previous.restrictedRequest, 'function')
+  const announce = t.mock.method(h.adapter.backchannel, 'announce')
+  let withdrew = false
+  const newSession = live.run.conn.newSession.bind(live.run.conn)
+  t.mock.method(live.run.conn, 'newSession', options => {
+    withdrew = true
+    return newSession(options)
+  })
+  const next = await h.adapter.refork(h.adapter.agents.get(AGY), live, live.dshAgent, undefined,
+    { renew: true, checkAccount: () => !withdrew })
+  assert.deepEqual([...next.only], [HISTORY])
+  assert.deepEqual(h.events('mcp-list').map(row => row.tools), [[HISTORY], []])
+  assert.equal(announce.mock.callCount(), 0)
+  assert.equal(previous.closed, true)
+  assert.equal(next.closed, true)
+  assert.equal(next.listed, false)
+  assert.equal(next.canList, undefined)
+  assert.equal(live.checkReforkAccount, undefined)
+  assert.deepEqual(h.executed, [])
+})
+
+for (const provider of [CLAUDE, 'acp-codex', OMP]) {
+  test(`${noCardCase} card-free control: ${provider}`, agyTest, async t => {
+    const team = await approvalTeam(t, { provider, level: 'manual' })
+    const w = provider === CLAUDE ? nativeWorld(t) : provider === OMP ? omp(t)
+      : codexWorld(t, { identity: () => ({ name: 'Fixture Bot' }), dshTools: true })
+    if (provider === OMP) w.skills(true)
+    w.services.approval.request = team.approval.request
+    w.services.tools.definitions = () => definitions
+    w.services.tools.executable = name => definitions.find(tool => tool.name === name)
+    w.services.tools.execute = async () => {
+      bodies++
+      return { results: [{ result: { isError: false, content: [{ type: 'text', text: maskedLine }] } }] }
+    }
+    let bodies = 0
+    const chat = w.chat(team.id)
+    team.attach(chat.session)
+    const chunks = await (provider === CLAUDE ? chat.turn(person('bridge-permit read_own_chat'), provider)
+      : provider === OMP ? chat.turn('history-lookup omp fixture')
+      : turnOn(w, chat, scheduled('codex-bridge read_own_chat {"query":"fixture"}')))
+    assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+    const { bridge } = w.adapter.live.get(team.id)
+    assert.equal(bridge.restrictedRequest, undefined)
+    assert.deepEqual(bridge.only === undefined ? undefined : [...bridge.only], provider === OMP ? [SKILL, HISTORY] : undefined)
+    assert.equal(team.requests.length, 1)
+    const [request] = team.requests
+    assert.equal(request.toolName, HISTORY)
+    assert.deepEqual(request.bridgeCall, { agentAsked: bridge.agentAsked === true })
+    assert.equal(approvalRows(chat.session, request.callId).outcome, 'allowed-once')
+    assert.deepEqual(team.order.get(request.callId), productionOrder)
+    assert.deepEqual(team.approvals, [])
+    assert.deepEqual(team.terminal, [])
+    assert.equal(bodies, 1)
+  })
+}
 
 test('C3 omp OFF admits its verified history call and rejects conflicting first or later claims', async t => {
   for (const kind of ['tool_call', 'tool_call_update', 'rename', 'raw-conflict']) {

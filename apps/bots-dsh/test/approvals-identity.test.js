@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { install } from '../src/host/approvals.js'
+import { install, teamLookup } from '../src/host/approvals.js'
+import { capabilityOfArgs } from '../src/host/turns.js'
+import { groupApprovals } from '../src/client/approvals.js'
 
 // The approval listener, with the team state it reads: a running task a Bot started, the
 // Bots' own chats, and hidden group Sessions.
@@ -27,6 +29,33 @@ function bench({ tasks = {}, chats = [], groups = [], runs = [] } = {}) {
 }
 
 const request = (sessionId, toolName = 'bash') => ({ toolName, reason: 'run the tests', agent: { session: { id: sessionId } }, callId: 'c1' })
+
+test('D2d no-card amendment: marked reads stay independent and ordinary lookups keep their shortcut', async () => {
+  for (const name of ['read_own_chat', 'list_bots', 'mcp__dsh__read_own_chat']) {
+    assert.equal(teamLookup(request('chat', name)), true)
+    assert.equal(teamLookup({ ...request('chat', name), bridgeCall: { personDecides: true } }), false)
+  }
+  const { rt, handlers } = bench({ chats: [['chat', 'genie']] })
+  rt.sessionFolder = () => '/fixture'
+  rt.callCapability = (_sessionId, _id, tool) => capabilityOfArgs(tool === 'bash' ? '{"command":"ls"}' : '{"query":"x"}', tool)
+  const openTwo = (tool, bridgeCall) => ['first', 'second'].map(callId => handlers[0].handler({
+    ...request('chat', tool), callId, ...(bridgeCall && { bridgeCall }),
+  }, () => new Promise(() => {})))
+  const marked = openTwo('read_own_chat', { personDecides: true })
+  const reads = rt.approvalsView()
+  assert.deepEqual(reads.map(entry => entry.capabilityKey), [undefined, undefined])
+  assert.equal(groupApprovals(reads).length, 2)
+  for (const entry of reads) rt.answerApproval(entry.id, 'allow')
+  assert.deepEqual(await Promise.all(marked), ['allowed-once', 'allowed-once'])
+
+  const shell = openTwo('bash')
+  const commands = rt.approvalsView()
+  assert.ok(commands[0].capabilityKey)
+  assert.equal(commands[1].capabilityKey, commands[0].capabilityKey)
+  assert.equal(groupApprovals(commands).length, 1)
+  for (const entry of commands) rt.answerApproval(entry.id, 'reject')
+  assert.deepEqual(await Promise.all(shell), ['rejected', 'rejected'])
+})
 
 test('a task approval carries the task id and title, and clears when the task chat answers it', async () => {
   const { rt, handlers, noted } = bench({ tasks: { task1: { from: 'genie', status: 'working', title: 'Clone the automagik repo' } } })

@@ -15,6 +15,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { createAssistantMessage, createDeveloperMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
+import { TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import { HISTORY_TOOL_NAME, SYNTHETIC_KIND } from './names.js'
 import { bridgeImages, nestedPlaceholder, readMsOf, readStoredImage, refMediaType } from './bridge-image.js'
 import { levelOf, TOOL_NAME } from './tool.js'
@@ -47,6 +48,10 @@ const REVIEW_TIMEOUT_MS = 120_000
 // Events that can change the Session's level while a review is pending.
 const LEVEL_EVENTS = new Set(['permission/preset', 'sandbox/mode', 'approval/policy'])
 const CANCELLED_INFO = Object.freeze({ name: 'BridgeCancelledError', code: 'BRIDGE_CANCELLED' })
+const APPROVAL_ABORT_INFO = Object.freeze({ name: 'AbortError', code: TOOL_ABORTED_BEFORE_DISPATCH })
+
+// Match the DSH pipeline's pre-execute approval denials for asks carried by the bridge.
+const approvalDenial = (reason, code) => ({ kind: 'deny', reason, info: { name: 'ApprovalError', code } })
 
 function historyCancelled() {
   return { content: [], isError: true, error: CANCELLED_INFO }
@@ -1151,7 +1156,7 @@ export class Backchannel {
           content = []
           historyContent = []
           isError = true
-          if (!ended()) rawInfo = CANCELLED_INFO
+          if (!ended() && rawInfo !== APPROVAL_ABORT_INFO) rawInfo = CANCELLED_INFO
         }
       }
       const terminal = skill && content.length === 0 && (!isError || (rawInfo === undefined && !skill.available())) &&
@@ -1222,6 +1227,8 @@ export class Backchannel {
     let timer
     let timedOut = false
     let levelChanged = false
+    let bridgeApproved = false
+    let approvalAbortedBeforeDispatch = false
     try {
       if (skill && !skill.available()) return await settle([], false)
       // Manual and every other asking level raise the one DSH dialog here. Auto does not: the
@@ -1237,7 +1244,7 @@ export class Backchannel {
             reason: `${record.name}: ${name}`,
             displayReason: { en: `${record.name} wants to run ${name}` },
             signal: stopped,
-            bridgeCall: { agentAsked: record.agentAsked === true },
+            bridgeCall: { agentAsked: record.agentAsked === true, ...(requestScoped && { personDecides: true }) },
         }
         try {
           outcome = await approval.request(request)
@@ -1258,6 +1265,7 @@ export class Backchannel {
               : bridgeRefusalText(name, outcome, policy))
           return await settle([{ type: 'text', text }], true, { name: 'ApprovalDeniedError', code: String(outcome).toUpperCase() })
         }
+        bridgeApproved = requestScoped
       }
       // A late grant can arrive after the bridge lost its authority. Check again before
       // dispatch, since a tool body may ignore the abort signal.
@@ -1312,9 +1320,32 @@ export class Backchannel {
         (exec === execution || exec.signal === signal)))
       if (restricted && typeof this.ctx?.on === 'function') {
         // Capture the registry execution before dispatch wrappers can substitute its signal.
-        unwatchPrepare = this.ctx.on('tools/pre-execute', (exec, next) => {
-          if (matches(exec)) execution = exec
-          return next()
+        unwatchPrepare = this.ctx.on('tools/pre-execute', async (exec, next) => {
+          if (!matches(exec)) return next()
+          execution = exec
+          const decision = await next()
+          if (!requestScoped || decision.kind !== 'ask') return decision
+          // The bridge already got this read's one decision. Explicit policy refusals above
+          // still reach the pipeline. Only DSH Auto delegated its ask to this gate.
+          if (bridgeApproved) return { kind: 'allow' }
+          if (!level.auto) return decision
+          const outcome = await approval?.request({
+            agent: record.agent, toolName: name, callId: id,
+            ...(decision.reason !== undefined && { reason: decision.reason }),
+            ...(decision.displayReason !== undefined && { displayReason: decision.displayReason }),
+            signal: exec.signal,
+            bridgeCall: { agentAsked: record.agentAsked === true, personDecides: true, escalated: true },
+          })
+          if (outcome === 'allowed-once') return { kind: 'allow' }
+          if (outcome === 'rejected') return approvalDenial(`the user rejected tool "${name}"`, 'APPROVAL_REJECTED')
+          if (outcome === 'cancelled') {
+            if (signal.aborted) {
+              approvalAbortedBeforeDispatch = true
+              return { kind: 'cancel' }
+            }
+            return approvalDenial(`approval for tool "${name}" was cancelled`, 'APPROVAL_CANCELLED')
+          }
+          return approvalDenial(`tool "${name}" requires approval, but no approval channel is available`, 'APPROVAL_UNAVAILABLE')
         }, { prepend: true })
       }
       if ((level.auto || restricted) && typeof this.ctx?.on === 'function') {
@@ -1344,9 +1375,12 @@ export class Backchannel {
           inline = decision.content ?? result.content
           return { ...decision, content: withheld }
         })
-        const finish = this.ctx.on('tools/post-execute', async (exec, _result, next) => {
+        const finish = this.ctx.on('tools/post-execute', async (exec, result, next) => {
           const decision = await next()
           if (!matches(exec)) return decision
+          if (approvalAbortedBeforeDispatch && result.error?.info?.code === TOOL_ABORTED_BEFORE_DISPATCH) {
+            return { kind: 'block', feedback: [], info: APPROVAL_ABORT_INFO }
+          }
           if (stopped.aborted || !restrictedAllowed()) return { kind: 'block', feedback: [], info: CANCELLED_INFO }
           return decision.content === withheld ? { ...decision, content: inline } : decision
         }, { prepend: true })
@@ -1390,9 +1424,12 @@ export class Backchannel {
       if (levelChanged) {
         return await settle([{ type: 'text', text: `Auto review cannot finish ${name}: the permission level changed.` }], true, { name: 'AutoReviewUnavailableError', code: 'AUTO_REVIEW_LEVEL_CHANGED' })
       }
+      const result = settled?.results?.[0]?.result
+      if (approvalAbortedBeforeDispatch && result?.error?.info?.code === TOOL_ABORTED_BEFORE_DISPATCH) {
+        return await settle([], true, APPROVAL_ABORT_INFO)
+      }
       // Stopped while the body ran: a body that ignored its signal is not reported as a result.
       if (own.signal.aborted || !restrictedAllowed()) return await cancelled()
-      const result = settled?.results?.[0]?.result
       if (result === undefined) return await settle([{ type: 'text', text: 'The tool returned no result.' }], true)
       const info = result.isError === true ? (result.error?.info ?? (typeof result.error?.code === 'string' ? result.error : undefined)) : undefined
       return await settle(result.content ?? [], result.isError === true, info)

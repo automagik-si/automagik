@@ -4,12 +4,15 @@
 // per-process log at `session/new` as the test's control file says (dev/fake-agent.mjs). No real
 // agy runs and nothing is downloaded.
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createUserMessage, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { Session } from '@deepseek-ai/dsh-session'
 import { apply, SERVICE } from '../../index.js'
+import { fakeContext } from '../../../bots-dsh/test/fake-ctx.js'
 
 export const AGY = 'acp-antigravity'
 export const AGY_OFF_ARGS = ['acp', '--agent', 'automagik-native-off', '--cli_dir_name', 'automagik-native-off']
@@ -33,7 +36,143 @@ exec ${quote(process.execPath)} ${quote(FAKE)} "$@"
   return path
 }
 
-export function agyWorld(t, { sandbox = true, version, registry, platform = process.platform, cliHome: withHome = true, deps = {}, env = {}, level = 'workspace' } = {}) {
+const waterfall = (listeners, terminal, invoke) => [...listeners].reduceRight(
+  (next, listener) => () => invoke(listener, next), terminal)()
+
+// Run the real Bots approval listeners with the same prepend and removal rules as Cordis.
+// The plugin's peer imports use the ACP test's pinned harness on this integration path.
+export async function approvalTeam(t, { provider = AGY, level = 'workspace-write', botAuto = false, reviewer = 'allow' } = {}) {
+  const botsUrl = new URL('../../../bots-dsh/', import.meta.url).href
+  const hook = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.startsWith(botsUrl) && specifier.startsWith('@deepseek-ai/')) {
+        return nextResolve(specifier, { ...context, parentURL: import.meta.url })
+      }
+      return nextResolve(specifier, context)
+    },
+  })
+  t.after(() => hook.deregister())
+  const { apply: applyBots } = await import('../../../bots-dsh/index.js')
+  const home = mkdtempSync(join(tmpdir(), 'approval-team-'))
+  const botId = 'fixture-bot'
+  const id = 'fixture-owned-chat'
+  const model = `${provider}/default`
+  writeFileSync(join(home, 'state.json'), JSON.stringify({
+    version: 1, mainBotIds: [botId], revision: 1, rooms: {}, exchanges: [], exchangeTurns: {}, questions: {},
+    bots: { [botId]: { id: botId, sessionId: id, name: 'Fixture Bot', role: '', instructions: '', createdAt: 1, model, appliedModel: model } },
+  }))
+  // Let the Pocket module construct its real approval source, while occupying the socket path
+  // with a fixture-only file so the plugin starts no Pocket server.
+  mkdirSync(join(home, 'pocket'))
+  writeFileSync(join(home, 'pocket', 'chat.sock'), '')
+  const presets = {
+    current: () => level,
+    resolve: name => ({ sandbox: name === 'auto' ? 'danger-full-access' : 'workspace-write', approval: 'ask' }),
+    set: (_session, name) => { level = name },
+  }
+  const sandboxPolicy = { resolve: () => ({ mode: 'workspace-write' }) }
+  const chatSessions = new Map()
+  const ctx = fakeContext({ services: {
+    permissionPresets: presets, sandboxPolicy, sessions: chatSessions,
+    approval: { request: request => approval.request(request), effectivePolicy: () => 'ask' },
+  } })
+  const reviewers = []
+  ctx.llm = {
+    ...ctx.llm,
+    resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'off' }] } }),
+    async* stream(request) {
+      reviewers.push(request)
+      if (reviewer === 'failure') throw new Error('fixture reviewer unavailable')
+      yield { type: 'text-delta', index: 0, text: JSON.stringify({ decision: reviewer, reason: 'fixture decision' }) }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  ctx.sessions = { get: key => chatSessions.get(key), list: () => [...chatSessions.values()], async flush() {} }
+  ctx.sessionController = {
+    follow() {}, events() {}, state() {}, observeState() {}, prompt() {}, cancel() {},
+    async resolveAgent(key) { return { agent: { session: chatSessions.get(key) ?? { id: key } } } },
+  }
+  const origin = new WeakMap()
+  ctx.on = (name, listener, { prepend } = {}) => {
+    if (name === 'approval/request') {
+      const location = new Error().stack.split('\n')[2]
+      origin.set(listener, /[/\\]([\w-]+)\.js:\d+:\d+/.exec(location)?.[1])
+    }
+    const registered = ctx.listeners.get(name) ?? []
+    ctx.listeners.set(name, registered)
+    if (prepend) registered.unshift(listener)
+    else registered.push(listener)
+    return () => {
+      const index = registered.indexOf(listener)
+      if (index !== -1) registered.splice(index, 1)
+    }
+  }
+  const pocketReady = Promise.withResolvers()
+  t.after(async () => {
+    await ctx.dispose()
+    rmSync(home, { recursive: true, force: true })
+  })
+  applyBots(ctx, { home })
+  const rt = ctx.provided.get('omniTeam')
+  rt.warn = message => {
+    if (String(message).includes('Pocket chat is off')) pocketReady.resolve()
+  }
+  await rt.load()
+  assert.equal(rt.chatOf(botId), id)
+  assert.equal(rt.chatOwners.get(id), botId)
+  await pocketReady.promise
+  rt.backgroundModel = async () => 'deepseek/fixture'
+  rt.cachedBackground = () => 'deepseek/fixture'
+  if (botAuto) {
+    await rt.setBotAuto(botId, 0)
+    assert.equal(rt.botOf(botId).permission, 'workspace-write')
+    assert.equal(rt.botOf(botId).permissionAuto, AGY)
+  }
+  const controls = { ask: () => 'allowed-once' }
+  const approvals = []
+  const requests = []
+  const terminal = []
+  const settled = []
+  const order = new Map()
+  const stop = rt.onApproval((kind, entry) => {
+    if (kind === 'open' && entry.answerable === true) approvals.push(entry)
+    if (kind === 'settled') settled.push(entry)
+  })
+  t.after(stop)
+  function attach(session) {
+    chatSessions.set(session.id, session)
+    t.mock.method(session, 'append', function (...args) {
+      const result = Session.prototype.append.apply(this, args)
+      for (const row of Array.isArray(result) ? result : [result]) {
+        for (const listener of ctx.listeners.get('session/event') ?? []) listener(session, row)
+      }
+      return result
+    })
+  }
+  const approval = {
+    effectivePolicy: () => 'ask',
+    async request(request) {
+      const { agent: { session }, toolName, callId, reason } = request
+      const id = randomUUID()
+      requests.push(request)
+      const trace = []
+      order.set(callId, trace)
+      session.append('approval/asked', { id, toolName, callId, ...(reason !== undefined && { reason }) })
+      const outcome = await waterfall(ctx.listeners.get('approval/request'), () => {
+        terminal.push(callId)
+        return controls.ask(request)
+      }, (listener, next) => {
+        trace.push(origin.get(listener))
+        return listener(request, next)
+      })
+      session.append('approval/decided', { id, outcome })
+      return outcome
+    },
+  }
+  return { id, rt, controls, approval, attach, approvals, requests, terminal, settled, order, reviewers, presets }
+}
+
+export function agyWorld(t, { sandbox = true, version, registry, platform = process.platform, cliHome: withHome = true, deps = {}, env = {}, level = 'workspace', team } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-agy-off-'))
   const cliHome = join(dir, 'acp', 'cli-homes')
   const trace = join(dir, 'agy-trace.jsonl')
@@ -47,12 +186,17 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
     ...env,
   })
   const agents = new Map()
-  const approvals = []
-  const controls = { ask: () => 'allowed-once' }
+  const approvals = team?.approvals ?? []
+  const requests = team?.requests ?? []
+  const controls = team?.controls ?? { ask: () => 'allowed-once' }
   const logs = []
   const services = {
-    approval: { effectivePolicy: () => level === 'full' ? 'never' : 'ask', request: async request => { approvals.push(request); return controls.ask(request) } },
-    permissionPresets: { current: () => level },
+    approval: team?.approval ?? { effectivePolicy: () => level === 'full' ? 'never' : 'ask', request: async request => {
+      requests.push(request)
+      approvals.push(request)
+      return controls.ask(request)
+    } },
+    permissionPresets: team?.presets ?? { current: () => level },
     ...(sandbox ? { sandboxPolicy: {
       defaultMode: 'workspace-write',
       resolve: ({ session }) => ({ mode: session?.snapshotEvents().findLast(event => event.type === 'sandbox/mode')?.data.mode ??
@@ -67,11 +211,15 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
     llm: { registerAdapter: (_providers, candidate) => { adapter = candidate; return () => {} } },
     agents: { get: id => agents.get(id), turnBoundaryOf: () => ({ lastTurn: 1 }) },
     get: name => services[name],
-    on: (name, listener) => {
-      const callbacks = listeners.get(name) ?? new Set()
-      callbacks.add(listener)
+    on: (name, listener, { prepend } = {}) => {
+      const callbacks = listeners.get(name) ?? []
+      if (prepend) callbacks.unshift(listener)
+      else callbacks.push(listener)
       listeners.set(name, callbacks)
-      return () => callbacks.delete(listener)
+      return () => {
+        const index = callbacks.indexOf(listener)
+        if (index !== -1) callbacks.splice(index, 1)
+      }
     },
     effect: fn => { disposers.push(fn()) },
     provide: (name, service) => { services[name] = service },
@@ -118,10 +266,15 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
   }
   const startsAfter = count => events('start').slice(count).filter(row => row.args[0] === 'acp')
   const onExecute = listener => ctx.on('tools/execute', listener)
-  const execute = (call, dispatch) => [...(listeners.get('tools/execute') ?? [])].reduceRight(
-    (next, listener) => () => listener(call, next), dispatch)()
-  function chat(id = 'chat') {
+  const execute = (call, dispatch) => waterfall(listeners.get('tools/execute') ?? [], dispatch,
+    (listener, next) => listener(call, next))
+  const preExecute = exec => waterfall(listeners.get('tools/pre-execute') ?? [], () => ({ kind: 'allow' }),
+    (listener, next) => listener(exec, next))
+  const postExecute = (exec, result) => waterfall(listeners.get('tools/post-execute') ?? [], () => ({ kind: 'accept' }),
+    (listener, next) => listener(exec, result, next))
+  function chat(id = team?.id ?? 'chat') {
     const session = Session.create(id, undefined, { version: 4, id, createdAt: 0, isSeeded: false, cwd: dir })
+    team?.attach(session)
     session.append('turn/start', { turn: 1 })
     session.append('step/start', { turn: 1, step: 1 })
     const agent = { session, ctx: { tools: { register: () => () => {} } } }
@@ -142,7 +295,7 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
     return { session, turn, policyEvent }
   }
   return {
-    dir, cliHome, agy, control, controls, onExecute, execute, logs, approvals, services, service, events, home, logDir, logOf, conversation, chat, startsAfter,
+    dir, cliHome, agy, control, controls, onExecute, execute, preExecute, postExecute, logs, approvals, requests, services, service, events, home, logDir, logOf, conversation, chat, startsAfter,
     get adapter() { return adapter },
     envs: () => read(envFile),
     setLog: value => writeFileSync(control, JSON.stringify(value)),
