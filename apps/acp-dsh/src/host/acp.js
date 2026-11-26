@@ -10,7 +10,7 @@ import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { batchSafe } from './batch-spawn.js'
 import { HOME_ENV, releaseRun, trackRun } from './cli-homes.js'
-import { AGY_SKILL_TOOL, BRIDGE_NAME, isBridgeName, mcpName } from './names.js'
+import { agyBridgeName, BRIDGE_NAME, HISTORY_TOOL_NAME, isBridgeName, mcpName, ompBridgeName } from './names.js'
 import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
@@ -43,31 +43,40 @@ export function structuredNameOf(update) {
   return undefined
 }
 
-const SKILL_OPERATION = mcpName(BRIDGE_NAME, 'load_skill')
+const SKILL_OPERATIONS = ['load_skill', HISTORY_TOOL_NAME]
 
-function skillIdentity(tool, update, provider) {
+function skillIdentity(spec, tool, update) {
+  if (!spec.skillBridge) return undefined
+  const { provider, skillTools } = spec
   const agy = provider === 'acp-antigravity'
-  const exact = name => name === SKILL_OPERATION || (agy && name === AGY_SKILL_TOOL)
-  const names = [tool.structuredName, update?.name, update?._meta?.claudeCode?.toolName]
+  const exact = (name, op) => name === mcpName(BRIDGE_NAME, op) ||
+    (agy && name === agyBridgeName(op)) || (provider === 'acp-omp' && name === ompBridgeName(op))
+  const names = [update?.name, update?._meta?.claudeCode?.toolName]
     .filter(name => typeof name === 'string' && name !== '')
-  const { server, serverName, tool: operation, toolName } = update?.rawInput ?? {}
-  const raw = server === BRIDGE_NAME && operation === 'load_skill'
-  const named = names.some(exact)
-  const claimsSkill = named || raw || tool.skillBridge === true
-  const disagrees = !names.every(exact) ||
-    (typeof server === 'string' && server !== BRIDGE_NAME) ||
-    (typeof serverName === 'string' && serverName !== BRIDGE_NAME) ||
-    (typeof operation === 'string' && operation !== 'load_skill') ||
-    (agy && typeof toolName === 'string' && toolName !== 'load_skill')
-  if (tool.skillConflict === true || (claimsSkill && disagrees)) return 'conflict'
+  const { server, serverName, tool: rawTool, toolName } = update?.rawInput ?? {}
+  const pair = op => server === BRIDGE_NAME && rawTool === op
+  const agyPair = op => pair(op) || (serverName === BRIDGE_NAME && toolName === op)
+  const op = tool.skillOperation ?? SKILL_OPERATIONS.find(op => names.some(name => exact(name, op)) ||
+    pair(op) || (agy && agyPair(op)))
+  if (op === undefined) return undefined
+  const disagrees = !names.every(name => exact(name, op)) ||
+    (tool.skillOperation === undefined && tool.structuredName !== undefined && !exact(tool.structuredName, op)) ||
+    (server !== undefined && server !== BRIDGE_NAME) ||
+    (serverName !== undefined && serverName !== BRIDGE_NAME) ||
+    (rawTool !== undefined && rawTool !== op) ||
+    (toolName !== undefined && toolName !== op)
+  if (disagrees || !(skillTools === undefined ? op === 'load_skill' : skillTools.has(op))) return 'conflict'
   // Codex's MCP updates omit the name. Its adapter labels this RPC as MCP and
   // supplies the server and operation outside the tool's own arguments.
   // Antigravity's flat MCP name can collide with a different server/tool pair.
   // Require the exact pair alongside that spelling, or a previously verified call.
-  const agyPair = raw || (serverName === BRIDGE_NAME && toolName === 'load_skill')
-  if (names.includes(SKILL_OPERATION) || (named && agy && agyPair) ||
-      (raw && update?._meta?.is_mcp_tool_call === true) || tool.skillBridge === true) return 'verified'
+  if (tool.skillOperation !== undefined || names.includes(mcpName(BRIDGE_NAME, op)) ||
+      (provider === 'acp-omp' && names.includes(ompBridgeName(op))) ||
+      (agy && names.includes(agyBridgeName(op)) && agyPair(op)) ||
+      (op === 'load_skill' && pair(op) && update?._meta?.is_mcp_tool_call === true)) return op
 }
+
+const verifiedSkill = identity => identity !== undefined && identity !== 'conflict'
 
 /**
  * The Agent/Task call a call ran inside, when the agent says so: Claude Code's adapter stamps
@@ -156,7 +165,7 @@ export function contentImages(content) {
 // Saved image paths still scrub later replies; the image bytes and other output can go.
 function retiredTool(tool) {
   const record = { id: tool.id, retired: true, unanswerable: true }
-  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'skillConflict', 'drift', 'refused', 'mirrored']) {
+  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'skillOperation', 'skillBridge', 'skillConflict', 'drift', 'refused', 'mirrored']) {
     if (tool[key] !== undefined) record[key] = tool[key]
   }
   record.listeners = new Set()
@@ -522,7 +531,7 @@ export class AgentRun {
     })
   }
 
-  prompt(prompt, onDelivered) {
+  prompt(prompt, onDelivered, signal) {
     if (this.busy) throw new Error(`${this.spec.name} is still answering`)
     this.queue = []
     this.promptSkillRefusals = new Set()
@@ -530,6 +539,9 @@ export class AgentRun {
     this.promptEnded = false
     this.forbiddenToolSeen = false
     this.cancelled = false
+    this.historyPrompt = this.spec.skillTools?.has(HISTORY_TOOL_NAME) ? new AbortController() : undefined
+    const history = this.historyPrompt?.signal
+    this.historySignal = history && signal ? AbortSignal.any([history, signal]) : history
     this.onPromptDelivered = onDelivered
     // The calls of the prompts before this one are over for DSH too: their cards ran in turns
     // that have ended, and a call already known never gets a second card. A question for one
@@ -580,6 +592,8 @@ export class AgentRun {
   }
 
   endPrompt(event) {
+    this.historyPrompt?.abort()
+    this.historySignal = undefined
     this.onPromptDelivered = undefined
     this.prompting = undefined
     // From here to the next prompt, a call seen for the first time gets no card (seeTool).
@@ -708,6 +722,7 @@ export class AgentRun {
   async cancel() {
     if (!this.busy || this.sessionId === undefined) return
     this.cancelled = true
+    this.historyPrompt?.abort()
     await this.held(() => this.conn.cancel({ sessionId: this.sessionId })).catch(() => {})
   }
 
@@ -733,6 +748,7 @@ export class AgentRun {
   dispose() {
     if (this.disposed === true) return
     this.disposed = true
+    this.historyPrompt?.abort()
     const child = this.child
     const snapshot = this.chatStopSnapshot ??= this.stopTreeSnapshot()
     if (snapshot) {
@@ -888,7 +904,13 @@ export class AgentRun {
         this.ignored('a tool update', update)
         return
       }
-      if (this.tools.get(update.toolCallId)?.retired === true) return
+      const known = this.tools.get(update.toolCallId)
+      if (known?.retired === true) {
+        if (this.checkSkillClaim(known, update) && known.skillOperation !== undefined && update.status !== undefined) {
+          known.status = update.status
+        }
+        return
+      }
     }
     const observedAt = isTool ? performance.now() : undefined
     switch (update?.sessionUpdate) {
@@ -908,11 +930,11 @@ export class AgentRun {
       }
       case 'tool_call':
         this.confirmPromptDelivery()
-        this.seeTool(update, observedAt)
+        if (this.seeTool(update, observedAt) === undefined) return
         break
       case 'tool_call_update': {
         const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update, observedAt)
-        if (tool !== undefined) this.changeTool(tool, update)
+        if (tool !== undefined && !this.changeTool(tool, update)) return
         break
       }
       case 'config_option_update':
@@ -938,15 +960,9 @@ export class AgentRun {
       return undefined
     }
     const known = this.tools.get(update.toolCallId)
-    if (known) {
-      if (known.retired !== true) this.changeTool(known, update)
-      return known
-    }
-    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity({}, update, this.spec.provider) === 'verified')) {
-      if (!this.forbiddenToolSeen) {
-        this.forbiddenToolSeen = true
-        this.spec.onForbiddenTool?.(update)
-      }
+    if (known) return known.retired === true || this.changeTool(known, update) ? known : undefined
+    if (this.spec.refuseTools === true && !verifiedSkill(skillIdentity(this.spec, {}, update))) {
+      this.forbidTool(update)
       return undefined
     }
     if (this.reviews?.last) this.reviews.after = true
@@ -979,9 +995,10 @@ export class AgentRun {
   /** What an update says the call is: its structured name, whether it is MCP, the bridge's. */
   markCall(tool, update) {
     if (this.spec.skillBridge) {
-      const identity = skillIdentity(tool, update, this.spec.provider)
-      tool.skillConflict = identity === 'conflict'
-      tool.skillBridge = identity === 'verified'
+      const identity = skillIdentity(this.spec, tool, update)
+      tool.skillConflict ||= identity === 'conflict'
+      tool.skillBridge = !tool.skillConflict && verifiedSkill(identity)
+      if (tool.skillBridge) tool.skillOperation = identity
     }
     const name = structuredNameOf(update)
     if (name !== undefined) tool.structuredName = name
@@ -999,7 +1016,22 @@ export class AgentRun {
     }
   }
 
+  forbidTool(update) {
+    if (this.forbiddenToolSeen) return
+    this.forbiddenToolSeen = true
+    this.spec.onForbiddenTool?.(update)
+  }
+
+  checkSkillClaim(tool, update, notify = true) {
+    if (skillIdentity(this.spec, tool, update) !== 'conflict') return true
+    tool.skillConflict = true
+    tool.skillBridge = false
+    if (notify && this.spec.refuseTools === true) this.forbidTool(update)
+    return false
+  }
+
   changeTool(tool, update) {
+    if (!this.checkSkillClaim(tool, update) && (tool.skillOperation !== undefined || this.spec.refuseTools === true)) return false
     // A command's output, for a client with no terminal of its own (Zed's terminal_output
     // extension, which codex-acp sends): kept as the call's output.
     const chunk = update._meta?.terminal_output?.data
@@ -1023,6 +1055,7 @@ export class AgentRun {
     }
     this.markCall(tool, update)
     for (const listener of tool.listeners) listener()
+    return true
   }
 
   /**
@@ -1082,18 +1115,21 @@ export class AgentRun {
   onPermission(params, signal) {
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
     const known = this.tools.get(params.toolCall?.toolCallId)
-    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity(known ?? {}, params.toolCall, this.spec.provider) === 'verified')) {
-      if (known && known.retired !== true) this.markCall(known, params.toolCall)
+    const identity = skillIdentity(this.spec, known ?? {}, params.toolCall)
+    if (known) this.checkSkillClaim(known, params.toolCall, false)
+    if (this.spec.refuseTools === true && (known?.skillConflict || !verifiedSkill(identity))) {
       return Promise.resolve(refusal('rejected', params.options ?? []))
     }
     const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall })
     if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
     const { title, ...details } = params.toolCall ?? {}
-    if (tool.retired !== true) this.changeTool(tool, { ...details, status: undefined })
+    if (tool.retired !== true && identity !== 'conflict') this.changeTool(tool, { ...details, status: undefined })
+    if (tool.skillOperation === HISTORY_TOOL_NAME &&
+        (tool.skillConflict || tool.retired || !this.busy || this.cancelled || this.disposed)) return Promise.resolve(CANCELLED)
     // The queued tool event is read after this synchronous handler: mark standalone approvals
     // before the adapter can turn one into a mirror card.
-    if (params._meta?.is_mcp_tool_approval === true) {
+    if (identity !== 'conflict' && params._meta?.is_mcp_tool_approval === true) {
       tool.mcp = true
       if (typeof params.toolCall?.rawInput?.serverName === 'string') tool.mcpServer = params.toolCall.rawInput.serverName
     }
