@@ -164,7 +164,9 @@ async function fixture(t, vendor, { peers = false, holdLoginStop = false, extraM
     await ctx.dispose()
     rmSync(root, { recursive: true, force: true })
   })
-  ctx.agents = { get: id => ctx.scopeAgent(id), list: () => [] }
+  // DSH keeps the same live Agent and Session handles across ACP startup checks.
+  const agents = new Map(Object.keys(bots).map(id => [id, ctx.scopeAgent(id)]))
+  ctx.agents = { get: id => agents.get(id), list: () => [...agents.values()] }
   const launches = []
   let pendingLoginStops = 0
   let next = B
