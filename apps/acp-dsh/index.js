@@ -27,7 +27,7 @@ import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
 import { CliStore, CLI_CHECK_EVERY_MS } from './src/host/clis.js'
-import { CliHomes, HOME_ENV, VERSION_ENV, runCount, stopRuns } from './src/host/cli-homes.js'
+import { CliHomes, HOME_ENV, runCount, stopRuns } from './src/host/cli-homes.js'
 import { canRunProfile, ensureChatProfiles } from './src/host/codex-chat-profiles.js'
 import { NATIVE_OFF_UNAVAILABLE, nativeOffLaunch } from './src/host/codex-native.js'
 import { CONSENT_FILE, ConsentStore } from './src/host/consent.js'
@@ -398,8 +398,8 @@ export function apply(ctx, config = {}, {
   }
   let registration
   let disposed = false
-  const cliEnvironment = (spec, detail) => {
-    const env = homed(spec) ? homes.environment(spec.key) : {}
+  const cliEnvironment = (spec, detail, staged) => {
+    const env = staged ?? (homed(spec) ? homes.environment(spec.key) : {})
     if (!detail?.managed) return env
     if (spec.key === 'claude') return { ...env, DISABLE_UPDATES: '1' }
     // Managed Codex runs its native executable; inherited package-manager ownership flags
@@ -1220,45 +1220,52 @@ export function apply(ctx, config = {}, {
       reconcile({ kick: false })
       attemptVersions.set(id, cliDetails.get(id)?.version)
       const version = authVersions.get(id)
-      return { cli: clis.get(id), env: { ...process.env, ...cliEnvironment(AGENTS[id], cliDetails.get(id)) },
+      const staged = chatLogin?.id === id ? chatLogin.storage?.env : undefined
+      return { cli: clis.get(id), env: { ...process.env, ...cliEnvironment(AGENTS[id], cliDetails.get(id), staged) },
         valid: () => !disposed && !restarting && !accountChanges.has(id) && authVersions.get(id) === version }
     },
     // `existing`: the CLI was signed in before the attempt, so nobody signed in through it. A
     // sign-in the person made here is their word for that account; an existing one waits for
     // `accountConfirm`, and until then nothing is announced, so no chosen model is applied.
-    async onReady(id, selected, { existing = false, fresh = false, compare = false, answered, valid = () => false, same } = {}) {
+    async onReady(id, selected, { existing = false, fresh = false, compare = false, attemptId, commit, valid = () => false, same } = {}) {
       const version = authVersions.get(id)
+      const preserving = attemptId && chatLogin?.id === id ? chatLogin : undefined
       const current = () => {
         if (!valid() || disposed || restarting || accountChanges.has(id)
           || authVersions.get(id) !== version || clis.get(id) !== selected.cli) return false
         try {
+          if (preserving && !preserving.adopted) return homes.matches(preserving.before.env)
           return !homes || (selected.env[HOME_ENV] === homes.home(AGENTS[id].key)
             && homes.matches(selected.env))
         } catch { return false }
       }
-      const preserving = fresh && chatLogin?.id === id && chatLogin.keep ? chatLogin : undefined
       if (!current()) return preserving ? false : undefined
       const who = consents === undefined ? undefined
         : await Promise.resolve().then(() => current() ? account(AGENTS[id], selected.cli, { env: selected.env }) : undefined).catch(() => undefined)
       if (!current()) return preserving ? false : undefined
       if (preserving) {
-        const before = preserving.before
-        const change = before?.signedIn === false || (before?.who?.id !== undefined && who?.id !== undefined
-          && before.who.id !== who.id)
-        // Claude's manual callback must belong to this attempt. A link and a zero exit
-        // cannot confirm the account already in the home. A changed identity is also proof.
-        if (who?.id === undefined || (!change && (before?.who?.id === undefined || (id === 'acp-claude' && !answered)))) return false
-        if (before.signedIn === true && change) {
-          const { key } = AGENTS[id]
+        // The named account is read from the same isolated home that reported signed out
+        // before this attempt. A submitted Claude code alone does not establish completion.
+        if (who?.kind !== 'account' || who.id === undefined) return false
+        await logins.drain(id)
+        if (!current()) return false
+        const adoption = preserving.storage.adopt()
+        preserving.adopted = true
+        commit()
+        try {
           adapter.endProvider(id, 'The Bot account changed. Sign in again in the app.')
           agents.get(id)?.catalog.dispose()
-          await stopRuns(homes.home(key))
+          await stopRuns(preserving.storage.old)
+          adoption.removePrevious()
+          Object.assign(selected.env, cliEnvironment(AGENTS[id], cliDetails.get(id)))
           if (!current()) return false
-          selected.env[VERSION_ENV] = homes.advanceVersion(key)
           signedOut(id)
           agents.set(id, agentOf(AGENTS[id], selected.cli))
+        } finally {
+          adoption.release()
         }
-        if (!change) same?.()
+        const beforeEmail = preserving.before.who?.facets?.email
+        if (beforeEmail !== undefined && beforeEmail === who.facets?.email) same?.()
       }
       signIns.set(id, true)
       inspections.delete(id)
@@ -1284,7 +1291,7 @@ export function apply(ctx, config = {}, {
       publish()
       if (!current() || consentStates.get(id) === 'needed') return
       try {
-        ctx.emit?.('acp-dsh/login-ready', { id })
+        ctx.emit?.('acp-dsh/login-ready', { id, ...(attemptId ? { attemptId } : {}) })
       } catch (error) {
         warn(ctx, `the sign-in of ${id} was not announced: ${error?.message ?? error}`)
       }
@@ -1292,7 +1299,7 @@ export function apply(ctx, config = {}, {
     // A failed Switch never strands Bots (#2064): still signed in -> the home runs again on the
     // account that stayed; signed out or unknown -> it stays paused until a sign-in. Only this
     // attempt's own lock: a newer sign-out, switch or restart already took it.
-    async onSettled({ id, attemptId, signedIn, selected, valid }) {
+    onSettled({ id, attemptId, signedIn, valid, drained }) {
       const owns = () => !restarting && !disposed && loginLocks.has(id) && !logins.current(id) && logins.owns(id, attemptId)
       if (!owns()) return
       const spec = AGENTS[id]
@@ -1300,14 +1307,10 @@ export function apply(ctx, config = {}, {
       let resume = signedIn === true
       if (preserving) {
         const before = preserving.before
-        resume = false
-        if (!before?.paused && valid() && signedIn === before?.signedIn) {
-          if (signedIn === false) resume = true
-          if (signedIn === true && before.who?.id !== undefined && selected) {
-            const who = await account(spec, selected.cli, { env: selected.env }).catch(() => undefined)
-            resume = who?.id === before.who.id
-          }
+        if (drained && !preserving.adopted) {
+          try { preserving.storage.discard() } catch { warn(ctx, 'The isolated sign-in home could not be removed.') }
         }
+        resume = !preserving.adopted && !before.paused && homes.matches(before.env)
       }
       if (!owns()) return
       loginLocks.delete(id)
@@ -1626,7 +1629,7 @@ export function apply(ctx, config = {}, {
   // browser ends on (signInCallback). On Linux an attempt with no link nativeSignInLinkMs after
   // `authenticate` ends as `no-browser`; a link is good for nativeSignInWindowMs after
   // `authenticate`.
-  async function signInNative(id, { label } = {}) {
+  async function signInNative(id, { label, chatFresh } = {}) {
     restartGuard()
     const spec = AGENTS[id]
     if (spec === undefined || !homedNative(spec) || typeof spec.acpSignIn !== 'string') {
@@ -1666,7 +1669,7 @@ export function apply(ctx, config = {}, {
     if (disposed || nativeSignIns.has(id)) return status()
     if (accountChanges.has(id)) throw accountFailure('busy', 'The Bot account is changing.')
     const controller = new AbortController()
-    const attempt = { controller, attemptId: randomUUID(), delivered: false,
+    const attempt = { controller, attemptId: randomUUID(), delivered: false, chatFresh,
       ...(typeof label === 'string' && label !== '' ? { label } : {}) }
     nativeSignIns.set(id, attempt)
     nativeSignInErrors.delete(id)
@@ -1789,7 +1792,8 @@ export function apply(ctx, config = {}, {
       // How the attempt ended, for a Bot chat that reads it by its id (loginStatus).
       const ended = (status, cause) => {
         if (disposed) return
-        nativeEnded.set(id, { attemptId: attempt.attemptId, status, ...(cause ? { cause } : {}), at: Date.now() })
+        nativeEnded.set(id, { attemptId: attempt.attemptId, status, chatFresh: attempt.chatFresh,
+          ...(cause ? { cause } : {}), at: Date.now() })
       }
       try {
         if (!disposed && attempt.noBrowser !== undefined) {
@@ -1833,7 +1837,7 @@ export function apply(ctx, config = {}, {
         if (!disposed && signIns.get(id) === true) {
           // As a terminal sign-in: the Bot team applies the model the person chose.
           try {
-            ctx.emit?.('acp-dsh/login-ready', { id })
+            ctx.emit?.('acp-dsh/login-ready', { id, ...(attempt.chatFresh ? { attemptId: attempt.attemptId } : {}) })
           } catch (error) {
             warn(ctx, `the sign-in of ${id} was not announced: ${error?.message ?? error}`)
           }
@@ -1897,6 +1901,7 @@ export function apply(ctx, config = {}, {
       id, attemptId: attempt.attemptId, status: typeof attempt.url === 'string' ? 'waiting' : 'starting',
       ...(!attempt.delivered && Number.isFinite(attempt.expiresAt) ? { expiresAt: attempt.expiresAt, expiresBy: 'app' } : {}),
       ...(attempt.label ? { openedBy: attempt.label } : {}),
+      ...(attempt.chatFresh ? { chatFresh: true } : {}),
       ...(typeof attempt.url === 'string' ? { url: attempt.url } : {}),
       ...(pasting ? { prompt: { id: 'agy-callback', secret: true } } : {}),
       ...(attempt.delivered ? { checking: true } : {}),
@@ -1909,17 +1914,17 @@ export function apply(ctx, config = {}, {
     if (attempt !== undefined && attempt.attemptId === attemptId && attempt.current()) return nativeLoginView(id, attempt)
     const ended = nativeEnded.get(id)
     if (ended !== undefined && ended.attemptId === attemptId && Date.now() - ended.at < NATIVE_RETAIN_MS) {
-      return { id, attemptId, status: ended.status, ...(ended.cause ? { cause: ended.cause } : {}) }
+      return { id, attemptId, status: ended.status, ...(ended.chatFresh ? { chatFresh: true } : {}), ...(ended.cause ? { cause: ended.cause } : {}) }
     }
     throw nativeNotFound()
   }
   const nativeLogins = {
-    async start(id, label) {
-      await signInNative(id, { label })
+    async start(id, label, { chatFresh } = {}) {
+      await signInNative(id, { label, chatFresh })
       const attempt = nativeSignIns.get(id)
       if (attempt === undefined) {
         const ended = nativeEnded.get(id)
-        if (ended !== undefined) return { id, attemptId: ended.attemptId, status: ended.status }
+        if (ended !== undefined) return nativeViewOf(id, ended.attemptId)
         throw signInFailure('failed', `The sign-in to ${AGENTS[id].defaultName} did not start. Try again.`)
       }
       if (attempt.label === undefined && typeof label === 'string' && label !== '') attempt.label = label
@@ -1969,7 +1974,9 @@ export function apply(ctx, config = {}, {
     }
     if (logins.current(attempt.id) || logins.settling(attempt.id)) return
     attempt.draining = true
-    void logins.drain(attempt.id).catch(() => {}).finally(() => {
+    void logins.drain(attempt.id).then(() => {
+      if (!attempt.adopted) attempt.storage?.discard()
+    }).catch(() => {}).finally(() => {
       if (chatLogin === attempt) chatLogin = undefined
     })
   }
@@ -1992,47 +1999,70 @@ export function apply(ctx, config = {}, {
     }
   }
 
-  async function startChatLogin(id, label, fresh) {
+  async function chatLoginStatus(id) {
+    const spec = AGENTS[id]
+    if (!homes || !consentIds.includes(id) || disposed || restarting || accountChanges.has(id)) return undefined
+    const cli = clis.get(id)
+    if (!enabled(spec) || cli === undefined) return undefined
+    try {
+      const env = cliEnvironment(spec, cliDetails.get(id))
+      const result = await signedIn(spec, cli, { env })
+      if (clis.get(id) === cli && homes.matches(env)) return result
+    } catch {}
+    return undefined
+  }
+
+  async function startChatLogin(id, label, fresh, withoutWarning) {
     restartGuard()
     if (!homes || disposed || !(consentIds.includes(id) || (fresh && isHomedNative(id)))) {
       throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
+    }
+    if (isHomedNative(id) && platform === 'win32') {
+      throw accountFailure('unavailable', 'Sign out is not available on Windows. Sign out in Antigravity itself.')
     }
     if (chatLogin || ordinaryLoginOperations > 0 || accountChanges.size > 0 || loginActive() > 0) throw loginBusy()
     const spec = AGENTS[id]
     const attempt = { id, keep: !isHomedNative(id), admitting: true }
     chatLogin = attempt
     try {
-      if (!attempt.keep && platform === 'win32') {
-        throw accountFailure('unavailable', 'Sign out is not available on Windows. Sign out in Antigravity itself.')
-      }
       if (!enabled(spec)) throw signInFailure('off', `Turn ${spec.defaultName} on first.`)
       reconcile({ kick: false })
       if (clis.get(id) === undefined) throw signInFailure('missing', `Install ${spec.defaultName} first.`)
       if (!attempt.keep) {
         await signOutNative(id)
-        return await nativeLogins.start(id, label)
+        return await nativeLogins.start(id, label, { chatFresh: true })
       }
 
       await awaitRecovery(id)
       restartGuard()
       const cli = clis.get(id)
       if (!enabled(spec) || cli === undefined || disposed) throw accountFailure('unavailable', 'The Bot account cannot be changed here.')
+      const env = cliEnvironment(spec, cliDetails.get(id))
+      const readStatus = () => signedIn(spec, cli, { env }).catch(() => undefined)
+      const authenticated = (await readStatus()) ?? await readStatus()
+      if (withoutWarning && authenticated !== false) {
+        throw accountFailure('confirmation-required', 'This stops running Bot work for this account. Continue?')
+      }
+      const readAccount = () => account(spec, cli, { env }).catch(() => undefined)
+      const who = authenticated === true ? (await readAccount()) ?? await readAccount() : undefined
+      restartGuard()
+      if (typeof authenticated !== 'boolean' || (authenticated && who?.id === undefined)
+        || disposed || !enabled(spec) || clis.get(id) !== cli || !homes.matches(env)) {
+        throw accountFailure('changed', 'The account changed since it was shown.')
+      }
       const paused = homes.paused(spec.key)
+      attempt.before = { paused, who, env }
       homes.begin(spec.key, { preserveVersion: true })
       loginLocks.add(id)
       authVersions.set(id, (authVersions.get(id) ?? 0) + 1)
       nextEpoch(id)
       try {
-        const env = cliEnvironment(spec, cliDetails.get(id))
-        const authenticated = await signedIn(spec, cli, { env }).catch(() => undefined)
-        const who = authenticated === true ? await account(spec, cli, { env }).catch(() => undefined) : undefined
-        attempt.before = { paused, signedIn: authenticated, who }
-        restartGuard()
-        if (disposed || !enabled(spec) || clis.get(id) !== cli || !homes.matches(env)) {
+        if (!homes.matches(env)) {
           throw accountFailure('changed', 'The Bot account changed since it was shown.')
         }
+        attempt.storage = homes.stageLogin(spec.key)
         signInNote(ctx, `account switch for ${spec.defaultName}: kept the signed-in account until the new sign-in`)
-        return logins.start(id, { label, fresh: true, keep: true })
+        return logins.start(id, { label, fresh: true, keep: true, priorSignIn: authenticated })
       } catch (error) {
         if (loginLocks.delete(id)) {
           if (!paused && !restarting && !disposed) homes.resume(spec.key)
@@ -2310,6 +2340,10 @@ export function apply(ctx, config = {}, {
      * Refusals carry an `acp-sign-in/*` code (`unsupported`, `off`, `missing`) or `acp-account/busy`.
      */
     signInNative: async id => ordinaryLogin(() => signInNative(id)),
+    accountSwitchNative: id => ordinaryLogin(async () => {
+      await signOutNative(id)
+      return signInNative(id)
+    }),
     /**
      * The address the browser ended on after a sign-in on any computer, for the attempt
      * `attemptId` (#2048, paste-back): answers status() once it reached agy. Refusals carry
@@ -2325,8 +2359,9 @@ export function apply(ctx, config = {}, {
       await homes.recoverLogins(key).catch(() => false)
       return { required: homes.recovery(key) }
     },
-    accountSwitch: async (id, { label, keep, fresh } = {}) => {
-      if (fresh === true || keep === true) return startChatLogin(id, label, fresh === true)
+    chatLoginStatus,
+    accountSwitch: async (id, { label, keep, fresh, withoutWarning } = {}) => {
+      if (fresh === true || keep === true) return startChatLogin(id, label, fresh === true, withoutWarning === true)
       return ordinaryLogin(async () => {
         // "Before" is read before the sign-out (#2064): only a signed-in, agreed account is compared.
         const compare = signIns.get(id) === true && ['given', 'carried'].includes(consentStates.get(id))

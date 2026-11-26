@@ -81,7 +81,7 @@ const homeOf = (cliHome) => {
   return join(cliHome, 'homes', 'antigravity', readFileSync(pointer, 'utf8'))
 }
 
-function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, hermes = false, external = true, prepare } = {}) {
+function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, hermes = false, external = true, prepare, onRoutes } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-agy-iso-'))
   prepare?.(dir)
   const cliHome = join(dir, 'acp', 'cli-homes')
@@ -116,7 +116,7 @@ function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, h
         registered.adapter = adapter
         routes.now = [...providers]
         const handle = () => { routes.now = [] }
-        handle.replace = (next) => { routes.now = [...next] }
+        handle.replace = (next) => { routes.now = [...next]; onRoutes?.() }
         return handle
       },
       listProviders: () => routes.now.map(id => ({ id, name: id })),
@@ -1206,4 +1206,44 @@ test('ordinary native sign-in keeps its attempt when chat requests another login
   assert.equal(w.home(), home)
   w.service.loginCancel(ID, initial.attemptId)
   await until(() => w.service.loginActive() === 0, 'cancelled Settings attempt to settle')
+})
+
+test('round 2 finding 6: Settings keeps admission between retirement and sign-in, and Windows keeps its refusal', unixOnly, async t => {
+  plant(t)
+  await t.test('Settings switch owns the gap', async t => {
+    let chat
+    let old
+    const compete = () => {
+      chat ??= w.service.accountSwitch(ID, { fresh: true, label: 'competing chat' }).catch(error => error)
+    }
+    const w = world(t, {
+      agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' },
+      onRoutes() {
+        if (old && w.home() !== old && w.service.accountSwitchNative) queueMicrotask(compete)
+      },
+    })
+    old = w.home()
+    if (w.service.accountSwitchNative) await w.service.accountSwitchNative(ID)
+    else {
+      await w.service.accountSignOutNative(ID)
+      compete()
+      await w.service.signInNative(ID).catch(() => {})
+    }
+    assert.notEqual(w.home(), old)
+    assert.ok(chat, 'the competitor tried after the old home was retired')
+    assert.equal((await chat).code, 'acp-account/busy')
+    const waiting = await until(() => w.service.loginCurrent(ID)?.url && w.service.loginCurrent(ID), 'the Settings link')
+    assert.notEqual(waiting.openedBy, 'competing chat')
+    w.service.loginCancel(ID, waiting.attemptId)
+    await until(() => w.service.loginActive() === 0, 'the Settings attempt settled')
+  })
+  await t.test('Windows refuses before busy', async t => {
+    const w = world(t, { platform: 'win32' })
+    const pending = w.service.signInNative('acp-claude').catch(error => error)
+    await assert.rejects(w.service.accountSwitch(ID, { fresh: true }), {
+      code: 'acp-account/unavailable',
+      message: 'Sign out is not available on Windows. Sign out in Antigravity itself.',
+    })
+    await pending
+  })
 })

@@ -24252,9 +24252,11 @@ function teamActions({
     }),
     cliLoginRelease: (claimId, rev) => call2("cli-login-release", { claimId, rev }),
     cliLoginReleaseMachine: (machineId) => call2("cli-login-release", { machineId }),
-    cliLoginSwitch: (botId, provider, { keep, fresh } = {}) => call2("cli-login-switch", loginPayload(botId, provider, {
+    cliLoginSwitch: (botId, provider, { keep, fresh } = {}, { confirmed: confirmed2, model } = {}) => call2("cli-login-switch", loginPayload(botId, provider, {
       ...keep === void 0 ? {} : { keep },
-      ...fresh === true ? { fresh } : {}
+      ...fresh === true ? { fresh } : {},
+      ...confirmed2 === false ? { withoutWarning: true } : {},
+      ...model ? { model } : {}
     })),
     cliLoginReset: (botId, provider) => call2("cli-login-reset", loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call2(
@@ -45503,7 +45505,10 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     if (provider === "acp-claude" && typeof view.url === "string") rememberLinkState(view.url);
     if (provider === "acp-antigravity" && typeof view.url === "string") rememberCallbackState(view.url);
     if (ACTIVE.has(view.status)) {
-      for (const row2 of attemptRows(provider)) setRow(row2.botId, { ...row2, attempt });
+      for (const row2 of attemptRows(provider)) {
+        const { fresh: _, ...rest2 } = row2;
+        setRow(row2.botId, { ...rest2, attempt, ...view.chatFresh === true ? { fresh: true } : {} });
+      }
       armPoll(provider);
     } else if (view.status === "ready") succeed(provider, view);
     else if (view.status === "confirm") askAccount(provider, view.account);
@@ -45601,6 +45606,11 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
   async function ended(provider) {
     const epoch = providerEpochs.get(provider);
     stopPoll(provider);
+    const last = attempts[provider];
+    if (last?.chatFresh === true || attemptRows(provider).some((row2) => row2.fresh === true)) {
+      applyView(provider, { status: "expired", message: EXPIRED, fresh: true, chatFresh: true });
+      return;
+    }
     let signedIn;
     let connection;
     try {
@@ -45618,7 +45628,6 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       succeed(provider, void 0);
       return;
     }
-    const last = attempts[provider];
     if (last?.expiresAt !== void 0 && last.expiresAt > now()) interrupt(provider);
     else applyView(provider, { status: "expired", message: EXPIRED, ...last?.fresh === true ? { fresh: true } : {} });
   }
@@ -45675,8 +45684,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       const sameProvider = existing?.provider === provider;
       const sameIntent = existing?.fresh === true === fresh;
       if (!switched && sameProvider && (existing.stage === "attempt" || sameIntent && ["offer", "account"].includes(existing.stage))) {
-        const { fresh: _, ...row2 } = existing;
-        setRow(botId, { ...row2, reveal: ++sequence, ...model ? { ref: model } : {}, ...fresh ? { fresh } : {} });
+        setRow(botId, { ...existing, reveal: ++sequence, ...model ? { ref: model } : {} });
         if (existing.stage === "attempt" && model && model !== existing.ref && !existing.busy) {
           const seq2 = existing.seq;
           try {
@@ -45898,10 +45906,17 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         switched = await actions.cliLoginSwitch(
           botId,
           provider,
-          ...row2.fresh ? [{ fresh: true, ...provider === "acp-antigravity" ? {} : { keep: true } }] : []
+          ...row2.fresh ? [
+            { fresh: true, ...provider === "acp-antigravity" ? {} : { keep: true } },
+            { confirmed: row2.confirm === true, model: row2.ref }
+          ] : []
         );
       } catch (error) {
         if (!live(botId, seq) || !valid()) return false;
+        if (error?.code === "bot/login-confirmation-required") {
+          patchRow(botId, seq, { stage: "offer", busy: false, confirm: true, error: null });
+          return false;
+        }
         patchRow(botId, seq, { busy: false, ...row2.fresh && row2.stage === "offer" ? {} : { confirm: false }, error: messageOf(error) });
         return false;
       }
@@ -45917,10 +45932,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
           const current = await actions.cliLoginCurrent(botId, provider);
           if (!live(botId, seq)) return false;
           if (current?.attempt) applyView(provider, current.attempt);
+          else if (row2.fresh) await ended(provider);
           else await readAccount(botId, provider, seq, null);
         }
       } catch (error) {
-        if (live(botId, seq) && !failedCall(provider, error)) await readAccount(botId, provider, seq, messageOf(error));
+        if (live(botId, seq) && !failedCall(provider, error)) {
+          if (row2.fresh) await ended(provider);
+          else await readAccount(botId, provider, seq, messageOf(error));
+        }
       }
       return true;
     },

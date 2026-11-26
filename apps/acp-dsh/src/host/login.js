@@ -351,6 +351,7 @@ export class CliLogins {
       ...(flow.status === 'failed' && typeof flow.cause === 'string' ? { cause: flow.cause } : {}),
       // A Switch account attempt (#2064), in every status: its row offers the switch again.
       ...(flow.fresh === true ? { fresh: true } : {}),
+      ...(flow.keep === true ? { chatFresh: true } : {}),
       ...(flow.status === 'ready' && flow.sameAccount === true ? { sameAccount: true } : {}),
       ...(flow.fresh === true && flow.settling === true ? { settling: true } : {}),
       ...(flow.fresh === true && !this.active(flow) && typeof flow.signedInAfter === 'boolean' ? { signedInAfter: flow.signedInAfter } : {}),
@@ -380,7 +381,7 @@ export class CliLogins {
    *   it (a Bot id), shown on cancel; `fresh` for a Switch account, and `compare` when the account
    *   it signed out of may be compared with the new one.
    */
-  start(id, { label, fresh = false, compare = false, keep = false } = {}) {
+  start(id, { label, fresh = false, compare = false, keep = false, priorSignIn } = {}) {
     if (this.disposed) throw failure('disposed', 'Sign-in is unavailable while Automagik restarts.')
     if (!known(id)) throw terminalOnly(id, this.hintOf(id)) ?? failure('invalid', CHOOSE)
     const previous = this.flows.get(id)
@@ -391,7 +392,7 @@ export class CliLogins {
     }
     if (previous) this.timers.clearTimeout(previous.retained)
     const flow = { id, label: labelOf(label), attemptId: randomUUID(), status: 'starting', deadline: this.now() + this.startupMs,
-      ...(fresh === true ? { fresh: true, compare: compare === true, keep: keep === true } : {}) }
+      ...(fresh === true ? { fresh: true, compare: compare === true, keep: keep === true, priorSignIn } : {}) }
     this.flows.set(id, flow)
     this.armDeadline(flow)
     this.changed()
@@ -428,6 +429,7 @@ export class CliLogins {
   /** Ends an attempt on an explicit request; reading or reconnecting never does. */
   cancel(id, attemptId) {
     const flow = this.flow(id, attemptId)
+    if (flow.committing) throw failure('busy', 'The Bot account is changing.')
     this.finish(flow, 'cancelled', cancelledMessage)
     return this.view(flow)
   }
@@ -526,8 +528,13 @@ export class CliLogins {
     // `existing`: the CLI was signed in before this attempt, so nobody signed in here (#869). A
     // Switch account attempt (`fresh`) never takes that as its result (#2064): its sign-in always
     // runs and shows its link; the status at its start is only recorded. Decided after the read.
-    const signedIn = await this.check(flow)
+    const initial = await this.readStatus(flow)
+    const signedIn = initial === true
     if (!this.active(flow)) return
+    if (flow.keep && initial !== false) {
+      this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
+      return
+    }
     if (flow.fresh) {
       flow.signedInAtStart = signedIn
       try { this.onSwitch({ id: flow.id, step: 'start', signedIn }) } catch {}
@@ -596,8 +603,12 @@ export class CliLogins {
     else this.claude(flow)
   }
 
+  async readStatus(flow) {
+    return this.signedIn(AGENTS[flow.id], flow.selected.cli, { env: flow.selected.env }).catch(() => undefined)
+  }
+
   async check(flow) {
-    return await this.signedIn(AGENTS[flow.id], flow.selected.cli, { env: flow.selected.env }).catch(() => undefined) === true
+    return await this.readStatus(flow) === true
   }
 
   async ready(flow) {
@@ -606,9 +617,16 @@ export class CliLogins {
     // A notification or an exit alone is not proof: check() asked the same CLI and env. The
     // sign-in is recorded before any view can read `ready`.
     let same = false
+    let finishCommit
+    const commit = () => {
+      // From this point on the selected home has changed. Cancellation cannot undo it.
+      flow.committing = new Promise(resolve => { finishCommit = resolve })
+      this.timers.clearTimeout(flow.timeout)
+      flow.confirmingUntil = undefined
+    }
     try {
       const accepted = await this.onReady(flow.id, flow.selected, { existing: flow.existing === true, fresh: flow.fresh === true,
-        compare: flow.compare === true, ...(flow.keep ? { answered: flow.answering === true } : {}),
+        compare: flow.compare === true, ...(flow.keep ? { attemptId: flow.attemptId, commit } : {}),
         valid: () => this.valid(flow), same: () => { same = true } })
       if (accepted === false) {
         this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
@@ -619,6 +637,11 @@ export class CliLogins {
         this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
         return
       }
+    } finally {
+      if (finishCommit) {
+        flow.committing = undefined
+        finishCommit()
+      }
     }
     if (this.valid(flow)) {
       if (same) flow.sameAccount = true
@@ -628,6 +651,10 @@ export class CliLogins {
 
   async confirm(flow) {
     if (!this.valid(flow) || flow.confirming) return
+    if (flow.keep && flow.id === 'acp-claude' && !flow.answering) {
+      this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
+      return
+    }
     flow.confirming = true
     this.confirmationDeadline(flow)
     flow.url = undefined
@@ -810,9 +837,14 @@ export class CliLogins {
   // says whether the vendor's home runs again (still signed in) or stays paused (signed out).
   // `drain` is called before any await: it stops only the trees alive now, never a newer one's.
   async settle(flow, selected) {
-    let signedIn = flow.signedInAfter
+    let signedIn = flow.keep ? flow.priorSignIn : flow.signedInAfter
+    let drained = false
     try {
-      if (signedIn === undefined || flow.keep) {
+      if (flow.keep) {
+        // An unproved process may still write to its isolated home. Leave the storage
+        // fenced off and let settlement resume the selected home independently.
+        drained = await this.drain(flow.id).then(() => true, () => false)
+      } else if (signedIn === undefined) {
         signedIn = undefined
         await this.drain(flow.id)
         if (selected === undefined && !this.disposed) {
@@ -828,7 +860,7 @@ export class CliLogins {
       if (!this.disposed) {
         try {
           const resumed = await this.onSettled({ id: flow.id, attemptId: flow.attemptId, signedIn,
-            ...(flow.keep ? { selected } : {}),
+            ...(flow.keep ? { drained } : {}),
             valid: () => !this.disposed && selected?.valid?.() !== false })
           if (flow.keep && resumed === true && signedIn === true && flow.status === 'failed') {
             flow.message = unchangedMessage
@@ -861,7 +893,8 @@ export class CliLogins {
 
   async stop(id) {
     const flow = this.flows.get(id)
-    if (flow) this.finish(flow, 'cancelled', cancelledMessage)
+    if (flow?.committing) await flow.committing
+    else if (flow) this.finish(flow, 'cancelled', cancelledMessage)
     await this.drain(id)
   }
 

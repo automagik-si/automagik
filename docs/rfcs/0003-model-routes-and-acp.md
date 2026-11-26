@@ -856,6 +856,13 @@ ownership. Live legacy registrations cannot distinguish PID reuse and remain con
 legacy markers that lack login-tree evidence are retained.
 Launches capture an account generation so delayed work cannot start under a later account.
 
+**Fresh chat sign-in (#2113).** Claude Code and Codex start in an empty, unselected vendor
+home without copying or linking credentials. Cancellation or failed authentication discards
+that home after the attempt's processes stop and preserves the selected home and its Sessions.
+After confirmed authentication, the Bot selects the attempt home and removes the previously
+selected home after its processes stop. This removal applies to the two homes involved in the
+fresh chat attempt. Reset's retention rules still apply to Reset.
+
 **Crash recovery and owner Reset.** Automatic app-crash recovery is Unix-only and requires the
 recorded login group's exit proof. Windows app death leaves its login record blocked, even if
 an old Job nonce exists: Windows crash recovery is by owner Reset followed by fresh sign-in.

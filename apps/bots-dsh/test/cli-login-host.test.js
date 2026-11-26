@@ -8,6 +8,9 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { RESERVATION_FILE } from '../src/host/account-reservations.js'
 import { CALLBACK_REFUSED, CODE_HINT, cliLoginUrl, cliLoginView, install } from '../src/host/cli-login.js'
+import { install as installHostModels } from '../src/host/host-models.js'
+import { createCliLogin } from '../src/client/cli-login-state.js'
+import { teamActions } from '../src/client/team-actions.js'
 import { isSignInUrl as welcomeSignInUrl } from '../../welcome-dsh/src/host/sign-in-url.js'
 import { CLAUDE, CODEX, reservationAcp } from './fixtures/account-reservations.js'
 
@@ -925,4 +928,56 @@ test('fresh current returns the cached Boolean and omits account identity before
   h.acp.account = async () => assert.fail('a fresh current read must not query the actual account')
   const current = await h.actions['cli-login-current']({ botId: 'a', provider, fresh: true })
   assert.deepEqual(current, { id: provider, attempt: null, signedIn: true })
+})
+
+test('round 2 finding 7: Continue rechecks host ownership while Settings can still use the anchor', async () => {
+  const h = fixture()
+  h.bots.a.model = 'acp-codex/default'
+  h.bots.a.kind = 'external'
+  h.rt.extended = { botModelsOf: () => undefined }
+  installHostModels(h.rt)
+  h.acp.authScope = 'isolated'
+  h.acp.freshChatLogin = true
+  h.acp.accountSwitch = async (...args) => h.calls.push(args)
+  h.acp.status = async () => ({ agents: [{ id: CODEX, signedIn: true }] })
+  const address = { botId: 'a', provider: CODEX }
+  assert.equal((await h.actions['cli-login-current']({ ...address, fresh: true })).signedIn, true)
+  h.rt.extended.botModelsOf = kind => kind === 'external' ? { snapshot: () => ({ entries: [] }) } : undefined
+  h.calls.length = 0
+  await assert.rejects(h.actions['cli-login-switch']({ ...address, fresh: true }), { code: 'bot/invalid' })
+  assert.deepEqual(h.calls, [])
+  await h.actions['cli-login-switch'](address)
+  assert.deepEqual(h.calls, [[CODEX, { label: 'a' }]])
+})
+
+test('round 2 finding 8: the idle model choice is applied to the intended Bot after fresh completion', async t => {
+  const h = fixture()
+  const ref = 'acp-codex/picked'
+  h.bots.a.model = 'acp-codex/default'
+  h.acp.authScope = 'isolated'
+  h.acp.freshChatLogin = true
+  h.acp.status = async () => ({ agents: [{ id: CODEX, signedIn: true }] })
+  let result
+  h.acp.loginCurrent = async () => undefined
+  h.acp.loginStatus = async () => result
+  h.acp.accountSwitch = async () => {
+    result = { id: CODEX, status: 'waiting', attemptId: ATTEMPT, fresh: true, chatFresh: true }
+    return result
+  }
+  const actions = teamActions({ call: (endpoint, payload) => h.actions[endpoint](payload) })
+  const login = createCliLogin({ actions, pollMs: 10 })
+  t.after(() => login.dispose())
+  await login.open({ botId: 'a', provider: CODEX, ref })
+  await login.open({ botId: 'a', provider: CODEX, fresh: true })
+  assert.equal(login.getSnapshot().rows.a.ref, ref)
+  assert.equal(h.rt.cliLoginChoice('a', CODEX), undefined)
+  assert.equal(await login.switchFresh('a'), true)
+  h.emit('acp-dsh/login-ready', { id: CODEX, attemptId: randomUUID() })
+  await settle()
+  assert.deepEqual(h.updates, [])
+  result = { ...result, status: 'ready' }
+  h.emit('acp-dsh/login-ready', { id: CODEX, attemptId: ATTEMPT })
+  await settle()
+  assert.deepEqual(h.updates, [['a', { model: ref }]])
+  assert.equal(h.bots.b.model, 'deepseek/v4')
 })

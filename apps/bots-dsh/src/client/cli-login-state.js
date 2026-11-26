@@ -132,7 +132,10 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
     // Antigravity's link (#2048): the address it ends on is refused in a message too.
     if (provider === 'acp-antigravity' && typeof view.url === 'string') rememberCallbackState(view.url)
     if (ACTIVE.has(view.status)) {
-      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt })
+      for (const row of attemptRows(provider)) {
+        const { fresh: _, ...rest } = row
+        setRow(row.botId, { ...rest, attempt, ...(view.chatFresh === true ? { fresh: true } : {}) })
+      }
       armPoll(provider)
     } else if (view.status === 'ready') succeed(provider, view)
     else if (view.status === 'confirm') askAccount(provider, view.account)
@@ -229,6 +232,11 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
   async function ended(provider) {
     const epoch = providerEpochs.get(provider)
     stopPoll(provider)
+    const last = attempts[provider]
+    if (last?.chatFresh === true || attemptRows(provider).some(row => row.fresh === true)) {
+      applyView(provider, { status: 'expired', message: EXPIRED, fresh: true, chatFresh: true })
+      return
+    }
     let signedIn
     let connection
     try {
@@ -242,7 +250,6 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       return
     }
     if (signedIn === true) { succeed(provider, undefined); return }
-    const last = attempts[provider]
     if (last?.expiresAt !== undefined && last.expiresAt > now()) interrupt(provider)
     // A Switch's attempt stays one (#2064): its row still knows where it came from.
     else applyView(provider, { status: 'expired', message: EXPIRED, ...(last?.fresh === true ? { fresh: true } : {}) })
@@ -293,8 +300,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       const sameProvider = existing?.provider === provider
       const sameIntent = (existing?.fresh === true) === fresh
       if (!switched && sameProvider && (existing.stage === 'attempt' || (sameIntent && ['offer', 'account'].includes(existing.stage)))) {
-        const { fresh: _, ...row } = existing
-        setRow(botId, { ...row, reveal: ++sequence, ...(model ? { ref: model } : {}), ...(fresh ? { fresh } : {}) })
+        setRow(botId, { ...existing, reveal: ++sequence, ...(model ? { ref: model } : {}) })
         // Another model chosen while the sign-in runs is the latest intent (rule 5): the host
         // keeps it in place of the older one. Start joins the live attempt, never opens a second.
         // A cancel or answer in flight (busy) is left alone, so a start never reopens what it ends.
@@ -521,10 +527,15 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       let switched
       try {
         switched = await actions.cliLoginSwitch(botId, provider,
-          ...(row.fresh ? [{ fresh: true, ...(provider === 'acp-antigravity' ? {} : { keep: true }) }] : []))
+          ...(row.fresh ? [{ fresh: true, ...(provider === 'acp-antigravity' ? {} : { keep: true }) },
+            { confirmed: row.confirm === true, model: row.ref }] : []))
       } catch (error) {
         // A refused switch keeps the failed row, with the host's sentence: Try again asks again.
         if (!live(botId, seq) || !valid()) return false
+        if (error?.code === 'bot/login-confirmation-required') {
+          patchRow(botId, seq, { stage: 'offer', busy: false, confirm: true, error: null })
+          return false
+        }
         patchRow(botId, seq, { busy: false, ...(row.fresh && row.stage === 'offer' ? {} : { confirm: false }), error: messageOf(error) })
         return false
       }
@@ -539,10 +550,14 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
           const current = await actions.cliLoginCurrent(botId, provider)
           if (!live(botId, seq)) return false
           if (current?.attempt) applyView(provider, current.attempt)
+          else if (row.fresh) await ended(provider)
           else await readAccount(botId, provider, seq, null)
         }
       } catch (error) {
-        if (live(botId, seq) && !failedCall(provider, error)) await readAccount(botId, provider, seq, messageOf(error))
+        if (live(botId, seq) && !failedCall(provider, error)) {
+          if (row.fresh) await ended(provider)
+          else await readAccount(botId, provider, seq, messageOf(error))
+        }
       }
       return true
     },

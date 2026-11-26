@@ -2,9 +2,9 @@
 // protocols and the connector's turns use only the fake account in a scratch home.
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
@@ -46,8 +46,11 @@ const elementsOf = node => node && typeof node === 'object'
   : []
 
 const BOT = 'fake-bot'
+const PEER = 'same-vendor-bot'
+const OTHER = 'other-vendor-bot'
 const A = 'account-a@example.test'
 const B = 'account-b@example.test'
+const OTHER_ACCOUNT = 'other-vendor@example.test'
 const STATE = 'fixture_state_0123456789'
 const deviceUrl = 'https://auth.openai.com/codex/device'
 const claudeUrl = `https://claude.ai/oauth/authorize?code=true&state=${STATE}`
@@ -90,7 +93,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 }
 `
 
-function fakeLogin({ vendor, home, next, onSpawn }) {
+function fakeLogin({ vendor, home, next, onSpawn, redeem }) {
   const child = new EventEmitter()
   child.stdin = new PassThrough()
   child.stdout = new PassThrough()
@@ -108,10 +111,10 @@ function fakeLogin({ vendor, home, next, onSpawn }) {
     setImmediate(() => child.stdout.write(`Visit: ${claudeUrl}\nPaste code here if prompted > `))
     child.stdin.once('data', bytes => {
       assert.equal(String(bytes).trim(), `fake-code#${STATE}`)
-      complete()
+      if (redeem()) complete()
       queueMicrotask(() => exit(0))
     })
-    onSpawn({ home, exit })
+    onSpawn({ home, exit, writeAccount: complete })
   } else {
     child.stdin.on('data', bytes => {
       const { method, id } = JSON.parse(String(bytes))
@@ -120,7 +123,7 @@ function fakeLogin({ vendor, home, next, onSpawn }) {
         write({ id, result: { type: 'chatgptDeviceCode', loginId: 'fake-login', verificationUrl: deviceUrl, userCode: 'FAKE-1234' } })
       }
     })
-    onSpawn({ home, exit, complete() {
+    onSpawn({ home, exit, writeAccount: complete, complete() {
       complete()
       write({ method: 'account/login/completed', params: { loginId: 'fake-login', success: true } })
     } })
@@ -128,14 +131,21 @@ function fakeLogin({ vendor, home, next, onSpawn }) {
   return child
 }
 
-async function fixture(t, vendor) {
+async function fixture(t, vendor, { peers = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'chat-fresh-'))
   const agent = join(root, 'connector.mjs')
   const provider = `acp-${vendor}`
   const model = `${provider}/default`
+  const otherVendor = vendor === 'claude' ? 'codex' : 'claude'
+  const otherProvider = `acp-${otherVendor}`
   const bot = { id: BOT, name: 'Fake Bot', model, createdAt: 1, nativeTools: true, nativeToolsAgent: provider }
+  const bots = { [BOT]: bot }
+  if (peers) {
+    bots[PEER] = { ...bot, id: PEER, name: 'Same vendor Bot' }
+    bots[OTHER] = { ...bot, id: OTHER, name: 'Other vendor Bot', model: `${otherProvider}/default`, nativeToolsAgent: otherProvider }
+  }
   writeFileSync(agent, connector)
-  writeFileSync(join(root, 'state.json'), JSON.stringify({ version: 1, bots: { [BOT]: bot }, mainBotIds: [BOT], revision: 1 }))
+  writeFileSync(join(root, 'state.json'), JSON.stringify({ version: 1, bots, mainBotIds: Object.keys(bots), revision: 1 }))
 
   const sandboxPolicy = { defaultMode: 'workspace-write', resolve: () => ({ mode: 'workspace-write' }) }
   const ctx = fakeContext({ services: { sandboxPolicy } })
@@ -147,6 +157,9 @@ async function fixture(t, vendor) {
   ctx.agents = { get: id => ctx.scopeAgent(id), list: () => [] }
   const launches = []
   let next = B
+  let redeem = true
+  let org
+  let skipIdentity = false
   let route
   const ready = []
   ctx.on('acp-dsh/login-ready', ({ id }) => ready.push(id))
@@ -158,26 +171,38 @@ async function fixture(t, vendor) {
   const accountPath = env => join(env.AUTOMAGIK_BOT_CLI_HOME, 'account')
   applyAcp(ctx, { dshTools: false, nativeTools: true }, {
     store: { home: join(root, 'adapters'), binOf: () => ({ path: agent, version: '1' }), update: async () => {} },
-    find: name => name === vendor ? join(root, name) : undefined,
+    find: name => name === vendor || (peers && name === otherVendor) ? join(root, name) : undefined,
     signedIn: async (spec, cli, { env }) => existsSync(accountPath(env)),
-    account: async (spec, cli, { env }) => existsSync(accountPath(env)) ? contents(readFileSync(accountPath(env), 'utf8')) : undefined,
+    account: async (spec, cli, { env }) => {
+      if (skipIdentity && spec.key === vendor) { skipIdentity = false; return undefined }
+      if (!existsSync(accountPath(env))) return undefined
+      const who = contents(readFileSync(accountPath(env), 'utf8'))
+      return org ? { ...who, id: `${who.id}\n${org}`, facets: { ...who.facets, org } } : who
+    },
     loginSpawn: (cli, args, { env }) => {
       assert.equal(cli, join(root, vendor))
       assert.deepEqual(args, vendor === 'claude' ? ['auth', 'login', '--claudeai'] : ['app-server', '--listen', 'stdio://'])
-      return fakeLogin({ vendor, next, home: env.AUTOMAGIK_BOT_CLI_HOME, onSpawn: attempt => launches.push(attempt) })
+      return fakeLogin({ vendor, next, home: env.AUTOMAGIK_BOT_CLI_HOME, redeem: () => redeem,
+        onSpawn: attempt => launches.push(attempt) })
     },
     logoutRun: () => assert.fail('chat must never log out the fake vendor'),
   })
   const acp = ctx.provided.get('acpAgents')
   const adapter = ctx.adapters[0].adapter
-  const home = adapter.agents.get(provider).spawn().env.AUTOMAGIK_BOT_CLI_HOME
+  const selectedHome = id => adapter.agents.get(id).spawn().env.AUTOMAGIK_BOT_CLI_HOME
+  const home = selectedHome(provider)
   writeFileSync(join(home, 'account'), A)
   await acp.accountConfirm(provider)
+  const otherHome = peers ? selectedHome(otherProvider) : undefined
+  if (otherHome) {
+    writeFileSync(join(otherHome, 'account'), OTHER_ACCOUNT)
+    await acp.accountConfirm(otherProvider)
+  }
   ready.length = 0
   const turns = []
   ctx.sessionController = { async prompt({ sessionId, content }) {
-    assert.equal(sessionId, BOT)
-    const ref = rt.botOf(BOT).model
+    assert.ok(Object.hasOwn(bots, sessionId))
+    const ref = rt.botOf(sessionId).model
     const [provider, model] = ref.split('/')
     const chunks = []
     for await (const chunk of adapter.stream(markAgentLoopRequest({ provider, model, sessionId,
@@ -193,14 +218,32 @@ async function fixture(t, vendor) {
     if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code })
     return result.value
   }
-  const roster = createSource(indexRoster({ bots: [bot], rooms: [], agents: [], models: [], prefs: {} }))
+  const roster = createSource(indexRoster({ bots: Object.values(bots), rooms: [], agents: [], models: [], prefs: {} }))
   const actions = teamActions({ call, after: promise => promise, roster, loginState: () => login })
   actions.refreshModels = async () => {}
   const login = createCliLogin({ actions, pollMs: 10 })
   const command = loginCommand({ roster, actions, t: key => key })
   t.after(() => login.dispose())
-  return { acp, adapter, call, command, home, launches, login, profile: email => { next = email }, provider, ready, turns,
-    row: () => login.getSnapshot().rows[BOT], session: () => adapter.live.get(BOT)?.run }
+  const createView = () => {
+    const view = createCliLogin({ actions, pollMs: 10 })
+    t.after(() => view.dispose())
+    return view
+  }
+  const cliRoot = dirname(home)
+  const vendorHomes = () => {
+    const generations = join(cliRoot, 'homes', vendor)
+    const candidates = [home, ...(existsSync(generations) ? readdirSync(generations).map(dir => join(generations, dir)) : [])]
+    return candidates.filter(dir => existsSync(dir))
+  }
+  const credentialHomes = () => vendorHomes().filter(dir => existsSync(join(dir, 'account')))
+  const reply = async (sessionId, email) => {
+    await call('send', { sessionId, text: 'Who am I?' })
+    assert.ok(JSON.stringify(turns.at(-1)).includes(email), `${sessionId} answered as ${email}`)
+  }
+  return { acp, adapter, call, command, createView, credentialHomes, vendorHomes, home, launches, login, otherHome, otherProvider,
+    profile: email => { next = email }, provider, ready, reply, selectedHome, turns, modelOf: sessionId => rt.botOf(sessionId).model,
+    ignoreCallback: () => { redeem = false }, changeOrg: value => { org = value }, missNextIdentity: () => { skipIdentity = true },
+    row: () => login.getSnapshot().rows[BOT], session: (sessionId = BOT) => adapter.live.get(sessionId)?.run }
 }
 
 for (const vendor of ['claude', 'codex']) {
@@ -222,7 +265,9 @@ for (const vendor of ['claude', 'codex']) {
     const waiting = await until(() => h.row()?.attempt?.status === 'waiting' && h.row(), 'the fresh sign-in link appeared')
     assert.equal(waiting.attempt.url, vendor === 'claude' ? claudeUrl : deviceUrl)
     assert.equal(h.launches.length, 1)
-    assert.equal(h.launches[0].home, h.home)
+    assert.notEqual(h.launches[0].home, h.home)
+    assert.deepEqual(h.credentialHomes(), [h.home])
+    assert.equal(readFileSync(join(h.home, 'account'), 'utf8'), A)
     assert.equal(h.session(), original, 'the original session survives while sign-in is pending')
     if (vendor === 'claude') await h.login.answer(BOT, `fake-code#${STATE}`)
     else {
@@ -230,6 +275,9 @@ for (const vendor of ['claude', 'codex']) {
       h.launches[0].complete()
     }
     const done = await until(() => h.row()?.stage === 'done' && h.row(), 'the fresh sign-in completed')
+    assert.equal(h.adapter.agents.get(h.provider).spawn().env.AUTOMAGIK_BOT_CLI_HOME, h.launches[0].home)
+    assert.equal(existsSync(h.home), false, 'A’s previous filesystem home was deleted before completion')
+    assert.deepEqual(h.credentialHomes(), [h.launches[0].home])
     assert.equal(done.signedInAs.email, B)
     assert.equal(done.sameAccount, undefined)
     assert.deepEqual(h.ready, [h.provider])
@@ -375,4 +423,181 @@ test('a chat request cannot replace an ordinary terminal sign-in already at work
   assert.equal(h.launches.length, 1)
   assert.equal(h.launches[0].home, h.home)
   h.acp.loginCancel(h.provider, waiting.attemptId)
+})
+
+test('round 2 finding 1: restored attempts and ordinary joins keep preserving retries', { timeout: 20_000 }, async t => {
+  for (const entry of ['reload', 'ordinary entry']) {
+    const h = await fixture(t, 'codex')
+    await h.call('send', { sessionId: BOT, text: 'Before retry' })
+    const original = h.session()
+    h.command.ui.run({ sessionId: BOT })
+    await until(() => h.row()?.confirm && !h.row().busy, 'the warning appeared')
+    await h.login.switchFresh(BOT)
+    await until(() => h.row()?.attempt?.status === 'waiting', 'the first link appeared')
+    let view = h.login
+    if (entry === 'reload') {
+      view.dispose()
+      view = h.createView()
+      await view.restore(BOT)
+    } else {
+      await view.open({ botId: BOT, provider: h.provider })
+    }
+    const row = () => view.getSnapshot().rows[BOT]
+    assert.equal(row()?.attempt?.status, 'waiting', entry)
+    h.launches[0].exit(1)
+    await until(() => row()?.stage === 'failed' && row().stillSignedIn, 'the failed attempt settled')
+    view.askSwitch(BOT)
+    assert.equal(await view.switchAgain(BOT), true, entry)
+    await until(() => row()?.attempt?.status === 'waiting', 'the preserving retry appeared')
+    assert.equal(await view.cancel(BOT), true)
+    await until(() => h.acp.loginActive() === 0, 'the retry settled')
+    await h.call('send', { sessionId: BOT, text: 'After retry cancellation' })
+    assert.equal(h.session(), original, entry)
+    assert.match(JSON.stringify(h.turns[1]), /account-a@example\.test/)
+    assert.equal((await h.acp.account(h.provider)).consent, 'given')
+  }
+})
+
+async function verifyOtherVendor(h, session) {
+  assert.equal(h.selectedHome(h.otherProvider), h.otherHome)
+  assert.equal(readFileSync(join(h.otherHome, 'account'), 'utf8'), OTHER_ACCOUNT)
+  assert.equal(h.session(OTHER), session)
+  await h.reply(OTHER, OTHER_ACCOUNT)
+  assert.equal(h.session(OTHER), session)
+}
+
+test('round 2 finding 2 one-home amendment: both same-vendor Bots resolve B after confirmed adoption', { timeout: 25_000 }, async t => {
+  for (const vendor of ['claude', 'codex']) {
+    await t.test(vendor, async t => {
+      const h = await fixture(t, vendor, { peers: true })
+      await h.reply(BOT, A)
+      await h.reply(PEER, A)
+      await h.reply(OTHER, OTHER_ACCOUNT)
+      const sessions = [BOT, PEER, OTHER].map(id => h.session(id))
+      assert.ok(sessions.every(Boolean))
+      const models = [BOT, PEER, OTHER].map(h.modelOf)
+      const endings = []
+      const endProvider = h.adapter.endProvider.bind(h.adapter)
+      h.adapter.endProvider = (id, notice) => {
+        endings.push({ id, notice, oldHomeExists: existsSync(h.home) })
+        endProvider(id, notice)
+      }
+      h.command.ui.run({ sessionId: BOT })
+      await until(() => h.row()?.confirm && !h.row().busy, 'the warning appeared')
+      assert.equal(await h.login.switchFresh(BOT), true)
+      await until(() => h.row()?.attempt?.status === 'waiting', 'the isolated sign-in link appeared')
+      const [attempt] = h.launches
+      assert.deepEqual(h.credentialHomes(), [h.home])
+      assert.equal(readFileSync(join(h.home, 'account'), 'utf8'), A)
+      assert.deepEqual([BOT, PEER, OTHER].map(id => h.session(id)), sessions)
+      if (vendor === 'claude') await h.login.answer(BOT, `fake-code#${STATE}`)
+      else attempt.complete()
+      await until(() => h.row()?.stage === 'done', 'the confirmed sign-in finished')
+      assert.equal(existsSync(h.home), false, 'the exact prior home is gone')
+      assert.deepEqual(h.vendorHomes(), [attempt.home])
+      assert.equal(h.selectedHome(h.provider), attempt.home)
+      assert.deepEqual(endings, [{
+        id: h.provider, notice: 'The Bot account changed. Sign in again in the app.', oldHomeExists: true,
+      }])
+      assert.equal(h.session(), undefined)
+      assert.equal(h.session(PEER), undefined)
+      await h.reply(BOT, B)
+      await h.reply(PEER, B)
+      assert.notEqual(h.session(), sessions[0])
+      assert.notEqual(h.session(PEER), sessions[1])
+      assert.deepEqual([BOT, PEER, OTHER].map(h.modelOf), models)
+      await verifyOtherVendor(h, sessions[2])
+    })
+  }
+})
+
+test('round 2 finding 2 one-home amendment: failed and cancelled writes leave only A and its Session', { timeout: 30_000 }, async t => {
+  for (const vendor of ['claude', 'codex']) {
+    for (const end of ['cancel', 'fail']) {
+      await t.test(`${vendor}: ${end}`, async t => {
+        const h = await fixture(t, vendor, { peers: true })
+        await h.call('send', { sessionId: BOT, text: 'Before login' })
+        const original = h.session()
+        await h.reply(OTHER, OTHER_ACCOUNT)
+        const other = h.session(OTHER)
+        h.command.ui.run({ sessionId: BOT })
+        await until(() => h.row()?.confirm && !h.row().busy, 'the warning appeared')
+        h.missNextIdentity()
+        await h.login.switchFresh(BOT)
+        await until(() => h.row()?.attempt?.status === 'waiting', 'the link appeared')
+        const [attempt] = h.launches
+        const initial = readdirSync(attempt.home)
+        attempt.writeAccount()
+        if (end === 'cancel') assert.equal(await h.login.cancel(BOT), true)
+        else attempt.exit(1)
+        await until(() => h.acp.loginActive() === 0, 'the isolated attempt settled')
+        assert.equal(readFileSync(join(h.home, 'account'), 'utf8'), A)
+        assert.equal(initial.includes('account'), false)
+        assert.equal(existsSync(attempt.home), false)
+        assert.deepEqual(h.vendorHomes(), [h.home])
+        await h.reply(BOT, A)
+        assert.equal(h.session(), original)
+        assert.equal((await h.acp.account(h.provider)).consent, 'given')
+        assert.deepEqual(h.ready, [])
+        await verifyOtherVendor(h, other)
+      })
+    }
+  }
+})
+
+test('round 2 finding 3: an unredeemed Claude callback or optional identity field cannot confirm A', { timeout: 20_000 }, async t => {
+  for (const callback of [true, false]) {
+    await t.test(callback ? 'unredeemed callback' : 'optional organization only', async t => {
+      const h = await fixture(t, 'claude')
+      const pending = 'pending@example.test'
+      writeFileSync(join(h.home, 'account'), pending)
+      assert.equal((await h.acp.account(h.provider, { fresh: true })).consent, 'needed')
+      h.ignoreCallback()
+      h.command.ui.run({ sessionId: BOT })
+      await until(() => h.row()?.confirm && !h.row().busy, 'the warning appeared')
+      await h.login.switchFresh(BOT)
+      await until(() => h.row()?.attempt?.prompt, 'the prompt appeared')
+      if (callback) await h.login.answer(BOT, `fake-code#${STATE}`)
+      else {
+        h.changeOrg('fake-org')
+        h.launches[0].exit(0)
+      }
+      const result = await until(() => ['failed', 'done'].includes(h.row()?.stage) && h.row(), 'the attempt settled')
+      assert.equal(result.stage, 'failed')
+      assert.deepEqual(h.ready, [])
+      assert.equal((await h.acp.account(h.provider, { fresh: true })).consent, 'needed')
+    })
+  }
+})
+
+test('round 2 finding 5: the rendered row requires Continue when cached signed-out status is stale', { timeout: 20_000 }, async t => {
+  const h = await fixture(t, 'codex')
+  const accountPath = join(h.home, 'account')
+  const render = () => elementsOf(CliLoginRow({ bot: { id: BOT }, row: h.row(), manager: h.login }))
+  const button = label => render().find(node => node.type === 'button' && node.children[0] === label)
+  const warning = () => render().some(node => node.type === 'p' && node.children[0] === 'This stops running Bot work for this account. Continue?')
+  rmSync(accountPath)
+  assert.equal((await h.acp.account(h.provider, { fresh: true })).signedIn, false)
+  writeFileSync(accountPath, A)
+  h.command.ui.run({ sessionId: BOT })
+  await until(() => h.row() && !h.row().busy, 'the first offer appeared')
+  assert.equal(warning(), true)
+  assert.equal(h.launches.length, 0)
+  h.login.dismiss(BOT)
+
+  rmSync(accountPath)
+  h.command.ui.run({ sessionId: BOT })
+  await until(() => h.row() && !h.row().busy, 'the signed-out offer appeared')
+  assert.equal(warning(), false)
+  assert.ok(button('Sign in'))
+  writeFileSync(accountPath, A)
+  button('Sign in').props.onClick()
+  await until(() => h.row() && !h.row().busy, 'the host checked sign-in again')
+  assert.equal(warning(), true)
+  assert.equal(h.launches.length, 0)
+  assert.equal(existsSync(join(h.home, 'paused')), false)
+  button('Continue').props.onClick()
+  await until(() => h.row()?.attempt?.status === 'waiting', 'Continue started sign-in')
+  assert.equal(h.launches.length, 1)
+  assert.equal(await h.login.cancel(BOT), true)
 })

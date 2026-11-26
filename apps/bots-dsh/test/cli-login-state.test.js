@@ -762,3 +762,37 @@ test('fresh chat joins an already active attempt without starting or switching',
     assert.equal(calls.filter(([name]) => name === 'start').length, 1)
   } finally { login.dispose() }
 })
+
+test('round 2 finding 4: a lost fresh attempt result does not confirm either kind of existing account', async () => {
+  for (const consent of ['given', 'needed']) {
+    const clock = manualTimers()
+    const { actions, host, names } = fakeHost(clock.now)
+    const provider = 'acp-codex'
+    const login = createCliLogin({ actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+    try {
+      const current = actions.cliLoginCurrent
+      const connections = actions.cliLoginConnections
+      actions.cliLoginCurrent = async (...args) => {
+        const result = await current(...args)
+        return consent === 'needed' && !result.attempt ? { ...result, account: { kind: 'account' } } : result
+      }
+      actions.cliLoginConnections = async () => {
+        const result = await connections()
+        result.connections[provider].consent = consent
+        return result
+      }
+      const attempt = await actions.cliLoginStart('a', provider)
+      Object.assign(host.attempt, { fresh: true, chatFresh: true })
+      await login.restore('a')
+      assert.equal(login.getSnapshot().rows.a.attempt.attemptId, attempt.attemptId)
+      host.attempt = null
+      host.signedIn = true
+      host.endedError = Object.assign(new Error('The sign-in has ended.'), { code: 'bot/login-ended' })
+      await clock.advance(100)
+      assert.equal(login.getSnapshot().rows.a.stage, 'failed', consent)
+      assert.equal(login.getSnapshot().rows.a.fresh, true)
+      assert.match(login.getSnapshot().rows.a.message, /expired/i)
+      assert.equal(names().includes('connections'), false)
+    } finally { login.dispose() }
+  }
+})

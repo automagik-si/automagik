@@ -322,8 +322,9 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     }),
     cliLoginRelease: (claimId, rev) => call('cli-login-release', { claimId, rev }),
     cliLoginReleaseMachine: machineId => call('cli-login-release', { machineId }),
-    cliLoginSwitch: (botId, provider, { keep, fresh } = {}) => call('cli-login-switch', loginPayload(botId, provider, {
+    cliLoginSwitch: (botId, provider, { keep, fresh } = {}, { confirmed, model } = {}) => call('cli-login-switch', loginPayload(botId, provider, {
       ...(keep === undefined ? {} : { keep }), ...(fresh === true ? { fresh } : {}),
+      ...(confirmed === false ? { withoutWarning: true } : {}), ...(model ? { model } : {}),
     })),
     cliLoginReset: (botId, provider) => call('cli-login-reset', loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call('cli-login-signout',

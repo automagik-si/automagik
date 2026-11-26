@@ -1,9 +1,9 @@
 // Bot authentication belongs to this installation, never to the terminal (#869).
 import { randomUUID } from 'node:crypto'
 import {
-  closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import {
   LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, reclaimWindowsLogins, unverifiedLogin, verifyLoginRecords,
 } from './login-ownership.js'
@@ -112,6 +112,15 @@ export class CliHomes {
       this.registered.set(vendor, home)
     }
     this.verify(home)
+    const selected = this.environmentAt(vendor, home, source)
+    selected[POINTER_ENV] = this.generations.pointer(vendor)
+    selected[GENERATION_ENV] = generation
+    this.generations.check(vendor)
+    assertGeneration(selected)
+    return selected
+  }
+
+  environmentAt(vendor, home, source) {
     const env = Object.fromEntries(Object.keys(source).map(key => [
       key, inherited.test(key) ? source[key] : undefined,
     ]))
@@ -119,7 +128,7 @@ export class CliHomes {
     for (const dir of [config, 'config', 'data', 'cache', 'state', 'roaming', 'local']) {
       mkdirSync(dir === config ? dir : join(home, dir), { recursive: true, mode: 0o700 })
     }
-    const selected = {
+    return {
       ...env,
       // agy stores its sign-in in the desktop session's Secret Service when it reaches a D-Bus
       // session bus, and that store belongs to the session, not to HOME. agy finds the session
@@ -144,14 +153,89 @@ export class CliHomes {
       CODEX_HOME: join(home, '.codex'),
       [HOME_ENV]: home,
       [LOGIN_OWNER_ENV]: this.instance,
-      [POINTER_ENV]: this.generations.pointer(vendor),
-      [GENERATION_ENV]: generation,
       [VERSION_ENV]: existsSync(join(home, 'version'))
         ? readFileSync(join(home, 'version'), 'utf8') : '',
     }
-    this.generations.check(vendor)
-    assertGeneration(selected)
-    return selected
+  }
+
+  stageLogin(vendor) {
+    const previous = this.generations.current(vendor)
+    const old = this.generations.folder(vendor, previous)
+    if (this.changes.get(vendor) !== old) throw failure('The Bot account is changing.')
+    const root = realpathSync(this.root)
+    const physical = path => {
+      const stat = lstatSync(path)
+      if (!stat.isDirectory() || realpathSync(path) !== join(root, relative(this.root, path))) throw unverifiedLogin()
+      return stat
+    }
+    const checked = (path, expected) => {
+      const stat = physical(path)
+      if (stat.dev !== expected.dev || stat.ino !== expected.ino) throw unverifiedLogin()
+    }
+    const original = physical(old)
+    const generation = randomUUID()
+    const home = this.generations.folder(vendor, generation)
+    const staging = join(this.root, 'login-staging', vendor)
+    const marker = join(staging, generation)
+    const container = dirname(home)
+    const newContainer = !existsSync(container)
+    mkdirSync(staging, { recursive: true, mode: 0o700 })
+    physical(staging)
+    writeFileSync(marker, '', { flag: 'wx', mode: 0o600 })
+    let owned
+    const discard = () => {
+      if (this.generations.current(vendor) === generation) return
+      if (owned) {
+        checked(home, owned)
+        rmSync(home, { recursive: true, force: true })
+        owned = undefined
+      }
+      if (newContainer) try { rmdirSync(container) } catch {}
+      rmSync(marker, { force: true })
+    }
+    try {
+      mkdirSync(container, { recursive: true, mode: 0o700 })
+      physical(container)
+      mkdirSync(home, { mode: 0o700 })
+      owned = physical(home)
+      const env = this.environmentAt(vendor, home, process.env)
+      const adopt = () => {
+        const release = this.generations.acquire(vendor)
+        try {
+          if (this.changes.get(vendor) !== old || this.generations.current(vendor) !== previous) throw unverifiedLogin()
+          this.generations.otherApps(vendor, old)
+          checked(old, original)
+          checked(home, owned)
+          this.verify(old)
+          this.verify(home)
+          writeFileSync(join(home, 'paused'), '', { mode: 0o600 })
+          const instance = join(home, 'instances', this.instance)
+          this.generations.publish(instance, LOGIN_RECORD_VERSION)
+          try { this.generations.select(vendor, generation, { previous }) } catch (error) {
+            this.generations.release(instance)
+            throw error
+          }
+          this.registered.set(vendor, home)
+          return {
+            release,
+            removePrevious: () => {
+              checked(old, original)
+              this.verify(old)
+              this.generations.release(join(old, 'instances', this.instance))
+              rmSync(old, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+              rmSync(marker, { force: true })
+            },
+          }
+        } catch (error) {
+          release()
+          throw error
+        }
+      }
+      return { env, adopt, discard, old }
+    } catch (error) {
+      discard()
+      throw error
+    }
   }
 
   changing(vendor) { return existsSync(join(this.home(vendor), 'changing')) }

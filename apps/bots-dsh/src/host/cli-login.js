@@ -244,6 +244,7 @@ export function cliLoginView(value, provider, attemptId) {
   if (value.status === 'failed') view.message = failedMessageOf(value, provider)
   if (value.status === 'expired') view.message = 'This sign-in expired. Start again.'
   if (value.status === 'cancelled') view.message = 'Sign-in cancelled.'
+  if (value.chatFresh === true) view.chatFresh = true
   // A Switch account attempt (#2064): booleans only, never an account.
   if (value.fresh === true) {
     view.fresh = true
@@ -281,7 +282,7 @@ export function cliAccountView(value) {
 
 const ACTIONS = {
   reset: ['botId', 'provider'],
-  switch: ['botId', 'provider', 'keep', 'fresh'],
+  switch: ['botId', 'provider', 'keep', 'fresh', 'model', 'withoutWarning'],
   signout: ['botId', 'provider'],
   confirm: ['botId', 'provider', 'ref', 'model'],
   start: ['botId', 'provider', 'model'],
@@ -300,6 +301,8 @@ function fields(payload, action) {
     || !providers.has(payload.provider)
     || (Object.hasOwn(payload, 'fresh') && payload.fresh !== true)
     || (Object.hasOwn(payload, 'keep') && payload.keep !== true)
+    || (action === 'switch' && (Object.hasOwn(payload, 'model') || Object.hasOwn(payload, 'withoutWarning')) && payload.fresh !== true)
+    || (Object.hasOwn(payload, 'withoutWarning') && payload.withoutWarning !== true)
     || (allowed.has('attemptId') && (typeof payload.attemptId !== 'string' || !ATTEMPT.test(payload.attemptId)))) throw invalid()
   // The model the entry is for: one of this agent's, or none (a view that only attaches).
   if (payload.model !== undefined && (typeof payload.model !== 'string' || !MODEL_REF.test(payload.model) || payload.model.split('/')[0] !== payload.provider)) throw invalid()
@@ -371,11 +374,13 @@ export function install(rt, reservationDeps) {
   let sequence = 0
   const keyOf = (botId, provider) => `${botId}\u0000${provider}`
 
-  function registerChoice(bot, provider, ref) {
+  function registerChoice(bot, provider, ref, scope) {
     const seq = ++sequence
-    choices.set(keyOf(bot.id, provider), { botId: bot.id, provider, ref, baseline: bot.model ?? null, seq })
+    const choice = { botId: bot.id, provider, ref, baseline: bot.model ?? null, seq, scope }
+    choices.set(keyOf(bot.id, provider), choice)
     latest.set(bot.id, seq)
     outcomes.delete(keyOf(bot.id, provider))
+    return choice
   }
 
   // A Bot's chat runs a turn on another model than the one it was on when the person chose:
@@ -397,6 +402,7 @@ export function install(rt, reservationDeps) {
   const crossingWaitMs = () => rt.config?.crossingWaitMs ?? 120_000
   const stillWanted = (bot, choice) => bot !== undefined && choice.dropped !== true && latest.get(bot.id) === choice.seq
     && (bot.model ?? null) === choice.baseline && bot.model !== choice.ref
+    && (!choice.scope || (bot.kind !== 'dsh' && !rt.hostOwned?.(bot)))
   const refusedMessage = error => (typeof error?.code === 'string' && error.code.startsWith('bot/') && typeof error.message === 'string' ? error.message.slice(0, 300) : 'The model could not be selected.')
 
   async function applyChoice(provider, key, choice, bot) {
@@ -441,10 +447,12 @@ export function install(rt, reservationDeps) {
     }
   }
 
-  async function applyChoices(provider) {
+  async function applyChoices(provider, attemptId, selected) {
     const later = []
     for (const [key, choice] of choices) {
       if (choice.provider !== provider) continue
+      if (selected && choice !== selected) continue
+      if (choice.scope && (choice.scope.attemptId === undefined || choice.scope.attemptId !== attemptId)) continue
       choices.delete(key)
       const bot = rt.botOf(choice.botId)
       if (!stillWanted(bot, choice)) continue
@@ -470,7 +478,7 @@ export function install(rt, reservationDeps) {
     if (!SIGN_IN_PROVIDERS.has(payload?.id)) return
     rt.clearAsideQuota?.(payload.id)
     rt.liftMemoryHolds?.()
-    void applyChoices(payload.id).catch(error => rt.warn('ds-bot: the model chosen for %s was not applied: %s', payload.id, error?.message ?? error))
+    void applyChoices(payload.id, payload.attemptId).catch(error => rt.warn('ds-bot: the model chosen for %s was not applied: %s', payload.id, error?.message ?? error))
       // Then the Bots that waited on this CLI's sign-in move to it (subscription-move.js, #868):
       // after the choices, so a model the person picked with the sign-in is theirs.
       .finally(() => rt.moveSubscriptionBots?.())
@@ -679,7 +687,9 @@ export function install(rt, reservationDeps) {
     // any sign-in starts. Their "Use this account" (confirm) is what makes the agent ready.
     if (action === 'start') {
       const account = await pendingAccount(body.provider, { probe: true })
-      if (account !== undefined) {
+      const service = acp()
+      if (account !== undefined && (typeof service?.chatLoginStatus !== 'function'
+        || (await service.loginCurrent?.(body.provider))?.chatFresh !== true)) {
         const choice = choiceOf(body.botId, body.provider)
         return { id: body.provider, status: 'confirm', account, ...(choice ? { choice } : {}) }
       }
@@ -708,14 +718,19 @@ export function install(rt, reservationDeps) {
     if (action === 'current' && (value === undefined || value === null)) {
       const choice = choiceOf(body.botId, body.provider)
       if (body.fresh) {
-        const row = await signInStatus(service, body.provider)
+        const signedIn = typeof service.chatLoginStatus === 'function'
+          ? await service.chatLoginStatus(body.provider)
+          : (await signInStatus(service, body.provider))?.signedIn
         return { id: body.provider, attempt: null,
-          ...(typeof row?.signedIn === 'boolean' ? { signedIn: row.signedIn } : {}), ...(choice ? { choice } : {}) }
+          ...(typeof signedIn === 'boolean' ? { signedIn } : {}), ...(choice ? { choice } : {}) }
       }
       const account = await pendingAccount(body.provider, { probe: false })
       return { id: body.provider, attempt: null, ...(account ? { account } : {}), ...(choice ? { choice } : {}) }
     }
     const view = cliLoginView(value, body.provider, action === 'start' || action === 'current' ? undefined : body.attemptId)
+    const key = keyOf(body.botId, body.provider)
+    if (['failed', 'cancelled', 'expired'].includes(view.status)
+      && choices.get(key)?.scope?.attemptId === view.attemptId) choices.delete(key)
     const choice = choiceOf(body.botId, body.provider)
     // An attempt that ended ready on a CLI that was already signed in (it raced the check
     // above): the same confirm step, never "done".
@@ -745,7 +760,7 @@ export function install(rt, reservationDeps) {
       const body = fields(payload, action)
       const bot = rt.botOf(body.botId)
       if (!bot) throw failed('This Bot is no longer available.', 'bot/not-found')
-      if (body.fresh && (bot.kind === 'dsh' || (bot.model ?? bot.appliedModel)?.split('/')[0] !== body.provider)) {
+      if (body.fresh && (bot.kind === 'dsh' || rt.hostOwned?.(bot) || (bot.model ?? bot.appliedModel)?.split('/')[0] !== body.provider)) {
         throw failed('This sign-in is not available for this Bot.', 'bot/invalid')
       }
       const service = acp()
@@ -755,15 +770,31 @@ export function install(rt, reservationDeps) {
         || ((body.fresh || body.keep) && service.freshChatLogin !== true)) {
         throw failed('Bot account controls are unavailable. Update Automagik and try again.')
       }
+      const needsConfirmation = () => failed('This stops running Bot work for this account. Continue?', 'bot/login-confirmation-required')
+      if (body.withoutWarning && typeof service.chatLoginStatus !== 'function') throw needsConfirmation()
+      const modelAtContinue = bot.model
+      const choiceAtContinue = latest.get(bot.id)
       try {
         const keep = body.keep || (body.fresh && body.provider !== 'acp-antigravity')
         const result = await service[method](body.provider, {
           label: body.botId, ...(keep ? { keep: true } : {}), ...(body.fresh ? { fresh: true } : {}),
+          ...(body.withoutWarning ? { withoutWarning: true } : {}),
         })
         if (action !== 'switch') return { id: body.provider, signedIn: false }
         // The switch's own attempt (#2064): its id lets the row read it even after it ended.
-        try { return { ...cliLoginView(result, body.provider), signedIn: false } } catch { return { id: body.provider, signedIn: false } }
+        let view
+        try { view = cliLoginView(result, body.provider) } catch { return { id: body.provider, signedIn: false } }
+        if (body.model !== undefined && latest.get(bot.id) === choiceAtContinue
+          && ['starting', 'waiting', 'ready'].includes(view.status)) {
+          const choice = registerChoice({ id: bot.id, model: modelAtContinue }, body.provider, body.model, { attemptId: view.attemptId })
+          // A fast vendor can complete before its initial RPC gets back to this host.
+          const status = view.status === 'ready' ? view
+            : await Promise.resolve().then(() => service.loginStatus?.(body.provider, view.attemptId)).catch(() => undefined)
+          if (status?.status === 'ready' && status.attemptId === view.attemptId) await applyChoices(body.provider, view.attemptId, choice)
+        }
+        return { ...view, signedIn: false }
       } catch (error) {
+        if (error?.code === 'acp-account/confirmation-required') throw needsConfirmation()
         if (error?.code === 'acp-account/unverified-login') {
           throw failed(ACCOUNT_RECOVERY_HINT, ACCOUNT_RECOVERY_CODE)
         }
