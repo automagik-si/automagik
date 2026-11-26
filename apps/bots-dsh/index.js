@@ -4,9 +4,9 @@
 // types. That home is $AUTOMAGIK_BOTS_HOME, else $AUTOMAGIK_HOME/bots (~/.automagik/bots),
 // never under DSH_HOME: installed into someone's own DSH, the team keeps its files apart from
 // DSH's and from other plugins'.
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import fs, { cpSync, existsSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
 import { DEFAULT_ROUTE_POLICY } from './src/shared/route-policy.js'
 import * as diagnostics from './src/host/diagnostics.js'
@@ -14,6 +14,7 @@ import * as extend from './src/host/extend.js'
 import * as store from './src/host/store.js'
 import { CONNECTOR_KEY, CONNECTOR_KEY_ORIGINS, connectorKeyOriginName, keyFileName, publishConnectorKey, readConnectorKey, readConnectorKeyOrigins } from './src/host/connectors/credential-key.js'
 import { checkImportedCredentials } from './src/host/connectors/credential-state.js'
+import { hasOnlyHostPublicationLinks, isHostPublicationTemp, publishHostFile, syncDirectorySync } from './src/host/files.js'
 import { writeBytesAtomic } from './src/host/supervisor/store.js'
 import * as addressPolicy from './src/host/address-policy.js'
 import * as models from './src/host/models.js'
@@ -160,6 +161,71 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => () => rt.dispose(), 'omni-ui: stop the team modules')
 }
 
+const SKILL_IMPORT_ORIGIN = '.skill-import-origin'
+const skillAlias = name => name.toLowerCase().replace(/[ .]+$/, '')
+const skillImportFailure = () => new Error('The imported team has an ambiguous Skills library destination.')
+const skillLibraryName = 'skill-library'
+const skillImportNames = new Set([skillLibraryName, skillLibrary.SKILL_REVIEW_KEY, skillLibrary.SKILL_IMPORT_MARK])
+
+function skillImportProof(path) {
+  const info = fs.lstatSync(path, { throwIfNoEntry: false })
+  if (!info?.isFile() || info.size > 8192 || !hasOnlyHostPublicationLinks(path, info) ||
+      (process.getuid && info.uid !== process.getuid()) || (process.platform !== 'win32' && (info.mode & 0o077))) {
+    throw skillImportFailure()
+  }
+  return fs.readFileSync(path, 'utf8')
+}
+
+function prepareSkillImport(home, from, hasSkills) {
+  const path = join(home, skillLibraryName)
+  const marker = join(home, skillLibrary.SKILL_IMPORT_MARK)
+  const names = existsSync(home) ? fs.readdirSync(home).filter(name => skillImportNames.has(skillAlias(name))) : []
+  if (names.some(name => name !== skillLibraryName && name !== skillLibrary.SKILL_IMPORT_MARK)) throw skillImportFailure()
+  if (!hasSkills) {
+    if (names.length) throw skillImportFailure()
+    return
+  }
+  const source = fs.realpathSync(from)
+  const info = fs.statSync(source, { bigint: true })
+  const origin = createHash('sha256').update(JSON.stringify([source, String(info.dev), String(info.ino), resolve(home)])).digest('hex')
+  let proof
+  if (names.includes(skillLibrary.SKILL_IMPORT_MARK)) {
+    proof = skillImportProof(marker)
+    const [id] = proof.split('\n')
+    if (!/^[a-f0-9]{32}$/.test(id) || proof !== `${id}\n${origin}\n`) throw skillImportFailure()
+  } else {
+    if (names.length) throw skillImportFailure()
+    fs.mkdirSync(home, { recursive: true, mode: 0o700 })
+    proof = `${random(16, 'hex')}\n${origin}\n`
+    publishHostFile(marker, proof)
+  }
+  const alreadyCopied = () => {
+    const library = fs.lstatSync(path, { throwIfNoEntry: false })
+    if (!library) return false
+    if (!library.isDirectory() || skillImportProof(join(path, SKILL_IMPORT_ORIGIN)) !== proof) throw skillImportFailure()
+    return true
+  }
+  alreadyCopied()
+  return () => {
+    if (alreadyCopied()) return
+    const scratch = fs.mkdtempSync(join(home, '.skill-import-'))
+    const staged = join(scratch, skillLibraryName)
+    try {
+      fs.mkdirSync(staged, { mode: 0o700 })
+      const sourceLibrary = join(from, skillLibraryName)
+      cpSync(sourceLibrary, staged, { recursive: true,
+        filter: file => dirname(file) !== sourceLibrary || (skillAlias(basename(file)) !== SKILL_IMPORT_ORIGIN &&
+          !isHostPublicationTemp(skillAlias(basename(file)), SKILL_IMPORT_ORIGIN)) })
+      publishHostFile(join(staged, SKILL_IMPORT_ORIGIN), proof)
+      if (alreadyCopied()) return
+      try { fs.renameSync(staged, path) } catch (error) {
+        if (!alreadyCopied()) throw error
+      }
+      syncDirectorySync(home)
+    } finally { fs.rmSync(scratch, { recursive: true, force: true }) }
+  }
+}
+
 // A team kept elsewhere before (config.importHome, e.g. ~/.dsh/bot) is copied in once,
 // when the home has no team yet. Only on request: the source is left as it was.
 function importTeam(home, from) {
@@ -167,18 +233,39 @@ function importTeam(home, from) {
   const sourceState = join(from, 'state.json')
   const destinationState = join(home, 'state.json')
   if (existsSync(destinationState) || !existsSync(sourceState)) return false
-  const copyHome = keyed => cpSync(from, home, { recursive: true, force: false, filter: source => {
-    if (source.endsWith('state.lock') || /[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source)) return false
-    if (dirname(source) !== from) return true
-    const name = basename(source)
-    return !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && (!keyed || source !== sourceState)
-  } })
+  const skillSources = fs.readdirSync(from, { withFileTypes: true }).filter(entry => skillAlias(entry.name) === skillLibraryName)
+  if (skillSources.some(entry => entry.name !== skillLibraryName || !entry.isDirectory())) throw skillImportFailure()
   const stateBytes = fs.readFileSync(sourceState)
   const sourceKey = readConnectorKey(join(from, CONNECTOR_KEY))
   checkImportedCredentials(stateBytes, sourceKey)
-  if (sourceKey.missing) {
-    copyHome(false)
+  const copySkills = prepareSkillImport(home, from, skillSources.length !== 0)
+  const stageState = !sourceKey.missing || copySkills !== undefined
+  const copyHome = () => cpSync(from, home, { recursive: true, force: false, filter: source => {
+    if (source.endsWith('state.lock') || /[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source)) return false
+    if (dirname(source) !== from) return true
+    const name = basename(source)
+    const alias = skillAlias(name)
+    return !skillImportNames.has(alias) && !alias.startsWith('.skill-import-') &&
+      ![skillLibrary.SKILL_REVIEW_KEY, skillLibrary.SKILL_IMPORT_MARK, 'state.json'].some(name => isHostPublicationTemp(alias, name)) &&
+      !/^\.write-[a-f0-9-]{36}\.tmp$/.test(alias) &&
+      // The destination may treat a distinct source entry as the state file.
+      !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && (!stageState || alias !== 'state.json')
+  } })
+
+  const publishState = () => {
+    copySkills?.()
+    try {
+      if (copySkills) publishHostFile(destinationState, stateBytes)
+      else writeBytesAtomic(destinationState, stateBytes, { exclusive: true })
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      return false
+    }
     return true
+  }
+  if (sourceKey.missing) {
+    copyHome()
+    return copySkills ? publishState() : true
   }
   if (sourceKey.bytes === undefined) throw new Error('The imported Bot team needs a readable connector key.')
 
@@ -202,19 +289,15 @@ function importTeam(home, from) {
       checkDestination()
     }
   }
-  copyHome(true)
+  copyHome()
   if (checkDestination().missing) throw new Error('The imported Bot team needs a matching connector key.')
-  try { writeBytesAtomic(destinationState, stateBytes, { exclusive: true }) } catch (error) {
-    if (error?.code !== 'EEXIST') throw error
-    return false
-  }
-  return true
+  return publishState()
 }
 
 export function createRuntime(ctx, config = {}) {
   const dshHome = folders.dshHomeOf(process.env.DSH_HOME)
   const home = folders.expandPath(config.home ?? folders.teamHomeOf(process.env))
-  const imported = importTeam(home, config.importHome && folders.expandPath(config.importHome))
+  const imported = importTeam(home, config.importHome && resolve(folders.expandPath(config.importHome)))
   const rt = {
     ctx,
     config,

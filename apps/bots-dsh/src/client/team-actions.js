@@ -2,13 +2,102 @@ import { countCards, createSource, detailsSubject, heldCardKey } from './sources
 import { noteClientError } from './diagnostics.js'
 import { CROSSING_DEADLINE_MS, crossesHarness, routeOfRef } from '../shared/routes.js'
 import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-model.js'
+import { checkViewer, mountedViewer, requestViewer } from './viewer.js'
+
+const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+const unfinishedSave = error => error.code === 'NETWORK' || error.code === 'bot/retired' || /^HTTP_50[234]$/.test(error.code ?? '') ||
+  error.name === 'AbortError' || error instanceof SyntaxError
 
 // The actions every window that draws the Bot views shares: dialogs and panels (the `ui`
 // source), requests to the host, and the notes the transcript keeps. The shell around the
 // views adds navigation and its own panels. `after` reads the team again once a request
 // is done; `partFor` maps a Bot id, or any part of its chat, to its current part.
 export function teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession, loginState, panelFolded, work,
-  storage = (() => { try { return globalThis.localStorage } catch { return null } })() }) {
+  storage = (() => { try { return globalThis.localStorage } catch { return null } })(),
+  skillStorage = (() => { try { return globalThis.sessionStorage } catch { return null } })() }) {
+  const skillSaves = new Map()
+  const skillScope = () => `automagik.skill-saves.${mountedViewer()?.id ?? 'local'}`
+  function storedSaves(scope) {
+    try {
+      const jobs = JSON.parse(skillStorage?.getItem(scope) ?? '[]')
+      if (Array.isArray(jobs)) return jobs.filter(job => job && /^[a-f0-9]{32}$/.test(job.id))
+    } catch { /* Site storage may be unavailable. */ }
+    return []
+  }
+  function rememberSave(scope, job, keep = true) {
+    try {
+      const jobs = storedSaves(scope).filter(entry => entry.id !== job.id)
+      if (keep) jobs.push(job)
+      if (jobs.length) skillStorage?.setItem(scope, JSON.stringify(jobs))
+      else skillStorage?.removeItem(scope)
+    } catch { /* The current client still has its operation. */ }
+  }
+  async function finishSave(scope, job, input, signal, viewerGuard) {
+    const poll = { operation: job.id, poll: true, ...(input === undefined ? { recover: true } : {}) }
+    const check = () => {
+      signal?.throwIfAborted()
+      // A newer mount can have the same viewer ID. It owns recovery of this Save.
+      checkViewer(viewerGuard)
+      if (scope !== skillScope()) throw Object.assign(new Error('The team viewer changed.'), { code: 'bot/retired' })
+    }
+    const request = body => {
+      check()
+      return call('skill-library-save', body, signal)
+    }
+    try {
+      let result = await request(input && !job.started ? { ...input, operation: job.id } : poll)
+      while (result.pending) {
+        signal?.throwIfAborted()
+        if (!job.started) {
+          job.started = true
+          rememberSave(scope, job)
+        }
+        await new Promise(resolve => setTimeout(resolve, 750))
+        result = await request(poll)
+      }
+      check()
+      rememberSave(scope, job, false)
+      return result
+    } catch (error) {
+      if (!unfinishedSave(error) && !signal?.aborted) rememberSave(scope, job, false)
+      throw error
+    }
+  }
+  async function saveSkill(skill) {
+    const viewerGuard = requestViewer('skill-library-save')
+    const scope = skillScope()
+    // A held skill is reviewed from storage. Only its identity and confirmation are sent.
+    const input = skill.reviewHash === undefined ? skill : Object.fromEntries(
+      Object.entries(skill).filter(([field]) => ['name', 'edit', 'reviewHash', 'confirm'].includes(field)),
+    )
+    const key = JSON.stringify(input)
+    const existing = storedSaves(scope)
+    const digest = skillStorage && globalThis.crypto.subtle
+      ? hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(key)))) : undefined
+    let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find(entry => entry.digest === digest))
+    if (!job) {
+      // Only an operation ID and a request digest enter browser storage.
+      job = { id: hex(globalThis.crypto.getRandomValues(new Uint8Array(16))), digest, started: false }
+      rememberSave(scope, job)
+    }
+    skillSaves.set(key, job)
+    try {
+      const result = await finishSave(scope, job, input, undefined, viewerGuard)
+      skillSaves.delete(key)
+      return result
+    } catch (error) {
+      if (!unfinishedSave(error)) skillSaves.delete(key)
+      throw error
+    }
+  }
+  function resumeSkillSaves(signal) {
+    const scope = skillScope()
+    return Promise.allSettled(storedSaves(scope).map(async job => {
+      const result = await finishSave(scope, job, undefined, signal, requestViewer('skill-library-save'))
+      for (const [key, current] of skillSaves) if (current.id === job.id) skillSaves.delete(key)
+      return result
+    }))
+  }
   // A deleted Bot's composer state (DSH's `dsh.conversation.<part>`), removed once the
   // host answered that it is deleted. The host's sweep list (draft-sweep.js) also covers
   // a key DSH writes again while the chat is still open.
@@ -443,8 +532,9 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     imLoginStart: payload => call('im-login-start', payload),
     imLoginWait: payload => call('im-login-wait', payload),
     skillLibrary: signal => call('skill-library', {}, signal),
-    getSkill: name => call('skill-library-get', { name }),
-    saveSkill: skill => after(call('skill-library-save', skill)),
+    getSkill: (name, signal) => call('skill-library-get', { name }, signal),
+    saveSkill: skill => after(saveSkill(skill)),
+    resumeSkillSaves,
     deleteSkill: name => after(call('skill-library-delete', { name })),
     setBotSkill: (id, name, attached, mode) => after(call(attached ? 'bot-skill-add' : 'bot-skill-remove', { id, name, mode })),
     setBotSkillMode: (id, name, mode) => after(call('bot-skill-mode', { id, name, mode })),

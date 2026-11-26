@@ -312,11 +312,15 @@ function scanFile(entry, finding, uses, unusual) {
 
 export function checkSkill(entries, { expectedName, legacy = false } = {}) {
   const findings = []
+  const injection = []
   const counts = { block: 0, warn: 0 }
   const retained = new Map()
   let truncated = false
   function add(id, path, line = null, detail, level = RULES.get(id).level) {
     const { key, area, reason } = RULES.get(id)
+    if (area === 'prompt-injection' && !injection.some(finding => finding.rule === id)) {
+      injection.push({ rule: id, key, level, area, path, line, reason })
+    }
     const identity = `${path}\0${id}`
     counts[level]++
     const count = retained.get(identity) ?? 0
@@ -384,7 +388,7 @@ export function checkSkill(entries, { expectedName, legacy = false } = {}) {
   return {
     version: SKILL_CHECK_VERSION, fingerprint: SKILL_CHECK_FINGERPRINT, hash,
     verdict: counts.block ? 'block' : counts.warn ? 'warn' : 'pass',
-    findings: findings.sort(digestOrder), truncated, counts,
+    findings: findings.sort(digestOrder), injection, truncated, counts,
     uses: { tools: [...uses.tools].sort(byteOrder), scripts: uses.scripts, endpoints: [...uses.endpoints].sort(byteOrder), secrets: [...uses.secrets].sort(byteOrder) },
     frontmatter, legacy,
   }

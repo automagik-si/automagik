@@ -16,6 +16,7 @@ import { WHY_EN, stopLineEn } from '../src/host/stops.js'
 import { REVIEW_GUARD_COPY, guardVerdictOf } from '../src/shared/review-guard.js'
 import { parseProposal, proposalLine } from '../src/shared/proposals.js'
 import { CALLER_BOT_KEYS } from '../src/host/caller-view.js'
+import { stubSkillReviewer } from './fixtures/skill-review-model.js'
 import { fakeContext } from './fake-ctx.js'
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -199,6 +200,7 @@ test('Skills registry: the guarded Solver can load its Automatic skill before a 
   const bot = await solver({ reviewerId: (await reviewer()).id })
   const other = await plain()
   const skill = { name: 'planning-notes', description: 'Read planning notes.', content: 'Use the short plan format.' }
+  stubSkillReviewer(rt)
   assert.equal((await call('skill-library-save', skill)).ok, true)
   const assignment = { id: bot.id, name: skill.name }
   assert.equal((await call('bot-skill-add', { ...assignment, mode: 'automatic' })).ok, true)

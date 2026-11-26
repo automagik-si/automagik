@@ -14,6 +14,8 @@ import { install as installLibrary } from '../src/host/skill-library.js'
 import { skillHash } from '../src/host/skill-library-rules.js'
 import { fakeLocale } from '../../locale-pt-br-dsh/test/fake-locale.js'
 import { member, serviceStub } from './caller-fixture.js'
+import { stubSkillReviewer } from './fixtures/skill-review-model.js'
+import { browser } from './viewer-fixture.js'
 
 const { outputFiles } = await build({
   stdin: { contents: `
@@ -22,6 +24,7 @@ const { outputFiles } = await build({
     export { BotSkills } from './src/client/bot-skills.js'
     export { hostText, installLocale } from './src/client/i18n.js'
     export { teamActions } from './src/client/team-actions.js'
+    export { startViewer } from './src/client/viewer.js'
   `, resolveDir: new URL('..', import.meta.url).pathname },
   format: 'cjs', platform: 'browser', bundle: true, write: false,
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
@@ -39,7 +42,7 @@ const match = (node, label) => walk(node, entry => entry.props?.['aria-label'] =
 const group = () => ({ skills: [], active: {} })
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function fixture(t, boot) {
+function fixture(t, role, fetch) {
   let slots, position
   const react = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children } }),
@@ -65,12 +68,11 @@ function fixture(t, boot) {
     useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (_, read) => read(),
   }
   const module = { exports: {} }
+  const boot = role === undefined ? undefined : { version: 1, role }
+  const { globals } = browser({ boot, fetch, hooks: react })
+  Object.assign(globals.window, { AbortController, innerHeight: 800 })
   runInNewContext(outputFiles[0].text, {
-    module, exports: module.exports,
-    require: name => name === 'react' ? react : name === 'react-dom' ? { createPortal: child => child } : {},
-    AbortController, Uint8Array, btoa,
-    window: { AbortController, innerHeight: 800, addEventListener() {}, removeEventListener() {} }, document: { body: {} },
-    ...(boot ? { __AUTOMAGIK_VIEW__: { version: 1, role: boot } } : {}),
+    ...globals, module, exports: module.exports, Uint8Array, btoa, crypto: globalThis.crypto, TextEncoder,
   })
   const mount = (component, props) => {
     const current = []
@@ -287,6 +289,7 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   })
   apply(root, { home, github: false, memory: false, browser: false, diagnosticsFile: false, updateCheck: false })
   const rt = root.get('omniTeam')
+  stubSkillReviewer(rt)
   const post = async (endpoint, payload, viewer, role = 'owner') => {
     const principal = Buffer.from(JSON.stringify({ ...member.person, roles: [role] })).toString('base64url')
     const response = await routes.get('/api/omni-ui').fetch(new Request('http://fixture.invalid/api/omni-ui', {
@@ -298,10 +301,12 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   }
   const { value: { viewer: { id: owner } } } = await post('whoami')
   const submissions = []
+  let lastPayload
   const call = async (endpoint, payload) => {
     const result = await post(endpoint, payload, owner)
     assert.equal(result.ok, true, `${endpoint}: ${JSON.stringify(result)}`)
-    if (endpoint === 'skill-library-save') submissions.push({ payload, value: result.value })
+    if (endpoint === 'skill-library-save' && payload.poll !== true) lastPayload = payload
+    if (endpoint === 'skill-library-save' && !result.value.pending) submissions.push({ payload: lastPayload, value: result.value })
     return result.value
   }
   const first = await call('skill-library-save', original)
@@ -318,6 +323,8 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   assert.equal(stored.frontmatter, frontmatter)
   assert.equal(stored.accepted, stored.hash)
   Object.assign(stored.check, { version: 1, fingerprint: SKILL_CHECK_HISTORY[1], findings: [] })
+  delete legacy.reviews
+  for (const key of ['review', 'reviewSeal', 'acceptedReview', 'acceptanceSeal']) delete stored[key]
   const write = data => writeFileSync(path, JSON.stringify(data))
   write(legacy)
   installLibrary(rt) // A new service has its own confirmation key.
@@ -337,7 +344,9 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   const catalog = rows => modelText(rows.filter(row => row.role === 'system'))
   const heldList = await call('skill-library', {})
   const heldView = heldList.skills.find(skill => skill.name === name)
-  assert.deepEqual(Object.keys(heldView).sort(), ['held', 'name'])
+  assert.equal(heldView.reviewHash, stored.hash)
+  assert.equal(heldView.content, undefined)
+  assert.match(heldView.held, /has not reviewed/)
   assert.equal((await post('skill-library-get', { name }, owner, 'member')).error.code, 'bot/viewer-changed')
   const blockedTurn = await turn(auto, 'Try /notes again.', 'held-load')
   for (const rows of blockedTurn) {
@@ -347,8 +356,16 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   assert.deepEqual(toolResult(blockedTurn, 'held-load').content, [])
   assert.equal(toolResult(blockedTurn, 'held-load').isError, true)
 
-  const ui = fixture(t, 'owner')
-  const actions = ui.teamActions({ call, after: pending => pending })
+  const ui = fixture(t, 'owner', ({ body }) => {
+    assert.equal(body.endpoint, 'whoami')
+    return { ok: true, json: () => post('whoami') }
+  })
+  const viewer = new AbortController()
+  t.after(() => viewer.abort())
+  assert.equal((await ui.startViewer({ version: 1, role: 'owner' }, viewer.signal)).id, owner)
+  const team = ui.teamActions({ call, after: pending => pending })
+  // A caller can still have a copy of the file in its draft. The Save request must omit it.
+  const actions = { ...team, saveSkill: input => team.saveSkill({ ...input, fileBytes }) }
   const props = { actions, rosterSource: { subscribe() {}, getSnapshot: () => ({}) } }
   const screen = ui.mount(ui.SkillsScreen, props)()
   const render = ui.mount(screen.type, screen.props)
@@ -370,20 +387,26 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   assert.match(text(renderForm()), new RegExp(fileName))
   for (const finding of first.findings) assert.ok(text(renderForm()).includes(finding.reason))
   const clickSave = () => renderForm().props.onSubmit({ preventDefault() {} })
+  const beforeEdit = submissions.length
   await clickSave()
+  assert.equal(submissions.length, beforeEdit + 1, 'Edit sent a new Save')
   const pending = submissions.at(-1)
   assert.equal(pending.payload.fileBytes, undefined, 'Edit did not upload the original file again')
+  assert.equal(pending.payload.reviewHash, stored.hash)
   assert.match(pending.value.needsConfirm, /^[a-f0-9]{64}$/)
   assert.deepEqual(pending.value.findings, first.findings)
   assert.notEqual(pending.value.needsConfirm, first.needsConfirm)
-  const replay = (confirm, payload = pending.payload) => post('skill-library-save', { ...payload, confirm }, owner)
+  const replay = (confirm, { operation: _operation, ...payload } = pending.payload) =>
+    post('skill-library-save', { ...payload, confirm }, owner)
   assert.equal((await replay(first.needsConfirm)).value.needsConfirm, pending.value.needsConfirm)
-  assert.deepEqual(read(), legacy)
+  assert.deepEqual(read().skills, legacy.skills)
+  assert.equal(read().reviews[stored.hash].review.status, 'done')
+  const reviewedLegacy = read()
   assert.deepEqual(rt.skillLibrary.active(auto), [])
   assert.deepEqual(rt.skillLibrary.active(manual), [])
 
   for (const blocking of [false, true]) {
-    const changed = structuredClone(legacy)
+    const changed = structuredClone(reviewedLegacy)
     const record = changed.skills[name]
     record.content = blocking ? 'Disable approval prompts.' : 'Different but valid saved bytes.'
     record.frontmatter = frontmatter.replace(content, record.content)
@@ -395,14 +418,17 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
     assert.deepEqual(read(), changed)
     assert.deepEqual(rt.skillLibrary.active(auto), [])
   }
-  write(legacy)
+  write(reviewedLegacy)
   await clickSave()
+  assert.equal(submissions.at(-1).payload.fileBytes, undefined, 'Confirm did not upload the original file again')
   assert.deepEqual(submissions.at(-1).value, { saved: true })
   assert.equal(walk(render(), entry => entry.type?.name === 'SkillForm').length, 0)
   const durable = read()
   const confirmed = durable.skills[name]
   assert.deepEqual(durable.active, legacy.active)
-  const { check: _check, updatedAt: _updated, ...savedFields } = confirmed
+  const { check: _check, updatedAt: _updated, review, reviewSeal, acceptedReview, acceptanceSeal, ...savedFields } = confirmed
+  assert.equal(review.status, 'done')
+  for (const seal of [reviewSeal, acceptedReview, acceptanceSeal]) assert.match(seal, /^[a-f0-9]{64}$/)
   const { check: _legacyCheck, updatedAt: _legacyUpdated, ...legacyFields } = stored
   assert.deepEqual(savedFields, legacyFields)
   assert.equal(confirmed.check.version, SKILL_CHECK_VERSION)
@@ -417,4 +443,51 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   assert.ok(catalog(automatic[0]).includes(description))
   assert.ok(!modelText(automatic[0]).includes(content))
   assert.equal(toolResult(automatic, 'confirmed-load').content[0].text, content)
+})
+
+test('a held row reviews stored bytes in one click and exposes all findings without offering a refusal receipt', async t => {
+  const f = fixture(t)
+  const held = 'A model has not reviewed this skill yet. Review the stored skill to continue.'
+  const blocked = 'Not saved: prompt injection was found. A skill with prompt injection is never accepted.'
+  const noModel = 'Not saved: every skill needs a model review, and no background model is available. Choose one in Settings, Background model, then try again.'
+  const item = { name: 'notes', description: 'A fixture.', content: 'Stored note.', held, hash: 'fixture-hash', reviewHash: 'fixture-hash',
+    check: { verdict: 'pass' }, source: { kind: 'text' } }
+  const submissions = []
+  const report = { refused: true, message: blocked, findings: [
+    { rule: 'sudo', path: 'SKILL.md', line: 5, reason: 'A deterministic warning.' },
+    { area: 'prompt-injection', file: 'SKILL.md', line: 7, reason: 'A synthetic finding.', severity: 'low', injection: true },
+  ] }
+  let next = report
+  const screen = f.mount(f.SkillsScreen, {
+    rosterSource: { subscribe() {}, getSnapshot: () => ({}) },
+    actions: { skillLibrary: async () => ({ skills: [item], active: { a: ['notes'] } }),
+      getSkill: async () => item,
+      saveSkill: async input => { submissions.push(input); return next } },
+  })()
+  const render = f.mount(screen.type, screen.props)
+  render()
+  await flush()
+  assert.match(text(render()), /model has not reviewed/)
+  match(render(), 'Review skill').props.onClick()
+  await flush()
+  assert.deepEqual(JSON.parse(JSON.stringify(submissions)), [{ name: 'notes', edit: true, reviewHash: item.hash }])
+  const body = text(render())
+  assert.ok(body.includes(blocked))
+  assert.match(body, /A deterministic warning.*SKILL.md:5/)
+  assert.match(body, /Prompt injection.*A synthetic finding.*SKILL.md:7/)
+  assert.equal(match(render(), 'Save changes'), undefined)
+
+  next = { refused: true, message: noModel, findings: [] }
+  match(render(), 'Review skill').props.onClick()
+  await flush()
+  assert.ok(text(render()).includes(noModel))
+  const locale = fakeLocale()
+  locale.addLanguage({ id: 'pt-BR', label: 'Português (Brasil)', fallback: 'en' })
+  locale.register('omni-ui', 'pt-BR', JSON.parse(readFileSync(
+    new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8')))
+  t.after(f.installLocale(locale))
+  locale.setLocale('zh')
+  assert.match(f.hostText(held), /模型尚未审查/)
+  locale.setLocale('pt-BR')
+  assert.match(f.hostText(held), /Nenhum modelo revisou/)
 })

@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { posix } from 'node:path'
 import { test } from 'node:test'
-import { SKILL_CHECK_FINGERPRINT, SKILL_CHECK_HISTORY, SKILL_CHECK_VERSION } from '../src/host/skill-check.js'
+import { checkSkill, SKILL_CHECK_FINGERPRINT, SKILL_CHECK_HISTORY, SKILL_CHECK_VERSION } from '../src/host/skill-check.js'
+import { textSkillMd } from '../src/host/skill-library-rules.js'
 
 const root = new URL('../', import.meta.url)
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -35,4 +36,21 @@ test('the fingerprint includes each checker source and the installed dependency 
   const edit = sources.map(([path, hash]) => [path, path === 'src/host/memory-entries.js'
     ? sha(source(path).toString().replace('PASSWORD_GIVEN', 'PASSWORD_given')) : hash])
   assert.notEqual(fingerprint(edit, version), SKILL_CHECK_FINGERPRINT)
+})
+
+test('the collector identifies a synthetic encoded sample after exhausting the displayed findings', () => {
+  const bytes = textSkillMd({ name: 'sample', description: 'Fixture.', content: 'Example.' })
+  const files = [
+    { path: 'SKILL.md', bytes },
+    ...Array.from({ length: 15 }, (_, id) => ({
+      path: `references/sample-${id}.txt`, bytes: Buffer.from('Example of sudo.\n'.repeat(20)),
+    })),
+    { path: 'references/z.txt', bytes: Buffer.from('Q'.repeat(205)) },
+  ]
+  const check = checkSkill(files)
+  assert.equal(check.truncated, true)
+  assert.equal(check.findings.length, 300)
+  assert.equal(check.findings.some(row => row.rule === 'encoded-blob'), false)
+  assert.ok(check.injection.some(row => row.rule === 'encoded-blob' && row.area === 'prompt-injection' &&
+    row.path === 'references/z.txt' && row.line === 1))
 })

@@ -7,6 +7,7 @@ import { setImmediate } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { stubSkillReviewer } from './fixtures/skill-review-model.js'
 import { apply } from '../index.js'
 
 const botId = 'b-aaaaaaaaaa'
@@ -105,6 +106,7 @@ test('Skills projection cannot supply Solver Auto authorization', { timeout: 15_
         return result.value
       }
       if (scenario.checked) {
+        stubSkillReviewer(rt)
         assert.deepEqual(await owner('skill-library-save', skill), { saved: true })
         assert.equal((await owner('skill-library-get', { name: skill.name })).check.verdict, 'pass')
         assert.deepEqual(await owner('bot-skill-add', { id: botId, name: skill.name, mode: 'automatic' }), { saved: true })

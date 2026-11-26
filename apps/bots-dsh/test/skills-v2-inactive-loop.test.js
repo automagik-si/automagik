@@ -17,6 +17,7 @@ import { chatPersonParts, SKILL_NOTICE } from '../src/host/skill-message.js'
 import { install as installClock } from '../src/host/time-context.js'
 import { fakeContext } from './fake-ctx.js'
 import { appendLegacyRefusal, nativeText, ordinaryText, rawText, refusedName, replyText, saveModelInput } from './support/legacy-skill-refusal.js'
+import { stubSkillReviewer } from './fixtures/skill-review-model.js'
 import { immediate, until } from './until.js'
 
 const fake = new URL('../../acp-dsh/dev/fake-agent.mjs', import.meta.url).pathname
@@ -352,6 +353,7 @@ test('owner exception group: a manual Add cannot reopen a recorded refusal', { t
   assert.deepEqual(notices().map(row => row.botId), ['bot-b', 'bot-b'])
 
   const owner = { role: 'owner' }
+  stubSkillReviewer(host)
   assert.deepEqual(await host.skillLibrary.endpoint('skill-library-save', manual, owner), { saved: true })
   assert.deepEqual(await host.skillLibrary.endpoint('bot-skill-add', { id: 'bot-b', name: manual.name }, owner), { saved: true })
   assert.deepEqual((await host.skillLibrary.endpoint('skill-library', {}, owner)).active['bot-b'], [{ name: manual.name, mode: 'manual' }])

@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import { apply } from '../index.js'
 import { TEAM_TOOLS } from '../src/host/constants.js'
 import { fakeContext } from './fake-ctx.js'
+import { stubSkillReviewer } from './fixtures/skill-review-model.js'
 import { until } from './until.js'
 
 const flush = async () => { for (let index = 0; index < 8; index += 1) await Promise.resolve() }
@@ -562,6 +563,7 @@ test('Skills row 10: assignments follow failed deletion, rollback and re-adoptio
   t.after(stop)
   await call('state', {})
   const rt = ctx.provided.get('omniTeam')
+  stubSkillReviewer(rt)
   const saveSkill = await call('skill-library-save', { name: 'notes', description: 'Take notes.', content: 'Write a note.' })
   assert.equal(saveSkill.ok, true)
   const attach = async id => {

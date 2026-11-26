@@ -594,6 +594,23 @@ var ZH2 = {
   "One-line description": "一句话描述",
   "No skills yet.": "还没有技能。",
   "No skills are active on this Bot.": "这个 Bot 没有启用的技能。",
+  "Not saved: every skill needs a model review, and no background model is available. Choose one in Settings, Background model, then try again.": "未保存：每个技能都需要模型审查，但没有可用的后台模型。请在“设置”的“后台模型”中选择一个，然后重试。",
+  "Not saved: the model review did not finish, and every skill needs one. Try again.": "未保存：模型审查未完成，而每个技能都需要模型审查。请重试。",
+  "Not saved: prompt injection was found. A skill with prompt injection is never accepted.": "未保存：发现提示注入。含有提示注入的技能永远不会被接受。",
+  "Held: prompt injection was found. A skill with prompt injection is never accepted.": "已暂停：发现提示注入。含有提示注入的技能永远不会被接受。",
+  "A model has not reviewed this skill yet. Review the stored skill to continue.": "模型尚未审查此技能。请审查已保存的技能以继续。",
+  "Not saved: the security report is incomplete. Change the skill and try again.": "未保存：安全报告不完整。请修改技能后重试。",
+  "Only retained findings are shown. This review cannot be confirmed.": "仅显示保留的发现。无法确认此次审查。",
+  "Checking the skill…": "正在检查技能…",
+  "Reviewed by a model": "已由模型审查",
+  "Review skill": "审查技能",
+  "Prompt injection": "提示注入",
+  "Mentions a credential (value hidden).": "提及凭据（值已隐藏）。",
+  "high": "高",
+  "medium": "中",
+  "low": "低",
+  "Another skill review is running. Try again.": "另一个技能正在审查中。请重试。",
+  "This Skills save is no longer available. Save the skill again.": "此次技能保存已不可用。请重新保存技能。",
   "Review the warnings, then save again to confirm.": "请查看警告，再次保存以确认。",
   "The skill {name} is not active on this Bot. Add it in the Bot's Details, under Skills.": "技能 {name} 未在这个 Bot 上启用。请在 Bot 的详情里，到“技能”中添加。",
   "Not saved: {reason} (line {line}). Change the text and save again.": "未保存：{reason}（第 {line} 行）。请修改后再保存。",
@@ -4813,7 +4830,14 @@ var call = async (endpoint, payload, signal) => {
     if (!vault && !isRetired()) noteClientError(endpoint, error);
     throw error;
   }
-  const result = await response.json();
+  let result;
+  try {
+    result = await response.json();
+  } catch (error) {
+    checkViewer(active2);
+    if (endpoint !== "skill-library-save" || error?.name === "AbortError") throw error;
+    throw Object.assign(new Error(t("Could not reach DSH. Check that it is still running."), { cause: error }), { code: "NETWORK" });
+  }
   if (whoami) signal?.throwIfAborted();
   checkViewer(active2);
   const changed = active2 && viewerChanged(result);
@@ -5277,18 +5301,46 @@ async function skillFileBytes(file) {
   for (const byte of bytes) binary2 += String.fromCharCode(byte);
   return btoa(binary2);
 }
-function SkillForm({ item, actions, onClose, saved, readOnly }) {
-  const review = item?.held && item.check?.verdict === "warn" ? item : void 0;
+function SkillReport({ report }) {
+  if (!report) return null;
+  return (0, import_react2.createElement)(
+    "div",
+    { className: "bt-set-row bt-bs-stack", role: "status" },
+    report.refused ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, hostText(report.message)) : report.needsConfirm ? t("Review the warnings, then save again to confirm.") : t("Warnings"),
+    report.truncated ? (0, import_react2.createElement)(
+      "p",
+      { className: "bt-set-hint" },
+      t("Only retained findings are shown. This review cannot be confirmed.")
+    ) : null,
+    report.findings?.length ? (0, import_react2.createElement)("ul", null, report.findings.map(({ rule, line, reason, path: path2, file, severity, injection, detail }, index) => {
+      const source = path2 ?? file;
+      return (0, import_react2.createElement)(
+        "li",
+        { key: `${rule ?? file}:${index}` },
+        [
+          injection ? t("Prompt injection") : null,
+          severity ? t(severity) : null,
+          hostText(reason),
+          detail,
+          source ? `${source}${line ? `:${line}` : ""}` : line
+        ].filter(Boolean).join(" · ")
+      );
+    })) : null
+  );
+}
+function SkillForm({ item, initial, actions, onClose, saved, readOnly, report }) {
   const [draft, setDraft] = (0, import_react2.useState)(() => ({
     name: item?.name ?? "",
     description: item?.description ?? "",
     content: item?.content ?? "",
     source: item?.source?.kind ?? "text",
     fileName: item?.source?.fileName,
-    reviewHash: review?.hash
+    reviewHash: item?.reviewHash,
+    ...initial
   }));
   const [busy, setBusy] = (0, import_react2.useState)(false);
-  const [warning, setWarning] = (0, import_react2.useState)(() => review?.check ?? null);
+  const [checking, setChecking] = (0, import_react2.useState)(false);
+  const [warning, setWarning] = (0, import_react2.useState)(() => report ?? (item?.held && item.check?.verdict === "warn" ? item.check : null));
   const [error, setError] = (0, import_react2.useState)("");
   const fileInput = (0, import_react2.useRef)(null);
   const set2 = (key, value) => {
@@ -5316,6 +5368,7 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
     event.preventDefault();
     if (disabled) return;
     setBusy(true);
+    setChecking(true);
     setError("");
     try {
       const input = draft.reviewHash === void 0 ? draft : { reviewHash: draft.reviewHash };
@@ -5325,12 +5378,13 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
         edit: !!item,
         ...warning?.needsConfirm ? { confirm: warning.needsConfirm } : {}
       });
-      if (result.needsConfirm) setWarning(result);
+      if (result.needsConfirm || result.refused) setWarning(result);
       else await saved();
     } catch (failure) {
       setError(hostText(failure.message));
     } finally {
       setBusy(false);
+      setChecking(false);
     }
   };
   return (0, import_react2.createElement)(
@@ -5368,12 +5422,8 @@ function SkillForm({ item, actions, onClose, saved, readOnly }) {
       multiline: true,
       onChange: (value) => set2("content", value)
     }) : null,
-    warning ? (0, import_react2.createElement)(
-      "div",
-      { className: "bt-set-row bt-bs-stack", role: "status" },
-      warning.needsConfirm ? t("Review the warnings, then save again to confirm.") : t("Warnings"),
-      (0, import_react2.createElement)("ul", null, warning.findings.map(({ rule, line, reason }, index) => (0, import_react2.createElement)("li", { key: `${rule}:${index}` }, `${hostText(reason)}${line ? ` · ${line}` : ""}`)))
-    ) : null,
+    checking ? (0, import_react2.createElement)("p", { className: "bt-set-hint", role: "status" }, t("Checking the skill…")) : null,
+    SkillReport({ report: warning }),
     error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
     (0, import_react2.createElement)(
       "div",
@@ -5392,6 +5442,39 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
   const [form, setForm] = (0, import_react2.useState)(null);
   const [confirmDelete, setConfirmDelete] = (0, import_react2.useState)(null);
   const [busy, setBusy] = (0, import_react2.useState)(false);
+  const [rowReview, setRowReview] = (0, import_react2.useState)(null);
+  const [recovered, setRecovered] = (0, import_react2.useState)([]);
+  const [recovering, setRecovering] = (0, import_react2.useState)(() => Boolean(actions.resumeSkillSaves));
+  (0, import_react2.useEffect)(() => {
+    if (!actions.resumeSkillSaves) return;
+    const controller = new window.AbortController();
+    const { signal } = controller;
+    setRecovering(true);
+    void (async () => {
+      try {
+        const results = await actions.resumeSkillSaves(signal);
+        const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        const forms = [];
+        for (const { form: initial, ...report } of completed) {
+          if (report.refused) forms.push({ report });
+          if (!report.needsConfirm || !initial) continue;
+          const item = initial.reviewHash !== void 0 ? await actions.getSkill(initial.name, signal) : initial.edit ? { name: initial.name } : void 0;
+          if (initial.reviewHash !== void 0 && item?.reviewHash !== initial.reviewHash) continue;
+          forms.push({ initial, item, report });
+        }
+        if (signal.aborted) return;
+        setRecovered(forms);
+        if (completed.length) await refresh(signal);
+        const failed = results.find((result) => result.status === "rejected" && result.reason.code !== "bot/not-found");
+        if (failed && !signal.aborted) setError(hostText(failed.reason.message));
+      } catch (failure) {
+        if (!signal.aborted) setError(hostText(failure.message));
+      } finally {
+        if (!signal.aborted) setRecovering(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [actions]);
   const change = async (action) => {
     setBusy(true);
     setError("");
@@ -5403,7 +5486,30 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       setBusy(false);
     }
   };
-  const disabled = readOnly || busy;
+  const reviewStored = (skill) => change(async () => {
+    setRowReview({ name: skill.name });
+    try {
+      const item = await actions.getSkill(skill.name);
+      if (item.reviewHash !== skill.reviewHash) {
+        await refresh();
+        return;
+      }
+      const result = await actions.saveSkill({ name: skill.name, edit: true, reviewHash: item.reviewHash });
+      if (result.needsConfirm) setForm({ item, report: result });
+      else if (result.refused) {
+        setRowReview({ name: skill.name, report: result });
+        await refresh();
+      } else await refresh();
+    } finally {
+      setRowReview((current) => current?.report ? current : null);
+    }
+  });
+  const disabled = readOnly || busy || recovering;
+  const activeForm = form ?? recovered.find((entry) => entry.initial);
+  const closeForm = () => {
+    if (form) setForm(null);
+    else setRecovered((current) => current.filter((entry) => entry !== activeForm));
+  };
   return (0, import_react2.createElement)(
     "main",
     { className: "bt-drawer-body" },
@@ -5415,14 +5521,17 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled, onClick: () => setForm({}) }, t("New skill"))
     ),
     error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
-    form ? (0, import_react2.createElement)(SkillForm, {
-      key: form.item?.name ?? "",
-      item: form.item,
+    recovered.filter((entry) => !entry.initial).map(({ report }, index) => (0, import_react2.createElement)(SkillReport, { key: index, report })),
+    activeForm ? (0, import_react2.createElement)(SkillForm, {
+      key: activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? "",
+      item: activeForm.item,
+      initial: activeForm.initial,
+      report: activeForm.report,
       actions,
       readOnly,
-      onClose: () => setForm(null),
+      onClose: closeForm,
       saved: async () => {
-        setForm(null);
+        closeForm();
         await refresh();
       }
     }) : null,
@@ -5433,14 +5542,27 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
         "div",
         { key: skill.name, className: "bt-connector bt-connector-head" },
         (0, import_react2.createElement)(
-          "span",
+          "div",
           { className: "bt-connector-text" },
           (0, import_react2.createElement)("span", { className: "bt-connector-name" }, skill.name),
-          (0, import_react2.createElement)("span", { className: "bt-connector-status" }, [skill.description, skill.source?.kind === "file" ? t("From file") : t("From text"), result, checked].filter(Boolean).join(" · "))
+          (0, import_react2.createElement)("span", { className: "bt-connector-status" }, [
+            skill.description,
+            skill.source?.kind === "file" ? t("From file") : t("From text"),
+            result,
+            skill.review?.status === "done" ? t("Reviewed by a model") : null,
+            checked
+          ].filter(Boolean).join(" · ")),
+          rowReview?.name === skill.name ? rowReview.report ? SkillReport({ report: rowReview.report }) : (0, import_react2.createElement)("span", { className: "bt-set-hint", role: "status" }, t("Checking the skill…")) : null
         ),
         (0, import_react2.createElement)(
           "span",
           { className: "bt-connector-actions" },
+          skill.reviewHash ? (0, import_react2.createElement)("button", {
+            type: "button",
+            className: "bt-soft bt-soft-sm",
+            disabled,
+            onClick: () => void reviewStored(skill)
+          }, t("Review skill")) : null,
           (0, import_react2.createElement)("button", {
             type: "button",
             className: "bt-soft bt-soft-sm",
@@ -6267,7 +6389,7 @@ var GRADIENTS = { aurora: [[0, "#A4FFB0"], [0.42, "#00F0E4"], [1, "#2E9EF7"]] };
 var ACCENT_INKS = ["deepseek", "charcoal", "graphite", "rose", "sky", "tangerine", "cobalt"];
 var LEGACY_INKS = { kimi: "charcoal", zai: "graphite", minimax: "rose", stepfun: "sky", mimo: "tangerine", qwen: "cobalt" };
 var isHex = (color) => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color);
-var luminance = (hex) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255).map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+var luminance = (hex2) => [1, 3, 5].map((index) => parseInt(hex2.slice(index, index + 2), 16) / 255).map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
 var inkName = (color) => INKS[color] ? color : INKS[LEGACY_INKS[color]] ? LEGACY_INKS[color] : "gray";
 var inkFill = (color) => isHex(color) ? color : `var(--bt-ink-${inkName(color)})`;
 var inkText = (color) => color === "black" ? "var(--bt-ink-gray)" : inkFill(color);
@@ -6989,8 +7111,8 @@ var HUE = { yellow: 54, orange: 30 };
 var GENIE_AURORA = "aurora";
 var GRAY = { gray: "saturate(0) brightness(1.05)", black: "saturate(0) brightness(.42) contrast(1.25)" };
 var EXTRA = { brown: " saturate(.5) brightness(.82)", yellow: " brightness(1.18) saturate(1.1)", orange: " brightness(1.06)" };
-function hueOf(hex) {
-  const [r, g, b] = [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255);
+function hueOf(hex2) {
+  const [r, g, b] = [1, 3, 5].map((index) => parseInt(hex2.slice(index, index + 2), 16) / 255);
   const max = Math.max(r, g, b);
   const span = max - Math.min(r, g, b);
   if (span === 0) return 0;
@@ -21584,7 +21706,7 @@ var THEMES = {
 };
 var DARK_INK = "#141414";
 var accentInk = (accent) => (luminance(accent) + 0.05) ** 2 > 1.05 * (luminance(DARK_INK) + 0.05) ? DARK_INK : "#ffffff";
-var rgba = (hex, alpha) => `rgba(${[1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)).join(",")},${alpha})`;
+var rgba = (hex2, alpha) => `rgba(${[1, 3, 5].map((index) => parseInt(hex2.slice(index, index + 2), 16)).join(",")},${alpha})`;
 function themeVars2(mode, dark2, accent = mode.accent) {
   return {
     "--bt-ink": mode.text,
@@ -23920,6 +24042,8 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
 }
 
 // src/client/team-actions.js
+var hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+var unfinishedSave = (error) => error.code === "NETWORK" || error.code === "bot/retired" || /^HTTP_50[234]$/.test(error.code ?? "") || error.name === "AbortError" || error instanceof SyntaxError;
 function teamActions({
   call: call2,
   after,
@@ -23940,8 +24064,96 @@ function teamActions({
     } catch {
       return null;
     }
+  })(),
+  skillStorage = (() => {
+    try {
+      return globalThis.sessionStorage;
+    } catch {
+      return null;
+    }
   })()
 }) {
+  const skillSaves = /* @__PURE__ */ new Map();
+  const skillScope = () => `automagik.skill-saves.${mountedViewer()?.id ?? "local"}`;
+  function storedSaves(scope) {
+    try {
+      const jobs = JSON.parse(skillStorage?.getItem(scope) ?? "[]");
+      if (Array.isArray(jobs)) return jobs.filter((job) => job && /^[a-f0-9]{32}$/.test(job.id));
+    } catch {
+    }
+    return [];
+  }
+  function rememberSave(scope, job, keep = true) {
+    try {
+      const jobs = storedSaves(scope).filter((entry) => entry.id !== job.id);
+      if (keep) jobs.push(job);
+      if (jobs.length) skillStorage?.setItem(scope, JSON.stringify(jobs));
+      else skillStorage?.removeItem(scope);
+    } catch {
+    }
+  }
+  async function finishSave(scope, job, input, signal, viewerGuard) {
+    const poll = { operation: job.id, poll: true, ...input === void 0 ? { recover: true } : {} };
+    const check = () => {
+      signal?.throwIfAborted();
+      checkViewer(viewerGuard);
+      if (scope !== skillScope()) throw Object.assign(new Error("The team viewer changed."), { code: "bot/retired" });
+    };
+    const request = (body) => {
+      check();
+      return call2("skill-library-save", body, signal);
+    };
+    try {
+      let result = await request(input && !job.started ? { ...input, operation: job.id } : poll);
+      while (result.pending) {
+        signal?.throwIfAborted();
+        if (!job.started) {
+          job.started = true;
+          rememberSave(scope, job);
+        }
+        await new Promise((resolve2) => setTimeout(resolve2, 750));
+        result = await request(poll);
+      }
+      check();
+      rememberSave(scope, job, false);
+      return result;
+    } catch (error) {
+      if (!unfinishedSave(error) && !signal?.aborted) rememberSave(scope, job, false);
+      throw error;
+    }
+  }
+  async function saveSkill(skill) {
+    const viewerGuard = requestViewer("skill-library-save");
+    const scope = skillScope();
+    const input = skill.reviewHash === void 0 ? skill : Object.fromEntries(
+      Object.entries(skill).filter(([field]) => ["name", "edit", "reviewHash", "confirm"].includes(field))
+    );
+    const key = JSON.stringify(input);
+    const existing = storedSaves(scope);
+    const digest = skillStorage && globalThis.crypto.subtle ? hex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)))) : void 0;
+    let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find((entry) => entry.digest === digest));
+    if (!job) {
+      job = { id: hex(globalThis.crypto.getRandomValues(new Uint8Array(16))), digest, started: false };
+      rememberSave(scope, job);
+    }
+    skillSaves.set(key, job);
+    try {
+      const result = await finishSave(scope, job, input, void 0, viewerGuard);
+      skillSaves.delete(key);
+      return result;
+    } catch (error) {
+      if (!unfinishedSave(error)) skillSaves.delete(key);
+      throw error;
+    }
+  }
+  function resumeSkillSaves(signal) {
+    const scope = skillScope();
+    return Promise.allSettled(storedSaves(scope).map(async (job) => {
+      const result = await finishSave(scope, job, void 0, signal, requestViewer("skill-library-save"));
+      for (const [key, current] of skillSaves) if (current.id === job.id) skillSaves.delete(key);
+      return result;
+    }));
+  }
   const forgetDrafts = (ids) => {
     if (!Array.isArray(ids)) return;
     for (const id of ids) {
@@ -24405,8 +24617,9 @@ function teamActions({
     imLoginStart: (payload) => call2("im-login-start", payload),
     imLoginWait: (payload) => call2("im-login-wait", payload),
     skillLibrary: (signal) => call2("skill-library", {}, signal),
-    getSkill: (name) => call2("skill-library-get", { name }),
-    saveSkill: (skill) => after(call2("skill-library-save", skill)),
+    getSkill: (name, signal) => call2("skill-library-get", { name }, signal),
+    saveSkill: (skill) => after(saveSkill(skill)),
+    resumeSkillSaves,
     deleteSkill: (name) => after(call2("skill-library-delete", { name })),
     setBotSkill: (id, name, attached, mode) => after(call2(attached ? "bot-skill-add" : "bot-skill-remove", { id, name, mode })),
     setBotSkillMode: (id, name, mode) => after(call2("bot-skill-mode", { id, name, mode })),

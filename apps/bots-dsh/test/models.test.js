@@ -29,6 +29,25 @@ test('the default model is the DSH default when served, else the first served mo
   assert.equal(await runtime(undefined).defaultModel(), 'deepseek/deepseek-v4.1-flash')
 })
 
+test('Skills review refuses an unavailable explicit preference even when background jobs can fall back', async () => {
+  const rt = runtime({ provider: 'ollama', model: 'kimi-k3' })
+  rt.state.prefs = { backgroundModel: 'deepseek/deepseek-v4-pro' }
+  rt.missingKeys = async () => new Set(['deepseek'])
+  assert.equal(await rt.backgroundModel(), 'ollama/kimi-k3')
+  assert.equal(await rt.skillReviewModel(), undefined)
+  rt.state.prefs.backgroundModel = 'not-served/name'
+  assert.equal(await rt.skillReviewModel(), undefined)
+  delete rt.state.prefs.backgroundModel
+  assert.equal(await rt.skillReviewModel(), 'ollama/kimi-k3')
+
+  rt.missingKeys = async () => new Set()
+  rt.state.prefs.backgroundModel = 'ollama/kimi-k3'
+  rt.noteAsideQuota('ollama')
+  assert.equal(await rt.skillReviewModel(), undefined)
+  delete rt.state.prefs.backgroundModel
+  assert.equal(await rt.skillReviewModel(), 'deepseek/deepseek-v4.1-flash')
+})
+
 test('the default model can run: a provider without its key is passed over, and an alias comes last', async () => {
   const rt = (selection, missing, providers) => {
     const ctx = {
