@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
 import { apply, SERVICE, SIGNED_IN_TTL_MS } from '../index.js'
+import { AgentRun } from '../src/host/acp.js'
 import { AGENTS } from '../src/host/agents.js'
 import { CONSENT_FILE, ConsentStore } from '../src/host/consent.js'
 import { UNAVAILABLE } from '../src/host/image.js'
@@ -601,6 +602,73 @@ test('a consented agent never waits on the account read, and another account sto
   assert.equal(out.signedIn, false)
   assert.equal(Object.hasOwn(out, 'consent'), false)
 })
+
+for (const phase of ['launch preparation', 'the first prompt gate']) {
+  test(`D2b round 2 a background account withdrawal during ${phase} stops startup`, async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+    const id = 'acp-codex'
+    const h = harness(t, {
+      signedIn: { codex: true }, accounts: { codex: CODEX_WORK },
+      config: { claude: false, codex: true, dshTools: true },
+    })
+    lateBins(h)
+    const adapter = h.registered.adapter
+    const agent = h.ctx.agents.get()
+    h.ctx.agents.get = () => agent
+    assert.match(await adapter.access(id), /Confirm the account of Codex/)
+    await h.service.accountConfirm(id)
+
+    const entered = Promise.withResolvers()
+    const release = Promise.withResolvers()
+    const wait = async () => { entered.resolve(); await release.promise }
+    t.mock.method(adapter.agents.get(id), 'spawn', async () => {
+      if (phase === 'launch preparation') await wait()
+      return { command: 'fake-acp' }
+    })
+    t.mock.method(adapter.backchannel, 'listen', async () => {})
+    const mint = t.mock.method(adapter.backchannel, 'mint')
+    const launch = t.mock.method(AgentRun.prototype, 'start', async function () {
+      this.child = {}
+      this.sessionId = 'fake-acp-session'
+      this.options = []
+    })
+    t.mock.method(AgentRun.prototype, 'setMode', async () => {})
+    const prompt = t.mock.method(AgentRun.prototype, 'prompt', async function () {
+      this.promptEnded = true
+      this.push({ type: 'end', stopReason: 'end_turn' })
+    })
+    let gates = 0
+    adapter.holds = () => [async () => {
+      if (++gates === 2 && phase === 'the first prompt gate') await wait()
+    }]
+    const account = Promise.withResolvers()
+    h.accounts.codex = () => account.promise
+    t.mock.timers.tick(SIGNED_IN_TTL_MS)
+    const turn = Array.fromAsync(adapter.stream({
+      provider: id, sessionId: 'chat', model: 'default',
+      messages: [{ id: 'user', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'fake prompt' }] }],
+    }))
+    await Promise.race([entered.promise, turn.then(chunks => {
+      assert.fail(`startup ended before ${phase}: ${JSON.stringify(chunks.at(-1).reason)}`)
+    })])
+    const expectedStarts = phase === 'launch preparation' ? 0 : 1
+    assert.equal(launch.mock.callCount(), expectedStarts)
+    const live = adapter.live.get('chat')
+    account.resolve(CODEX_OTHER)
+    await settle()
+    assert.equal((await h.service.status()).agents.find(row => row.id === id).consent, 'needed')
+    release.resolve()
+    const chunks = await turn
+
+    assert.deepEqual([mint, launch, prompt].map(mock => mock.mock.callCount()), [expectedStarts, expectedStarts, 0])
+    assert.equal(chunks.at(-1).reason.failure?.code, MODEL_ACCESS_REQUIRED)
+    assert.equal(adapter.live.has('chat'), false)
+    if (live !== undefined) {
+      assert.equal(live.run.alive, false)
+      assert.equal(live.bridge.closed, true)
+    }
+  })
+}
 
 test('C1: sameAccount names only the account the record holds; Claude needs its email on both sides', (t) => {
   const file = scratch(t)

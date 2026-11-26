@@ -986,3 +986,31 @@ test('acp archive 7 ignores a late tool update from the archived run', async t =
   assert.ok(archiveChild(w, a) === child, 'The replacement reply changed its child')
   assert.equal(w.events('prompt').at(-1).pid, child.pid)
 })
+
+test('acp Stop clears the active image grant before the next turn', async t => {
+  const w = await world(t, { level: WRITE, modes: [WRITE], spec: { sessionFiles: true } })
+  const spec = w.adapter.agents.get(PROVIDER)
+  const spawn = spec.spawn
+  const prepare = t.mock.method(spec, 'spawn', context => ({ ...spawn(context), sessionFileEnabled: true, sessionFileMode: WRITE }))
+  const a = w.chat('stop-image')
+  const image = join(a.session.header.cwd, 'approved.png')
+  writeFileSync(image, 'test image')
+  const file = fileIdentity(image)
+  const owner = w.adapter.sessionFiles.owner(a.agent, PROVIDER)
+  owner.grant = { staged: true, ready: Promise.resolve(), files: [file] }
+
+  const stop = new AbortController()
+  const turn = a.step({ signal: stop.signal, input: [said('hang after opening the approved image')] })
+  try {
+    await w.seen('prompt')
+    assert.deepEqual(prepare.mock.calls[0].arguments[0].sessionFiles.files, [file])
+    assert.equal(w.adapter.starting.has(a.id), false)
+  } finally {
+    stop.abort()
+    await turn
+  }
+
+  assert.equal(w.adapter.sessionFiles.owners.has(a.id), false, 'Stop must remove the active file owner')
+  await archiveReply(a, 'plain next turn after Stop')
+  assert.deepEqual(prepare.mock.calls[1].arguments[0].sessionFiles.files, [])
+})

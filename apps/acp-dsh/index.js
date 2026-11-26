@@ -51,7 +51,7 @@ import {
 import { agentRoute, carryEffort, crossed } from './src/host/switch.js'
 
 export const name = 'acp-dsh'
-export const inject = ['llm', 'agents']
+export const inject = ['llm', 'agents', 'sessions']
 
 // The bridge, its DSH approval, the drift detector and live switching: an absent key takes the
 // per-agent default for the bridge (Claude on; Codex only on an explicit true), the transcript
@@ -295,6 +295,7 @@ export function apply(ctx, config = {}, {
     redactor: redact,
     onSignedOut: id => signedOut(id),
     access: id => consentGate(id),
+    currentAccess: id => currentAccountRefusal(id),
   })
   // What acted on each Session's permissions (permission-diagnostics.js): it only records.
   const diagnostics = new PermissionDiagnostics()
@@ -438,22 +439,32 @@ export function apply(ctx, config = {}, {
   // The connectors that wait for the account record (see `install`): connector package -> what
   // the status and a turn say meanwhile. Without it the wait showed as "installing" for good.
   const recordWaits = new Map()
+  const accountRecordWait = () => {
+    consents?.settle()
+    if (consents !== undefined && !consents.saved) {
+      return `the account record could not be saved (${consents.saveError ?? 'error'})`
+    }
+  }
+  const connectorStartMessage = (spec, failed) => {
+    const reason = failed ? `the last install failed: ${failed}` : 'send this again in a minute'
+    return `its ACP adapter (${spec.adapter}) is still being installed; ${reason}`
+  }
   const install = (spec, { repair = false } = {}) => {
     // A native agent has no connector: its CLI is the ACP server.
     if (isNative(spec)) return Promise.resolve()
     // The first-run account record is on disk before this version installs a connector, so a
     // connector found with no record always means an earlier version (consent.js).
-    consents?.settle()
+    const wait = accountRecordWait()
     const before = store.binOf(spec.adapter, spec.bin)?.path
     // A record that could not be written: a connector installed now would look, at the next
     // start, like one an earlier version left, and its vendor would be carried unasked. The
     // connector waits for the record (every later install tries the write again). One already
     // installed says nothing new, so its updates go on.
-    if (consents !== undefined && !consents.saved && before === undefined) {
+    if (wait !== undefined && before === undefined) {
       if (!disposed) warn(ctx, `${spec.adapter} not installed yet: the account record could not be saved`)
       // Said as a failed install, so the settings page shows why and offers Retry, which comes
       // back here and tries the record again. Only the write error's code, never a path.
-      recordWaits.set(spec.adapter, { message: `the account record could not be saved (${consents.saveError ?? 'error'})` })
+      recordWaits.set(spec.adapter, { message: wait })
       // Nothing can be installed until the record is saved: no retry waits meanwhile.
       forgetCheckRetry(spec)
       return Promise.resolve()
@@ -611,6 +622,11 @@ export function apply(ctx, config = {}, {
     // goes back to the release before it, when that is still here (install.js). A native agent
     // has no connector in the store, so it has neither: a failed start is only reported.
     ...(isNative(spec) ? {} : {
+      connectorStartFailure: () => {
+        if (store.binOf(spec.adapter, spec.bin) !== undefined) return
+        const failed = store.lastError?.(spec.adapter) ?? accountRecordWait()
+        if (failed) return connectorStartMessage(spec, failed)
+      },
       proven: () => { startFailed.delete(spec.adapter); return store.markGood?.(spec.adapter) },
       repair: (error) => {
         if (disposed) return false
@@ -646,9 +662,7 @@ export function apply(ctx, config = {}, {
         void install(spec)
         // Read after the try above: a record that still cannot be saved is this turn's reason.
         const failed = store.lastError?.(spec.adapter) ?? recordWaits.get(spec.adapter)?.message
-        throw new Error(failed
-          ? `its ACP adapter (${spec.adapter}) is still being installed; the last install failed: ${failed}`
-          : `its ACP adapter (${spec.adapter}) is still being installed; send this again in a minute`)
+        throw new Error(connectorStartMessage(spec, failed))
       }
       // Antigravity's switch (#1564): every start records the version agy answered; an OFF start
       // writes and checks its files in the home this child runs in, before any child exists.
@@ -852,33 +866,40 @@ export function apply(ctx, config = {}, {
       publish()
     }
   }
+  const isolatedAccount = spec => homes !== undefined && spec !== undefined && !isNative(spec)
+  const accountChanging = (id, spec) => accountChanges.has(id) || homes.changing(spec.key) || homes.paused(spec.key)
+  // A background read can change the decision after a turn was admitted. Read it again at
+  // startup boundaries without inspecting the CLI or waiting on an account read.
+  const currentAccountRefusal = (id) => {
+    if (disposed || !Object.hasOwn(AGENTS, id)) return
+    const spec = AGENTS[id]
+    if (isolatedAccount(spec) && (accountChanging(id, spec) || signIns.get(id) !== true)) {
+      return `Sign in to ${spec.defaultName} in the app to resume this Bot. `
+        + 'Your terminal login is separate.'
+    }
+    if (signIns.get(id) === true && consentStates.get(id) === 'needed') {
+      // The Bot team's refusal (models.js ACCESS_MESSAGES.account), translated the same way.
+      return `Confirm the account of ${spec.defaultName} before using this model.`
+    }
+  }
   // What a turn about to open on an agent is told (adapter.js `access`): a text when the account
   // its CLI is signed in to has not been confirmed, else undefined. A sign-in nobody has read
   // yet is read first; one already read answers at once and is read again in the background
   // when its answer is old, so no turn of a consented agent waits on the CLI.
   const consentGate = async (id) => {
     const spec = AGENTS[id]
-    if (homes && spec && !isNative(spec)) {
-      if (accountChanges.has(id) || homes.changing(spec.key) || homes.paused(spec.key)) {
-        return `Sign in to ${spec.defaultName} in the app to resume this Bot. `
-          + 'Your terminal login is separate.'
-      }
+    if (isolatedAccount(spec)) {
+      if (accountChanging(id, spec)) return currentAccountRefusal(id)
       await inspect(id)
-      if (signIns.get(id) !== true) {
-        return `Sign in to ${spec.defaultName} in the app to resume this Bot. `
-          + 'Your terminal login is separate.'
-      }
+      if (signIns.get(id) !== true) return currentAccountRefusal(id)
     }
-    if (consents === undefined || disposed || !Object.hasOwn(AGENTS, id)) return undefined
+    if (consents === undefined || disposed || !Object.hasOwn(AGENTS, id)) return currentAccountRefusal(id)
     const entry = inspections.get(id)
     const stale = entry === undefined || entry.cli !== clis.get(id) || (entry.at !== undefined && Date.now() - entry.at >= entry.ttl)
     if (signIns.get(id) === undefined || consentStates.get(id) === 'needed') {
       try { await inspect(id) } catch {}
     } else if (stale) void inspect(id).catch(() => {})
-    if (signIns.get(id) !== true || consentStates.get(id) !== 'needed') return undefined
-    // The Bot team's own refusal, word for word (its models.js ACCESS_MESSAGES.account), so the
-    // row this text lands in is translated like that one. The account step says who it is.
-    return `Confirm the account of ${AGENTS[id].defaultName} before using this model.`
+    return currentAccountRefusal(id)
   }
   const inspect = async (id) => {
     if (!Object.hasOwn(AGENTS, id)) return undefined

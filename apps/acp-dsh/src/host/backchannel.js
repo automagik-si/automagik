@@ -482,7 +482,13 @@ export class Backchannel {
   }
 
   async listen() {
+    if (this.closed) throw new Error('the back-channel is closed')
     if (this.server !== undefined) return this
+    this.listening ??= this.bind().finally(() => { this.listening = undefined })
+    return this.listening
+  }
+
+  async bind() {
     const server = createServer((request, response) => {
       this.handle(request, response).catch((error) => {
         try {
@@ -492,16 +498,27 @@ export class Backchannel {
         this.log(`bridge request failed: ${error?.message ?? error}`)
       })
     })
-    this.server = server
-    await new Promise((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => {
-        server.off('error', reject)
-        resolve()
-      })
+    const bound = await new Promise((resolve, reject) => {
+      const failed = error => {
+        server.off('listening', listening)
+        server.off('error', failed)
+        reject(error)
+      }
+      const listening = () => {
+        server.off('error', failed)
+        resolve(server.address())
+      }
+      server.once('error', failed)
+      server.once('listening', listening)
+      try { server.listen(0, '127.0.0.1') } catch (error) { failed(error) }
     })
+    if (this.closed) {
+      server.close()
+      throw new Error('the back-channel is closed')
+    }
     server.unref?.()
-    this.url = `http://127.0.0.1:${server.address().port}`
+    this.url = `http://127.0.0.1:${bound.port}`
+    this.server = server
     return this
   }
 

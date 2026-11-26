@@ -132,6 +132,7 @@ const STOPPED = () => finish('aborted', 'Stopped', 'ABORTED')
 // inside its `try`: an error of that turn is never a connector failure (no rollback, no repair).
 const KEPT_RELAUNCH = Symbol('acp-dsh kept relaunch')
 const ARCHIVED = Symbol('archived Session')
+const START_CHANGED = Symbol('ACP start changed')
 
 /**
  * What the person reads when the agent did not answer in time. A start that hangs is usually a
@@ -634,7 +635,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, access, holds, ownMode = () => undefined, hostStopping = () => false,
+    botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, access, currentAccess, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
@@ -663,6 +664,8 @@ export class AcpAdapter extends LlmAdapter {
     // Asked before a turn opens on an agent (#869): a text when its signed-in account has not
     // been confirmed for the app, else undefined. Never asked for a call that continues a turn.
     this.access = access
+    // Synchronous decision at startup boundaries, using the account state already read.
+    this.currentAccess = currentAccess
     // Told which agent answered ACP's auth_required, so a cached "signed in" is dropped at once.
     this.onSignedOut = onSignedOut
     this.ctx = ctx
@@ -719,10 +722,24 @@ export class AcpAdapter extends LlmAdapter {
       this.registerMirror(agent)
     })
     this.ctx.on?.('agent/disposed', ({ agent } = {}) => {
+      if (agent === undefined) return
       const id = agent?.session?.id
       const live = this.live.get(id)
-      if (live?.own || live?.fileOwner) this.end(id, live)
+      const starting = this.starting.get(id)
+      if (starting?.dshAgent === agent) {
+        starting.agentDisposed = true
+        this.invalidateStart(id, starting)
+      }
+      if (this.live.get(id) === live && live?.dshAgent === agent && (live.own || live.fileOwner)) {
+        this.end(id, live, { preserveFiles: true })
+      }
       if (this.sessionFiles.owners.get(id)?.agent === agent) this.sessionFiles.clear(id)
+    })
+    this.offSessionDisposed = this.ctx.on?.('session/disposed', session => {
+      const starting = this.starting.get(session?.id)
+      if (starting !== undefined && starting.session === session) {
+        this.invalidateStart(session.id, starting)
+      }
     })
     for (const agent of this.ctx.agents?.list?.() ?? []) this.registerMirror(agent)
     // A mirror call DSH refuses before its body (a gate, a failed review, the person's no, a
@@ -1044,12 +1061,14 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   endProvider(provider, why) {
-    for (const [id, owner] of this.sessionFiles.owners) if (owner.provider === provider) this.endSession(id, why)
     for (const [id, starting] of this.starting) {
-      if (starting.provider === provider) this.endSession(id, why)
+      if (starting.provider === provider) this.endSession(id, why, provider, candidate => candidate === starting)
     }
     for (const [id, live] of this.live) {
-      if (live.provider === provider) this.endSession(id, why)
+      if (live.provider === provider) this.endSession(id, why, provider, candidate => candidate === live)
+    }
+    for (const [id, owner] of this.sessionFiles.owners) {
+      if (owner.provider === provider) this.sessionFiles.clear(id, { owner, retire: false })
     }
   }
 
@@ -1272,16 +1291,21 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   endSession(sessionId, why, provider, matches = () => true) {
-    if (provider === undefined) this.sessionFiles.clear(sessionId, { retire: false })
     const text = typeof why === 'string' && why.trim() !== '' ? why : HELD_TEXT
     const starting = this.starting.get(sessionId)
     const stopStarting = starting !== undefined && (provider === undefined || starting.provider === provider) && matches(starting)
+    const live = this.live.get(sessionId)
+    const stopLive = live !== undefined && (provider === undefined || live.provider === provider) && matches(live)
+    const owner = this.sessionFiles.owners.get(sessionId)
+    if (provider === undefined && owner !== undefined && (
+      (stopStarting && starting.fileOwner === owner) || (stopLive && live.fileOwner === owner)
+      || matches({ dshAgent: owner.agent, session: owner.session, provider: owner.provider })
+    )) this.sessionFiles.clear(sessionId, { owner, retire: false })
     if (stopStarting) {
       starting.held ??= text
       starting.upload?.controller.abort()
     }
-    const live = this.live.get(sessionId)
-    if (live === undefined || (provider !== undefined && live.provider !== provider) || !matches(live)) return stopStarting
+    if (!stopLive || this.live.get(sessionId) !== live) return stopStarting
     live.held = text
     live.open = false
     live.substitution = undefined
@@ -1300,6 +1324,12 @@ export class AcpAdapter extends LlmAdapter {
     // A step waiting for the agent's next event wakes now, not when the process has exited.
     try { live.run?.push({ type: 'error', message: 'held' }) } catch {}
     return true
+  }
+
+  // A crossing or disposal can arrive before there is any child or credential to revoke.
+  invalidateStart(sessionId, entry) {
+    entry.invalidated = true
+    this.endSession(sessionId, undefined, undefined, candidate => candidate === entry || candidate === entry.startup)
   }
 
   /** The `session/new` server entry for one bridge: the adapter spawns it with this env only. */
@@ -1427,7 +1457,8 @@ export class AcpAdapter extends LlmAdapter {
     // sessions kept by the ordinary bridge-off path. No transcript can recreate authority.
     const owner = this.sessionFiles.owners.get(session?.id)
     if (owner?.session === session && ['permission/preset', 'sandbox/mode', 'approval/policy', 'model/selection'].includes(event?.type)) {
-      this.endSession(session.id, 'Image session permission changed. Send a new message to continue.')
+      this.endSession(session.id, 'Image session permission changed. Send a new message to continue.', undefined,
+        candidate => candidate.dshAgent === owner.agent && (candidate.session ?? candidate.dshAgent?.session) === session)
     }
     if (this.teamManaged() && ['sandbox/mode', 'permission/preset', 'approval/policy'].includes(event?.type)) {
       const live = this.live.get(session?.id)
@@ -1443,14 +1474,19 @@ export class AcpAdapter extends LlmAdapter {
       }
     }
     if (event?.type !== 'model/selection') return
+    const provider = event.data?.provider
+    const starting = this.starting.get(session?.id)
     const live = this.live.get(session?.id)
-    if (live === undefined) return
+    if (starting !== undefined && starting.session === session && typeof provider === 'string' && provider !== starting.provider) {
+      this.invalidateStart(session.id, starting)
+    }
+    const liveSession = live?.dshAgent?.session
+    if (live === undefined || (liveSession !== undefined && liveSession !== session)) return
     // Off is the old path, byte for byte: the agent session is kept across a turn on another
     // provider, so switching back resumes the same ACP session. The default is per agent.
     if (!this.bridgeOn(this.agents.get(live.provider), session?.id)) return
-    const provider = event.data?.provider
     if (agentRoute(this.agents, provider)) return
-    this.end(session.id, live)
+    if (this.live.get(session.id) === live) this.end(session.id, live)
     try {
       session.append?.('user/message', boundaryNotice('Switching to DSH'), { surfaceOp: 'append' })
     } catch (error) {
@@ -1559,6 +1595,15 @@ export class AcpAdapter extends LlmAdapter {
     try { this.onSignedOut?.(id) } catch {}
   }
 
+  // A CLI account waiting for the person's word is refused before any process starts.
+  async accountRefusal(provider) {
+    let unconfirmed
+    try { unconfirmed = await this.access?.(provider) } catch {
+      unconfirmed = 'The Bot account could not be checked. Sign in again in the app.'
+    }
+    if (typeof unconfirmed === 'string' && unconfirmed !== '') return finish('error', unconfirmed, MODEL_ACCESS_REQUIRED)
+  }
+
   // One model step. The turn that is starting there is tracked from here to the step's last
   // exit (`starting`), whichever way it leaves: a refusal, a failure, a stop, its end.
   async *stream(options) {
@@ -1567,7 +1612,9 @@ export class AcpAdapter extends LlmAdapter {
     // Latch durable membership at admission, before the first await. Undo can remove
     // the id before this step resumes, but only a fresh entry may start afterward.
     const entry = { held: undefined, archived: this.isArchived(sessionId), fileOwner, fileLive: this.live.get(sessionId) }
-    if (!entry.archived && fileOwner?.grant && this.starting.has(sessionId)) {
+    const pending = this.starting.get(sessionId)
+    if (!entry.archived && fileOwner?.grant && pending !== undefined
+        && pending.dshAgent === fileOwner.agent && pending.held === undefined) {
       return yield finish('error', 'The image session is already starting. Wait for that message to finish.')
     }
     const stopFiles = () => {
@@ -1581,6 +1628,7 @@ export class AcpAdapter extends LlmAdapter {
       if (starting !== undefined && starting !== entry) return
       const why = 'The image session was stopped.'
       entry.held ??= why
+      this.sessionFiles.clear(sessionId, { owner: entry.fileOwner, retire: false })
       this.endSession(sessionId, why, undefined, candidate => candidate === entry || candidate === entry.fileLive)
     }
     signal?.addEventListener('abort', stopFiles, { once: true })
@@ -1592,13 +1640,15 @@ export class AcpAdapter extends LlmAdapter {
       if (!entry.archived && entry.fileStartup && this.starting.get(sessionId) === entry
           && entry.fileOwner?.grant && this.sessionFiles.owners.get(sessionId) === entry.fileOwner
           && (entry.upload === undefined || (this.live.get(sessionId) === entry.upload.live
-            && entry.upload.live.run === entry.upload.run))) this.endSession(sessionId)
+            && entry.upload.live.run === entry.upload.run))) {
+        this.endSession(sessionId, undefined, undefined, candidate => candidate === entry || candidate === entry.fileLive)
+      }
       if (this.starting.get(sessionId) === entry) this.starting.delete(sessionId)
     }
   }
 
   async *step(options, entry) {
-    const agent = this.agents.get(options.provider)
+    let agent = this.agents.get(options.provider)
     if (agent === undefined) {
       return yield entry.archived ? finish('stop') : finish('error', `No ACP agent is set up as ${options.provider}`, 'NO_ADAPTER')
     }
@@ -1635,13 +1685,59 @@ export class AcpAdapter extends LlmAdapter {
     // agent session there ends with the refusal.
     // The turn is starting from here: an `endSession` that lands before its prompt refuses it.
     entry.provider = options.provider
+    entry.dshAgent = dshAgent
+    entry.session = dshAgent.session
+    if (entry.fileOwner?.agent !== dshAgent || entry.fileOwner?.session !== entry.session) entry.fileOwner = undefined
     if (!entry.archived) this.starting.set(sessionId, entry)
     const started = () => { if (this.starting.get(sessionId) === entry) this.starting.delete(sessionId) }
+    const ownsStart = () => this.starting.get(sessionId) === entry && !entry.agentDisposed
+      && this.ctx.agents?.get?.(sessionId) === dshAgent && dshAgent.session === entry.session
+      && (typeof this.ctx.sessions?.get !== 'function' || this.ctx.sessions.get(sessionId) === entry.session)
+    const startChanged = () => entry.held !== undefined || !ownsStart() || this.agents.get(options.provider) !== agent
+    const stopOwned = (why, expected, owner) => {
+      if (this.starting.get(sessionId) !== entry) return
+      if (owner?.agent === dshAgent && owner.session === entry.session) {
+        this.sessionFiles.clear(sessionId, { owner, retire: false })
+      }
+      this.endSession(sessionId, why, undefined, candidate => candidate === entry
+        || (candidate === expected && (!entry.invalidated || candidate === entry.startup)
+          && candidate.dshAgent === dshAgent && candidate.dshAgent.session === entry.session))
+    }
+    const stopChanged = function* () {
+      const why = entry.held ?? live?.held ?? HELD_TEXT
+      stopOwned(why, live, entry.fileOwner)
+      if (options.signal?.aborted && why === HELD_TEXT) return yield STOPPED()
+      return yield* stopped(why)
+    }
+    const firstPromptRefusal = () => {
+      if (live.run.promptEnded !== undefined) return
+      const message = this.currentAccess?.(options.provider)
+      if (message === undefined) return
+      stopOwned(message, live, live.fileOwner)
+      return finish('error', message, MODEL_ACCESS_REQUIRED)
+    }
     const held = await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
     if (archived()) return yield finish('stop')
+    agent = this.agents.get(options.provider)
+    if (agent === undefined) return yield finish('error', `No ACP agent is set up as ${options.provider}`, 'NO_ADAPTER')
+    const followsTool = options.messages.findLast(message => !bridgeRow(message))?.role === 'tool'
+    if (!ownsStart()) {
+      // A disposed agent can still report a known account or connector refusal for its turn.
+      if (!followsTool && this.starting.get(sessionId) === entry && (held === undefined || entry.agentDisposed)) {
+        const refusal = await this.accountRefusal(options.provider)
+        if (archived()) return yield finish('stop')
+        if (this.starting.get(sessionId) === entry) {
+          if (refusal !== undefined) return yield refusal
+          const current = this.agents.get(options.provider)
+          const failed = current?.connectorStartFailure?.()
+          if (failed !== undefined) return yield finish('error', `${current.name} did not start: ${failed}`)
+        }
+      }
+      return yield* stopped(held ?? HELD_TEXT)
+    }
     if (held !== undefined) {
+      stopOwned(held, live, entry.fileOwner)
       started()
-      this.endSession(sessionId, held)
       return yield* stopped(held)
     }
     live = entry.fileLive = this.live.get(sessionId)
@@ -1663,7 +1759,7 @@ export class AcpAdapter extends LlmAdapter {
     if (continuing) started()
     if (!continuing) {
       if (live !== undefined) live.substitution = undefined
-      if (options.messages.findLast(message => !bridgeRow(message))?.role === 'tool') {
+      if (followsTool) {
         // The agent may still be on the prompt this step belonged to. Nobody is reading it any
         // more, so it is asked to stop now, and its session is ended if it has not stopped in
         // the time a cancel gets (`reap`, which also answers whatever it was still asking),
@@ -1708,20 +1804,41 @@ export class AcpAdapter extends LlmAdapter {
       // The switch is the Bot's: every turn of its Sessions follows it, whoever sends it (#1564).
       const ompNativeAllowed = () => permitsNative(levelAtStart())
         && this.savedNativeOn(sessionId, options.provider)
+      // Capture the turn's initial switch before the account wait. A later flip still
+      // invalidates startup when it reaches the launch checks.
+      const codexOffAtStart = codexRow && !kept && this.teamManaged()
+        && !(permitsNative(turnLevel) && this.nativeOn(agent, sessionId, options.provider))
+      const refusal = await this.accountRefusal(options.provider)
+      if (archived()) return yield finish('stop')
+      if (startChanged()) return yield* stopChanged()
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
       const botIdentity = takesIdentity || options.provider === 'acp-omp' ? readIdentity(this.botIdentity, sessionId)
         : readIdentity(this.solverIdentity, sessionId)
       const identityRead = takesIdentity ? botIdentity : undefined
+      // Other ACP agents can receive the Solver's method supplement through the
+      // existing identity prompt delivery, without adopting the whole Bot role.
+      const role = takesIdentity ? rolePromptOf(identityRead)
+        : rolePromptOf({ name: botIdentity?.name, rolePrompt: botIdentity?.solverLimitsPrompt })
+      const turn = this.roleTurns.get(sessionId)
+      const sameTurn = live !== undefined && turn !== undefined && live.roleTurn === turn
+      const roleChanged = live !== undefined && !sameTurn && (live.roleDigest ?? '') !== role.digest
+      if (refusal !== undefined) {
+        const owner = entry.fileOwner
+        if (owner?.provider === options.provider && owner.grant?.staged) {
+          this.sessionFiles.clear(sessionId, { owner, retire: false })
+        }
+        // A run with a revoked role must give up its old authority even on a refused turn.
+        if (roleChanged && live.roleDigest && live.provider === options.provider
+            && live.dshAgent === dshAgent && this.live.get(sessionId) === live) this.end(sessionId, live)
+        return yield refusal
+      }
       // Whether the Details switch could turn this turn's Codex ON, read when the text is made: any
       // Session of a Bot it is not blocked for.
       const switchHere = () => {
         try { return identityRead?.nativeToolsBlocked === false } catch { return false }
       }
       const offText = reason => offUnavailableText(reason, switchHere())
-      // A Codex turn that will run with its own tools off never asks for own mode or opens an
-      // image-file grant: DSH's read_image reaches images through the bridge.
-      const codexOffAtStart = codexRow && !kept && this.teamManaged()
-        && !(permitsNative(turnLevel) && this.nativeOn(agent, sessionId, options.provider))
+      // An OFF Codex turn does not ask for own mode or open an image-file grant.
       // Only a genuine user message activates staged file authority. The trailing-tool
       // guard above remains the sole continuation rule; no approval creates a prompt.
       let fileOwner
@@ -1735,6 +1852,7 @@ export class AcpAdapter extends LlmAdapter {
           strictChat = await this.ownAnswer(sessionId, dshAgent, options.provider) !== 'yes'
         }
         if (archived()) return yield finish('stop')
+        if (startChanged()) return yield* stopChanged()
         if (options.signal?.aborted || entry.held !== undefined) return yield* stopped(entry.held ?? 'The image session was stopped.')
         const currentLevel = levelOf(this.ctx.get?.('approval'), dshAgent.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
         if (strictChat && (!restrictedLevel(currentLevel) || currentLevel.sandbox !== level.sandbox)) {
@@ -1748,13 +1866,15 @@ export class AcpAdapter extends LlmAdapter {
             const fileGrant = fileOwner.grant
             const files = await this.sessionFiles.activate(fileOwner, last, options.signal)
             if (archived()) return yield finish('stop')
+            if (startChanged()) return yield* stopChanged()
             if (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined) throw new Error('Image permission changed before startup.')
             fileContext = { sandbox: level.sandbox, files }
             keepsFiles = () => fileOwner !== undefined && this.sessionFiles.valid(fileOwner)
               && fileOwner.grant === fileGrant && entry.held === undefined
           } catch (error) {
             if (archived()) return yield finish('stop')
-            this.endSession(sessionId)
+            if (startChanged()) return yield* stopChanged()
+            stopOwned(undefined, live, fileOwner)
             return yield finish('error', error.message)
           }
         } else if (this.sessionFiles.owners.has(sessionId)) {
@@ -1797,15 +1917,10 @@ export class AcpAdapter extends LlmAdapter {
       // eligibility or executable proof changes, replace the child and replay delivered history.
       const relaunchForSkills = agyOffLive && live.agySkillsVersion !== wantedAgyVersion
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
-      // Other ACP agents can receive the Solver's method supplement through the
-      // existing identity prompt delivery, without adopting the whole Bot role.
-      const role = takesIdentity ? rolePromptOf(identityRead)
-        : rolePromptOf({ name: botIdentity?.name, rolePrompt: botIdentity?.solverLimitsPrompt })
-      const turn = this.roleTurns.get(sessionId)
-      const sameTurn = live !== undefined && turn !== undefined && live.roleTurn === turn
-      const roleChanged = live !== undefined && !sameTurn && (live.roleDigest ?? '') !== role.digest
       // A new tool set or role needs a new agent session.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
+        || (live.run.promptEnded === undefined && (live.dshAgent !== dshAgent
+          || (live.providerRow !== undefined && live.providerRow !== agent)))
         || bridgeGone || needsSkillBridge || relaunchForSkills || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
       if (remade) {
         if (roleChanged) {
@@ -1817,19 +1932,6 @@ export class AcpAdapter extends LlmAdapter {
         this.end(sessionId, live, { preserveFiles: keepsFiles() })
         live = undefined
       }
-      // The account this CLI is signed in to waits for the person's word (index.js, consent.js):
-      // refused like a signed-out CLI, before any process starts, and never answered elsewhere.
-      let unconfirmed
-      try { unconfirmed = await this.access?.(options.provider) } catch {
-        unconfirmed = 'The Bot account could not be checked. Sign in again in the app.'
-      }
-      // Ended while the consent was read: nothing starts for this turn.
-      if (archived()) return yield finish('stop')
-      if (entry.held !== undefined) {
-        started()
-        return yield* stopped(entry.held)
-      }
-      if (typeof unconfirmed === 'string' && unconfirmed !== '') return yield finish('error', unconfirmed, MODEL_ACCESS_REQUIRED)
       // The agent is still on its last prompt (a Stop it has not answered yet, a turn DSH ended
       // without it). Asked to stop, it has `cancelWaitMs`; one that will not end is replaced
       // below by a new session in this same turn, which the replay carries the chat to, so the
@@ -1838,10 +1940,7 @@ export class AcpAdapter extends LlmAdapter {
         const ended = await this.stopping(live, options.signal)
         // Ended while the old prompt was given its time (endSession): nothing starts here.
         if (archived()) return yield finish('stop')
-        if (entry.held !== undefined) {
-          started()
-          return yield* stopped(entry.held)
-        }
+        if (startChanged()) return yield* stopChanged()
         if (options.signal?.aborted) {
           if (!ended) this.reap(sessionId, live)
           return yield STOPPED()
@@ -1875,22 +1974,27 @@ export class AcpAdapter extends LlmAdapter {
       let crossing = false
       let renewedForSkills = false
       let replaySource
+      let launchEligible
       const prior = lastProviderOf(options.messages)
       // The transcript before this turn: what a replay carries (plan A-5, independent of the
       // bridge; only the kill switch turns it off).
       const replaying = this.replayOn()
       if (live !== undefined && live.skillCatalog !== undefined && live.skillCatalog !== skillCatalog(live)?.key) {
         try {
+          if (startChanged()) return yield* stopChanged()
           if (codexRow && live.nativeOff === true) ensureCatalog(live.offCatalog)
           await this.refork(agent, live, dshAgent, options.signal, { renew: true })
         } catch (error) {
           if (archived()) return yield finish('stop')
           if (live.held !== undefined) return yield* stopped(live.held)
+          if (startChanged()) return yield* stopChanged()
           this.end(sessionId, live)
           const left = this.unanswered(agent, error, 'refreshing its Skills catalog')
           if (left !== undefined) return yield left
           return yield finish('error', `${agent.name} would not refresh its session: ${error?.message ?? error}`)
         }
+        if (archived()) return yield finish('stop')
+        if (startChanged()) return yield* stopChanged()
         live.skillCatalog = undefined
         fresh = renewedForSkills = true
         // The DSH Session and its visible transcript stay in place. Rebuild
@@ -1903,11 +2007,12 @@ export class AcpAdapter extends LlmAdapter {
         crossing = replaying && prior !== undefined && prior !== options.provider
         const state = {
           fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox,
-          provider: options.provider, name: agent.name, asks, native, twinsOff: false,
+          provider: options.provider, providerRow: agent, name: agent.name, asks, native, twinsOff: false,
           run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent,
           bridge: undefined, replay: undefined, owed: undefined, drifted: false,
           roleDigest: role.digest, roleTurn: turn,
         }
+        entry.startup = state
         if (role.refused) {
           try {
             this.ctx.logger?.info?.(
@@ -1929,9 +2034,12 @@ export class AcpAdapter extends LlmAdapter {
           if (options.model !== DEFAULT_MODEL) return false
           try { return (this.startModels.get(agent) ?? agent.catalog?.ownModel?.()) === undefined } catch { return true }
         }
-        const checkArchive = () => {
+        const checkStart = () => {
           entry.archived ||= this.isArchived(sessionId)
           if (entry.archived) throw ARCHIVED
+          if (startChanged() || options.signal?.aborted) throw START_CHANGED
+          const message = this.currentAccess?.(options.provider)
+          if (message !== undefined) throw Object.assign(new Error(message), { code: MODEL_ACCESS_REQUIRED })
         }
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
@@ -1950,12 +2058,17 @@ export class AcpAdapter extends LlmAdapter {
               && this.nativeOn(agent, sessionId, options.provider))
             const codexOff = codexRow && !preOn
             const nativeOff = spawnOmpManaged ? !ompNativeAllowed() : codexRow ? codexOff : undefined
+            const checkArgsMode = () => {
+              if (omp && (spawnOmpManaged !== this.teamManaged()
+                  || (spawnOmpManaged && nativeOff === ompNativeAllowed()))) throw START_CHANGED
+            }
             entry.nativeOff = state.nativeOff = nativeOff
             const agyOff = agy && nativeOff === true
             let prepareAgySkills = agyOff && agySkillsWanted() !== undefined
             if (prepareAgySkills) {
               await this.backchannel.listen()
-              checkArchive()
+              checkStart()
+              checkArgsMode()
               prepareAgySkills = canMountSkills()
             }
             if (codexOff) {
@@ -1977,11 +2090,12 @@ export class AcpAdapter extends LlmAdapter {
                   ...(nativeOff === true ? { nativeOff: true } : {}),
                   ...(prepareAgySkills ? { skillBridge: true } : {}),
                 }
+            checkStart()
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
             // omp's launch spec is synchronous and it has no bridge to prepare.
             // Keep its policy decision and actual spawn in the same event-loop turn.
             const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, agySkillsVersion, offRecheck, ...spec } = omp ? launch : await launch
-            checkArchive()
+            checkStart()
             state.agySkillsVersion = agySkillsVersion
             const agySkills = agySkillsVersion !== undefined
             if (spawnOmpManaged && entry.held !== undefined) return yield* stopped(entry.held)
@@ -2023,9 +2137,16 @@ export class AcpAdapter extends LlmAdapter {
             const bridged = decision.on
             state.bridgeDefault = decision.setting === undefined ? bridged : undefined
             const skillOnly = !bridged && (agyOff ? agySkills : canMountSkills())
+            launchEligible = () => {
+              const current = this.bridgeDecision(agent, sessionId, codexOff)
+              return current.on === bridged && current.setting === decision.setting
+                && (agyOff ? !agySkills || canMountSkills() : skillOnly === (!bridged && canMountSkills()))
+                && (!fileOwner || this.sessionFiles.valid(fileOwner))
+            }
             if ((bridged || skillOnly) && !agySkills) {
               await this.backchannel.listen()
-              checkArchive()
+              checkStart()
+              checkArgsMode()
             }
             const spawnManaged = ['acp-claude', 'acp-codex'].includes(options.provider) && this.teamManaged() && !kept
             if (spawnManaged && entry.held !== undefined) return yield* stopped(entry.held)
@@ -2048,6 +2169,8 @@ export class AcpAdapter extends LlmAdapter {
             const roleExtras = bridged && agent.disableBuiltInTools !== true && decision.setting !== true && this.roleToolsInDsh(sessionId)
             const twinsOff = codexRow ? !codexOff && roleExtras : spawnNative || roleExtras
             state.twinsOff = twinsOff
+            checkStart()
+            if (!launchEligible()) throw START_CHANGED
             if (bridged || skillOnly) {
               state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name,
                 promptRunning: () => state.open === true && state.run?.busy === true,
@@ -2115,7 +2238,8 @@ export class AcpAdapter extends LlmAdapter {
               ...(agent.requestMs === undefined ? {} : { requestMs: agent.requestMs }),
               timers: this.timers,
             })
-            checkArchive()
+            checkStart()
+            if (!launchEligible()) throw START_CHANGED
             state.run = run
             this.live.set(sessionId, state)
             entry.fileLive = state
@@ -2125,7 +2249,8 @@ export class AcpAdapter extends LlmAdapter {
               if (state.run === run && state.bridge !== undefined) this.backchannel.revoke(state.bridge)
             })
             await starting
-            if (entry.archived || state.archived) return yield finish('stop')
+            if (state.archived) throw ARCHIVED
+            checkStart()
             // DSH's `default` for Codex is the model a process with its own tools started on. An
             // OFF process reads a catalog without the kept models, so it never says.
             if (codexRow && !codexOff && typeof run.startModel === 'string') this.startModels.set(agent, run.startModel)
@@ -2135,17 +2260,21 @@ export class AcpAdapter extends LlmAdapter {
           } catch (error) {
             if (error === ARCHIVED || entry.archived || state.archived || this.isArchived(sessionId)) {
               entry.archived = true
-              this.end(sessionId, state)
+              this.end(sessionId, state, { preserveFiles: true })
               return yield finish('stop')
             }
             // Not a failed start: the turn runs again as a kept one, outside the start's `try`.
             if (error === KEPT_RELAUNCH) return yield* relaunchKept()
             // Nothing is left of a start that failed: the process is gone with its bridge.
-            this.end(sessionId, state)
+            if (state.fileOwner !== undefined) {
+              this.sessionFiles.clear(sessionId, { owner: state.fileOwner, retire: false })
+            }
+            this.end(sessionId, state, { preserveFiles: true })
             state.run = undefined
             state.bridge = undefined
             // Ended while it started (endSession): not a failed connector, so no rollback.
-            if (state.held !== undefined) return yield* stopped(state.held)
+            if (state.held !== undefined || entry.held !== undefined) return yield* stopped(state.held ?? entry.held)
+            if (error === START_CHANGED || startChanged()) return yield* stopChanged()
             // A Stop while it started ends the turn as any Stop does; a start nobody answered
             // says where to look. Neither blames the connector's release: a CLI waiting for the
             // person hangs the same way on any release, so there is no rollback for them.
@@ -2155,7 +2284,7 @@ export class AcpAdapter extends LlmAdapter {
               this.signedOut(options.provider)
               return yield signInFailure(agent, error)
             }
-            if (error?.code === 'acp-account/busy') {
+            if (error?.code === MODEL_ACCESS_REQUIRED || error?.code === 'acp-account/busy') {
               return yield finish('error', error.message, MODEL_ACCESS_REQUIRED)
             }
             // Every model of this Codex answered its check with no tool block (B1-4): none is
@@ -2272,14 +2401,20 @@ export class AcpAdapter extends LlmAdapter {
             }
           }
           try {
+            if (startChanged()) return yield* stopChanged()
+            const refusal = firstPromptRefusal()
+            if (refusal !== undefined) return yield refusal
             await this.refork(agent, live, dshAgent, options.signal)
           } catch (error) {
             if (archived()) return yield finish('stop')
             if (live.held !== undefined) return yield* stopped(live.held)
+            if (startChanged()) return yield* stopChanged()
             const left = this.unanswered(agent, error, 'refreshing its DSH tools')
             if (left !== undefined) return yield left
             return yield finish('error', `${agent.name} would not refresh its DSH tools: ${error?.message ?? error}`, error?.code === 'acp_bridge_missing' ? 'acp_bridge_missing' : undefined)
           }
+          if (archived()) return yield finish('stop')
+          if (startChanged()) return yield* stopChanged()
         }
       }
       // A refused model can leave the run alive with no prompt yet. Revalidate when its
@@ -2315,6 +2450,7 @@ export class AcpAdapter extends LlmAdapter {
       } catch (error) {
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
+        if (startChanged()) return yield* stopChanged()
         const left = this.abandoned(sessionId, live, agent, error, `taking ${options.model}`)
         if (left !== undefined) return yield left
         const at = options.reasoningEffort ? ` at ${options.reasoningEffort} effort` : ''
@@ -2323,6 +2459,7 @@ export class AcpAdapter extends LlmAdapter {
         return yield finish('error', why)
       }
       if (archived()) return yield finish('stop')
+      if (startChanged()) return yield* stopChanged()
       // The model now on a Codex process decides which launch it needed. Every branch that ends
       // here sends no prompt.
       if (codexRow) {
@@ -2368,6 +2505,7 @@ export class AcpAdapter extends LlmAdapter {
         own = await this.ownAnswer(sessionId, dshAgent, options.provider)
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
+        if (startChanged()) return yield* stopChanged()
         if (own === 'yes' && live.sessionFileEnabled) {
           this.endSession(sessionId)
           return yield finish('error', 'The effective permission mode changed. Send a new message to continue.')
@@ -2377,12 +2515,14 @@ export class AcpAdapter extends LlmAdapter {
           try { await live.run.setMode([agent.ownMode], { signal: options.signal }) } catch (error) {
             if (archived()) return yield finish('stop')
             if (live.held !== undefined) return yield* stopped(live.held)
+            if (startChanged()) return yield* stopChanged()
             const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
             if (left !== undefined) return yield left
             own = 'refused'
           }
           if (archived()) return yield finish('stop')
           if (live.held !== undefined) return yield* stopped(live.held)
+          if (startChanged()) return yield* stopChanged()
         }
       }
       try {
@@ -2392,9 +2532,11 @@ export class AcpAdapter extends LlmAdapter {
         } else if (!possible) await live.run.setMode(modes, { signal: options.signal, force: Boolean(live.sessionFileMode) || offModes !== undefined })
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
+        if (startChanged()) return yield* stopChanged()
       } catch (error) {
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
+        if (startChanged()) return yield* stopChanged()
         const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
         if (left !== undefined) return yield left
         if (live.ownSent === true || live.fileOwner) this.end(sessionId, live)
@@ -2436,6 +2578,9 @@ export class AcpAdapter extends LlmAdapter {
           if (!uploadValid()) return yield uploadStopped()
           return yield finish('error', `Uploaded image input failed: ${error?.message ?? error}`, 'acp_upload_content')
         }
+        if (archived()) return yield finish('stop')
+        if (!uploadValid()) return yield uploadStopped()
+        if (startChanged()) return yield* stopChanged()
       }
       // Asked again right before the prompt: a Session held since the first ask (while consent,
       // the start, a fork or the mode were awaited) gets no prompt. One that was ended since
@@ -2444,22 +2589,24 @@ export class AcpAdapter extends LlmAdapter {
       const late = entry.held ?? live.held ?? await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
       if (archived()) return yield finish('stop')
       if (!uploadValid()) return yield uploadStopped()
-      if (uploads === undefined && !startingNative && !startingOmp) started()
       if (late !== undefined) {
-        if (this.live.get(sessionId) === live) this.endSession(sessionId, late)
+        stopOwned(late, live, live.fileOwner)
         return yield* stopped(late)
       }
+      if (startChanged()) return yield* stopChanged()
       if (own === 'yes') {
         const again = await this.ownAnswer(sessionId, dshAgent, options.provider)
         if (archived()) return yield finish('stop')
         if (!uploadValid()) return yield uploadStopped()
         if (live.held !== undefined) return yield* stopped(live.held)
+        if (startChanged()) return yield* stopChanged()
         if (again !== 'yes') {
           own = 'changed'
           try { await live.run.setMode(strict, { signal: options.signal, force: true }) } catch (error) {
             if (archived()) return yield finish('stop')
             if (!uploadValid()) return yield uploadStopped()
             if (live.held !== undefined) return yield* stopped(live.held)
+            if (startChanged()) return yield* stopChanged()
             const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
             if (left !== undefined) return yield left
             this.end(sessionId, live)
@@ -2468,6 +2615,7 @@ export class AcpAdapter extends LlmAdapter {
           if (archived()) return yield finish('stop')
           if (!uploadValid()) return yield uploadStopped()
           if (live.held !== undefined) return yield* stopped(live.held)
+          if (startChanged()) return yield* stopChanged()
         }
       }
       // A table agent with no `modeFor` took no level above: say so once per agent session.
@@ -2493,17 +2641,20 @@ export class AcpAdapter extends LlmAdapter {
           await this.sessionFiles.activate(live.fileOwner, last, options.signal)
           if (archived()) return yield finish('stop')
           if (!uploadValid()) return yield uploadStopped()
+          if (startChanged()) return yield* stopChanged()
           if (!this.sessionFiles.valid(live.fileOwner) || this.live.get(sessionId) !== live ||
               (live.sessionFileMode && live.run.modes?.currentModeId !== live.sessionFileMode) || own === 'yes') throw new Error('Image permission changed before the prompt.')
         } catch (error) {
           if (archived()) return yield finish('stop')
           if (!uploadValid()) return yield uploadStopped()
-          this.endSession(sessionId)
+          if (startChanged()) return yield* stopChanged()
+          stopOwned(undefined, live, live.fileOwner)
           return yield finish('error', error.message)
         }
       }
       if (archived() || this.isArchived(sessionId)) return yield finish('stop')
       if (!uploadValid()) return yield uploadStopped()
+      if (startChanged()) return yield* stopChanged()
       const personCalls = new WeakSet()
       const send = currentSkills(personCalls)
       const catalog = skillCatalog(live)
@@ -2574,6 +2725,10 @@ export class AcpAdapter extends LlmAdapter {
           skills?.available(sessionId) === true && agent.agySkillsVersion?.() === undefined) {
         skills.noticeAgyUnavailable?.(session)
       }
+      if (startChanged() || live.held !== undefined || this.live.get(sessionId) !== live || options.signal?.aborted
+          || launchEligible?.() === false) return yield* stopChanged()
+      const promptRefusal = firstPromptRefusal()
+      if (promptRefusal !== undefined) return yield promptRefusal
       started()
       live.replay = undefined
       live.owed = undefined
@@ -2763,7 +2918,12 @@ export class AcpAdapter extends LlmAdapter {
     this.offArchived = undefined
     try { this.offResult?.() } catch {}
     try { this.offReviewed?.() } catch {}
-    for (const entry of this.starting.values()) entry.upload?.controller.abort()
+    try { this.offSessionDisposed?.() } catch {}
+    this.offSessionDisposed = undefined
+    for (const entry of this.starting.values()) {
+      entry.held ??= HELD_TEXT
+      entry.upload?.controller.abort()
+    }
     this.starting.clear()
     this.roleTurns.clear()
     for (const id of this.sessionFiles.owners.keys()) this.sessionFiles.clear(id)
