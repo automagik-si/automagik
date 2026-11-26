@@ -1228,12 +1228,24 @@ export class Backchannel {
     let timedOut = false
     let levelChanged = false
     let bridgeApproved = false
+    let enteredAuto = false
+    const bridgeApprovalRefusal = () => {
+      if (bridgeApproved && (enteredAuto || this.ctx?.get?.('permissionPresets')?.current?.(session) === 'auto')) {
+        return approvalDenial('The Session switched to DSH Auto after the bridge requested approval.', 'APPROVAL_PRESET_CHANGED')
+      }
+    }
     let approvalAbortedBeforeDispatch = false
     try {
       if (skill && !skill.available()) return await settle([], false)
       // Manual and every other asking level raise the one DSH dialog here. Auto does not: the
       // pipeline's pre-execute is auto-review's gate, and its ask (if any) is the one dialog.
       if (!level.full && !level.auto) {
+        if (requestScoped && typeof this.ctx?.on === 'function') {
+          // An Auto transition supersedes this card even if the Session switches back.
+          unwatch = this.ctx.on('session/event', (eventSession, event) => {
+            if (eventSession === session && event?.type === 'permission/preset' && event.data?.preset === 'auto') enteredAuto = true
+          })
+        }
         let outcome = 'unavailable'
         let policy
         try { policy = approval?.effectivePolicy?.(session) } catch {}
@@ -1324,7 +1336,10 @@ export class Backchannel {
           if (!matches(exec)) return next()
           execution = exec
           const decision = await next()
-          if (!requestScoped || decision.kind !== 'ask') return decision
+          if (!requestScoped || decision.kind === 'deny' || decision.kind === 'cancel') return decision
+          const refusal = bridgeApprovalRefusal()
+          if (refusal !== undefined) return refusal
+          if (decision.kind !== 'ask') return decision
           // The bridge already got this read's one decision. Explicit policy refusals above
           // still reach the pipeline. Only DSH Auto delegated its ask to this gate.
           if (bridgeApproved) return { kind: 'allow' }
@@ -1355,6 +1370,8 @@ export class Backchannel {
           if (restricted && (dispatched || stopped.aborted || !restrictedAllowed())) {
             throw new Error('The restricted call lost its prompt authorization.')
           }
+          const refusal = bridgeApprovalRefusal()
+          if (refusal !== undefined) throw Object.assign(new Error(refusal.reason), refusal.info)
           dispatched = true
           clearTimeout(timer)
           timer = undefined

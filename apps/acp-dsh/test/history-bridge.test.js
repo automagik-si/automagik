@@ -934,6 +934,36 @@ for (const downstream of ['ask', 'deny']) {
   })
 }
 
+test(`${noCardCase} R1: entering DSH Auto invalidates the Workspace card before dispatch`, agyTest, async t => {
+  const { h, team, chat } = await ownedAgyHistory(t)
+  const reviewed = []
+  const dispose = h.adapter.ctx.on('tools/pre-execute', (exec, next) => {
+    if (team.presets.current(exec.agent.session) !== 'auto') return next()
+    reviewed.push(exec.callId)
+    return askOnDenial
+  })
+  t.after(dispose)
+  h.controls.ask = () => {
+    assert.equal(team.presets.current(chat.session), 'workspace-write')
+    team.presets.set(chat.session, 'auto')
+    chat.policyEvent('permission/preset', { preset: 'auto' })
+    return 'allowed-once'
+  }
+  const chunks = await chat.turn(agyRequest({ query: 'switch to DSH Auto' }))
+  t.diagnostic(`requests=${h.requests.length} cards=${h.approvals.length} bodies=${h.executed.length}`)
+  assert.equal(h.requests.length, 1)
+  assert.equal(h.approvals.length, 1)
+  const [entry] = h.approvals
+  assert.deepEqual(reviewed, [entry.callId])
+  assert.deepEqual(team.terminal, [entry.callId])
+  const result = assertCard(h, team, chat.session, entry, 'allowed-once', 'dsh', 0)
+  assert.deepEqual(result.error, { name: 'ApprovalError', code: 'APPROVAL_PRESET_CHANGED' })
+  const wire = h.events('agy-real-result').map(row => row.answer)
+  assert.equal(wire.length, 1)
+  assert.equal(wire[0].isError, true)
+  assert.doesNotMatch(JSON.stringify([chunks, chat.session.snapshotEvents(), wire]), /synthetic marker/)
+})
+
 test(`${noCardCase} restack: restricted Antigravity ON replacement does not list after withdrawal`, agyTest, async t => {
   const h = agyHistory(t, true)
   const chat = openAgyHistory(h)
