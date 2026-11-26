@@ -534,7 +534,8 @@ export class Backchannel {
    * `native`: the agent keeps its own tools (native-tools mode), so this bridge offers and runs
    * only DSH's extras, never a twin of one of them (NATIVE_TWIN_TOOLS).
    * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean,
-   *   historyPrompt?: () => AbortSignal | undefined, restrictedCall?: (callId: string | undefined, name: string, prompt?: AbortSignal) => any,
+   *   historyPrompt?: () => AbortSignal | undefined,
+   *   restrictedCall?: (callId: string | undefined, name: string, prompt?: AbortSignal, claim?: { refused?: boolean }) => any,
    *   promptSkillRefusals?: () => Set<string> | undefined,
    *   native?: boolean, only?: Set<string>, skillRefusal?: boolean, skillOnly?: boolean, canList?: () => boolean }} options
    */
@@ -761,7 +762,11 @@ export class Backchannel {
       return reply(200, { tools: offeredTools(this.ctx, record.agent, record), generation: record.generation })
     }
     if (op === 'call') {
+      const callId = typeof body.callId === 'string' ? body.callId : undefined
       if (record.only !== undefined && !record.only.has(body.name) && !(record.skillRefusal && body.name === 'load_skill')) {
+        if (record.only.has(HISTORY_TOOL_NAME) && callId && typeof body.name === 'string' && body.name !== '') {
+          record.restrictedCall?.(callId, body.name, historyPrompt, { refused: true })
+        }
         return reply(403, { error: 'refused', isError: true })
       }
       const attachment = record.attachment
@@ -779,7 +784,6 @@ export class Backchannel {
       record.calls = (record.calls ?? 0) + 1
       let result
       let confirmSkill
-      const callId = typeof body.callId === 'string' ? body.callId : undefined
       try {
         result = await this.call(record, {
           name: typeof body.name === 'string' ? body.name : '',

@@ -776,6 +776,42 @@ test('round 2: omp OFF remembers a permission-first conflict and accepts status 
   } finally { await end() }
 })
 
+test('a refused explicit ACP operation leaves a retired restricted identity', async t => {
+  const p = probe(t, { provider: OMP, skillBridge: true, skillTools: new Set([HISTORY]), refuseTools: true })
+  const id = 'fixture-acp-refusal'
+  const end = p.begin()
+  const permission = await p.ask(id, { sessionId: 'current', toolCall: { toolCallId: id, name: 'mcp__dsh_fixture_unoffered' } })
+  await end()
+
+  const next = p.begin()
+  try {
+    const tool = p.run.tools.get(id)
+    assert.deepEqual({ permission, retired: tool?.retired, restricted: tool?.restrictedIdentity, conflict: tool?.skillConflict },
+      { permission: picked('no'), retired: true, restricted: true, conflict: true })
+  } finally { await next() }
+})
+
+test('an MCP allowlist refusal revokes the exact restricted identity', async t => {
+  const h = await combined(t, { off: true })
+  h.controls.body = () => []
+  const id = 'fixture-bridge-refusal'
+  const otherId = 'fixture-other-call'
+  const end = h.p.begin()
+  try {
+    await h.seen(id, HISTORY)
+    await h.seen(otherId, HISTORY)
+    const tool = h.p.run.tools.get(id)
+    const other = h.p.run.tools.get(otherId)
+    const record = h.live.bridge
+    const post = wire(h.backchannel, record, record.attachment)
+    const refused = await post('call', { name: 'fixture_unoffered', callId: id })
+    assert.deepEqual({ refused, conflict: tool.skillConflict, revoked: tool.skillAbort.signal.aborted,
+      otherRevoked: other.skillAbort.signal.aborted, executed: h.executed },
+    { refused: { status: 403, body: { error: 'refused', isError: true } }, conflict: true,
+      revoked: true, otherRevoked: false, executed: [] })
+  } finally { await end() }
+})
+
 for (const change of ['provider row', 'DSH Agent', 'Session']) {
   test(`round 2: replacing the exact ${change} after a completed prompt replaces the history credential`, async t => {
     const h = omp(t)

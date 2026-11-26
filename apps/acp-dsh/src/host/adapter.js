@@ -928,13 +928,13 @@ export class AcpAdapter extends LlmAdapter {
       promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
       ...(only?.has(HISTORY_TOOL_NAME) && {
         historyPrompt: () => live.run?.historySignal,
-        restrictedCall: (callId, name, prompt) => {
+        restrictedCall: (callId, name, prompt, claim) => {
           if (live.open !== true || live.run?.busy !== true || live.held !== undefined || live.archived ||
               this.live.get(sessionId) !== live || live.bridge !== record || this.agents.get(provider) !== providerRow ||
               this.ctx.agents?.get?.(sessionId) !== dshAgent || dshAgent.session !== session ||
               (typeof this.ctx.sessions?.get === 'function' && this.ctx.sessions.get(sessionId) !== session) ||
               !this.historyWanted(providerRow, sessionId, provider)) return undefined
-          return live.run.restrictedCall(callId, name, prompt)
+          return live.run.restrictedCall(callId, name, prompt, claim)
         },
       }),
     })

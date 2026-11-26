@@ -966,7 +966,7 @@ export class AgentRun {
     if (known) return known.retired === true || this.changeTool(known, update, sessionId) ? known : undefined
     const identity = skillIdentity(this.spec, {}, update)
     if (this.spec.refuseTools === true && !verifiedSkill(identity)) {
-      this.rememberSkillConflict(update, identity)
+      if (identity === 'conflict') this.retireRestrictedCall(update.toolCallId, update.status)
       this.forbidTool(update)
       return undefined
     }
@@ -1040,18 +1040,28 @@ export class AgentRun {
     this.spec.onForbiddenTool?.(update)
   }
 
-  rememberSkillConflict(update, identity) {
-    if (identity !== 'conflict' || !this.spec.skillTools?.has(HISTORY_TOOL_NAME)) return
-    const id = update.toolCallId
+  retireRestrictedCall(id, status) {
+    if (!this.spec.skillTools?.has(HISTORY_TOOL_NAME)) return
+    const known = this.tools.get(id)
+    if (known !== undefined) {
+      known.restrictedIdentity = true
+      known.unanswerable = true
+      this.conflictSkill(known)
+      return
+    }
     this.tools.set(id, {
       id, skillConflict: true, skillBridge: false, restrictedIdentity: true, unanswerable: true,
-      status: update.status ?? 'pending', listeners: new Set(),
+      status: status ?? 'pending', listeners: new Set(),
     })
     this.turn.add(id)
   }
 
-  restrictedCall(callId, operation, prompt) {
+  restrictedCall(callId, operation, prompt, { refused = false } = {}) {
     if (!isToolId(callId) || prompt === undefined || prompt.aborted || prompt !== this.historySignal) return
+    if (refused) {
+      this.retireRestrictedCall(callId)
+      return
+    }
     const tool = this.tools.get(callId)
     if (tool?.skillPrompt !== prompt || tool.skillSession !== this.sessionId || tool.retired || tool.skillConflict) return
     if (tool.skillOperation !== operation) {
@@ -1158,11 +1168,19 @@ export class AgentRun {
    */
   onPermission(params, signal) {
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
-    const known = this.tools.get(params.toolCall?.toolCallId)
-    const identity = skillIdentity(this.spec, known ?? {}, params.toolCall)
-    if (known) this.checkSkillClaim(known, params.toolCall, false)
+    const { toolCall } = params
+    const known = this.tools.get(toolCall.toolCallId)
+    const identity = skillIdentity(this.spec, known ?? {}, toolCall)
+    if (known) this.checkSkillClaim(known, toolCall, false)
     if (this.spec.refuseTools === true && (known?.skillConflict || !verifiedSkill(identity))) {
-      if (!known) this.rememberSkillConflict(params.toolCall, identity)
+      // Status-only requests carry no new operation claim.
+      const { server, serverName, tool, toolName } = toolCall.rawInput ?? {}
+      const explicitOperation = structuredNameOf(toolCall) !== undefined ||
+        (isToolId(server) && isToolId(tool)) || (isToolId(serverName) && isToolId(toolName))
+      if ((!known && identity === 'conflict') ||
+          (explicitOperation && this.sessionId !== undefined && params.sessionId === this.sessionId)) {
+        this.retireRestrictedCall(toolCall.toolCallId, toolCall.status)
+      }
       return Promise.resolve(refusal('rejected', params.options ?? []))
     }
     const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall }, undefined, params.sessionId)
