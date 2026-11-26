@@ -2650,6 +2650,10 @@ var ZH2 = {
   "{count} steps did not run: {why}": "{count} 个步骤未执行：{why}",
   "{tool} may already have run ({why})": "{tool} 可能已执行（{why}）",
   "{count} steps may already have run ({why})": "{count} 个步骤可能已执行（{why}）",
+  "{tool} ran unheld: nothing asked before it ran ({why})": "{tool} 已执行，执行前未请求批准（{why}）",
+  "{count} steps ran unheld: nothing asked before they ran ({why})": "{count} 个步骤已执行，执行前未请求批准（{why}）",
+  "{name} ran a step unheld": "{name} 执行了一个未被拦截的步骤",
+  "A step ran unheld": "一个未被拦截的步骤已执行",
   "A subagent step did not run: {why}": "一个子代理步骤未执行：{why}",
   "A step did not run: {why}": "一个步骤未执行：{why}",
   "approvals are off here, so you were not asked": "这里关闭了审批，所以没有询问你",
@@ -11291,6 +11295,9 @@ function whyText(why) {
 }
 function stopLine(entry) {
   const why = whyText(entry.why);
+  if (entry.ran === true) {
+    return entry.count > 1 ? t("{count} steps ran unheld: nothing asked before they ran ({why})", { count: entry.count, why }) : t("{tool} ran unheld: nothing asked before it ran ({why})", { tool: entry.tool, why });
+  }
   if (entry.mayHaveRun === true) {
     return entry.count > 1 ? t("{count} steps may already have run ({why})", { count: entry.count, why }) : t("{tool} may already have run ({why})", { tool: entry.tool, why });
   }
@@ -29079,8 +29086,12 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const waitingCount = useWork ? useWork((work) => approvalCount(work, (e) => e.botId === id)) : 0;
   const blockedTask = useWork ? useWork((work) => (work.approvals ?? []).some((entry) => entry.taskId !== void 0 && entry.botId === id)) : false;
   const blockedLine = blockedTask ? t("A task needs your approval") : "";
-  const stopped = useWork ? useWork((work) => openStops(work).some((entry) => entry.botId === id)) : false;
-  const stoppedLine = stopped ? t("A step stopped on a permission") : "";
+  const stopped = useWork ? useWork((work) => {
+    const stops = openStops(work).filter((entry) => entry.botId === id);
+    if (stops.length === 0) return void 0;
+    return stops.every((entry) => entry.ran === true) ? "ran" : "stopped";
+  }) : void 0;
+  const stoppedLine = stopped === "ran" ? t("A step ran unheld") : stopped === "stopped" ? t("A step stopped on a permission") : "";
   const alert = roster.questions?.[part] !== void 0 || approval;
   const doing = useActivity((map) => map[id]);
   const groups = workKeys(useGroupWork(useWork, (rooms) => Object.entries(rooms).flatMap(([roomId, entries2]) => entries2.filter((entry) => entry.botId === id).map((entry) => ({ id: roomId, ...doingOf(entry) })))));
@@ -48248,7 +48259,8 @@ function noticeApprovals({ work, roster, shownSession, openSession, since: since
       const drawsHere = entry.roomId !== void 0 ? entry.inRound === true : entry.calls?.some((call2) => call2.sessionId === entry.sessionId);
       if (drawsHere && document.visibilityState === "visible" && shownSession() === (entry.roomId ?? entry.sessionId)) continue;
       const { byId, roomsById } = roster.getSnapshot();
-      const note = new Notification(t("{name} stopped on a permission", { name: byId[entry.botId]?.name ?? t("A Bot") }), {
+      const title = entry.ran === true ? t("{name} ran a step unheld", { name: byId[entry.botId]?.name ?? t("A Bot") }) : t("{name} stopped on a permission", { name: byId[entry.botId]?.name ?? t("A Bot") });
+      const note = new Notification(title, {
         body: [roomsById[entry.roomId]?.name ?? entry.label, stopLine(entry)].filter(Boolean).join(" · "),
         tag: `omni-ui-stop-${entry.id}`
       });

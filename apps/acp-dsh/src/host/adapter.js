@@ -31,7 +31,7 @@ import {
   replayBlocks, turnStart, unreadHandoff,
 } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
-import { callArguments, entered, levelOf, mirrorTool, reviewed, TOOL_NAME } from './tool.js'
+import { callArguments, entered, levelOf, mirrorTool, nestedPermissionMatches, reviewed, TOOL_NAME } from './tool.js'
 import { guardSession } from './write-guard.js'
 import { checkUploadSize, prepareUpload } from './upload-content.js'
 
@@ -632,6 +632,9 @@ function withOfferedEfforts(entry, models) {
 }
 
 export class AcpAdapter extends LlmAdapter {
+  // Strict dispatches outlive replacement of a Session's live ACP run.
+  #nestedPermissions = new Map()
+
   /**
    * @param {import('@deepseek-ai/cordis').Context} ctx
    * @param {Map<string, { name: string, catalog: import('./catalog.js').Catalog, installed?(): boolean, spawn(): { command: string, args?: string[], env?: Record<string, string> } }>} agents
@@ -699,6 +702,9 @@ export class AcpAdapter extends LlmAdapter {
     this.tool = mirrorTool({
       sessionFiles: (...args) => this.sessionFiles.ask(...args),
       runOf: sessionId => this.live.get(sessionId),
+      ownsSession: (sessionId, live, agent, session) => live.dshAgent === agent
+        && this.ctx.agents?.get?.(sessionId) === agent && this.ctx.sessions?.get?.(sessionId) === session,
+      nestedPermissionOf: callId => this.#nestedPermissions.get(callId),
       cancelled: (sessionId, live) => this.reap(sessionId, live),
       bridgeApprovals: (sessionId, position, signal) =>
         this.backchannel?.awaitApprovals?.(sessionId, position, signal),
@@ -790,18 +796,23 @@ export class AcpAdapter extends LlmAdapter {
    * open. At Auto this is what puts the call through DSH's review gate: the reviewer answers a
    * real execution, and the mirror body answers the agent's question. The call's rows are
    * written in that step; the agent's queued update later finds `cardExecuted` and draws no
-   * second card. A failure leaves the question unanswered for the direct ask that follows.
+   * second card. Guarded waits carry the exact pending question through the executor.
+   * The caller handles a dispatch failure for that question.
    * @returns {Promise<boolean>} whether the nested question got its answer
    */
-  async runNested(live, nested, exec) {
+  async runNested(live, nested, exec, boundQuestion) {
     const session = exec.agent?.session
     const position = openStepOf(session)
     const tools = this.ctx.get?.('tools')
     const question = nested.permission
     if (session === undefined || position === undefined || tools?.execute === undefined
       || exec.toolSet === undefined || question === undefined) return false
+    const run = live.run
+    const args = boundQuestion?.call ? callArguments(boundQuestion.call) : callArguments(nested)
+    if (boundQuestion && (this.live.get(session.id) !== live || run.tools.get(nested.id) !== nested
+      || !nestedPermissionMatches(nested, boundQuestion, args))) return false
     const id = `acp_${randomUUID()}`
-    const raw = JSON.stringify(callArguments(nested))
+    const raw = JSON.stringify(args)
     let hide
     try {
       hide = advertise(session, position, routeOf(session), { id, name: TOOL_NAME, raw }, message => this.warn(message))
@@ -813,6 +824,9 @@ export class AcpAdapter extends LlmAdapter {
     nested.cardExecuted = id
     live.calls.add(id)
     live.toolIds.set(id, nested.id)
+    if (boundQuestion) {
+      this.#nestedPermissions.set(id, { live, session, run, tool: nested, question: boundQuestion, args })
+    }
     try {
       await tools.execute({
         calls: [{ id, name: TOOL_NAME, arguments: raw }],
@@ -824,10 +838,13 @@ export class AcpAdapter extends LlmAdapter {
     } catch (error) {
       this.warn(`a nested call was not recorded: ${error?.message ?? error}`)
     } finally {
+      this.#nestedPermissions.delete(id)
       hide()
       live.calls.delete(id)
       live.toolIds.delete(id)
-      if (nested.permission === question) nested.cardExecuted = undefined
+      if (nested.cardExecuted === id && nested.permission !== undefined && (boundQuestion || nested.permission === question)) {
+        nested.cardExecuted = undefined
+      }
     }
     return nested.permission !== question
   }
@@ -839,6 +856,8 @@ export class AcpAdapter extends LlmAdapter {
    */
   refusedFirst(exec) {
     try {
+      // The waiting mirror settles the captured question if its strict dispatch never enters.
+      if (exec?.name === TOOL_NAME && this.#nestedPermissions.has(exec.callId)) return
       if (exec?.name === TOOL_NAME && exec.parent === undefined) {
         const live = this.live.get(exec.agent?.session?.id)
         live?.pendingMirrors?.delete(exec.callId)

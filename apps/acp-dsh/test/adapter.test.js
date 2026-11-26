@@ -18,7 +18,7 @@ import { isAuthRequired, SYNTHETIC_KIND } from '../src/host/names.js'
 import { PermissionDiagnostics } from '../src/host/permission-diagnostics.js'
 import { credentialShapes } from '../src/host/redact.js'
 import { BOUNDARY_KIND, crossed } from '../src/host/switch.js'
-import { optionFor, TOOL_NAME } from '../src/host/tool.js'
+import { mirrorTool, optionFor, TOOL_NAME } from '../src/host/tool.js'
 
 const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-agent.mjs')
 
@@ -2420,4 +2420,15 @@ test('a kept Codex model missing from the live session fails before any prompt',
   assert.equal(events.at(-1).reason.kind, 'error')
   assert.match(events.at(-1).reason.failure.message, /it offers no model gpt-6.1-sol/)
   assert.equal(traceEvents(trace).filter(event => event.event === 'prompt').length, 0)
+})
+
+test('#2132 T12 execute presentation exposes the command through completed terminal output', () => {
+  const tool = mirrorTool({})
+  const open = { id: 't12', title: 'A command', kind: 'execute', input: null }
+  const meta = { title: open.title, kind: open.kind, text: 'output' }
+  assert.deepEqual(tool.presentCall({ ...open, input: { command: 'echo CMD-MARK-2132' } }),
+    { card: 'terminal', title: open.title, description: 'echo CMD-MARK-2132' })
+  assert.deepEqual(tool.presentResult(open, { meta }), { card: 'terminal', title: open.title, output: 'output' })
+  assert.deepEqual(tool.presentResult(open, { meta: { ...meta, command: 'echo late' } }),
+    { card: 'terminal', title: open.title, output: '$ echo late\noutput' })
 })

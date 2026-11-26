@@ -46,7 +46,9 @@ export function noticeApprovals({ work, roster, shownSession, openSession, since
       const drawsHere = entry.roomId !== undefined ? entry.inRound === true : entry.calls?.some(call => call.sessionId === entry.sessionId)
       if (drawsHere && document.visibilityState === 'visible' && shownSession() === (entry.roomId ?? entry.sessionId)) continue
       const { byId, roomsById } = roster.getSnapshot()
-      const note = new Notification(t('{name} stopped on a permission', { name: byId[entry.botId]?.name ?? t('A Bot') }), {
+      const title = entry.ran === true ? t('{name} ran a step unheld', { name: byId[entry.botId]?.name ?? t('A Bot') })
+        : t('{name} stopped on a permission', { name: byId[entry.botId]?.name ?? t('A Bot') })
+      const note = new Notification(title, {
         body: [roomsById[entry.roomId]?.name ?? entry.label, stopLine(entry)].filter(Boolean).join(' · '),
         tag: `omni-ui-stop-${entry.id}`,
       })

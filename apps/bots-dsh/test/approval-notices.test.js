@@ -139,3 +139,11 @@ test('task notifications include the roster title and bounded command detail', (
   page.shown[0].onclick()
   assert.deepEqual(page.opened, ['t1'])
 })
+
+test('#2132 a confirmed run uses the existing notice with its run status', () => {
+  const page = windowWith()
+  page.noticeApprovals({ work: page.work, roster: page.roster, shownSession: () => 'elsewhere', openSession: page.openSession, since: 100 })
+  page.work.set({ stops: [stopEntry({ id: 'ran', why: 'guard', tool: 'acp_tool', ran: true }), stopEntry()] })
+  assert.deepEqual(page.shown.map(note => note.title), ['Writer ran a step unheld', 'Writer stopped on a permission'])
+  assert.match(page.shown[0].body, /acp_tool ran unheld/)
+})

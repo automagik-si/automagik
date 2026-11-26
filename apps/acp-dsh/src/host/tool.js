@@ -46,6 +46,14 @@ export function callArguments(tool) {
   }
 }
 
+export function nestedPermissionMatches(tool, question, args) {
+  return tool !== undefined && tool.permission === question && question?.call?.id === tool.id
+    && question.signal?.aborted !== true && tool.retired !== true && tool.ended !== true
+    && tool.unanswerable !== true && tool.structuredName === question.call.structuredName
+    && isDeepStrictEqual(args, callArguments(question.call))
+    && isDeepStrictEqual(args, callArguments(tool))
+}
+
 // The text of a call Auto's judge refused (bots-dsh auto-judge.js): it names the judge, never the person.
 const judgedText = tool => `Auto's judge refused ${tool.title}: ${tool.judgeReason}.`.replace(/\s+/g, ' ').slice(0, 300)
 
@@ -96,6 +104,10 @@ async function resultOf(tool, attachments) {
     ...(images.length ? { images } : {}),
   }
 }
+
+// The pinned DSH chat's generic card replays raw result content. Its terminal
+// presenter can use the same output, with the original tool title and stdout.
+const commandOutput = (command, text) => command ? `$ ${command}\n${text}` : text
 
 // DSH's one-shot answer, as the option the agent offered for it.
 export function optionFor(outcome, options) {
@@ -176,7 +188,7 @@ export const reviewed = new WeakMap()
 /**
  * `images()` is the chat's image keeper (acpAgents.keepImages), or undefined. `attachments()` is
  * DSH's attachment store, where an image a call answers with is kept, or undefined.
- * @param {{ runOf(sessionId: string): { run: import('./acp.js').AgentRun, name: string } | undefined, approval(): any, sandboxPolicy?(): any, permissionPresets?(): any, images?(): { start?(call: object): void, keep(image: object): Promise<{ file: string }>, fail?(call: object): void } | undefined, attachments?(): { saveImage?(input: { data: Buffer, mediaType: string }): Promise<any> } | undefined }} host
+ * @param {{ runOf(sessionId: string): { run: import('./acp.js').AgentRun, name: string } | undefined, ownsSession?(sessionId: string, live: object, agent: object, session: object): boolean, nestedPermissionOf?(callId: string): object | undefined, approval(): any, sandboxPolicy?(): any, permissionPresets?(): any, images?(): { start?(call: object): void, keep(image: object): Promise<{ file: string }>, fail?(call: object): void } | undefined, attachments?(): { saveImage?(input: { data: Buffer, mediaType: string }): Promise<any> } | undefined }} host
  */
 export function mirrorTool(host) {
   return defineTool({
@@ -203,21 +215,51 @@ export function mirrorTool(host) {
           text: { type: 'string', required: true },
           diffs: { type: 'json' },
           images: { type: 'json' },
+          command: { type: 'string' },
           terminalOutcome: { type: 'json' },
           terminalStart: { type: 'json' },
         },
       },
       render: (_args, value) => [
-        { type: 'text', text: value.text || `${value.title}: ${value.status}` },
+        { type: 'text', text: commandOutput(value.command, value.text) || `${value.title}: ${value.status}` },
         ...(Array.isArray(value.images) ? value.images : []),
       ],
       presentationMeta: (_args, value) => value,
     },
     async execute(args, exec) {
+      const { agent, callId } = exec
+      const session = agent?.session
+      const sessionId = session?.id
+      const dispatched = host.nestedPermissionOf?.(callId)
+      const live = host.runOf(sessionId)
+      const run = live?.run
+      const tool = run?.tools.get(args.id)
+      const observation = exec.reviewGuardUnheld
+      const marked = typeof observation?.reason === 'string'
+      const dispatchNested = marked || dispatched !== undefined
+      const ownsTool = () => typeof sessionId === 'string' && sessionId !== '' && session.id === sessionId
+        && exec.agent === agent && agent.session === session && exec.callId === callId
+        && host.runOf(sessionId) === live && tool !== undefined && live.run === run
+        && host.ownsSession?.(sessionId, live, agent, session) === true && live.calls?.has(callId) === true
+        && live.toolIds?.get(callId) === args.id && args.id === tool.id && run.tools.get(tool.id) === tool
+      const ownedOnEntry = ownsTool()
+      const matchesQuestion = question => dispatched.live === live && dispatched.session === session && dispatched.run === run
+        && dispatched.tool === tool && dispatched.question === question && ownsTool()
+        && !exec.signal?.aborted && !run.cancelled && !run.disposed
+        && isDeepStrictEqual(dispatched.args, args) && isDeepStrictEqual(exec.arguments, args)
+        && nestedPermissionMatches(tool, question, args)
+      const rejectDispatched = () => dispatched.question.answer(optionFor('rejected', dispatched.question.options))
+      const dispatchCurrent = () => ownsTool() && (tool.permission === undefined || tool.permission === dispatched.question)
+      if (dispatched && !matchesQuestion(dispatched.question)) {
+        rejectDispatched()
+        return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent’s permission question no longer matches this call.' }
+      }
+      if (marked && (run?.spec?.provider !== 'acp-claude' || live.native !== true || (tool && !ownedOnEntry))) {
+        observation.mismatch = true
+        return { title: args.title, kind: args.kind, status: 'failed', text: observation.reason }
+      }
       entered.add(exec)
-      const position = openStepOf(exec.agent?.session)
-      const live = host.runOf(exec.agent?.session?.id)
-      const tool = live?.run.tools.get(args.id)
+      const position = openStepOf(session)
       if (!tool || tool.retired === true) return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent is no longer running this call.' }
       // The card follows an image being made from its start (the keeper's progress).
       if (isImageCall(tool)) {
@@ -227,6 +269,10 @@ export function mirrorTool(host) {
       try {
         try {
           for (;;) {
+            if (dispatched && !dispatchCurrent()) {
+              rejectDispatched()
+              break
+            }
             if (exec.signal?.aborted) {
               tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
               // The agent may ignore the cancel: the host gives its prompt a bounded time to end.
@@ -234,9 +280,14 @@ export function mirrorTool(host) {
               await live.run.cancel()
               break
             }
+            if (marked && !dispatched && !ownsTool()) break
             const permission = tool.permission
             if (permission && !permission.asked) {
               permission.asked = true
+              if (dispatched && !matchesQuestion(permission)) {
+                permission.answer(optionFor('rejected', permission.options))
+                continue
+              }
               if (live.sessionFileEnabled && permission.call?.structuredName === 'request_permissions') {
                 try { tool.sessionFileResult = await host.sessionFiles?.(live, tool, exec, permission) } catch {
                   tool.sessionFileResult = 'The image was not approved for this chat session.'
@@ -244,13 +295,33 @@ export function mirrorTool(host) {
                 permission.answer({ outcome: { outcome: 'cancelled' } })
                 break
               }
-              permission.answer(optionFor(await ask(host, live, tool, exec, permission), permission.options))
+              if (marked) {
+                tool.refusedReason = observation.reason
+                observation.refused = true
+                permission.answer(optionFor('rejected', permission.options))
+                continue
+              }
+              let outcome
+              try {
+                outcome = await ask(host, live, tool, exec, permission)
+              } catch (error) {
+                if (!dispatched) throw error
+                outcome = 'rejected'
+              }
+              const decision = dispatched && (outcome === 'unavailable' || !matchesQuestion(permission)) ? 'rejected' : outcome
+              permission.answer(optionFor(decision, permission.options))
               continue
             }
             if (isTerminal(tool) || !live.run.busy) break
             const nested = nestedQuestion(live, tool)
             if (nested !== undefined) {
               const question = nested.permission
+              if (dispatchNested) {
+                let answered
+                try { answered = await host.runNested?.(live, nested, exec, question) } catch {}
+                if (answered !== true) question.answer(optionFor('rejected', question.options))
+                continue
+              }
               // Auto review reads a call from its own DSH execution. A nested call asked from
               // the waiting Agent card has none yet, so at Auto run its own card here, inside
               // the open step: the reviewer answers it like any call, and only an escalation
@@ -268,14 +339,16 @@ export function mirrorTool(host) {
           // The card's body is done asking, however it left: a question that comes for the call
           // now has nobody to ask it, and the agent's run answers it as cancelled (acp.js
           // onPermission). One still stored when the body failed is withdrawn the same way.
-          tool.mirrored = true
-          tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
+          if (!dispatched || dispatchCurrent()) {
+            tool.mirrored = true
+            tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
+          }
         }
         if (!exec.signal?.aborted && isTerminal(tool)) {
           try {
             await host.bridgeApprovals?.(exec.agent?.session?.id, position, exec.signal)
           } catch {}
-          if (exec.signal?.aborted) {
+          if (exec.signal?.aborted && (!dispatched || dispatchCurrent())) {
             tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
             host.cancelled?.(exec.agent?.session?.id, live)
             await live.run.cancel()
@@ -283,9 +356,26 @@ export function mirrorTool(host) {
         }
         // Only an image-generation call is answered as a kept image; any other call that answers
         // with an image (a Read, a screenshot) keeps its own result, image blocks included.
-        if (isImageCall(tool)) return await imageResult(host, live, tool, exec)
-        const result = await resultOf(tool, host.attachments?.())
-        if (tool.kind === 'execute') Object.assign(result, terminalResult(live, tool, args, exec))
+        const image = isImageCall(tool)
+        const result = await (image ? imageResult(host, live, tool, exec) : resultOf(tool, host.attachments?.()))
+        const ownedAtRelease = ownedOnEntry && ownsTool()
+        if (marked && !ownedAtRelease) delete observation.refused
+        if (!image && tool.kind === 'execute') {
+          Object.assign(result, terminalResult(live, tool, args, exec))
+          const evidence = tool.terminalEvidence
+          if (ownedAtRelease && typeof run.sessionId === 'string' && run.sessionId !== ''
+            && evidence?.sessionId === run.sessionId && !evidence.reason && !tool.retired) {
+            if (!commandOf(args.input) && typeof evidence.command === 'string'
+              && evidence.command !== '' && evidence.command === commandOf(tool.rawInput)) {
+              result.command = evidence.command
+            }
+            if (marked && tool.status === 'completed' && evidence.status === 'completed'
+              && !exec.signal?.aborted && !run.cancelled && !run.disposed && !tool.ended && !tool.unanswerable
+              && !tool.refused && !tool.refusedReason && !tool.confinedReason && !tool.lastingReason && !tool.judgeReason) {
+              observation.ran = true
+            }
+          }
+        }
         return result
       } finally { live.mirrorBodies -= 1 }
     },
@@ -300,7 +390,10 @@ export function mirrorTool(host) {
       const meta = result?.meta && typeof result.meta === 'object' ? result.meta : undefined
       const title = meta?.title ?? args?.title
       if (Array.isArray(meta?.diffs) && meta.diffs.length > 0) return { card: 'diff', title, diffs: meta.diffs }
-      if ((meta?.kind ?? args?.kind) === 'execute') return { card: 'terminal', title, output: meta?.text ?? contentText(result?.content) }
+      if ((meta?.kind ?? args?.kind) === 'execute') {
+        const output = commandOutput(meta?.command, meta?.text ?? contentText(result?.content))
+        return { card: 'terminal', title, output }
+      }
       return { card: 'generic', title, content: result?.content ?? [] }
     },
   })

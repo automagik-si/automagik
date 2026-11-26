@@ -513,6 +513,69 @@ const implementation = {
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    if (/\b(?:guard-nested|late-command|no-command)\b/.test(said)) {
+      const waitForFile = async file => {
+        const deadline = Date.now() + 8_000
+        while (!existsSync(file) && !session.cancelled) {
+          if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${file}`)
+          await new Promise(resolve => setTimeout(resolve, 10))
+        }
+      }
+      const complete = (toolCallId, text, args = {}) => update({
+        sessionUpdate: 'tool_call_update', toolCallId, status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text } }], ...args,
+      })
+      if (/\bguard-nested\b/.test(said)) {
+        const parent = 'guard-parent'
+        await update({ sessionUpdate: 'tool_call', toolCallId: parent, title: 'Run parent', kind: 'execute',
+          status: 'in_progress', rawInput: { command: 'touch nested-parent' } })
+        writeFileSync('nested-parent', '')
+        trace({ event: 'own-tool-ran', sessionId, toolCallId: parent, mode: session.mode })
+        await waitForFile('.guard-parent-open')
+        if (session.cancelled) return { stopReason: 'cancelled' }
+        for (const [id, name, rawInput] of [
+          ['guard-held', 'Bash', { command: 'touch held-child' }],
+          ['guard-sibling', 'Read', { file_path: 'notes.txt' }],
+          ['guard-mutated', 'Read', { file_path: 'notes.txt' }],
+        ]) {
+          const kind = name === 'Bash' ? 'execute' : 'read'
+          const toolCall = { toolCallId: id, kind, rawInput }
+          const details = { claudeCode: { toolName: name, parentToolUseId: id === 'guard-mutated' ? 'guard-sibling' : parent } }
+          await update({ sessionUpdate: 'tool_call', ...toolCall, title: name, status: 'pending', _meta: details })
+          const pending = conn.requestPermission({ sessionId, toolCall,
+            options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+          })
+          if (id === 'guard-mutated') {
+            await waitForFile('.guard-child-open')
+            await update({ sessionUpdate: 'tool_call_update', toolCallId: id, rawInput: { file_path: 'different.txt' } })
+          }
+          const { outcome } = await pending
+          const answer = outcome.optionId ?? outcome.outcome
+          if (answer === 'yes') {
+            if (name === 'Bash') writeFileSync('held-child', '')
+            trace({ event: 'native-tool-ran', sessionId, toolCallId: id, name })
+            if (id !== 'guard-sibling') await complete(id, 'nested result')
+          } else {
+            trace({ event: 'native-tool-refused', sessionId, toolCallId: id, name, answer })
+            await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'failed' })
+          }
+        }
+        await complete('guard-sibling', 'nested result')
+        await complete(parent, 'parent result')
+      } else {
+        const toolCallId = 'guard-terminal'
+        await update({ sessionUpdate: 'tool_call', toolCallId, title: 'Terminal command', kind: 'execute', status: 'in_progress' })
+        await waitForFile('.guard-terminal-open')
+        if (session.cancelled) return { stopReason: 'cancelled' }
+        if (/\blate-command\b/.test(said)) {
+          await update({ sessionUpdate: 'tool_call_update', toolCallId, rawInput: { command: 'touch late-2132' } })
+          writeFileSync('late-2132', '')
+        }
+        trace({ event: 'own-tool-ran', sessionId, toolCallId, mode: session.mode })
+        await complete(toolCallId, 'terminal result')
+      }
+      return { stopReason: 'end_turn' }
+    }
     if (session.listed) {
       // Antigravity resolves the OFF profile against the component registry. Listing a
       // session server is insufficient: only eagerly loaded tools become components.
