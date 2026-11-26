@@ -15,6 +15,7 @@ import { skillHash } from '../src/host/skill-library-rules.js'
 import { fakeLocale } from '../../locale-pt-br-dsh/test/fake-locale.js'
 import { member, serviceStub } from './caller-fixture.js'
 import { stubSkillReviewer } from './fixtures/skill-review-model.js'
+import { browser } from './viewer-fixture.js'
 
 const { outputFiles } = await build({
   stdin: { contents: `
@@ -23,6 +24,7 @@ const { outputFiles } = await build({
     export { BotSkills } from './src/client/bot-skills.js'
     export { hostText, installLocale } from './src/client/i18n.js'
     export { teamActions } from './src/client/team-actions.js'
+    export { startViewer } from './src/client/viewer.js'
   `, resolveDir: new URL('..', import.meta.url).pathname },
   format: 'cjs', platform: 'browser', bundle: true, write: false,
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
@@ -40,7 +42,7 @@ const match = (node, label) => walk(node, entry => entry.props?.['aria-label'] =
 const group = () => ({ skills: [], active: {} })
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function fixture(t, boot) {
+function fixture(t, role, fetch) {
   let slots, position
   const react = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children } }),
@@ -66,12 +68,11 @@ function fixture(t, boot) {
     useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (_, read) => read(),
   }
   const module = { exports: {} }
+  const boot = role === undefined ? undefined : { version: 1, role }
+  const { globals } = browser({ boot, fetch, hooks: react })
+  Object.assign(globals.window, { AbortController, innerHeight: 800 })
   runInNewContext(outputFiles[0].text, {
-    module, exports: module.exports,
-    require: name => name === 'react' ? react : name === 'react-dom' ? { createPortal: child => child } : {},
-    AbortController, Uint8Array, btoa, crypto: globalThis.crypto, setTimeout,
-    window: { AbortController, innerHeight: 800, addEventListener() {}, removeEventListener() {} }, document: { body: {} },
-    ...(boot ? { __AUTOMAGIK_VIEW__: { version: 1, role: boot } } : {}),
+    ...globals, module, exports: module.exports, Uint8Array, btoa, crypto: globalThis.crypto, TextEncoder,
   })
   const mount = (component, props) => {
     const current = []
@@ -355,8 +356,16 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   assert.deepEqual(toolResult(blockedTurn, 'held-load').content, [])
   assert.equal(toolResult(blockedTurn, 'held-load').isError, true)
 
-  const ui = fixture(t, 'owner')
-  const actions = ui.teamActions({ call, after: pending => pending })
+  const ui = fixture(t, 'owner', ({ body }) => {
+    assert.equal(body.endpoint, 'whoami')
+    return { ok: true, json: () => post('whoami') }
+  })
+  const viewer = new AbortController()
+  t.after(() => viewer.abort())
+  assert.equal((await ui.startViewer({ version: 1, role: 'owner' }, viewer.signal)).id, owner)
+  const team = ui.teamActions({ call, after: pending => pending })
+  // A caller can still have a copy of the file in its draft. The Save request must omit it.
+  const actions = { ...team, saveSkill: input => team.saveSkill({ ...input, fileBytes }) }
   const props = { actions, rosterSource: { subscribe() {}, getSnapshot: () => ({}) } }
   const screen = ui.mount(ui.SkillsScreen, props)()
   const render = ui.mount(screen.type, screen.props)
@@ -378,9 +387,12 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   assert.match(text(renderForm()), new RegExp(fileName))
   for (const finding of first.findings) assert.ok(text(renderForm()).includes(finding.reason))
   const clickSave = () => renderForm().props.onSubmit({ preventDefault() {} })
+  const beforeEdit = submissions.length
   await clickSave()
+  assert.equal(submissions.length, beforeEdit + 1, 'Edit sent a new Save')
   const pending = submissions.at(-1)
   assert.equal(pending.payload.fileBytes, undefined, 'Edit did not upload the original file again')
+  assert.equal(pending.payload.reviewHash, stored.hash)
   assert.match(pending.value.needsConfirm, /^[a-f0-9]{64}$/)
   assert.deepEqual(pending.value.findings, first.findings)
   assert.notEqual(pending.value.needsConfirm, first.needsConfirm)
@@ -408,6 +420,7 @@ test('owner Edit reconfirms a held checker warning from the saved file', { timeo
   }
   write(reviewedLegacy)
   await clickSave()
+  assert.equal(submissions.at(-1).payload.fileBytes, undefined, 'Confirm did not upload the original file again')
   assert.deepEqual(submissions.at(-1).value, { saved: true })
   assert.equal(walk(render(), entry => entry.type?.name === 'SkillForm').length, 0)
   const durable = read()

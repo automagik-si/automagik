@@ -24112,7 +24112,10 @@ function teamActions({
   async function saveSkill(skill) {
     const viewerGuard = requestViewer("skill-library-save");
     const scope = skillScope();
-    const key = JSON.stringify(skill);
+    const input = skill.reviewHash === void 0 ? skill : Object.fromEntries(
+      Object.entries(skill).filter(([field]) => ["name", "edit", "reviewHash", "confirm"].includes(field))
+    );
+    const key = JSON.stringify(input);
     const existing = storedSaves(scope);
     const digest = skillStorage && globalThis.crypto.subtle ? hex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)))) : void 0;
     let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find((entry) => entry.digest === digest));
@@ -24122,7 +24125,7 @@ function teamActions({
     }
     skillSaves.set(key, job);
     try {
-      const result = await finishSave(scope, job, skill, void 0, viewerGuard);
+      const result = await finishSave(scope, job, input, void 0, viewerGuard);
       skillSaves.delete(key);
       return result;
     } catch (error) {

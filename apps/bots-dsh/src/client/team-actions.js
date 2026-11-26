@@ -66,7 +66,11 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
   async function saveSkill(skill) {
     const viewerGuard = requestViewer('skill-library-save')
     const scope = skillScope()
-    const key = JSON.stringify(skill)
+    // A held skill is reviewed from storage. Only its identity and confirmation are sent.
+    const input = skill.reviewHash === undefined ? skill : Object.fromEntries(
+      Object.entries(skill).filter(([field]) => ['name', 'edit', 'reviewHash', 'confirm'].includes(field)),
+    )
+    const key = JSON.stringify(input)
     const existing = storedSaves(scope)
     const digest = skillStorage && globalThis.crypto.subtle
       ? hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(key)))) : undefined
@@ -78,7 +82,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     }
     skillSaves.set(key, job)
     try {
-      const result = await finishSave(scope, job, skill, undefined, viewerGuard)
+      const result = await finishSave(scope, job, input, undefined, viewerGuard)
       skillSaves.delete(key)
       return result
     } catch (error) {
