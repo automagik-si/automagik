@@ -11,14 +11,62 @@ import { mkdir, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { ANCHOR_LINE_MAX, HISTORY_PAGE, HISTORY_PAGES_MAX, HISTORY_TIMEOUT_MS, OWN_CHAT_BRIEF, OWN_CHAT_LINE_MAX, OWN_CHAT_READ, OWN_CHAT_SEARCH } from './constants.js'
 import { excerpt } from './text.js'
+import { CREDENTIALS, credentialShapes } from './redact.js'
 
 const INDEX_VERSION = 3
 const AROUND_LINES = 6
 const SEARCH_TERMS_MAX = 6
 const ANY_TERM_HITS = 50
 const INDEX_TIMEOUT_MS = 120_000
+// A prefixed key can match again at nearly every character of the key.
+const CREDENTIAL_SCAN_PASSES = 256
 // A part still gets a few events (a title, a late reply) just after it ends.
 const SEAL_AFTER_MS = 60_000
+
+// Find both sets of ranges on the original line. Rendering one first can split a
+// credential and hide its remaining characters from the other matcher.
+export function maskLine(text, mask) {
+  const ranges = mask.ranges?.(text) ?? []
+  for (const [pattern, replacement] of CREDENTIALS) {
+    const overlapping = new RegExp(pattern)
+    const firstRange = ranges.length
+    let firstStart
+    let remaining = CREDENTIAL_SCAN_PASSES * text.length
+    for (let from = 0, match; (match = overlapping.exec(text)) !== null;) {
+      firstStart ??= match.index
+      const end = overlapping.lastIndex
+      // Charge the gap and the full greedy match, even where a restart scans it again.
+      remaining -= end - from
+      if (remaining < 0) {
+        ranges.length = firstRange
+        ranges.push([firstStart, text.length, '[hidden]'])
+        break
+      }
+      const label = typeof replacement === 'function' ? replacement(...match)
+        : replacement.replace('$1', () => match[1])
+      if (label !== match[0]) ranges.push([match.index, end, label])
+      // Another credential can start inside this match and extend past it.
+      from = match.index + (text.codePointAt(match.index) > 0xFFFF ? 2 : 1)
+      overlapping.lastIndex = from
+    }
+  }
+  ranges.sort((a, b) => a[0] - b[0])
+  const merged = []
+  for (const range of ranges) {
+    const previous = merged.at(-1)
+    if (previous !== undefined && range[0] < previous[1]) {
+      previous[1] = Math.max(previous[1], range[1])
+      previous[2] = '[hidden]'
+    } else merged.push(range)
+  }
+  let cursor = 0
+  let masked = ''
+  for (const [start, end, label] of merged) {
+    masked += text.slice(cursor, start) + label
+    cursor = end
+  }
+  return masked + text.slice(cursor)
+}
 
 const likeOf = term => `%${term.replace(/[\\%_]/g, char => `\\${char}`)}%`
 // Each term is a quoted FTS5 phrase when trigrams can match it, else a LIKE filter.
@@ -100,6 +148,11 @@ export function install(rt) {
     return opening
   }
 
+  function savedMask() {
+    rt.loadSecrets?.()
+    return rt.connectorDiagnosticRedactor?.() ?? credentialShapes
+  }
+
   function createIndex(db) {
     try {
       db.exec('PRAGMA journal_mode = WAL')
@@ -115,9 +168,9 @@ export function install(rt) {
         db,
         mark: db.prepare('SELECT through, keep, sealed, turn FROM marks WHERE session = ?'),
         setMark: db.prepare('INSERT OR REPLACE INTO marks (session, through, keep, sealed, turn) VALUES (?, ?, ?, ?, ?)'),
-        insert: db.prepare('INSERT INTO lines (text, session, seq, time, who) VALUES (?, ?, ?, ?, ?)'),
-        before: db.prepare('SELECT text, session, seq, time, who FROM lines WHERE session = ? AND seq < ? ORDER BY seq DESC LIMIT ?'),
-        from: db.prepare('SELECT text, session, seq, time, who FROM lines WHERE session = ? AND seq >= ? ORDER BY seq LIMIT ?'),
+        insert: db.prepare('INSERT INTO main.lines (text, session, seq, time, who) VALUES (?, ?, ?, ?, ?)'),
+        before: db.prepare('SELECT text, session, seq, time, who FROM main.lines WHERE session = ? AND seq < ? ORDER BY seq DESC LIMIT ?'),
+        from: db.prepare('SELECT text, session, seq, time, who FROM main.lines WHERE session = ? AND seq >= ? ORDER BY seq LIMIT ?'),
       }
     } catch (error) {
       db.close()
@@ -129,6 +182,35 @@ export function install(rt) {
     chatIndex = undefined
     indexOpening = undefined
   }, 'ds-bot: chat index')
+
+  // Search and rank only text the caller can read. The persistent index still supplies full
+  // lines and anchors. Keep a masked FTS view on this connection, rebuilt when the vault's
+  // redactor changes so saved values added after indexing are removed from old matches too.
+  function prepareSearch(index, mask) {
+    if (index.searchMask === mask) return
+    const { db } = index
+    if (index.searchInsert === undefined) {
+      db.exec("CREATE VIRTUAL TABLE temp.lines USING fts5(text, session UNINDEXED, seq UNINDEXED, time UNINDEXED, who UNINDEXED, tokenize = 'trigram')")
+      index.searchInsert = db.prepare('INSERT INTO temp.lines (text, session, seq, time, who) VALUES (?, ?, ?, ?, ?)')
+    }
+    db.function('mask_history_line', text => maskLine(text, mask))
+    db.exec('BEGIN')
+    try {
+      db.exec(`DELETE FROM temp.lines;
+        INSERT INTO temp.lines (text, session, seq, time, who)
+          SELECT mask_history_line(text), session, seq, time, who FROM main.lines;
+        COMMIT;`)
+      index.searchMask = mask
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  function insertLine(index, text, session, seq, time, who) {
+    index.insert.run(text, session, seq, time, who)
+    if (index.searchMask !== undefined) index.searchInsert.run(maskLine(text, index.searchMask), session, seq, time, who)
+  }
 
   // Adds what a part said since its mark. Reads of one part wait for each other, so no
   // line is added twice.
@@ -160,11 +242,11 @@ export function install(rt) {
           const entry = rt.historyEntry(event, false)
           if (entry === undefined) continue
           if (entry.answer) {
-            if (keep) index.insert.run(entry.text, part.sessionId, event.seq, event.time ?? 0, 'you')
+            if (keep) insertLine(index, entry.text, part.sessionId, event.seq, event.time ?? 0, 'you')
             continue
           }
           keep = entry.keepAnswers
-          if (entry.text !== '') index.insert.run(entry.text, part.sessionId, event.seq, event.time ?? 0, entry.who)
+          if (entry.text !== '') insertLine(index, entry.text, part.sessionId, event.seq, event.time ?? 0, entry.who)
         }
         index.setMark.run(part.sessionId, last, keep ? 1 : 0, seal ? 1 : 0, turn)
         index.db.exec('COMMIT')
@@ -182,10 +264,11 @@ export function install(rt) {
     const part = parts.find(item => item.sessionId === row.session)
     return `${parts.length > 1 ? `part ${part?.number ?? '?'} ` : ''}#${row.seq}`
   }
-  const rowLine = (parts, row, terms = [], max = OWN_CHAT_LINE_MAX) => {
-    const lower = row.text.toLowerCase()
+  const rowLine = (parts, row, { terms = [], max = OWN_CHAT_LINE_MAX, mask } = {}) => {
+    const line = mask === undefined ? row.text : maskLine(row.text, mask)
+    const lower = line.toLowerCase()
     const wanted = terms.find(term => lower.includes(term)) ?? ''
-    const text = row.who === 'user' ? `User: ${row.text}` : row.who === 'you' ? `You: ${row.text}` : row.text
+    const text = row.who === 'user' ? `User: ${line}` : row.who === 'you' ? `You: ${line}` : line
     return `[${anchorOf(parts, row)} · ${rt.clock(row.time)}] ${excerpt(text, wanted, max)}`
   }
 
@@ -207,6 +290,7 @@ export function install(rt) {
     const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))].slice(0, SEARCH_TERMS_MAX)
     const { index, parts, hidden } = await indexedParts(botId, askingId)
     if (index === null) return { lines: await scanOwnChat(botId, query, limit), every: true }
+    prepareSearch(index, savedMask())
     const sessions = parts.map(part => part.sessionId)
     const run = (wanted, max) => {
       const { sql, args } = termQuery(wanted, sessions, max, hidden)
@@ -228,7 +312,7 @@ export function install(rt) {
       }
       rows = [...found.values()].sort((a, b) => (b.count - a.count) || (b.row.time - a.row.time)).slice(0, limit).map(hit => hit.row)
     }
-    return { lines: rows.sort(byTime).map(row => rowLine(parts, row, terms)), every }
+    return { lines: rows.sort(byTime).map(row => rowLine(parts, row, { terms })), every }
   }
 
   // The latest messages across all parts, oldest first.
@@ -241,7 +325,8 @@ export function install(rt) {
       rows.push(...index.before.all(part.sessionId, below, limit - rows.length))
       if (rows.length >= limit) break
     }
-    return rows.reverse().map(row => rowLine(parts, row))
+    const mask = savedMask()
+    return rows.reverse().map(row => rowLine(parts, row, { mask }))
   }
 
   // The messages around an anchor, in its part.
@@ -255,7 +340,9 @@ export function install(rt) {
     if (part === undefined) return { error: `Your own chat has no part ${number}.` }
     const seq = Number(found[2])
     const rows = [...index.before.all(part.sessionId, seq, AROUND_LINES).reverse(), ...index.from.all(part.sessionId, seq, AROUND_LINES + 1)]
-    return { part, exact: rows.some(row => row.seq === seq), lines: rows.map(row => rowLine(parts, row, [], row.seq === seq ? ANCHOR_LINE_MAX : OWN_CHAT_LINE_MAX)) }
+    const mask = savedMask()
+    const lines = rows.map(row => rowLine(parts, row, { mask, max: row.seq === seq ? ANCHOR_LINE_MAX : OWN_CHAT_LINE_MAX }))
+    return { part, exact: rows.some(row => row.seq === seq), lines }
   }
 
   // The messages just older than an anchor, across parts: the rest of the anchor's part, then
@@ -276,7 +363,8 @@ export function install(rt) {
     }
     const more = rows.length > limit
     const shown = rows.slice(0, limit).reverse()
-    return { lines: shown.map(row => rowLine(parts, row)), older: more && shown.length > 0 ? anchorOf(parts, shown[0]) : undefined }
+    const mask = savedMask()
+    return { lines: shown.map(row => rowLine(parts, row, { mask })), older: more && shown.length > 0 ? anchorOf(parts, shown[0]) : undefined }
   }
 
   // Without the index: what the user, other Bots, and the Bot itself said, across all
@@ -285,13 +373,17 @@ export function install(rt) {
     const wanted = query.toLowerCase()
     const parts = rt.partsOf(botId)
     const signal = AbortSignal.timeout(HISTORY_TIMEOUT_MS)
+    const mask = savedMask()
     const lines = []
     for (const part of [...parts].reverse()) {
       for await (const line of rt.partLines(part.sessionId, signal)) {
-        if (wanted !== '' && !line.text.toLowerCase().includes(wanted)) continue
-        lines.push(`[${parts.length > 1 ? `part ${part.number} · ` : ''}${rt.clock(line.time)}] ${excerpt(line.text, wanted)}`)
+        if (savedMask() !== mask) return []
+        const text = maskLine(line.text, mask)
+        if (wanted !== '' && !text.toLowerCase().includes(wanted)) continue
+        lines.push(`[${parts.length > 1 ? `part ${part.number} · ` : ''}${rt.clock(line.time)}] ${excerpt(text, wanted)}`)
         if (lines.length >= limit) break
       }
+      if (savedMask() !== mask) return []
       if (lines.length >= limit) break
     }
     return lines.reverse()

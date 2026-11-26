@@ -349,14 +349,14 @@ export function redactor(entries, { wholeWords = true } = {}) {
     return patterns
   }
   const rejected = (escaped, start, match) => match.startsWith('\\') && escapeLed.has(formKey(match)) && escaped(start)
-  // Every whole match as [start, end, label], in text order, never overlapping.
-  const wholeMatches = (text) => {
+  // Whole matches as [start, end, label]. History also needs overlapping matches.
+  const wholeMatches = (text, overlaps = false) => {
     const found = []
     const escaped = escapedIn(text)
     const list = compile()
     const single = list.length === 1 && typeof list[0] !== 'string'
     const take = (start, end, match) => {
-      if (!single && found.some(([from, to]) => from < end && start < to)) return
+      if (!overlaps && !single && found.some(([from, to]) => from < end && start < to)) return
       found.push([start, end, labels.get(formKey(match))])
     }
     let textKey
@@ -384,6 +384,7 @@ export function redactor(entries, { wholeWords = true } = {}) {
         // A rejected escape may hide a secret inside it: search again one step on.
         if (rejected(escaped, match.index, match[0])) { pattern.lastIndex = match.index + 1; continue }
         take(match.index, match.index + match[0].length, match[0])
+        if (overlaps) pattern.lastIndex = match.index + (text.codePointAt(match.index) > 0xFFFF ? 2 : 1)
       }
     }
     return found.sort((x, y) => x[0] - y[0])
@@ -432,8 +433,8 @@ export function redactor(entries, { wholeWords = true } = {}) {
   // Every region to replace: whole matches, plus cut pieces at the edges of a cut text.
   // Overlapping regions merge into one, labelled by every secret in it, and text outside
   // them is never reprocessed, so word boundaries stay as they were.
-  const regions = (text, cut) => {
-    const found = present(text) ? wholeMatches(text) : []
+  const regions = (text, cut, overlaps = false) => {
+    const found = present(text) ? wholeMatches(text, overlaps) : []
     const long = text.length >= TAIL_FLOOR
     const foldedText = cut || long ? foldHex(text) : ''
     cut = cut && (anchorPattern.test(text) || anchorPattern.test(foldedText))
@@ -554,6 +555,8 @@ export function redactor(entries, { wholeWords = true } = {}) {
   }
   const redact = text => apply(text, false)
   redact.cut = text => apply(text, true)
+  redact.ranges = text => regions(text, Boolean(anchorPattern) && text.includes(TRUNCATED), true)
+    .map(([start, end, names]) => [start, end, names.join('')])
   return redact
 }
 
