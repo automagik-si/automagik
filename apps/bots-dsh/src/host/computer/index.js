@@ -10,7 +10,7 @@ import { LEGACY_EXECUTABLES, LEGACY_NAME } from '../legacy.mjs'
 import { classify, isComputerTool, levelAllows, LEVELS, CUA_WITHOUT_HANDLE, DRIVER_GLOBAL, DRIVER_REFUSED } from './catalog.js'
 import { createLeases } from './leases.js'
 import { prepareComputerHelper } from './mac-helper.js'
-import { REPLY_KIND } from '../constants.js'
+import { COMPUTER_HANDOFF_OFF, REPLY_KIND } from '../constants.js'
 import { output } from '../tools.js'
 import { refusal } from '../refusal.js'
 
@@ -1230,7 +1230,7 @@ export function install(rt) {
       const sessionId = exec.agent?.id
       const bot = rt.botOf(rt.selfOf(sessionId))
       if (bot === undefined || !rt.isBotSession(sessionId)) return 'Only Bots on the team can hand the computer to the user.'
-      if (!enabled() || levelOf(bot) === 'off') return 'Computer use is off for you.'
+      if (!enabled() || levelOf(bot) === 'off') return COMPUTER_HANDOFF_OFF
       const callId = rt.chatOwners.get(sessionId) === bot.id && typeof exec.callId === 'string' ? exec.callId : undefined
       holds.set(bot.id, {
         id: randomUUID(),

@@ -25,7 +25,7 @@ import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { openTurnAt } from './btw.js'
-import { HANDOFF_ACK, HISTORY_TIMEOUT_MS, REPLY_KIND, SOURCE_KIND, SWITCH_CUT } from './constants.js'
+import { COMPUTER_HANDOFF_OFF, HANDOFF_ACK, HISTORY_TIMEOUT_MS, REPLY_KIND, SOURCE_KIND, SWITCH_CUT } from './constants.js'
 import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.js'
 import { CHECKPOINT_PROMPT, STEWARD_SYSTEM, checkpointCount, checkpointTail, checkpointTailNote, checkpointText, linesFor, parseDecision, stewardRequest } from './steward.js'
 import { RESUME_DELAY_MS } from './resume.js'
@@ -38,6 +38,7 @@ import { contextPolicy } from '../shared/context-policy.js'
 import { routeAllowed, routeLabel } from '../shared/route-policy.js'
 import { ACP_NAME, CROSSING_DEADLINE_MS, commandCapableAgent, crossesHarness, isHermesRoute, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
+import { questionOptions } from './tools.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { readableRoute } from './session-route.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -3611,7 +3612,40 @@ export function install(rt) {
   // Earlier parts of a Bot's own chat, newest page first, for the chat to show above
   // the current part as one conversation.
   const EARLIER_PAGE = 60
-  function displayItems(partId, events, session, seedTurn, activity = false) {
+  function hasUsableQuestionOptions(args) {
+    try { return questionOptions(args?.options).length > 0 } catch { return false }
+  }
+
+  async function refusedComputerHandoffs(address, events, signal) {
+    const computerOff = content => content?.length === 1 && content[0]?.type === 'text' && content[0].text === COMPUTER_HANDOFF_OFF
+    const bySeq = new Map(events.map(event => [event.seq, event]))
+    const dispatches = new Map()
+    const refusals = new Map()
+    for (const event of events) {
+      const { type, data, seq, time } = event
+      if (type === 'turn/start') dispatches.clear()
+      if (data?.name === 'computer_handoff' && type === 'tool/ptc-dispatch-start') {
+        dispatches.set(data.subCallId, event)
+      } else if (data?.name === 'computer_handoff' && type === 'tool/ptc-dispatch' && computerOff(data.content)) {
+        const call = dispatches.get(data.subCallId)
+        if (call && call.data.parentCallId === data.parentCallId) refusals.set(call.seq, call)
+        else refusals.set(seq, { ...event, type: 'tool/ptc-dispatch-start' })
+      } else if (type === 'tool/result' && computerOff(data?.message?.content)) {
+        const callSeq = event.sourceEventSeqs?.[0]
+        if (!Number.isSafeInteger(callSeq) || callSeq < 0 || callSeq >= seq) continue
+        const onPage = bySeq.get(callSeq)
+        // At a page cut the result owns the row. Read its referenced call to
+        // distinguish the handoff refusal from identical text produced by another tool.
+        const call = onPage ?? (await ctx.sessionController.page({ address, beforeSeq: callSeq + 1, maxMessages: 1 }, signal)).records.at(-1)?.event
+        if (call?.seq !== callSeq || call.type !== 'tool/call' || call.data?.name !== 'computer_handoff' ||
+            call.data.callId !== data.message.toolCallId || call.data.turn !== data.turn) continue
+        refusals.set(onPage ? callSeq : seq, onPage ?? { ...call, seq, time })
+      }
+    }
+    return refusals
+  }
+
+  function displayItems(partId, events, session, seedTurn, activity = false, handoffRefusals) {
     const hidden = new Set(state.exchangeTurns[partId] ?? [])
     const showTools = activity && !rt.roomOf(partId) && !(rt.pastOwners.get(partId)?.roomId && !rt.pastOwners.get(partId)?.botId)
     const seenTools = new Set()
@@ -3655,6 +3689,8 @@ export function install(rt) {
         continue
       }
       if (event.type === 'turn/end' && Number.isSafeInteger(event.data?.turn)) turn = event.data.turn
+      const refusedHandoff = handoffRefusals?.get(event.seq)
+      if (refusedHandoff !== undefined) showTool(refusedHandoff, refusedHandoff.data.turn ?? turn)
       if (event.type === BRIDGE_ACTIVITY_RECORD) {
         const origin = bridgeOriginOf(event)
         if (origin?.exchangeId === null) showTool(event, origin.turn)
@@ -3677,7 +3713,7 @@ export function install(rt) {
         // A group_relay call's result is paired back to it by call id — the tool
         // name is on the call, never on the result.
         if (!dispatch && named === 'group_relay') relayCalls.add(event.data?.callId)
-        // The handoff's reply message carries its card in history.
+        // The handoff's reply carries its card. Confirmed refusals use the rows above.
         if (named === 'browser_handoff' || named === 'computer_handoff') continue
         // Hidden turns and refused calls never showed a display card. Closed cards
         // stay at the call that asked them, including in a hidden Bot-to-Bot turn.
@@ -3688,6 +3724,7 @@ export function install(rt) {
           if (named === 'ask_user') {
             // The reply message carries an answered card, even on a different page.
             if (closed !== undefined) items.push({ kind: 'closed', closed, question: { question: String(args?.question ?? ''), ...(args?.detail ? { detail: String(args.detail) } : {}), options: Array.isArray(args?.options) ? args.options : [], multiSelect: args?.multiSelect === true }, callId, time: event.time })
+            else if (showTools && !hasUsableQuestionOptions(args)) showTool(event, owningTurn)
             continue
           }
           const view = normalizeView(args?.view)
@@ -3765,11 +3802,12 @@ export function install(rt) {
   async function partPage(parts, index, cursor, steps = false) {
     const part = parts[index]
     const signal = AbortSignal.timeout(HISTORY_TIMEOUT_MS)
+    const address = { kind: 'session', sessionId: part.sessionId }
     // An archived earlier part may have no live agent left; its stored events
     // still page fine, so resolve failure only drops the live-session cap.
     const agent = await rt.resolveAgent(part.sessionId).catch(() => undefined)
     const page = await ctx.sessionController.page({
-      address: { kind: 'session', sessionId: part.sessionId },
+      address,
       ...(agent ? { throughSeq: Number(agent.session.seq) - 1 } : {}),
       ...(Number.isInteger(cursor?.beforeSeq) ? { beforeSeq: cursor.beforeSeq } : {}),
       maxMessages: EARLIER_PAGE,
@@ -3782,7 +3820,7 @@ export function install(rt) {
       let before = events[0]?.seq
       while (Number.isInteger(before) && seedTurn === undefined) {
         const back = await ctx.sessionController.page({
-          address: { kind: 'session', sessionId: part.sessionId },
+          address,
           beforeSeq: before,
           maxMessages: EARLIER_PAGE,
         }, signal)
@@ -3796,7 +3834,8 @@ export function install(rt) {
         before = back.records[0]?.event?.seq
       }
     }
-    const items = displayItems(part.sessionId, events, agent?.session, seedTurn, true)
+    const handoffRefusals = await refusedComputerHandoffs(address, events, signal)
+    const items = displayItems(part.sessionId, events, agent?.session, seedTurn, true, handoffRefusals)
     const more = page.hasMore && events.length > 0
     // The line above a part's first message marks where it began, and names the agent an
     // agent switch moved the chat to (the segment of the part before it carries `switchedTo`).
