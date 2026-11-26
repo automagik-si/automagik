@@ -12,6 +12,7 @@ import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { fileURLToPath } from 'node:url'
 import { apply as applyAcp } from '../../acp-dsh/index.js'
 import { Session } from '@deepseek-ai/dsh-session'
+import * as timeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as native from '@deepseek-ai/dsh-tool-executor-native'
 import { ToolsService, defineTool } from '@deepseek-ai/dsh-tools'
 import { AgentRun } from '../../acp-dsh/src/host/acp.js'
@@ -38,9 +39,8 @@ const reviewerModel = { provider: 'fake', model: 'reviewer-model' }
 const refOf = ({ provider, model }) => `${provider}/${model}`
 const content = text => [{ type: 'text', text }]
 
-function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { liveTurn, configure } = {}) {
+function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { liveTurn, configure, agents = new Map() } = {}) {
   const ctx = fakeContext()
-  const agents = new Map()
   let identity
   ctx.acpAgents = {
     botIdentity: read => { identity = read },
@@ -91,9 +91,9 @@ function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { live
   t.after(close)
   const rt = ctx.provided.get('omniTeam')
   let seq = 0
-  const event = (id, type, data) => {
+  const event = (id, type, data, ordinal = ++seq) => {
     for (const listener of ctx.listeners.get('session/event') ?? []) {
-      listener(sessionOf(id), { type, data, seq: ++seq, time: 100 })
+      listener(sessionOf(id), { type, data, seq: ordinal, time: 100 })
     }
   }
   const person = (text, id = 'solver') => event(id, 'user/message', { content: content(text), source: { kind: 'user' } })
@@ -119,7 +119,7 @@ function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { live
     method: 'POST', body: JSON.stringify({ endpoint, payload }),
   }))).json()
   const progress = (action, args = {}, id = 'solver') => tool('solver_progress', { action, ...args }, id)
-  return { ctx, rt, home, agentOf, event, person, takeInput, execute, tool, call, progress, botMessage, finish, close,
+  return { ctx, rt, home, agents, agentOf, event, person, takeInput, execute, tool, call, progress, botMessage, finish, close,
     identity: id => identity?.(id),
   }
 }
@@ -208,7 +208,7 @@ async function watchSolver(t, home) {
   return events
 }
 
-async function bridgeFixture(t, { pocket = false, extra = {} } = {}) {
+async function bridgeFixture(t, { pocket = false, extra = {}, withPolicies = false, withTimeout = false } = {}) {
   const root = new Context()
   t.after(() => root.fiber.dispose())
   root.provide('systemPrompt', { tools() {}, section() {}, context() {}, getContextOrder() { return 0 } })
@@ -218,14 +218,26 @@ async function bridgeFixture(t, { pocket = false, extra = {} } = {}) {
   await root.plugin(ToolsService)
   await root.plugin(native)
   await root.plugin(ApprovalService, { policy: 'ask' })
+  if (withTimeout) await root.plugin(timeoutPolicy)
   let scopeHost
   await root.plugin({ name: 'solver-bridge-actors', inject: ['tools'], apply(ctx) { scopeHost = ctx } })
   const agents = new Map()
-  const h = await setup(t, { reviewGuard: true, ...extra }, 2, (ctx, agentOf) => {
+  const policies = new Map()
+  const configure = (ctx, agentOf) => {
     agents.set('solver', agentOf('solver'))
     ctx.provided.set('agents', { get: id => agents.get(id), list: () => [...agents.values()] })
-    ctx.provided.set('tools', root.tools)
+    const get = ctx.get
+    ctx.get = name => name === 'tools' ? root.get('tools') : get(name)
     ctx.provided.set('approval', root.approval)
+    if (withPolicies) {
+      const on = ctx.on
+      const registrations = []
+      policies.set(ctx, registrations)
+      ctx.on = (name, listener, options) => {
+        if (name === 'tools/pre-execute') registrations.push([listener, options])
+        return on(name, listener, options)
+      }
+    }
     if (pocket) Object.assign(ctx.sessionController, {
       async *follow(_request, signal) {
         yield { type: 'snapshot', header: { id: 'solver', version: 4 }, cursor: 0, records: [],
@@ -240,11 +252,18 @@ async function bridgeFixture(t, { pocket = false, extra = {} } = {}) {
       async state() { return { cursor: 0, pendingInput: [], running: true } },
       prompt() {}, cancel() {},
     })
-  })
+  }
+  const h = await setup(t, { reviewGuard: true, ...extra }, 2, configure)
+  let current = h
   const desktop = []
   const team = []
   const audit = []
   const bodies = []
+  const dispatchSignals = []
+  if (withTimeout) root.on('tools/execute', (exec, next) => {
+    dispatchSignals.push(exec.signal)
+    return next()
+  })
   let n = 0
   const agentFor = (id, header = {}) => {
     const agent = h.agentOf(id)
@@ -252,12 +271,13 @@ async function bridgeFixture(t, { pocket = false, extra = {} } = {}) {
       const scope = createScope(scopeHost, agent)
       agent.ctx = scope.ctx
       agent.session.header = header
-      const events = []
-      agent.session.snapshotEvents = () => events.slice()
+      const events = [{ type: 'turn/start', data: { turn: 2 }, seq: 0 },
+        { type: 'step/start', data: { turn: 2, step: 1 }, seq: 1 }]
+      agent.session.snapshotEvents = (from, to) => events.slice(from, to)
       agent.session.append = (type, data) => {
         const event = { type, data, seq: events.length }
         events.push(event)
-        h.event(id, type, data)
+        current.event(id, type, data, event.seq)
         if (type.startsWith('approval/')) audit.push({ id, type, ...data })
         return event
       }
@@ -267,24 +287,38 @@ async function bridgeFixture(t, { pocket = false, extra = {} } = {}) {
     return agent
   }
   const solver = agentFor('solver')
-  const off = h.rt.onApproval((kind, row) => {
-    if (kind !== 'open') return
-    team.push(row)
-    // Group and child asks have no DSH card. The ordinary team answers still settle them.
-    if (row.child || row.roomId) queueMicrotask(() => h.rt.answerApproval(row.id, 'allow'))
-  })
-  t.after(off)
   root.on('approval/request', (request) => {
     desktop.push({ id: request.agent.session.id, name: request.toolName, callId: request.callId })
     if (!request.toolName.endsWith(progressName) || request.reason === 'fixture person') return 'allowed-once'
     return new Promise(resolve => request.signal.addEventListener('abort', () => resolve('cancelled'), { once: true }))
   })
-  for (const hook of h.ctx.listeners.get('approval/request')) root.on('approval/request', hook, { prepend: true })
-  for (const hook of h.ctx.listeners.get('tools/execute')) root.on('tools/execute', hook)
-  root.on('tools/execute', (exec, next) => {
-    bodies.push([exec.name, exec.callId])
-    return next()
-  })
+  let unmount
+  const mountHooks = ({ ctx, rt }) => {
+    const listeners = [rt.onApproval((kind, row) => {
+      if (kind !== 'open') return
+      team.push(row)
+      // Group and child asks have no DSH card. The ordinary team answers still settle them.
+      if (row.child || row.roomId) queueMicrotask(() => rt.answerApproval(row.id, 'allow'))
+    })]
+    for (const hook of ctx.listeners.get('approval/request')) listeners.push(root.on('approval/request', hook, { prepend: true }))
+    for (const [hook, options] of policies.get(ctx) ?? []) listeners.push(root.on('tools/pre-execute', hook, options))
+    for (const hook of ctx.listeners.get('tools/execute')) listeners.push(root.on('tools/execute', hook))
+    listeners.push(root.on('tools/execute', (exec, next) => {
+      bodies.push([exec.name, exec.callId])
+      return next()
+    }))
+    unmount = () => listeners.forEach(stop => stop())
+  }
+  mountHooks(current)
+  t.after(() => unmount())
+  const reinstall = async () => {
+    unmount()
+    await current.close()
+    current = fixture(t, h.home, { configure, agents: h.agents })
+    await current.rt.load()
+    mountHooks(current)
+    return current.rt
+  }
   const cwd = h.rt.botOf('solver').workDir
   const commandTool = defineTool({
     name: 'bash', description: 'Fixture foreground check',
@@ -294,28 +328,39 @@ async function bridgeFixture(t, { pocket = false, extra = {} } = {}) {
   })
   solver.ctx.tools.register(commandTool)
 
-  const start = (name, args, options = {}) => {
+  const openCall = (name, args, options = {}) => {
     const agent = options.agent ?? solver
     const callId = options.callId ?? `bridge-${++n}`
     const abort = new AbortController()
     const raw = JSON.stringify(args)
     const record = options.record ?? name
-    if (record) agent.session.append('tool/call', { callId, name: record, arguments: raw })
+    const position = { turn: 2, step: options.step ?? 1 }
+    if (record) agent.session.append('tool/call', { ...position, callId, name: record, arguments: raw })
     options.beforeAsk?.(agent)
+    const dispatch = async () => {
+      const batch = await root.tools.execute({ calls: [{ id: callId, name, arguments: raw }], agent, signal: abort.signal })
+      return batch.results[0].result
+    }
+    const execute = async () => {
+      const result = await dispatch()
+      agent.session.append('tool/result', { ...position, message: { toolCallId: callId, content: result.content } })
+      return { result, text: result.content[0]?.text }
+    }
+    return { agent, callId, abort, dispatch, execute }
+  }
+  const start = (name, args, options = {}) => {
+    const call = openCall(name, args, options)
     const request = {
-      agent, toolName: name, callId, reason: options.reason ?? `Claude Code (fixture): ${name}`,
-      bridgeCall: { agentAsked: false }, signal: abort.signal,
+      agent: call.agent, toolName: name, callId: call.callId, reason: options.reason ?? `Claude Code (fixture): ${name}`,
+      bridgeCall: { agentAsked: options.agentAsked ?? false }, signal: call.abort.signal,
     }
     const approval = root.approval.request(request)
     const run = async () => {
       const outcome = await approval
       if (outcome !== 'allowed-once') return { outcome, refused: request.bridgeCall.refused?.reason }
-      const batch = await root.tools.execute({ calls: [{ id: callId, name, arguments: raw }], agent, signal: abort.signal })
-      const result = batch.results[0].result
-      agent.session.append('tool/result', { callId, message: { toolCallId: callId, content: result.content } })
-      return { outcome, result, text: result.content[0]?.text }
+      return { outcome, ...await call.execute() }
     }
-    return { approval, abort, callId, run }
+    return { ...call, approval, run }
   }
   const attempt = async (name, args, options) => {
     const pending = start(name, args, options)
@@ -339,7 +384,8 @@ async function bridgeFixture(t, { pocket = false, extra = {} } = {}) {
     const layer = root.tools.layers.peek(solver).tools
     t.after(layer.insert(mcpNameOf(name), layer.get(name)))
   }
-  return { ...h, root, agentFor, solver, start, attempt, desktop, team, audit, bodies, cardCounts, alias }
+  return { ...h, root, agentFor, solver, openCall, start, attempt, desktop, team, audit, bodies,
+    dispatchSignals, cardCounts, alias, reinstall }
 }
 
 for (const prefixed of [false, true]) test(`T1 Claude Code bridge Solver reaches Done with no ${prefixed ? 'prefixed' : 'bare'} progress card`, async t => {
@@ -531,6 +577,152 @@ test('AC-6 a replacement after the host answer still needs ordinary approval', a
     await run
   }
 })
+
+test('Round 2 AC-7 a CLI referral leaves the progress decision to the person', async t => {
+  const h = await bridgeFixture(t, { pocket: true })
+  const routine = await h.attempt(progressName, { action: 'status' })
+  assert.equal(routine.outcome, 'allowed-once')
+  assert.equal(routine.result.isError, false)
+  assert.deepEqual(h.cardCounts(), { desktop: {}, team: {}, pocket: {} })
+  const referred = h.start(progressName, { action: 'status' }, { agentAsked: true })
+  t.after(() => referred.abort.abort())
+  await immediate()
+  const row = h.rt.approvalsView().find(row => row.callId === referred.callId)
+  assert.ok(row, 'the CLI referral opened a person card')
+  await until(() => h.cardCounts().pocket[progressName] === 1)
+  assert.equal(h.cardCounts().desktop[progressName], 1)
+  h.rt.answerApproval(row.id, 'reject')
+  assert.equal((await referred.run()).outcome, 'rejected')
+  assert.deepEqual(h.bodies, [[progressName, h.audit[0].callId]])
+})
+
+test('Round 2 AC-7 an executor policy referral lets the person decline progress', async t => {
+  const h = await bridgeFixture(t)
+  const referred = h.openCall(progressName, { action: 'status' })
+  t.after(() => referred.abort.abort())
+  h.root.on('tools/pre-execute', (exec, next) => exec.callId === referred.callId
+    ? { kind: 'ask', reason: 'Auto review denied tool "solver_progress": fixture referral' }
+    : next())
+  const run = referred.execute()
+  await immediate()
+  const row = h.rt.approvalsView().find(row => row.callId === referred.callId)
+  assert.ok(row, 'the native executor request opened a person card')
+  h.rt.answerApproval(row.id, 'reject')
+  assert.equal((await run).result.error.info.code, 'APPROVAL_REJECTED')
+  assert.deepEqual(h.bodies, [])
+})
+
+test('Round 2 AC-7 the routine bridge answer does not satisfy the independent hard-step check', async t => {
+  const h = await bridgeFixture(t, { withPolicies: true })
+  const call = h.start(progressName, { action: 'status' })
+  t.after(() => call.abort.abort())
+  assert.equal(await call.approval, 'allowed-once')
+  assert.deepEqual(h.team, [])
+  // Exercise the ladder's real extension seam after the routine approval.
+  t.after(h.rt.stepHooks.sendsOutside(step => step.tool === progressName))
+  const run = call.run()
+  await immediate()
+  const row = h.rt.approvalsView().find(row => row.callId === call.callId)
+  assert.match(row?.reason ?? '', /hard to undo/)
+  h.rt.answerApproval(row.id, 'reject')
+  assert.equal((await run).result.error.info.code, 'APPROVAL_REJECTED')
+  assert.deepEqual(h.bodies, [])
+})
+
+for (const closesBy of ['result', 'step']) {
+  test(`Round 2 AC-6 a ${closesBy} retires the evidence for its progress call`, async t => {
+    const h = await bridgeFixture(t)
+    const closed = h.start(progressName, { action: 'status' }, {
+      callId: 'closed',
+      beforeAsk(agent) {
+        const position = { turn: 2, step: 1 }
+        if (closesBy === 'result') {
+          agent.session.append('tool/result', { ...position, message: { toolCallId: 'closed', content: content('complete') } })
+        } else {
+          agent.session.append('step/end', position)
+          agent.session.append('step/start', { turn: 2, step: 2 })
+        }
+      },
+    })
+    t.after(() => closed.abort.abort())
+    await immediate()
+    const row = h.rt.approvalsView().find(row => row.callId === closed.callId)
+    assert.ok(row, 'the closed call cannot prove entitlement to a host answer')
+    h.rt.answerApproval(row.id, 'reject')
+    assert.equal((await closed.run()).outcome, 'rejected')
+    const live = await h.attempt(progressName, { action: 'status' }, { step: closesBy === 'result' ? 1 : 2 })
+    assert.equal(live.outcome, 'allowed-once')
+    assert.match(live.text, /^Request: /)
+    assert.equal(h.desktop.length, 1)
+    assert.equal(h.bodies.length, 1)
+  })
+
+  test(`Round 2 AC-6 a ${closesBy} blocks delayed dispatch without affecting the next live call`, async t => {
+    const h = await bridgeFixture(t)
+    const args = { action: 'status' }
+    const closed = h.start(progressName, args)
+    t.after(() => closed.abort.abort())
+    assert.equal(await closed.approval, 'allowed-once')
+    const position = { turn: 2, step: 1 }
+    if (closesBy === 'result') {
+      h.solver.session.append('tool/result', { ...position, message: {
+        toolCallId: closed.callId, content: content('closed'), isError: true,
+      } })
+    } else {
+      h.solver.session.append('step/end', position)
+      h.solver.session.append('step/start', { turn: 2, step: 2 })
+    }
+    const live = h.start(progressName, args, { step: closesBy === 'result' ? 1 : 2 })
+    t.after(() => live.abort.abort())
+    assert.equal(await live.approval, 'allowed-once')
+    assert.equal((await closed.dispatch()).isError, true)
+    assert.deepEqual(h.bodies, [])
+    assert.match((await live.run()).text, /^Request: /)
+    assert.deepEqual(h.bodies, [[progressName, live.callId]])
+    assert.deepEqual(h.desktop, [])
+  })
+}
+
+for (const { change, pick } of [
+  { change: 'timeout', pick: 'reject' },
+  { change: 'reinstall', pick: 'reject' },
+  { change: 'reinstall with replacement', pick: 'reject' },
+  { change: 'registration', pick: 'allow' },
+  { change: 'registration', pick: 'reject' },
+]) {
+  test(`Round 2 AC-6 ${change} requires a fresh decision and ${pick} controls the replacement body`, async t => {
+    const h = await bridgeFixture(t, { withTimeout: change === 'timeout' })
+    const call = h.start(progressName, { action: 'status' })
+    t.after(() => call.abort.abort())
+    assert.equal(await call.approval, 'allowed-once')
+    const rt = change.startsWith('reinstall') ? await h.reinstall() : h.rt
+    const entries = h.root.tools.layers.peek(h.solver).tools.data
+    const actual = entries.get(progressName)
+    let executions = 0
+    if (change !== 'reinstall') {
+      entries.set(progressName, { ...actual, definition: {
+        ...actual.definition, ...(change === 'timeout' ? { timeoutMs: 8000 } : {}),
+        execute() { executions += 1; return 'replacement ran' },
+      } })
+      t.after(() => entries.set(progressName, actual))
+    }
+    const run = call.run()
+    await immediate()
+    const row = rt.approvalsView().find(row => row.callId === call.callId)
+    if (change === 'timeout') {
+      assert.equal(h.dispatchSignals.length, 1)
+      assert.notEqual(h.dispatchSignals[0], call.abort.signal, 'the pinned timeout policy derived a signal')
+    }
+    assert.ok(row, 'the old host answer cannot release the replacement')
+    assert.equal(executions, 0)
+    rt.answerApproval(row.id, pick)
+    const result = await run
+    assert.equal(executions, pick === 'allow' ? 1 : 0)
+    assert.equal(h.bodies.length, pick === 'allow' ? 1 : 0)
+    assert.equal(result.result.isError, pick === 'reject')
+    assert.equal(h.audit.filter(event => event.type === 'approval/asked' && event.callId === call.callId).length, 2)
+  })
+}
 
 test('H3 the registered Auto action still requires the exact words from the person', async t => {
   const h = await bridgeFixture(t)

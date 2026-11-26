@@ -1,7 +1,7 @@
 // A refusal never becomes a grant: the person only decides whether work continues.
 import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { hardToUndo, hardContext, refusalCounter } from './auto-judge.js'
-import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
+import { TEAM_LOOKUPS, hasRoutineSolverApproval, teamToolOf } from './approvals.js'
 import { REMOTE_TOOL } from './remote-chat-adapter.js'
 
 // Office operations create host-owned output files outside the shell sandbox. Read only
@@ -87,9 +87,11 @@ export function install(rt) {
       // Lookups read their arguments as text; they never execute the steps it describes. A mirror
       // card runs nothing here: the step ran, or runs, on the other side under its own rules
       // (the ACP agent's, Remote Hermes's), and what Hermes asks reaches the person as its own question.
+      const allowed = outcomes.get(keyOf(id, exec.callId))?.outcome === 'allowed-once'
+        && !hasRoutineSolverApproval(session, exec.callId)
       if (!exec.agent || outerRun(exec) || tool === 'acp_tool' || exec.name === REMOTE_TOOL || TEAM_LOOKUPS.has(tool)
         || !hardToUndo(pending, hardContext(rt, id, pending, session)) || !rt.botOfSession(id, exec.agent)
-        || fullHere(session) || outcomes.get(keyOf(id, exec.callId))?.outcome === 'allowed-once') return decision
+        || fullHere(session) || allowed) return decision
       const step = stepText(exec)
       const never = policyOf(session) === 'never'
       if (never || !answerable(id)) {
