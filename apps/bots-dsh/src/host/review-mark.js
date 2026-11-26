@@ -398,8 +398,10 @@ export function install(rt) {
     if (progressWrites.has(bot) || runningWork.has(bot)) throw refusal('Finish the current Solver work before requesting a review.')
     const progress = structuredClone(track.solver)
     const prior = kind === 'plan' ? progress.plan?.review : progress.review
-    if (prior && prior.verdict === undefined && !(kind === 'result' && prior.images?.v !== 1) && (reviewSends.has(prior.exchangeId) || rt.deliveryNote?.(prior.exchangeId)
-      || rt.exchangeOf?.(prior.exchangeId, bot.id, reviewer.id))) {
+    if (prior && prior.verdict === undefined
+      && !(kind === 'result' && (legacyResultReview(prior) || prior.images?.v !== 1))
+      && (reviewSends.has(prior.exchangeId) || rt.deliveryNote?.(prior.exchangeId)
+        || rt.exchangeOf?.(prior.exchangeId, bot.id, reviewer.id))) {
       throw refusal('A designated review is already waiting for its answer.')
     }
     const issue = designateReview(progress, { kind, exchangeId, reviewerId: reviewer.id,

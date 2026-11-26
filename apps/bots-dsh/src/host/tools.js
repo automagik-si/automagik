@@ -58,6 +58,26 @@ const messageOutput = {
     : { sent: value.sent === true, reason: value.reason }),
 }
 const refusedMessage = reason => ({ text: reason, sent: false, reason })
+
+async function reviewPictureReceipt(rt, agent, sessionId) {
+  const unknown = 'Pictures count only if the reviewer\'s answering turn receives them. Otherwise the RESULT stays unverified.'
+  let route
+  try {
+    route = typeof agent.model?.current === 'function' ? agent.model.current() : agent.session?.requestHeader?.()?.config
+  } catch { return unknown }
+  const { provider, model } = route ?? {}
+  if (typeof provider !== 'string' || provider === '') return unknown
+  const unseen = 'The reviewer cannot see pictures on this route. A RESULT SHIP will stay unverified if its answering turn cannot see the pictures.'
+  if (!provider.startsWith('acp-')) {
+    return await rt.readsImagesStrict?.(provider, model) ? '' : unseen
+  }
+  let capability
+  try { capability = rt.ctx.get?.('acpAgents')?.promptImageCapability?.(sessionId, provider) } catch {}
+  if (capability === true) return 'The reviewer\'s ACP agent accepts pictures on this route. A RESULT SHIP stays unverified if its answering turn does not receive them.'
+  if (capability === false) return unseen
+  return unknown
+}
+
 export const GROUP_REF = { type: 'string', required: true, description: 'Exact group chat name from list_bots' }
 const BLOCKING_QUESTION_TOOL = 'ask_user_question'
 // A Bot's own chat runs DSH's goal: the loop the team asked for is this one, and
@@ -467,11 +487,9 @@ export function install(rt) {
                 ? `Queued for ${target.name}: it reads your message after its current work. Its reply will arrive later as a new message; do not wait for it.`
                 : `Delivered to ${target.name}. Its reply will arrive later as a new message; do not wait for it.`
         const asker = work !== undefined && rt.ownsWork(sender.id, work) ? rt.botOf(state.works[work].from)?.name : undefined
-        const route = agent.session?.requestHeader?.()?.config
-        const unseen = long.reviewComplete && !(await rt.readsImagesStrict?.(route?.provider, route?.model))
         const notes = [
           long.reviewNotice,
-          unseen ? 'The reviewer cannot see pictures on this route. A RESULT SHIP will stay unverified if its answering turn cannot see the pictures.' : '',
+          long.reviewComplete ? await reviewPictureReceipt(rt, agent, chat) : '',
           joins ? `${target.name} had not read your earlier message yet, so this one was added to it, ${mergedNoReply ? 'and it reads them together.' : 'and it answers both at once.'}` : '',
           status === 'idle' ? '' : `${target.name} now: ${status}.`,
           asker ? `When you have handed on everything, end your turn: each reply brings you back to this work, and your answer goes to ${asker} once all of it is back.` : '',

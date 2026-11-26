@@ -15,7 +15,7 @@ import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { fileURLToPath } from 'node:url'
 import { apply as applyAcp } from '../../acp-dsh/index.js'
 import { Session } from '@deepseek-ai/dsh-session'
-import { AssistantStreamAccumulator, createAssistantMessage, LlmAdapter, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { AssistantStreamAccumulator, createAssistantMessage, LlmAdapter, markAgentLoopRequest, textOnlyImageText } from '@deepseek-ai/dsh-llm'
 import * as timeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as native from '@deepseek-ai/dsh-tool-executor-native'
 import { ToolsService, defineTool } from '@deepseek-ai/dsh-tools'
@@ -4249,9 +4249,11 @@ async function checkedVisualReview(t, { path = reviewPath, bytes = reviewPng, pr
   return { ...f, folder, stored, attachStore, send }
 }
 
-function answeringReviewer(t, h, { native = false, capable = true, shared = false, expectedPicture = reviewPng, loopSession } = {}) {
-  const provider = native ? 'fake' : 'acp-review-fixture'
-  const route = { provider, model: native ? 'reviewer-model' : 'default' }
+function answeringReviewer(t, h, { native = false, capable = true, shared = false, expectedPicture = reviewPng, loopSession, wireImage } = {}) {
+  const wire = wireImage !== undefined
+  const route = wire ? { provider: 'acp-codex', model: 'gpt-6.2-astra' }
+    : native ? reviewerModel : { provider: 'acp-review-fixture', model: 'default' }
+  const { provider } = route
   const agent = h.agentOf('reviewer')
   agent.ctx.tools.register = () => () => {}
   const session = loopSession ?? Session.create(agent.id)
@@ -4270,9 +4272,29 @@ function answeringReviewer(t, h, { native = false, capable = true, shared = fals
     const ref = row?.content.find(block => block.type === 'image')?.attachment
     return ref === undefined ? undefined : Buffer.from((await h.ctx.get('attachments').readImage(ref)).data)
   }
-  const adapter = native ? undefined : new AcpAdapter(h.ctx, new Map([[provider, {
+  const fakeProvider = {
     name: 'Fake reviewer', spawn: () => assert.fail('no native process'),
-  }]]))
+  }
+  let adapter, readWire
+  if (wire) {
+    const trace = join(h.home, 'reviewer-wire.jsonl')
+    const connector = join(h.home, 'reviewer-connector.mjs')
+    const args = [trace, provider, wireImage ? 'result-image' : 'result-text']
+    writeFileSync(trace, '')
+    writeFileSync(connector, `process.argv.splice(2, Infinity, ...${JSON.stringify(args)}); await import(${JSON.stringify(wireFixture)});\n`)
+    applyAcp(h.ctx, { dshTools: false }, {
+      store: { binOf: pkg => pkg === '@agentclientprotocol/codex-acp' ? { path: connector, version: '1.0.0' } : undefined, update: async () => {} },
+      find: name => name === 'codex' ? '/bin/false' : undefined,
+      signedIn: async () => true,
+    })
+    adapter = h.ctx.adapters.at(-1).adapter
+    h.ctx.acpAgents = h.ctx.provided.get('acpAgents')
+    h.ctx.llm.resolveModelInfo = (id, model) => id === provider ? adapter.resolveModel(id, model) : { inputModalities: ['text', 'image'] }
+    readWire = () => readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+  } else if (!native) {
+    adapter = new AcpAdapter(h.ctx, new Map([[provider, fakeProvider]]))
+    h.ctx.acpAgents.promptImageCapability = (...args) => adapter.promptImageCapability?.(...args)
+  }
   let nextRun = 0
   const replaceRun = () => {
     if (nextRun > 0) adapter.end(session.id, adapter.live.get(session.id))
@@ -4289,10 +4311,10 @@ function answeringReviewer(t, h, { native = false, capable = true, shared = fals
       return { stopReason: 'end_turn' }
     } }
     run.dispose = () => run.letGo(true)
-    adapter.live.set(session.id, { run, provider, name: 'Fake reviewer', dshAgent: agent,
+    adapter.live.set(session.id, { run, provider, providerRow: fakeProvider, name: 'Fake reviewer', dshAgent: agent, session, initialized: true,
       asks: false, calls: new Set(), open: false })
   }
-  if (adapter) {
+  if (adapter && !wire) {
     replaceRun()
     t.after(() => adapter.dispose())
   }
@@ -4354,7 +4376,82 @@ function answeringReviewer(t, h, { native = false, capable = true, shared = fals
     h.finish(solver, 'Delivered the checked result.')
     return reply
   }
-  return { enter, generate, answer, replaceRun, projected, prompts, session, route, dispatch }
+  return { enter, generate, answer, replaceRun, projected, prompts, session, route, dispatch, adapter, readWire }
+}
+
+for (const kind of ['Codex image', 'Codex text', 'pending ACP', 'native']) {
+  test(`2133 ACP receipt ${kind}`, async t => {
+    const { h, send, track } = await checkedVisualReview(t)
+    const native = kind === 'native'
+    const pending = kind === 'pending ACP'
+    const capable = kind !== 'Codex text'
+    const reviewer = answeringReviewer(t, h, native ? { native } : { wireImage: capable })
+    const agent = h.agentOf('reviewer')
+    if (native) delete agent.model.current
+    else agent.model.current = () => reviewer.route
+    if (pending) reviewer.session.requestHeader = () => ({ config: reviewerModel })
+
+    if (!native && !pending) {
+      const { adapter, route, session } = reviewer
+      const warm = await Array.fromAsync(adapter.stream({ ...route, sessionId: session.id,
+        messages: [{ role: 'user', content: content('Warm this reviewer session.') }] }))
+      assert.equal(warm.at(-1).reason.kind, 'stop', JSON.stringify(warm.at(-1)))
+      assert.equal(adapter.live.get(session.id).run.init.agentCapabilities.promptCapabilities.image, capable)
+      assert.equal((await h.ctx.llm.resolveModelInfo(route.provider, route.model)).inputModalities, undefined)
+    }
+
+    const { receipt, row } = await send(h, [reviewPath])
+    if (pending) {
+      assert.deepEqual(reviewer.readWire(), [], 'a receipt must not start the selected ACP agent')
+      assert.match(receipt, /Pictures count only if the reviewer's answering turn receives them\. Otherwise the RESULT stays unverified\./)
+      assert.doesNotMatch(receipt, /cannot see pictures|accepts pictures/)
+      return
+    }
+    h.finish('solver', 'Waiting for RESULT review.')
+    reviewer.enter(row, 5)
+    const answer = await reviewer.generate()
+    const reply = await reviewer.answer(answer)
+    const prompt = native ? reviewer.prompts[0].prompt : reviewer.readWire().findLast(entry => entry.method === 'session/prompt').prompt
+    const image = prompt.find(block => block.type === 'image')
+    if (capable) {
+      assert.deepEqual(Buffer.from(image.data, 'base64'), reviewPng)
+      assert.equal(track().solver.review.visualOk, true)
+      assert.equal(track().last?.done, true)
+      if (native) {
+        assert.doesNotMatch(receipt, /cannot see pictures|accepts pictures|Pictures count only/)
+      } else {
+        t.diagnostic(`native ACP image sha256=${reviewDigest(reviewPng)} visualOk=true done=true`)
+        assert.match(receipt, /The reviewer's ACP agent accepts pictures on this route\. A RESULT SHIP stays unverified if its answering turn does not receive them\./)
+        assert.doesNotMatch(receipt, /cannot see pictures/)
+      }
+    } else {
+      const ref = row.content.find(block => block.type === 'image').attachment
+      assert.equal(image, undefined)
+      const digest = ref.attachmentId.slice('sha256:'.length)
+      const name = JSON.stringify(ref.name ?? 'image.png')
+      const handle = prompt.find(block => block.type === 'text' && (block.text === textOnlyImageText(ref)
+        || (block.text.startsWith(`[Image ${name} `) && block.text.includes('read-only copy saved at') && block.text.includes(digest))))
+      assert.ok(handle, 'the ACP prompt provides a text handle for the intended picture')
+      assert.equal(track().solver.review.unverified, 'images')
+      assert.equal(track().last?.done, undefined)
+      assert.match(reply.content.at(-1).text, /RESULT review is unverified/)
+      assert.match(receipt, /The reviewer cannot see pictures on this route\. A RESULT SHIP will stay unverified if its answering turn cannot see the pictures\./)
+    }
+  })
+}
+
+for (const [reason, current] of Object.entries({
+  'has no provider': () => ({ model: 'unknown' }),
+  throws: () => { throw new Error('model unavailable') },
+})) {
+  test(`2133 ACP receipt is neutral when the current route ${reason}`, async t => {
+    const { h, send } = await checkedVisualReview(t)
+    const agent = h.agentOf('reviewer')
+    agent.model.current = current
+    const { receipt, row } = await send(h, [reviewPath])
+    assert.equal(row.content.some(block => block.type === 'image'), true)
+    assert.match(receipt, /Pictures count only if the reviewer's answering turn receives them\. Otherwise the RESULT stays unverified\./)
+  })
 }
 
 for (const committed of [false, true]) {
@@ -4484,6 +4581,7 @@ for (const [id, options] of Object.entries({
     const f = await checkedVisualReview(t, { path: options.text ? null : options.path })
     const { h, track } = f
     const reviewer = answeringReviewer(t, h, { ...options, stored: f.stored })
+    if (id.startsWith('E1')) h.agentOf('reviewer').model.current = () => reviewer.route
     const priorVerdicts = structuredClone(track().verdicts)
     const selector = options.text || options.omit ? undefined : [options.path ?? reviewPath]
     const { receipt, row } = await f.send(h, selector)

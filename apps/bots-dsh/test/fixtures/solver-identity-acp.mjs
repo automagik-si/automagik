@@ -4,9 +4,10 @@ import { createInterface } from 'node:readline'
 
 const [trace, provider, acknowledgement = 'selected'] = process.argv.slice(2)
 const codex = provider === 'acp-codex'
-const concrete = codex ? 'gpt-6-sol' : 'sonnet'
+const resultReview = acknowledgement === 'result-image' || acknowledgement === 'result-text'
+const concrete = resultReview ? 'gpt-6.2-astra' : codex ? 'gpt-6-sol' : 'sonnet'
 const mode = codex ? 'workspace-write' : 'default'
-const rows = [{ value: 'default', name: 'Default' }, { value: concrete, name: codex ? 'GPT-6 Sol' : 'Sonnet 5.5' }]
+const rows = [{ value: 'default', name: 'Default' }, { value: concrete, name: resultReview ? 'GPT-6.2 Astra' : codex ? 'GPT-6 Sol' : 'Sonnet 5.5' }]
 const opusAlias = ['opus-alias', 'opus-relabelled', 'opus-haiku-conflict'].includes(acknowledgement)
 const relabelled = acknowledgement === 'opus-relabelled' && existsSync(trace + '.relabelled')
 if (!codex) rows.push(
@@ -33,11 +34,18 @@ for await (const line of createInterface({ input: process.stdin })) {
   let result
   switch (method) {
     case 'initialize':
-      result = { protocolVersion: 1, agentCapabilities: {} }
+      result = { protocolVersion: 1, agentCapabilities: resultReview
+        ? { promptCapabilities: { image: acknowledgement === 'result-image' } } : {} }
+      if (resultReview) appendFileSync(trace, `${JSON.stringify({ method, sessionId })}\n`)
       break
     case 'session/new':
       if (['already-current', 'own-model'].includes(acknowledgement)) selected = concrete
       result = { sessionId, configOptions: configOptions(), modes: { currentModeId: mode, availableModes: [{ id: mode, name: mode }] } }
+      if (resultReview) {
+        selected = concrete
+        result.configOptions = configOptions()
+        result.models = { currentModelId: `${concrete}[high]`, availableModels: [{ modelId: `${concrete}[high]`, name: 'GPT-6.2 Astra' }] }
+      }
       break
     case 'session/set_config_option':
       if (params.configId === 'effort') {
@@ -58,8 +66,9 @@ for await (const line of createInterface({ input: process.stdin })) {
       }
       break
     case 'session/prompt':
-      appendFileSync(trace, `${JSON.stringify({ method, sessionId, selected })}\n`)
-      send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Verdict: SHIP\nEvidence verified.' } } } })
+      appendFileSync(trace, `${JSON.stringify({ method, sessionId, selected, ...(resultReview && { prompt: params.prompt }) })}\n`)
+      send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text',
+        text: resultReview ? 'RESULT SHIP\nThe checked result is ready.' : 'Verdict: SHIP\nEvidence verified.' } } } })
       if (acknowledgement === 'conflict') {
         selected = 'default'
         send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'config_option_update', configOptions: configOptions() } } })

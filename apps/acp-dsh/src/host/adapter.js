@@ -1326,6 +1326,19 @@ export class AcpAdapter extends LlmAdapter {
     return live?.own === true && live.run.busy === true
   }
 
+  /** Read the prompt advertisement of this Session's initialized ACP run. */
+  promptImageCapability(sessionId, provider) {
+    const live = this.live.get(sessionId)
+    if (!live?.initialized || live.provider !== provider || !live.run.alive || live.archived || live.held !== undefined) {
+      return undefined
+    }
+    const agent = this.ctx.agents?.get?.(sessionId)
+    if (agent !== live.dshAgent || agent?.session !== live.session || live.providerRow !== this.agents.get(provider)) {
+      return undefined
+    }
+    return live.run.init?.agentCapabilities?.promptCapabilities?.image === true
+  }
+
   /**
    * Whether a gate holds this Session now: the sentence to answer the step with, or undefined.
    * Every gate is asked; any refusal wins, the first to arrive. A gate lets the Session go only
@@ -2424,6 +2437,7 @@ export class AcpAdapter extends LlmAdapter {
             // OFF process reads a catalog without the kept models, so it never says.
             if (codexRow && !codexOff && typeof run.startModel === 'string') this.startModels.set(agent, run.startModel)
             if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined)) throw new Error('Image permission changed during startup.')
+            state.initialized = true
             try { agent.proven?.() } catch {}
             break
           } catch (error) {
