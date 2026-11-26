@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream'
 import zlib from 'node:zlib'
-import { LIMITS } from './skill-library-rules.js'
+import { LIMITS, skillPath } from './skill-library-rules.js'
 import { archiveShape, RAW_MEMBERS, SKILL_MD, skippedPath, treeError, treeRegistry, treeText, validateSkillTree } from './skill-tree.js'
 
 export const ARCHIVE_INPUT_MAX = 6 * 1024 * 1024
@@ -21,6 +21,8 @@ const corrupt = () => { throw treeError('The skill archive is damaged or has inv
 const format = () => { throw treeError('Choose a supported .zip or .tar.gz skill archive.') }
 const encrypted = () => { throw treeError('Encrypted skill archives are unavailable.') }
 const invalidType = path => { throw treeError(`Only regular skill files and directories are allowed: ${path}`) }
+const unsafePath = path => { throw treeError(`Unsafe skill path: ${path}`) }
+const oversizedFile = path => { throw treeError(`A skill file exceeds its size limit: ${path}`) }
 const zero = bytes => bytes.every(byte => byte === 0)
 const signature = (bytes, offset, magic) => bytes.length >= offset + 4 && bytes.readUInt32LE(offset) === magic
 
@@ -29,9 +31,16 @@ function rawName(bytes) {
   try { return names.decode(bytes) } catch { corrupt() }
 }
 
+function rawMemberPath(path) {
+  const split = path.indexOf('/')
+  return skillPath(path) || (split >= 0 && skillPath(path.slice(0, split)) && skillPath(path.slice(split + 1)))
+}
+
 function membersOf() {
-  const registry = treeRegistry()
+  const registry = treeRegistry(rawMemberPath)
   let wrapper
+  let requiredWrapper
+  let wrapperOnlyPath
   let wrapped = true
   let rootSkill = false
   let wrappedSkill = false
@@ -41,13 +50,18 @@ function membersOf() {
   function register(raw, directory, size) {
     let path = directory && (raw === '.' || raw === './') ? '' : raw.startsWith('./') ? raw.slice(2) : raw
     if (directory && path.endsWith('/')) path = path.slice(0, -1)
-    if (!path && raw !== '.' && raw !== './') throw treeError(`Unsafe skill path: ${raw}`)
+    if (!path && raw !== '.' && raw !== './') unsafePath(raw)
     registry.register(path, directory, size)
+    const split = path.indexOf('/')
+    const top = split < 0 ? path : path.slice(0, split)
+    if (path && !skillPath(path)) {
+      if (requiredWrapper !== undefined && top !== requiredWrapper) unsafePath(path)
+      requiredWrapper = top
+      wrapperOnlyPath ??= path
+    }
     if (!directory && !skippedPath(path)) {
       directCount++
       rootSkill ||= path === SKILL_MD
-      const split = path.indexOf('/')
-      const top = split < 0 ? path : path.slice(0, split)
       wrapper ??= top
       wrapped &&= split >= 0 && top === wrapper
       if (wrapped) {
@@ -61,8 +75,17 @@ function membersOf() {
         throw treeError('A skill may contain at most 256 files.')
       }
     }
+    if (requiredWrapper !== undefined && (rootSkill || !wrapped || (wrapper !== undefined && wrapper !== requiredWrapper))) {
+      unsafePath(wrapperOnlyPath)
+    }
     return path
   }
+
+  function verifyPaths() {
+    if (wrapperOnlyPath !== undefined && !wrappedSkill) unsafePath(wrapperOnlyPath)
+  }
+
+  const possibleWrappedRoot = path => !rootSkill && wrapped && path === `${wrapper}/${SKILL_MD}`
 
   function canonical(path) {
     if (rootSkill) return skippedPath(path) ? undefined : path
@@ -82,7 +105,7 @@ function membersOf() {
     }
     return { format, entries: validateSkillTree(entries), skipped }
   }
-  return { register, canonical, finish }
+  return { register, verifyPaths, possibleWrappedRoot, canonical, finish }
 }
 
 function extendedTimestamp(data, central) {
@@ -248,13 +271,12 @@ function readZip(bytes) {
   for (const record of records) {
     record.path = registry.register(record.decoded, record.directory, record.size)
   }
+  registry.verifyPaths()
   const entries = []
   for (const record of records) {
     if (record.directory) continue
     const canonical = registry.canonical(record.path)
-    if (canonical === SKILL_MD && record.size > LIMITS.skillMd) {
-      throw treeError(`A skill file exceeds its size limit: ${record.path}`)
-    }
+    if (canonical === SKILL_MD && record.size > LIMITS.skillMd) oversizedFile(record.path)
   }
   for (const record of records) {
     if (record.directory) continue
@@ -334,12 +356,11 @@ function tarStream(gzip) {
     if (fetched > TAR_BYTES) corrupt()
     return true
   }
-  async function take(size) {
-    const data = Buffer.allocUnsafe(size)
+  async function consume(size, data) {
     for (let filled = 0; filled < size;) {
       if (at === chunk.length && !await next()) corrupt()
       const count = Math.min(size - filled, chunk.length - at)
-      chunk.copy(data, filled, at, at + count)
+      if (data) chunk.copy(data, filled, at, at + count)
       at += count
       filled += count
     }
@@ -351,21 +372,27 @@ function tarStream(gzip) {
       if (!zero(chunk.subarray(at))) corrupt()
     } while (await next())
   }
-  return { take, finish, remaining: () => TAR_BYTES - spent }
+  return { take: size => consume(size, Buffer.allocUnsafe(size)), skip: consume, finish, remaining: () => TAR_BYTES - spent }
 }
 
-async function unpackTar(gzip) {
+async function unpackTar(gzip, directRootKnown) {
   const stream = tarStream(gzip)
   const registry = membersOf()
   const entries = []
   let count = 0
   let pax
   let longName
+  let deferredRoot
   for (;;) {
     const block = await stream.take(TAR_BLOCK)
     if (zero(block)) {
       if (pax || longName !== undefined || !zero(await stream.take(TAR_BLOCK))) corrupt()
       await stream.finish()
+      registry.verifyPaths()
+      if (deferredRoot !== undefined) {
+        if (registry.canonical(deferredRoot) === SKILL_MD) oversizedFile(deferredRoot)
+        return null
+      }
       return registry.finish(entries, 'tar.gz')
     }
     const { raw, size, type } = tarHeader(block)
@@ -394,24 +421,30 @@ async function unpackTar(gzip) {
       const member = registry.register(path, type === '5', size)
       pax = longName = undefined
       if (type === '0') {
-        const bytes = await stream.take(size)
-        treeText(bytes, member)
-        entries.push({ path: member, bytes })
+        if (!directRootKnown && size > LIMITS.skillMd && registry.possibleWrappedRoot(member)) {
+          // The later headers may contain a direct root. Skip this payload
+          // without materializing it. Only a direct-root archive is replayed.
+          deferredRoot = member
+          await stream.skip(size)
+        } else {
+          const bytes = await stream.take(size)
+          treeText(bytes, member)
+          entries.push({ path: member, bytes })
+        }
       }
     }
     if (!zero(await stream.take(padded - size))) corrupt()
   }
 }
 
-async function readTar(bytes) {
-  if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) corrupt()
+async function readTarPass(bytes, directRootKnown) {
   function* chunks() {
     for (let at = 0; at < bytes.length; at += TAR_INPUT_CHUNK) yield bytes.subarray(at, at + TAR_INPUT_CHUNK)
   }
   const source = Readable.from(chunks())
   const gzip = source.pipe(zlib.createGunzip({ chunkSize: TAR_INPUT_CHUNK }))
   try {
-    return await unpackTar(gzip)
+    return await unpackTar(gzip, directRootKnown)
   } catch (error) {
     if (error.code === 'bot/invalid') throw error
     corrupt()
@@ -419,6 +452,11 @@ async function readTar(bytes) {
     source.destroy()
     gzip.destroy()
   }
+}
+
+async function readTar(bytes) {
+  if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) corrupt()
+  return (await readTarPass(bytes, false)) ?? readTarPass(bytes, true)
 }
 
 export async function readSkillArchive(bytes, { kind }) {

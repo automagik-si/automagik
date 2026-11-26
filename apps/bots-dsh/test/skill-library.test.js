@@ -3,10 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, existsSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { rootMember, zip } from './fixtures/skill-archives.js'
 import { assembledReview, CLEAN_REVIEW, stubSkillReviewer } from './fixtures/skill-review-model.js'
 import { install } from '../src/host/skill-library.js'
 import { textSkillMd } from '../src/host/skill-library-rules.js'
+import { credentialShapes } from '../src/host/redact.js'
 
 function fixture(t) {
   const home = mkdtempSync(join(tmpdir(), 'skill-library-'))
@@ -218,10 +220,15 @@ test('#2078 folder preview reviews the full tree and persists only admitted text
   mkdirSync(path)
   mkdirSync(join(path, 'scripts'))
   mkdirSync(join(path, 'references'))
-  writeFileSync(join(path, 'SKILL.md'), rootMember.data)
-  writeFileSync(join(path, 'scripts', 'run.sh'), '#!/bin/bash\nprintf "fixture\\n"\n', { mode: 0o755 })
-  writeFileSync(join(path, 'references', 'guide.md'), 'Reference marker.')
-  writeFileSync(join(path, 'references', 'big.md'), 'Harmless reference text.\n'.repeat(12_000))
+  const admitted = new Map([
+    ['SKILL.md', rootMember.data],
+    ['scripts/run.sh', '#!/bin/bash\nprintf "fixture\\n"\n'],
+    ['references/guide.md', 'Reference marker.\n#key=$DSH_SECRET_FIXTURE\n'],
+    ['references/big.md', 'Harmless reference text.\n'.repeat(12_000)],
+  ])
+  for (const [name, text] of admitted) {
+    writeFileSync(join(path, name), text, { mode: name === 'scripts/run.sh' ? 0o755 : 0o644 })
+  }
   writeFileSync(join(path, '.DS_Store'), 'Skipped fixture marker.')
   const calls = reviewer(f)
   const preview = await f.call('skill-library-save', { preview: true, source: 'folder', path })
@@ -233,6 +240,39 @@ test('#2078 folder preview reviews the full tree and persists only admitted text
   const manifest = new Set(preview.files.map(file => file.path))
   for (const name of manifest) assert.ok(calls.some(frame => frame.includes(name)), name)
   assert.ok(calls.every(frame => !frame.includes('.DS_Store') && !frame.includes('Skipped fixture marker.')))
+  const chunks = new Map()
+  for (const frame of calls) {
+    const token = frame.split('\n')[1].slice('token '.length)
+    assert.match(token, /^SKR[0-9a-f]{32}$/)
+    const header = frame.indexOf(`${token} chunk `)
+    assert.ok(header >= 0)
+    const start = frame.indexOf('\n', header) + 1
+    const fields = /^\S+ chunk file=(\d+) part=(\d+)\/(\d+) offset=(\d+) length=(\d+) .* path=(.+)\n$/
+      .exec(frame.slice(header, start))
+    assert.ok(fields)
+    const [, file, part, total, offset, length, name] = fields
+    const end = `\n${token} end file=${file} part=${part}`
+    assert.ok(frame.endsWith(end))
+    const parts = chunks.get(name) ?? []
+    parts.push({ part: Number(part), total: Number(total), offset: Number(offset), length: Number(length),
+      text: frame.slice(start, -end.length) })
+    chunks.set(name, parts)
+  }
+  assert.deepEqual(new Set(chunks.keys()), new Set(admitted.keys()))
+  assert.ok(chunks.get('references/big.md').length > 1)
+  assert.notEqual(credentialShapes(admitted.get('references/guide.md')), admitted.get('references/guide.md'))
+  for (const [name, source] of admitted) {
+    const parts = chunks.get(name)
+    let offset = 0
+    for (const [index, part] of parts.entries()) {
+      assert.equal(part.part, index + 1, name)
+      assert.equal(part.total, parts.length, name)
+      assert.equal(part.offset, offset, name)
+      assert.equal(part.length, Buffer.byteLength(part.text), name)
+      offset += part.length
+    }
+    assert.ok(parts.map(part => part.text).join('') === credentialShapes(source), `reviewed text for ${name}`)
+  }
   const beforeSave = calls.length
   assert.deepEqual(await f.call('skill-library-save', { token: preview.token, confirm: preview.needsConfirm }), { saved: true })
   assert.equal(calls.length, beforeSave)
@@ -374,4 +414,160 @@ test('#2078 tree injection is a hard block and failed review remains retryable',
   const resumed = await save(retry)
   assert.ok(resumed.token)
   assert.equal(resumed.needsConfirm, undefined)
+})
+
+test('#2078 correction replace retains identical model-finding occurrences and their confirmation', async t => {
+  const f = fixture(t)
+  const row = finding('low')
+  const calls = reviewer(f, (frame, path) => path !== row.file ? CLEAN_REVIEW
+    : frame.includes('Two occurrences') ? answer(row, row) : answer(row))
+  const save = input => f.call('skill-library-save', input)
+  const input = (data, extra) => archiveInput([rootMember, { path: row.file, data }], extra)
+  const replacement = { edit: true, name: 'notes' }
+  const first = await save(input('Two occurrences.', {}))
+  assert.equal(first.review.findings.length, 2)
+  assert.deepEqual(await save({ token: first.token, confirm: first.needsConfirm }), { saved: true })
+  assert.equal((await f.call('skill-library-get', { name: 'notes' })).held, undefined)
+
+  const second = await save(input('One occurrence.', replacement))
+  const displayed = { ...row, injection: false }
+  assert.deepEqual(second.diff.findings, { new: [], gone: [displayed] })
+  assert.deepEqual(second.findings, [displayed])
+  assert.equal((await save({ token: second.token, confirm: first.needsConfirm })).needsConfirm, second.needsConfirm)
+  const reviewed = calls.length
+  assert.deepEqual(await save({ token: second.token, confirm: second.needsConfirm }), { saved: true })
+  assert.equal(calls.length, reviewed)
+
+  const third = await save(input('Two occurrences.', replacement))
+  assert.deepEqual(third.diff.findings, { new: [displayed], gone: [] })
+  assert.deepEqual(third.findings, [displayed, displayed])
+  assert.deepEqual((await save({ token: third.token })).findings, third.findings)
+  assert.deepEqual(await save({ token: third.token, confirm: third.needsConfirm }), { saved: true })
+  assert.equal((await f.call('skill-library-get', { name: 'notes' })).held, undefined)
+})
+
+function forgetReview(f, hash) {
+  const data = JSON.parse(readFileSync(f.path))
+  assert.ok(data.reviews[hash])
+  delete data.reviews[hash]
+  writeFileSync(f.path, JSON.stringify(data))
+}
+
+test('#2078 correction H3 a locally blocked stored tree cannot deliver, Add or re-accept', async t => {
+  const f = fixture(t)
+  let row = finding('low')
+  const calls = reviewer(f, (_frame, path) => path === row.file ? answer(row) : CLEAN_REVIEW)
+  const save = input => f.call('skill-library-save', input)
+  const input = archiveInput([rootMember, { path: row.file, data: 'Harmless stored reference.' }])
+  const preview = await save(input)
+  assert.deepEqual(await save({ token: preview.token, confirm: preview.needsConfirm }), { saved: true })
+  await f.add()
+  assert.deepEqual(f.rt.skillLibrary.active('a').map(skill => skill.name), ['notes'])
+  const hash = preview.review.hash
+  const accepted = JSON.parse(readFileSync(f.path)).skills.notes
+  assert.equal(accepted.accepted, hash)
+  assert.ok(accepted.acceptedReview)
+  // Submit the stored bytes to a fresh local review while the accepted record is still assigned.
+  forgetReview(f, hash)
+  row = finding('low', 'prompt-injection')
+  const blocked = await save({ ...input, edit: true, name: 'notes' })
+  assert.equal(blocked.refused, true)
+  assert.equal(blocked.review.hash, hash)
+  assert.deepEqual(blocked.review.findings, [row])
+  assert.ok(JSON.parse(readFileSync(f.path)).reviewBlocks[hash].seal)
+  install(f.rt)
+
+  const held = await f.call('skill-library-get', { name: 'notes' })
+  assert.match(held.held, /prompt injection was found/)
+  assert.equal(held.content, undefined)
+  assert.deepEqual(f.rt.skillLibrary.active('a'), [])
+  await assert.rejects(f.add('b'), /held:.*prompt injection was found/i)
+  const before = readFileSync(f.path, 'utf8')
+  const reviewed = calls.length
+  const refused = await save({ edit: true, name: 'notes', reviewHash: hash, confirm: preview.needsConfirm })
+  assert.equal(refused.refused, true)
+  assert.match(refused.message, /prompt injection was found/)
+  assert.equal(refused.needsConfirm, undefined)
+  assert.equal(calls.length, reviewed)
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+  assert.deepEqual(JSON.parse(before).skills.notes, accepted)
+})
+
+async function recoverSave(f, input, operation) {
+  const save = body => f.call('skill-library-save', body)
+  const start = { ...input, operation }
+  assert.deepEqual(await save(start), { pending: true })
+  const poll = { operation, poll: true, recover: true }
+  for (let i = 0; i < 100; i++) {
+    const result = await save(poll)
+    if (!result.pending) {
+      assert.deepEqual(await save(poll), result)
+      assert.deepEqual(await save(start), result)
+      assert.deepEqual(await save(poll), result)
+      return result
+    }
+    await delay(10)
+  }
+  assert.fail('The Skills operation did not complete.')
+}
+
+const auditRows = f => existsSync(f.audit) ? readFileSync(f.audit, 'utf8').trimEnd().split('\n').map(JSON.parse) : []
+
+function assertRefusalAudit(f, before, privateValues) {
+  const added = auditRows(f).slice(before)
+  assert.deepEqual(added.map(({ time, ...row }) => {
+    assert.ok(Number.isFinite(time))
+    return row
+  }), [{ action: 'skill-library-save', target: 'notes', caller: 'owner', outcome: 'refused', reason: 'injection' }])
+  const raw = readFileSync(f.audit, 'utf8')
+  for (const value of privateValues) assert.ok(!raw.includes(value))
+}
+
+test('#2078 correction archive and folder preview refusals audit once per operation', async t => {
+  const f = fixture(t)
+  const row = finding('low', 'prompt-injection')
+  reviewer(f, (_frame, path) => path === row.file ? answer(row) : CLEAN_REVIEW)
+  const text = 'Private synthetic archive reference.'
+  const archive = archiveInput([rootMember, { path: row.file, data: text }])
+  const result = await recoverSave(f, archive, '1'.repeat(32))
+  assert.equal(result.refused, true)
+  assert.equal(result.token, undefined)
+  assertRefusalAudit(f, 0, [text, rootMember.data, archive.fileBytes])
+  if (process.platform === 'linux') {
+    const path = join(f.home, 'picked-folder')
+    mkdirSync(join(path, 'references'), { recursive: true })
+    writeFileSync(join(path, 'SKILL.md'), rootMember.data)
+    writeFileSync(join(path, row.file), text)
+    const folder = await recoverSave(f, { preview: true, source: 'folder', path }, '2'.repeat(32))
+    assert.equal(folder.refused, true)
+    assert.equal(folder.token, undefined)
+    assertRefusalAudit(f, 1, [text, rootMember.data, archive.fileBytes, path])
+  }
+})
+
+test('#2078 correction a token claim refused by a durable block audits once', async t => {
+  const f = fixture(t)
+  const row = finding('low', 'prompt-injection')
+  let blocked = false
+  const calls = reviewer(f, (_frame, path) => blocked && path === row.file ? answer(row) : CLEAN_REVIEW)
+  const save = input => f.call('skill-library-save', input)
+  const text = 'Private synthetic stored claim reference.'
+  const archive = archiveInput([rootMember, { path: row.file, data: text }])
+  const preview = await save(archive)
+  assert.ok(preview.token)
+  const hash = preview.review.hash
+  forgetReview(f, hash)
+  blocked = true
+  assert.equal((await save(archive)).refused, true)
+  assert.ok(JSON.parse(readFileSync(f.path)).reviewBlocks[hash].seal)
+  forgetReview(f, hash)
+  const before = auditRows(f).length
+  const reviewed = calls.length
+  const refused = await recoverSave(f, { token: preview.token }, '3'.repeat(32))
+  assert.equal(refused.refused, true)
+  assert.match(refused.message, /prompt injection was found/)
+  assert.equal(refused.review, undefined)
+  assert.deepEqual(JSON.parse(readFileSync(f.path)).skills, {})
+  assert.equal(calls.length, reviewed)
+  assertRefusalAudit(f, before, [text, rootMember.data, archive.fileBytes, f.home])
 })

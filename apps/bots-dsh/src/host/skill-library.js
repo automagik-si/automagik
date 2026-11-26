@@ -57,6 +57,15 @@ const checkFindings = check => uniqueFindings([...check.findings, ...check.injec
 const uniqueModelFindings = findings => [...new Map(findings.map(finding => [JSON.stringify(finding), finding])).values()]
 const reportFindings = (check, model) => [...checkFindings(check), ...uniqueModelFindings(model).map(modelFindingView)]
 
+function treeReportFindings(check, { review, blocked = [] }) {
+  // The review preserves occurrences. Durable block evidence adds findings
+  // that may be missing from this review, including after an interruption.
+  const model = review?.findings ?? []
+  const seen = new Set(model.map(finding => JSON.stringify(finding)))
+  return [...checkFindings(check), ...model.map(modelFindingView),
+    ...blocked.filter(finding => !seen.has(JSON.stringify(finding))).map(modelFindingView)]
+}
+
 export function mergeSkillChecks(raw, delivered) {
   return { ...raw, verdict: [raw.verdict, delivered.verdict].includes('block') ? 'block'
     : [raw.verdict, delivered.verdict].includes('warn') ? 'warn' : 'pass',
@@ -371,6 +380,12 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     } catch { rt.warn?.('Skills audit could not be written') }
   }
 
+  function auditReviewRefusal(name, identity, generation, { why, review }) {
+    authorizedGeneration(generation)
+    const reason = why === 'review-failed' && review?.why ? `review-failed:${review.why}` : why ?? 'deterministic'
+    audit('skill-library-save', { name }, identity, 'refused', reason)
+  }
+
   async function write(data, generation, before, durable = false) {
     const assertOwner = () => {
       if (rt.readOnly() !== undefined || !rt.sameTeam(generation) || rt.teamCurrent?.() === false) throw notWritable()
@@ -402,7 +417,8 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     const findings = reportFindings(check, [...(review?.findings ?? []), ...(blocked ?? [])])
     const reviewDigest = review?.status === 'done' ? hashJson(review) : null
     const findingsDigest = hashJson(findings)
-    const out = { findings, findingsDigest, review, reviewDigest, truncated: check.truncated || review?.why === 'overflow', counts: check.counts }
+    const out = { findings, findingsDigest, review, reviewDigest, blocked,
+      truncated: check.truncated || review?.why === 'overflow', counts: check.counts }
     if (check.injection.length || blocked || findings.some(finding => finding.injection)) {
       return { ...out, decision: 'refuse', why: 'injection', message: INJECTION }
     }
@@ -497,8 +513,8 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     return { bytes, entries: [{ path: SKILL_MD, bytes }], parsed, check, previous, source, frontmatter }
   }
 
-  function saveView(decision) {
-    const { findings, review, truncated, counts } = decision
+  function saveView(decision, findings = decision.findings) {
+    const { review, truncated, counts } = decision
     if (decision.decision === 'confirm') return { needsConfirm: decision.receipt, findings, review, truncated, counts }
     return { refused: true, message: decision.message, findings, review, truncated, counts }
   }
@@ -570,25 +586,27 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       const baseline = edit ? replacementBaseline(previous, verified) : undefined
       const earlier = verified && !verified.held ? storedDocument(name, previous, treeChecks) : undefined
       const decision = await reviewSkill({ name, entries, check, caller })
+      const { identity, generation } = caller
+      const findings = treeReportFindings(check, decision)
       if (earlier || edit) {
         view.diff = {
           ...(earlier ? { files: compareFiles(diffEntries(earlier.entries), diffEntries(entries)) } : { held: true }),
-          findings: findingDelta(earlier ? reportFindings(earlier.check, verified.review.findings) : [], decision.findings),
+          findings: findingDelta(earlier ? treeReportFindings(earlier.check, verified) : [], findings),
         }
       }
       if (decision.decision === 'block' || decision.decision === 'refuse') {
         if (decision.decision === 'block' && (!parsed.ok || !parsed.name || !parsed.description)) {
           decision.message = 'SKILL.md needs a name and a one-line description in its frontmatter.'
         }
-        return { ...view, ...saveView(decision) }
+        auditReviewRefusal(name, identity, generation, decision)
+        return { ...view, ...saveView(decision, findings) }
       }
       const token = randomBytes(16).toString('hex')
-      const { identity, generation } = caller
       previews.set(token, { identity, generation: JSON.stringify(generation), name, edit, baseline, source, entries,
         hash: check.hash, reviewDigest: decision.reviewDigest, expires: Date.now() + PREVIEW_TTL })
       prunePreviews(previews)
-      return { ...view, token, ...(decision.decision === 'confirm' ? saveView(decision)
-        : { findings: decision.findings, review: decision.review }) }
+      return { ...view, token, ...(decision.decision === 'confirm' ? saveView(decision, findings)
+        : { findings, review: decision.review }) }
     } finally { previewing = false }
   }
 
@@ -614,14 +632,15 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       const decision = decisionOf(check, cachedReview(data, check.hash, key), blockFor(data, check.hash, key), identity, generation)
       if (decision.decision === 'block' || decision.why === 'injection') {
         previews.delete(body.token)
-        return saveView(decision)
+        auditReviewRefusal(name, identity, generation, decision)
+        return saveView(decision, treeReportFindings(check, decision))
       }
       if (decision.reviewDigest !== preview.reviewDigest) {
         previews.delete(body.token)
         throw reject(PREVIEW_EXPIRED, 'bot/refused')
       }
       if (decision.decision !== 'accept' && (decision.decision !== 'confirm' || !equalMac(body.confirm, decision.receipt))) {
-        return saveView(decision)
+        return saveView(decision, treeReportFindings(check, decision))
       }
       const result = await writeSkill(document, name, source, previous, decision, key, data, generation, stamp)
       previews.delete(body.token)
@@ -639,10 +658,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       const reviewed = await reviewSkill({ name, entries: first.entries ?? [{ path: SKILL_MD, bytes: first.bytes }],
         check: first.check, caller: { identity, generation } })
       if (reviewed.decision === 'block' || reviewed.decision === 'refuse') {
-        authorizedGeneration(generation)
-        const reason = reviewed.why === 'review-failed' && reviewed.review?.why
-          ? `review-failed:${reviewed.review.why}` : reviewed.why ?? 'deterministic'
-        audit(action, body, identity, 'refused', reason)
+        auditReviewRefusal(name, identity, generation, reviewed)
         return saveView(reviewed)
       }
 

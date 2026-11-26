@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import zlib from 'node:zlib'
 import { readSkillArchive } from '../src/host/skill-archive.js'
+import { LIMITS } from '../src/host/skill-library-rules.js'
 import { rootMember, tar, zip } from './fixtures/skill-archives.js'
 
 const readers = [['zip', zip], ['tar.gz', tar]]
@@ -42,4 +43,53 @@ test('#2078 archive size and count are enforced before allocating the member pay
     { kind: 'tar.gz' }), /size limit: references\/big\.md/)
   assert.equal(alloc.mock.calls.some(call => call.arguments[0] >= 1_048_577), false)
   await assert.rejects(readSkillArchive(tar([rootMember, ...excessFiles]), { kind: 'tar.gz' }), /256 files/)
+})
+
+for (const [kind, make] of readers) {
+  test(`#2078 correction ${kind} applies depth and UTF-8 byte limits to the canonical path`, async () => {
+    const leaf = `${'é'.repeat(45)}.md`
+    const suffix = `/b/c/d/e/f/${leaf}`
+    const prefix = 'references/'
+    const fill = LIMITS.pathBytes - Buffer.byteLength(prefix + suffix)
+    const boundary = prefix + 'a'.repeat(fill) + suffix
+    const withPath = path => {
+      if (kind === 'zip') return { path, data: 'Boundary text.' }
+      const split = path.lastIndexOf('/')
+      return { prefix: path.slice(0, split), path: path.slice(split + 1), data: 'Boundary text.' }
+    }
+    const read = (path, folder = '') => readSkillArchive(make([
+      { ...rootMember, path: folder + rootMember.path }, withPath(folder + path),
+    ]), { kind })
+    assert.equal(boundary.split('/').length, LIMITS.depth)
+    assert.equal(Buffer.byteLength(boundary), LIMITS.pathBytes)
+    const plain = await read(boundary)
+    assert.deepEqual(plain.entries.map(({ path }) => path), ['SKILL.md', boundary])
+    assert.deepEqual(await read(boundary, 'notes/'), plain)
+    for (const folder of ['', 'notes/']) {
+      await assert.rejects(read(boundary + 'x', folder), /Unsafe skill path/)
+      await assert.rejects(read('references/a/b/c/d/e/f/g/note.md', folder), /Unsafe skill path/)
+    }
+  })
+}
+
+test('#2078 correction tar refuses an oversized canonical root before reading its member data', async t => {
+  const marker = 'Oversized root fixture.\n'
+  const data = (marker + ' '.repeat(LIMITS.skillMd)).slice(0, LIMITS.skillMd + 1)
+  const plain = tar([{ path: 'SKILL.md', data }])
+  const wrappedRoot = tar([{ path: 'notes/SKILL.md', data }])
+  const alloc = t.mock.method(Buffer, 'allocUnsafe')
+  const copy = t.mock.method(Buffer.prototype, 'copy')
+  for (const [bytes, message] of [[plain, /size limit: SKILL\.md/], [wrappedRoot, /size limit: notes\/SKILL\.md/]]) {
+    await assert.rejects(readSkillArchive(bytes, { kind: 'tar.gz' }), message)
+    assert.ok(!alloc.mock.calls.some(call => call.arguments[0] >= data.length))
+    assert.ok(!copy.mock.calls.some(call => call.this.subarray(call.arguments[2], call.arguments[3]).includes(marker)))
+  }
+})
+
+test('#2078 correction tar keeps a larger supplemental SKILL.md before the direct root', async () => {
+  const data = ' '.repeat(LIMITS.skillMd + 1)
+  const { entries } = await readSkillArchive(tar([{ path: 'references/SKILL.md', data }, rootMember]), { kind: 'tar.gz' })
+  assert.equal(entries[0].path, 'SKILL.md')
+  assert.equal(entries[1].path, 'references/SKILL.md')
+  assert.equal(entries[1].bytes.toString(), data)
 })

@@ -28,7 +28,7 @@ export function skippedPath(path) {
     components.some(part => part === '.git' || part === '.DS_Store' || part.startsWith('._'))
 }
 
-export function treeRegistry() {
+export function treeRegistry(validPath = skillPath) {
   const paths = new Map()
   let total = 0
   let rawCount = 0
@@ -41,7 +41,7 @@ export function treeRegistry() {
       paths.set('', {})
       return
     }
-    if (!skillPath(path)) throw treeError(`Unsafe skill path: ${path}`)
+    if (!validPath(path)) throw treeError(`Unsafe skill path: ${path}`)
     const components = path.split('/')
     for (let i = 1; i <= components.length; i++) {
       const spelling = components.slice(0, i).join('/')
