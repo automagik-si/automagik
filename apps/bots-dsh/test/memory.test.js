@@ -3477,7 +3477,8 @@ test('R2-4 ACP admission refusal keeps background quota and the batch through pr
   const first = await tickReview()
   const five = await tickReview(5 * minute)
   const beforeExpiry = await tickReview(55 * minute - 1)
-  const held = { hidden: 1, prompts: 0, calls: 1, failure: { reason: 'quota', at, retryAt: until },
+  const ownFailureCode = 'acp/aside-unavailable'
+  const held = { hidden: 1, prompts: 0, calls: 1, failure: { reason: 'quota', at, retryAt: until, ownFailureCode },
     cursor: 9, expiry: until }
   assert.deepEqual({ first, five, beforeExpiry }, { first: held, five: held, beforeExpiry: held })
 
@@ -3488,7 +3489,7 @@ test('R2-4 ACP admission refusal keeps background quota and the batch through pr
   await rt.catalog({ fresh: true, remember: false })
   assert.deepEqual(await tickReview(1), {
     hidden: 2, prompts: 0, calls: 2, cursor: 9, expiry: until + 60 * minute,
-    failure: { reason: 'quota', at: until, retryAt: until + 15 * minute },
+    failure: { reason: 'quota', at: until, retryAt: until + 15 * minute, ownFailureCode },
   })
   recovered = true
   assert.deepEqual(await tickReview(15 * minute), {

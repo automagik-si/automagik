@@ -10,7 +10,8 @@ const wire = join(import.meta.dirname, 'fake-aside-agent.mjs')
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'"
 
 export function asideWorld(t, options = {}) {
-  const { provider = 'acp-codex', start = CHECKED[0], version = AGY_OFF_CHECKED,
+  const { provider = 'acp-codex', start = CHECKED[0],
+    version = provider === 'acp-codex' ? '2.12.0' : AGY_OFF_CHECKED,
     system = false, transform, onEvent, reply = {}, permissionMode, confirm = true } = options
   const dir = mkdtempSync(join(tmpdir(), 'acp-test-aside-'))
   const traceFile = join(dir, 'trace.ndjson')
@@ -18,7 +19,7 @@ export function asideWorld(t, options = {}) {
   const setReply = value => writeFileSync(replyFile, JSON.stringify(value))
   setReply(reply)
   const argv = [wire, traceFile, replyFile, version, permissionMode ??
-    (provider === 'acp-codex' ? 'read-only' : 'default'), start, system ? 'on' : 'off']
+    (provider === 'acp-codex' ? 'read-only' : 'default'), start, system ? 'on' : 'off', provider]
   const fakeCli = join(dir, 'fake-cli')
   writeFileSync(fakeCli, '#!/bin/sh\nexec ' + [process.execPath, ...argv].map(shellQuote).join(' ')
     + ' "$@"\n', { mode: 0o700 })

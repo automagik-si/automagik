@@ -1680,13 +1680,16 @@ export function install(rt) {
     let ownAdmitted = eligible && !hidden
     const failures = []
     let quota = false
-    const record = (ref, provider, error) => {
+    let ownFailureCode
+    const record = (ref, provider, error, isOwn = false) => {
       checkActive()
       if (terminalShot(error)) throw error
       if (error?.code === 'acp/aside-stopped') return
       if (QUOTA_CODES.has(error?.providerCode ?? error?.code)) {
         rt.noteAsideQuota(provider)
         quota = true
+      } else if (isOwn) {
+        ownFailureCode = failureCode({ code: error?.providerCode || error?.code })
       }
       failures.push({ ref, error })
     }
@@ -1722,7 +1725,7 @@ export function install(rt) {
           return answered({ ...own, model: reply.model ?? own.model }, reply.text.trim(), 'own-acp')
         }
       } catch (error) {
-        record(mine, own.provider, error)
+        record(mine, own.provider, error, true)
       }
     }
     const background = await rt.memoryBackground(sessionId)
@@ -1744,7 +1747,7 @@ export function install(rt) {
       ? modelFailure(failures.map(({ ref, error }) => `${ref}: ${failureText(error, 'provider error')}`).join('; '))
       : failures.length === 1 ? answerFailure(failures[0].error)
         : retryAt ? modelFailure('The available model accounts are out of quota.') : noModel()
-    throw Object.assign(error, { quota, retryAt })
+    throw Object.assign(error, { quota, retryAt, ownFailureCode })
   }
 
   function memoryShot(bot, system, text, tag, dispatch) {

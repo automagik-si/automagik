@@ -34,8 +34,11 @@ class AsideRun extends AgentRun {
     const option = optionOf(options, 'model')
     const sessionModelId = models?.currentModelId
     // A later effort-only update can omit a report that already contradicted the other.
-    if (option && typeof sessionModelId === 'string' && option.currentValue !== sessionModelId) {
-      this.conflictingModels = true
+    if (option && typeof sessionModelId === 'string') {
+      // Codex reports a bare model option alongside a session model ID with its effort.
+      const sessionSlug = this.spec.provider === 'acp-codex'
+        ? sessionModelId.replace(/\[(?:none|minimal|low|medium|high|xhigh|max)\]$/, '') : sessionModelId
+      if (option.currentValue !== sessionSlug) this.conflictingModels = true
     }
   }
 

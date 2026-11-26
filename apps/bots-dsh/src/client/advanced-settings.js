@@ -20,6 +20,8 @@ function memoryStatus(memory) {
   const failure = memory?.failure
   if (!failure) return status
   const time = timeOf(failure.at)
+  const ownDetail = failure.ownFailureCode
+    ? t('The Bot’s model failed ({code}).', { code: failure.ownFailureCode }) : ''
   const detail = failure.reason === 'quota'
     ? t("The last review failed at {time}: the model's account is out of quota or balance. The next review waits until {retry}.", {
         time, retry: timeOf(failure.retryAt),
@@ -27,7 +29,7 @@ function memoryStatus(memory) {
     : failure.reason === 'no-model'
       ? t('The last review failed at {time}: no model can run it. Pick a background model in Settings.', { time })
       : t('The last review failed at {time}: the model could not answer.', { time })
-  return `${status} ${detail}`
+  return ownDetail ? `${status} ${detail} ${ownDetail}` : `${status} ${detail}`
 }
 
 // Empty resets an override; bad numbers never leave the input as a mutation.

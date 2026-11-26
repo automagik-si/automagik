@@ -5,7 +5,7 @@ import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotoc
 import { serveAgent } from '../../dev/serve-agent.mjs'
 import { AGY_SETTINGS_FAILED, agyOffPaths } from '../../src/host/agy-off.js'
 
-const [traceFile, replyFile, version, mode, startModel, systemCapability, ...args] =
+const [traceFile, replyFile, version, mode, startModel, systemCapability, provider, ...args] =
   process.argv.slice(2)
 const trace = (event, fields = {}) => appendFileSync(traceFile,
   JSON.stringify({ event, pid: process.pid, ...fields }) + '\n')
@@ -24,6 +24,9 @@ const wire = serveAgent({
   async newSession({ cwd, mcpServers, systemPrompt, _meta }) {
     trace('new', { cwd, mcpServers, systemPrompt, meta: _meta })
     const reply = JSON.parse(readFileSync(replyFile, 'utf8'))
+    const codex = provider === 'acp-codex'
+    // codex-acp 2.12.0 uses ModelId strings in models and bare slugs in configOptions.
+    const modelId = slug => codex ? slug + '[high]' : slug
     const profileArg = args.indexOf('--cli_dir_name')
     if (profileArg >= 0) {
       const { agentFile, settingsFile, logDir } = agyOffPaths(process.env.HOME, args[profileArg + 1])
@@ -37,10 +40,10 @@ const wire = serveAgent({
         failure ? AGY_SETTINGS_FAILED + ' fixture failure' : 'fixture settings loaded')
     }
     return { sessionId: 'aside-fixture', configOptions: modelOption(),
-      ...(reply.sessionModel === undefined ? {} : {
-        models: { currentModelId: reply.sessionModel,
-          availableModels: modelOption()[0].options.map(({ value, name }) => ({ modelId: value, name })) },
-      }),
+      ...(codex || reply.sessionModel !== undefined ? {
+        models: { currentModelId: reply.sessionModel ?? modelId(model),
+          availableModels: modelOption()[0].options.map(({ value, name }) => ({ modelId: modelId(value), name })) },
+      } : {}),
       modes: { currentModeId: 'other',
         availableModes: ['other', mode].map(id => ({ id, name: id })) },
     }

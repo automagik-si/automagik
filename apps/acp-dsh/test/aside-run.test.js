@@ -73,6 +73,29 @@ test('R2-3 conflicting Codex current-model reports block private text', async t 
   assert.deepEqual(await installed(world), { text: 'Fixture response.', model: 'gpt-6.2-sol' })
 })
 
+test('Stage 6 admits Codex reports that agree after the protocol effort suffix', async t => {
+  const world = asideWorld(t, { reply: { sessionModel: 'gpt-6.2-sol[high]' } })
+  await world.ready()
+  const result = await installed(world).catch(error => error.code)
+  const prompts = world.events().filter(row => row.event === 'prompt').length
+  assert.deepEqual({ result, prompts }, {
+    result: { text: 'Fixture response.', model: 'gpt-6.2-sol' }, prompts: 1,
+  })
+})
+
+test('R2-3 genuine conflict with an effort suffix stays refused after selecting a model', async t => {
+  const world = asideWorld(t, { start: 'gpt-5.5', reply: { sessionModel: 'gpt-6.2-sol[high]' } })
+  await world.ready()
+  let reads = 0
+  await assert.rejects(installed(world, { model: 'gpt-6.2-sol', readPrompt: () => {
+    reads++
+    return { system: 'Fixture instructions.', text: 'Fixture prompt.' }
+  } }), { code: 'acp/aside-unavailable' })
+  assert.ok(world.events().some(row => row.event === 'mode'), 'selection and mode setup completed')
+  assert.equal(reads, 0)
+  noPrompt(world)
+})
+
 test('R2-5 Codex accepts legacy read-only with the checked model and scratch cwd', async t => {
   const world = asideWorld(t, {
     transform: launch => ({ ...launch,

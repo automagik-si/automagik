@@ -2204,6 +2204,7 @@ var ZH2 = {
   "The last review failed at {time}: the model's account is out of quota or balance. The next review waits until {retry}.": "上次审核于 {time} 失败：模型账号的额度或余额已用完。下次审核将等到 {retry}。",
   "The last review failed at {time}: no model can run it. Pick a background model in Settings.": "上次审核于 {time} 失败：没有模型可以运行它。请在设置中选择后台模型。",
   "The last review failed at {time}: the model could not answer.": "上次审核于 {time} 失败：模型无法回答。",
+  "The Bot’s model failed ({code}).": "Bot 自己的模型失败（{code}）。",
   "Default: {model}": "默认：{model}",
   "Same for every member": "全员统一",
   "Replaces each member's own permissions in this group.": "在这个群里代替各成员自己的权限。",
@@ -18544,11 +18545,12 @@ function memoryStatus(memory) {
   const failure = memory?.failure;
   if (!failure) return status;
   const time = timeOf(failure.at);
+  const ownDetail = failure.ownFailureCode ? t("The Bot’s model failed ({code}).", { code: failure.ownFailureCode }) : "";
   const detail = failure.reason === "quota" ? t("The last review failed at {time}: the model's account is out of quota or balance. The next review waits until {retry}.", {
     time,
     retry: timeOf(failure.retryAt)
   }) : failure.reason === "no-model" ? t("The last review failed at {time}: no model can run it. Pick a background model in Settings.", { time }) : t("The last review failed at {time}: the model could not answer.", { time });
-  return `${status} ${detail}`;
+  return ownDetail ? `${status} ${detail} ${ownDetail}` : `${status} ${detail}`;
 }
 function NumberSetting({ label, value, min, max, integer = false, disabled, onSave }) {
   const [draft, setDraft] = (0, import_react42.useState)(String(value ?? ""));

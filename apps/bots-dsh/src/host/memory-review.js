@@ -447,6 +447,7 @@ export function installReview(rt, memory) {
     const last = lastFailure(`bot:${botId}`, bot.model)
     const failure = last ? { reason: last.reason, at: last.at,
       ...(last.retryAt === undefined ? {} : { retryAt: last.retryAt }),
+      ...(last.ownFailureCode === undefined ? {} : { ownFailureCode: last.ownFailureCode }),
     } : null
     return { enabled: chatReviewEnabled(botId), allowed: reviewOn, failure,
       pending: [...reviewTimers.keys()].some(id => owns(reviewOf(id))) || [...reviewQueue.values()].some(owns),
@@ -484,12 +485,13 @@ export function installReview(rt, memory) {
           const count = (last?.count ?? 0) + Number(error.quota === true)
           const delay = QUOTA_DELAYS[Math.min(Math.max(count - 1, 0), QUOTA_DELAYS.length - 1)]
           const retryAt = Math.max(error.retryAt ?? 0, error.quota ? at + delay : last?.retryAt ?? 0)
+          const ownFailureCode = error.ownFailureCode ?? (error.quota ? undefined : last?.ownFailureCode)
           failures.set(holder, { reason: 'quota', at: error.quota ? at : last?.at ?? at,
-            retryAt, count, model })
+            retryAt, count, model, ownFailureCode })
           if (!error.quota) return
         } else {
           const reason = error?.code === 'memory/no-model' ? 'no-model' : 'error'
-          failures.set(holder, { reason, at, count: 0, model })
+          failures.set(holder, { reason, at, count: 0, model, ownFailureCode: error?.ownFailureCode })
         }
         rt.warn('omni-ui: memory review of %s failed: %s%s', waited.key, failureCode(error),
           error?.quota ? ' (QUOTA)' : '',

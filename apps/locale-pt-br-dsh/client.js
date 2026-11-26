@@ -2245,6 +2245,7 @@ const pack = createPack({
     "The last review failed at {time}: the model's account is out of quota or balance. The next review waits until {retry}.": "A última revisão falhou às {time}: a conta do modelo está sem cota ou saldo. A próxima revisão espera até {retry}.",
     "The last review failed at {time}: no model can run it. Pick a background model in Settings.": "A última revisão falhou às {time}: nenhum modelo consegue fazê-la. Escolha um modelo de segundo plano em Configurações.",
     "The last review failed at {time}: the model could not answer.": "A última revisão falhou às {time}: o modelo não conseguiu responder.",
+    "The Bot’s model failed ({code}).": "O modelo do próprio Bot falhou ({code}).",
     "Default: {model}": "Padrão: {model}",
     "Runs as Workspace here": "Aqui roda como Área de trabalho",
     "The permission level was saved, but some conversations could not take it and keep the level they had until DeepSeek Harness opens them again.": "O nível de permissão foi salvo, mas algumas conversas não puderam adotá-lo e mantêm o nível que tinham até o DeepSeek Harness abri-las de novo.",

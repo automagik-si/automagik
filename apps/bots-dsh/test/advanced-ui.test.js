@@ -163,5 +163,7 @@ test('T6 Advanced puts quota times and an error in the existing review status li
     assert.equal(await refresh({ reason: 'error', at }),
       `Memory review idle. The last review failed at ${time(at)}: the model could not answer.`)
     assert.equal(await refresh(null), 'Memory review idle.')
+    assert.equal(await refresh({ reason: 'quota', at, retryAt, ownFailureCode: 'acp/aside-unavailable' }),
+      `Memory review idle. The last review failed at ${time(at)}: the model's account is out of quota or balance. The next review waits until ${time(retryAt)}. The Bot’s model failed (acp/aside-unavailable).`)
   } finally { lifecycle.close() }
 })
