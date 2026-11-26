@@ -439,7 +439,7 @@ function solverLimitsPart(bot) {
     mode,
     'Use solver_progress status to get the active request ID. Pass it as request in every progress update. Register every agreed check with a stable ID and its exact foreground command using plan, then send that plan to your reviewer with message_bot (solver_review "plan", solver_request set to the request ID). Include the same check IDs and their meaning in the plan. Keep IDs for the same checks across re-plans even when their labels change.',
     "Before running an agreed check command, use start with a unique run ID and one agreed check ID. Run that check in the foreground in the result folder, then record its actual outcome with checks and that run ID before attempting more work. If a check regenerates output, run the checks again on the stable result. Repeat the same ID only to retry a progress call. Record replan with its own unique run ID before replacing the plan. After a failing run or relevant work, verify all agreed checks again on the current result.",
-    'After every agreed check passes, use message_bot with solver_review "result" and solver_request for the result review. Wait for the designated reviewer to answer. Only its independent SHIP can certify Done. Ask for a decision at a limit even on a route whose native actions the host cannot intercept.',
+    'After every agreed check passes, use message_bot with solver_review "result" and solver_request for the result review. Wait for the designated reviewer to answer. Only its independent SHIP can certify Done. Tell the person SHIP only after that result SHIP is recorded and every agreed check has a recorded run; otherwise say the result is not verified. Ask for a decision at a limit even on a route whose native actions the host cannot intercept.',
     "If this route does not offer the progress or review tool, keep your own check and attempt record and follow these limits. Explain the missing host evidence in your delivery and withhold Done."
   ].join("\n");
 }
@@ -4080,7 +4080,7 @@ var ZH2 = {
   "Waiting for your answer after the attempt limit for {check}.": "{check} 已达到尝试上限，正在等待你的答复。",
   "Waiting for your answer after the re-plan limit.": "已达到重新规划上限，正在等待你的答复。",
   "Done: every check passed and {name} approved.": "已完成：所有检查均已通过，且 {name} 已批准。",
-  "Not marked done: current passing results are missing for agreed checks.": "未标记为完成：仍有约定的检查缺少当前版本的通过结果。",
+  "Result not verified, so not marked done: current passing results are missing for agreed checks.": "结果未经验证，因此未标记为完成：仍有约定的检查缺少当前版本的通过结果。",
   "Not marked done: {name} has not independently approved the current result.": "未标记为完成：{name} 尚未独立批准当前结果。",
   "Choose a specific model for the Solver and its reviewer.": "请为 Solver 和审阅者选择具体模型。",
   "Choose a different model for the reviewer.": "请为审阅者选择不同的模型。",
@@ -34204,7 +34204,7 @@ function reviewMarkText(bot, roster) {
   const reviewed = reviewText2(mark2, bot, roster);
   const outcome = bot.solverStatus?.outcome;
   const name = mark2.reviewer?.name ?? roster?.byId?.[bot.reviewerId]?.name ?? t("its reviewer");
-  const completion = mark2.done === true ? t("Done: every check passed and {name} approved.", { name }) : outcome?.reason === "checks" ? t("Not marked done: current passing results are missing for agreed checks.") : outcome?.reason === "review" ? t("Not marked done: {name} has not independently approved the current result.", { name }) : null;
+  const completion = mark2.done === true ? t("Done: every check passed and {name} approved.", { name }) : outcome?.reason === "checks" ? t("Result not verified, so not marked done: current passing results are missing for agreed checks.") : outcome?.reason === "review" ? t("Not marked done: {name} has not independently approved the current result.", { name }) : null;
   return completion ? `${reviewed}
 ${completion}` : reviewed;
 }

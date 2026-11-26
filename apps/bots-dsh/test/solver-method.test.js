@@ -19,6 +19,13 @@ const QUOTES = '"'.repeat(40)
 const TEST_STEP = '8. Test: runs only for agreed checks. Log output.'
 const PRIOR_TEST_STEP = "8. Test: run step 1's checks and keep the output."
 
+test('#2131 the Solver limits part says SHIP only after a recorded result SHIP and recorded runs', () => {
+  const sentence = 'Tell the person SHIP only after that result SHIP is recorded and every agreed check has a recorded run; otherwise say the result is not verified.'
+  for (const solverAuto of [false, true]) {
+    assert.ok(solverLimitsPart({ solverAuto }).includes(sentence), `${solverAuto ? 'Auto' : 'Normal'}: ${sentence}`)
+  }
+})
+
 test('every rule of the method is in both forms', () => {
   assert.equal(SOLVER_METHOD_VERSION, 1)
   for (const text of [solverInstructions({ reviewer: 'Ada reviewer', dedicated: true }), solverInstructions({ reviewer: null })]) {

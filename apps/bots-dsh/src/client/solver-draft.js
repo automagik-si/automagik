@@ -176,7 +176,7 @@ export function reviewMarkText(bot, roster) {
   const outcome = bot.solverStatus?.outcome
   const name = mark.reviewer?.name ?? roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
   const completion = mark.done === true ? t('Done: every check passed and {name} approved.', { name })
-    : outcome?.reason === 'checks' ? t('Not marked done: current passing results are missing for agreed checks.')
+    : outcome?.reason === 'checks' ? t('Result not verified, so not marked done: current passing results are missing for agreed checks.')
       : outcome?.reason === 'review' ? t('Not marked done: {name} has not independently approved the current result.', { name })
         : null
   return completion ? `${reviewed}\n${completion}` : reviewed

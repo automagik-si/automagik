@@ -3515,7 +3515,7 @@ const ZH = {
   "Waiting for your answer after the attempt limit for {check}.": "{check} 已达到尝试上限，正在等待你的答复。",
   "Waiting for your answer after the re-plan limit.": "已达到重新规划上限，正在等待你的答复。",
   "Done: every check passed and {name} approved.": "已完成：所有检查均已通过，且 {name} 已批准。",
-  "Not marked done: current passing results are missing for agreed checks.": "未标记为完成：仍有约定的检查缺少当前版本的通过结果。",
+  "Result not verified, so not marked done: current passing results are missing for agreed checks.": "结果未经验证，因此未标记为完成：仍有约定的检查缺少当前版本的通过结果。",
   "Not marked done: {name} has not independently approved the current result.": "未标记为完成：{name} 尚未独立批准当前结果。",
   "Choose a specific model for the Solver and its reviewer.": "请为 Solver 和审阅者选择具体模型。",
   "Choose a different model for the reviewer.": "请为审阅者选择不同的模型。",
