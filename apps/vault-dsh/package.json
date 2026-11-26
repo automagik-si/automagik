@@ -1,6 +1,6 @@
 {
   "name": "@automagik/vault-dsh",
-  "version": "3.175.11",
+  "version": "3.175.12",
   "description": "Read Bitwarden vault fields for approved Bot commands in DeepSeek Harness.",
   "keywords": [
     "dsh-plugin",
