@@ -17,7 +17,7 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // read_own_chat searches every part, the condensed messages included.
 import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
 import { skillActivityOf } from '../shared/skill-activity.js'
-import { BRIDGE_ACTIVITY_RECORD, toolEventOf } from '../shared/tool-activity.js'
+import { BRIDGE_ACTIVITY_RECORD, bridgeOriginOf, toolEventOf } from '../shared/tool-activity.js'
 import { legacySkillHistory, projectRoomContent } from './skill-library-call.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
@@ -3636,8 +3636,9 @@ export function install(rt) {
     const showTool = (event, owningTurn) => {
       if (!showTools || !Number.isSafeInteger(owningTurn) || hidden.has(owningTurn)) return
       const row = toolEventOf(event)
-      if (row && !seenTools.has(row.id)) {
-        seenTools.add(row.id)
+      const key = row && JSON.stringify([owningTurn, row.id])
+      if (row && !seenTools.has(key)) {
+        seenTools.add(key)
         items.push({ ...row, turn: owningTurn })
       }
     }
@@ -3654,7 +3655,12 @@ export function install(rt) {
         continue
       }
       if (event.type === 'turn/end' && Number.isSafeInteger(event.data?.turn)) turn = event.data.turn
-      if (event.type === BRIDGE_ACTIVITY_RECORD || event.type === 'tool/ptc-dispatch-start') {
+      if (event.type === BRIDGE_ACTIVITY_RECORD) {
+        const origin = bridgeOriginOf(event)
+        if (origin?.exchangeId === null) showTool(event, origin.turn)
+        continue
+      }
+      if (event.type === 'tool/ptc-dispatch-start') {
         showTool(event, turn)
         continue
       }

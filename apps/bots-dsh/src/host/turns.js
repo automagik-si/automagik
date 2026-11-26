@@ -13,7 +13,7 @@ import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
 import { rawTextOf, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
-import { BRIDGE_ACTIVITY_RECORD, toolEventOf } from '../shared/tool-activity.js'
+import { BRIDGE_ACTIVITY_RECORD, bridgeOriginOf, toolEventOf } from '../shared/tool-activity.js'
 import { reminderText } from './schedules.js'
 import { modelOf, replyModel } from './solver-progress.js'
 
@@ -589,12 +589,16 @@ export function install(rt) {
   const noting = (id, turn) => rt.handoffNoteTurn?.(id, turn) === true || rt.writingNote?.(id) === true
   // The round counter: a group Session's events keep its round's waiter alive and mark work.
   const countsInRound = id => rt.groupOwners.has(id) && !noting(id, live.get(id)?.turn)
-  const recordRoomTool = (id, entry, event, turn) => {
-    if (!entry.roomToolSource || !Number.isSafeInteger(turn) || entry.turn !== turn || !countsInRound(id)) return
+  const writeRoomTool = (id, source, event) => {
     const activity = toolEventOf(event)
     if (activity) {
-      try { rt.roomToolActivity?.(id, entry.roomToolSource, activity) }
+      try { rt.roomToolActivity?.(id, source, activity) }
       catch { rt.warn('Group tool activity could not be recorded') }
+    }
+  }
+  const recordRoomTool = (id, entry, event, turn) => {
+    if (entry.roomToolSource && Number.isSafeInteger(turn) && entry.turn === turn && countsInRound(id)) {
+      writeRoomTool(id, entry.roomToolSource, event)
     }
   }
 
@@ -923,7 +927,7 @@ export function install(rt) {
       return
     }
     const entry = liveOf(id)
-    if (countsInRound(id)) rt.touchRoomTurn?.(id)
+    if (event.type !== BRIDGE_ACTIVITY_RECORD && countsInRound(id)) rt.touchRoomTurn?.(id)
     switch (event.type) {
       case 'subagent/catalog': {
         const childId = event.data?.childId
@@ -950,9 +954,12 @@ export function install(rt) {
         if (countsInRound(id)) rt.workRoomTurn?.(id, name)
         break
       }
-      case BRIDGE_ACTIVITY_RECORD:
-        recordRoomTool(id, entry, event, entry.turn)
+      case BRIDGE_ACTIVITY_RECORD: {
+        const origin = bridgeOriginOf(event)
+        const source = entry.roomToolSources?.get(origin?.turn)
+        if (source && source.exchangeId === origin.exchangeId) writeRoomTool(id, source, event)
         break
+      }
       case 'tool/ptc-dispatch':
         endCall(id, entry, event.data?.subCallId)
         break
@@ -1068,7 +1075,14 @@ export function install(rt) {
         // still claims it as today, a later one only joins it.
         const opened = entry.opened === true
         if (entry.turn !== undefined && !bare(source) && opensTurn(event.data)) {
-          if (!opened && source?.kind === SOURCE_KIND && source.role === 'room') entry.roomToolSource = source
+          if (!opened && source?.kind === SOURCE_KIND && source.role === 'room') {
+            entry.roomToolSource = source
+            if (Number.isSafeInteger(entry.turn) && countsInRound(id)) {
+              const sources = entry.roomToolSources ??= new Map()
+              if (!sources.has(entry.turn)) sources.set(entry.turn, source)
+              if (sources.size > 400) sources.delete(sources.keys().next().value)
+            }
+          }
           entry.opened = true
         }
         if (entry.turn !== undefined && opensTurn(event.data)) {

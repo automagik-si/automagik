@@ -9,6 +9,9 @@ export const CALLER_BOT_KEYS = Object.freeze(['id', 'name', 'role', 'color', 'ki
 const emptyPage = () => ({ items: [], cursor: null })
 const unknown = () => refusal('Unknown Bot', { code: 'bot/not-found' })
 
+export const visibleAssistantText = block =>
+  block?.type === 'text' && typeof block.text === 'string' && block.text.trim() !== ''
+
 export function closesPart(event) {
   if (event?.type !== 'user/message') return false
   const source = event.data?.source
@@ -42,7 +45,7 @@ export function callerItems(sessionId, events, seedTurn, exchangeTurns) {
       items.push({ kind: 'user', text: textOf(content), time, seq, turn, ...(images > 0 ? { images } : {}) })
     } else if (type === 'assistant/message' && Array.isArray(data?.message?.content)) {
       for (const block of data.message.content) {
-        if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '') {
+        if (visibleAssistantText(block)) {
           items.push({ kind: 'bot', text: block.text, time, seq, turn })
         }
       }

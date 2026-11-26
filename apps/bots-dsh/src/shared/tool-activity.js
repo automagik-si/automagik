@@ -3,6 +3,14 @@ import { redactText } from '../host/redact.js'
 export const TOOL_ACTIVITY = 'tool-activity'
 export const BRIDGE_ACTIVITY_RECORD = 'plugin:acp-dsh/bridge-outside-step'
 
+export function bridgeOriginOf(event) {
+  const { turn, exchangeId } = event?.data ?? {}
+  if (event?.type !== BRIDGE_ACTIVITY_RECORD || event.ignorable !== true ||
+    !Number.isSafeInteger(turn) || turn < 0 ||
+    (exchangeId !== null && (typeof exchangeId !== 'string' || exchangeId === ''))) return
+  return { turn, exchangeId }
+}
+
 const knownTools = new Set([
   'apply_patch', 'ask_user', 'ask_user_question', 'bash', 'browser_handoff', 'computer_handoff',
   'create_bot', 'create_group', 'delete_bot', 'delete_group', 'edit', 'fetch', 'forget', 'generate_image',
@@ -18,7 +26,6 @@ const acpOperations = new Map([
 ])
 const fileTools = new Set(['read', 'read_file', 'read_image', 'write', 'edit', 'delete', 'move', 'str_replace_editor', 'list_dir'])
 const webTools = new Set(['fetch', 'web_fetch'])
-const identifiedAcpPlugins = new Set(['mcp__github__create_issue', 'mcp__linear__get_issue'])
 const privateShape = /(?:^|[./\\_-])(?:password|passwd|credential[s]?|secret[s]?|token[s]?|authorization|auth[_-]?token|api[_-]?key|private[_-]?key|gh[pousr]_|github_pat_|sk[-_]|xox[baprs]-|npm_|\.env(?:$|[./\\])|\.npmrc(?:$|[./\\]))/i
 const safeText = value => !privateShape.test(value) && redactText(value) === value
 const own = (object, key) => object && Object.hasOwn(object, key) ? object[key] : undefined
@@ -48,29 +55,23 @@ function hostnameOf(value) {
 
 function pluginOf(name) {
   if (name.length > 64 || !safeText(name)) return
-  const match = /^mcp__([a-z0-9]+(?:[-_][a-z0-9]+)*)__((?:[a-z0-9]+[-_.])*[a-z0-9]+)$/i.exec(name)
-  if (match && match[1] !== 'dsh') return { label: 'plugin', name: `${match[1]} · ${match[2]}` }
+  const [server, operation, extra] = name.slice('mcp__'.length).split('__')
+  if (extra !== undefined || !operation || server.toLowerCase() === 'dsh' ||
+    !/^[a-z0-9]+(?:[-_][a-z0-9]+)*$/i.test(server) ||
+    !/^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/i.test(operation) || operation !== operation.trim() ||
+    !safeText(server) || !safeText(operation)) return
+  return { label: 'plugin', name: `${server} · ${operation}` }
 }
 
-// Tool names from the call envelope are distinct from an ACP mirror's free-form title.
-// The latter only identifies an operation when it matches a known structured MCP name.
+// A registered tool name comes from the call envelope. ACP mirror arguments carry display
+// details and operation kind. They do not attest which plugin supplied the operation.
 export function toolActivityOf({ name: raw, arguments: args }) {
   if (typeof raw !== 'string' || raw === '' || raw === 'ToolSearch' || isSkillTool(raw)) return
   const tool = raw.startsWith('mcp__dsh__') ? raw.slice('mcp__dsh__'.length) : raw
   if (tool === 'run_code' || tool === 'ToolSearch') return
   const data = argsOf(args)
   const acp = tool === 'acp_tool'
-  const title = own(data, 'title')
   const input = acp ? own(data, 'input') : data
-  if (acp) {
-    const server = own(input, 'server')
-    const operation = own(input, 'tool')
-    if (typeof server === 'string' && typeof operation === 'string') {
-      const plugin = pluginOf('mcp__' + server + '__' + operation)
-      if (plugin) return plugin
-    }
-    if (identifiedAcpPlugins.has(title)) return pluginOf(title)
-  }
   if (!acp && raw.startsWith('mcp__') && raw === tool) return pluginOf(raw) ?? { label: 'plugin', name: 'tool' }
   const name = acp ? acpOperations.get(own(data, 'kind')) ?? 'tool' : knownTools.has(tool) ? tool : 'tool'
   const path = own(input, 'file_path') ?? own(input, 'path') ?? own(input, 'notebook_path') ??

@@ -308,6 +308,28 @@ function betweenStepTurn(session) {
 /** Whether the current turn ended a step and has not ended itself. */
 export const betweenSteps = session => betweenStepTurn(session) !== undefined
 
+// Capture the Session position when the bridge accepts the call. The tool can finish
+// after another turn starts, and its completion then says nothing about its origin.
+function outsideOriginOf(session) {
+  const events = session?.snapshotEvents?.() ?? []
+  const start = events.findLastIndex(event => event.type === 'turn/start')
+  const turn = events[start]?.data?.turn
+  if (!Number.isSafeInteger(turn) || turn < 0) return
+  const end = events.findLastIndex(event => event.type === 'turn/end' && event.data?.turn === turn)
+  if (end <= start) return
+  for (let i = start + 1; i < end; i++) {
+    const { type, data } = events[i]
+    if (type !== 'user/message') continue
+    const source = data?.source
+    if (source?.kind === 'user') return source.handoff !== true ? { turn, exchangeId: null } : undefined
+    if (source?.kind === 'bot') {
+      return typeof source.exchangeId === 'string' && source.exchangeId !== ''
+        ? { turn, exchangeId: source.exchangeId } : undefined
+    }
+    if (['goal', 'retry', 'schedule', 'user-question-reply'].includes(source?.kind)) return
+  }
+}
+
 /**
  * What Auto review needs before it can read a bridge call: an open step, the Session's route,
  * and exactly one complete schema for the call in the request header. Missing any of them is a
@@ -945,7 +967,9 @@ export class Backchannel {
     if (session === undefined || tools?.execute === undefined) return error(`DSH tools are not available to ${record.name}.`)
     let waited
     const waitingTurn = betweenStepTurn(session)
-    if (openStepOf(session) === undefined && betweenSteps(session) && record.promptRunning?.() === true) {
+    const hasStep = openStepOf(session) !== undefined
+    const origin = hasStep ? undefined : outsideOriginOf(session)
+    if (!hasStep && waitingTurn !== undefined && record.promptRunning?.() === true) {
       const waiting = new AbortController()
       record.controllers.add(waiting)
       try {
@@ -973,7 +997,7 @@ export class Backchannel {
     // without a card (no loadable row exists outside a step); Auto refuses, because Auto review
     // reads a call from its step. A plain refusal here would be a silent dead end for the agent.
     if (openStepOf(session) === undefined && !betweenSteps(session) && record.promptRunning?.() !== true) {
-      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered })
+      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered, origin: origin ?? null })
     }
     const approval = this.ctx?.get?.('approval')
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
@@ -1290,9 +1314,9 @@ export class Backchannel {
    * own turn numbering is private. Manual and Full run it without DSH rows and record a plugin
    * record instead; Auto refuses, because Auto review reads the pending call from its step.
    * @param {any} record
-   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean, skill?: any, onSkillDelivered?: Function }} call
+   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean, skill?: any, onSkillDelivered?: Function, origin?: {turn: number, exchangeId: string | null} | null }} call
    */
-  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered }) {
+  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered, origin = outsideOriginOf(record.agent?.session) }) {
     const error = text => ({ content: name === 'load_skill' ? [] : [{ type: 'text', text }], isError: true })
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
     const session = record.agent?.session
@@ -1301,7 +1325,8 @@ export class Backchannel {
     const id = bridgeCallId(callId)
     const skills = skill && this.ctx?.get?.('omniTeam')?.skillCalls
     const note = (outcome) => {
-      try { return appendPluginRecord(session, 'plugin:acp-dsh/bridge-outside-step', { callId: id, name, outcome }) } catch {}
+      const position = outcome === 'ran' ? origin : undefined
+      try { return appendPluginRecord(session, 'plugin:acp-dsh/bridge-outside-step', { callId: id, name, outcome, ...position }) } catch {}
     }
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
     if (level.auto) {

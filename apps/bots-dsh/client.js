@@ -20606,6 +20606,11 @@ function redactorFor(ctx) {
 // src/shared/tool-activity.js
 var TOOL_ACTIVITY = "tool-activity";
 var BRIDGE_ACTIVITY_RECORD = "plugin:acp-dsh/bridge-outside-step";
+function bridgeOriginOf(event) {
+  const { turn, exchangeId } = event?.data ?? {};
+  if (event?.type !== BRIDGE_ACTIVITY_RECORD || event.ignorable !== true || !Number.isSafeInteger(turn) || turn < 0 || exchangeId !== null && (typeof exchangeId !== "string" || exchangeId === "")) return;
+  return { turn, exchangeId };
+}
 var knownTools = /* @__PURE__ */ new Set([
   "apply_patch",
   "ask_user",
@@ -20665,7 +20670,6 @@ var acpOperations = /* @__PURE__ */ new Map([
 ]);
 var fileTools = /* @__PURE__ */ new Set(["read", "read_file", "read_image", "write", "edit", "delete", "move", "str_replace_editor", "list_dir"]);
 var webTools = /* @__PURE__ */ new Set(["fetch", "web_fetch"]);
-var identifiedAcpPlugins = /* @__PURE__ */ new Set(["mcp__github__create_issue", "mcp__linear__get_issue"]);
 var privateShape = /(?:^|[./\\_-])(?:password|passwd|credential[s]?|secret[s]?|token[s]?|authorization|auth[_-]?token|api[_-]?key|private[_-]?key|gh[pousr]_|github_pat_|sk[-_]|xox[baprs]-|npm_|\.env(?:$|[./\\])|\.npmrc(?:$|[./\\]))/i;
 var safeText = (value) => !privateShape.test(value) && redactText(value) === value;
 var own = (object, key) => object && Object.hasOwn(object, key) ? object[key] : void 0;
@@ -20695,8 +20699,9 @@ function hostnameOf(value) {
 }
 function pluginOf(name) {
   if (name.length > 64 || !safeText(name)) return;
-  const match = /^mcp__([a-z0-9]+(?:[-_][a-z0-9]+)*)__((?:[a-z0-9]+[-_.])*[a-z0-9]+)$/i.exec(name);
-  if (match && match[1] !== "dsh") return { label: "plugin", name: `${match[1]} · ${match[2]}` };
+  const [server, operation, extra] = name.slice("mcp__".length).split("__");
+  if (extra !== void 0 || !operation || server.toLowerCase() === "dsh" || !/^[a-z0-9]+(?:[-_][a-z0-9]+)*$/i.test(server) || !/^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/i.test(operation) || operation !== operation.trim() || !safeText(server) || !safeText(operation)) return;
+  return { label: "plugin", name: `${server} · ${operation}` };
 }
 function toolActivityOf({ name: raw, arguments: args }) {
   if (typeof raw !== "string" || raw === "" || raw === "ToolSearch" || isSkillTool(raw)) return;
@@ -20704,17 +20709,7 @@ function toolActivityOf({ name: raw, arguments: args }) {
   if (tool === "run_code" || tool === "ToolSearch") return;
   const data = argsOf(args);
   const acp = tool === "acp_tool";
-  const title = own(data, "title");
   const input = acp ? own(data, "input") : data;
-  if (acp) {
-    const server = own(input, "server");
-    const operation = own(input, "tool");
-    if (typeof server === "string" && typeof operation === "string") {
-      const plugin = pluginOf("mcp__" + server + "__" + operation);
-      if (plugin) return plugin;
-    }
-    if (identifiedAcpPlugins.has(title)) return pluginOf(title);
-  }
   if (!acp && raw.startsWith("mcp__") && raw === tool) return pluginOf(raw) ?? { label: "plugin", name: "tool" };
   const name = acp ? acpOperations.get(own(data, "kind")) ?? "tool" : knownTools.has(tool) ? tool : "tool";
   const path2 = own(input, "file_path") ?? own(input, "path") ?? own(input, "notebook_path") ?? (acp ? own(own(data, "locations")?.[0], "path") : void 0);
@@ -22171,8 +22166,8 @@ function SettingsCard({ target, note, roster, actions, useUpdate, startOpen = fa
     ) : null
   );
 }
-function SettingsCall({ args, done, content, isError, roster, actions }) {
-  if (!done || isError || !SHOWN.test(content ?? "")) return (0, import_react49.createElement)(CellEmpty);
+function SettingsCall({ args, done, content, isError, roster, actions, fallback }) {
+  if (!done || isError || !SHOWN.test(content ?? "")) return fallback ?? (0, import_react49.createElement)(CellEmpty);
   const target = settingsTarget({ page: args.text("page"), bot: args.text("bot"), group: args.text("group") }, roster, actions.pluginSettings?.() ?? []);
   return (0, import_react49.createElement)("div", { className: "bt-q-inline" }, (0, import_react49.createElement)(SettingsCard, { target, note: args.text("note"), roster, actions }));
 }
@@ -22282,9 +22277,9 @@ function ProposalCard({ proposal, roster, actions }) {
     )
   );
 }
-function ProposalCall({ done, content, isError, roster, actions }) {
+function ProposalCall({ done, content, isError, roster, actions, fallback }) {
   const proposal = done && !isError ? parseProposal(content) : void 0;
-  if (proposal === void 0) return (0, import_react49.createElement)(CellEmpty);
+  if (proposal === void 0) return fallback ?? (0, import_react49.createElement)(CellEmpty);
   return (0, import_react49.createElement)("div", { className: "bt-q-inline" }, (0, import_react49.createElement)(ProposalCard, { proposal, roster, actions }));
 }
 var SETTINGS_CARD_CSS = `
@@ -22653,17 +22648,9 @@ function ToolActivityRow({ label, name, target, bot }) {
   const line = label === "plugin" ? t("Plugin: {name}", { name }) : t("Tool: {name}", { name });
   return (0, import_react50.createElement)(ActivityRows, { lines: [target ? line + " · `" + target + "`" : line], bot });
 }
-var TOOL_ACTIVITY_BOUNDARY = "tool-activity-boundary";
 function registerToolActivity(ctx) {
   const register = (definition) => ctx.uiConversation?.events?.register?.(definition);
-  const boundary = (event) => ({ id: String(event.seq), role: "start" });
-  const offBoundary = register({
-    kind: TOOL_ACTIVITY_BOUNDARY,
-    match: { "turn/start": boundary, "turn/end": boundary },
-    start: (_context, { event }) => ({ turn: event.data.turn }),
-    update: (context) => context.state
-  });
-  const callKey = (id) => JSON.stringify(["call", id]);
+  const callKey = (turn, id) => JSON.stringify(["call", turn, id]);
   const toCall = ({ event, location: location2 }, turn) => {
     const { callId, subCallId, parentCallId, name, arguments: args } = event.data;
     return { turn, seq: event.seq, location: location2, root: {
@@ -22681,25 +22668,20 @@ function registerToolActivity(ctx) {
     kind: TOOL_ACTIVITY,
     target: "chat",
     match: {
-      [BRIDGE_ACTIVITY_RECORD]: (event) => toolEventOf(event) ? { id: callKey(event.data.callId), role: "start" } : null,
-      "tool/call": (event) => typeof event.data?.callId === "string" ? { id: callKey(event.data.callId), role: "start" } : null,
+      [BRIDGE_ACTIVITY_RECORD]: (event) => bridgeOriginOf(event)?.exchangeId === null && toolEventOf(event) ? { id: callKey(event.data.turn, event.data.callId), role: "start" } : null,
+      "tool/call": (event) => typeof event.data?.callId === "string" ? { id: callKey(event.data.turn, event.data.callId), role: "start" } : null,
       "tool/result": (event) => {
         const id = event.data?.message?.toolCallId ?? event.data?.message?.source?.callId;
-        return typeof id === "string" ? { id: callKey(id), role: "update" } : null;
+        return typeof id === "string" ? { id: callKey(event.data.turn, id), role: "update" } : null;
       },
       "tool/ptc-dispatch-start": dispatch,
       "tool/ptc-dispatch": dispatch
     },
-    start: (_context, match, reader) => {
+    start: (_context, match) => {
       const { event, location: location2 } = match;
       const turn = event.data?.turn ?? location2.turn?.turn;
       if (event.type === BRIDGE_ACTIVITY_RECORD) {
-        return {
-          turn: turn ?? reader.previous(TOOL_ACTIVITY_BOUNDARY)?.state.turn,
-          seq: event.seq,
-          location: location2,
-          activity: toolEventOf(event)
-        };
+        return { turn, seq: event.seq, location: { kind: "session" }, activity: toolEventOf(event) };
       }
       return toCall(match, turn);
     },
@@ -22724,16 +22706,13 @@ function registerToolActivity(ctx) {
         target: "chat",
         anchorSeq: state2.seq,
         location: state2.location,
-        groupTree: "turn",
+        ...state2.root && { groupTree: "turn" },
         visibility: visible ? "visible" : "hidden",
         data: state2
       };
     }
   });
-  return () => {
-    offRows?.();
-    offBoundary?.();
-  };
+  return () => offRows?.();
 }
 function ToolActivityCell({ node, sessionId, useRoster, ...props }) {
   const { turn, activity, root } = node.data;
@@ -23538,17 +23517,17 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
     if (done) return void 0;
     let stop3 = false;
     let timer;
-    let seen = "";
+    let seen;
     const tick = async () => {
       const result = await actions.roomProgress(sessionId);
       if (stop3) return;
       const own3 = result?.find((item) => item.callId === callId);
       const entry = own3 ?? result?.[0];
-      const replies2 = Array.isArray(entry?.replies) ? entry.replies.filter((reply) => own3 !== void 0 || reply?.kind !== SKILL_ACTIVITY) : [];
+      const replies2 = Array.isArray(entry?.replies) ? entry.replies.filter((reply) => own3 !== void 0 || reply?.kind !== SKILL_ACTIVITY && reply?.kind !== TOOL_ACTIVITY) : [];
       const key = entry ? JSON.stringify([replies2, entry.speaking]) : "";
-      if (entry && key !== seen) {
+      if (key !== seen) {
         seen = key;
-        setLive({ replies: replies2, speaking: [entry.speaking ?? []].flat() });
+        setLive({ replies: replies2, speaking: [entry?.speaking ?? []].flat() });
       }
       timer = setTimeout(tick, document.hidden ? 5e3 : 1e3);
     };
@@ -23678,7 +23657,7 @@ function useShownCards(actions, sessionId, callIds) {
     return () => actions.noteCards(sessionId, ids, -1);
   }, [sessionId, key]);
 }
-function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot: findBot3, heldCards, hooks }) {
+function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot: findBot3, heldCards, hooks }, fallback) {
   const tool = toolName(call2);
   const done = call2.kind === "tool-result";
   const { text: arg, value: argValue } = toolArgs(call2);
@@ -23773,9 +23752,9 @@ function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSess
     case "show_view":
       return (0, import_react50.createElement)(WidgetCell, { sessionId, callId: call2.callId, args: { text: arg, value: argValue }, done, isError: call2.isError, roster, actions, heldCards });
     case "show_settings":
-      return (0, import_react50.createElement)(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call2.content) : "", isError: call2.isError, roster, actions });
+      return (0, import_react50.createElement)(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call2.content) : "", isError: call2.isError, roster, actions, fallback });
     case "propose_bot_change":
-      return (0, import_react50.createElement)(ProposalCall, { done, content: done ? contentText(call2.content) : "", isError: call2.isError, roster, actions });
+      return (0, import_react50.createElement)(ProposalCall, { done, content: done ? contentText(call2.content) : "", isError: call2.isError, roster, actions, fallback });
     case "generate_image":
       return (0, import_react50.createElement)(ImageCell, { bot: self, callId: call2.callId, prompt: arg("prompt"), size: arg("size"), done, content: done ? contentText(call2.content) : "", isError: call2.isError, onAsk: askHere });
     case "acp_tool":
@@ -23860,14 +23839,16 @@ function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus
         call2.error.reason ?? contentText(call2.content)
       );
     }
-    const card = renderCall(call2, env);
     const name = toolName(call2);
-    const fallback = !hidden && !roster.roomsById[sessionId] && call2.phase !== "preparing" && !orderedDispatch && (!card || card.type === CellEmpty) && !CARDS.has(name) && !toolCards.asks(name) && !stop3;
-    const activity = fallback ? toolActivityOf({ name, arguments: call2.argsRaw ?? call2.call?.argsRaw }) : void 0;
+    const allowFallback = !hidden && !roster.roomsById[sessionId] && call2.phase !== "preparing" && !orderedDispatch && !CARDS.has(name) && !toolCards.asks(name) && !stop3;
+    const activity = allowFallback ? toolActivityOf({ name, arguments: call2.argsRaw ?? call2.call?.argsRaw }) : void 0;
+    const fallback = activity && (0, import_react50.createElement)(ToolActivityRow, activity);
+    const card = renderCall(call2, env, fallback);
+    const content = fallback && (!card || card.type === CellEmpty) ? fallback : card ?? (0, import_react50.createElement)(CellEmpty);
     return (0, import_react50.createElement)(
       import_react50.Fragment,
       { key: call2.callId ?? index },
-      activity ? (0, import_react50.createElement)(ToolActivityRow, activity) : card ?? (0, import_react50.createElement)(CellEmpty),
+      content,
       stop3 ? (0, import_react50.createElement)("div", { className: "bt-event bt-event-error", role: "status", title: stop3.why }, stop3.line) : null
     );
   }));

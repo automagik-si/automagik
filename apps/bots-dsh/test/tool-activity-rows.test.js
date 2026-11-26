@@ -10,11 +10,13 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage, createToolResultMessage, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
-import { Backchannel } from '../../acp-dsh/src/host/backchannel.js'
+import { advertise, Backchannel } from '../../acp-dsh/src/host/backchannel.js'
 import { callerItems } from '../src/host/caller-view.js'
-import { DshChatSource, rowIdOf, rowsOf } from '../src/host/pocket-chat.js'
+import { DshChatSource, PREVIEW_MAX, rowIdOf, rowsOf } from '../src/host/pocket-chat.js'
 import { allowlist, fixture, guest, member } from './caller-fixture.js'
-import { host as pocketGroupHost, watch as watchPocketGroup } from './support/pocket-groups.js'
+import { afterRound } from './relay-rows.js'
+import { host as pocketGroupHost, roomSeed, watch as watchPocketGroup } from './support/pocket-groups.js'
+import { until } from './until.js'
 
 const sharedModule = new URL('../src/shared/tool-activity.js', import.meta.url)
 const activity = await import(sharedModule).catch(error => {
@@ -37,8 +39,10 @@ const react = {
   useSyncExternalStore: (_subscribe, read) => read(),
 }
 const module = { exports: {} }
+const clock = { setTimeout, clearTimeout }
 runInNewContext(syntax.outputFiles[0].text, {
-  module, exports: module.exports, URL, atob,
+  module, exports: module.exports, URL, atob, document: { hidden: false },
+  setTimeout: (...args) => clock.setTimeout(...args), clearTimeout: (...args) => clock.clearTimeout(...args),
   require: name => name === 'react' ? react : {},
 })
 const ui = module.exports
@@ -62,12 +66,16 @@ const event = (seq, type, data, extra) => ({ type, seq, time: seq, data, ...extr
 const call = (seq, callId, name, args = {}, turn = 1) => event(seq, 'tool/call', { turn, step: 0, callId, name, arguments: JSON.stringify(args) })
 const dispatch = (seq, subCallId, name, args = {}, parentCallId = 'program') =>
   event(seq, 'tool/ptc-dispatch-start', { rootCallId: 'program', parentCallId, subCallId, name, arguments: args })
-const receipt = (seq, callId, outcome = 'ran') => event(seq, 'plugin:acp-dsh/bridge-outside-step', { callId, name: 'list_bots', outcome }, { ignorable: true })
+const receipt = (seq, callId, outcome = 'ran') => event(seq, 'plugin:acp-dsh/bridge-outside-step',
+  { callId, name: 'list_bots', outcome, turn: 1, exchangeId: null }, { ignorable: true })
 const turnStart = (seq, turn = 1) => event(seq, 'turn/start', { turn })
 const turnEnd = (seq, turn = 1) => event(seq, 'turn/end', { turn, reason: { kind: 'completed' } })
 const skill = (seq, turn = 1) => event(seq, 'plugin:automagik/skill-activity', { id: 'skill', name: 'mint', turn, step: 0 }, { ignorable: true })
 const text = text => ({ type: 'text', text })
 const user = content => createUserMessage({ source: { kind: 'user' }, content: [text(content)] })
+const personOpener = seq => event(seq, 'user/message', user('A synthetic request.'))
+const result = (seq, turn, toolCallId, output) => event(seq, 'tool/result',
+  { turn, step: 0, message: { toolCallId, content: [text(output)] } })
 const marker = 'SYNTHETIC-HEADER-2111'
 const shellArgs = { command: 'ls -la # Authorization: Bearer ' + marker }
 const readArgs = { file_path: '/tmp/fixture/notes.md' }
@@ -102,7 +110,7 @@ test('AT-2 validates complete operation and target fields before display', () =>
     { label: 'plugin', name: 'github · create_issue' },
     { label: 'tool', name: 'list_bots' },
     { label: 'tool', name: 'shell' },
-    { label: 'plugin', name: 'linear · get_issue' },
+    { label: 'tool', name: 'tool' },
     { label: 'tool', name: 'tool' },
     { label: 'tool', name: 'read' },
     { label: 'tool', name: 'read' },
@@ -142,14 +150,7 @@ test('AT-6 keeps live cards and hidden stop lines while earlier parts fall back 
     .map(({ kind, name }) => [kind, name]), [['tool-activity', 'create_bot']])
 })
 
-test('AT-6 dispatch nodes use their own sequence, interleave Skill rows, and deduplicate by call identity', async t => {
-  const f = fixture(t)
-  await f.start()
-  const events = [
-    turnStart(0), call(1, 'program', 'run_code'), dispatch(2, 'a', 'bash', shellArgs),
-    skill(3), dispatch(4, 'b', 'read', readArgs), dispatch(5, 'a', 'bash'),
-    turnEnd(6), receipt(7, 'bridge'), receipt(8, 'bridge'), receipt(9, 'no', 'refused'),
-  ]
+function projectedActivity(events, roster, sessionId = 'b') {
   const definitions = new Map()
   const ctx = { uiConversation: { events: { register: spec => { definitions.set(spec.kind, spec); return () => {} } } } }
   ui.registerSkillActivity(ctx)
@@ -157,12 +158,14 @@ test('AT-6 dispatch nodes use their own sequence, interleave Skill rows, and ded
   const drawn = []
   for (const definition of definitions.values()) {
     const contexts = new Map()
+    let turn
     for (const event of events) {
+      if (event.type === 'turn/start' || event.type === 'turn/end') turn = event.data.turn
       const match = definition.match[event.type]?.(event)
       if (!match) continue
-      const location = event.seq < 7 ? { kind: 'step', turn: { turn: 1 } } : { kind: 'session' }
+      const location = event.ignorable ? { kind: 'session' } : { kind: 'step', turn: { turn } }
       const record = { event, location }
-      const previous = () => ({ state: { turn: 1 } })
+      const previous = () => ({ state: { turn } })
       const existing = contexts.get(match.id)
       if (existing) existing.state = definition.update(existing, record)
       else if (match.role === 'start') contexts.set(match.id, { key: match.id, id: match.id, start: record, current: new Map(),
@@ -172,37 +175,55 @@ test('AT-6 dispatch nodes use their own sequence, interleave Skill rows, and ded
       const node = definition.buildViewNode?.(context)
       if (node?.visibility !== 'visible') continue
       const Component = node.kind === 'skill-activity' ? ui.SkillActivityCell : ui.ToolActivityCell
-      for (const line of rowText(Component({ ...props(), node }))) drawn.push([node.anchorSeq, line])
+      for (const line of rowText(Component({ ...props(roster), sessionId, node }))) drawn.push([node.anchorSeq, line])
     }
   }
-  assert.deepEqual(drawn.sort((a, b) => a[0] - b[0]), [
-    [2, 'Tool: bash'], [3, 'Skill: mint'], [4, 'Tool: read · notes.md'], [7, 'Tool: list_bots'],
+  return drawn.sort((a, b) => a[0] - b[0])
+}
+
+test('AT-6 dispatch nodes use their own sequence, interleave Skill rows, and deduplicate by call identity', async t => {
+  const f = fixture(t)
+  await f.start()
+  const events = [
+    turnStart(0), personOpener(1), call(2, 'program', 'run_code'), dispatch(3, 'a', 'bash', shellArgs),
+    skill(4), dispatch(5, 'b', 'read', readArgs), dispatch(6, 'a', 'bash'),
+    turnEnd(7), receipt(8, 'bridge'), receipt(9, 'bridge'), receipt(10, 'no', 'refused'),
+  ]
+  assert.deepEqual(projectedActivity(events), [
+    [3, 'Tool: bash'], [4, 'Skill: mint'], [5, 'Tool: read · notes.md'], [8, 'Tool: list_bots'],
   ])
-  const earlier = f.rt.displayItems('b', events, undefined, undefined, true)
+  const earlier = f.rt.displayItems('b', events, undefined, undefined, true).filter(row => row.kind !== 'user')
   assert.deepEqual(earlier.map(({ seq, kind, id }) => [seq, kind, id ?? null]), [
-    [2, 'tool-activity', 'a'], [3, 'skill-activity', null], [4, 'tool-activity', 'b'], [7, 'tool-activity', 'bridge'],
+    [3, 'tool-activity', 'a'], [4, 'skill-activity', null], [5, 'tool-activity', 'b'], [8, 'tool-activity', 'bridge'],
   ])
   const output = pocket(events)
   assert.deepEqual(safePocket(output), ['Tool: run_code', 'Tool: bash', 'Skill: mint', 'Tool: read · notes.md', 'Tool: list_bots'])
-  assert.deepEqual(output.filter(row => [2, 4, 7].some(seq => row.id === rowIdOf('b', seq))).map(row => row.input), ['', '', ''])
+  assert.deepEqual(output.filter(row => [3, 5, 8].some(seq => row.id === rowIdOf('b', seq))).map(row => row.input), ['', '', ''])
   assert.doesNotMatch(JSON.stringify(output.map(({ tool, summary }) => ({ tool, summary }))), new RegExp(marker))
 })
 
-test('AT-1 member and guest pages and live feeds stay private, including earlier parts', async t => {
-  const f = fixture(t)
-  await f.start()
-  const id = await f.open('b', allowlist)
-  f.event(id, 'turn/start', { turn: 1 })
-  f.event(id, 'user/message', { source: { kind: 'user' }, content: [text('A visible request.')] })
-  const stops = []
+async function callerReaders(t, f) {
+  const readers = []
   for (const principal of [member, guest]) {
     const viewer = f.rt.viewerOf(principal)
     const route = f.ctx.get('automagikCallerRoutes').match('/api/omni-ui/feed', 'GET')
     const response = await route(new Request('http://fixture.invalid/api/omni-ui/feed?viewer=' + viewer.id + '.' + viewer.role), principal)
     const reader = response.body.getReader()
     assert.match(new TextDecoder().decode((await reader.read()).value), /^event: hello/)
-    stops.push({ principal, reader })
+    assert.equal(response.status, 200)
+    t.after(() => reader.cancel())
+    readers.push({ principal, reader })
   }
+  return readers
+}
+
+test('AT-1 carried guest and member pages and live feeds stay private, including earlier parts', async t => {
+  const f = fixture(t)
+  await f.start()
+  const id = await f.open('b', allowlist)
+  f.event(id, 'turn/start', { turn: 1 })
+  f.event(id, 'user/message', { source: { kind: 'user' }, content: [text('A visible request.')] })
+  const stops = await callerReaders(t, f)
   const e = f.event(id, 'tool/call', call(2, 'read', 'read', readArgs).data)
   for (const { principal, reader } of stops) {
     let frame
@@ -216,8 +237,6 @@ test('AT-1 member and guest pages and live feeds stay private, including earlier
     await reader.cancel()
     await read
   }
-  assert.deepEqual(f.rt.displayItems(id, [turnStart(1), e], undefined, undefined, true)
-    .map(({ target }) => target), ['notes.md'])
   assert.equal((await f.call('bot-new-part', { botId: 'b' })).ok, true)
   await f.finishSwitch()
   for (const principal of [member, guest]) {
@@ -232,24 +251,26 @@ test('AT-1 member and guest pages and live feeds stay private, including earlier
 test('AT-3 Pocket cold windows, resume and live delivery drop hidden or unshared calls and results', async () => {
   let shared = true
   let hidden = false
-  const calls = [call(1, 'program', 'run_code'), call(2, 'read', 'read', readArgs)]
-  const result = event(3, 'tool/result', { turn: 1, message: { toolCallId: 'read', content: [text('synthetic contents')] } })
-  const sub = dispatch(4, 'child', 'bash', shellArgs)
-  let page = [result, sub]
-  const entry = { botId: 'b', sessionId: 'b', rows: [], controller: new AbortController(), cursor: 6, floorSeq: 7, status: {}, scope: undefined }
+  const calls = [call(2, 'program', 'run_code'), call(3, 'read', 'read', readArgs)]
+  const done = result(4, 1, 'read', 'synthetic contents')
+  const sub = dispatch(5, 'child', 'bash', shellArgs)
+  let page = [done, sub]
+  const entry = { botId: 'b', sessionId: 'b', rows: [], controller: new AbortController(), cursor: 7, floorSeq: 8, status: {}, scope: undefined }
   const source = new DshChatSource({ adapter: { events: async () => ({ records: page.map(event => ({ event })) }) },
     bots: () => [{ id: 'b', sessionId: 'b' }], shown: () => shared, turnHidden: (_id, turn) => hidden && turn === 1 })
   entry.scope = source.rowScope('b')
-  assert.deepEqual(await source.backfill(entry, rowIdOf('b', 6)), [])
-  page = [turnStart(0), ...calls, result, sub]
-  const visible = await source.backfill(entry, rowIdOf('b', 6))
-  assert.deepEqual(visible.filter(row => row.kind === 'tool-result').map(row => [row.call, row.output]), [[rowIdOf('b', 2), 'synthetic contents']])
+  assert.deepEqual(await source.backfill(entry, rowIdOf('b', 7)), [])
+  page = [turnStart(0), personOpener(1), ...calls, done, sub]
+  const visible = await source.backfill(entry, rowIdOf('b', 7))
+  assert.deepEqual(visible.filter(row => row.kind === 'tool-result').map(row => [row.call, row.output]), [[rowIdOf('b', 3), 'synthetic contents']])
   assert.equal(visible.at(-1).input, '')
   hidden = true
-  assert.deepEqual(await source.backfill(entry, rowIdOf('b', 6)), [])
-  assert.deepEqual((await source.snapshotFor(entry, rowIdOf('b', 0))).rows, [])
+  const tools = rows => rows.filter(row => row.kind.startsWith('tool-'))
+  assert.deepEqual(tools(await source.backfill(entry, rowIdOf('b', 7))), [])
+  assert.deepEqual(tools((await source.snapshotFor(entry, rowIdOf('b', 0))).rows), [])
   hidden = false
   entry.cursor = 0
+  for (const item of page.slice(0, 2)) rowsOf(item, entry.scope)
   entry.listeners = new Set()
   const delivered = []
   entry.listeners.add(frame => delivered.push(frame))
@@ -260,7 +281,7 @@ test('AT-3 Pocket cold windows, resume and live delivery drop hidden or unshared
   const liveCall = calls[1]
   const live = async function* () {
     yield { type: 'event', event: liveCall }
-    yield { type: 'event', event: result }
+    yield { type: 'event', event: done }
   }
   await source.pump(entry, live())
   assert.deepEqual(delivered.filter(frame => frame.type === 'rows'), [])
@@ -351,7 +372,7 @@ function fakeAcp(t, session, route, tools = []) {
   }]]))
   t.after(() => { adapter.dispose(); bridge.dispose(); rmSync(scratch, { recursive: true, force: true }) })
   const prompts = () => readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse)
-  return { adapter, bridge, agent, prompts }
+  return { adapter, bridge, agent, prompts, tools: services.tools }
 }
 
 function openTurn(session, turn, prompt) {
@@ -447,9 +468,9 @@ test('AT-5 mirrors on all other ACP routes, the remote route, and a successful b
       assert.deepEqual(safePocket(pocket(session.snapshotEvents(), turn => turn === 1)), [])
     }
   }
-  const remote = call(1, 'remote', 'remote_hermes_tool', { id: 'remote', title: marker, input: shellArgs })
+  const remote = call(2, 'remote', 'remote_hermes_tool', { id: 'remote', title: marker, input: shellArgs })
   observed.push(rowText(draw(remote)))
-  observed.push(safePocket(pocket([turnStart(0), remote])))
+  observed.push(safePocket(pocket([turnStart(0), personOpener(1), remote])))
   assert.deepEqual(observed, [
     ['Tool: read · notes.md'], ['Tool: list_bots'], ['Tool: read · notes.md'],
     ['Tool: read · notes.md'], ['Tool: read · notes.md'], ['Tool: tool'], ['Tool: tool'],
@@ -521,40 +542,55 @@ test('Pocket group watch, resume and backfill serve group messages without membe
   handle.close()
 })
 
-test('fake E2E native and AT-4: recording on versus off preserves wire bytes, ACP prompt, room reads and cursors', { timeout: 25_000 }, async t => {
+test('fake E2E native and AT-4: recording on versus off preserves wire bytes, ACP prompt, room reads, cursors and the delivered report', { timeout: 25_000 }, async t => {
   const deep = deepSeek(t, [actions, [text('Synthetic final reply.')], [text('Synthetic follow-up.')],
     actions, [text('Synthetic final reply.')], [text('Synthetic follow-up.')]])
   const outcomes = []
   for (const recording of [false, true]) {
-    const h = await pocketGroupHost(t)
+    const h = await pocketGroupHost(t, { rooms: { r1: roomSeed('r1', { members: ['b'] }) } })
     if (!recording) h.rt.roomToolActivity = undefined
     h.quote({ who: 'User', text: 'Earlier group line.' })
-    h.rt.ledger.append('group-r1', { event: 'anchor', id: 'relay', from: 1, time: 0 })
-    scopeRoom(h, 'exchange', 'relay')
+    const posted = await h.tool('post_to_group', { group: 'Ops', message: '@Writer Check the synthetic notes.', report_back: true }, 'a')
+    assert.match(posted, /^Posted in "Ops"/)
+    const post = h.agentOf('r1').calls[0]
+    h.emit('r1', 'user/message', post)
+    const relay = await h.tool('group_relay', {}, 'r1', { callId: 'relay', signal: t.signal })
+    const { from, anchor } = JSON.parse(relay)
+    const writer = h.agentOf('gb')
+    await until(() => writer.inbox.nextTurn.length > 0, { label: 'production relay reached Writer' })
+    const message = writer.inbox.nextTurn.shift()
     const session = Session.create('gb')
     openTurn(session, 1, user('Use two synthetic tools.'))
-    startRoomTurn(h, 1, roomSource('exchange'))
+    h.emit('gb', 'turn/start', { turn: 1 })
+    h.emit('gb', 'user/message', message)
     const onCall = event => h.emit('gb', event.type, event.data)
     const outcome = await playTurn(t, session, deep.adapter, provider, model, 1, args => {
       assert.ok(fakeOutputs.has(args.name))
       return fakeOutputs.get(args.name)
     }, onCall)
+    h.emit('gb', 'assistant/message', { turn: 1, message: { content: [text(outcome)] } })
     h.emit('gb', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await afterRound(h.rt, 'r1', relay)
+    const recipient = h.agentOf('a')
+    await until(() => recipient.calls.some(message => message.source?.role === 'report'), { label: 'production report reached Main' })
+    const reportMessage = recipient.calls.find(message => message.source?.role === 'report')
+    const report = reportMessage.content
+    assert.equal(reportMessage.source.roomId, 'r1')
+    assert.match(report.map(({ text }) => text).join('\n'), /Writer: Synthetic final reply\./)
     const events = session.snapshotEvents()
     const shown = {
       desktop: callEvents(session).flatMap(event => rowText(draw(event))),
       pocket: safePocket(pocket(events)),
-      group: onlyActivity(h.rt.groupRowsView('r1', 1, undefined, 'relay').rows).map(({ name }) => name),
+      group: onlyActivity(h.rt.groupRowsView('r1', from, undefined, anchor).rows).map(({ name }) => name),
     }
     assert.equal(session.snapshotEvents().length, events.length)
     const reads = (await h.rt.groupLinesAfter('r1', 0)).map(({ who, seq, text }) => ({ who, seq, text }))
-    const report = h.rt.groupRows('r1', 1, undefined, 'relay').map(({ kind, text }) => [kind, text])
     const cursors = { seen: structuredClone(h.room().seen), seq: h.room().seq }
     const nextPrompt = user('Read back from cursor ' + JSON.stringify(cursors) + ': ' + JSON.stringify(reads))
     openTurn(session, 2, nextPrompt)
     const follow = await playTurn(t, session, deep.adapter, provider, model, 2, () => assert.fail('unexpected fake tool'))
     const acp = fakeAcp(t, session, 'acp-claude')
-    openTurn(session, 3, user('Compare this group report: ' + JSON.stringify(report)))
+    openTurn(session, 3, reportMessage)
     await playTurn(t, session, acp.adapter, 'acp-claude', 'default', 3, mirror(t, acp))
     outcomes.push({ shown, reads, report, cursors, acp: acp.prompts(),
       wire: deep.wire.slice(-3), count: session.snapshotEvents().length, outcome, follow })
@@ -568,4 +604,283 @@ test('fake E2E native and AT-4: recording on versus off preserves wire bytes, AC
   assert.deepEqual(on, {
     desktop: ['Tool: bash', 'Tool: read · notes.md'], pocket: ['Tool: bash', 'Tool: read · notes.md'], group: ['bash', 'read'],
   })
+})
+
+test('round 2 AT-1: a real ACP bridge announcement is silent for both caller feeds', async t => {
+  const f = fixture(t)
+  await f.start()
+  const id = await f.open('b', allowlist)
+  const session = Session.create(id)
+  openTurn(session, 1, user('A visible request.'))
+  for (const event of session.snapshotEvents()) f.event(id, event.type, event.data)
+  const readers = await callerReaders(t, f)
+  const nextFrame = readers.map(({ reader, principal }) => {
+    const observation = { role: f.rt.viewerOf(principal).role }
+    observation.read = reader.read().then(result => {
+      observation.frame = new TextDecoder().decode(result.value)
+    })
+    return observation
+  })
+  const before = session.snapshotEvents().length
+  const name = 'read'
+  const raw = JSON.stringify(readArgs)
+  advertise(session, { turn: 1, step: 0 }, { kind: 'model', provider: 'acp-fixture', model: 'default' },
+    { id: 'bridge-read', name, raw }, () => {})
+  session.append('tool/call', { turn: 1, step: 0, callId: 'bridge-read', name, arguments: raw })
+  const bridgeEvents = session.snapshotEvents().slice(before)
+  assert.deepEqual(bridgeEvents.map(({ type }) => type), ['assistant/message', 'tool/call'])
+  for (const event of bridgeEvents) f.event(id, event.type, event.data)
+  await next()
+  const whileToolRuns = nextFrame.map(({ role, frame }) => [role, frame])
+  assert.deepEqual(f.rt.displayItems(id, bridgeEvents, session, 1, true).map(({ target }) => target), ['notes.md'])
+  f.event(id, 'assistant/message', { turn: 1, message: { content: [text('Visible reply.')] } })
+  await Promise.all(nextFrame.map(({ read }) => read))
+  for (const { principal } of readers) {
+    const page = await f.rt.callerChat(principal, 'b')
+    assert.match(JSON.stringify(page), /Visible reply/)
+    assert.doesNotMatch(JSON.stringify(page), /notes\.md|tool-activity/)
+  }
+  assert.deepEqual(nextFrame.map(({ frame }) => frame), Array(2).fill('event: changed\ndata: {"botId":"b"}\n\n'))
+  assert.deepEqual(whileToolRuns, [['member', undefined], ['guest', undefined]])
+})
+
+test('round 2 AT-2: activity uses the actual operation envelope on all three surfaces', async t => {
+  const h = await pocketGroupHost(t)
+  h.rt.ledger.append('group-r1', { event: 'anchor', id: 'relay', from: 1, time: 0 })
+  scopeRoom(h, 'origin', 'relay')
+  startRoomTurn(h, 1, roomSource('origin'))
+  const genuine = call(2, 'plugin-call', 'mcp__journal__list_notes')
+  const ordinary = call(3, 'shell-call', 'acp_tool', {
+    kind: 'execute', title: 'Run command', input: { command: 'echo mint', server: 'journal', tool: 'list_notes' },
+  })
+  for (const item of [genuine, ordinary]) h.emit('gb', item.type, item.data)
+  const observed = {
+    desktop: [genuine, ordinary].flatMap(item => rowText(draw(item))),
+    pocket: safePocket(pocket([turnStart(0), personOpener(1), genuine, ordinary])),
+    room: onlyActivity(h.rt.ledger.records('group-r1')).map(({ label, name }) => [label, name]),
+  }
+  assert.deepEqual(observed, {
+    desktop: ['Plugin: journal · list_notes', 'Tool: shell'],
+    pocket: ['Plugin: journal · list_notes', 'Tool: shell'],
+    room: [['plugin', 'journal · list_notes'], ['tool', 'shell']],
+  })
+})
+
+const privateSource = exchangeId => ({ kind: 'bot', role: 'request', noReply: true, exchangeId })
+const privateOpener = (seq, exchangeId) => event(seq, 'user/message',
+  createUserMessage({ source: privateSource(exchangeId), content: [text('A synthetic private request.')] }))
+const toolRows = rows => rows.filter(row => row.kind === 'tool-call' || row.kind === 'tool-result')
+
+test('round 2 AT-3: Pocket cold history and resume require evidence after hidden marker eviction', async t => {
+  const f = fixture(t, { seed: team => { team.exchangeTurns.b = Array.from({ length: 400 }, (_, i) => i + 1) } })
+  await f.start()
+  f.event('b', 'turn/start', { turn: 401 })
+  f.event('b', 'user/message', privateOpener(0, 'new-private').data)
+  assert.equal(f.rt.state.exchangeTurns.b.length, 400)
+  assert.equal(f.rt.state.exchangeTurns.b.includes(1), false)
+  assert.equal(f.rt.state.exchangeTurns.b.includes(401), true)
+  const events = [
+    turnStart(1), privateOpener(2, 'old-private'), call(3, 'private-tool', 'read', { path: '/tmp/old-note.txt' }),
+    result(4, 1, 'private-tool', 'Old private note.'), turnEnd(5),
+    turnStart(6, 402), personOpener(7), call(8, 'allowed', 'read', readArgs, 402),
+    result(9, 402, 'allowed', 'Visible note.'), turnEnd(10, 402),
+  ]
+  const source = new DshChatSource({ adapter: { events: async () => ({ records: events.map(event => ({ event })) }) },
+    bots: () => [{ id: 'b', sessionId: 'b' }], turnHidden: (id, turn) => f.rt.state.exchangeTurns[id]?.includes(turn) })
+  const entry = { botId: 'b', sessionId: 'b', cursor: 20, floorSeq: 11, rows: [], controller: new AbortController() }
+  const history = toolRows(await source.backfill(entry, rowIdOf('b', 11)))
+  const resumed = await source.snapshotFor(entry, rowIdOf('b', 0))
+  assert.equal(resumed.reset, false)
+  const view = rows => toolRows(rows).map(row => [row.turn, row.summary ?? row.output])
+  const expected = [[402, 'read · notes.md'], [402, 'Visible note.']]
+  assert.deepEqual({ history: view(history), resume: view(resumed.rows) }, { history: expected, resume: expected })
+})
+
+function beginReceipt(t, fake, id) {
+  const result = Promise.withResolvers()
+  t.mock.method(fake.tools, 'execute', () => result.promise)
+  const run = fake.bridge.selfOpenedCall({ agent: fake.agent, controllers: new Set() }, {
+    name: 'list_bots', raw: '{}', callId: id, authority: t.signal, ended: () => false,
+  })
+  return async () => {
+    result.resolve({ results: [{ result: { content: [text('Synthetic receipt.')], isError: false } }] })
+    assert.equal((await run).isError, false)
+    return fake.agent.session.snapshotEvents().at(-1)
+  }
+}
+
+function endBeforeReceipt(session, turn) {
+  session.append('step/end', { turn, step: 0 })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
+test('round 2 AT-3/5/7: delayed receipts keep their own visible turn or exact room relay', async t => {
+  const f = fixture(t, { seed: team => { team.exchangeTurns.b = [1, 3] } })
+  await f.start()
+  const session = Session.create('b')
+  const fake = fakeAcp(t, session, 'acp-fixture')
+  openTurn(session, 1, privateOpener(0, 'private-origin').data)
+  endBeforeReceipt(session, 1)
+  const privateReceipt = beginReceipt(t, fake, 'private-receipt')
+  openTurn(session, 2, user('Visible request.'))
+  await privateReceipt()
+  endBeforeReceipt(session, 2)
+  const publicReceipt = beginReceipt(t, fake, 'visible-receipt')
+  openTurn(session, 3, privateOpener(0, 'later-private').data)
+  const visible = await publicReceipt()
+  const events = session.snapshotEvents()
+
+  const h = await pocketGroupHost(t)
+  for (const [exchange, anchor] of [['first-exchange', 'first-relay'], ['next-exchange', 'next-relay']]) {
+    h.rt.ledger.append('group-r1', { event: 'anchor', id: anchor, from: 1, time: 0 })
+    scopeRoom(h, exchange, anchor)
+  }
+  const room = Session.create('gb')
+  const roomFake = fakeAcp(t, room, 'acp-fixture')
+  let cursor = 0
+  const send = entry => {
+    for (const listener of h.ctx.listeners.get('session/event') ?? []) {
+      if (listener.length >= 2) listener(room, entry)
+    }
+  }
+  const flush = () => {
+    const events = room.snapshotEvents()
+    events.slice(cursor).forEach(send)
+    cursor = events.length
+  }
+  const startRoom = (turn, source) => {
+    openTurn(room, turn, createUserMessage({ source, content: [text('Synthetic room request.')] }))
+    flush()
+  }
+  startRoom(1, roomSource('first-exchange'))
+  endBeforeReceipt(room, 1)
+  const ownRelay = beginReceipt(t, roomFake, 'first-receipt')
+  startRoom(2, privateSource('private-room-origin'))
+  endBeforeReceipt(room, 2)
+  const outsideRelay = beginReceipt(t, roomFake, 'private-room-receipt')
+  startRoom(3, roomSource('next-exchange'))
+  const roomVisible = await ownRelay()
+  const roomHidden = await outsideRelay()
+  flush()
+  send(roomVisible)
+  send(roomHidden)
+  send(event(roomHidden.seq + 1, roomHidden.type, { callId: 'uncertain', name: 'list_bots', outcome: 'ran' }, { ignorable: true }))
+  const unknown = event(visible.seq + 1, visible.type, { callId: 'uncertain', name: 'list_bots', outcome: 'ran' }, { ignorable: true })
+  const ownEvents = [...events, turnStart(visible.seq + 1, 4), personOpener(visible.seq + 2), { ...unknown, seq: visible.seq + 3 }]
+  const ownership = {
+    desktop: projectedActivity(ownEvents, { exchangeTurns: { b: [1, 3] } }),
+    history: onlyActivity(f.rt.displayItems('b', ownEvents, undefined, undefined, true)).map(row => [row.seq, row.turn, row.id]),
+    pocket: toolRows(pocket(ownEvents, turn => turn === 1 || turn === 3)).map(row => [row.id, row.turn]),
+    room: onlyActivity(h.rt.ledger.records('group-r1')).map(row => [row.id, row.exchangeId, row.anchor]),
+  }
+  assert.deepEqual(ownership, {
+    desktop: [[visible.seq, 'Tool: list_bots']],
+    history: [[visible.seq, 2, 'visible-receipt']],
+    pocket: [[rowIdOf('b', visible.seq), 2]],
+    room: [['first-receipt', 'first-exchange', 'first-relay']],
+  })
+  assert.deepEqual([visible.data.turn, visible.data.exchangeId], [2, null])
+  assert.deepEqual([roomVisible.data.turn, roomVisible.data.exchangeId], [1, 'first-exchange'])
+  assert.deepEqual([roomHidden.data.turn, roomHidden.data.exchangeId], [2, 'private-room-origin'])
+})
+
+test('round 2 AT-7: live relay polling drops activity when its own entry disappears', async t => {
+  const reply = (id, name) => ({ kind: 'tool-activity', id, label: 'tool', name, botId: 'b' })
+  const own = { callId: 'mine', replies: [reply('own', 'read')], speaking: [] }
+  const other = { callId: 'other', replies: [reply('theirs', 'write')], speaking: [] }
+  let data = [other, own]
+  const cell = draw(call(1, 'mine', 'group_relay'), { roomsById: { b: { id: 'room' } } },
+    { actions: { roomProgress: async id => { assert.equal(id, 'b'); return data } } })
+  const relay = cell.props.children[0][0].props.children[0]
+  assert.equal(relay.type.name, 'GroupReplies')
+  const states = []
+  let nextPoll
+  let cleanup
+  t.mock.method(clock, 'setTimeout', fn => { nextPoll = fn })
+  t.mock.method(clock, 'clearTimeout', () => { nextPoll = undefined })
+  t.after(() => cleanup?.())
+  const render = initial => {
+    let slot = 0
+    const { useState, useEffect } = react
+    react.useState = value => {
+      const index = slot++
+      if (initial) states[index] = typeof value === 'function' ? value() : value
+      return [states[index], updated => { states[index] = updated }]
+    }
+    react.useEffect = effect => { if (initial) cleanup ??= effect() }
+    try { return relay.type(relay.props) } finally { Object.assign(react, { useState, useEffect }) }
+  }
+  render(true)
+  await next()
+  assert.deepEqual(rowText(render(false)), ['Tool: read'])
+  data = [other]
+  assert.equal(typeof nextPoll, 'function')
+  await nextPoll()
+  assert.deepEqual(rowText(render(false)), [])
+})
+
+test('round 2 AT-6: final output preserves a rendered card and a stop and fills an empty card', () => {
+  const root = item => ({ ...toRoot(item), phase: undefined, kind: 'tool-result', content: [text(item.result)] })
+  const settings = call(1, 'settings', 'show_settings', { page: 'bots' })
+  const proposal = call(2, 'proposal', 'propose_bot_change')
+  const stop = call(3, 'stop', 'show_settings', { page: 'bots' })
+  const calls = [root({ ...settings, result: 'Showing Settings for Bots.' }),
+    root({ ...proposal, result: 'No changes proposed.' }), root({ ...stop, result: 'Cancelled.' })]
+  const rendered = calls.map(root => ui.ToolCell({
+    ...props(), node: { key: root.callId, data: { root } },
+    useWork: pick => pick({ stops: [{ why: 'guard', tool: 'show_settings', calls: [{ sessionId: 'b', callId: 'stop' }] }] }),
+  }))
+  assert.equal(view(rendered[0]).filter(node => node.props?.className === 'bt-setcard').length, 1)
+  assert.deepEqual(rowText(rendered[0]), [])
+  assert.equal(view(rendered[2]).filter(node => node.props?.role === 'status').length, 1)
+  assert.deepEqual(rowText(rendered[2]), [])
+  assert.deepEqual(rowText(rendered[1]), ['Tool: propose_bot_change'])
+})
+
+test('round 2 AT-3: real Pocket approval requests retain a bounded preview for the visible invocation', async () => {
+  const adapter = {
+    prompt: () => assert.fail('an approval must never prompt the agent'),
+    cancel: () => assert.fail('an approval must never cancel the agent'),
+  }
+  const source = new DshChatSource({ adapter, bots: () => [], writable: true, turnHidden: (_id, turn) => turn === 2 })
+  const observed = []
+  const entry = { botId: 'b', sessionId: 'b', cursor: 0, rows: [], scope: source.rowScope('b'),
+    listeners: new Set([frame => { if (frame.type === 'approval' && frame.row.open) observed.push(frame.row.input) }]) }
+  source.entries.set('b', entry)
+  const follow = (...events) => {
+    for (const event of events) {
+      entry.cursor = event.seq
+      entry.rows.push(...rowsOf(event, entry.scope))
+    }
+  }
+  const input = call(2, 'same-call', 'bash', { command: 'echo ' + 'mint '.repeat(PREVIEW_MAX) })
+  follow(turnStart(0), personOpener(1), input)
+  const request = () => source.raceApproval({
+    agent: { session: { id: 'b' } }, toolName: 'bash', callId: 'same-call', reason: 'Synthetic approval',
+  }, () => ({ outcome: 'rejected' }))
+  await request()
+  follow(turnEnd(3), turnStart(4, 2), privateOpener(5, 'hidden-approval'),
+    call(6, 'same-call', 'bash', { command: 'echo private' }, 2))
+  await request()
+  assert.equal(observed.length, 2)
+  assert.ok(observed[0].startsWith('{"command":"echo mint '))
+  assert.ok(observed[0].length <= PREVIEW_MAX + 1 && observed[0].length < input.data.arguments.length)
+  assert.equal(observed[1], '')
+})
+
+test('round 2 AT-3/5: Pocket deduplicates replays within each invocation of a reused ID', () => {
+  const events = [
+    turnStart(0), personOpener(1),
+    call(2, 'reused', 'read', readArgs), call(3, 'reused', 'read', readArgs),
+    result(4, 1, 'reused', 'First note.'), result(5, 1, 'reused', 'First note.'), turnEnd(6),
+    turnStart(7, 2), personOpener(8),
+    call(9, 'reused', 'read', { path: '/tmp/other.md' }, 2), call(10, 'reused', 'read', {}, 2),
+    result(11, 2, 'reused', 'Second note.'), result(12, 2, 'reused', 'Second note.'), turnEnd(13, 2),
+  ]
+  assert.deepEqual(toolRows(pocket(events)).map(row => [row.turn, row.call ?? row.id, row.summary ?? row.output]), [
+    [1, rowIdOf('b', 2), 'read · notes.md'],
+    [1, rowIdOf('b', 2), 'First note.'],
+    [2, rowIdOf('b', 9), 'read · other.md'],
+    [2, rowIdOf('b', 9), 'Second note.'],
+  ])
 })

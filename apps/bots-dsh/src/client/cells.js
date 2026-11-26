@@ -24,7 +24,7 @@ import { turnReasoning, thinkingStep, opensReply, stepActivity } from './turn-re
 import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.js'
 import { SKILL_NOTICE } from '../host/skill-message.js'
 import { SKILL_ACTIVITY, SKILL_ACTIVITY_RECORD, skillActivityOf } from '../shared/skill-activity.js'
-import { BRIDGE_ACTIVITY_RECORD, TOOL_ACTIVITY, toolActivityOf, toolEventOf } from '../shared/tool-activity.js'
+import { BRIDGE_ACTIVITY_RECORD, TOOL_ACTIVITY, bridgeOriginOf, toolActivityOf, toolEventOf } from '../shared/tool-activity.js'
 import { FOLD_AT, FOLD_HUGE, NEVER, stripLongNote, useFold } from './fold.js'
 import { noHover, useViewport, viewBottom } from './motion.js'
 import { heldCardKey } from './sources.js'
@@ -355,18 +355,9 @@ export function ToolActivityRow({ label, name, target, bot }) {
   return h(ActivityRows, { lines: [target ? line + ' · `' + target + '`' : line], bot })
 }
 
-const TOOL_ACTIVITY_BOUNDARY = 'tool-activity-boundary'
-
 export function registerToolActivity(ctx) {
   const register = definition => ctx.uiConversation?.events?.register?.(definition)
-  const boundary = event => ({ id: String(event.seq), role: 'start' })
-  const offBoundary = register({
-    kind: TOOL_ACTIVITY_BOUNDARY,
-    match: { 'turn/start': boundary, 'turn/end': boundary },
-    start: (_context, { event }) => ({ turn: event.data.turn }),
-    update: context => context.state,
-  })
-  const callKey = id => JSON.stringify(['call', id])
+  const callKey = (turn, id) => JSON.stringify(['call', turn, id])
   const toCall = ({ event, location }, turn) => {
     const { callId, subCallId, parentCallId, name, arguments: args } = event.data
     return { turn, seq: event.seq, location, root: { phase: 'start', callId: subCallId ?? callId, parentCallId,
@@ -379,21 +370,24 @@ export function registerToolActivity(ctx) {
     kind: TOOL_ACTIVITY,
     target: 'chat',
     match: {
-      [BRIDGE_ACTIVITY_RECORD]: event => toolEventOf(event) ? { id: callKey(event.data.callId), role: 'start' } : null,
-      'tool/call': event => typeof event.data?.callId === 'string' ? { id: callKey(event.data.callId), role: 'start' } : null,
+      [BRIDGE_ACTIVITY_RECORD]: event => bridgeOriginOf(event)?.exchangeId === null && toolEventOf(event)
+        ? { id: callKey(event.data.turn, event.data.callId), role: 'start' } : null,
+      'tool/call': event => typeof event.data?.callId === 'string'
+        ? { id: callKey(event.data.turn, event.data.callId), role: 'start' } : null,
       'tool/result': event => {
         const id = event.data?.message?.toolCallId ?? event.data?.message?.source?.callId
-        return typeof id === 'string' ? { id: callKey(id), role: 'update' } : null
+        return typeof id === 'string' ? { id: callKey(event.data.turn, id), role: 'update' } : null
       },
       'tool/ptc-dispatch-start': dispatch,
       'tool/ptc-dispatch': dispatch,
     },
-    start: (_context, match, reader) => {
+    start: (_context, match) => {
       const { event, location } = match
       const turn = event.data?.turn ?? location.turn?.turn
       if (event.type === BRIDGE_ACTIVITY_RECORD) {
-        return { turn: turn ?? reader.previous(TOOL_ACTIVITY_BOUNDARY)?.state.turn,
-          seq: event.seq, location, activity: toolEventOf(event) }
+        // A late receipt can land outside its own turn. Keep the event anchor without
+        // inheriting the turn tree at the position where the receipt was written.
+        return { turn, seq: event.seq, location: { kind: 'session' }, activity: toolEventOf(event) }
       }
       return toCall(match, turn)
     },
@@ -412,10 +406,10 @@ export function registerToolActivity(ctx) {
       const visible = Number.isSafeInteger(state.turn) && (state.root || state.activity)
       if (!visible && !current.get('chat')) return null
       return { key, id, kind: TOOL_ACTIVITY, target: 'chat', anchorSeq: state.seq,
-        location: state.location, groupTree: 'turn', visibility: visible ? 'visible' : 'hidden', data: state }
+        location: state.location, ...(state.root && { groupTree: 'turn' }), visibility: visible ? 'visible' : 'hidden', data: state }
     },
   })
-  return () => { offRows?.(); offBoundary?.() }
+  return () => offRows?.()
 }
 
 export function ToolActivityCell({ node, sessionId, useRoster, ...props }) {
@@ -1250,15 +1244,16 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
     if (done) return undefined
     let stop = false
     let timer
-    let seen = ''
+    let seen
     const tick = async () => {
       const result = await actions.roomProgress(sessionId)
       if (stop) return
       const own = result?.find(item => item.callId === callId)
       const entry = own ?? result?.[0]
-      const replies = Array.isArray(entry?.replies) ? entry.replies.filter(reply => own !== undefined || reply?.kind !== SKILL_ACTIVITY) : []
+      const replies = Array.isArray(entry?.replies) ? entry.replies.filter(reply => own !== undefined ||
+        (reply?.kind !== SKILL_ACTIVITY && reply?.kind !== TOOL_ACTIVITY)) : []
       const key = entry ? JSON.stringify([replies, entry.speaking]) : ''
-      if (entry && key !== seen) { seen = key; setLive({ replies, speaking: [entry.speaking ?? []].flat() }) }
+      if (key !== seen) { seen = key; setLive({ replies, speaking: [entry?.speaking ?? []].flat() }) }
       timer = setTimeout(tick, document.hidden ? 5000 : 1000)
     }
     void tick()
@@ -1381,7 +1376,7 @@ function useShownCards(actions, sessionId, callIds) {
   }, [sessionId, key])
 }
 
-function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks }) {
+function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks }, fallback) {
   const tool = toolName(call)
   const done = call.kind === 'tool-result'
   const { text: arg, value: argValue } = toolArgs(call)
@@ -1482,9 +1477,9 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
     case 'show_view':
       return h(WidgetCell, { sessionId, callId: call.callId, args: { text: arg, value: argValue }, done, isError: call.isError, roster, actions, heldCards })
     case 'show_settings':
-      return h(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions })
+      return h(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions, fallback })
     case 'propose_bot_change':
-      return h(ProposalCall, { done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions })
+      return h(ProposalCall, { done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions, fallback })
     case 'generate_image':
       // The chat's own Bot paints (image-cell.js painterOf); a group chat has none, so the mark does.
       return h(ImageCell, { bot: self, callId: call.callId, prompt: arg('prompt'), size: arg('size'), done, content: done ? contentText(call.content) : '', isError: call.isError, onAsk: askHere })
@@ -1575,13 +1570,14 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
       return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status' },
         call.error.reason ?? contentText(call.content))
     }
-    const card = renderCall(call, env)
     const name = toolName(call)
-    const fallback = !hidden && !roster.roomsById[sessionId] && call.phase !== 'preparing' &&
-      !orderedDispatch && (!card || card.type === CellEmpty) &&
-      !CARDS.has(name) && !toolCards.asks(name) && !stop
-    const activity = fallback ? toolActivityOf({ name, arguments: call.argsRaw ?? call.call?.argsRaw }) : undefined
-    return h(Fragment, { key: call.callId ?? index }, activity ? h(ToolActivityRow, activity) : card ?? h(CellEmpty),
+    const allowFallback = !hidden && !roster.roomsById[sessionId] && call.phase !== 'preparing' &&
+      !orderedDispatch && !CARDS.has(name) && !toolCards.asks(name) && !stop
+    const activity = allowFallback ? toolActivityOf({ name, arguments: call.argsRaw ?? call.call?.argsRaw }) : undefined
+    const fallback = activity && h(ToolActivityRow, activity)
+    const card = renderCall(call, env, fallback)
+    const content = fallback && (!card || card.type === CellEmpty) ? fallback : card ?? h(CellEmpty)
+    return h(Fragment, { key: call.callId ?? index }, content,
       stop ? h('div', { className: 'bt-event bt-event-error', role: 'status', title: stop.why }, stop.line) : null)
   }))
 }

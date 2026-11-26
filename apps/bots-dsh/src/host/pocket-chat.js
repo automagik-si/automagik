@@ -40,7 +40,7 @@
 //   and one fresh home registry snapshot.
 import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
 import { SKILL_ACTIVITY_RECORD, skillActivityOf } from '../shared/skill-activity.js'
-import { BRIDGE_ACTIVITY_RECORD, isSkillTool, toolEventOf } from '../shared/tool-activity.js'
+import { BRIDGE_ACTIVITY_RECORD, bridgeOriginOf, isSkillTool, toolEventOf } from '../shared/tool-activity.js'
 import { randomUUID } from 'node:crypto'
 import { isBotId } from '../shared/registry.js'
 import { guardGroupText, guardOffNoticeOf } from '../shared/guard-groups.js'
@@ -49,6 +49,8 @@ import { ATTACH_REQUEST_PREFIX, THUMBNAILS, attachmentCode, effectiveAttachments
 import { startPocketSocket } from './pocket-socket.js'
 import { pocketSettingsOf } from './pocket-settings.js'
 import { homeRegistryPathOf, shownReader } from './shown.js'
+import { SOURCE_KIND } from './constants.js'
+import { opensTurn } from './turns.js'
 
 /** The Session Controller methods this source needs (DSH 0.2.2); all of them, or none is used. */
 export const SESSION_METHODS = Object.freeze(['follow', 'events', 'state', 'observeState'])
@@ -196,10 +198,18 @@ const legacyRows = rows => rows.filter(legacyVisible).map(row => {
   return legacy
 })
 const rowsFor = (rows, attachments) => attachments ? rows : legacyRows(rows)
+const callKey = (turn, id) => JSON.stringify([turn, id])
+
+function visibleOpener(source) {
+  if (source.kind !== SOURCE_KIND) return source.handoff !== true
+  if (source.role === 'request') return source.audience === 'user'
+  if (source.role === 'handoff') return source.resume === true
+  return ['continue', 'reply', 'report', 'kickoff'].includes(source.role)
+}
 
 /**
  * The Pocket rows one committed Session event makes (Pocket Link chat/types.js row kinds).
- * `scope` carries what the fold needs across events: the open turn and the tool-call rows by call id.
+ * `scope` carries the open turn, observed turn openers, and calls by turn and call id.
  * @param {{ type: string, seq: number, time?: number, data?: any }} event
  * Track the call's turn separately from the default turn number used by text and status.
  */
@@ -213,18 +223,27 @@ export function rowsOf(event, scope) {
       ? [] : [{ ...base(), turn: activity.turn ?? 0, kind: 'tool-call', tool: 'Skill', summary: activity.name, input: '', output: '' }]
   }
   const explicitTurn = Number.isSafeInteger(data.turn) && data.turn >= 0 ? data.turn : undefined
-  if (explicitTurn !== undefined) scope.turn = explicitTurn
-  const hidden = turn => !Number.isSafeInteger(turn) || scope.hidden?.(turn)
+  const visible = turn => Number.isSafeInteger(turn) && scope.visibleTurns?.get(turn) === true && !scope.hidden?.(turn)
   const callRow = (activity, turn, input = '') => [{
     ...base(), turn, kind: 'tool-call', tool: activity.label === 'plugin' ? 'Plugin' : 'Tool',
     summary: activity.target ? activity.name + ' · ' + activity.target : activity.name, input,
   }]
   switch (event.type) {
     case 'turn/start':
+      scope.startedTurn = explicitTurn
+      scope.openTurn = explicitTurn
+      if (explicitTurn !== undefined) scope.turn = explicitTurn
+      return []
     case 'step/start':
-      scope.openTurn = scope.lastTurn = explicitTurn
+      scope.openTurn = explicitTurn
+      if (explicitTurn !== undefined) scope.turn = explicitTurn
       return []
     case 'user/message': {
+      const turn = scope.openTurn
+      if (Number.isSafeInteger(turn) && scope.startedTurn === turn && opensTurn(data)) {
+        const turns = scope.visibleTurns ??= new Map()
+        if (!turns.has(turn)) turns.set(turn, visibleOpener(data.source))
+      }
       if (data.source?.kind === SKILL_NOTICE) {
         return [{ ...base(), kind: 'status', state: 'notice', msg: cut(textOf(data.content), PREVIEW_MAX) }]
       }
@@ -238,6 +257,7 @@ export function rowsOf(event, scope) {
         : []
     }
     case 'assistant/message': {
+      if (explicitTurn !== undefined) scope.turn = explicitTurn
       const rows = []
       const text = textOf(data.message?.content)
       if (text.trim()) rows.push({ ...base(), kind: 'text', role: 'assistant', text: cut(text, TEXT_MAX), ...(data.interrupted === true ? { interrupted: true } : {}) })
@@ -246,46 +266,54 @@ export function rowsOf(event, scope) {
       return rows
     }
     case 'turn/end': {
+      if (explicitTurn !== undefined) scope.turn = explicitTurn
       const msg = scope.stopOf?.(data.turn ?? scope.turn)
-      scope.openTurn = undefined
-      scope.lastTurn = explicitTurn
+      scope.openTurn = scope.startedTurn = undefined
       return msg ? [{ ...base('stop'), kind: 'status', state: 'error', msg: cut(msg, PREVIEW_MAX) }] : []
     }
     case 'tool/call': {
       const turn = explicitTurn ?? scope.openTurn
-      if (typeof data.callId !== 'string' || data.callId === '' || scope.calls.has(data.callId)) return []
+      if (!visible(turn) || typeof data.callId !== 'string' || data.callId === '') return []
+      const key = callKey(turn, data.callId)
+      if (scope.calls.has(key)) return []
       const activity = toolEventOf(event)
       // The existing program row still opens its arguments. Each new dispatch has its own label.
       const program = data.name === 'run_code' || data.name === 'mcp__dsh__run_code'
       const drillDown = activity !== undefined || program
-      scope.calls.set(data.callId, { id: base().id, turn, drillDown })
-      if (hidden(turn) || !drillDown) return []
+      scope.calls.set(key, { id: base().id, drillDown })
+      if (!drillDown) return []
       return callRow(activity ?? { name: 'run_code' }, turn, cut(typeof data.arguments === 'string' ? data.arguments : '', PREVIEW_MAX))
     }
     case 'tool/ptc-dispatch-start': {
-      const parent = scope.calls.get(data.parentCallId)
-      const root = scope.calls.get(data.rootCallId)
-      const turn = root?.turn
-      if (hidden(turn) || parent?.turn !== turn || turn !== (explicitTurn ?? scope.openTurn) ||
-        typeof data.subCallId !== 'string' || scope.calls.has(data.subCallId)) return []
-      scope.calls.set(data.subCallId, { turn })
+      const turn = explicitTurn ?? scope.openTurn
+      if (!visible(turn) || !scope.calls.has(callKey(turn, data.parentCallId)) ||
+        !scope.calls.has(callKey(turn, data.rootCallId)) || typeof data.subCallId !== 'string') return []
+      const key = callKey(turn, data.subCallId)
+      if (scope.calls.has(key)) return []
+      scope.calls.set(key, {})
       const activity = toolEventOf(event)
       return activity ? callRow(activity, turn) : []
     }
     case BRIDGE_ACTIVITY_RECORD: {
       const activity = toolEventOf(event)
-      const turn = scope.openTurn ?? scope.lastTurn
-      if (!activity || hidden(turn) || scope.calls.has(activity.id)) return []
-      scope.calls.set(activity.id, { turn })
+      const origin = bridgeOriginOf(event)
+      const turn = origin?.exchangeId === null ? origin.turn : undefined
+      if (!activity || !visible(turn)) return []
+      const key = callKey(turn, activity.id)
+      if (scope.calls.has(key)) return []
+      scope.calls.set(key, {})
       return callRow(activity, turn)
     }
     case 'tool/result': {
       const message = data.message ?? {}
-      const call = scope.calls.get(message.toolCallId)
-      if (!call?.drillDown || hidden(call.turn) || (explicitTurn !== undefined && explicitTurn !== call.turn) ||
+      const turn = explicitTurn
+      if (!visible(turn)) return []
+      const call = scope.calls.get(callKey(turn, message.toolCallId))
+      if (!call?.drillDown || call.result ||
         isSkillTool(message.source?.toolName) || (Array.isArray(message.content) &&
           message.content.some(part => part?.automagikSkill?.use === 'load'))) return []
-      return [{ ...base(), turn: call.turn, kind: 'tool-result', call: call.id, ok: message.isError !== true, output: cut(textOf(personParts(message.content)), PREVIEW_MAX) }]
+      call.result = true
+      return [{ ...base(), turn, kind: 'tool-result', call: call.id, ok: message.isError !== true, output: cut(textOf(personParts(message.content)), PREVIEW_MAX) }]
     }
     default:
       return []
@@ -593,6 +621,7 @@ export class DshChatSource {
     entry.floorSeq = records.length ? records[0].event.seq : (Number.isSafeInteger(opening.cursor) ? opening.cursor + 1 : 0)
     entry.mediaFloorSeq = entry.floorSeq
     entry.cursor = Number.isSafeInteger(opening.cursor) ? opening.cursor : -1
+    if (opening.hasMore) await this.seedOpeningTurn(entry, records)
     for (const record of records) this.noteRequestId(entry.sessionId, record.event)
     this.keepRows(entry, records.flatMap(record => rowsOf(record.event, entry.scope)))
     this.applyState(entry, await this.adapter.state(entry.sessionId, signal), { quiet: true })
@@ -601,6 +630,28 @@ export class DshChatSource {
     entry.poller = this.timers.setInterval(() => { if (entry.status.state !== 'idle') void this.readState(entry) }, this.pollMs)
     entry.poller?.unref?.()
     return { ok: true }
+  }
+
+  async seedOpeningTurn(entry, records) {
+    const boundary = records.findIndex(({ event }) => event.type === 'turn/start')
+    const initial = boundary < 0 ? records : records.slice(0, boundary)
+    if (!initial.some(({ event }) => event.type === 'tool/call' || event.type === 'tool/result')) return
+    // The follow window can begin mid-turn. Read one preceding page for source evidence,
+    // without adding its rows or treating its tool calls as part of the follow window.
+    const beforeSeq = entry.floorSeq
+    let page
+    try {
+      page = await this.adapter.events(entry.sessionId, { beforeSeq, maxMessages: PAGE_ROWS }, entry.controller.signal)
+    } catch { return }
+    const prior = page?.records ?? []
+    const start = prior.findLastIndex(({ event }) => event.type === 'turn/start')
+    if (start < 0) return
+    const turn = prior.slice(start)
+    if (turn.some(({ event }, index) => event.seq !== beforeSeq - turn.length + index)) return
+    for (const { event } of turn) {
+      if (event.type === 'user/message' || event.type === 'turn/start' ||
+        event.type === 'turn/end' || event.type === 'step/start') rowsOf(event, entry.scope)
+    }
   }
 
   keepRows(entry, rows) {
@@ -1056,7 +1107,9 @@ export class DshChatSource {
   turnOfSession(sessionId) { return [...this.entries.values()].find(entry => entry.sessionId === sessionId)?.scope.turn ?? 0 }
   callInput(sessionId, callId) {
     const entry = [...this.entries.values()].find(item => item.sessionId === sessionId)
-    const rowId = typeof callId === 'string' ? entry?.scope.calls.get(callId) : undefined
+    const turn = entry?.scope.openTurn
+    if (typeof callId !== 'string' || !Number.isSafeInteger(turn) || this.turnHidden(sessionId, turn)) return ''
+    const rowId = entry.scope.calls.get(callKey(turn, callId))?.id
     const row = rowId === undefined ? undefined : entry.rows.find(item => item.id === rowId)
     return typeof row?.input === 'string' ? cut(row.input, PREVIEW_MAX) : ''
   }
