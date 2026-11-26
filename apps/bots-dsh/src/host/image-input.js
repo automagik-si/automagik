@@ -119,7 +119,7 @@ export function readResultPicture(folder, { bot, selector, signal, allowPath }) 
     const mediaType = resultImageType(bytes)
     if (!mediaType) throw refused('Convert the result picture to PNG, JPEG or WebP.')
     const digest = createHash('sha256').update(bytes).digest('hex')
-    return { path, digest, attachmentId: `sha256:${digest}`, image: { mediaType, data: bytes, name: basename(path) } }
+    return { path, digest, image: { mediaType, data: bytes, name: basename(path) } }
   } catch (error) {
     if (error.code === 'bot/unavailable') throw error
     throw refused(error.reason ?? (signal?.aborted ? 'Reading the result picture was stopped.'

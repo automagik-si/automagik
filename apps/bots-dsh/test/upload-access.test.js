@@ -6,6 +6,8 @@ import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, truncate, writeFile
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import LocalAttachmentStore, { prepareImageFile } from '@deepseek-ai/dsh-attachment-local'
 import { install as uploads } from '../src/host/shared-uploads.js'
 import { install as tools } from '../src/host/tools.js'
 import { install as delivery } from '../src/host/delivery.js'
@@ -119,16 +121,16 @@ async function fixture(t, { withTools = true } = {}) {
     saves, data, bytes, edits: () => edits }
 }
 
-async function resultFixture(t, { solver = 'a' } = {}) {
+async function resultFixture(t, { solver = 'a', rootParts = ['result'], normalization } = {}) {
   const f = await fixture(t)
   f.data = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4AWOUs4n6b8NwhAEADDUCtSU1IikAAAAASUVORK5CYII=',
     'base64',
   )
   const bot = f.bots[solver]
   bot.role = 'Solver'
   bot.reviewerId = 'b'
-  const root = bot.workDir ?? join(f.folder, 'result')
+  const root = bot.workDir ?? join(f.folder, ...rootParts)
   await mkdir(root, { recursive: true })
   bot.workDir = root
   const findBot = f.rt.findBot
@@ -143,6 +145,22 @@ async function resultFixture(t, { solver = 'a' } = {}) {
     write.afterWrite()
   }
   f.rt.readsImagesStrict = async () => true
+  f.rt.dropWork = exchange => { delete f.rt.state.works[exchange] }
+  const storeCtx = new Context()
+  t.after(() => storeCtx.fiber.dispose())
+  await storeCtx.plugin(LocalAttachmentStore, { dshHome: f.rt.dshHome, ...normalization })
+  const store = storeCtx.get('attachments')
+  const get = f.rt.ctx.get
+  const readImage = store.readImage.bind(store)
+  const saveImage = store.saveImage.bind(store)
+  store.readImage = (ref, signal) => f.bytes.has(ref.attachmentId) ? get('attachments').readImage(ref) : readImage(ref, signal)
+  store.saveImage = async input => {
+    const ref = await saveImage(input)
+    f.bytes.set(ref.attachmentId, Buffer.from((await readImage(ref)).data))
+    f.saves.push(ref)
+    return ref
+  }
+  f.rt.ctx.get = name => name === 'attachments' ? store : get(name)
   reviewMark(f.rt)
   f.rt.reviewCreated(bot, 'Check this result')
   const request = bot.reviewTrack.solver.request
@@ -156,21 +174,27 @@ async function resultFixture(t, { solver = 'a' } = {}) {
   return { ...f, bot, root, markPassed, send }
 }
 
-async function observeResultRead(t, f, { portable = true, change } = {}) {
+async function observeResultRead(t, f, { portable = true, change, target = join(f.root, 'sub', 'visual.png') } = {}) {
   const stat = fs.lstatSync, fstat = fs.fstatSync, open = fs.openSync, read = fs.readSync
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')
   const file = join(f.root, 'sub', 'visual.png')
   const dir = dirname(file)
   const opened = []
   const handles = new Set()
-  let reads = 0, heads = 0, linkChecks = 0, secondStats = 0
-  const currentPath = path => String(path).startsWith('/proc/self/fd/') ? fs.realpathSync(path) : path
+  let reads = 0, heads = 0, linkChecks = 0, readerLinkChecks = 0, secondStats = 0
+  const identity = stat(target, { bigint: true })
   const different = (sample, overrides) => Object.assign(Object.create(sample), overrides)
   const mocks = []
-  if (portable) Object.defineProperty(process, 'platform', { value: 'darwin' })
+  if (portable) {
+    // Load the host's raster decoder before selecting the portable filesystem branch.
+    const { imageLimits, normalizationPolicy } = f.rt.ctx.get('attachments')
+    await prepareImageFile({ data: f.data, mediaType: 'image/png' }, imageLimits, normalizationPolicy)
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
+  }
   mocks.push(t.mock.method(fs, 'openSync', (path, ...args) => {
     const fd = open(path, ...args)
-    if (currentPath(path) === file) {
+    const sample = fstat(fd, { bigint: true })
+    if (sample.dev === identity.dev && sample.ino === identity.ino) {
       opened.push(path)
       handles.add(fd)
     } else handles.delete(fd)
@@ -190,7 +214,10 @@ async function observeResultRead(t, f, { portable = true, change } = {}) {
   }))
   mocks.push(t.mock.method(fs, 'lstatSync', (path, ...args) => {
     const sample = stat(path, ...args)
-    if ((path === file || path === dir) && sample.isSymbolicLink()) linkChecks++
+    if ((path === file || path === dir) && sample.isSymbolicLink()) {
+      linkChecks++
+      if (new Error().stack.includes('at readResultFile ')) readerLinkChecks++
+    }
     if (reads > 0 && ((change === 'parent' && path === dir) || (change === 'leaf' && path === file)
       || (change === 'root' && path === f.root))) return different(sample, { ino: sample.ino + 1n })
     return sample
@@ -211,7 +238,7 @@ async function observeResultRead(t, f, { portable = true, change } = {}) {
     syncBuiltinESMExports()
     Object.defineProperty(process, 'platform', platform)
   }
-  return { error, receipt, opened, reads, heads, linkChecks, secondStats }
+  return { error, receipt, opened, reads, heads, linkChecks, readerLinkChecks, secondStats }
 }
 
 for (const [label, change] of [['P1', 'before'], ['P2 leaf', 'leaf-link'], ['P2 parent', 'parent-link'],
@@ -234,7 +261,8 @@ for (const [label, change] of [['P1', 'before'], ['P2 leaf', 'leaf-link'], ['P2 
       await writeFile(join(local, 'visual.png'), f.data)
     }
     f.markPassed()
-    const seen = await observeResultRead(t, f, { change })
+    const seen = await observeResultRead(t, f, { change,
+      ...(change?.endsWith('link') ? { target: join(other, 'visual.png') } : {}) })
     if (change === undefined) {
       assert.match(seen.receipt, /with 1 picture/)
       assert.equal(seen.reads, 1)
@@ -251,6 +279,7 @@ for (const [label, change] of [['P1', 'before'], ['P2 leaf', 'leaf-link'], ['P2 
       if (label.startsWith('P2')) {
         assert.equal(seen.opened.length, 0)
         assert.ok(seen.linkChecks > 0)
+        assert.equal(seen.readerLinkChecks, 1)
       }
       if (label === 'P1') {
         assert.equal(seen.opened.length, 1)
@@ -451,6 +480,137 @@ test('2133 T4b authority removed while writing the private ledger prevents pictu
   assert.match(await reviewRefusal(() => f.send([path])), /result changed/)
   assert.equal(f.saves.length, 0)
   assert.equal(f.rows('b').length, 0)
+})
+
+test('2133 source 2 active authority is checked after a history match and before full reads', async t => {
+  const f = await resultFixture(t)
+  const path = join(f.root, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  f.person('a', f.other)
+  const history = f.rt.eventsBackwards
+  f.rt.eventsBackwards = async function* (...args) {
+    await Promise.resolve()
+    f.bot.reviewTrack.requested = false
+    yield* history(...args)
+  }
+  const read = fs.readSync
+  const target = await lstat(path)
+  let fullReads = 0
+  const mock = t.mock.method(fs, 'readSync', (fd, buffer, ...args) => {
+    const opened = fs.fstatSync(fd)
+    if (opened.dev === target.dev && opened.ino === target.ino && buffer.length === f.data.length) fullReads++
+    return read(fd, buffer, ...args)
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.match(await reviewRefusal(() => f.send([f.other.name])), /result changed/)
+    assert.equal(fullReads, 0)
+    assert.equal(f.saves.length, 0)
+    assert.equal(f.rows('b').length, 0)
+  } finally {
+    mock.mock.restore()
+    syncBuiltinESMExports()
+  }
+})
+
+test('2133 source 2 a private-region grant change during the ledger wait blocks publication', async t => {
+  const f = await resultFixture(t, { solver: 'test-private-bot' })
+  const region = join(f.root, 'review')
+  await mkdir(region)
+  const path = join(region, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  f.rt.isMain = id => id === 'outside'
+  f.rt.ledger.written = async book => {
+    if (f.books.get(book)?.some(row => row.event === 'picture-forward-authorised')) {
+      f.bots.outside.private = true
+      f.bots.outside.workDir = region
+    }
+  }
+  assert.match(await reviewRefusal(() => f.send([path])), /protected folder|result changed/)
+  assert.equal(f.saves.length, 0)
+  assert.equal(f.rows('b').length, 0)
+})
+
+test('2133 source 2 rechecks the path grant at delivery after designation', async t => {
+  const f = await resultFixture(t)
+  const region = join(f.root, 'review')
+  await mkdir(region)
+  const path = join(region, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  const deliver = f.rt.deliver
+  f.rt.deliver = (...args) => {
+    f.bots.outside.private = true
+    f.bots.outside.workDir = region
+    return deliver(...args)
+  }
+  assert.match(await reviewRefusal(() => f.send([path])), /changed before the review could be sent/)
+  assert.equal(f.saves.length, 1)
+  assert.equal(f.rows('b').length, 0)
+})
+
+for (const [name, rootParts, allowed] of [
+  ['Git', ['.git', 'scratch'], false],
+  ['Automagik state', ['.automagik', 'scratch'], false],
+  ['Solver uploads', ['.automagik', 'bots', 'a', 'uploads', 'scratch'], false],
+  ['Solver review', ['.automagik', 'bots', 'a', 'review', 'scratch'], true],
+]) {
+  test(`2133 source 3 canonical ${name} ancestry controls result discovery and selection`, async t => {
+    const f = await resultFixture(t, { rootParts })
+    const path = join(f.root, 'render')
+    await writeFile(path, f.data)
+    f.markPassed()
+    let opens = 0
+    const open = fs.openSync
+    const mock = t.mock.method(fs, 'openSync', (name, ...args) => {
+      if (basename(name) === 'render') opens++
+      return open(name, ...args)
+    })
+    syncBuiltinESMExports()
+    try {
+      const receipt = await reviewRefusal(() => f.send([path]))
+      if (allowed) {
+        assert.equal(f.saves.length, 1)
+        assert.equal(f.rows('b').length, 1)
+        assert.ok(opens > 0)
+      } else {
+        assert.match(receipt, /protected folder/)
+        assert.equal(opens, 0)
+        assert.equal(f.saves.length, 0)
+        assert.equal(f.rows('b').length, 0)
+      }
+    } finally {
+      mock.mock.restore()
+      syncBuiltinESMExports()
+    }
+  })
+}
+
+test('2133 source 4 the private ledger authorizes the normalized outgoing ID before saving', async t => {
+  const f = await resultFixture(t, { solver: 'test-private-bot', normalization: { normalizedImageMaxDimension: 1 } })
+  const path = join(f.root, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  f.rt.isMain = id => id === 'outside'
+  const sourceDigest = createHash('sha256').update(f.data).digest('hex')
+  const store = f.rt.ctx.get('attachments')
+  const saveImage = store.saveImage
+  let authorized
+  store.saveImage = async input => {
+    assert.equal(f.rows('b').length, 0)
+    authorized = f.books.get('pair-b-test-private-bot').find(row => row.event === 'picture-forward-authorised').images
+    return saveImage(input)
+  }
+  const outcome = await reviewRefusal(() => f.send([path]))
+  assert.equal(f.saves.length, 1)
+  const ref = f.saves[0]
+  assert.notEqual(ref.attachmentId, `sha256:${sourceDigest}`)
+  assert.equal(ref.width, 1)
+  assert.deepEqual(authorized, [ref.attachmentId], 'authorize the actual outgoing ID before publication')
+  assert.equal(f.rows('b')[0]?.content.find(block => block.type === 'image')?.attachment.attachmentId, ref.attachmentId, outcome)
+  assert.deepEqual(f.bot.reviewTrack.solver.review.images.required, [{ path: 'result.png', digest: sourceDigest, attachmentId: ref.attachmentId }])
 })
 
 test('2133 T4d result discovery and selection skip another private workspace outside Automagik', async t => {

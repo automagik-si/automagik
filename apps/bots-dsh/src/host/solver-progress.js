@@ -68,6 +68,7 @@ export function cleanProgress(value) {
     ...(record(limit) && count(limit.at) && (limit.kind === 'replan' || (limit.kind === 'fix' && id(limit.check))) ? { limit } : {}),
     ...(record(value.review) ? { review: value.review } : {}),
     ...(imageBase ? { imageBase } : {}),
+    ...(value.visualReviewRequired === true ? { visualReviewRequired: true } : {}),
   }
 }
 
@@ -128,14 +129,15 @@ export function resultImageType(bytes, { gif = false } = {}) {
   if (gif && ['GIF87a', 'GIF89a'].includes(bytes.toString('ascii', 0, 6))) return 'image/gif'
 }
 
-function canReadResultEntry(parts, botId) {
+function canReadResultEntry(parts, botId, { absolute = false, directory = false } = {}) {
   if (parts.some(part => part.toLowerCase() === '.git')) return false
   if (parts.some((part, i) => part.toLowerCase() === 'objects'
     && /^[a-f0-9]{2}$/i.test(parts[i + 1]) && /^(?:[a-f0-9]{62}|[a-f0-9]{64})$/i.test(parts[i + 2]))) return false
   const managed = parts.findIndex(part => part.toLowerCase() === '.automagik')
   if (managed === -1) return true
-  if (managed !== 0 || parts.slice(1).some(part => part.toLowerCase() === '.automagik')) return false
-  return parts[1] === 'bots' && parts[2] === botId && parts.length > 3 && parts[3].toLowerCase() !== 'uploads'
+  if ((!absolute && managed !== 0) || parts.slice(managed + 1).some(part => part.toLowerCase() === '.automagik')) return false
+  const [area, owner, child] = parts.slice(managed + 1)
+  return area === 'bots' && owner === botId && (child === undefined ? directory : child.toLowerCase() !== 'uploads')
 }
 
 function checkedRead(path, stat, bytes, signal, deadline) {
@@ -167,6 +169,29 @@ const partsOf = path => path.split(sep === '\\' ? /[\\/]/ : '/')
 const cleanPart = part => part !== '' && part !== '.' && part !== '..' && !part.includes('\0')
   && (sep !== '\\' || (!/[<>:"|?*]/.test(part) && !/[ .]$/.test(part)))
 
+const resultRootAllowed = (root, botId, allowPath) => canReadResultEntry(partsOf(root), botId, { absolute: true, directory: true })
+  && allowPath?.(root) !== false
+
+function resultEntryAllowed(root, parts, botId, allowPath) {
+  const path = join(root, ...parts)
+  return canReadResultEntry(parts, botId) && canReadResultEntry(partsOf(path), botId, { absolute: true })
+    && allowPath?.(path) !== false
+}
+
+export function resultPicturePathsAllowed(folder, paths, { botId, allowPath }) {
+  if (paths.length === 0) return true
+  try {
+    if (!isAbsolute(folder) || !entryStat(folder).isDirectory()) return false
+    const root = realpathSync.native(folder)
+    return resultRootAllowed(root, botId, allowPath) && paths.every(path => {
+      const parts = partsOf(path)
+      return parts.every(cleanPart) && resultEntryAllowed(root, parts, botId, allowPath)
+    })
+  } catch {
+    return false
+  }
+}
+
 export function readResultFile(folder, selector, { botId, maxBytes, signal, allowPath }) {
   if (!folder || !isAbsolute(folder) || typeof selector !== 'string') throw snapshotError('The Solver has no usable result path.')
   const absolute = isAbsolute(selector)
@@ -185,7 +210,7 @@ export function readResultFile(folder, selector, { botId, maxBytes, signal, allo
   }
   const parts = partsOf(name)
   if (isAbsolute(name) || !parts.every(cleanPart)) throw snapshotError('Use a path inside the result folder.')
-  if (!canReadResultEntry(parts, botId) || allowPath?.(join(root, ...parts)) === false) {
+  if (!resultRootAllowed(root, botId, allowPath) || !resultEntryAllowed(root, parts, botId, allowPath)) {
     throw snapshotError('The result picture is in a protected folder.')
   }
   const confined = hasDescriptorPaths()
@@ -241,6 +266,7 @@ export function inspectResult(folder, { manifest = false, botId, managedEntry, s
   const hash = createHash('sha256')
   let remaining = MAX_RESULT_ENTRIES - 1
   const images = []
+  let discover = false
   let indeterminate = false
   const deadline = performance.now() + 10_000
   const shown = path => JSON.stringify(relative(root, path) || '.').slice(0, 200)
@@ -286,7 +312,7 @@ export function inspectResult(folder, { manifest = false, botId, managedEntry, s
       const changes = [stat.size, stat.mtimeNs, stat.ctimeNs].map(String)
       hash.update(JSON.stringify([...identity, ...changes]))
       const pathInResult = relative(root, locationOfEntry)
-      if (manifest && canReadResultEntry(partsOf(pathInResult), botId) && allowPath?.(locationOfEntry) !== false) {
+      if (discover && resultEntryAllowed(root, partsOf(pathInResult), botId, allowPath)) {
         try {
           const extension = IMAGE_EXTENSIONS.has(extname(name).toLowerCase())
           if (!descriptorPaths && process.platform === 'linux') throw snapshotError('Confined result reads are unavailable.')
@@ -314,6 +340,8 @@ export function inspectResult(folder, { manifest = false, botId, managedEntry, s
     if (!rootStat.isDirectory()) return { reason: rootStat.isSymbolicLink()
       ? 'The result root is a symbolic link.' : 'The result root is not a directory.' }
     root = realpathSync.native(selectedRoot)
+    discover = manifest && resultRootAllowed(root, botId, allowPath)
+    if (manifest && !discover) indeterminate = true
     location = root
     descriptorPaths = hasDescriptorPaths()
     let walkRoot = root
@@ -447,6 +475,10 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
       ...(reason === 'images' ? { imagesWhy } : {}),
       ...(reason === undefined && verdict === 'SHIP' && visual?.ok === true ? { visualOk: true } : {}),
       ...(receipt ? { receipt } : {}),
+    }
+    if (result.images?.v !== 1 && reason === 'images') progress.visualReviewRequired = true
+    if (result.images?.v === 1 && result.images.kind !== 'text' && progress.review.visualOk === true) {
+      delete progress.visualReviewRequired
     }
     return reason
   } else if (result?.verdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict)) {

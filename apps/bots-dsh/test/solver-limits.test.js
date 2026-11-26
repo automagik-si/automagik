@@ -8,13 +8,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { fileURLToPath } from 'node:url'
 import { apply as applyAcp } from '../../acp-dsh/index.js'
 import { Session } from '@deepseek-ai/dsh-session'
-import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { AssistantStreamAccumulator, createAssistantMessage, LlmAdapter, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import * as timeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as native from '@deepseek-ai/dsh-tool-executor-native'
 import { ToolsService, defineTool } from '@deepseek-ai/dsh-tools'
@@ -4191,14 +4192,14 @@ test('Snapshot E P1: a plain Solver folder still records a verified pass', async
 })
 
 const reviewPng = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
+  'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4AWOUs4n6b8NwhAEADDUCtSU1IikAAAAASUVORK5CYII=',
   'base64',
 )
 const reviewDigest = data => createHash('sha256').update(data).digest('hex')
 const reviewPath = '.automagik/bots/solver/review/art.png'
 const reviewAnswer = 'RESULT SHIP\nThe checked result is ready.'
 
-async function checkedVisualReview(t, { path = reviewPath, bytes = reviewPng, prepareFiles } = {}) {
+async function checkedVisualReview(t, { path = reviewPath, bytes = reviewPng, prepareFiles, normalization } = {}) {
   const f = await reviewReplyFixture(t)
   const { h, request, review, answer, openReply } = f
   const planExchange = await review('plan')
@@ -4218,17 +4219,20 @@ async function checkedVisualReview(t, { path = reviewPath, bytes = reviewPng, pr
   assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
   assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
   const stored = new Map()
-  function attachStore(host) {
-    host.ctx.provided.set('attachments', {
-      async saveImage(input) {
-        const attachmentId = `sha256:${reviewDigest(input.data)}`
-        stored.set(attachmentId, Buffer.from(input.data))
-        return { attachmentId, bytes: input.data.length, mediaType: input.mediaType, width: 1, height: 1, name: input.name }
-      },
-      async readImage(ref) { return { ref, data: stored.get(ref.attachmentId) } },
-    })
+  async function attachStore(host) {
+    const ctx = new Context()
+    t.after(() => ctx.fiber.dispose())
+    await ctx.plugin(LocalAttachmentStore, { dshHome: join(host.home, 'review-attachments'), ...normalization })
+    const store = ctx.get('attachments')
+    const saveImage = store.saveImage.bind(store)
+    store.saveImage = async input => {
+      const ref = await saveImage(input)
+      stored.set(ref.attachmentId, (await store.readImage(ref)).data)
+      return ref
+    }
+    host.ctx.provided.set('attachments', store)
   }
-  attachStore(h)
+  await attachStore(h)
   // Return actual exhausted paging for empty fake history.
   h.agentOf('solver').session.seq = 0
   async function send(host, images) {
@@ -4245,24 +4249,26 @@ async function checkedVisualReview(t, { path = reviewPath, bytes = reviewPng, pr
   return { ...f, folder, stored, attachStore, send }
 }
 
-function answeringReviewer(t, h, { native = false, capable = true, shared = false, stored } = {}) {
+function answeringReviewer(t, h, { native = false, capable = true, shared = false, expectedPicture = reviewPng, loopSession } = {}) {
   const provider = native ? 'fake' : 'acp-review-fixture'
   const route = { provider, model: native ? 'reviewer-model' : 'default' }
   const agent = h.agentOf('reviewer')
   agent.ctx.tools.register = () => () => {}
-  const session = Session.create(agent.id)
+  const session = loopSession ?? Session.create(agent.id)
   const folder = shared ? h.rt.botOf('solver').workDir : join(h.home, 'reviewer-folder')
   mkdirSync(folder, { recursive: true })
-  session.header = { ...session.header, cwd: folder }
-  session.requestHeader = () => ({ config: route })
+  if (!loopSession) {
+    session.header = { ...session.header, cwd: folder }
+    session.requestHeader = () => ({ config: route })
+  }
   agent.session = session
   h.ctx.agents = { get: id => h.agentOf(id) }
   h.ctx.llm.resolveModelInfo = async () => capable ? { inputModalities: ['text', 'image'] } : {}
   const projected = []
   const prompts = []
   const consume = async row => {
-    const id = row.content.find(block => block.type === 'image')?.attachment?.attachmentId
-    return id === undefined ? undefined : (await h.ctx.get('attachments').readImage({ attachmentId: id })).data
+    const ref = row?.content.find(block => block.type === 'image')?.attachment
+    return ref === undefined ? undefined : Buffer.from((await h.ctx.get('attachments').readImage(ref)).data)
   }
   const adapter = native ? undefined : new AcpAdapter(h.ctx, new Map([[provider, {
     name: 'Fake reviewer', spawn: () => assert.fail('no native process'),
@@ -4278,7 +4284,7 @@ function answeringReviewer(t, h, { native = false, capable = true, shared = fals
     run.conn = { prompt: async params => {
       prompts.push(structuredClone(params))
       const data = params.prompt.find(block => block.type === 'image')?.data
-      const suffix = data && Buffer.from(data, 'base64').equals(reviewPng) ? '\nPicture bytes verified.' : ''
+      const suffix = data && Buffer.from(data, 'base64').equals(expectedPicture) ? '\nPicture bytes verified.' : ''
       await run.onUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: reviewAnswer + suffix } }, params.sessionId)
       return { stopReason: 'end_turn' }
     } }
@@ -4297,39 +4303,170 @@ function answeringReviewer(t, h, { native = false, capable = true, shared = fals
     projected.push(options.messages)
     if (adapter) yield* adapter.stream(options)
     else {
-      const bytes = await consume(options.messages.at(-1))
+      const bytes = await consume(options.messages.findLast(row => row.source?.resultReview?.v === 1))
       prompts.push({ prompt: bytes ? [{ type: 'image', data: bytes.toString('base64') }] : [] })
-      yield { type: 'text-delta', text: reviewAnswer }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: reviewAnswer }
+      yield { type: 'block-end', index: 0, block: content(reviewAnswer)[0] }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
   }
   const dispatch = options => imageMiddleware(options, () => boundary(options))
   h.ctx.llm.stream = dispatch
+  let attempt, nextAttempt = 0, revision = 0
+  const frame = data => h.ctx.emit('agent/assistant-stream', { agent, frame: { ...data, revision: ++revision } })
   const enter = (row, turn) => {
     h.event('reviewer', 'turn/start', { turn })
     session.append('user/message', row, { surfaceOp: 'append' })
     h.takeInput('reviewer', row)
   }
-  const generate = async () => {
+  const generate = async (turn = h.rt.live.get('reviewer').turn) => {
     const options = markAgentLoopRequest({ ...route, sessionId: session.id, messages: session.deriveMessages() })
+    if (attempt && !attempt.ended) frame({ type: 'end', attemptId: attempt.attemptId, outcome: { kind: 'abandoned' } })
+    attempt = { attemptId: `reviewer:${++nextAttempt}`, turn, step: 1, stream: new AssistantStreamAccumulator() }
+    frame({ type: 'start', attemptId: attempt.attemptId, turn, step: attempt.step })
     const chunks = await Array.fromAsync(dispatch(options))
     assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1)))
+    for (const [index, chunk] of chunks.entries()) {
+      const timed = attempt.stream.push({ time: index + 1, chunk })
+      frame({ type: 'chunk', attemptId: attempt.attemptId, index, ...timed })
+    }
     return chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
   }
-  const answer = async (text, turn = 5, model = route) => {
-    const prior = h.agentOf('solver').message
+  const answer = async (text, turn = 5, model = route, { solver = 'solver', committed = true } = {}) => {
+    const prior = h.agentOf(solver).message
     if (model !== route) agent.session.requestHeader = () => ({ config: model })
-    h.event('reviewer', 'assistant/message', { turn, message: { source: { kind: 'model', ...route }, content: content(text) } })
+    const data = { turn, step: 1, message: createAssistantMessage({ source: model, content: content(text) }),
+      stream: attempt ? [...attempt.stream.snapshot()] : [] }
+    const event = session.append('assistant/message', data, { surfaceOp: 'append' })
+    h.event('reviewer', event.type, event.data, event.seq)
+    if (attempt) {
+      const seq = committed ? event.seq : event.seq + 1
+      frame({ type: 'end', attemptId: attempt.attemptId, index: data.stream.length,
+        outcome: { kind: 'committed', eventType: 'assistant/message', seq } })
+      attempt.ended = true
+    }
     h.event('reviewer', 'turn/end', { turn, reason: { kind: 'completed' } })
-    await until(() => h.agentOf('solver').message !== prior, { label: 'the reviewer’s answer in the Solver chat' })
-    const reply = h.agentOf('solver').message
-    h.event('solver', 'turn/start', { turn: turn + 1 })
-    h.takeInput('solver', reply)
-    h.finish('solver', 'Delivered the checked result.')
+    await until(() => h.agentOf(solver).message !== prior, { label: 'the reviewer’s answer in the Solver chat' })
+    const reply = h.agentOf(solver).message
+    h.event(solver, 'turn/start', { turn: turn + 1 })
+    h.takeInput(solver, reply)
+    h.finish(solver, 'Delivered the checked result.')
     return reply
   }
-  return { enter, generate, answer, replaceRun, projected, prompts, session }
+  return { enter, generate, answer, replaceRun, projected, prompts, session, route, dispatch }
 }
+
+for (const committed of [false, true]) {
+  test(`2133 source 1 ${committed ? 'matching' : 'different'} committed attempt on the same route controls visual credit`, async t => {
+    const f = await checkedVisualReview(t)
+    const { h } = f
+    const reviewer = answeringReviewer(t, h)
+    const { row } = await f.send(h, [reviewPath])
+    h.finish('solver', 'Waiting for RESULT review.')
+    reviewer.enter(row, 5)
+    await reviewer.generate()
+    const text = await reviewer.generate()
+    if (committed) reviewer.session.requestHeader = () => ({ config: solverModel })
+    await reviewer.answer(text, 5, reviewer.route, { committed })
+    assert.equal(f.track().solver.review.verdict, committed ? 'SHIP' : 'unverified')
+    assert.equal(f.track().solver.review.imagesWhy, committed ? undefined : 'lost')
+    assert.equal(f.track().last?.done, committed ? true : undefined)
+  })
+}
+
+test('2133 source 1 the pinned AgentLoop settles the joined native proof with its committed sequence', async t => {
+  const f = await checkedVisualReview(t)
+  const { h } = f
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await mountAgentLoopTestDependencies(ctx)
+  class ReviewModel extends LlmAdapter {
+    async resolveModel(provider, id) { return { provider, id, name: id, inputModalities: ['text', 'image'] } }
+    stream() { assert.fail('the reviewer prompt stays inside the fixture') }
+  }
+  ctx.llm.registerAdapter([reviewerModel.provider], new ReviewModel())
+  const loop = await mountAgentLoopTestHarness(ctx)
+  const agent = await loop.create('reviewer', reviewerModel)
+  const reviewer = answeringReviewer(t, h, { native: true, loopSession: agent.session })
+  const frames = []
+  ctx.on('llm/stream', options => reviewer.dispatch(options))
+  ctx.on('agent/assistant-stream', payload => {
+    frames.push(payload.frame)
+    h.ctx.emit('agent/assistant-stream', payload)
+  })
+  ctx.on('agent/inbox/claimed', payload => h.ctx.emit('agent/inbox/claimed', payload))
+  ctx.on('session/event', (session, event) => {
+    if (session === agent.session) h.event('reviewer', event.type, event.data, event.seq)
+  })
+  const { row } = await f.send(h, [reviewPath])
+  h.finish('solver', 'Waiting for RESULT review.')
+  const prior = h.agentOf('solver').message
+  agent.followup(row)
+  await agent.whenIdle()
+  const committed = agent.session.snapshotEvents().findLast(event => event.type === 'assistant/message')
+  assert.ok(committed?.data.stream.length)
+  const start = frames.find(frame => frame.type === 'start')
+  const end = frames.find(frame => frame.type === 'end' && frame.attemptId === start.attemptId)
+  assert.equal(start.turn, committed.data.turn)
+  assert.equal(start.step, committed.data.step)
+  assert.deepEqual(end?.outcome, { kind: 'committed', eventType: 'assistant/message', seq: committed.seq })
+  assert.deepEqual(Buffer.from(reviewer.prompts[0].prompt[0].data, 'base64'), reviewPng)
+  await until(() => h.agentOf('solver').message !== prior, { label: 'the pinned loop’s reviewer reply' })
+  h.event('solver', 'turn/start', { turn: 7 })
+  h.takeInput('solver', h.agentOf('solver').message)
+  h.finish('solver', 'Delivered the checked result.')
+  assert.equal(f.track().last?.done, true)
+})
+
+test('2133 source 4 the normalized result ID earns visual credit on the answering attempt', async t => {
+  const f = await checkedVisualReview(t, { normalization: { normalizedImageMaxDimension: 1 } })
+  const { h } = f
+  const { row } = await f.send(h, [reviewPath])
+  const ref = row.content.find(block => block.type === 'image')?.attachment
+  assert.ok(ref, 'the normalized result is on the real review row')
+  const sourceDigest = reviewDigest(reviewPng)
+  assert.notEqual(ref.attachmentId, `sha256:${sourceDigest}`)
+  const bytes = f.stored.get(ref.attachmentId)
+  assert.equal(ref.attachmentId, `sha256:${reviewDigest(bytes)}`)
+  const reviewer = answeringReviewer(t, h, { expectedPicture: bytes })
+  h.finish('solver', 'Waiting for RESULT review.')
+  reviewer.enter(row, 5)
+  const text = await reviewer.generate()
+  assert.match(text, /Picture bytes verified/)
+  await reviewer.answer(text)
+  assert.deepEqual(f.track().solver.review.images.required, [{ path: reviewPath, digest: sourceDigest, attachmentId: ref.attachmentId }])
+  assert.equal(f.track().last?.done, true)
+})
+
+test('2133 source 6 a second Solver queued to the reviewer earns credit on its first dispatch', async t => {
+  const f = await checkedVisualReview(t, { path: 'result.png' })
+  const { h } = f
+  const other = h.rt.botOf('other')
+  const { review, ...progress } = f.track().solver
+  const request = 'queued-solver-request'
+  Object.assign(other, {
+    role: 'Solver', reviewerId: 'reviewer', workDir: f.folder,
+    reviewTrack: { requested: true, requestAt: 1, verdicts: [], solver: { ...structuredClone(progress), request } },
+  })
+  const reviewer = answeringReviewer(t, h, { native: true })
+  const first = await f.send(h, ['result.png'])
+  h.agentOf('other').session.seq = 0
+  assert.match(await h.tool('message_bot', { to: 'reviewer', message: 'Review the queued result.',
+    solver_review: 'result', solver_request: request, images: ['result.png'] }, 'other'), /with 1 picture/)
+  const queued = h.agentOf('reviewer').message
+  assert.notEqual(queued.source.exchangeId, first.row.source.exchangeId)
+  reviewer.enter(first.row, 5)
+  await reviewer.generate()
+  assert.equal(reviewer.prompts.length, 1)
+  assert.equal(reviewer.projected[0].some(row => row.source?.exchangeId === queued.source.exchangeId), false)
+  assert.equal(other.reviewTrack.solver.review.verdict, undefined)
+  reviewer.enter(queued, 7)
+  await reviewer.answer(await reviewer.generate(), 7, reviewer.route, { solver: 'other' })
+  assert.equal(other.reviewTrack.solver.review.verdict, 'SHIP')
+  assert.equal(other.reviewTrack.last?.done, true)
+  assert.equal(f.track().solver.review.verdict, undefined)
+})
 
 for (const [id, options] of Object.entries({
   'E1 Test 5 T2a': { capable: false, why: 'unseen' },
@@ -4410,7 +4547,7 @@ test('2133 E7 a real text-only resume loses visual credit and a fresh designatio
     events: id === 'reviewer' ? reviewer.session.snapshotEvents(0, reviewer.session.seq) : [],
   })
   await next.rt.load()
-  f.attachStore(next)
+  await f.attachStore(next)
   next.agentOf('solver').session.seq = 0
   const waiting = setInterval(() => {}, 1000)
   try { await next.rt.resumesDone } finally { clearInterval(waiting) }
@@ -4498,6 +4635,24 @@ test('2133 T2e a complete legacy scan credits only an old text-only SHIP', async
       assert.equal(f.track().last?.done, path ? undefined : true)
       assert.equal(f.track().last?.result, path ? false : true)
       assert.equal(f.track().delivered === true, !path)
+      if (path) {
+        const { h, request } = f
+        await h.rt.reviewRequest('solver', { text: 'Please clarify the checked result.' })
+        h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request })
+        assert.equal(f.track().last?.result, false, 'the legacy SHIP stays out of the next delivery mark')
+        assert.notEqual(f.track().delivered, true)
+        assert.equal(await requestOf(h), request)
+        assert.match(await checked(h, request, 'fresh-test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+        assert.match(await checked(h, request, 'fresh-diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+        const reviewer = answeringReviewer(t, h)
+        const fresh = await f.send(h, [path])
+        assert.notEqual(fresh.row.source.exchangeId, row.source.exchangeId)
+        h.finish('solver', 'Waiting for the fresh RESULT review.')
+        reviewer.enter(fresh.row, 7)
+        await reviewer.answer(await reviewer.generate(), 7)
+        assert.equal(f.track().last?.done, true)
+        assert.equal(f.track().last?.resultExchangeId, fresh.row.source.exchangeId)
+      }
     })
   }
 })

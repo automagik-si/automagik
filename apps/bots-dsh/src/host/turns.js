@@ -2,7 +2,7 @@
 // triggered, the waiters and inboxes of group rounds, and routing a finished turn's reply.
 //
 // Turn tracking: which turns were triggered by another Bot, and what they said.
-import { originalReviewContent } from '../shared/solver-model.js'
+import { chosenIdentity, originalReviewContent } from '../shared/solver-model.js'
 import { requestedSkills } from './skill-library-call.js'
 import { chatPersonParts, personParts } from './skill-message.js'
 import { randomUUID } from 'node:crypto'
@@ -1288,8 +1288,8 @@ export function install(rt) {
         }
         break
       case 'assistant/message': {
-        const generation = rt.generationForReply?.(id, event)
-        const content = event.data?.message?.content
+        const generation = rt.generationForReply?.(session, event)
+        const { source, content } = event.data?.message ?? {}
         const raw = rawTextOf(content)
         const text = raw.trim()
         const called = Array.isArray(content) && content.some(block => block?.type === 'tool-call')
@@ -1299,7 +1299,7 @@ export function install(rt) {
           entry.texts.push(absoluteLinks(text, rt.sessionFolder?.(session)))
           entry.rawTexts.push(raw)
           entry.textModels ??= []
-          entry.textModels.push(modelOf(session))
+          entry.textModels.push(source?.kind === 'model' ? chosenIdentity(source.provider, source.model) : modelOf(session))
           entry.textGenerations ??= []
           entry.textGenerations.push(generation)
           if (entry.turn !== undefined) showSteps(id, entry, called ? entry.texts.length : entry.texts.length - 1)

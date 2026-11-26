@@ -18,7 +18,7 @@ import { refusal } from './refusal.js'
 import { nativeCheckDirectory, normalizeCheckCommand, withinCheckRoot } from './solver-check-command.js'
 import {
   activeSolverLimit, cleanProgress, designateReview, imageBaseline, inspectResult, invalidateResult, legacyResultReview, modelOf, newProgress,
-  normalizedAutoInstruction, recordedModelOf, recordProgress, recordSolverVerdict, resumeProgress, solverOutcome, solverTracked,
+  normalizedAutoInstruction, recordedModelOf, recordProgress, recordSolverVerdict, resultPicturePathsAllowed, resumeProgress, solverOutcome, solverTracked,
 } from './solver-progress.js'
 import { readResultPicture } from './image-input.js'
 
@@ -193,6 +193,11 @@ export function install(rt) {
   const inspect = (bot, options) => inspectResult(folderOf(bot), { botId: bot.id, managedEntry,
     ...(options?.manifest ? { allowPath: rt.resultReadAllowed?.(bot.id) } : {}), ...options })
   const snapshotOf = bot => inspect(bot).snapshot
+  const resultPathsAllowed = (bot, paths) => paths.length === 0 || resultPicturePathsAllowed(folderOf(bot), paths,
+    { botId: bot.id, allowPath: rt.resultReadAllowed?.(bot.id) })
+  const assertResultPaths = (bot, paths) => {
+    if (!resultPathsAllowed(bot, paths)) throw refusal('The result picture is in a protected folder.')
+  }
   const manifestsMatch = (bot, progress) => {
     const result = inspect(bot, { manifest: true })
     return result.snapshot === progress.snapshot && result.manifest?.indeterminate === false ? result.manifest : undefined
@@ -280,7 +285,7 @@ export function install(rt) {
       if (limit || directAuto) {
         if (limit) resumeProgress(track.solver, limit)
         if (directAuto) track.solver.auto = true
-        return saveProgress(bot, before, track.solver, track, () => remember(track)).then(() => track.solver.request)
+        return saveProgress(bot, before, track.solver, track, { onCommit: () => remember(track) }).then(() => track.solver.request)
       }
       bot.reviewTrack = track
     } else {
@@ -295,7 +300,7 @@ export function install(rt) {
 
   // Keep input and review events ordered with the durable write, including the interval
   // between rename and directory sync. A replacement team still produces a conflict.
-  async function saveProgress(bot, before, solver, next = { ...before, solver }, onCommit) {
+  async function saveProgress(bot, before, solver, next = { ...before, solver }, { onCommit, authorizeCommit } = {}) {
     if (progressWrites.has(bot)) throw refusal('A Solver progress update is still being saved.')
     const assertCurrent = () => {
       if (rt.botOf(bot.id) !== bot || bot.reviewTrack !== before) throw refusal('The Solver request changed. Read solver_progress status again.')
@@ -308,7 +313,10 @@ export function install(rt) {
         copy.bots[bot.id].reviewTrack = next
       }, {
         durable: true,
-        beforeCommit: assertCurrent,
+        beforeCommit: () => {
+          assertCurrent()
+          authorizeCommit?.()
+        },
         afterWrite: () => {
           assertCurrent()
           bot.reviewTrack = next
@@ -353,7 +361,7 @@ export function install(rt) {
       const onStart = pending ? () => {
         nativeRunStarts.set(bot, { request: track.solver.request, run: pending.run, revision: pending.revision, at: performance.now() })
       } : undefined
-      await saveProgress(bot, before, track.solver, undefined, onStart)
+      await saveProgress(bot, before, track.solver, undefined, { onCommit: onStart })
       if (args.action === 'auto' && autoInstructions.get(bot) === authority) autoInstructions.delete(bot)
     }
     return changed.text
@@ -376,11 +384,11 @@ export function install(rt) {
     const issue = designateReview(progress, { kind, exchangeId, reviewerId: reviewer.id,
       model: modelOf(agent?.session), snapshot: kind === 'result' ? snapshotOf(bot) : undefined })
     if (issue) throw refusal(issue)
-    const assertAuthority = () => {
+    const assertAuthority = (writing = false) => {
       pictures?.signal?.throwIfAborted()
       if (rt.botOf(bot.id) !== bot || rt.botOf(reviewer.id) !== reviewer || bot.reviewTrack !== before
         || !before.requested || before.delivered || before.solver?.request !== request || before.solver.revision !== track.solver.revision
-        || bot.reviewerId !== reviewer.id || progressWrites.has(bot) || runningWork.has(bot)
+        || bot.reviewerId !== reviewer.id || (!writing && progressWrites.has(bot)) || runningWork.has(bot)
         || (kind === 'result' && progress.snapshot !== snapshotOf(bot))) {
         throw refusal('The Solver result changed. Verify the current checks before requesting a review.')
       }
@@ -388,14 +396,18 @@ export function install(rt) {
     const prepared = await prepare(kind, progress.plan.checks, progress.plan.commands)
     if (prepared === undefined) return
     assertAuthority()
-    let resultPictures
+    let resultPictures, authorizeCommit
     if (kind === 'result') {
       resultPictures = await prepareResultPictures(bot, progress, pictures, assertAuthority)
       assertAuthority()
+      authorizeCommit = () => {
+        assertAuthority(true)
+        assertResultPaths(bot, progress.review.images.selectedPaths)
+      }
     }
     reviewSends.add(exchangeId)
     try {
-      await saveProgress(bot, before, progress)
+      await saveProgress(bot, before, progress, undefined, { authorizeCommit })
       if (prior && prior.verdict === undefined) rt.dropWork(prior.exchangeId)
     } catch (error) {
       reviewSends.delete(exchangeId)
@@ -412,6 +424,7 @@ export function install(rt) {
       && progress.review?.exchangeId === exchangeId && progress.review.revision === progress.revision
       && progress.review.verdict === undefined && !progressWrites.has(bot) && !runningWork.has(bot)
       && progress.snapshot === snapshotOf(bot)
+      && resultPathsAllowed(bot, progress.review.images?.selectedPaths ?? [])
   }
 
   async function prepareResultPictures(bot, progress, pictures, assertAuthority) {
@@ -441,11 +454,35 @@ export function install(rt) {
     }
     const required = []
     let missing = !manifest || (!base && paths.size === 0) || paths.size > 4
+    const selectedPaths = [...selected.keys()]
+    const assertRelease = () => {
+      assertAuthority()
+      assertResultPaths(bot, selectedPaths)
+    }
+    assertRelease()
+    let store
+    if (selected.size > 0) {
+      store = rt.ctx.get('attachments')
+      const local = await import('@deepseek-ai/dsh-attachment-local').catch(() => undefined)
+      assertRelease()
+      if (!local || !(store instanceof local.default)) throw refusal('This Automagik cannot prepare result pictures for review.')
+      for (const result of selected.values()) {
+        try {
+          const prepared = await local.prepareImageFile(result.image, store.imageLimits, store.normalizationPolicy)
+          result.ref = prepared.ref
+        } catch {
+          throw refusal(`The result picture ${JSON.stringify(result.path)} could not be prepared. Convert it to PNG or reduce its size, then attach it again.`)
+        }
+        assertRelease()
+      }
+    }
     for (const path of [...paths].slice(0, 4)) {
+      const included = selected.get(path)
+      if (!included) assertAuthority()
       try {
-        const result = selected.get(path) ?? read(path)
-        required.push({ path, digest: result.digest, ...(selected.has(path) ? { attachmentId: result.attachmentId } : {}) })
-        if (!selected.has(path)) missing = true
+        const result = included ?? read(path)
+        required.push({ path, digest: result.digest, ...(included ? { attachmentId: included.ref.attachmentId } : {}) })
+        if (!included) missing = true
       } catch {
         missing = true
       }
@@ -459,20 +496,23 @@ export function install(rt) {
       paths.size > 4 ? 'Combine the result into at most 4 pictures and remove the rest from the result.'
         : 'Attach the result picture paths under images. Convert unsupported pictures to PNG.',
     ] : []
-    assertAuthority()
-    const outgoing = [...images, ...selected.values()]
-    if (outgoing.length > 0) await pictures.authorize(outgoing)
-    assertAuthority()
+    assertRelease()
+    const outgoing = new Map(images.map(ref => [ref.attachmentId, ref]))
+    for (const { ref } of selected.values()) outgoing.set(ref.attachmentId, ref)
+    if (outgoing.size > 0) await pictures.authorize([...outgoing.values()])
+    assertRelease()
     for (const result of selected.values()) {
-      const store = rt.ctx.get('attachments')
-      if (typeof store?.saveImage !== 'function') throw refusal('This Automagik cannot store pictures.')
+      if (rt.ctx.get('attachments') !== store) throw refusal('The result picture store changed. Request the review again.')
+      // The pinned store deterministically prepares the same input under its frozen policy.
       const ref = await store.saveImage(result.image)
-      if (ref?.attachmentId !== result.attachmentId || ref.bytes !== result.image.data.length
-        || ref.mediaType !== result.image.mediaType) throw refusal('The stored result picture does not match its verified bytes.')
+      if (ref?.attachmentId !== result.ref.attachmentId || ref.bytes !== result.ref.bytes
+        || ref.mediaType !== result.ref.mediaType || ref.width !== result.ref.width || ref.height !== result.ref.height) {
+        throw refusal('The stored result picture does not match its authorized reference.')
+      }
       images.push(ref)
-      assertAuthority()
+      assertRelease()
     }
-    progress.review.images = { v: 1, kind, required, carried, names, definite: manifest !== undefined && !missing }
+    progress.review.images = { v: 1, kind, required, carried, names, selectedPaths, definite: manifest !== undefined && !missing }
     return { images, reviewNotice: receipts.join(' '), reviewComplete: kind !== 'text' && !missing }
   }
 
@@ -495,6 +535,27 @@ export function install(rt) {
   const reviewImages = (sessionId, exchangeId) => pendingReviewImages(sessionId)
     .find(({ review }) => review.exchangeId === exchangeId)?.review
   const resultReviewImages = (sessionId, exchangeId) => reviewImages(sessionId, exchangeId)?.images.carried
+  const reviewAttempts = new Map()
+  const reviewAttempt = sessionId => reviewAttempts.get(sessionId)
+  function reviewAttemptFrame(session, frame) {
+    if (!session || !frame) return
+    const { id } = session
+    if (frame.type === 'start') {
+      if (pendingReviewImages(id).length === 0) {
+        reviewAttempts.delete(id)
+        return
+      }
+      const { attemptId, turn, step } = frame
+      reviewAttempts.set(id, { session, attemptId, turn, step })
+    } else if (frame.type === 'end') {
+      const attempt = reviewAttempts.get(id)
+      if (attempt?.session !== session || attempt.attemptId !== frame.attemptId) return
+      reviewAttempts.delete(id)
+      const outcome = frame.outcome
+      if (outcome?.kind === 'committed' && outcome.eventType === 'assistant/message') attempt.committedSeq = outcome.seq
+    }
+  }
+
   const currentGeneration = new Map()
   function beginReviewGeneration({ sessionId, messages, provider, model, runKey, nativeIds }) {
     const pending = pendingReviewImages(sessionId)
@@ -511,47 +572,58 @@ export function install(rt) {
         && source.resultReview?.v === 1 && source.senderSessionId === bot.id
         && !source.resumed && !source.resumedByUpdate && !source.retried && !source.resume
       const previousEntry = previous?.entries.get(review.exchangeId)
+      // A queued exchange participates only after one of its rows reaches a stream request.
+      if (!row && !previousEntry) continue
       const replaced = previous?.runKey !== undefined && previous.runKey !== runKey && previousEntry !== undefined
       const native = marked ? nativeIds?.(row, review.images.carried) ?? [] : []
       entries.set(review.exchangeId, { request: progress.request, revision: review.revision, native,
-        lost: !marked || replaced || previousEntry?.lost === true })
+        lost: !marked || replaced || previousEntry?.lost === true || previousEntry?.native.some(id => !native.includes(id)) === true })
     }
-    const generation = { entries, runKey, sessionId, route: chosenIdentity(provider, model), confirmed: false, ended: false }
+    const generation = { entries, runKey, sessionId, route: chosenIdentity(provider, model), confirmed: false }
     currentGeneration.set(sessionId, generation)
     return generation
   }
 
-  function reviewGenerationOutput(generation, { confirmed, completed } = {}) {
+  function reviewGenerationOutput(generation, { confirmed, completed, attempt } = {}) {
     if (!generation || currentGeneration.get(generation.sessionId) !== generation) return
     if (confirmed !== undefined) generation.confirmed = confirmed
-    if (completed !== undefined) generation.ended = completed
+    if (completed === true && attempt && reviewAttempt(generation.sessionId) === attempt) attempt.generation = generation
     if (confirmed === false || completed === false) {
       for (const entry of generation.entries.values()) entry.lost = true
     }
   }
 
-  function generationForReply(sessionId, event) {
-    const generation = currentGeneration.get(sessionId)
-    const source = event.data?.message?.source
-    if (generation?.ended && !event.data.interrupted && generation.route === chosenIdentity(source?.provider, source?.model)) {
-      generation.ended = false
-      return generation
+  function generationForReply(session, event) {
+    const attempt = reviewAttempt(session.id)
+    const { turn, step, stream, interrupted, message } = event.data ?? {}
+    const route = chosenIdentity(message?.source?.provider, message?.source?.model)
+    // The pinned loop appends the event before emitting the end frame. The frame
+    // supplies the committed sequence; the verdict consumes it after the turn ends.
+    if (attempt?.session === session && attempt.generation?.route === route && route
+      && attempt.turn === turn && attempt.step === step && Array.isArray(stream) && stream.length > 0
+      && Number.isSafeInteger(event.seq) && !interrupted) {
+      return { attempt, seq: event.seq }
     }
   }
 
-  function visualVerdict(bot, progress, model, generation) {
+  function visualVerdict(bot, progress, model, answer) {
     const { review } = progress
-    if (review.images?.v !== 1) return legacyText(bot, progress) ? { ok: true } : { why: 'missing' }
+    if (review.images?.v !== 1) return !progress.visualReviewRequired && legacyText(bot, progress) ? { ok: true } : { why: 'missing' }
     const { kind, definite, required } = review.images
     if (!definite || !manifestsMatch(bot, progress)) return { why: 'missing' }
-    if (kind === 'text') return { ok: true }
+    if (kind === 'text') return progress.visualReviewRequired ? { why: 'missing' } : { ok: true }
     if (!required?.length) return { why: 'missing' }
     const sessionId = rt.chatOf(review.reviewerId)
+    const generation = answer?.attempt.generation
     const entry = generation?.entries.get(review.exchangeId)
-    if (!entry || entry.lost || !generation.confirmed || generation !== currentGeneration.get(sessionId)
+    const current = currentGeneration.get(sessionId)?.entries.get(review.exchangeId)
+    if (!entry || entry.lost || !generation.confirmed || !current || current.lost
+      || answer.attempt.committedSeq !== answer.seq
+      || current.request !== progress.request || current.revision !== review.revision
       || entry.request !== progress.request || entry.revision !== review.revision
       || generation.route !== chosenIdentityOf(model)) return { why: 'lost' }
-    return required.every(file => file.attachmentId === `sha256:${file.digest}` && entry.native.includes(file.attachmentId))
+    return required.every(file => /^[a-f0-9]{64}$/.test(file.digest)
+      && /^sha256:[a-f0-9]{64}$/.test(file.attachmentId) && entry.native.includes(file.attachmentId))
       ? { ok: true } : { why: 'unseen' }
   }
 
@@ -774,8 +846,11 @@ export function install(rt) {
         const reason = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt,
           stage === 'result' && legacyHeld, visual)
         withholdShip = reason === 'held' || reason === 'same' || reason === 'images'
-        if (stage === 'result' && generation === currentGeneration.get(generation?.sessionId)) {
-          currentGeneration.delete(generation?.sessionId)
+        if (stage === 'result') {
+          const sessionId = rt.chatOf(fromId)
+          const dispatch = currentGeneration.get(sessionId)
+          dispatch?.entries.delete(reply?.replyTo)
+          if (dispatch?.entries.size === 0) currentGeneration.delete(sessionId)
         }
       }
       const at = Date.now()
@@ -1034,9 +1109,10 @@ export function install(rt) {
     const visualKind = oldShip ? (legacyText(bot, track.solver) ? 'text' : 'indeterminate') : undefined
     if (oldShip && visualKind !== 'text') {
       track.solver.review = { ...result, verdict: 'unverified', unverified: 'images', imagesWhy: 'missing' }
+      track.solver.visualReviewRequired = true
     }
     track.outcome = solverOutcome(bot, track, review, pending, model, track.solver?.snapshot ? snapshotOf(bot) : undefined, visualKind)
-    const imagesUnverified = track.solver?.review?.unverified === 'images'
+    const imagesUnverified = track.solver?.visualReviewRequired === true || track.solver?.review?.unverified === 'images'
     track.last = { ...deliveryMark(track, review, Date.now(), { pending }), ...(track.outcome.done
       ? { done: true, reviewer: track.outcome.reviewer, plan: true, result: true, resultExchangeId: track.outcome.exchangeId }
       : imagesUnverified ? { result: false } : {}) }
@@ -1058,19 +1134,20 @@ export function install(rt) {
     const limit = activeSolverLimit(bot, track)
     const result = track?.solver?.review
     const reason = result?.verdict === 'unverified' && result.revision === track.solver.revision
-      ? unverifiedReason(result.unverified) : undefined
+      ? unverifiedReason(result.unverified) : track?.solver?.visualReviewRequired === true ? 'images' : undefined
     return { solverStatus: {
       ...(track?.requested && !track.delivered ? { auto: track.solver?.auto === true } : {}),
       ...(limit ? { limit: { kind: limit.kind, check: limit.check } } : {}),
       ...(track?.outcome ? { outcome: track.outcome } : {}),
       ...(reason ? { unverified: reason } : {}),
-      ...(reason === 'images' && result.imagesWhy ? { imagesWhy: result.imagesWhy } : {}),
+      ...(reason === 'images' ? { imagesWhy: result?.imagesWhy ?? 'missing' } : {}),
     } }
   }
 
   Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf,
     solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork, designatedReplyRequest, takeReviewReply, withReviewFeedback,
     rememberReviewUpload, resultReviewCurrent, resultReviewImages, beginReviewGeneration, reviewGenerationOutput, generationForReply,
+    reviewAttemptFrame, reviewAttempt,
     resultReplyRequest: binding => {
       const bot = rt.botOf(binding.toId)
       return resultReplyRequest(bot, bot?.reviewTrack, binding)

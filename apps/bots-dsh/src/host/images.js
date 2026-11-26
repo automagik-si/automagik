@@ -67,6 +67,7 @@ export function install(rt) {
   const tracksNativeReview = options => isAgentLoopRequest(options) && !options.provider?.startsWith('acp-')
     && typeof rt.beginReviewGeneration === 'function'
   async function* reviewStream(options, next) {
+    const attempt = rt.reviewAttempt?.(options.sessionId)
     const capable = options.messages.some(message => message.source?.resultReview?.v === 1 && liveImages(message))
       && await readsImagesStrict(options.provider, options.model)
     const generation = rt.beginReviewGeneration({
@@ -83,7 +84,7 @@ export function install(rt) {
       }
     } finally {
       const completed = ok && !options.signal?.aborted
-      rt.reviewGenerationOutput(generation, { confirmed: completed, completed })
+      rt.reviewGenerationOutput(generation, { confirmed: completed, completed, attempt })
     }
   }
 

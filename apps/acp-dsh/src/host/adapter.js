@@ -1744,6 +1744,8 @@ export class AcpAdapter extends LlmAdapter {
   // exit (`starting`), whichever way it leaves: a refusal, a failure, a stop, its end.
   async *stream(options) {
     const { sessionId, signal } = options
+    const review = teamService(this.ctx)
+    const attempt = review?.reviewAttempt?.(sessionId)
     const fileOwner = this.sessionFiles.owners.get(sessionId)
     // Latch durable membership at admission, before the first await. Undo can remove
     // the id before this step resumes, but only a fresh entry may start afterward.
@@ -1773,13 +1775,13 @@ export class AcpAdapter extends LlmAdapter {
       for await (const chunk of this.step(options, entry)) {
         if (chunk.type === 'finish') {
           const completed = !['error', 'aborted'].includes(chunk.reason?.kind) && !signal?.aborted
-          teamService(this.ctx)?.reviewGenerationOutput?.(entry.reviewGeneration, { completed })
+          review?.reviewGenerationOutput?.(entry.reviewGeneration, { completed, attempt })
           entry.reviewCompleted = completed
         }
         yield chunk
       }
     } finally {
-      if (!entry.reviewCompleted) teamService(this.ctx)?.reviewGenerationOutput?.(entry.reviewGeneration, { completed: false })
+      if (!entry.reviewCompleted) review?.reviewGenerationOutput?.(entry.reviewGeneration, { completed: false })
       signal?.removeEventListener('abort', stopFiles)
       if (!entry.archived && entry.fileStartup && this.starting.get(sessionId) === entry
           && entry.fileOwner?.grant && this.sessionFiles.owners.get(sessionId) === entry.fileOwner
