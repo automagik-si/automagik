@@ -290,3 +290,48 @@ test('without DSH\'s session projections the run-stats endpoint has nothing to s
   await call('state')
   assert.deepEqual(await call('run-stats', { botId: 'm1' }), { ok: true, value: null })
 })
+
+test('earlier parts replay dedicated cards once and keep activity for calls without a replay card', async (t) => {
+  const { handoffReply, questionReply, viewReply } = await import('../src/host/parts.js')
+  const question = { id: 'q', callId: 'question', question: 'Which draft?', options: [{ label: 'Short' }] }
+  const view = { type: 'options', id: 'lane', options: [{ label: 'Ship now' }] }
+  const part = (seq, name, args, ids) => ({
+    type: ids.subCallId ? 'tool/ptc-dispatch-start' : 'tool/call', seq, time: seq,
+    data: { turn: 1, name, arguments: JSON.stringify(args), ...ids },
+  })
+  const reply = (seq, { text, source }) => ({
+    type: 'user/message', seq, time: seq, data: { source, content: [{ type: 'text', text }] },
+  })
+  const events = [
+    { type: 'turn/start', seq: 1, data: { turn: 1 } },
+    part(2, 'ask_user', question, { subCallId: 'question' }),
+    part(3, 'bash', {}, { subCallId: 'shell' }),
+    part(4, 'ask_user', question, { subCallId: 'closed-question' }),
+    part(5, 'show_view', { title: 'Pick a lane', view }, { subCallId: 'view' }),
+    part(6, 'show_view', { title: 'Refused view', view, await_reply: false }, { callId: 'refused-view' }),
+    part(7, 'request_secret', {}, { callId: 'secret' }),
+    part(8, 'browser_handoff', { reason: 'other' }, { callId: 'handoff' }),
+    reply(9, questionReply(question, { selected: ['Short'] })),
+    reply(10, viewReply({ id: 'v', callId: 'view', title: 'Pick a lane', view }, 'lane', { selected: ['Ship now'] })),
+    reply(11, handoffReply({ callId: 'handoff', reason: 'other' }, 'done')),
+  ]
+  const { call, stop } = start({
+    team: { ...TEAM, closedCards: { m1: { 'closed-question': 'dismissed' } } },
+    pages: { 'm1:end': { records: events.map(event => ({ event })), hasMore: false } },
+  })
+  t.after(stop)
+  await call('state')
+  const page = (await call('earlier', { sessionId: 'm1c' })).value
+  assert.deepEqual(page.items.map(item => [item.kind, item.id ?? item.callId ?? item.seq]), [
+    ['tool-activity', 'shell'],
+    ['closed', 'closed-question'],
+    ['tool-activity', 'refused-view'],
+    ['tool-activity', 'secret'],
+    ['answer', 9],
+    ['answer', 10],
+    ['answer', 11],
+  ])
+  assert.equal(page.items[4].answers[0].selected[0], 'Short')
+  assert.equal(page.items[5].views[0].title, 'Pick a lane')
+  assert.equal(page.items[6].handoff.outcome, 'done')
+})

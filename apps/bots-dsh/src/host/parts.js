@@ -3660,10 +3660,6 @@ export function install(rt) {
         if (origin?.exchangeId === null) showTool(event, origin.turn)
         continue
       }
-      if (event.type === 'tool/ptc-dispatch-start') {
-        showTool(event, turn)
-        continue
-      }
       if (event.type === 'assistant/message') {
         if (hidden.has(event.data?.turn)) continue
         // One entry per text block: the chat shows each block in a bubble of its own.
@@ -3673,32 +3669,38 @@ export function install(rt) {
         }
         continue
       }
-      if (event.type === 'tool/call') {
+      if (event.type === 'tool/call' || event.type === 'tool/ptc-dispatch-start') {
+        const dispatch = event.type === 'tool/ptc-dispatch-start'
+        const callId = (dispatch ? event.data?.subCallId : event.data?.callId) ?? null
+        const named = event.data?.name
+        const owningTurn = dispatch ? turn : event.data?.turn ?? turn
         // A group_relay call's result is paired back to it by call id — the tool
         // name is on the call, never on the result.
-        if (event.data?.name === 'group_relay') relayCalls.add(event.data?.callId)
+        if (!dispatch && named === 'group_relay') relayCalls.add(event.data?.callId)
+        // The handoff's reply message carries its card in history.
+        if (named === 'browser_handoff' || named === 'computer_handoff') continue
         // Hidden turns and refused calls never showed a display card. Closed cards
         // stay at the call that asked them, including in a hidden Bot-to-Bot turn.
-        const named = event.data?.name
-        const owningTurn = event.data?.turn ?? turn
         if (named === 'show_view' || named === 'ask_user') {
           let args = event.data?.arguments
           if (typeof args === 'string') { try { args = JSON.parse(args) } catch { args = undefined } }
-          const callId = event.data?.callId ?? null
           const closed = callId === null ? undefined : rt.own(rt.own(state.closedCards, partId), callId)
           if (named === 'ask_user') {
+            // The reply message carries an answered card, even on a different page.
             if (closed !== undefined) items.push({ kind: 'closed', closed, question: { question: String(args?.question ?? ''), ...(args?.detail ? { detail: String(args.detail) } : {}), options: Array.isArray(args?.options) ? args.options : [], multiSelect: args?.multiSelect === true }, callId, time: event.time })
-            else showTool(event, owningTurn)
             continue
           }
           const view = normalizeView(args?.view)
           const shown = checkShownView(args?.title, view)
+          // A valid interactive view with no closed card can be carried by its reply.
           if (shown.error === undefined && !shown.interactive && args?.await_reply !== true) {
-            if (!hidden.has(event.data?.turn ?? turn)) items.push({ kind: 'view', title: shown.title, view, callId, time: event.time })
+            if (!hidden.has(owningTurn)) items.push({ kind: 'view', title: shown.title, view, callId, time: event.time })
           } else if (shown.error === undefined && closed !== undefined) {
             items.push({ kind: 'closed', closed, title: shown.title, view, callId, time: event.time })
-          } else showTool(event, owningTurn)
-        } else if (named !== 'group_relay' || !relayResults.has(event.data?.callId)) showTool(event, owningTurn)
+          } else if (shown.error !== undefined || (args?.await_reply ?? shown.interactive) !== shown.interactive) {
+            showTool(event, owningTurn)
+          }
+        } else if (dispatch || named !== 'group_relay' || !relayResults.has(event.data?.callId)) showTool(event, owningTurn)
         continue
       }
       if (event.type === 'tool/result') {
