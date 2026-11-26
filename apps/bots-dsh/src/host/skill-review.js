@@ -283,31 +283,32 @@ function parseFinding(row, frame) {
 
 export function parseReview(text, frame) {
   let value
-  try { value = JSON.parse(text) } catch { return { findings: [], why: 'malformed' } }
-  if (!exact(value, ['findings', 'overflow']) || !Array.isArray(value.findings) || typeof value.overflow !== 'boolean') {
+  let malformed = false
+  try { value = JSON.parse(text) } catch {
+    malformed = true
+    value = recoverReview(text)
+  }
+  if (!value || !Object.hasOwn(value, 'findings') || !Array.isArray(value.findings)) {
     return { findings: [], why: 'malformed' }
   }
+  malformed ||= !exact(value, ['findings', 'overflow']) || typeof value.overflow !== 'boolean'
   const findings = []
-  let why = value.overflow || value.findings.length > 50 ? 'overflow' : undefined
+  let why = malformed ? 'malformed' : undefined
+  if (value.overflow || value.findings.length > 50) why ??= 'overflow'
   for (const row of value.findings) {
     const finding = parseFinding(row, frame)
-    if (finding) findings.push(finding)
-    else why ??= 'malformed'
+    if (!finding) why ??= 'malformed'
+    else if (!malformed || finding.area === 'prompt-injection') findings.push(finding)
   }
   return { findings, why }
 }
 
-// Walk the leading findings array of an interrupted JSON document. Only whole,
-// individually valid rows count. A string or nested value cannot supply a row.
-function interruptedInjection(text, frame) {
-  const prefix = /^\s*\{\s*(?:("(?:[^"\\]|\\.)*"\s*:\s*(?:true|false))\s*,\s*)?"(?:[^"\\]|\\.)*"\s*:\s*\[/.exec(text)
-  if (!prefix) return []
-  const suffix = prefix[1] ? ']}' : '],"overflow":false}'
-  const findings = []
+// Split the immediate members of an object or array, leaving each value's
+// JSON syntax to JSON.parse. The last member may be cut off.
+function* jsonMembers(text, start, close) {
   const ends = []
-  let start = prefix[0].length
   let string = false
-  for (let end = start; end <= text.length; end++) {
+  for (let end = start; end < text.length; end++) {
     const char = text[end]
     if (string && char === '\\') { end++; continue }
     if (char === '"') string = !string
@@ -317,17 +318,34 @@ function interruptedInjection(text, frame) {
       if ((char === '}' || char === ']') && ends.pop() !== char) break
       continue
     }
-    if (char !== ',' && char !== ']' && char !== undefined) continue
-
-    // Give each row its own report with the original property spellings.
-    const { findings: rows } = parseReview(prefix[0] + text.slice(start, end) + suffix, frame)
-    for (const finding of rows) {
-      if (finding.area === 'prompt-injection') findings.push(finding)
-    }
-    if (char !== ',') break
+    if (char !== ',' && char !== close) continue
+    yield text.slice(start, end)
+    if (char === close) return
     start = end + 1
   }
-  return findings
+  yield text.slice(start)
+}
+
+function recoverReview(text) {
+  const open = /^[\t\n\r ]*\{/.exec(text)
+  if (!open) return
+  const value = Object.create(null)
+  for (const member of jsonMembers(text, open[0].length, '}')) {
+    try {
+      Object.assign(value, JSON.parse(`{${member}}`))
+      continue
+    } catch { /* An interrupted array can still contain complete rows. */ }
+    const array = /^[\t\n\r ]*"(?:[^"\\]|\\.)*"[\t\n\r ]*:[\t\n\r ]*\[/.exec(member)
+    if (!array) continue
+    let property
+    try { property = JSON.parse(`{${array[0]}]}`) } catch { continue }
+    const [rows] = Object.values(property)
+    for (const row of jsonMembers(member, array[0].length, ']')) {
+      try { rows.push(JSON.parse(row)) } catch { /* Discard this row only. */ }
+    }
+    Object.assign(value, property)
+  }
+  return value
 }
 
 async function chooseReviewer(rt) {
@@ -349,11 +367,11 @@ async function callFrame(rt, options, frame, signal, check, block) {
   let abort
   let attempt
   let abortPersistence
-  const retain = async text => {
-    const injection = interruptedInjection(text, frame)
+  const onFailedAttempt = async assembler => {
+    const { findings } = parseReview(reviewText(assembler.interruptedBlocks()), frame)
+    const injection = findings.filter(finding => finding.area === 'prompt-injection')
     if (injection.length) await block(injection)
   }
-  const onFailedAttempt = assembler => retain(reviewText(assembler.interruptedBlocks()))
   try {
     check()
     const stopped = new Promise((_, reject) => {
@@ -377,7 +395,6 @@ async function callFrame(rt, options, frame, signal, check, block) {
     if (response.observedFinish?.kind !== 'stop') {
       parsed.why = response.finish.kind === 'error' ? 'provider-error' : 'incomplete'
     }
-    if (parsed.why) await retain(text)
     return parsed
   } catch {
     return { findings: [], why: timeout.aborted ? 'timeout' : 'provider-error' }

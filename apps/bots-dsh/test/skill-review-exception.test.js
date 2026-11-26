@@ -458,7 +458,7 @@ for (const mode of ['aborted', 'sibling', 'cut report']) {
   })
 }
 
-test('shared review parser keeps a complete safety finding blocked across cancellation and reload', async t => {
+async function assertCancelledReviewBlocked(t, ...chunks) {
   const sent = Promise.withResolvers()
   const release = Promise.withResolvers()
   t.after(release.resolve)
@@ -472,8 +472,7 @@ test('shared review parser keeps a complete safety finding blocked across cancel
       return
     }
     cancelledSignal = request.signal
-    yield delta(String.raw`{"overfl\u006fw":false,"f\u0069ndings":[`)
-    yield delta(finding('prompt-injection') + ',{"file":')
+    for (const chunk of chunks) yield delta(chunk)
     sent.resolve()
     await release.promise
   } })
@@ -494,6 +493,14 @@ test('shared review parser keeps a complete safety finding blocked across cancel
   const expected = [JSON.parse(finding('prompt-injection'))]
   assert.deepEqual({ recorded: recorded?.findings, decision: reloaded.decision, why: reloaded.why, calls: f.calls() - calls },
     { recorded: expected, decision: 'refuse', why: 'injection', calls: 0 }, 'the cancelled review durably blocks the same hash')
+}
+
+test('shared review parser keeps a complete safety finding blocked across cancellation and reload', t => {
+  return assertCancelledReviewBlocked(t, String.raw`{"overfl\u006fw":false,"f\u0069ndings":[`, finding('prompt-injection') + ',{"file":')
+})
+
+test('shared review parser uses the last repeated findings property across cancellation and reload', t => {
+  return assertCancelledReviewBlocked(t, `{"findings":[],"findings":[${finding('prompt-injection')}],"overflow":false}`)
 })
 
 for (const remountFirst of [false, true]) {
