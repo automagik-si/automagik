@@ -1395,6 +1395,7 @@ export class AcpAdapter extends LlmAdapter {
       promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
       native: live.twinsOff === true,
       skillOnly: previous?.skillOnly === true,
+      canList: checkAccount,
     })
     live.bridge = next
     live.checkReforkAccount = checkAccount
@@ -1420,6 +1421,7 @@ export class AcpAdapter extends LlmAdapter {
       if (previous !== undefined) this.backchannel.revoke(previous)
       throw error
     } finally {
+      if (next !== undefined) next.canList = undefined
       if (live.checkReforkAccount === checkAccount) delete live.checkReforkAccount
     }
     return next
@@ -1735,7 +1737,8 @@ export class AcpAdapter extends LlmAdapter {
     let reforked = false
     let readinessRefusal
     const checkReforkAccount = () => {
-      readinessRefusal = currentRefusal()
+      // A refused list stays binding for this replacement until readiness can retire it.
+      readinessRefusal ??= currentRefusal()
       return readinessRefusal === undefined
     }
     const reforkRefusal = () => reforked ? accountRefused(readinessRefusal) : undefined

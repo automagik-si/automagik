@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 import { test } from 'node:test'
 import { Session } from '@deepseek-ai/dsh-session'
 import { apply, SERVICE, SIGNED_IN_TTL_MS } from '../index.js'
@@ -716,14 +716,15 @@ async function reforkAccountFixture(t) {
   h.ctx.sessions = new Map([[id, session]])
   let catalog = { key: 'first', text: 'First fake Skills catalog' }
   const skillCalls = { available: () => true, catalog: () => catalog, project: options => options }
-  h.ctx.get = name => name === 'omniTeam' ? { skillCalls } : undefined
+  const tools = { definitions: () => [{ name: 'load_skill', description: 'Load a fake Skill' }] }
+  h.ctx.get = name => name === 'omniTeam' ? { skillCalls } : name === 'tools' ? tools : undefined
   assert.equal(await adapter.access(provider), RECONFIRM_CODEX)
   await h.service.accountConfirm(provider)
 
   t.mock.method(adapter.agents.get(provider), 'spawn', () => ({ command: 'fake-acp' }))
   t.mock.method(adapter.backchannel, 'listen', async () => {})
   const mint = t.mock.method(adapter.backchannel, 'mint')
-  const announced = t.mock.method(adapter.backchannel, 'announce', record => { record.listed = true })
+  const announced = t.mock.method(adapter.backchannel, 'announce')
   const refork = t.mock.method(adapter, 'refork')
   const accountRead = Promise.withResolvers()
   const freshAccount = Promise.withResolvers()
@@ -737,6 +738,20 @@ async function reforkAccountFixture(t) {
   const renewals = []
   const forks = []
   const requests = []
+  const firstLists = []
+  async function list(record) {
+    const request = Object.assign(Readable.from([Buffer.from('{"op":"list"}')]), {
+      method: 'POST', url: record.path,
+      headers: { authorization: `Bearer ${record.credential}`, 'x-dsh-bridge-attachment': '0'.repeat(32) },
+    })
+    let status
+    let answer
+    await adapter.backchannel.handle(request, {
+      writeHead: code => { status = code }, end: body => { answer = JSON.parse(body) },
+    })
+    assert.equal(status, 200)
+    return { tools: answer.tools.map(tool => tool.name), listed: record.listed, announced: record.announced }
+  }
   t.mock.method(adapter.backchannel, 'refresh', record => changedTools && record === originalBridge)
   const launch = t.mock.method(AgentRun.prototype, 'start', async function () {
     this.child = {}
@@ -745,6 +760,7 @@ async function reforkAccountFixture(t) {
     const replacement = async (route, params, calls) => {
       calls.push(params.mcpServers.length)
       if (phase === 'request') await pause()
+      firstLists.push(await list(mint.mock.calls.at(-1).result))
       requests.push(route)
       return { sessionId: `fake-${route}` }
     }
@@ -753,6 +769,7 @@ async function reforkAccountFixture(t) {
       newSession: params => replacement('renewal', params, renewals),
       forkSession: params => replacement('fork', params, forks),
     }
+    await list(mint.mock.calls.at(-1).result)
     await this.spec.onReady?.(this)
   })
   t.mock.method(AgentRun.prototype, 'setMode', async () => {
@@ -816,7 +833,7 @@ async function reforkAccountFixture(t) {
   const replacement = () => mint.mock.calls[1]?.result
   const publications = () => announced.mock.calls.slice(1).map(call => call.arguments[0])
   const reconfirm = () => h.service.accountConfirm(provider)
-  return { attempt, counts, ended, live, publications, replacement, reconfirm, requests, stream }
+  return { attempt, counts, ended, firstLists, live, publications, replacement, reconfirm, requests, stream }
 }
 
 function assertAccountRefused(reason) {
@@ -844,6 +861,7 @@ for (const [label, skills] of [['R2', true], ['T2', false]]) {
       starts: 1, mints: 1, renewals: skills ? [1] : [], forks: skills ? [] : [1], reforks: 1, prompts: 2,
     })
     assert.equal(reason.kind, 'stop')
+    assert.deepEqual(h.firstLists, [{ tools: ['load_skill'], listed: true, announced: false }])
     assert.deepEqual(h.publications(), [h.replacement()])
     assert.equal(h.replacement().listed, true)
     assert.equal(h.replacement().closed, false)
@@ -856,6 +874,7 @@ for (const [label, skills] of [['H3', true], ['T3', false]]) {
     const h = await reforkAccountFixture(t)
     const reason = await h.attempt({ skills, tools: !skills, at: 'request' })
     assert.deepEqual(h.requests, [skills ? 'renewal' : 'fork'])
+    assert.deepEqual(h.firstLists, [{ tools: [], listed: false, announced: false }])
     assert.deepEqual(h.publications(), [], 'readiness must never announce the replacement')
     assert.notEqual(h.replacement().listed, true)
     assert.equal(h.replacement().closed, true)

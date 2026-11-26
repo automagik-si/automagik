@@ -1724,16 +1724,38 @@ test('S4: sign-out clears the starting provider’s exact image grant without a 
   assert.equal(h.adapter.sessionFiles.owners.has(h.id), false)
 })
 
-test('AD-5: gate cleanup clears its exact grant independently of the sign-out sweep', { timeout: 8000 }, async t => {
-  const h = await signOutLifecycleFixture(t)
-  const gate = await h.waitAtGate(LIVE_CODEX, 1)
-  try {
-    h.adapter.endSession(h.id, SIGNED_OUT, LIVE_CODEX)
-    assert.equal(h.adapter.live.has(h.id), false)
-    assert.equal(h.adapter.sessionFiles.owners.get(h.id), h.owner)
-  } finally {
-    gate.release()
-  }
-  assertHeldTurn(await gate.turn, SIGNED_OUT)
-  h.assertEnded()
-})
+for (const replace of [false, true]) {
+  test(`AD-5: provider-scoped gate cleanup ${replace ? 'preserves the replacement owner' : 'clears its exact grant independently of the sign-out sweep'}`, { timeout: 8000 }, async t => {
+    const h = await signOutLifecycleFixture(t)
+    const gate = await h.waitAtGate(LIVE_CODEX, 1)
+    const files = h.adapter.sessionFiles
+    let replacement
+    let callsAtRelease
+    try {
+      const sweep = t.mock.method(files, 'clear', () => {}, { times: 1 })
+      h.adapter.endProvider(LIVE_CODEX, SIGNED_OUT)
+      assert.equal(h.adapter.starting.get(h.id).heldByProvider, LIVE_CODEX)
+      assert.equal(h.adapter.live.has(h.id), false)
+      assert.equal(files.owners.get(h.id), h.owner)
+      assert.deepEqual(sweep.mock.calls.map(call => call.arguments), [[h.id, { owner: h.owner, retire: false }]])
+      if (replace) {
+        files.clear(h.id, { owner: h.owner, retire: false })
+        replacement = h.stageGrant()
+        assert.notEqual(replacement.owner, h.owner)
+      }
+      callsAtRelease = h.teardown.mock.callCount()
+    } finally {
+      gate.release()
+    }
+    assertHeldTurn(await gate.turn, SIGNED_OUT)
+    assert.deepEqual(h.teardown.mock.calls.slice(callsAtRelease).map(call => call.arguments[2]), [LIVE_CODEX])
+    h.assertEnded()
+    if (replacement === undefined) {
+      assert.equal(files.owners.has(h.id), false)
+    } else {
+      assert.equal(files.owners.get(h.id), replacement.owner)
+      assert.equal(replacement.owner.grant, replacement.grant)
+      assert.equal(replacement.owner.lifetime.signal.aborted, false)
+    }
+  })
+}
