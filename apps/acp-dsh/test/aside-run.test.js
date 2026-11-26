@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { asideWorld } from './fixtures/aside-world.mjs'
@@ -9,6 +10,10 @@ const installed = (world, request = {}) => world.service.answerAside({
   readPrompt: () => ({ system: 'Fixture instructions.', text: 'Fixture prompt.' }), ...request,
 })
 const noPrompt = world => assert.equal(world.events().filter(row => row.event === 'prompt').length, 0)
+
+// The aside removes its scratch directory before returning.
+// Resolve its surviving parent and keep the full scratch directory name.
+const resolved = path => join(realpathSync(dirname(path)), basename(path))
 
 test('E2b registered ACP aside opens and closes a checked scratch Codex session', async t => {
   const world = asideWorld(t, { system: true, reply: { chunks: ['Fixture ', 'response.'] } })
@@ -20,8 +25,8 @@ test('E2b registered ACP aside opens and closes a checked scratch Codex session'
     ['start', 'new', 'mode', 'prompt', 'close'])
   assert.equal(world.contexts[0].nativeOff, true)
   assert.equal(world.contexts[0].cwd, session.cwd)
-  assert.equal(start.cwd, session.cwd)
-  assert.ok(world.fake.calls.every(call => call.cwd === session.cwd))
+  assert.equal(resolved(start.cwd), resolved(session.cwd))
+  assert.ok(world.fake.calls.every(call => resolved(call.cwd) === resolved(session.cwd)))
   assert.deepEqual(session.mcpServers, [])
   assert.equal(session.systemPrompt, undefined)
   assert.equal(mode.modeId, 'read-only')
@@ -105,7 +110,7 @@ test('R2-5 Codex accepts legacy read-only with the checked model and scratch cwd
   const result = await installed(world, { model: 'gpt-6.2-sol' }).catch(error => error.code)
   const session = world.events().find(row => row.event === 'new')
   assert.equal(session.cwd, world.contexts[0].cwd)
-  assert.ok(world.fake.calls.length > 0 && world.fake.calls.every(call => call.cwd === session.cwd))
+  assert.ok(world.fake.calls.length > 0 && world.fake.calls.every(call => resolved(call.cwd) === resolved(session.cwd)))
   assert.deepEqual({ result, modes: world.events().filter(row => row.event === 'mode').map(row => row.modeId),
     models: world.events().filter(row => row.event === 'prompt').map(row => row.model) },
   { result: { text: 'Fixture response.', model: 'gpt-6.2-sol' }, modes: ['read-only'], models: ['gpt-6.2-sol'] })
