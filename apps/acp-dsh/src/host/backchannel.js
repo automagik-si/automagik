@@ -13,7 +13,7 @@
 // list.
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
-import { createAssistantMessage, createDeveloperMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createDeveloperMessage, createToolResultMessage, HarnessError } from '@deepseek-ai/dsh-llm'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import { HISTORY_TOOL_NAME, SYNTHETIC_KIND } from './names.js'
@@ -52,6 +52,8 @@ const APPROVAL_ABORT_INFO = Object.freeze({ name: 'AbortError', code: TOOL_ABORT
 
 // Match the DSH pipeline's pre-execute approval denials for asks carried by the bridge.
 const approvalDenial = (reason, code) => ({ kind: 'deny', reason, info: { name: 'ApprovalError', code } })
+
+class ApprovalError extends HarnessError {}
 
 function historyCancelled() {
   return { content: [], isError: true, error: CANCELLED_INFO }
@@ -1221,18 +1223,25 @@ export class Backchannel {
       return { revoked: true }
     }
     let unwatch
+    let unwatchBridgeApproval
     let unwatchPre
     let unwatchPrepare
     let unwatchPost
+    let toolSet
     let timer
     let timedOut = false
     let levelChanged = false
     let bridgeApproved = false
     let enteredAuto = false
+    const effectiveAuto = () => this.ctx?.get?.('permissionPresets')?.current?.(session) === 'auto'
     const bridgeApprovalRefusal = () => {
-      if (bridgeApproved && (enteredAuto || this.ctx?.get?.('permissionPresets')?.current?.(session) === 'auto')) {
+      if (bridgeApproved && (enteredAuto || effectiveAuto())) {
         return approvalDenial('The Session switched to DSH Auto after the bridge requested approval.', 'APPROVAL_PRESET_CHANGED')
       }
+    }
+    const requireCurrentBridgeApproval = () => {
+      const refusal = bridgeApprovalRefusal()
+      if (refusal !== undefined) throw new ApprovalError(refusal.reason, refusal.info.code)
     }
     let approvalAbortedBeforeDispatch = false
     try {
@@ -1241,9 +1250,10 @@ export class Backchannel {
       // pipeline's pre-execute is auto-review's gate, and its ask (if any) is the one dialog.
       if (!level.full && !level.auto) {
         if (requestScoped && typeof this.ctx?.on === 'function') {
-          // An Auto transition supersedes this card even if the Session switches back.
-          unwatch = this.ctx.on('session/event', (eventSession, event) => {
-            if (eventSession === session && event?.type === 'permission/preset' && event.data?.preset === 'auto') enteredAuto = true
+          // The same effective preset the DSH reviewer reads supersedes this card,
+          // including sandbox or approval overrides and a subsequent switch back.
+          unwatchBridgeApproval = this.ctx.on('session/event', (eventSession, event) => {
+            if (eventSession === session && LEVEL_EVENTS.has(event?.type) && effectiveAuto()) enteredAuto = true
           })
         }
         let outcome = 'unavailable'
@@ -1370,8 +1380,7 @@ export class Backchannel {
           if (restricted && (dispatched || stopped.aborted || !restrictedAllowed())) {
             throw new Error('The restricted call lost its prompt authorization.')
           }
-          const refusal = bridgeApprovalRefusal()
-          if (refusal !== undefined) throw Object.assign(new Error(refusal.reason), refusal.info)
+          requireCurrentBridgeApproval()
           dispatched = true
           clearTimeout(timer)
           timer = undefined
@@ -1406,6 +1415,25 @@ export class Backchannel {
       if (levelChanged) {
         return await settle([{ type: 'text', text: `Auto review cannot finish ${name}: the permission level changed.` }], true, { name: 'AutoReviewUnavailableError', code: 'AUTO_REVIEW_LEVEL_CHANGED' })
       }
+      if (bridgeApproved) {
+        // The registry resolves the tool again after the execute waterfall. Wrap only
+        // this call's existing executable so a later listener can wait safely.
+        const agent = record.agent
+        toolSet = {
+          dispose() { toolSet = undefined },
+          view(scope) {
+            const tool = scope === agent && toolSet !== undefined ? tools.executable(name, agent) : undefined
+            if (tool === undefined) return new Map()
+            return new Map([[name, {
+              ...tool,
+              execute(args, exec) {
+                requireCurrentBridgeApproval()
+                return tool.execute(args, exec)
+              },
+            }]])
+          },
+        }
+      }
       let settled
       try {
         if (!restrictedAllowed() || (restricted && stopped.aborted)) return await cancelled()
@@ -1413,6 +1441,7 @@ export class Backchannel {
           calls: [{ id, name, arguments: raw }],
           agent: record.agent,
           signal,
+          ...(toolSet !== undefined && { toolSet }),
         })
       } catch (cause) {
         if (ended()) return await revoked()
@@ -1461,9 +1490,11 @@ export class Backchannel {
     } finally {
       clearTimeout(timer)
       unwatch?.()
+      unwatchBridgeApproval?.()
       unwatchPre?.()
       unwatchPrepare?.()
       unwatchPost?.()
+      toolSet?.dispose()
       // After its step ended this writes nothing: the write guard hid the block there.
       hideSynthetic()
       releaseApproval()

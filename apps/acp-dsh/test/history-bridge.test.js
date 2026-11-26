@@ -9,8 +9,10 @@ import { createInterface } from 'node:readline'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
+import { PermissionPresetService } from '@deepseek-ai/dsh-permission-presets'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session } from '@deepseek-ai/dsh-session'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
 import { apply as applySpill, inject as spillInject } from '@deepseek-ai/dsh-spill-policy'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -963,6 +965,81 @@ test(`${noCardCase} R1: entering DSH Auto invalidates the Workspace card before 
   assert.equal(wire[0].isError, true)
   assert.doesNotMatch(JSON.stringify([chunks, chat.session.snapshotEvents(), wire]), /synthetic marker/)
 })
+
+for (const change of ['during review', 'before the bridge execute guard', 'during later execute middleware', 'at body entry']) {
+  test(`${noCardCase} R1 body entry: effective Auto ${change}`, agyTest, async t => {
+    const { h, team, chat } = await ownedAgyHistory(t)
+    const harness = new Context()
+    t.after(() => harness.fiber.dispose())
+    harness.provide('shell', { sandboxMode: 'workspace-write' })
+    harness.provide('approval', { config: { policy: 'ask' } })
+    harness.provide('sessions', new Map())
+    harness.provide('agents', { list: () => [] })
+    await harness.plugin(SessionProjectionRegistry)
+    await harness.plugin(PermissionPresetService)
+    await harness.plugin(SystemPrompt)
+    await harness.plugin(ToolRuntime)
+    await harness.plugin({ apply: applyExecutor, inject: executorInject })
+    const presets = harness.get('permissionPresets')
+    presets.registerAuto(() => {})
+    h.services.permissionPresets = presets
+    h.services.tools = harness.tools
+    const agent = h.adapter.ctx.agents.get(chat.session.id)
+    await harness.inject(['tools'], ctx => { agent.ctx = createScope(ctx, agent).ctx })
+    harness.tools.register({
+      name: HISTORY,
+      description: 'Read fixture history.',
+      parameters: { type: 'object' },
+      output: { schema: { type: 'string' }, render: (_, text) => [{ type: 'text', text }] },
+      execute: (_, exec) => { h.executed.push({ id: exec.callId }); return maskedLine },
+    })
+    const on = h.adapter.ctx.on
+    h.adapter.ctx.on = (event, listener, options) => event.startsWith('tools/')
+      ? harness.on(event, listener, options) : on(event, listener, options)
+
+    // The stored Auto selection does not match the initial workspace sandbox. Only the
+    // effective sandbox changes during this call, with no new preset selection.
+    chat.policyEvent('permission/preset', { preset: 'auto' })
+    assert.equal(presets.current(chat.session), 'workspace-write')
+    const observed = []
+    async function enterAuto(exec) {
+      await Promise.resolve()
+      if (change === 'at body entry') chat.session.append('sandbox/mode', { mode: 'danger-full-access' })
+      else chat.policyEvent('sandbox/mode', { mode: 'danger-full-access' })
+      observed.push([exec.callId, presets.current(chat.session)])
+      if (change === 'during review' || change === 'during later execute middleware') {
+        chat.policyEvent('sandbox/mode', { mode: 'workspace-write' })
+        observed.push([exec.callId, presets.current(chat.session)])
+      }
+    }
+    const waitThenRun = async (exec, next) => { await enterAuto(exec); return next() }
+    if (change === 'before the bridge execute guard') harness.on('tools/execute', waitThenRun)
+    else harness.on('tools/pre-execute', async (exec, next) => {
+      if (change === 'during review') {
+        await enterAuto(exec)
+        return askOnDenial
+      }
+      // Register after the bridge's execute guard, with the waterfall still to come.
+      harness.on('tools/execute', waitThenRun)
+      return next()
+    })
+
+    const chunks = await chat.turn(agyRequest({ query: 'fixture history' }))
+    t.diagnostic(`requests=${h.requests.length} cards=${h.approvals.length} bodies=${h.executed.length}`)
+    assert.equal(h.requests.length, 1)
+    assert.equal(h.approvals.length, 1)
+    const [entry] = h.approvals
+    const expected = [[entry.callId, 'auto']]
+    if (change === 'during review' || change === 'during later execute middleware') expected.push([entry.callId, 'workspace-write'])
+    assert.deepEqual(observed, expected)
+    const result = assertCard(h, team, chat.session, entry, 'allowed-once', 'dsh', 0)
+    assert.deepEqual(result.error, { name: 'ApprovalError', code: 'APPROVAL_PRESET_CHANGED' })
+    const wire = h.events('agy-real-result').map(row => row.answer)
+    assert.equal(wire.length, 1)
+    assert.equal(wire[0].isError, true)
+    assert.doesNotMatch(JSON.stringify([chunks, chat.session.snapshotEvents(), wire]), /synthetic marker/)
+  })
+}
 
 test(`${noCardCase} restack: restricted Antigravity ON replacement does not list after withdrawal`, agyTest, async t => {
   const h = agyHistory(t, true)
