@@ -273,6 +273,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: seat chat',
     'on agent/created',
     'effect ds-bot: remote Hermes',
+    'effect omni-ui: worker skill snapshots',
     // Skills adds only the outgoing catalog and a checked, authorized body.
     'on agent/pre-step (prepend)',
     'on tools/pre-execute (prepend)',

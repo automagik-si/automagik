@@ -6,8 +6,11 @@ import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { setImmediate } from 'node:timers/promises'
 import { KEY_ERROR } from '../src/host/connectors/credential-key.js'
+import { install as installSkills } from '../src/host/skill-library.js'
 import { install } from '../src/host/store.js'
+import { stubSkillReviewer } from './fixtures/skill-review-model.js'
 
 function patch(method, replace) {
   const original = fsp[method]
@@ -673,6 +676,100 @@ test('refresh adopts a fixed state file and clears read-only mode', async (t) =>
   rt.state.prefs.marker = 'saved after repair'
   await rt.save()
   assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).prefs.marker, 'saved after repair')
+})
+
+const settleSkills = async rt => {
+  await setImmediate()
+  await rt.skillLibrary.settled?.()
+}
+
+async function workerSnapshotRoster(t) {
+  const bot = { id: 'retired', sessionId: 'fixture-retired', name: 'Retired fixture', capabilities: [], createdAt: 1 }
+  const seed = runtime(t, { version: 2, revision: 77, bots: { retired: bot }, capabilities: { items: {} } })
+  const { rt, home, statePath } = seed
+  stubSkillReviewer(rt)
+  installSkills(rt)
+  await rt.load()
+  await rt.save()
+  const caller = { role: 'owner', id: 'fixture-owner' }
+  await rt.skillLibrary.endpoint('skill-library-save', {
+    name: 'notes', description: 'Fixture notes.', content: 'Copy the synthetic notes to the worksheet.',
+  }, caller)
+  await rt.skillLibrary.endpoint('bot-skill-add', { id: 'retired', name: 'notes' }, caller)
+  await settleSkills(rt)
+  const library = join(home, 'skill-library', 'library.json')
+  const dir = join(home, 'skills', '.bots')
+  const target = join(dir, 'retired.json')
+  const fixed = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+  assert.equal(fixed.version, 2)
+  delete fixed.bots.retired
+  fixed.mainBotIds = []
+  fixed.revision += 100
+  fixed.autoStamp = fixed.revision
+  return { ...seed, fixed, dir, target, library }
+}
+
+test('#2084 case 11c current-format roster adoption retires a Bot without a skill write', async t => {
+  const { rt, fixed, statePath, target, library } = await workerSnapshotRoster(t)
+  assert.ok(fs.existsSync(target), 'initial assignment publishes the snapshot')
+  const before = fs.readFileSync(library)
+  const bytes = JSON.stringify(fixed)
+  let gained = 0
+  rt.onLockGained(() => gained++)
+  fs.writeFileSync(statePath, bytes)
+  await assert.rejects(rt.save(), { code: 'ELOCKLOST' })
+  await rt.refresh()
+  await settleSkills(rt)
+  assert.equal(rt.botOf('retired'), undefined)
+  assert.equal(gained, 0)
+  assert.equal(fs.readFileSync(statePath, 'utf8'), bytes)
+  assert.deepEqual(fs.readFileSync(library), before)
+  assert.equal(fs.existsSync(target), false)
+})
+
+test('#2084 case 11c adoption listeners see current ownership after an outside-change save rejection', async t => {
+  const { rt, fixed, statePath, warnings } = await workerSnapshotRoster(t)
+  const events = []
+  rt.onAdopted?.(() => { throw new Error('synthetic listener failure') })
+  const remove = rt.onAdopted?.(() => events.push('disposed'))
+  remove?.()
+  rt.onAdopted?.(() => events.push([rt.teamCurrent(), rt.holdsLock(), rt.botOf('retired')]))
+  fs.writeFileSync(statePath, JSON.stringify(fixed))
+  await assert.rejects(rt.save(), { code: 'ELOCKLOST' })
+  await rt.refresh()
+  await settleSkills(rt)
+  assert.deepEqual(events, [[true, true, undefined]], 'successful adoption notifies after clearing the tracked slot')
+  assert.ok(warnings.some(args => /listener failed/.test(args[0]) && /synthetic listener failure/.test(String(args[1]))))
+})
+
+test('#2084 AS-R2 repaired refresh retires a Bot before any save or library read', async t => {
+  const seed = await workerSnapshotRoster(t)
+  const { home, fixed, statePath, dir, target, library } = seed
+  await seed.dispose()
+  const before = fs.readFileSync(library)
+  if (!fs.existsSync(target)) {
+    // On the base, seed the stale publication directly to exercise the repair boundary.
+    const { hash } = JSON.parse(before).skills.notes
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    fs.writeFileSync(target, JSON.stringify({ version: 1, botId: 'retired',
+      skills: [{ name: 'notes', mode: 'manual', hash }] }), { mode: 0o444 })
+  }
+  const { rt, dispose } = host(home, { version: 999, revision: 77 })
+  t.after(dispose)
+  installSkills(rt)
+  await rt.load()
+  await settleSkills(rt)
+  assert.match(rt.readOnly(), /could not be read/)
+  assert.equal(fs.existsSync(target), true)
+  const bytes = JSON.stringify(fixed)
+  fs.writeFileSync(statePath, bytes)
+  await rt.refresh()
+  await settleSkills(rt)
+  assert.equal(rt.readOnly(), undefined)
+  assert.equal(rt.botOf('retired'), undefined)
+  assert.equal(fs.readFileSync(statePath, 'utf8'), bytes, 'refresh did not save a migration')
+  assert.deepEqual(fs.readFileSync(library), before)
+  assert.equal(fs.existsSync(target), false, 'lock-holder repair refresh reconciles before a save or library read')
 })
 
 test('a state file changed while the lock was gone is adopted, this host\'s state kept aside', async (t) => {

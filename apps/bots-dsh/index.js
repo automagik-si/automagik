@@ -6,7 +6,7 @@
 // DSH's and from other plugins'.
 import { createHash, randomBytes } from 'node:crypto'
 import fs, { cpSync, existsSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
 import { DEFAULT_ROUTE_POLICY } from './src/shared/route-policy.js'
 import * as diagnostics from './src/host/diagnostics.js'
@@ -228,7 +228,7 @@ function prepareSkillImport(home, from, hasSkills) {
 
 // A team kept elsewhere before (config.importHome, e.g. ~/.dsh/bot) is copied in once,
 // when the home has no team yet. Only on request: the source is left as it was.
-function importTeam(home, from) {
+function importTeam(home, from, warn) {
   if (!from) return false
   const sourceState = join(from, 'state.json')
   const destinationState = join(home, 'state.json')
@@ -241,6 +241,14 @@ function importTeam(home, from) {
   const copySkills = prepareSkillImport(home, from, skillSources.length !== 0)
   const stageState = !sourceKey.missing || copySkills !== undefined
   const copyHome = () => cpSync(from, home, { recursive: true, force: false, filter: source => {
+    const [first, second] = relative(from, source).split(sep)
+    if (skillAlias(first) === 'skills') {
+      if (second !== undefined && skillAlias(second) === '.bots') return false
+      if (second === undefined && !fs.lstatSync(source, { throwIfNoEntry: false })?.isDirectory()) {
+        warn('ds-bot: skipped the imported skills entry because it is not a folder')
+        return false
+      }
+    }
     if (source.endsWith('state.lock') || /[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source)) return false
     if (dirname(source) !== from) return true
     const name = basename(source)
@@ -297,7 +305,8 @@ function importTeam(home, from) {
 export function createRuntime(ctx, config = {}) {
   const dshHome = folders.dshHomeOf(process.env.DSH_HOME)
   const home = folders.expandPath(config.home ?? folders.teamHomeOf(process.env))
-  const imported = importTeam(home, config.importHome && resolve(folders.expandPath(config.importHome)))
+  const imported = importTeam(home, config.importHome && resolve(folders.expandPath(config.importHome)),
+    message => ctx.logger.warn(message))
   const rt = {
     ctx,
     config,
