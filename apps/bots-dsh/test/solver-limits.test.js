@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
-import { createConnection } from 'node:net'
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { createConnection, createServer } from 'node:net'
 import { createInterface } from 'node:readline'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -22,6 +23,7 @@ import { apply } from '../index.js'
 import { ROUTE, STEER_CUT } from '../src/host/constants.js'
 import { questionReply } from '../src/host/parts.js'
 import { socketPathOf } from '../src/host/pocket-socket.js'
+import { resultSnapshot } from '../src/host/solver-progress.js'
 import { answerSender } from '../src/host/turns.js'
 import { DICTIONARY, installLocale } from '../src/client/i18n.js'
 import { reviewMarkText, solverAutoView } from '../src/client/solver-draft.js'
@@ -3712,4 +3714,277 @@ test('the live Claude alias relabel refuses an explicit pin and an offered concr
 
   await stream(concrete.adapter, 'opus')
   assert.equal(concrete.wire(provider).find(row => row.method === 'session/prompt')?.selected, 'opus')
+})
+
+const snapshotDigest = /^[a-f0-9]{64}$/
+
+function teamWithSnapshotLink(h) {
+  const team = join(h.home, 'team')
+  const modules = join(team, 'stt', 'node_modules')
+  mkdirSync(join(modules, 'semver', 'bin'), { recursive: true })
+  mkdirSync(join(modules, '.bin'))
+  writeFileSync(join(modules, 'semver', 'bin', 'semver.js'), 'fake executable')
+  symlinkSync('../semver/bin/semver.js', join(modules, '.bin', 'semver'))
+  h.ctx.workspaceRegistry.get = () => ({ path: team })
+  delete h.rt.botOf('solver').workDir
+  return team
+}
+
+function snapshotFixture(t) {
+  const home = mkdtempSync(join(tmpdir(), 'solver-snapshot-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  return home
+}
+
+function recordSnapshotAccess(t, run, before = () => {}) {
+  const calls = []
+  const mocks = []
+  const linkText = fs.readlinkSync
+  for (const method of ['lstatSync', 'statSync', 'readlinkSync', 'openSync', 'opendirSync', 'readdirSync', 'readFileSync', 'realpathSync']) {
+    const original = fs[method]
+    mocks.push(t.mock.method(fs, method, (path, ...args) => {
+      if (typeof path === 'string') {
+        const physical = path.replace(/^\/proc\/self\/fd\/\d+/, fd => linkText(fd))
+        calls.push([method, physical, args[0]])
+        before(method, physical)
+      }
+      return original(path, ...args)
+    }))
+  }
+  syncBuiltinESMExports()
+  try { return { value: run(), calls } } finally {
+    for (const method of mocks) method.mock.restore()
+    syncBuiltinESMExports()
+  }
+}
+
+function assertNoSnapshotTargetAccess(calls, links, outside) {
+  for (const [method, path] of calls) {
+    assert.ok(path !== outside && !path.startsWith(outside + '/'), `${method} accessed ${path}`)
+    for (const link of links) {
+      assert.ok(!path.startsWith(link + '/'), `${method} accessed ${path} through a link`)
+      if (path === link) assert.ok(['lstatSync', 'readlinkSync'].includes(method), `${method} accessed ${link}`)
+    }
+  }
+}
+
+async function reportSnapshotCheck(h, request, run, cwd, command, check = 'answer') {
+  await h.ctx.listeners.get('tools/execute')[0]({
+    name: 'bash', arguments: { command }, agent: h.agentOf('solver'), callId: run,
+  }, async () => ({ isError: false, value: { kind: 'foreground', cwd, exitCode: 0, signal: null, timedOut: false, aborted: false } }))
+  return h.progress('checks', { request, run, results: results(check) })
+}
+
+test('Snapshot E T1/E2E: a folder-less Solver verifies a check and delivers Done', async t => {
+  const h = await setup(t)
+  const team = teamWithSnapshotLink(h)
+  const answer = join(team, 'task', 'answer.txt')
+  const command = `test -s "${answer}"`
+  const { request, send, delivered } = await reviewedPlan(h, ['answer'], [{ check: 'answer', command }])
+  mkdirSync(dirname(answer))
+  writeFileSync(answer, '42\n')
+  assert.match(await h.progress('start', { request, run: 'team-check', checks: ['answer'] }), /^Recorded\./)
+  assert.match(await reportSnapshotCheck(h, request, 'team-check', team, command), /^Recorded\./)
+  const bot = h.rt.botOf('solver')
+  assert.deepEqual(bot.reviewTrack.solver.passed, ['answer'])
+  assert.equal(bot.reviewTrack.solver.runs['team-check'].unverified, undefined)
+  await send('result')
+  h.event('reviewer', 'user/message', { content: content('Review the agreed check.'), source: {
+    kind: 'bot', role: 'request', senderSessionId: 'solver', exchangeId: delivered.at(-1).exchangeId,
+  } })
+  h.event('reviewer', 'turn/start', { turn: 2 })
+  h.finish('reviewer', 'SHIP\nEvidence verified.')
+  h.event('solver', 'turn/start', { turn: 3 })
+  h.finish('solver', 'The answer is 42.')
+  const mark = bot.reviewTrack.last
+  assert.equal(mark.done, true)
+  assert.equal(reviewMarkText({ ...bot, reviewMark: mark }, { byId: h.rt.state.bots }),
+    'Plan and result reviewed by reviewer.\nDone: every check passed and reviewer approved.')
+})
+
+test('Snapshot E T2: a link retarget and a replacement file produce distinct digests', t => {
+  const folder = snapshotFixture(t)
+  const link = join(folder, 'link')
+  symlinkSync('missing-a', link)
+  const before = resultSnapshot(folder)
+  assert.match(before ?? '', snapshotDigest)
+  symlinkSync('missing-b', link + '.new')
+  renameSync(link + '.new', link)
+  const retargeted = resultSnapshot(folder)
+  assert.match(retargeted ?? '', snapshotDigest)
+  assert.notEqual(retargeted, before)
+  unlinkSync(link)
+  writeFileSync(link, 'missing-b')
+  const file = resultSnapshot(folder)
+  assert.match(file ?? '', snapshotDigest)
+  assert.notEqual(file, retargeted)
+})
+
+test('Snapshot E T3: snapshot access and digest exclude link targets', t => {
+  const folder = snapshotFixture(t)
+  const outside = snapshotFixture(t)
+  const target = join(outside, 'secret.txt')
+  const targetDir = join(outside, 'dir')
+  const fileLink = join(folder, 'out')
+  const dirLink = join(folder, 'outdir')
+  mkdirSync(targetDir)
+  writeFileSync(target, 'disposable fake')
+  symlinkSync(target, fileLink)
+  symlinkSync(targetDir, dirLink)
+  const take = () => recordSnapshotAccess(t, () => resultSnapshot(folder))
+  const initial = take()
+  assertNoSnapshotTargetAccess(initial.calls, [fileLink, dirLink], outside)
+  assert.match(initial.value ?? '', snapshotDigest)
+  for (const link of [fileLink, dirLink]) {
+    assert.ok(initial.calls.some(([method, path]) => method === 'readlinkSync' && path === link))
+  }
+  const check = () => {
+    const next = take()
+    assertNoSnapshotTargetAccess(next.calls, [fileLink, dirLink], outside)
+    assert.match(next.value ?? '', snapshotDigest)
+    assert.equal(next.value, initial.value)
+  }
+  writeFileSync(target, 'changed disposable fake')
+  utimesSync(target, 1, 1)
+  writeFileSync(join(targetDir, 'added'), 'added disposable fake')
+  check()
+  unlinkSync(target)
+  check()
+  writeFileSync(target, 'recreated disposable fake')
+  check()
+})
+
+test('Snapshot E AE-2: a directory replaced before traversal does not redirect the walk', t => {
+  const folder = snapshotFixture(t)
+  const outside = snapshotFixture(t)
+  const nested = join(folder, 'nested')
+  mkdirSync(nested)
+  writeFileSync(join(outside, 'outside-name'), 'disposable fake')
+  let replaced = false
+  const attempt = recordSnapshotAccess(t, () => resultSnapshot(folder), (method, path) => {
+    if (replaced || path !== nested || !['openSync', 'readdirSync', 'opendirSync'].includes(method)) return
+    replaced = true
+    renameSync(nested, join(folder, 'original'))
+    symlinkSync(outside, nested)
+  })
+  assert.equal(replaced, true)
+  assert.equal(attempt.value, undefined)
+  for (const [method, path, flags] of attempt.calls) {
+    if (method === 'openSync' && path === nested) {
+      assert.equal(flags & fs.constants.O_NOFOLLOW, fs.constants.O_NOFOLLOW)
+      continue
+    }
+    assertNoSnapshotTargetAccess([[method, path]], [nested], outside)
+  }
+})
+
+test('Snapshot E T4: a linked or non-directory root refuses without recording a run', async t => {
+  const h = await setup(t)
+  const outside = snapshotFixture(t)
+  const folder = h.rt.botOf('solver').workDir
+  const { request } = await reviewedPlan(h, ['check-a'])
+  rmdirSync(folder)
+  symlinkSync(outside, folder)
+  for (const leading of [folder, folder + '/']) {
+    const inspected = recordSnapshotAccess(t, () => resultSnapshot(leading))
+    assert.equal(inspected.value, undefined)
+    assertNoSnapshotTargetAccess(inspected.calls, [folder], outside)
+  }
+  const start = () => h.progress('start', { request, run: 'invalid-root', checks: ['check-a'] })
+  assert.match(await start(), /^Cannot start this run\. The result folder cannot be verified: .*symbolic link.* No run was recorded\./)
+  const assertNoRun = () => {
+    const progress = h.rt.botOf('solver').reviewTrack.solver
+    assert.deepEqual(progress.runs, {})
+    assert.equal(progress.pending, undefined)
+  }
+  assertNoRun()
+  unlinkSync(folder)
+  writeFileSync(folder, 'not a directory')
+  assert.match(await start(), /^Cannot start this run\. The result folder cannot be verified: .*not a directory.* No run was recorded\./)
+  assertNoRun()
+})
+
+test('Snapshot E T5: a folder-less Solver refuses a socket with its relative path', async t => {
+  const h = await setup(t)
+  const folder = teamWithSnapshotLink(h)
+  const { request } = await reviewedPlan(h, ['answer'])
+  const server = createServer()
+  await new Promise((resolve, reject) => server.once('error', reject).listen(join(folder, 's.sock'), resolve))
+  t.after(() => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
+  const refusal = await h.progress('start', { request, run: 'socket-run', checks: ['answer'] })
+  assert.equal(refusal, 'Cannot start this run. The result folder cannot be verified: It contains a device, pipe or socket at "s.sock".'
+    + ' No run was recorded. Ask the person to set a smaller working folder for this Solver, or remove what blocks the check, then start again.')
+  const progress = h.rt.botOf('solver').reviewTrack.solver
+  assert.deepEqual(progress.runs, {})
+  assert.equal(progress.pending, undefined)
+  const disk = JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots.solver.reviewTrack.solver
+  assert.deepEqual(disk.runs, {})
+  assert.equal(disk.pending, undefined)
+})
+
+test('Snapshot E AE-3: refusal retires prior RESULT evidence across reload and permits retry', async t => {
+  let h = await setup(t)
+  const folder = h.rt.botOf('solver').workDir
+  const sealed = join(h.home, 'original-workspace')
+  const { request, send, verdict, delivered } = await reviewedPlan(h, ['check-a'])
+  assert.match(await checked(h, request, 'original-run'), /^Recorded\./)
+  await send('result')
+  verdict(delivered.at(-1).exchangeId)
+  const prior = h.rt.botOf('solver').reviewTrack.solver
+  assert.deepEqual(prior.passed, ['check-a'])
+  assert.deepEqual(prior.passRuns, { 'check-a': 'original-run' })
+  assert.match(prior.snapshot ?? '', snapshotDigest)
+  assert.equal(prior.review.verdict, 'SHIP')
+  renameSync(folder, sealed)
+  symlinkSync(sealed, folder)
+  const refusal = await h.progress('start', { request, run: 'refused-run', checks: ['check-a'] })
+  assert.match(refusal, /^Cannot start this run\./)
+  unlinkSync(folder)
+  renameSync(sealed, folder)
+  await h.close()
+  h = fixture(t, h.home)
+  await h.rt.load()
+  const reloaded = h.rt.botOf('solver').reviewTrack.solver
+  assert.equal(reloaded.revision, prior.revision + 1)
+  assert.deepEqual(reloaded.runs, prior.runs)
+  assert.deepEqual(reloaded.passed, [])
+  assert.deepEqual(reloaded.passRuns, {})
+  assert.equal(reloaded.snapshot, undefined)
+  assert.equal(reloaded.review, undefined)
+  assert.equal(reloaded.pending, undefined)
+  assert.match(await checked(h, request, 'refused-run'), /^Recorded\./)
+  assert.deepEqual(h.rt.botOf('solver').reviewTrack.solver.passRuns, { 'check-a': 'refused-run' })
+})
+
+test('Snapshot E AE-4: link retarget after start refuses the observed pass', async t => {
+  const h = await setup(t)
+  const team = teamWithSnapshotLink(h)
+  const command = 'fake answer'
+  const { request } = await reviewedPlan(h, ['answer'], [{ check: 'answer', command }])
+  const run = 'retargeted'
+  assert.match(await h.progress('start', { request, run, checks: ['answer'] }), /^Recorded\./)
+  const link = join(team, 'stt', 'node_modules', '.bin', 'semver')
+  symlinkSync('../different-target', link + '.new')
+  renameSync(link + '.new', link)
+  assert.match(await reportSnapshotCheck(h, request, run, team, command), /The result changed between the start and the outcome\./)
+  const progress = h.rt.botOf('solver').reviewTrack.solver
+  assert.deepEqual(progress.passed, [])
+  assert.equal(progress.runs[run].unverified, true)
+})
+
+test('Snapshot E AE-4: entry cap counts the root and links but excludes the root .git', t => {
+  const folder = snapshotFixture(t)
+  mkdirSync(join(folder, '.git'))
+  for (let i = 0; i < 19_998; i++) writeFileSync(join(folder, String(i)), '')
+  symlinkSync('missing', join(folder, 'last-link'))
+  assert.match(resultSnapshot(folder) ?? '', snapshotDigest)
+  writeFileSync(join(folder, 'over-cap'), '')
+  assert.equal(resultSnapshot(folder), undefined)
+})
+
+test('Snapshot E P1: a plain Solver folder still records a verified pass', async t => {
+  const h = await setup(t)
+  const { request } = await reviewedPlan(h, ['check-a'])
+  assert.match(await checked(h, request, 'plain-check'), /^Recorded\./)
+  assert.deepEqual(h.rt.botOf('solver').reviewTrack.solver.passed, ['check-a'])
 })
