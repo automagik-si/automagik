@@ -123,7 +123,7 @@ const pack = createPack({
     "This preview expired. Preview the skill again.": "A prévia expirou. Abra uma nova prévia da skill.",
     "The skill changed since the preview. Preview it again.": "A skill mudou depois da prévia. Abra uma nova prévia.",
     "Replace this skill from a folder or an archive.": "Substitua esta skill por uma pasta ou um arquivo compactado.",
-    "Only the owner of this computer can read a folder on it. Upload a .zip or .tar.gz instead.": "Só quem é responsável por este computador pode ler uma pasta nele. Envie um arquivo .zip ou .tar.gz.",
+    "Only the owner of this computer can read a folder on it. Upload a .zip or .tar.gz instead.": "Só quem é responsável por este computador pode ler uma pasta local. Envie um arquivo .zip ou .tar.gz.",
     "SKILL.md needs a name and a one-line description in its frontmatter.": "O cabeçalho do SKILL.md precisa de um nome e uma descrição de uma linha.",
     "Not saved: {reason} ({path}, line {line}). Change the text and save again.": "A skill não foi salva: {reason} ({path}, linha {line}). Mude o texto e salve de novo.",
     "Not saved: {reason} ({path}, line {line}). Name the key in the skill and set its value in Apps or Secrets.": "A skill não foi salva: {reason} ({path}, linha {line}). Use o nome da chave na skill e defina seu valor em Apps ou Segredos.",

@@ -59,7 +59,7 @@ test('#2078 folder checks the opened identity before any file reads during a sub
 })
 
 test('#2078 folder stops incremental enumeration at the raw ceiling and reads no file before limits pass', { skip: process.platform !== 'linux' }, t => {
-  const { root, home } = folder(t)
+  const { home } = folder(t)
   const bytes = join(home, 'bytes')
   const raw = join(home, 'raw')
   const count = join(home, 'count')
