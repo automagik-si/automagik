@@ -89,9 +89,9 @@ function world(t, options = {}) {
     return { owner, grant }
   }
 
-  async function stream(provider = PROVIDER) {
+  async function stream(provider = PROVIDER, model = 'default') {
     const messages = [{ id: 'user', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'fake prompt' }] }]
-    const chunks = await Array.fromAsync(adapter.stream({ provider, sessionId: ID, model: 'default', messages }))
+    const chunks = await Array.fromAsync(adapter.stream({ provider, sessionId: ID, model, messages }))
     return chunks.at(-1).reason
   }
 
@@ -335,4 +335,54 @@ test('B10 a provider row replaced in the final prompt gate receives no first pro
 
   assert.equal(h.prompt.mock.callCount(), 0)
   assert.equal(h.adapter.live.has(ID), false)
+})
+
+test('D2b round 2 a retained child cannot take its first prompt after its row is replaced', async t => {
+  const h = world(t)
+  h.addAgent()
+  assert.match((await h.stream(PROVIDER, 'missing-model')).failure?.message, /offers no choice of model/)
+  const retained = h.adapter.live.get(ID)
+  assert.equal(retained.run.alive, true)
+  assert.equal(h.prompt.mock.callCount(), 0)
+
+  h.rows.set(PROVIDER, { ...h.row, spawn: () => ({ command: 'replacement-fake-acp' }) })
+  assert.equal((await h.stream()).kind, 'stop')
+
+  assert.deepEqual(h.prompt.mock.calls.map(call => call.this.spec.command), ['replacement-fake-acp'])
+  assert.equal(retained.run.alive, false)
+  assert.equal(retained.bridge.closed, true)
+})
+
+test('D2b round 2 provider teardown retires the old run and leaves the replacement start and image grant', async t => {
+  const gate = pause()
+  const h = world(t, { holds: () => [({ provider }) => { if (provider === OTHER) return gate.wait() }] })
+  h.rows.get(OTHER).sessionFiles = true
+  h.addAgent()
+  assert.equal((await h.stream()).kind, 'stop')
+  const old = h.adapter.live.get(ID)
+
+  const replacement = h.addAgent()
+  const { owner, grant } = h.grantImage(replacement, OTHER)
+  const turn = h.stream(OTHER)
+  await gate.entered
+  const pending = h.adapter.starting.get(ID)
+  h.adapter.endProvider(PROVIDER, 'The Bot account changed.')
+  const held = pending.held
+  const current = h.adapter.starting.get(ID)
+  const grantAfterTeardown = h.adapter.sessionFiles.owners.get(ID)?.grant
+  gate.release()
+  const reason = await turn
+
+  assert.equal(old.run.alive, false)
+  assert.equal(old.bridge.closed, true)
+  assert.deepEqual({
+    keptPending: current === pending && held === undefined,
+    keptGrant: grantAfterTeardown === grant,
+    prompts: h.prompt.mock.calls.map(call => call.this.spec.name),
+  }, { keptPending: true, keptGrant: true, prompts: ['Fake', 'Replacement'] })
+  assert.equal(reason.kind, 'stop')
+  assert.equal(h.adapter.live.get(ID).fileOwner, owner)
+  assert.equal(h.adapter.sessionFiles.owners.get(ID), owner)
+  assert.equal(owner.grant, grant)
+  assert.equal(owner.lifetime.signal.aborted, false)
 })

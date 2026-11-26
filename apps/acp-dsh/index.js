@@ -295,6 +295,7 @@ export function apply(ctx, config = {}, {
     redactor: redact,
     onSignedOut: id => signedOut(id),
     access: id => consentGate(id),
+    currentAccess: id => currentAccountRefusal(id),
   })
   // What acted on each Session's permissions (permission-diagnostics.js): it only records.
   const diagnostics = new PermissionDiagnostics()
@@ -865,33 +866,40 @@ export function apply(ctx, config = {}, {
       publish()
     }
   }
+  const isolatedAccount = spec => homes !== undefined && spec !== undefined && !isNative(spec)
+  const accountChanging = (id, spec) => accountChanges.has(id) || homes.changing(spec.key) || homes.paused(spec.key)
+  // A background read can change the decision after a turn was admitted. Read it again at
+  // startup boundaries without inspecting the CLI or waiting on an account read.
+  const currentAccountRefusal = (id) => {
+    if (disposed || !Object.hasOwn(AGENTS, id)) return
+    const spec = AGENTS[id]
+    if (isolatedAccount(spec) && (accountChanging(id, spec) || signIns.get(id) !== true)) {
+      return `Sign in to ${spec.defaultName} in the app to resume this Bot. `
+        + 'Your terminal login is separate.'
+    }
+    if (signIns.get(id) === true && consentStates.get(id) === 'needed') {
+      // The Bot team's refusal (models.js ACCESS_MESSAGES.account), translated the same way.
+      return `Confirm the account of ${spec.defaultName} before using this model.`
+    }
+  }
   // What a turn about to open on an agent is told (adapter.js `access`): a text when the account
   // its CLI is signed in to has not been confirmed, else undefined. A sign-in nobody has read
   // yet is read first; one already read answers at once and is read again in the background
   // when its answer is old, so no turn of a consented agent waits on the CLI.
   const consentGate = async (id) => {
     const spec = AGENTS[id]
-    if (homes && spec && !isNative(spec)) {
-      if (accountChanges.has(id) || homes.changing(spec.key) || homes.paused(spec.key)) {
-        return `Sign in to ${spec.defaultName} in the app to resume this Bot. `
-          + 'Your terminal login is separate.'
-      }
+    if (isolatedAccount(spec)) {
+      if (accountChanging(id, spec)) return currentAccountRefusal(id)
       await inspect(id)
-      if (signIns.get(id) !== true) {
-        return `Sign in to ${spec.defaultName} in the app to resume this Bot. `
-          + 'Your terminal login is separate.'
-      }
+      if (signIns.get(id) !== true) return currentAccountRefusal(id)
     }
-    if (consents === undefined || disposed || !Object.hasOwn(AGENTS, id)) return undefined
+    if (consents === undefined || disposed || !Object.hasOwn(AGENTS, id)) return currentAccountRefusal(id)
     const entry = inspections.get(id)
     const stale = entry === undefined || entry.cli !== clis.get(id) || (entry.at !== undefined && Date.now() - entry.at >= entry.ttl)
     if (signIns.get(id) === undefined || consentStates.get(id) === 'needed') {
       try { await inspect(id) } catch {}
     } else if (stale) void inspect(id).catch(() => {})
-    if (signIns.get(id) !== true || consentStates.get(id) !== 'needed') return undefined
-    // The Bot team's own refusal, word for word (its models.js ACCESS_MESSAGES.account), so the
-    // row this text lands in is translated like that one. The account step says who it is.
-    return `Confirm the account of ${AGENTS[id].defaultName} before using this model.`
+    return currentAccountRefusal(id)
   }
   const inspect = async (id) => {
     if (!Object.hasOwn(AGENTS, id)) return undefined

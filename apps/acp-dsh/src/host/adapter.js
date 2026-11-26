@@ -635,7 +635,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, access, holds, ownMode = () => undefined, hostStopping = () => false,
+    botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, access, currentAccess, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
@@ -664,6 +664,8 @@ export class AcpAdapter extends LlmAdapter {
     // Asked before a turn opens on an agent (#869): a text when its signed-in account has not
     // been confirmed for the app, else undefined. Never asked for a call that continues a turn.
     this.access = access
+    // Synchronous decision at startup boundaries, using the account state already read.
+    this.currentAccess = currentAccess
     // Told which agent answered ACP's auth_required, so a cached "signed in" is dropped at once.
     this.onSignedOut = onSignedOut
     this.ctx = ctx
@@ -1059,12 +1061,14 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   endProvider(provider, why) {
-    for (const [id, owner] of this.sessionFiles.owners) if (owner.provider === provider) this.endSession(id, why)
     for (const [id, starting] of this.starting) {
-      if (starting.provider === provider) this.endSession(id, why)
+      if (starting.provider === provider) this.endSession(id, why, provider, candidate => candidate === starting)
     }
     for (const [id, live] of this.live) {
-      if (live.provider === provider) this.endSession(id, why)
+      if (live.provider === provider) this.endSession(id, why, provider, candidate => candidate === live)
+    }
+    for (const [id, owner] of this.sessionFiles.owners) {
+      if (owner.provider === provider) this.sessionFiles.clear(id, { owner, retire: false })
     }
   }
 
@@ -1705,6 +1709,13 @@ export class AcpAdapter extends LlmAdapter {
       if (options.signal?.aborted && why === HELD_TEXT) return yield STOPPED()
       return yield* stopped(why)
     }
+    const firstPromptRefusal = () => {
+      if (live.run.promptEnded !== undefined) return
+      const message = this.currentAccess?.(options.provider)
+      if (message === undefined) return
+      stopOwned(message, live, live.fileOwner)
+      return finish('error', message, MODEL_ACCESS_REQUIRED)
+    }
     const held = await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
     if (archived()) return yield finish('stop')
     agent = this.agents.get(options.provider)
@@ -1908,7 +1919,8 @@ export class AcpAdapter extends LlmAdapter {
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       // A new tool set or role needs a new agent session.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
-        || (live.run.promptEnded === undefined && live.dshAgent !== dshAgent)
+        || (live.run.promptEnded === undefined && (live.dshAgent !== dshAgent
+          || (live.providerRow !== undefined && live.providerRow !== agent)))
         || bridgeGone || needsSkillBridge || relaunchForSkills || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
       if (remade) {
         if (roleChanged) {
@@ -1995,7 +2007,7 @@ export class AcpAdapter extends LlmAdapter {
         crossing = replaying && prior !== undefined && prior !== options.provider
         const state = {
           fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox,
-          provider: options.provider, name: agent.name, asks, native, twinsOff: false,
+          provider: options.provider, providerRow: agent, name: agent.name, asks, native, twinsOff: false,
           run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent,
           bridge: undefined, replay: undefined, owed: undefined, drifted: false,
           roleDigest: role.digest, roleTurn: turn,
@@ -2026,6 +2038,8 @@ export class AcpAdapter extends LlmAdapter {
           entry.archived ||= this.isArchived(sessionId)
           if (entry.archived) throw ARCHIVED
           if (startChanged() || options.signal?.aborted) throw START_CHANGED
+          const message = this.currentAccess?.(options.provider)
+          if (message !== undefined) throw Object.assign(new Error(message), { code: MODEL_ACCESS_REQUIRED })
         }
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
@@ -2270,7 +2284,7 @@ export class AcpAdapter extends LlmAdapter {
               this.signedOut(options.provider)
               return yield signInFailure(agent, error)
             }
-            if (error?.code === 'acp-account/busy') {
+            if (error?.code === MODEL_ACCESS_REQUIRED || error?.code === 'acp-account/busy') {
               return yield finish('error', error.message, MODEL_ACCESS_REQUIRED)
             }
             // Every model of this Codex answered its check with no tool block (B1-4): none is
@@ -2388,6 +2402,8 @@ export class AcpAdapter extends LlmAdapter {
           }
           try {
             if (startChanged()) return yield* stopChanged()
+            const refusal = firstPromptRefusal()
+            if (refusal !== undefined) return yield refusal
             await this.refork(agent, live, dshAgent, options.signal)
           } catch (error) {
             if (archived()) return yield finish('stop')
@@ -2711,6 +2727,8 @@ export class AcpAdapter extends LlmAdapter {
       }
       if (startChanged() || live.held !== undefined || this.live.get(sessionId) !== live || options.signal?.aborted
           || launchEligible?.() === false) return yield* stopChanged()
+      const promptRefusal = firstPromptRefusal()
+      if (promptRefusal !== undefined) return yield promptRefusal
       started()
       live.replay = undefined
       live.owed = undefined
