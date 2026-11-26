@@ -51,7 +51,7 @@ import {
 import { agentRoute, carryEffort, crossed } from './src/host/switch.js'
 
 export const name = 'acp-dsh'
-export const inject = ['llm', 'agents']
+export const inject = ['llm', 'agents', 'sessions']
 
 // The bridge, its DSH approval, the drift detector and live switching: an absent key takes the
 // per-agent default for the bridge (Claude on; Codex only on an explicit true), the transcript
