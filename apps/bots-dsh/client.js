@@ -2696,6 +2696,10 @@ var ZH2 = {
   "Allow once": "允许一次",
   "Run a remote tool": "运行远程工具",
   "Remote Hermes asks before it runs this. Allow it?": "远程 Hermes 在运行此操作前询问。是否允许？",
+  "Allow Remote Hermes to read this folder until its sandbox is turned off?": "是否允许远程 Hermes 读取此文件夹，直到其沙箱关闭？",
+  "Allow Remote Hermes to read and write this folder until its sandbox is turned off?": "是否允许远程 Hermes 读写此文件夹，直到其沙箱关闭？",
+  "Allow Remote Hermes to access this site until its sandbox is turned off?": "是否允许远程 Hermes 访问此网站，直到其沙箱关闭？",
+  "Allow until sandbox is off": "允许，直到沙箱关闭",
   "Couldn't message {name}": "没能给 {name} 发消息",
   Messaged: "已发消息给",
   "Couldn't stop {name}": "没能叫停 {name}",
@@ -12102,10 +12106,14 @@ function insertComposerNewline(event, inputActions) {
   return true;
 }
 
+// src/shared/hermes-consent.js
+var SANDBOX_ALLOW = "Allow until sandbox is off";
+var isSandboxGrant = (question) => question?.intent?.kind === "approval" && question.intent.approve === SANDBOX_ALLOW;
+
 // src/client/questions.js
 var import_react22 = require("react");
 var keyLetter = (index) => String.fromCharCode(65 + index);
-var wordingOf = (question) => question?.intent?.kind === "approval" ? { prompt: hostText(question.question ?? ""), label: (label) => t(label), detail: question.detail === "Run a remote tool" ? t("Run a remote tool") : question.detail } : { prompt: question?.question ?? "", label: (label) => label, detail: question?.detail };
+var wordingOf = (question) => question?.intent?.kind === "approval" ? { prompt: hostText(question.question ?? ""), label: (label) => t(label), detail: !isSandboxGrant(question) && question.detail === "Run a remote tool" ? t("Run a remote tool") : question.detail } : { prompt: question?.question ?? "", label: (label) => label, detail: question?.detail };
 var optionsOf = (question) => (question?.options ?? []).map((option) => typeof option === "string" ? { label: option } : option);
 var isTypingTarget = (node) => node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement || node instanceof HTMLElement && node.isContentEditable;
 var optionKeyCards = createSource(0);
@@ -12281,7 +12289,12 @@ function SettledQuestion({ question, answer, closed }) {
     (0, import_react22.createElement)(
       "div",
       { className: "bt-q-head" },
-      (0, import_react22.createElement)("div", { className: "bt-q-text" }, prompt ? (0, import_react22.createElement)("p", { className: "bt-q-title" }, prompt) : null),
+      (0, import_react22.createElement)(
+        "div",
+        { className: "bt-q-text" },
+        prompt ? (0, import_react22.createElement)("p", { className: "bt-q-title" }, prompt) : null,
+        isSandboxGrant(question) && wording.detail ? (0, import_react22.createElement)("div", { className: "bt-q-detail" }, wording.detail) : null
+      ),
       answered ? null : (0, import_react22.createElement)("span", { className: "bt-q-badge" }, closedLabel(closed))
     ),
     chosen.length > 0 ? (0, import_react22.createElement)("div", { className: "bt-q-list", role: "group", "aria-label": t("Your answer") }, chosen.map(({ label, at }, index) => (0, import_react22.createElement)(
@@ -24854,7 +24867,7 @@ body[data-ds-dark-theme] .bt-q{--bt-q-edge:rgba(255,255,255,.16);--bt-q-rule:rgb
 .bt-q-head{display:flex;align-items:flex-start;gap:8px;min-width:0}
 .bt-q-text{flex:1 1 0;min-width:0;display:flex;flex-direction:column}
 .bt-q-title{margin:0;font-size:15px;line-height:22px;font-weight:600;overflow-wrap:anywhere}
-.bt-q-detail{font-size:13px;line-height:18px;color:var(--bt-ink-2)}
+.bt-q-detail{font-size:13px;line-height:18px;color:var(--bt-ink-2);white-space:pre-wrap;overflow-wrap:anywhere}
 .bt-q-x{flex:none;width:20px;height:20px;border:0;padding:0;border-radius:6px;background:none;color:var(--bt-ink-2);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:background-color .12s ease,color .12s ease,${spring(SPRING_TAP, "scale")}}
 .bt-q-x svg{width:14px;height:14px}
 .bt-q-x:hover{background:var(--bt-hover);color:var(--bt-ink)}

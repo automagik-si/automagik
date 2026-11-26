@@ -426,6 +426,71 @@ test('no chat level answers a Hermes question for the person: an asking level us
   }
 })
 
+test('structured Hermes consent names the remote target, access and sandbox lifetime at every policy', async () => {
+  const allow = 'Allow until sandbox is off'
+  for (const policy of ['ask', 'never', undefined]) {
+    for (const [params, prompt, detail] of [
+      [{ kind: 'access', access: 'read', path: '/sample/specs' }, 'Allow Remote Hermes to read this folder until its sandbox is turned off?', '/sample/specs'],
+      [{ kind: 'access', access: 'read_write', path: '/sample/reports' }, 'Allow Remote Hermes to read and write this folder until its sandbox is turned off?', '/sample/reports'],
+      [{ kind: 'network', host: 'docs.example.test', label: 'Documentation', risk: 'Shares network access' }, 'Allow Remote Hermes to access this site until its sandbox is turned off?', 'docs.example.test\nDocumentation\nShares network access'],
+    ]) {
+      const question = { ...params, request_id: 'sample', choices: ['always', 'once', 'deny'], description: 'generic command text' }
+      for (const [picked, expected] of [[allow, 'once'], ['Deny', 'deny'], ['Allow once', 'deny']]) {
+        let asks = 0
+        const ctx = { get(name) {
+          if (name === 'approval') return { effectivePolicy: () => policy, request: async () => assert.fail('generic card would promise one action') }
+          if (name === 'userQuestions') return { ask: async ({ questions: [card] }) => {
+            asks++
+            assert.equal(card.question, prompt)
+            assert.equal(card.detail, detail)
+            assert.deepEqual(card.options, [{ label: allow }, { label: 'Deny' }])
+            assert.equal(card.intent.approve, allow)
+            return { answers: [{ id: card.id, selected: [picked] }] }
+          } }
+        } }
+        assert.equal(await remoteApproval(ctx, { session: {} }, question), expected)
+        assert.equal(asks, 1)
+      }
+    }
+  }
+})
+
+test('Hermes refuses unsupported targets and unavailable grants before asking or sending a wider choice', async () => {
+  let questions = 0
+  const ctx = { get(name) {
+    if (name === 'approval') return { effectivePolicy: () => 'ask', request: async () => { questions++; return 'allowed-once' } }
+    if (name === 'userQuestions') return { ask: async () => { questions++; return {} } }
+  } }
+  const agent = { session: {} }
+  for (const params of [
+    { kind: 'access', path: '/sample' }, { kind: 'access', path: '/sample', access: 'write' },
+    { kind: 'access', path: '   ', access: 'read' }, { kind: 'network' }, { kind: 'network', host: ' ' },
+    { kind: 'unrecognized' }, { kind: 'access', path: '/sample', access: 'read', choices: ['always', 'deny'] },
+    { kind: 'network', host: 'docs.example.test', choices: [] }, { kind: 'network', host: 'docs.example.test' },
+    { kind: 'network', host: 'a\nb', choices: ['once', 'deny'] }, { kind: 'access', access: 'read', path: '[redacted]', choices: ['once', 'deny'] },
+    { command: 'sample', choices: ['session', 'deny'] }, { command: 'sample', choices: 'once' },
+    { command: 'sample', choices: [null, 'once', 'deny'] },
+  ]) assert.equal(await remoteApproval(ctx, agent, { request_id: 'r', ...params }), 'deny', JSON.stringify(params))
+  assert.equal(questions, 0)
+  assert.equal(await remoteApproval({ get: () => undefined }, agent, { kind: 'network', host: 'example.test' }), 'deny')
+  assert.equal(await remoteApproval(ctx, agent, { kind: 'command', request_id: 'r', choices: ['once', 'deny'], command: 'sample' }), 'once')
+  assert.equal(questions, 1)
+})
+
+test('withdrawing consent during any Hermes prompt discards a late affirmative response', async () => {
+  for (const [policy, scope] of [['ask', {}], ['never', {}], ['ask', { kind: 'access', access: 'read', path: '/sample' }]]) {
+    const abort = new AbortController()
+    const ctx = { get(name) {
+      if (name === 'approval') return { effectivePolicy: () => policy, request: async () => { abort.abort(); return 'allowed-once' } }
+      if (name === 'userQuestions') return { ask: async ({ questions: [card] }) => {
+        abort.abort()
+        return { answers: [{ id: card.id, selected: [card.intent.approve] }] }
+      } }
+    } }
+    assert.equal(await remoteApproval(ctx, { session: {} }, { request_id: 'r', choices: ['once', 'deny'], ...scope }, abort.signal), 'deny')
+  }
+})
+
 test('a failed Hermes chat question is denied and diagnosed without logging remote data', async () => {
   const secret = randomUUID()
   for (const [error, code] of [
@@ -476,14 +541,21 @@ test('at a never-ask level Hermes’s question passes DSH’s real question serv
   assert.equal(requests[0].agent.session.header, agent.session.header)
   assert.equal(requests[0].questions[0].intent.kind, 'approval')
   assert.equal(requests[0].questions[0].detail, 'Delete sample.txt')
+  // The scoped prompt passes the real DSH intent schema and answers the same wire request.
+  const scoped = question('srq-site')
+  Object.assign(scoped.params, { kind: 'network', host: 'docs.example.test', choices: ['once', 'deny'] })
+  answer = request => ({ answers: [{ id: request.questions[0].id, selected: ['Allow until sandbox is off'] }] })
+  f.socket().frame(scoped); await settle()
+  assert.equal(requests.at(-1).questions[0].detail, 'docs.example.test')
+  assert.deepEqual(f.sent.filter(frame => frame.id === scoped.id), [{ jsonrpc: '2.0', id: scoped.id, result: { choice: 'once' } }])
   // A question Hermes withdraws closes in the chat, and a late answer is not sent.
   let late
-  answer = request => new Promise(resolve => { late = { resolve, signal: request.signal } })
+  answer = request => new Promise(resolve => { late = { resolve, signal: request.signal, id: request.questions[0].id } })
   f.socket().frame(question('srq-late')); await settle()
   assert.equal(late.signal.aborted, false)
   f.socket().event('request.cancel', { id: 'srq-late', method: 'approval', reason: 'timeout' })
   assert.equal(late.signal.aborted, true)
-  late.resolve({ answers: [{ id: 'approval-srq-late', selected: ['Allow once'] }] }); await settle()
+  late.resolve({ answers: [{ id: late.id, selected: ['Allow once'] }] }); await settle()
   assert.deepEqual(f.sent.filter(frame => frame.id === 'srq-late'), [])
   f.socket().event('message.complete', { text: 'Done' })
   await first

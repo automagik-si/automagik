@@ -263,6 +263,47 @@ test('what Remote Hermes asks reads in the interface language, and the answer st
   } finally { off() }
 })
 
+test('Hermes sandbox consent keeps its target and duration on the open card and in the answered transcript', async () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const allow = 'Allow until sandbox is off'
+  const prompts = [
+    ['Allow Remote Hermes to read this folder until its sandbox is turned off?', { kind: 'access', access: 'read', path: 'Run a remote tool' }, 'Run a remote tool'],
+    ['Allow Remote Hermes to read and write this folder until its sandbox is turned off?', { kind: 'access', access: 'read_write', path: '/work/Plan  A', label: 'Update the draft' }, '/work/Plan  A\nUpdate the draft'],
+    ['Allow Remote Hermes to access this site until its sandbox is turned off?', { kind: 'network', host: 'exemplo.test', risk: 'Review {name}' }, 'exemplo.test\nReview {name}'],
+  ]
+  const written = node => all(node, child => ['bt-q-title', 'bt-q-detail', 'bt-q-label'].includes(child.props?.className))
+    .map(child => [child.props.children].flat(Infinity).join(''))
+  for (const [language, dictionary] of [['zh', DICTIONARY.zh], ['pt', pt]]) {
+    const off = installLocale({ register: () => () => {}, bind: () => key => dictionary[key] ?? key, getLocale: () => ({ active: language }) })
+    try {
+      for (const [prompt, params, target] of prompts) {
+        const labels = [allow, 'Deny']
+        for (const key of [prompt, ...labels]) assert.ok(dictionary[key] && dictionary[key] !== key, language + ' ' + key)
+        for (const [index, label] of labels.entries()) {
+          let matched, response
+          const userQuestions = { ask: ({ questions }) => new Promise(resolve => {
+            matched = { questions, answer: value => { response = plain(value); resolve(value) }, dismiss() {} }
+          }) }
+          const outcome = remoteApproval({ get: name => name === 'userQuestions' ? userQuestions : undefined }, { session: { id: 'ada' } }, { request_id: 'scope', choices: ['once', 'deny'], ...params })
+          const card = mount(QuestionCard, { matched }), shown = card.render(), view = mount(shown.type, shown.props)
+          try {
+            const form = view.render()
+            assert.deepEqual(written(form), [dictionary[prompt], target, ...labels.map(option => dictionary[option])])
+            options(form)[index].props.onClick()
+            const id = matched.questions[0].id
+            assert.notEqual(id, 'scope')
+            assert.deepEqual(response, { answers: [{ id, selected: [label] }] })
+            assert.equal(await outcome, index === 0 ? 'once' : 'deny')
+            const data = { questions: [{ id, question: prompt }], text: JSON.stringify({ questions: matched.questions }), answers: response.answers }
+            const settled = find(AnsweredCell({ node: { data } }), child => typeof child.type === 'function')
+            assert.deepEqual(written(settled.type(settled.props)), [dictionary[prompt], target, dictionary[label]])
+          } finally { view.unmount(); card.unmount() }
+        }
+      }
+    } finally { off() }
+  }
+})
+
 // The Bot ask_user card shares the composer preference: while Enter sends, a plain
 // Enter answers; off, it is the field's own newline and the Submit button answers.
 test('the own-answer field honors the Enter preference', async () => {

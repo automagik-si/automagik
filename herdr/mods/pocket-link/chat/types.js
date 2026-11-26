@@ -179,7 +179,7 @@ export const APPROVAL_CHOICES = Object.freeze(/** @type {const} */ (['allow', 'a
  * @typedef {RowBase & { kind: 'tool-call', tool: string, summary: string, input: string }} ToolCallRow  input is a short preview
  * @typedef {RowBase & { kind: 'tool-result', call: string, ok: boolean, output: string }} ToolResultRow  call is the tool-call row's id
  * @typedef {RowBase & { kind: 'approval', tool: string, summary: string, choices: Array<'allow' | 'allow-always' | 'deny'>, open: boolean }} ApprovalRow
- * @typedef {RowBase & { kind: 'question', prompt: string, options: string[], multi: boolean, answerable: boolean,
+ * @typedef {RowBase & { kind: 'question', prompt: string, options: string[], multi: boolean, answerable: boolean, fixedOptions?: boolean,
  *   call?: string | null, open?: boolean, why?: string }} QuestionRow  options: labels, option 1 first (question.js)
  * @typedef {RowBase & { kind: 'status', state: string, msg: string }} StatusRow
  * @typedef {RowBase & { kind: 'tokens', input: number, output: number, cache: number, context?: number }} TokensRow
