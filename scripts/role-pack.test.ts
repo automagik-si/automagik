@@ -697,6 +697,7 @@ test('a plugin upgrade keeps unchanged role pins attachable and flags byte-chang
         'host/role-voice.js', 'host/roles.js', 'host/role-keys.json', 'host/refusal.js', 'host/bounded-get.js', 'host/no-runner.js',
         'host/bundled-roles.js', 'host/bundled-roles.json', 'host/lane-verify.js', 'host/session-route.js', 'host/solver-progress.js',
         'host/solver-check-command.js', 'shared/solver-model.js',
+        'shared/review-guard.js', 'shared/review-mark.js', 'shared/native-tools.js', 'shared/permission-levels.js',
         'shared/roles.js', 'shared/solver-method.js', 'shared/routes.js', 'shared/machine-reservations.js', 'shared/own-tools.js', 'client/role-shop.js', 'client/i18n.js',
         'shared/guard-groups.js', 'shared/solver-looks.js',
       ]) {

@@ -1,0 +1,18 @@
+{
+  "from": "solver",
+  "to": "reviewer",
+  "name": "solver-review-result",
+  "open": [],
+  "results": [
+    {
+      "id": "6bd03dce-d7ea-4774-bfce-c721dc5ef17c",
+      "name": "other",
+      "text": "The fixture is present.",
+      "at": 1795644089997
+    }
+  ],
+  "at": 1795644089993,
+  "held": "RESULT SHIP",
+  "heldReviewText": "RESULT SHIP",
+  "heldFirstLine": "RESULT SHIP"
+}

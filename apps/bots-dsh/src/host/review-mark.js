@@ -17,7 +17,7 @@ import { reachesShell } from './tool-deny.js'
 import { refusal } from './refusal.js'
 import { nativeCheckDirectory, normalizeCheckCommand, withinCheckRoot } from './solver-check-command.js'
 import {
-  activeSolverLimit, cleanProgress, designateReview, invalidateResult, modelOf, newProgress,
+  activeSolverLimit, cleanProgress, designateReview, invalidateResult, legacyResultReview, modelOf, newProgress, recordedModelOf,
   normalizedAutoInstruction, recordProgress, recordSolverVerdict, resultSnapshot, resumeProgress, solverOutcome, solverTracked,
 } from './solver-progress.js'
 
@@ -346,12 +346,12 @@ export function install(rt) {
     if (progressWrites.has(bot) || runningWork.has(bot)) throw refusal('Finish the current Solver work before requesting a review.')
     const progress = structuredClone(track.solver)
     const prior = kind === 'plan' ? progress.plan?.review : progress.review
-    if (prior && prior.verdict === undefined && (reviewSends.has(prior.exchangeId) || rt.deliveryNote?.(prior.exchangeId)
+    if (prior && prior.verdict === undefined && !(kind === 'result' && legacyResultReview(prior)) && (reviewSends.has(prior.exchangeId) || rt.deliveryNote?.(prior.exchangeId)
       || rt.exchangeOf?.(prior.exchangeId, bot.id, reviewer.id))) {
       throw refusal('A designated review is already waiting for its answer.')
     }
     const issue = designateReview(progress, { kind, exchangeId, reviewerId: reviewer.id,
-      model: modelOf(rt, agent), snapshot: kind === 'result' ? snapshotOf(bot) : undefined })
+      model: modelOf(agent?.session), snapshot: kind === 'result' ? snapshotOf(bot) : undefined })
     if (issue) throw refusal(issue)
     const prepared = await prepare(kind, progress.plan.checks, progress.plan.commands)
     if (prepared === undefined) return
@@ -519,13 +519,38 @@ export function install(rt) {
     rt.forgetDelivery?.(reply.exchangeId)
   }
 
+  // Base-format designations kept only a bare model. Recover the original
+  // route when the Solver log shows exactly one matching call before work opened.
+  function originalSolverModel(bot, track, workAt, events) {
+    const log = events ?? rt.ctx.sessions?.get?.(rt.chatOf(bot.id))?.snapshotEvents?.()
+    if (!log) return undefined
+    let model
+    let found
+    let matched = false
+    for (const row of log) {
+      const event = row.event ?? row
+      if (event.type === 'request/header' || event.type === 'request/context') {
+        model = recordedModelOf(event)
+      }
+      if (event.type !== 'tool/call' || !isTime(event.time) || event.time < track.requestAt || event.time > workAt
+        || teamToolOf(event.data?.name) !== 'message_bot') continue
+      let args
+      try { args = JSON.parse(event.data.arguments) } catch { continue }
+      if (args?.solver_review !== 'result' || args.solver_request !== track.solver.request) continue
+      if (matched) return undefined
+      matched = true
+      found = model
+    }
+    return found
+  }
+
   // A reply going from `fromId` to the Bot `toId` that asked it. The Solver's own reviewer
   // answering work from its own chat can hold delivery even if the reply has no verdict.
   // `workAt`: when the work it answers was opened. A reply to work opened before this request (a
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
   // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
   // every tracked Bot, so a guard turned on mid-request reads a verdict that already came.
-  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model, firstLine) {
+  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model, firstLine, solverEvents, legacyHeld) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
@@ -551,12 +576,22 @@ export function install(rt) {
       const verdict = verdictOf(text, stage, firstLine, { veto: stage !== undefined })
       const planVerdict = guardVerdictOf(text, reviewer?.name, stage, firstLine)
       if (verdict === undefined && planVerdict === undefined && reply === undefined) return
-      const at = Date.now()
-      if (planVerdict !== undefined) current.planVerdictAt ??= at
-      if (verdict !== undefined) current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+      let withholdShip = false
       if (reviewer) {
+        const result = current.solver?.review
+        if (stage === 'result' && legacyResultReview(result) && result.verdict === undefined) {
+          const original = originalSolverModel(bot, current, workAt, solverEvents)
+          if (original) current.solver = { ...current.solver, review: { ...result, solverModel: original } }
+        }
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
-        recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt)
+        const reason = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt,
+          stage === 'result' && legacyHeld)
+        withholdShip = reason === 'held' || reason === 'same'
+      }
+      const at = Date.now()
+      if (planVerdict !== undefined && (!withholdShip || planVerdict !== 'SHIP')) current.planVerdictAt ??= at
+      if (verdict !== undefined && (!withholdShip || verdict !== 'SHIP')) {
+        current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
       }
       bot.reviewTrack = current
       if (decision) return rt.save({ durable: true, required: true })
@@ -717,7 +752,8 @@ export function install(rt) {
       ? { ...reply, toId } : undefined)
     const result = track?.solver?.review
     const reason = binding && resultReplyRequest(bot, track, binding)
-      && result?.revision === track.solver.revision && result?.receipt === binding.receipt && result.verdict === 'unverified'
+      && result?.revision === track.solver.revision && result?.receipt === binding.receipt
+      && (result.verdict === 'unverified' || result.unverified === 'held')
       && unverifiedReason(result.unverified)
     const notice = unverifiedNotice(reason)
     if (!notice && !source.reviewFeedback) return message
@@ -782,7 +818,8 @@ export function install(rt) {
     if (deferIngress(bot, () => reviewTurnEnd(botId, turn))) return
     const track = cleanTrack(bot.reviewTrack)
     if (track?.requested !== true || track.delivered === true) return
-    if (activeSolverLimit(bot, track) || runningWork.has(bot)) return
+    const result = track.solver?.review
+    if (activeSolverLimit(bot, track) || runningWork.has(bot) || legacyResultReview(result) || result?.unverified === 'held') return
     if (Object.hasOwn(turn, 'request') && track.solver) {
       const progress = track.solver
       const botRequest = progress.origin === 'bot' && typeof track.openerExchange === 'string' && trigger?.exchangeId === track.openerExchange
@@ -829,7 +866,6 @@ export function install(rt) {
       ...(limit ? { limit: { kind: limit.kind, check: limit.check } } : {}),
       ...(track?.outcome ? { outcome: track.outcome } : {}),
       ...(reason ? { unverified: reason } : {}),
-      ...(rt.reviewerModelWarning?.(bot.reviewerId) ? { reviewerModelChoice: true } : {}),
     } }
   }
 

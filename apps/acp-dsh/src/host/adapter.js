@@ -5,7 +5,7 @@
 // reasoning, and each of its tool calls ends the model step with a call to the mirror tool
 // (tool.js), so DSH shows the card and asks for approval. The next step drains what the agent
 // said since. DSH keeps the Session, its history and the sidebar.
-import { SONNET_PIN, sonnetWire } from './model-identity.js'
+import { CLAUDE_PINS, pinOf, pinWire } from './model-identity.js'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -580,22 +580,22 @@ export function aside(providers, ctx, sideModel = () => SIDE_MODEL, redact = tex
  * @param {string} model
  * @param {string | undefined} effort
  * @param {(id: string) => string | undefined} [ownEffort]
- * @param {{ signal?: AbortSignal, standIns?: string[], pinWire?: string, bindModel?: boolean }} [options]
+ * @param {{ signal?: AbortSignal, standIns?: string[], pin?: string, wire?: string, bindModel?: boolean }} [options]
  */
-export async function choose(run, model, effort, ownEffort, { signal, standIns = [], pinWire, bindModel = false } = {}) {
+export async function choose(run, model, effort, ownEffort, { signal, standIns = [], pin, wire, bindModel = false } = {}) {
   const option = run.option('model')
   const offered = valuesOf(option).map(choice => choice.value)
   const ownModel = offered.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : run.startModel
   // A stand-in that has disappeared can use the agent's own model if it is still offered.
   const substituted = model !== DEFAULT_MODEL && standIns.includes(model) && !offered.includes(model)
     && (option === undefined || offered.includes(ownModel))
-  const target = pinWire ?? (substituted || model === DEFAULT_MODEL ? ownModel : model)
+  const target = wire ?? (substituted || model === DEFAULT_MODEL ? ownModel : model)
   if (option === undefined) {
     if (!substituted && model !== DEFAULT_MODEL) throw new Error(`it offers no choice of model, so not ${model}`)
   } else if (target !== undefined) {
-    await run.setOption('model', target, { signal, ...(pinWire ? { requireReported: true } : {}) })
+    await run.setOption('model', target, { signal, ...(pin ? { requireReported: true } : {}) })
   }
-  if (bindModel && !substituted && model !== DEFAULT_MODEL) run.bindModel(model, target, pinWire !== undefined)
+  if (bindModel && !substituted && model !== DEFAULT_MODEL) run.bindModel(model, target, pin)
   if (!substituted && effort !== undefined) {
     await run.setOption('thought_level', effort, { signal })
   } else {
@@ -603,7 +603,7 @@ export async function choose(run, model, effort, ownEffort, { signal, standIns =
     const levels = valuesOf(levelOption).map(choice => choice.value)
     if (levels.includes(DEFAULT_MODEL)) await run.setOption('thought_level', DEFAULT_MODEL, { signal })
     else if (levelOption !== undefined) {
-      const own = ownEffort?.(pinWire ?? (substituted ? target ?? DEFAULT_MODEL : model))
+      const own = ownEffort?.(wire ?? (substituted ? target ?? DEFAULT_MODEL : model))
       if (levels.includes(own)) await run.setOption('thought_level', own, { signal })
     }
   }
@@ -678,7 +678,6 @@ export class AcpAdapter extends LlmAdapter {
     this.redact = redactor ?? (text => text)
     this.live = new Map()
     this.roleTurns = new Map()
-    this.modelAnswers = new WeakMap()
     this.sessionFiles = new SessionFiles({
       agent: id => this.ctx.agents?.get?.(id), live: id => this.live.get(id),
       level: session => levelOf(ctx.get?.('approval'), session, ctx.get?.('sandboxPolicy'), ctx.get?.('permissionPresets')),
@@ -1446,7 +1445,6 @@ export class AcpAdapter extends LlmAdapter {
     if (event?.type !== 'model/selection') return
     const live = this.live.get(session?.id)
     if (live === undefined) return
-    this.modelAnswers.delete(live.run)
     // Off is the old path, byte for byte: the agent session is kept across a turn on another
     // provider, so switching back resumes the same ACP session. The default is per agent.
     if (!this.bridgeOn(this.agents.get(live.provider), session?.id)) return
@@ -1472,14 +1470,18 @@ export class AcpAdapter extends LlmAdapter {
     if (agent === undefined || agent.installed?.() === false) return []
     if (agent.concreteClaude) agent.catalog.kick({ requireLive: true })
     const models = await agent.catalog.models()
-    const wire = agent.concreteClaude && this.sonnetIn(agent.catalog.identityModels())
-    const pinned = wire && wire !== SONNET_PIN ? models.find(row => row.id === wire) : undefined
-    return [...models, ...(pinned ? [{ ...pinned, id: SONNET_PIN }] : [])]
+    const live = agent.concreteClaude ? agent.catalog.identityModels() : undefined
+    const pinned = live === undefined ? [] : CLAUDE_PINS.flatMap(pin => {
+      if (this.pinIn(live, pin) !== pin.alias) return []
+      const alias = models.find(row => row.id === pin.alias)
+      return alias ? [{ ...alias, id: pin.id }] : []
+    })
+    return [...models, ...pinned]
       .map(model => ({ provider, id: model.id, name: model.name, ...(model.description ? { description: model.description } : {}) }))
   }
 
-  sonnetIn(models) {
-    return models && sonnetWire(models.map(({ id, name }) => ({ value: id, name })))
+  pinIn(models, pin) {
+    return models && pinWire(models.map(({ id, name }) => ({ value: id, name })), pin)
   }
 
   async resolveModelIdentity(provider, model) {
@@ -1499,25 +1501,16 @@ export class AcpAdapter extends LlmAdapter {
     // reported at session start. An agent's own Default row makes no such claim.
     const own = model === DEFAULT_MODEL ? agent.catalog.identityDefault() : undefined
     if (own) model = own
-    if (agent.concreteClaude && (model === 'sonnet' || model === SONNET_PIN)) {
-      const wire = this.sonnetIn(models)
+    const pin = agent.concreteClaude ? pinOf(model) : undefined
+    if (pin !== undefined) {
+      const wire = this.pinIn(models, pin)
       // A raw alias alongside a concrete row still needs its own exact affiliation.
-      const alias = this.sonnetIn(models.filter(row => row.id !== SONNET_PIN))
-      if (wire && (model === SONNET_PIN || alias === 'sonnet')) return { status: 'offered', model: SONNET_PIN }
+      const alias = this.pinIn(models.filter(row => row.id !== pin.id), pin)
+      if (wire && (model === pin.id || alias === pin.alias)) return { status: 'offered', model: pin.id }
       return { status: 'unresolved' }
     }
     return models.filter(row => row.id === model).length === 1
       ? { status: 'offered', model } : { status: 'unresolved' }
-  }
-
-  effectiveModelOf(sessionId, provider, model, turn, canonicalModel) {
-    const state = this.live.get(sessionId)
-    const answer = this.modelAnswers.get(state?.run)
-    if (state?.provider !== provider || !state?.run?.alive || state.archived || state.held
-      || !answer || answer.session !== state.run.sessionId
-      || (model !== undefined && model !== answer.model)) return undefined
-    if (turn !== undefined && (answer.turn?.turn !== turn || answer.turn !== this.roleTurns.get(sessionId))) return undefined
-    return state.run.acknowledgedModel(canonicalModel)
   }
 
   // A model's efforts are the ones the agent offers for it; DSH turns down any other before the
@@ -1527,10 +1520,11 @@ export class AcpAdapter extends LlmAdapter {
     const agent = this.agents.get(provider)
     const models = agent?.catalog ? await agent.catalog.models() : []
     let found = models.find(entry => entry.id === model)
-    if (found === undefined && agent?.concreteClaude && model === SONNET_PIN) {
-      const wire = this.sonnetIn(agent.catalog.identityModels())
+    const pin = agent?.concreteClaude ? pinOf(model) : undefined
+    if (found === undefined && pin !== undefined && model === pin.id) {
+      const wire = this.pinIn(agent.catalog.identityModels(), pin)
       const row = models.find(entry => entry.id === wire)
-      if (row) found = { ...row, id: SONNET_PIN }
+      if (row) found = { ...row, id: pin.id }
     }
     if (found === undefined) {
       found = agent?.catalog?.spec?.fallback?.find(entry => entry.id === model)
@@ -1572,8 +1566,7 @@ export class AcpAdapter extends LlmAdapter {
     const fileOwner = this.sessionFiles.owners.get(sessionId)
     // Latch durable membership at admission, before the first await. Undo can remove
     // the id before this step resumes, but only a fresh entry may start afterward.
-    const entry = { held: undefined, archived: this.isArchived(sessionId), fileOwner, fileLive: this.live.get(sessionId),
-      modelTurn: this.roleTurns.get(sessionId) }
+    const entry = { held: undefined, archived: this.isArchived(sessionId), fileOwner, fileLive: this.live.get(sessionId) }
     if (!entry.archived && fileOwner?.grant && this.starting.has(sessionId)) {
       return yield finish('error', 'The image session is already starting. Wait for that message to finish.')
     }
@@ -1668,7 +1661,6 @@ export class AcpAdapter extends LlmAdapter {
     })()
     const continuing = mirrorAnswered && live?.provider === options.provider && live.open
     if (continuing) started()
-    else if (live) this.modelAnswers.delete(live.run)
     if (!continuing) {
       if (live !== undefined) live.substitution = undefined
       if (options.messages.findLast(message => !bridgeRow(message))?.role === 'tool') {
@@ -2308,16 +2300,17 @@ export class AcpAdapter extends LlmAdapter {
       }
       // The Session's model and effort, then its level as the agent's own permission mode, before every prompt.
       let substitution
-      const sonnetPin = agent.concreteClaude && options.model === SONNET_PIN
-      const wire = sonnetPin && sonnetWire(valuesOf(live.run.option('model')))
+      const claudePin = agent.concreteClaude ? pinOf(options.model) : undefined
+      const pin = claudePin?.id === options.model ? claudePin : undefined
+      const wire = pin && pinWire(valuesOf(live.run.option('model')), pin)
       live.run.modelProof = undefined
       const standIns = (agent.catalog?.spec?.fallback ?? []).map(entry => entry.id).filter(id => id !== DEFAULT_MODEL)
       try {
-        if (sonnetPin && !wire) throw new Error('the pinned Sonnet model is not offered')
+        if (pin && !wire) throw new Error(`the pinned ${pin.family} model is not offered`)
         substitution = await choose(
           live.run, options.model, options.reasoningEffort,
           id => agent.catalog?.ownEffort(id),
-          { signal: options.signal, standIns, bindModel: true, ...(sonnetPin ? { pinWire: wire } : {}) },
+          { signal: options.signal, standIns, bindModel: true, pin: pin?.id, wire },
         )
       } catch (error) {
         if (archived()) return yield finish('stop')
@@ -2574,8 +2567,8 @@ export class AcpAdapter extends LlmAdapter {
           return yield finish('error', AGY_NOT_LOADED_TEXT)
         }
       }
-      if (sonnetPin && live.run.acknowledgedModel() !== SONNET_PIN) {
-        return yield finish('error', `${agent.name} did not acknowledge the pinned Sonnet model.`)
+      if (pin && live.run.acknowledgedModel() !== pin.id) {
+        return yield finish('error', `${agent.name} did not acknowledge the pinned ${pin.family} model.`)
       }
       if (agy && live.nativeOff === true && live.agySkillsVersion === undefined &&
           skills?.available(sessionId) === true && agent.agySkillsVersion?.() === undefined) {
@@ -2594,7 +2587,6 @@ export class AcpAdapter extends LlmAdapter {
       live.calls.clear()
       live.confinedReason = undefined
       live.toolIds?.clear()
-      this.modelAnswers.set(live.run, { model: options.model, turn: entry.modelTurn, session: live.run.sessionId })
       live.skillCatalog = catalog?.text ? catalog.key : undefined
       live.run.prompt(prompt, () => skills?.admit({ ...send, messages: promptRows(current).rows }, session)).catch(() => {})
       // The notice belongs to this prompt, including any step after a mirror result.

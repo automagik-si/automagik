@@ -678,7 +678,6 @@ export function install(rt) {
     }
     // Not awaited: renaming a session must not hold up the first roster read.
     for (const room of stale) void rt.retitleRoom(room)
-    void rt.upgradeReviewerModels?.()
   })()
 
   // An outside edit of state.json while this host held the lock, found at a

@@ -4052,10 +4052,9 @@ var ZH2 = {
   "Waiting for your answer after the re-plan limit.": "已达到重新规划上限，正在等待你的答复。",
   "Done: every check passed and {name} approved.": "已完成：所有检查均已通过，且 {name} 已批准。",
   "Not marked done: current passing results are missing for agreed checks.": "未标记为完成：仍有约定的检查缺少当前版本的通过结果。",
-  "Not marked done: {name} has not approved the current result on a different model.": "未标记为完成：{name} 尚未使用不同的模型批准当前结果。",
+  "Not marked done: {name} has not independently approved the current result.": "未标记为完成：{name} 尚未独立批准当前结果。",
   "Choose a specific model for the Solver and its reviewer.": "请为 Solver 和审阅者选择具体模型。",
   "Choose a different model for the reviewer.": "请为审阅者选择不同的模型。",
-  "Choose a specific model in the reviewer’s Details to verify its reviews.": "请在审阅者的详情中选择具体模型，以便验证其审阅。",
   "RESULT review unverified. {reason}": "结果审阅未通过验证。{reason}",
   "The reviewer’s effective model could not be verified.": "无法验证审阅者实际使用的模型。",
   "The reviewer used the same model as the Solver.": "审阅者使用了与 Solver 相同的模型。",
@@ -21783,17 +21782,20 @@ var AT_START2 = new RegExp(`^${WORD}`);
 var LABEL2 = new RegExp(`^(?:Verdict|verdict|VERDICT)[*_\`]*\\s*:\\s*[*_\`]*\\s*${WORD}`);
 var GLUED = new RegExp(`${LEAD}${MD}${WORD}${MD}(?:\\s*[.!]*$|\\s+[-–—]\\s+\\S)`);
 function guardVerdictOf(text2, reviewerName2, stage, firstLine) {
+  return guardVerdictMatch(text2, reviewerName2, stage, firstLine)?.verdict;
+}
+function guardVerdictMatch(text2, reviewerName2, stage, firstLine) {
   if (typeof text2 !== "string") return void 0;
   let lines = text2.split(/\r?\n/);
   const explicit = stageVerdictOf(firstLine ?? lines[0]);
-  if (explicit) return explicit.stage === stage ? explicit.verdict : void 0;
+  if (explicit) return explicit.stage === stage ? { verdict: explicit.verdict, line: 0 } : void 0;
   if (typeof reviewerName2 === "string" && reviewerName2 !== "") {
     const cut = lines.indexOf(`[Handed back to ${reviewerName2} for this work]`);
     if (cut >= 0) lines = lines.slice(0, cut);
   }
   let fenced = false;
   let first = true;
-  for (const raw of lines) {
+  for (const [index, raw] of lines.entries()) {
     if (FENCE3.test(raw)) {
       if (raw.split(/```|~~~/).length % 2 === 0) fenced = !fenced;
       first = false;
@@ -21805,21 +21807,23 @@ function guardVerdictOf(text2, reviewerName2, stage, firstLine) {
       first = false;
       if (!line.startsWith(">")) {
         const found = AT_START2.exec(line);
-        if (found) return found[1];
+        if (found) return { verdict: found[1], line: index };
       }
     }
     const label = LABEL2.exec(line);
-    if (label) return label[1];
+    if (label) return { verdict: label[1], line: index };
   }
   return gluedFirstLine(lines);
 }
 function gluedFirstLine(lines) {
-  for (const raw of lines) {
+  for (const [index, raw] of lines.entries()) {
     if (FENCE3.test(raw)) return void 0;
     const line = raw.replace(/^[\s#*_`]+/, "");
     if (line === "") continue;
     if (line.startsWith(">") || LIST_ITEM.test(raw) || INDENTED.test(raw)) return void 0;
-    return GLUED.exec(raw.replace(/^[\s#*_]+/, ""))?.[1];
+    const found = GLUED.exec(raw.replace(/^[\s#*_]+/, ""));
+    if (found) return { verdict: found[1], line: index };
+    return void 0;
   }
   return void 0;
 }
@@ -33788,21 +33792,32 @@ var nativeToolsZh = {
 // src/shared/solver-model.js
 var CHOOSE_CONCRETE = "Choose a specific model for the Solver and its reviewer.";
 var CHOOSE_DIFFERENT = "Choose a different model for the reviewer.";
-var REVIEWER_MODEL_CHOICE = "Choose a specific model in the reviewer’s Details to verify its reviews.";
-function concreteModel(provider, model) {
-  if (typeof model !== "string") return void 0;
-  const slug2 = model.trim().toLowerCase().split(provider === "acp-hermes" ? /[:/]/ : "/").at(-1);
-  if (!slug2 || slug2.endsWith("-latest") || /^(?:default|auto|latest|unknown|opus|sonnet|haiku|fable)(?:plan)?(?:\[1m\])?$/.test(slug2)) return void 0;
-  if (provider.startsWith("acp-") && !/^(?:claude|gpt|o[1-9]|gemini|deepseek|qwen|llama|mistral|grok)[.-][a-z0-9.-]*\d[a-z0-9.\[\]-]*$/.test(slug2)) return void 0;
-  return slug2.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "").replace(/^claude-(\d+-\d+)-(opus|sonnet|haiku)$/, "claude-$2-$1");
+var CLAUDE_PINS = Object.freeze({
+  sonnet: "claude-sonnet-5-5",
+  opus: "claude-opus-5-5",
+  fable: "claude-fable-5-2",
+  haiku: "claude-haiku-5-5"
+});
+function chosenIdentity(provider, model) {
+  const agent = typeof provider === "string" ? provider.trim().toLowerCase() : "";
+  const id = typeof model === "string" ? model.trim().toLowerCase().replace(/\[1m\]$/, "") : "";
+  if (!agent || agent.includes("/") || !id) return void 0;
+  const chosen = agent === "acp-claude" && Object.hasOwn(CLAUDE_PINS, id) ? CLAUDE_PINS[id] : id;
+  return `${agent}/${chosen}`;
 }
+function chosenIdentityOf(ref) {
+  const slash = typeof ref === "string" ? ref.indexOf("/") : -1;
+  if (slash > 0) return chosenIdentity(ref.slice(0, slash), ref.slice(slash + 1));
+}
+var MODEL_UNVERIFIED = "The reviewer’s effective model could not be verified.";
 var RESULT_UNVERIFIED = Object.freeze({
-  model: "The reviewer’s effective model could not be verified.",
+  model: MODEL_UNVERIFIED,
+  held: MODEL_UNVERIFIED,
   same: "The reviewer used the same model as the Solver.",
   verdict: "The reviewer did not give a strict verdict."
 });
 var unverifiedReason = (reason) => typeof reason === "string" && Object.hasOwn(RESULT_UNVERIFIED, reason) ? reason : void 0;
-var unverifiedNotice = (reason) => unverifiedReason(reason) ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.]` : void 0;
+var unverifiedNotice = (reason) => unverifiedReason(reason) ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.` + (reason === "held" ? " Ask the designated reviewer once more on the same checked work.]" : "]") : void 0;
 function originalReviewContent(message) {
   const { content, source } = message;
   const notice = unverifiedNotice(source?.reviewFeedback);
@@ -33834,34 +33849,31 @@ var agentOf = (ref) => {
 var modelOfBot = (bot) => bot?.model ?? bot?.appliedModel;
 var usableModels = (roster) => (roster.models ?? []).filter((model) => setUp(model) && !isHermesRemote(model.ref));
 function solverCatalog(roster) {
-  return { ...roster, models: roster.models?.filter((entry) => !entry.solverRef || entry.solverRef === entry.ref) };
+  const refs = new Set(roster.models?.map((row2) => row2.ref));
+  return { ...roster, models: roster.models?.filter((row2) => {
+    const twin = row2.solverRef;
+    return !row2.ref.startsWith("acp-claude/") || row2.ref === "acp-claude/default" || !twin || twin === row2.ref || chosenIdentityOf(row2.ref) !== twin || !refs.has(twin);
+  }) };
 }
-var solverIdentity = (roster, ref) => {
-  const row2 = roster.models?.find((entry) => entry.ref === ref);
-  if (row2 && Object.hasOwn(row2, "solverIdentity")) return row2.solverIdentity;
-  return row2 ? ref : void 0;
-};
 function solverStartModel(roster) {
-  const models = usableModels(roster);
+  const models = usableModels(solverCatalog(roster));
   const claude = models.filter((model) => markOf(model.ref) === "acp-claude");
   const first = claude.find((model) => model.ref === roster.prefs?.defaultBotModel) ?? claude.find((model) => model.superseded !== true) ?? claude[0];
-  if (first) return first.solverRef ?? first.ref;
+  if (first) return first.ref;
   return startModel({ ...roster, models: (roster.models ?? []).filter((model) => !isHermesRemote(model.ref)) });
 }
 function reviewerChoices(roster, solverModel) {
   const models = usableModels(roster);
-  const refs = new Set(models.map((model2) => model2.ref));
-  const identity = solverIdentity(roster, solverModel);
-  const others = models.filter((model2) => model2.ref !== solverModel && solverIdentity(roster, model2.ref) !== identity);
-  const elsewhere = others.filter((model2) => agentOf(model2.ref) !== agentOf(solverModel));
-  const resolvable = (entry) => entry.solverIdentity !== null;
-  const model = elsewhere.find((entry) => entry.superseded !== true && resolvable(entry)) ?? elsewhere.find(resolvable) ?? others.find((entry) => entry.superseded !== true && resolvable(entry)) ?? others.find(resolvable) ?? elsewhere[0] ?? others[0];
-  const ref = model?.solverRef ?? model?.ref;
+  const refs = new Set(models.map((model) => model.ref));
+  const identity = chosenIdentityOf(solverModel);
+  const others = usableModels(solverCatalog(roster)).filter((model) => chosenIdentityOf(model.ref) !== identity);
+  const elsewhere = others.filter((model) => agentOf(model.ref) !== agentOf(solverModel));
+  const ref = (elsewhere.find((entry) => entry.superseded !== true) ?? elsewhere[0] ?? others.find((entry) => entry.superseded !== true) ?? others[0])?.ref;
   const choices = ref === void 0 ? [] : [{ key: "new", kind: "new", model: ref }];
   const mains = new Set(roster.mainBotIds ?? []);
   const bots = (roster.bots ?? []).filter((bot) => {
     const ref2 = modelOfBot(bot);
-    return !mains.has(bot.id) && bot.kind === void 0 && typeof ref2 === "string" && !isHermesRemote(ref2) && refs.has(ref2) && ref2 !== solverModel && solverIdentity(roster, ref2) !== identity;
+    return !mains.has(bot.id) && bot.kind === void 0 && typeof ref2 === "string" && !isHermesRemote(ref2) && refs.has(ref2) && chosenIdentityOf(ref2) !== identity;
   });
   const away = (bot) => agentOf(modelOfBot(bot)) !== agentOf(solverModel) ? 0 : 1;
   bots.sort((a, b) => away(a) - away(b) || a.name.localeCompare(b.name));
@@ -33870,8 +33882,8 @@ function reviewerChoices(roster, solverModel) {
   return choices;
 }
 function reviewerModels(roster, solverModel) {
-  const identity = solverIdentity(roster, solverModel);
-  return (roster.models ?? []).filter((row2) => row2.ref !== solverModel && (!identity || solverIdentity(roster, row2.ref) !== identity));
+  const identity = chosenIdentityOf(solverModel);
+  return (roster.models ?? []).filter((row2) => !identity || chosenIdentityOf(row2.ref) !== identity);
 }
 function newBotBlock(roster, ref) {
   const map = roster?.nativeToolsNew ?? {};
@@ -33922,7 +33934,7 @@ function reviewMarkText(bot, roster) {
   const reviewed = reviewText2(mark2, bot, roster);
   const outcome = bot.solverStatus?.outcome;
   const name = mark2.reviewer?.name ?? roster?.byId?.[bot.reviewerId]?.name ?? t("its reviewer");
-  const completion = mark2.done === true ? t("Done: every check passed and {name} approved.", { name }) : outcome?.reason === "checks" ? t("Not marked done: current passing results are missing for agreed checks.") : outcome?.reason === "review" ? t("Not marked done: {name} has not approved the current result on a different model.", { name }) : null;
+  const completion = mark2.done === true ? t("Done: every check passed and {name} approved.", { name }) : outcome?.reason === "checks" ? t("Not marked done: current passing results are missing for agreed checks.") : outcome?.reason === "review" ? t("Not marked done: {name} has not independently approved the current result.", { name }) : null;
   return completion ? `${reviewed}
 ${completion}` : reviewed;
 }
@@ -33947,7 +33959,6 @@ function solverAutoView(bot, roster, level) {
   const reason = unverifiedReason(bot.solverStatus?.unverified);
   const lines = [
     ...reason ? [t("RESULT review unverified. {reason}", { reason: t(RESULT_UNVERIFIED[reason]) })] : [],
-    ...bot.solverStatus?.reviewerModelChoice ? [t(REVIEWER_MODEL_CHOICE)] : [],
     ...typeof request === "boolean" ? [request ? t("Auto is on for this request.") : t("This request follows the saved Auto setting.")] : [],
     ...limit ? [limit.kind === "fix" ? t("Waiting for your answer after the attempt limit for {check}.", { check: limit.check }) : t("Waiting for your answer after the re-plan limit.")] : [],
     solverAutoHint(bot, level)
@@ -34140,11 +34151,10 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
   const shownView = native ? nativeSwitchView(solverCandidate(roster, model, true), roster) : unticked;
   const hermes = isHermesRemote(model) || choice.kind === "new" && isHermesRemote(newModel);
   const permission = roster.newBotPermission ?? roster.prefs?.permission ?? roster.permissions?.defaultPreset;
-  const hasProofCatalog = roster.models?.some((row2) => Object.hasOwn(row2, "solverIdentity")) === true;
   const designated = choice.kind !== "fresh";
-  const solverIdentityNow = solverIdentity(roster, model);
-  const reviewerIdentity = solverIdentity(roster, choice.kind === "new" ? newModel : choice.model);
-  const modelProblem = hasProofCatalog && designated ? !solverIdentityNow || !reviewerIdentity ? CHOOSE_CONCRETE : solverIdentityNow === reviewerIdentity ? CHOOSE_DIFFERENT : void 0 : void 0;
+  const solverIdentity = chosenIdentityOf(model);
+  const reviewerIdentity = chosenIdentityOf(choice.kind === "new" ? newModel : choice.model);
+  const modelProblem = designated && solverIdentity && solverIdentity === reviewerIdentity ? CHOOSE_DIFFERENT : void 0;
   const blocked = Boolean(modelProblem) || busy || made !== null || clash || Boolean(problem) || !model || Boolean(roster.readOnly) || hermes;
   const intendsInstall = rolesOn(roster.prefs) && !Object.hasOwn(roster.roles ?? {}, SOLVER_ROLE_ID);
   const create = async () => {
@@ -34169,7 +34179,7 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
           look: { shape: pick3(DEFAULT_SHAPES), color: pick3(DEFAULT_COLORS) },
           model: newModel,
           workDir,
-          solverModelChoice: hasProofCatalog
+          solverModelChoice: true
         }) : void 0,
         solverPayloadFor: ({ reviewer: reviewerBot, dedicated, reviewerId }) => solverPayload({
           name: finalName,
@@ -34184,7 +34194,7 @@ function NewSolver({ roster, actions, brief = "", sectionId = null, onBack, canG
           reviewerId,
           guard: guard2,
           auto,
-          solverModelChoice: hasProofCatalog && designated
+          solverModelChoice: designated
         })
       });
       if (result.solver && !result.sendError && !result.roleNote) {

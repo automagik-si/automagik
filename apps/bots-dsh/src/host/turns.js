@@ -14,7 +14,7 @@ import { absoluteLinks } from './links.js'
 import { rawTextOf, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { reminderText } from './schedules.js'
-import { modelOf } from './solver-progress.js'
+import { modelOf, replyModel } from './solver-progress.js'
 
 // What a running tool call is about, for an approval card.
 export const detailOfArgs = raw => {
@@ -106,7 +106,22 @@ const closingReviews = new WeakSet()
 // The reply a sender waits for, sent the way a finished turn sends it: the work it was
 // for closes, and the answer goes up to the Bot that asked. `id` is the Session the
 // answer comes from; `source` is the trigger the turn answered.
-export function answerSender(rt, id, source, text, long, shouldSend, model, review = { reviewText: text }) {
+export function answerSender(rt, id, source, text, long, shouldSend, model, review = { reviewText: text }, {
+  solverEvents, heldRouteResolved = false,
+} = {}) {
+  if (!review?.legacyHeld || heldRouteResolved) return sendAnswer(rt, id, source, text, long, shouldSend, model, review, solverEvents)
+  const work = rt.state.works[source.exchangeId]
+  if (work === undefined) return
+  const generation = rt.teamGeneration?.()
+  const name = rt.botOf(rt.selfOf(id))?.name
+  void rt.recoverHeldReview(id, source, review, name).then(recovered => {
+    if (shouldSend?.() === false || rt.sameTeam?.(generation) === false || rt.state.works[source.exchangeId] !== work
+      || work.heldReviewText !== review.reviewText || work.heldFirstLine !== review.firstLine) return
+    sendAnswer(rt, id, source, text, long, shouldSend, recovered.model, review, recovered.solverEvents)
+  }).catch(error => rt.warn('omni-ui: could not settle held reviewer work: %s', error))
+}
+
+function sendAnswer(rt, id, source, text, long, shouldSend, model, review, solverEvents) {
   const back = rt.roomOf(source.senderRoomId)?.sessions?.[source.senderSessionId]
   const fromId = rt.selfOf(id)
   const name = rt.botOf(fromId)?.name ?? 'The other Bot'
@@ -124,7 +139,7 @@ export function answerSender(rt, id, source, text, long, shouldSend, model, revi
   // The verdict uses the selected reviewer's own reply. Notices and child results
   // still travel with the answer and receipt, without supplying verdict evidence.
   const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, review?.reviewText,
-    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine)
+    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine, solverEvents, review?.legacyHeld)
   const durableResult = onReplyRecorded?.ready !== undefined
   if (durableResult) closingReviews.add(answered)
   const generation = rt.teamGeneration?.()
@@ -934,6 +949,7 @@ export function install(rt) {
         entry.since = event.time ?? Date.now()
         entry.texts = []
         entry.rawTexts = []
+        entry.textModels = []
         entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
@@ -950,7 +966,6 @@ export function install(rt) {
         entry.later = []
         entry.steeredAt = undefined
         entry.carried = false
-        entry.carriedTexts = 0
         let claimedPending
         let claimedPendingText
         if (entry.pending !== undefined) {
@@ -965,6 +980,7 @@ export function install(rt) {
           entry.carry = undefined
           entry.texts = carry.texts
           entry.rawTexts = carry.rawTexts
+          entry.textModels = carry.textModels
           entry.firstLine = carry.firstLine
           entry.shown = carry.shown
           entry.answers = carry.answers
@@ -973,7 +989,6 @@ export function install(rt) {
           entry.toolCount = carry.toolCount ?? 0
           entry.opened = true
           entry.carried = true
-          entry.carriedTexts = carry.texts.length
           if (carry.info !== undefined) claimTrigger(id, entry, carry.info)
           entry.joined = carry.joined
           // A request the carry displaced as this turn's trigger keeps its deferred
@@ -1231,6 +1246,8 @@ export function install(rt) {
           // What a turn says goes on to the group or the sender, read from other folders.
           entry.texts.push(absoluteLinks(text, rt.sessionFolder?.(session)))
           entry.rawTexts.push(raw)
+          entry.textModels ??= []
+          entry.textModels.push(modelOf(session))
           if (entry.turn !== undefined) showSteps(id, entry, called ? entry.texts.length : entry.texts.length - 1)
         }
         entry.lastText = text
@@ -1254,7 +1271,7 @@ export function install(rt) {
         const noteTurn = rt.handoffNoteTurn?.(id, entry.turn ?? event.data?.turn) === true
         if (steerCut) {
           entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0,
-            rawTexts: entry.rawTexts.slice(0, cut.texts), firstLine: cut.texts > 0 ? entry.firstLine : undefined }
+            rawTexts: entry.rawTexts.slice(0, cut.texts), textModels: entry.textModels?.slice(0, cut.texts) ?? [], firstLine: cut.texts > 0 ? entry.firstLine : undefined }
         }
         const info = entry.info
         const joined = entry.joined ?? []
@@ -1267,8 +1284,7 @@ export function install(rt) {
         const { lastText, lastCalled } = entry
         // Exact stage verdicts use the reviewer's own first line, before reply formatting.
         const reviewFirstLine = entry.shown === 0 ? entry.firstLine ?? '' : ''
-        const carriesReplyText = entry.shown < (entry.carriedTexts ?? 0)
-        const answeringTurn = event.data?.turn ?? entry.adoptedTurn ?? entry.turn
+        const textModels = entry.textModels?.slice(entry.shown) ?? []
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
         // A turn stopped for a switch goes on in the next part, which answers instead.
@@ -1284,6 +1300,7 @@ export function install(rt) {
         entry.info = undefined
         entry.texts = []
         entry.rawTexts = []
+        entry.textModels = []
         entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
@@ -1366,10 +1383,9 @@ export function install(rt) {
           && promisesWork(lastText) && !rt.callsRoomMember?.(id, info, lastText)
         const retry = (wroteCall || promisedOnly) && info?.retried !== true && !(info?.role === 'room' && stoppedRoomTurns.has(info.exchangeId))
         // A Solver's delivery in its own chat is marked with the review the host saw (review-mark.js).
-        const model = reason?.kind === 'completed' ? modelOf(rt, undefined, session) : undefined
-        // A reply that still contains text from the cut turn cannot use this turn's model proof.
-        const answerModel = reason?.kind === 'completed' && !carriesReplyText
-          ? modelOf(rt, undefined, session, typeof answeringTurn === 'number' ? answeringTurn : null) : undefined
+        const model = reason?.kind === 'completed' ? modelOf(session) : undefined
+        const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
+        const answerModel = reason?.kind === 'completed' ? replyModel(rawTexts, textModels, reviewFirstLine, name) : undefined
         if (owner !== undefined && !retry) {
           const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
           const mark = request => rt.reviewTurnEnd?.(owner, {
@@ -1402,7 +1418,6 @@ export function install(rt) {
         const groupReply = () => rt.withRoomSteps?.(held, reply.text) ?? reply.text
         // Whoever the turn answers gets the same three-way rule: a failure notice,
         // the turn's text (or a stopped-before-answer line), or nothing.
-        const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
         const answer = (source, response) => {
           if (!expectsReply(source) || answersUser(source) || goesOn) return
           if (failure !== undefined) {

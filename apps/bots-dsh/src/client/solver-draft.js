@@ -8,7 +8,7 @@ import { dateLocale, t } from './i18n.js'
 import { AUTO, AUTO_ROW, markOf } from '../shared/permission-levels.js'
 import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isSolverBot, solverInstructions } from '../shared/solver-method.js'
 import { packageAttachment, ROLES_OFF_REASON, rolesOn, sameRolePin } from '../shared/roles.js'
-import { RESULT_UNVERIFIED, REVIEWER_MODEL_CHOICE, unverifiedReason } from '../shared/solver-model.js'
+import { RESULT_UNVERIFIED, chosenIdentityOf, unverifiedReason } from '../shared/solver-model.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
@@ -56,21 +56,20 @@ const usableModels = roster => (roster.models ?? []).filter(model => setUp(model
 // The normal catalog keeps raw routes for existing callers. In this dialog an
 // affiliated alias shares the concrete row and only that row is offered.
 export function solverCatalog(roster) {
-  return { ...roster, models: roster.models?.filter(entry => !entry.solverRef || entry.solverRef === entry.ref) }
-}
-
-export const solverIdentity = (roster, ref) => {
-  const row = roster.models?.find(entry => entry.ref === ref)
-  if (row && Object.hasOwn(row, 'solverIdentity')) return row.solverIdentity
-  return row ? ref : undefined
+  const refs = new Set(roster.models?.map(row => row.ref))
+  return { ...roster, models: roster.models?.filter(row => {
+    const twin = row.solverRef
+    return !row.ref.startsWith('acp-claude/') || row.ref === 'acp-claude/default' || !twin || twin === row.ref
+      || chosenIdentityOf(row.ref) !== twin || !refs.has(twin)
+  }) }
 }
 
 /** The Solver's first model: Claude Code when it is set up (its native subagents), else the form's. */
 export function solverStartModel(roster) {
-  const models = usableModels(roster)
+  const models = usableModels(solverCatalog(roster))
   const claude = models.filter(model => markOf(model.ref) === 'acp-claude')
   const first = claude.find(model => model.ref === roster.prefs?.defaultBotModel) ?? claude.find(model => model.superseded !== true) ?? claude[0]
-  if (first) return first.solverRef ?? first.ref
+  if (first) return first.ref
   return startModel({ ...roster, models: (roster.models ?? []).filter(model => !isHermesRemote(model.ref)) })
 }
 
@@ -83,19 +82,17 @@ export function solverStartModel(roster) {
 export function reviewerChoices(roster, solverModel) {
   const models = usableModels(roster)
   const refs = new Set(models.map(model => model.ref))
-  const identity = solverIdentity(roster, solverModel)
-  const others = models.filter(model => model.ref !== solverModel && solverIdentity(roster, model.ref) !== identity)
+  const identity = chosenIdentityOf(solverModel)
+  const others = usableModels(solverCatalog(roster)).filter(model => chosenIdentityOf(model.ref) !== identity)
   const elsewhere = others.filter(model => agentOf(model.ref) !== agentOf(solverModel))
-  const resolvable = entry => entry.solverIdentity !== null
-  const model = (elsewhere.find(entry => entry.superseded !== true && resolvable(entry)) ?? elsewhere.find(resolvable)
-    ?? others.find(entry => entry.superseded !== true && resolvable(entry)) ?? others.find(resolvable) ?? elsewhere[0] ?? others[0])
-  const ref = model?.solverRef ?? model?.ref
+  const ref = (elsewhere.find(entry => entry.superseded !== true) ?? elsewhere[0]
+    ?? others.find(entry => entry.superseded !== true) ?? others[0])?.ref
   const choices = ref === undefined ? [] : [{ key: 'new', kind: 'new', model: ref }]
   const mains = new Set(roster.mainBotIds ?? [])
   const bots = (roster.bots ?? []).filter((bot) => {
     const ref = modelOfBot(bot)
     return !mains.has(bot.id) && bot.kind === undefined && typeof ref === 'string'
-      && !isHermesRemote(ref) && refs.has(ref) && ref !== solverModel && solverIdentity(roster, ref) !== identity
+      && !isHermesRemote(ref) && refs.has(ref) && chosenIdentityOf(ref) !== identity
   })
   const away = bot => (agentOf(modelOfBot(bot)) !== agentOf(solverModel) ? 0 : 1)
   bots.sort((a, b) => away(a) - away(b) || a.name.localeCompare(b.name))
@@ -106,8 +103,8 @@ export function reviewerChoices(roster, solverModel) {
 
 // Keep the normal model menu (including its sign-in rows) except for the Solver’s model.
 export function reviewerModels(roster, solverModel) {
-  const identity = solverIdentity(roster, solverModel)
-  return (roster.models ?? []).filter(row => row.ref !== solverModel && (!identity || solverIdentity(roster, row.ref) !== identity))
+  const identity = chosenIdentityOf(solverModel)
+  return (roster.models ?? []).filter(row => !identity || chosenIdentityOf(row.ref) !== identity)
 }
 
 /**
@@ -180,7 +177,7 @@ export function reviewMarkText(bot, roster) {
   const name = mark.reviewer?.name ?? roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
   const completion = mark.done === true ? t('Done: every check passed and {name} approved.', { name })
     : outcome?.reason === 'checks' ? t('Not marked done: current passing results are missing for agreed checks.')
-      : outcome?.reason === 'review' ? t('Not marked done: {name} has not approved the current result on a different model.', { name })
+      : outcome?.reason === 'review' ? t('Not marked done: {name} has not independently approved the current result.', { name })
         : null
   return completion ? `${reviewed}\n${completion}` : reviewed
 }
@@ -210,7 +207,6 @@ export function solverAutoView(bot, roster, level) {
   const reason = unverifiedReason(bot.solverStatus?.unverified)
   const lines = [
     ...(reason ? [t('RESULT review unverified. {reason}', { reason: t(RESULT_UNVERIFIED[reason]) })] : []),
-    ...(bot.solverStatus?.reviewerModelChoice ? [t(REVIEWER_MODEL_CHOICE)] : []),
     ...(typeof request === 'boolean' ? [request ? t('Auto is on for this request.') : t('This request follows the saved Auto setting.')] : []),
     ...(limit ? [limit.kind === 'fix' ? t('Waiting for your answer after the attempt limit for {check}.', { check: limit.check })
       : t('Waiting for your answer after the re-plan limit.')] : []),

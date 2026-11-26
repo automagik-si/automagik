@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { configured, install } from '../src/host/models.js'
+import { CLAUDE_PINS } from '../../acp-dsh/src/host/model-identity.js'
+import { chosenIdentity, chosenIdentityOf } from '../src/shared/solver-model.js'
 
 const PROVIDERS = {
   deepseek: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }, { id: 'deepseek-v4-pro' }],
@@ -1066,4 +1068,54 @@ test('a group Session with history on another harness is not moved across in pla
   assert.equal(await rt.reselectOwnRoute(agent('g-history'), () => true), false)
   assert.equal(await rt.reselectOwnRoute(agent('g-empty'), () => true), true)
   assert.deepEqual(picks.map(([id]) => id), ['g-empty'])
+})
+
+test('Claude Code pin proofs populate Solver rows and a saved pin survives a catalog outage', async () => {
+  const pins = [['opus', 'Opus 5.5', 'claude-opus-5-5'], ['fable', 'Fable 5.2', 'claude-fable-5-2'], ['haiku', 'Haiku 5.5', 'claude-haiku-5-5']]
+  const identities = new Map(pins.map(([alias, , id]) => [alias, id]))
+  const acpAgents = {
+    modelIdentityOf(_provider, model) { return { status: 'offered', model: identities.get(model) } },
+  }
+  const rt = runtime(undefined)
+  rt.ctx.get = key => key === 'acpAgents' ? acpAgents : undefined
+  const previous = rt.ctx.llm.listModels
+  let online = true
+  rt.ctx.llm.listProviders = () => [{ id: 'acp-claude' }, { id: 'deepseek' }]
+  rt.ctx.llm.listModels = async provider => provider !== 'acp-claude' ? previous(provider)
+    : online ? pins.map(([id, name]) => ({ id, name })) : []
+  const rows = await rt.catalog({ fresh: true })
+  for (const [alias, , id] of pins) {
+    const row = rows.find(row => row.ref === `acp-claude/${alias}`)
+    assert.equal(row?.solverIdentity, `acp-claude/${id}`)
+    assert.equal(row?.solverRef, `acp-claude/${id}`)
+  }
+  online = false
+  await rt.catalog({ fresh: true })
+  assert.equal(await rt.desiredModel({ model: 'acp-claude/claude-opus-5-5' }), 'acp-claude/claude-opus-5-5')
+})
+
+test('Solver chosen identity matches the four ACP pins and keeps provider, full ID and default', () => {
+  assert.equal(CLAUDE_PINS.length, 4)
+  for (const { alias, id } of CLAUDE_PINS) {
+    assert.equal(chosenIdentity(' ACP-CLAUDE ', alias.toUpperCase() + '[1m] '), `acp-claude/${id}`)
+    assert.equal(chosenIdentity('acp-hermes', alias), `acp-hermes/${alias}`)
+  }
+  assert.equal(chosenIdentityOf(' ACP-HERMES / VENDOR/Model[1m] '), 'acp-hermes/vendor/model')
+  assert.equal(chosenIdentityOf('acp-claude/default'), 'acp-claude/default')
+  assert.equal(chosenIdentityOf('anthropic/v-20261001'), 'anthropic/v-20261001')
+  assert.equal(chosenIdentityOf('model'), undefined)
+})
+
+test('Solver host accepts distinct choices without ACP proofs and refuses only equal choices', async () => {
+  const rt = runtime(undefined)
+  const reviewer = { id: 'reviewer', model: 'acp-claude/sonnet' }
+  rt.botOf = id => id === reviewer.id ? reviewer : undefined
+  rt.ctx.get = () => ({ resolveModelIdentity: () => assert.fail('creation must use the chosen identity') })
+  for (const ref of ['acp-claude/opus', 'acp-antigravity/default', 'acp-omp/default',
+    'acp-hermes/route/vendor/model', 'anthropic/claude-sonnet-5-5']) await rt.checkSolverModel(ref, reviewer)
+  for (const ref of ['acp-claude/sonnet', 'acp-claude/claude-sonnet-5-5', 'acp-claude/sonnet[1m]']) {
+    await assert.rejects(rt.checkSolverModel(ref, reviewer), /Choose a different model/)
+  }
+  await assert.rejects(rt.checkSolverModel('acp-claude/opus', { ...reviewer }), /Choose a specific model/)
+  assert.equal(rt.upgradeReviewerModels, undefined)
 })
