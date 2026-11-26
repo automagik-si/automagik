@@ -550,12 +550,12 @@ test('at a never-ask level Hermes’s question passes DSH’s real question serv
   assert.deepEqual(f.sent.filter(frame => frame.id === scoped.id), [{ jsonrpc: '2.0', id: scoped.id, result: { choice: 'once' } }])
   // A question Hermes withdraws closes in the chat, and a late answer is not sent.
   let late
-  answer = request => new Promise(resolve => { late = { resolve, signal: request.signal } })
+  answer = request => new Promise(resolve => { late = { resolve, signal: request.signal, id: request.questions[0].id } })
   f.socket().frame(question('srq-late')); await settle()
   assert.equal(late.signal.aborted, false)
   f.socket().event('request.cancel', { id: 'srq-late', method: 'approval', reason: 'timeout' })
   assert.equal(late.signal.aborted, true)
-  late.resolve({ answers: [{ id: 'approval-srq-late', selected: ['Allow once'] }] }); await settle()
+  late.resolve({ answers: [{ id: late.id, selected: ['Allow once'] }] }); await settle()
   assert.deepEqual(f.sent.filter(frame => frame.id === 'srq-late'), [])
   f.socket().event('message.complete', { text: 'Done' })
   await first

@@ -290,9 +290,11 @@ test('Hermes sandbox consent keeps its target and duration on the open card and 
             const form = view.render()
             assert.deepEqual(written(form), [dictionary[prompt], target, ...labels.map(option => dictionary[option])])
             options(form)[index].props.onClick()
-            assert.deepEqual(response, { answers: [{ id: 'scope', selected: [label] }] })
+            const id = matched.questions[0].id
+            assert.notEqual(id, 'scope')
+            assert.deepEqual(response, { answers: [{ id, selected: [label] }] })
             assert.equal(await outcome, index === 0 ? 'once' : 'deny')
-            const data = { questions: [{ id: 'scope', question: prompt }], text: JSON.stringify({ questions: matched.questions }), answers: response.answers }
+            const data = { questions: [{ id, question: prompt }], text: JSON.stringify({ questions: matched.questions }), answers: response.answers }
             const settled = find(AnsweredCell({ node: { data } }), child => typeof child.type === 'function')
             assert.deepEqual(written(settled.type(settled.props)), [dictionary[prompt], target, dictionary[label]])
           } finally { view.unmount(); card.unmount() }
