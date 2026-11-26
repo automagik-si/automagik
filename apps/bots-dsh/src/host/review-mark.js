@@ -17,7 +17,7 @@ import { reachesShell } from './tool-deny.js'
 import { refusal } from './refusal.js'
 import { nativeCheckDirectory, normalizeCheckCommand, withinCheckRoot } from './solver-check-command.js'
 import {
-  activeSolverLimit, cleanProgress, designateReview, invalidateResult, legacyResultReview, modelOf, newProgress, recordedModelOf,
+  activeSolverLimit, cleanProgress, designateReview, inspectResult, invalidateResult, legacyResultReview, modelOf, newProgress, recordedModelOf,
   normalizedAutoInstruction, recordProgress, recordSolverVerdict, resultSnapshot, resumeProgress, solverOutcome, solverTracked,
 } from './solver-progress.js'
 
@@ -323,12 +323,13 @@ export function install(rt) {
       now: Date.now(),
       authorizedAuto: authority?.request === args.request && authority.instruction === normalizedAutoInstruction(args.quote),
       running: runningWork.has(bot),
+      inspect: () => inspectResult(folderOf(bot)),
       snapshotOf: () => snapshotOf(bot),
     })
     if (changed.changed) {
-      const onStart = args.action === 'start' ? () => {
-        const { request, pending: { run, revision } } = track.solver
-        nativeRunStarts.set(bot, { request, run, revision, at: performance.now() })
+      const pending = args.action === 'start' ? track.solver.pending : undefined
+      const onStart = pending ? () => {
+        nativeRunStarts.set(bot, { request: track.solver.request, run: pending.run, revision: pending.revision, at: performance.now() })
       } : undefined
       await saveProgress(bot, before, track.solver, undefined, onStart)
       if (args.action === 'auto' && autoInstructions.get(bot) === authority) autoInstructions.delete(bot)

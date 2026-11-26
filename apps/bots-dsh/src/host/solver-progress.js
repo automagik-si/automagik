@@ -1,12 +1,15 @@
 import { chosenIdentity, chosenIdentityOf } from '../shared/solver-model.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { lstatSync, readdirSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readlinkSync, realpathSync, statfsSync } from 'node:fs'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { SOLVER_FIX_LIMIT, SOLVER_REPLAN_LIMIT, isSolverBot, isWrittenSolverMethod, solverAutoOn } from '../shared/solver-method.js'
 import { guardVerdictMatch } from '../shared/review-guard.js'
 import { normalizeCheckCommand } from './solver-check-command.js'
 
 const MAX_CHECKS = 20
+const MAX_RESULT_ENTRIES = 20_000
+const FD_ROOT = '/proc/self/fd'
+const PROC_SUPER_MAGIC = 0x9fa0
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const count = value => Number.isSafeInteger(value) && value >= 0
 const id = value => typeof value === 'string' && /^[a-z0-9][a-z0-9_.:-]{0,79}$/.test(value)
@@ -86,36 +89,120 @@ export function resumeProgress(progress, limit) {
   delete progress.limit
 }
 
-// File identity and change times track local result changes without reading file contents.
-export function resultSnapshot(folder) {
-  if (typeof folder !== 'string' || !isAbsolute(folder)) return undefined
+const entryStat = path => lstatSync(path, { bigint: true })
+const directoryStat = fd => fstatSync(fd, { bigint: true })
+const sameEntry = (a, b) => a.dev === b.dev && a.ino === b.ino && a.mode === b.mode
+const sameVersion = (a, b) => sameEntry(a, b) && a.ctimeNs === b.ctimeNs
+const changedDuringRead = 'It changed while it was read.'
+const tooManyEntries = 'It has more than 20,000 entries.'
+const snapshotError = reason => Object.assign(new Error(reason), { reason })
+
+function hasDescriptorPaths() {
+  if (process.platform !== 'linux' || !constants.O_DIRECTORY || !constants.O_NOFOLLOW) return false
+  try {
+    return statfsSync(FD_ROOT).type === PROC_SUPER_MAGIC
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR', 'ENOSYS'].includes(error.code)) return false
+    throw error
+  }
+}
+
+export function inspectResult(folder) {
+  if (typeof folder !== 'string' || !isAbsolute(folder)) return { reason: 'The Solver has no usable result folder.' }
+  const selectedRoot = resolve(folder)
+  let root = selectedRoot
   const hash = createHash('sha256')
-  let remaining = 20_000
-  function visit(path, name, root = false) {
-    if (--remaining < 0) throw new Error('Result has too many entries to verify.')
-    const stat = lstatSync(path, { bigint: true })
+  let remaining = MAX_RESULT_ENTRIES - 1
+  const openDirectory = path => openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  const fdPath = fd => join(FD_ROOT, String(fd))
+  const shown = path => JSON.stringify(relative(root, path) || '.').slice(0, 200)
+  let location = root
+  let descriptorPaths
+  let rootStat
+  function visit(path, locationOfEntry, name, isRoot = false) {
+    location = locationOfEntry
+    const stat = entryStat(path)
+    if (isRoot && !sameVersion(rootStat, stat)) throw snapshotError(changedDuringRead)
     const identity = [name, stat.dev, stat.ino, stat.mode].map(String)
     if (stat.isDirectory()) {
-      const children = readdirSync(path).sort().filter(child => !root || child !== '.git')
-      for (const child of children) {
-        visit(join(path, child), child)
+      const fd = descriptorPaths ? openDirectory(path) : undefined
+      try {
+        const opened = fd === undefined ? entryStat(path) : directoryStat(fd)
+        if (!sameVersion(stat, opened)) throw snapshotError(changedDuringRead)
+        const directoryPath = fd === undefined ? path : fdPath(fd)
+        const children = []
+        const directory = opendirSync(directoryPath)
+        try {
+          for (let child; (child = directory.readSync()) !== null;) {
+            if (isRoot && child.name === '.git') continue
+            if (--remaining < 0) throw snapshotError(tooManyEntries)
+            children.push(child.name)
+          }
+        } finally {
+          directory.closeSync()
+        }
+        // On the portable path a concurrent swap can expose directory metadata between
+        // the identity checks. Reject observed changes before looking up any child names.
+        if (fd === undefined && !sameVersion(stat, entryStat(path))) throw snapshotError(changedDuringRead)
+        children.sort()
+        for (const child of children) visit(join(directoryPath, child), join(locationOfEntry, child), child)
+        location = locationOfEntry
+        if (!sameVersion(stat, entryStat(path))) throw snapshotError(changedDuringRead)
+        hash.update(JSON.stringify([...identity, children]))
+      } finally {
+        if (fd !== undefined) closeSync(fd)
       }
-      if (stat.ctimeNs !== lstatSync(path, { bigint: true }).ctimeNs) throw new Error('Result changed during verification.')
-      hash.update(JSON.stringify([...identity, children]))
     } else if (stat.isFile()) {
       const changes = [stat.size, stat.mtimeNs, stat.ctimeNs].map(String)
       hash.update(JSON.stringify([...identity, ...changes]))
+    } else if (stat.isSymbolicLink()) {
+      const target = readlinkSync(path, { encoding: 'buffer' }).toString('hex')
+      if (!sameVersion(stat, entryStat(path))) throw snapshotError(changedDuringRead)
+      const changes = [stat.size, stat.mtimeNs, stat.ctimeNs].map(String)
+      hash.update(JSON.stringify([...identity, ...changes, 'link', target]))
     } else {
-      throw new Error('Result contains an unverifiable entry.')
+      throw snapshotError(`It contains a device, pipe or socket at ${shown(location)}.`)
     }
   }
+  const parents = []
   try {
-    visit(folder, folder, true)
-    return hash.digest('hex')
-  } catch {
-    return undefined
+    rootStat = entryStat(selectedRoot)
+    if (!rootStat.isDirectory()) return { reason: rootStat.isSymbolicLink()
+      ? 'The result root is a symbolic link.' : 'The result root is not a directory.' }
+    root = realpathSync.native(selectedRoot)
+    location = root
+    descriptorPaths = hasDescriptorPaths()
+    let walkRoot = root
+    if (descriptorPaths) {
+      // Procfs keeps lookup and enumeration tied to held directory descriptors. Open
+      // each component of the resolved root with O_NOFOLLOW before walking its entries.
+      const components = root.split('/').filter(Boolean)
+      const name = components.pop()
+      let parent = '/'
+      for (const component of ['', ...components]) {
+        if (!name) break
+        const path = join(parent, component)
+        const fd = openDirectory(path)
+        parents.push({ path, fd })
+        parent = fdPath(fd)
+      }
+      if (name) walkRoot = join(parent, name)
+    }
+    visit(walkRoot, root, folder, true)
+    for (const { path, fd } of parents) {
+      if (!sameEntry(entryStat(path), directoryStat(fd))) throw snapshotError(changedDuringRead)
+    }
+    if (selectedRoot !== root && !sameVersion(rootStat, entryStat(selectedRoot))) throw snapshotError(changedDuringRead)
+    return { snapshot: hash.digest('hex') }
+  } catch (error) {
+    return { reason: error.reason ?? (error.code
+      ? `An entry at ${shown(location)} could not be read (${error.code}).` : 'It could not be read.') }
+  } finally {
+    for (const { fd } of parents.reverse()) closeSync(fd)
   }
 }
+
+export const resultSnapshot = folder => inspectResult(folder).snapshot
 
 export function modelOf(session) {
   try {
@@ -217,7 +304,7 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
   }
 }
 
-export function recordProgress(bot, track, args, { now, authorizedAuto, running, snapshotOf } = {}) {
+export function recordProgress(bot, track, args, { now, authorizedAuto, running, inspect, snapshotOf } = {}) {
   const progress = track.solver
   const limit = activeSolverLimit(bot, track)
   const recorded = `Recorded. ${Math.max(0, SOLVER_REPLAN_LIMIT - progress.replans)} re-plans left in Normal.`
@@ -277,9 +364,13 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
     }
     if (progress.pending) return { text: progress.pending.run === run && includesAll(progress.pending.checks, checks)
       ? 'Recorded. This run is already open.' : 'Record the open run before starting another attempt.' }
-    const startSnapshot = snapshotOf?.()
-    if (progress.snapshot && progress.snapshot !== startSnapshot) invalidateResult(progress)
-    progress.pending = { run, checks: [...checks], revision: progress.revision, ...(startSnapshot ? { startSnapshot } : {}) }
+    const { snapshot: startSnapshot, reason } = inspect()
+    const invalidated = Boolean(progress.snapshot && progress.snapshot !== startSnapshot)
+    if (invalidated) invalidateResult(progress)
+    if (!startSnapshot) return { changed: invalidated,
+      text: `Cannot start this run. The result folder cannot be verified: ${reason} No run was recorded. Ask the person to set a smaller working folder for this Solver, or remove what blocks the check, then start again.`,
+    }
+    progress.pending = { run, checks: [...checks], revision: progress.revision, startSnapshot }
     delete progress.review
     return { changed: true, text: 'Recorded. Run the check and report all its outcomes.' }
   }
