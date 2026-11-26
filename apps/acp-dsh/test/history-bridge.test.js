@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -15,7 +16,9 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { apply as applyExecutor, inject as executorInject } from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { AcpAdapter, BRIDGE_PATH } from '../src/host/adapter.js'
+import { AGY_OFF_CHECKED, AGY_OFF_SKILLS_NAME, agyOffPaths } from '../src/host/agy-off.js'
 import { Backchannel, signatureOf } from '../src/host/backchannel.js'
+import { AGY, AGY_OFF_ARGS, agyWorld, unixOnly } from './fixtures/agy-world.js'
 import { codexWorld, scheduled, turnOn } from './fixtures/codex-native-world.js'
 import { CLAUDE, nativeWorld, person } from './fixtures/managed-native-world.js'
 import { ompWorld, OMP } from './fixtures/omp-world.js'
@@ -150,10 +153,188 @@ test('C2 only the eligible omp Session gets one restricted dsh bridge', async t 
     assert.deepEqual(h.events('mcp-list').slice(before).map(row => row.tools), expected.length ? [expected] : [])
   }
   h.role(true)
-  for (const provider of ['acp-hermes', 'acp-antigravity']) {
-    assert.equal(h.adapter.historyWanted({ bridge: false }, 'no-role', provider), false)
-  }
+  assert.equal(h.adapter.historyWanted({ bridge: false }, 'no-role', 'acp-hermes'), false)
+  assert.equal(h.adapter.historyWanted({ bridge: false }, 'no-role', AGY), true)
+  assert.equal(h.adapter.historyWanted({ bridge: false }, 'no-role', AGY, true), false)
 })
+
+function agyHistory(t, nativeTools, options) {
+  const h = agyWorld(t, options)
+  h.service.botIdentity(() => ({ name: 'Fixture Bot', needsDshTools: true, nativeTools, nativeToolsAgent: AGY }))
+  h.services.tools = { definitions: () => definitions, execute: t.mock.fn() }
+  return h
+}
+
+function agySkills(h, available = () => true) {
+  h.services.omniTeam = { skillCalls: { available, catalog: () => undefined, project: options => options, admit() {} } }
+}
+
+const textOf = chunks => chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
+const toolBlocks = chunks => chunks.filter(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
+
+test('D1 Antigravity ON lists history on dsh and authorizes one correlated, card-free read', { ...unixOnly, timeout: 15_000 }, async t => {
+  const h = agyHistory(t, true)
+  agySkills(h, id => id === 'with-skills')
+  const chat = h.chat()
+  const row = h.adapter.agents.get(AGY)
+  const order = []
+  const spawn = row.spawn
+  t.mock.method(row, 'spawn', options => {
+    const launch = spawn(options)
+    const agyReady = launch.agyReady
+    return { ...launch, agyReady: async run => { await agyReady(run); order.push('agyReady') } }
+  })
+  const ready = h.adapter.ready
+  t.mock.method(h.adapter, 'ready', async (agent, live) => {
+    order.push('ready')
+    await ready.call(h.adapter, agent, live)
+  })
+
+  const masked = { type: 'text', text: 'synthetic marker [secret:fixture]' }
+  h.services.tools.execute.mock.mockImplementation(async () => ({
+    results: [{ result: { content: [masked], isError: false } }],
+  }))
+  const bridge = h.adapter.backchannel
+  const call = bridge.call
+  const duplicates = []
+  t.mock.method(bridge, 'call', async (record, request) => {
+    const result = await call.call(bridge, record, request)
+    if (request.arguments.query === 'correlated' && result.isError === false) {
+      duplicates.push(await call.call(bridge, record, request))
+    }
+    return result
+  })
+
+  const chunks = await chat.turn('agy-bridge read_own_chat {"query":"correlated"}')
+  const { args, pid } = h.conversation('"correlated"')
+  assert.deepEqual(h.events('new-session').filter(event => event.pid === pid).map(event => event.servers), [['dsh']])
+  assert.deepEqual(h.events('mcp-list').map(({ server, tools }) => [server, tools]), [['dsh', [HISTORY]]])
+  assert.deepEqual(args, ['acp'])
+  assert.deepEqual(order, ['agyReady', 'ready'])
+  assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+  const [read] = h.events('mcp-history-result')
+  assert.deepEqual(read.answer, { content: [masked], isError: false })
+  assert.match(textOf(chunks), /synthetic marker \[secret:fixture\]/)
+  assert.deepEqual(h.events('permission-answer').map(event => event.answer), [{ outcome: 'selected', optionId: 'agy-allow' }])
+  assert.deepEqual(h.approvals.map(({ toolName, callId }) => [toolName, callId]), [[HISTORY, read.toolCallId]])
+  assert.deepEqual(toolBlocks(chunks), [])
+  assert.deepEqual(duplicates.map(result => result.error?.code), ['BRIDGE_CANCELLED'])
+  assert.equal(h.services.tools.execute.mock.callCount(), 1)
+
+  const live = h.adapter.live.get(chat.session.id)
+  const verified = live.run.tools.get(read.toolCallId)
+  assert.equal(verified.structuredName, 'mcp_dsh_read_own_chat')
+  assert.equal(verified.skillOperation, HISTORY)
+  assert.equal(verified.skillPrompt.aborted, true)
+
+  const onUpdate = live.run.onUpdate
+  const bindings = []
+  t.mock.method(live.run, 'onUpdate', async (update, sessionId) => {
+    if (update.sessionUpdate === 'tool_call') bindings.push(live.run.restrictedCall(read.toolCallId, HISTORY, live.run.historySignal))
+    return onUpdate.call(live.run, update, sessionId)
+  })
+  const missing = await chat.turn('agy-bridge-without-id read_own_chat {"query":"missing"}')
+  assert.deepEqual(bindings, [undefined])
+  assert.equal(h.events('permission-answer').at(-1)?.answer.optionId, 'agy-allow')
+  assert.equal(h.events('mcp-history-result').at(-1)?.answer.isError, true)
+  assert.doesNotMatch(textOf(missing), /synthetic marker/)
+  assert.equal(h.services.tools.execute.mock.callCount(), 1)
+  assert.equal(h.approvals.length, 1)
+
+  const native = await chat.turn('native-read')
+  assert.deepEqual(h.events('native-tool-ran').map(event => event.name), ['Read'])
+  assert.deepEqual(toolBlocks(native).map(chunk => chunk.block.name), ['acp_tool'])
+  assert.equal(h.adapter.live.get(chat.session.id), live)
+
+  const withSkills = await h.chat('with-skills').turn('plain with automatic skills')
+  assert.equal(withSkills.at(-1)?.reason.kind, 'stop')
+  const skillPid = h.conversation('plain with automatic skills').pid
+  assert.deepEqual(h.events('new-session').filter(event => event.pid === skillPid).map(event => event.servers), [['dsh']])
+  assert.deepEqual(h.events('mcp-list').map(event => event.tools), [[HISTORY], [HISTORY, SKILL]])
+})
+
+test('D1b Antigravity ON stops before its first prompt if the bridge never lists', { ...unixOnly, timeout: 15_000 }, async t => {
+  const h = agyHistory(t, true, { env: { FAKE_ACP_SKIP_MCP: '1' } })
+  h.adapter.agents.get(AGY).bridgeReadyMs = 50
+  const chunks = await h.chat().turn('plain readiness control')
+  assert.equal(chunks.at(-1)?.reason.failure?.code, 'acp_bridge_missing')
+  assert.deepEqual(h.events('new-session').at(-1)?.servers, ['dsh'])
+  assert.deepEqual(h.events('mcp-list'), [])
+  assert.deepEqual(h.events('prompt'), [])
+  assert.equal(h.services.tools.execute.mock.callCount(), 0)
+})
+
+test('D1 Stop discards a pending Antigravity history result', { ...unixOnly, timeout: 15_000 }, async t => {
+  const h = agyHistory(t, true)
+  const chat = h.chat()
+  const entered = Promise.withResolvers()
+  const finished = Promise.withResolvers()
+  const stop = new AbortController()
+  const bridge = h.adapter.backchannel
+  const call = bridge.call
+  const stoppedLine = 'synthetic stopped history'
+  t.mock.method(bridge, 'call', async (record, request) => {
+    const result = await call.call(bridge, record, request)
+    finished.resolve(result)
+    return result
+  })
+  h.services.tools.execute.mock.mockImplementation(async ({ signal }) => {
+    entered.resolve(signal)
+    if (!signal.aborted) await once(signal, 'abort')
+    return { results: [{ result: { content: [{ type: 'text', text: stoppedLine }], isError: false } }] }
+  })
+  const launch = await chat.turn('plain stop control')
+  assert.equal(launch.at(-1)?.reason.kind, 'stop')
+  assert.deepEqual(h.events('mcp-list').map(event => event.tools), [[HISTORY]])
+  const pending = chat.turn('agy-bridge read_own_chat {"query":"stop"}', [], stop.signal)
+  try {
+    const signal = await soon(entered.promise)
+    stop.abort()
+    const result = await soon(finished.promise)
+    assert.equal(signal.aborted, true)
+    assert.doesNotMatch(JSON.stringify(result), /synthetic stopped history/)
+  } finally {
+    stop.abort()
+    await pending
+  }
+  const chunks = await pending
+  assert.equal(chunks.at(-1)?.reason.kind, 'aborted')
+  assert.doesNotMatch(JSON.stringify([chunks, chat.session.snapshotEvents(), h.events('mcp-history-result')]), /synthetic stopped history/)
+  assert.equal(h.approvals.length, 1)
+  assert.equal(h.services.tools.execute.mock.callCount(), 1)
+})
+
+for (const verified of [true, false]) {
+  test(`D2 eligible Antigravity OFF stays silent with ${verified ? 'verified' : 'unverified'} Skills`, { ...unixOnly, timeout: 15_000 }, async t => {
+    const agySkillsVersions = []
+    const h = agyHistory(t, false, { registry: 'eager', version: AGY_OFF_CHECKED, deps: { agySkillsVersions } })
+    if (verified) agySkillsVersions.push({ version: AGY_OFF_CHECKED, sha256: createHash('sha256').update(readFileSync(h.agy)).digest('hex') })
+    agySkills(h)
+    const chat = h.chat()
+    const chunks = await chat.turn('plain eligible OFF control')
+    assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+    assert.doesNotMatch(textOf(chunks), /history|read_own_chat|tried to use a tool/i)
+    const { args, pid } = h.conversation('plain eligible OFF control')
+    assert.deepEqual(h.events('new-session').filter(event => event.pid === pid).map(event => event.servers), [verified ? ['dsh'] : []])
+    const record = h.adapter.live.get(chat.session.id).bridge
+    if (verified) {
+      assert.deepEqual(args, ['acp', '--agent', AGY_OFF_SKILLS_NAME, '--cli_dir_name', AGY_OFF_SKILLS_NAME])
+      assert.deepEqual(h.events('mcp-list').map(event => event.tools), [[SKILL]])
+      assert.deepEqual(h.events('registry').map(event => event.registry), [['mcp_dsh_load_skill']])
+      const paths = agyOffPaths(h.home(), AGY_OFF_SKILLS_NAME)
+      assert.match(readFileSync(paths.agentFile, 'utf8'), /^tools: \["mcp_dsh_load_skill"\]$/m)
+      assert.deepEqual(JSON.parse(readFileSync(paths.settingsFile, 'utf8')).permissions.allow, ['mcp(dsh/load_skill)'])
+      assert.equal((await h.adapter.backchannel.call(record, { name: HISTORY })).isError, true)
+    } else {
+      assert.deepEqual(args, AGY_OFF_ARGS)
+      assert.deepEqual(h.events('mcp-list'), [])
+      assert.equal(record, undefined)
+    }
+    assert.deepEqual(h.logs.filter(line => /history|read_own_chat|tried to use a tool/i.test(line)), [])
+    assert.equal(h.services.tools.execute.mock.callCount(), 0)
+    assert.deepEqual(h.approvals, [])
+  })
+}
 
 test('C3 omp OFF admits its verified history call and rejects conflicting first or later claims', async t => {
   for (const kind of ['tool_call', 'tool_call_update', 'rename', 'raw-conflict']) {
@@ -658,18 +839,18 @@ for (const provider of [CLAUDE, 'acp-codex']) {
   })
 }
 
-async function combined(t, { off = false } = {}) {
+async function combined(t, { off = false, provider = OMP } = {}) {
   const only = new Set([HISTORY, SKILL])
   const h = world(t, { level: 'full', only })
   h.backchannel.revoke(h.record)
   const providerRow = { bridge: false }
-  const adapter = new AcpAdapter(h.ctx, new Map([[OMP, providerRow]]), {
+  const adapter = new AcpAdapter(h.ctx, new Map([[provider, providerRow]]), {
     backchannel: h.backchannel, botIdentity: () => ({ needsDshTools: true }), dshTools: () => true,
   })
   t.after(() => adapter.dispose())
   h.ctx.sessions = new Map([[h.session.id, h.session]])
-  const p = probe(t, { provider: OMP, skillBridge: true, skillTools: only, refuseTools: off })
-  const live = { provider: OMP, providerRow, dshAgent: h.agent, session: h.session, run: p.run, open: true }
+  const p = probe(t, { provider, skillBridge: true, skillTools: only, refuseTools: off })
+  const live = { provider, providerRow, dshAgent: h.agent, session: h.session, run: p.run, open: true }
   adapter.live.set(h.session.id, live)
   live.bridge = adapter.mintBridge(live, h.agent, only)
   await h.backchannel.listen()
@@ -810,6 +991,57 @@ test('an MCP allowlist refusal revokes the exact restricted identity', async t =
     { refused: { status: 403, body: { error: 'refused', isError: true } }, conflict: true,
       revoked: true, otherRevoked: false, executed: [] })
   } finally { await end() }
+})
+
+test('D1 the restricted ACP permission boundary retires a conflicting Antigravity operation', async t => {
+  const p = probe(t, { provider: AGY, skillBridge: true, skillTools: new Set([HISTORY]), refuseTools: true })
+  const id = 'fixture-acp-conflict'
+  const end = p.begin()
+  try {
+    const permission = await p.ask(id, { sessionId: 'current', toolCall: {
+      toolCallId: id, name: 'mcp_dsh_read_own_chat', rawInput: { server: 'dsh', tool: SKILL },
+    } })
+    assert.deepEqual(permission, picked('no'))
+  } finally {
+    await end()
+  }
+  const next = p.begin()
+  try {
+    const tool = p.run.tools.get(id)
+    assert.equal(tool.restrictedIdentity, true)
+    assert.equal(tool.skillConflict, true)
+    assert.equal(tool.retired, true)
+  } finally {
+    await next()
+  }
+})
+
+test('D1 the MCP allowlist boundary retires only the refused Antigravity identity', async t => {
+  const h = await combined(t, { provider: AGY })
+  const id = 'fixture-mcp-refusal'
+  const other = 'fixture-other-identity'
+  const end = h.p.begin()
+  try {
+    for (const callId of [id, other]) {
+      await h.send(callId, { name: 'mcp_dsh_read_own_chat', rawInput: { server: 'dsh', tool: HISTORY } })
+      assert.equal(h.p.run.tools.get(callId).skillOperation, HISTORY)
+    }
+    const post = wire(h.backchannel, h.live.bridge, h.live.bridge.attachment)
+    const refused = await post('call', { name: 'fixture_unoffered', callId: id })
+    assert.deepEqual(refused, { status: 403, body: { error: 'refused', isError: true } })
+    assert.equal(h.p.run.tools.get(id).skillConflict, true)
+    assert.equal(h.p.run.tools.get(id).skillAbort.signal.aborted, true)
+    assert.equal(h.p.run.tools.get(other).skillAbort.signal.aborted, false)
+    assert.deepEqual(h.executed, [])
+  } finally {
+    await end()
+  }
+  const next = h.p.begin()
+  try {
+    assert.equal(h.p.run.tools.get(id).retired, true)
+  } finally {
+    await next()
+  }
 })
 
 for (const change of ['provider row', 'DSH Agent', 'Session']) {

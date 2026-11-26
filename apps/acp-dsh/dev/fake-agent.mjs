@@ -713,13 +713,14 @@ const implementation = {
       return { stopReason: 'end_turn' }
     }
     // codex-acp's own shapes (#1564 PR B), each checked before the generic "bridge" trigger.
-    const codexBridge = /\b(agy-bridge) (\S+)(?: (\{.*\}))?/.exec(current)
+    const codexBridge = /\b(agy-bridge(?:-without-id)?) (\S+)(?: (\{.*\}))?/.exec(current)
       ?? /\b(codex-bridge) (\S+)(?: (\{.*\}))?/.exec(said)
     if (codexBridge !== null) {
       const [, style, name, raw] = codexBridge
       const args = raw === undefined ? {} : JSON.parse(raw)
       const toolCallId = `codex-bridge-${session.turns}`
-      if (style === 'agy-bridge') {
+      const agyBridge = style !== 'codex-bridge'
+      if (agyBridge) {
         const toolCall = { toolCallId, name: `mcp_dsh_${name}`, title: `mcp_dsh_${name}`, kind: 'execute',
           rawInput: { server: 'dsh', tool: name, arguments: args } }
         await update({ sessionUpdate: 'tool_call', ...toolCall, status: 'pending' })
@@ -736,7 +737,12 @@ const implementation = {
       const connection = session.mcp.get('dsh')
       if (connection !== undefined) {
         try {
-          const answer = await connection.request('tools/call', { name, arguments: args })
+          const history = agyBridge && name === 'read_own_chat'
+          const answer = await connection.request('tools/call', {
+            name, arguments: args,
+            ...(history && style === 'agy-bridge' && { _meta: { callId: toolCallId } }),
+          })
+          if (history) trace({ event: 'mcp-history-result', sessionId, toolCallId, answer })
           text = (answer.content ?? []).map(block => block.text ?? '').join('\n') || '(no text)'
         } catch (error) {
           text = `bridge failed: ${error?.message ?? error}`

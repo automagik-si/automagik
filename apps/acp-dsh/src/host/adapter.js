@@ -895,9 +895,9 @@ export class AcpAdapter extends LlmAdapter {
     try { return this.botIdentity(sessionId)?.needsDshTools === true } catch { return false }
   }
 
-  historyWanted(agent, sessionId, provider) {
+  historyWanted(agent, sessionId, provider, agyOff = false) {
     return this.backchannel !== undefined && agent?.bridge === false &&
-      SKILL_BRIDGE_PROVIDERS.has(provider) && provider !== 'acp-antigravity' &&
+      SKILL_BRIDGE_PROVIDERS.has(provider) && !agyOff &&
       this.dshTools() !== false && this.roleToolsInDsh(sessionId)
   }
 
@@ -908,7 +908,7 @@ export class AcpAdapter extends LlmAdapter {
 
   restrictedTools(agent, sessionId, provider, agyOff = false, agySkills = false, previous) {
     const only = new Set()
-    const history = this.historyWanted(agent, sessionId, provider) && typeof this.ctx.get?.('tools')?.definitions === 'function'
+    const history = this.historyWanted(agent, sessionId, provider, agyOff) && typeof this.ctx.get?.('tools')?.definitions === 'function'
     // A retained Skills-only session must still answer a call from its old catalog with
     // Skills' checked unavailable result. A history bridge always recomputes both entries.
     const keepSkillRefusal = !history && previous?.size === 1 && previous.has('load_skill')
@@ -933,7 +933,7 @@ export class AcpAdapter extends LlmAdapter {
               this.live.get(sessionId) !== live || live.bridge !== record || this.agents.get(provider) !== providerRow ||
               this.ctx.agents?.get?.(sessionId) !== dshAgent || dshAgent.session !== session ||
               (typeof this.ctx.sessions?.get === 'function' && this.ctx.sessions.get(sessionId) !== session) ||
-              !this.historyWanted(providerRow, sessionId, provider)) return undefined
+              !this.historyWanted(providerRow, sessionId, provider, provider === 'acp-antigravity' && live.nativeOff === true)) return undefined
           return live.run.restrictedCall(callId, name, prompt, claim)
         },
       }),

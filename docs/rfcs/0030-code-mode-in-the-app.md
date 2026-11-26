@@ -325,6 +325,11 @@ Otherwise:
 6. The new agent reads any earlier message with `read_own_chat` (this Bot's own chat only,
    read-only, paged). Claude Code and Codex reach it over the `dsh` bridge, a native model as a DSH
    tool, omp and Antigravity over a one-tool `dsh-history` bridge (RFC 0003).
+   **2026-11-26 amendment (#2061 D2d).** omp and Antigravity share the existing `dsh` bridge,
+   whose restricted allowlist can contain `load_skill` and `read_own_chat` as eligibility permits.
+   Antigravity offers history with Native tools ON. With Native tools OFF, history stays silently
+   unavailable and the handoff note still reaches the fresh part. Hermes keeps
+   `needs-new-conversation`.
 7. If the switch cannot finish within 120 seconds, or the new route is not served, not signed in or
    not allowed, the Bot stays on its part and model, its input goes back in order, the lock ends,
    and the model line says "<model> could not take over this conversation. This Bot stays on
@@ -546,7 +551,7 @@ about where it runs:
   `MODEL_OWN_TOOLS_DENIED` when the Bot denies `acp_tool` and the switch, or its way back, would
   run an agent's own tools); a part segment carries `switchedTo`; an earlier page and its divider
   carry `switchedTo`; `read_own_chat` takes `before`; acp-dsh's one-tool `dsh-history` bridge
-  (D2).
+  (D2). The 2026-11-26 [handoff note amendment](#handoff-note) records the shared `dsh` bridge.
 - RFC 0028's worker kind `lead`, if Q8 is yes. An amendment to RFC 0028.
 - No new plugin id or storage prefix; `<app home>/automagik-herdr/` is kept.
 
@@ -561,7 +566,7 @@ about where it runs:
 | The Genie types into the team behind the orchestrator | The grant reaches only the orchestrator's terminal; its children carry no Genie label |
 | A populated own chat crosses through the model picker | Q7a refuses the pick before selecting a route or starting a switch (2026-11-20; since 2026-11-23 only on a Hermes route) |
 | A prompt reaches the old agent while a switch runs | The switch job takes over every step of the old part before the model is called and moves its input behind the handoff; the composer is locked; the new route is selected, and the handoff put in, only on a part no surface can reach yet; a running reply is stopped only with the person's consent (`stopReply`) (Handoff note, 2026-11-23) |
-| The new agent reads beyond its own chat | `read_own_chat` reads only the asking Session's Bot's own chat; `dsh-history` (D2, not in D1) will list and run that one tool; secrets and credential shapes are masked in its output and in the handoff |
+| The new agent reads beyond its own chat | `read_own_chat` reads only the asking Session's Bot's own chat; `dsh-history` (D2, not in D1) will list and run that one tool; secrets and credential shapes are masked in its output and in the handoff. See the 2026-11-26 [handoff note amendment](#handoff-note) for the shared `dsh` bridge. |
 | A Bot moves its chat's history to another vendor without the person | `update_bot` refuses a crossing with history; only the person's pick or Apply on `propose_bot_change` switches (Handoff note, 2026-11-23) |
 | The summary reaches a model the person did not pick | the outgoing agent writes it (its own route, or a hidden turn in its own chat); no background model; none at all past 45 seconds |
 | A watching view reflows a terminal someone is using | The app never resizes a terminal, watching or typing (Q15, 2026-11-20) |

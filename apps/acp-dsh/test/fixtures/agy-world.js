@@ -33,7 +33,7 @@ exec ${quote(process.execPath)} ${quote(FAKE)} "$@"
   return path
 }
 
-export function agyWorld(t, { sandbox = true, version, registry, platform = process.platform, cliHome: withHome = true, deps = {} } = {}) {
+export function agyWorld(t, { sandbox = true, version, registry, platform = process.platform, cliHome: withHome = true, deps = {}, env = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-agy-off-'))
   const cliHome = join(dir, 'acp', 'cli-homes')
   const trace = join(dir, 'agy-trace.jsonl')
@@ -44,6 +44,7 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
     FAKE_ACP_MODES: 'default', FAKE_ACP_TRACE: trace, FAKE_ACP_ENV_FILE: envFile, FAKE_ACP_AGY_LOG: control,
     ...(version === undefined ? {} : { FAKE_ACP_AGENT_VERSION: version }),
     ...(registry === undefined ? {} : { FAKE_ACP_AGY_REGISTRY: registry }),
+    ...env,
   })
   const agents = new Map()
   const approvals = []
@@ -120,10 +121,10 @@ export function agyWorld(t, { sandbox = true, version, registry, platform = proc
     const agent = { session, ctx: { tools: { register: () => () => {} } } }
     agents.set(id, agent)
     const history = []
-    async function turn(message, prior = []) {
+    async function turn(message, prior = [], signal) {
       history.push(...prior, typeof message === 'string' ? ownerMessage(message) : message)
       const chunks = []
-      for await (const chunk of adapter.stream(markAgentLoopRequest({ provider: AGY, model: 'default', sessionId: id, messages: [...history] }))) chunks.push(chunk)
+      for await (const chunk of adapter.stream(markAgentLoopRequest({ provider: AGY, model: 'default', sessionId: id, messages: [...history], signal }))) chunks.push(chunk)
       const content = chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block)
       history.push({ role: 'assistant', source: { kind: 'model', provider: AGY, model: 'default' }, content })
       return chunks
