@@ -1,13 +1,19 @@
 import { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { ChevronLeftIcon } from './icons.js'
 import { hostText, t } from './i18n.js'
+import { lineDiff } from './learning-card-model.js'
 import { bootView, isRetired, mountedViewer } from './viewer.js'
 
 export const SKILLS_PANEL = 'automagik-skills'
+const archiveFile = name => /\.(?:zip|tar\.gz|tgz)$/i.test(name)
+const archiveAccept = '.zip,.tar.gz,.tgz'
+const treeSkill = item => item?.source?.kind === 'folder' || item?.source?.kind === 'archive'
+const viewerRole = () => mountedViewer()?.role ?? bootView()?.role ?? 'owner'
+const treeNote = () => t('Scripts and references are stored with this skill but are not yet available to Bots. A Bot receives only the SKILL.md text.')
 
 export function canManageSkills() {
   if (isRetired()) return false
-  const role = mountedViewer()?.role ?? bootView()?.role ?? 'owner'
+  const role = viewerRole()
   return role === 'owner' || role === 'admin'
 }
 
@@ -50,12 +56,26 @@ export async function skillFileBytes(file) {
   return btoa(binary)
 }
 
-function SkillReport({ report }) {
+async function skillArchiveBytes(file) {
+  const limit = 6 * 1024 * 1024
+  const tooLarge = () => new Error(t('The skill archive is over 6 MiB.'))
+  if (file.size > limit) throw tooLarge()
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  if (bytes.length > limit) throw tooLarge()
+  const chunks = []
+  const chunkSize = 24_576
+  for (let start = 0; start < bytes.length; start += chunkSize) {
+    chunks.push(btoa(String.fromCharCode(...bytes.subarray(start, start + chunkSize))))
+  }
+  return chunks.join('')
+}
+
+function SkillReport({ report, title }) {
   if (!report) return null
   return h('div', { className: 'bt-set-row bt-bs-stack', role: 'status' },
     report.refused
       ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, hostText(report.message))
-      : report.needsConfirm ? t('Review the warnings, then save again to confirm.') : t('Warnings'),
+      : title ?? (report.needsConfirm ? t('Review the warnings, then save again to confirm.') : t('Warnings')),
     report.truncated ? h('p', { className: 'bt-set-hint' },
       t('Only retained findings are shown. This review cannot be confirmed.')) : null,
     report.findings?.length ? h('ul', null, report.findings.map(({ rule, line, reason, path, file, severity, injection, detail }, index) => {
@@ -64,6 +84,141 @@ function SkillReport({ report }) {
         [injection ? t('Prompt injection') : null, severity ? t(severity) : null, hostText(reason),
           detail, source ? `${source}${line ? `:${line}` : ''}` : line].filter(Boolean).join(' · '))
     })) : null)
+}
+
+function TreeDetails({ view }) {
+  const { tree = [], scripts = [], references = [], skipped } = view
+  const interpreters = new Map(scripts.map(script => [script.path, script.interpreter]))
+  const referencePaths = new Set(references)
+  return h('div', { className: 'bt-set-row bt-bs-stack' },
+    tree.length ? h('ul', null, tree.map(({ path, size }) => {
+      const interpreter = interpreters.get(path)
+      return h('li', { key: path },
+        h('code', null, path), ' · ', t('{size} bytes', { size }),
+        interpreter ? ` · ${interpreter}` : null,
+        referencePaths.has(path) ? ` · ${t('Reference file')}` : null)
+    })) : null,
+    skipped ? h('p', { className: 'bt-set-hint' }, t('Skipped files: {count}', { count: skipped })) : null,
+    tree.length > 1 ? h('p', { className: 'bt-set-hint' }, treeNote()) : null)
+}
+
+function TreeDiff({ diff }) {
+  if (!diff) return null
+  const fileGroup = (title, rows, before, after) => rows.length ? h('details', null,
+    h('summary', null, `${title} · ${rows.length}`),
+    rows.map(row => {
+      const left = before(row)
+      const right = after(row)
+      return h('div', { key: row.path },
+        h('code', null, row.path),
+        left === undefined || right === undefined
+          ? h('p', { className: 'bt-set-hint' }, t('Too large to show line by line.'))
+          : h('pre', null, lineDiff(left, right).map(({ kind, line }) =>
+            `${kind === 'added' ? '+' : kind === 'removed' ? '-' : ' '} ${line}`).join('\n')))
+    })) : null
+  return h('div', { className: 'bt-set-row bt-bs-stack' },
+    diff.findings.new.length ? h(SkillReport, { title: t('New findings'), report: { findings: diff.findings.new } }) : null,
+    diff.findings.gone.length ? h(SkillReport, { title: t('Gone findings'), report: { findings: diff.findings.gone } }) : null,
+    diff.held ? h('p', { className: 'bt-set-hint' }, t('The saved version could not be verified; this replaces it.')) : null,
+    diff.files ? [
+      fileGroup(t('Added files'), diff.files.added, () => '', row => row.text),
+      fileGroup(t('Removed files'), diff.files.removed, row => row.text, () => ''),
+      fileGroup(t('Changed files'), diff.files.changed, row => row.beforeText, row => row.afterText),
+    ] : null)
+}
+
+function useTreePreview({ item, preview, actions, saved }) {
+  const [view, setView] = useState(preview ?? null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [typing, setTyping] = useState(false)
+  const [path, setPath] = useState('')
+  const run = async task => {
+    setError('')
+    setBusy(true)
+    try { await task() } catch (failure) { setError(hostText(failure.message)) }
+    finally { setBusy(false) }
+  }
+  const request = async input => {
+    const result = await actions.saveSkill({ ...input, preview: true, ...(item ? { edit: true, name: item.name } : {}) })
+    setView(result)
+    setTyping(false)
+  }
+  return {
+    view, busy, error, typing, path, setPath,
+    fromFile: file => run(async () => request({ source: 'archive', fileName: file.name, fileBytes: await skillArchiveBytes(file) })),
+    fromFolder: () => run(async () => {
+      const folders = await actions.folders()
+      if (folders?.picker !== 'native') { setTyping(true); return }
+      const path = await actions.folderPick()
+      if (path) await request({ source: 'folder', path })
+    }),
+    usePath: () => run(() => request({ source: 'folder', path })),
+    confirmStored: report => run(async () => {
+      const result = await actions.saveSkill({ name: item.name, edit: true, reviewHash: item.reviewHash, confirm: report.needsConfirm })
+      if (result.refused || result.needsConfirm) setView(result)
+      else await saved()
+    }),
+    save: () => run(async () => {
+      const result = await actions.saveSkill({ token: view.token, name: view.name,
+        ...(view.needsConfirm ? { confirm: view.needsConfirm } : {}) })
+      if (result.refused || result.needsConfirm) setView({ ...view, ...result, ...(result.refused ? { token: undefined } : {}) })
+      else await saved()
+    }),
+  }
+}
+
+function FolderPath({ tree, disabled }) {
+  return tree.typing ? h('div', { className: 'bt-set-row' },
+    h(Field, { label: t('Full path of a folder'), value: tree.path, disabled, onChange: tree.setPath }),
+    h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: disabled || !tree.path,
+      onClick: tree.usePath }, t('Use this folder'))) : null
+}
+
+function TreePreview({ tree, onClose, readOnly }) {
+  const { view, busy, error } = tree
+  return h('div', { className: 'bt-set-card bt-task-form' },
+    h('div', { className: 'bt-set-row bt-bs-stack' },
+      h('strong', null, view.name), h('span', { className: 'bt-set-hint' }, view.description)),
+    h(TreeDetails, { view }),
+    h(TreeDiff, { diff: view.diff }),
+    view.refused || view.findings?.length ? h(SkillReport, { report: view }) : null,
+    error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null,
+    h('div', { className: 'bt-set-row bt-task-foot' },
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onClose }, t('Cancel')),
+      view.token && !view.refused ? h('button', { type: 'button', className: 'bt-send bt-soft-sm', disabled: readOnly || busy,
+        onClick: tree.save }, t('Save')) : null))
+}
+
+function TreeForm({ item, report, preview, actions, onClose, saved, readOnly }) {
+  const tree = useTreePreview({ item, preview, actions, saved })
+  const input = useRef(null)
+  if (tree.view?.preview) return h(TreePreview, { tree, onClose, readOnly })
+  const disabled = readOnly || tree.busy
+  const current = tree.view ?? report
+  return h('div', { className: 'bt-set-card bt-task-form' },
+    h('div', { className: 'bt-set-row bt-bs-stack' },
+      h('strong', null, item.name), h('span', { className: 'bt-set-hint' }, item.description),
+      item.held ? h('p', { className: 'bt-set-hint' }, hostText(item.held)) : null),
+    h(TreeDetails, { view: item }),
+    current ? h(SkillReport, { report: current }) : null,
+    h('div', { className: 'bt-set-row' },
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled,
+        onClick: () => input.current?.click() }, t('Replace from file')),
+      viewerRole() === 'owner' ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm',
+        disabled, onClick: tree.fromFolder }, t('Replace from folder')) : null,
+      h('input', { ref: input, type: 'file', accept: archiveAccept, hidden: true, disabled, onChange: event => {
+        const file = event.target.files?.[0]
+        event.target.value = ''
+        if (file) return tree.fromFile(file)
+      } })),
+    h(FolderPath, { tree, disabled }),
+    tree.busy ? h('p', { className: 'bt-set-hint', role: 'status' }, t('Checking the skill…')) : null,
+    tree.error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, tree.error) : null,
+    h('div', { className: 'bt-set-row bt-task-foot' },
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onClose }, t('Cancel')),
+      current?.needsConfirm && item.reviewHash ? h('button', { type: 'button', className: 'bt-send bt-soft-sm', disabled,
+        onClick: () => tree.confirmStored(current) }, t('Save')) : null))
 }
 
 function SkillForm({ item, initial, actions, onClose, saved, readOnly, report }) {
@@ -77,15 +232,17 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
   const [warning, setWarning] = useState(() => report ?? (item?.held && item.check?.verdict === 'warn' ? item.check : null))
   const [error, setError] = useState('')
   const fileInput = useRef(null)
+  const tree = useTreePreview({ actions, saved })
   const set = (key, value) => {
     setDraft(current => ({ ...current, [key]: value, reviewHash: undefined }))
     setWarning(null)
   }
-  const disabled = readOnly || busy
+  const disabled = readOnly || busy || tree.busy
   const choose = async event => {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
+    if (!item && archiveFile(file.name)) return tree.fromFile(file)
     setError('')
     setBusy(true)
     try {
@@ -112,6 +269,7 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
       setError(hostText(failure.message))
     } finally { setBusy(false); setChecking(false) }
   }
+  if (tree.view) return h(TreePreview, { tree, onClose, readOnly })
   return h('form', { className: 'bt-set-card bt-task-form', onSubmit: submit },
     h(Field, { label: t('Name'), value: draft.name, disabled: disabled || !!item, maxLength: 32, onChange: value => set('name', value) }),
     h(Field, { label: t('One-line description'), value: draft.description, disabled, maxLength: 200, onChange: value => set('description', value) }),
@@ -123,13 +281,16 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
         } }, t('From text')),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled,
         'aria-pressed': draft.source === 'file', onClick: () => fileInput.current?.click() }, t('From file')),
-      h('input', { ref: fileInput, type: 'file', accept: '.md,.markdown,.txt', hidden: true, disabled, onChange: choose }),
+      !item && viewerRole() === 'owner' ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled,
+        onClick: tree.fromFolder }, t('From folder')) : null,
+      h('input', { ref: fileInput, type: 'file', accept: `.md,.markdown,.txt${item ? '' : ',' + archiveAccept}`, hidden: true, disabled, onChange: choose }),
       draft.source === 'file' ? h('span', { className: 'bt-set-hint' }, draft.fileName) : null),
+    h(FolderPath, { tree, disabled }),
     draft.fileBytes === undefined ? h(Field, { label: t('Skill instructions'), value: draft.content, disabled,
       multiline: true, onChange: value => set('content', value) }) : null,
-    checking ? h('p', { className: 'bt-set-hint', role: 'status' }, t('Checking the skill…')) : null,
+    checking || tree.busy ? h('p', { className: 'bt-set-hint', role: 'status' }, t('Checking the skill…')) : null,
     SkillReport({ report: warning }),
-    error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null,
+    error || tree.error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, tree.error || error) : null,
     h('div', { className: 'bt-set-row bt-task-foot' },
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onClose }, t('Cancel')),
       h('button', { type: 'submit', className: 'bt-send bt-soft-sm', disabled }, item ? t('Save changes') : t('Save'))))
@@ -159,6 +320,7 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
         const completed = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
         const forms = []
         for (const { form: initial, ...report } of completed) {
+          if (report.preview) { forms.push({ preview: report }); continue }
           if (report.refused) forms.push({ report })
           if (!report.needsConfirm || !initial) continue
           const item = initial.reviewHash !== undefined ? await actions.getSkill(initial.name, signal)
@@ -202,7 +364,7 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
     }
   })
   const disabled = readOnly || busy || recovering
-  const activeForm = form ?? recovered.find(entry => entry.initial)
+  const activeForm = form ?? recovered.find(entry => entry.initial || entry.preview)
   const closeForm = () => {
     if (form) setForm(null)
     else setRecovered(current => current.filter(entry => entry !== activeForm))
@@ -213,9 +375,10 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       h('h1', { className: 'bt-section-title' }, t('Skills')),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled, onClick: () => setForm({}) }, t('New skill'))),
     error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null,
-    recovered.filter(entry => !entry.initial).map(({ report }, index) => h(SkillReport, { key: index, report })),
-    activeForm ? h(SkillForm, { key: activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? '',
-      item: activeForm.item, initial: activeForm.initial, report: activeForm.report, actions, readOnly,
+    recovered.filter(entry => !entry.initial && !entry.preview).map(({ report }, index) => h(SkillReport, { key: index, report })),
+    activeForm ? h(activeForm.preview || treeSkill(activeForm.item) ? TreeForm : SkillForm,
+      { key: activeForm.preview?.token ?? (activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? ''),
+      item: activeForm.item, initial: activeForm.initial, report: activeForm.report, preview: activeForm.preview, actions, readOnly,
       onClose: closeForm, saved: async () => { closeForm(); await refresh() } }) : null,
     library.skills.length ? h('div', { className: 'bt-set-card' }, library.skills.map(skill => {
       const result = skill.held ? hostText(skill.held) : skill.check?.verdict === 'warn' ? t('Warnings') : t('Verified')
@@ -223,8 +386,13 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       return h('div', { key: skill.name, className: 'bt-connector bt-connector-head' },
         h('div', { className: 'bt-connector-text' },
           h('span', { className: 'bt-connector-name' }, skill.name),
-          h('span', { className: 'bt-connector-status' }, [skill.description, skill.source?.kind === 'file' ? t('From file') : t('From text'), result,
+          h('span', { className: 'bt-connector-status' }, [skill.description, t({
+            folder: 'From folder', archive: 'From archive', file: 'From file', text: 'From text',
+          }[skill.source?.kind] ?? 'From text'), result,
+            skill.scripts?.length ? t('Scripts: {count}', { count: skill.scripts.length }) : null,
+            skill.references?.length ? t('References: {count}', { count: skill.references.length }) : null,
             skill.review?.status === 'done' ? t('Reviewed by a model') : null, checked].filter(Boolean).join(' · ')),
+          skill.tree?.length > 1 ? h('p', { className: 'bt-set-hint' }, treeNote()) : null,
           rowReview?.name === skill.name ? (rowReview.report ? SkillReport({ report: rowReview.report })
             : h('span', { className: 'bt-set-hint', role: 'status' }, t('Checking the skill…'))) : null),
         h('span', { className: 'bt-connector-actions' },

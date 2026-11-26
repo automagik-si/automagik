@@ -591,6 +591,52 @@ var ZH2 = {
   "Add skill": "添加技能",
   "From text": "文本",
   "From file": "文件",
+  "From folder": "文件夹",
+  "From archive": "压缩包",
+  "Replace from file": "从文件替换",
+  "Replace from folder": "从文件夹替换",
+  "Scripts and references are stored with this skill but are not yet available to Bots. A Bot receives only the SKILL.md text.": "脚本和参考文件已随此技能保存，但 Bot 暂时还不能使用。Bot 只会收到 SKILL.md 的正文。",
+  "{size} bytes": "{size} 字节",
+  "Reference file": "参考文件",
+  "Skipped files: {count}": "已跳过的文件：{count}",
+  "New findings": "新增问题",
+  "Gone findings": "已消失的问题",
+  "Added files": "新增文件",
+  "Removed files": "已删除的文件",
+  "Changed files": "修改后的文件",
+  "Too large to show line by line.": "内容过大，无法逐行显示。",
+  "The saved version could not be verified; this replaces it.": "无法验证已保存的版本；这将替换它。",
+  "Scripts: {count}": "脚本：{count}",
+  "References: {count}": "参考文件：{count}",
+  "The skill archive is over 6 MiB.": "技能压缩包超过 6 MiB。",
+  "Choose a supported .zip or .tar.gz skill archive.": "请选择受支持的 .zip 或 .tar.gz 技能压缩包。",
+  "Choose an archive containing a single skill folder with a root SKILL.md.": "请选择包含单个技能文件夹且根目录有 SKILL.md 的压缩包。",
+  "Nested archives are unavailable in skills: {path}": "技能不支持嵌套压缩包：{path}",
+  "Skill files must contain UTF-8 text: {path}": "技能文件必须是 UTF-8 文本：{path}",
+  "A skill may contain at most 1,024 entries.": "技能最多可包含 1,024 项。",
+  "A skill contains a duplicate or conflicting path: {path}": "技能包含重复或冲突的路径：{path}",
+  "Unsafe skill path: {path}": "不安全的技能路径：{path}",
+  "A skill file exceeds its size limit: {path}": "技能文件超出大小限制：{path}",
+  "The skill expands to over 5 MiB.": "技能解压后超过 5 MiB。",
+  "A skill may contain at most 256 files.": "技能最多可包含 256 个文件。",
+  "A skill contains a skipped path: {path}": "技能包含应跳过的路径：{path}",
+  "The skill archive is damaged or has invalid framing.": "技能压缩包已损坏或结构无效。",
+  "Encrypted skill archives are unavailable.": "不支持加密的技能压缩包。",
+  "Only regular skill files and directories are allowed: {path}": "技能仅支持普通文件和目录：{path}",
+  "The folder is unavailable or changed while it was read. Try again.": "文件夹不可用或在读取时发生变化。请重试。",
+  "Only regular, single-link skill files and directories are allowed: {path}": "技能仅支持普通的单链接文件和目录：{path}",
+  "This host cannot safely read skill folders. Upload a .zip or .tar.gz instead.": "此主机无法安全读取技能文件夹。请上传 .zip 或 .tar.gz 文件。",
+  "A skill folder contains a filename outside UTF-8.": "技能文件夹包含非 UTF-8 文件名。",
+  "Choose a folder with a root SKILL.md.": "请选择根目录有 SKILL.md 的文件夹。",
+  "Choose a folder with a valid name.": "请选择名称有效的文件夹。",
+  "Another skill preview is running. Try again.": "另一项技能预览正在进行。请重试。",
+  "This preview expired. Preview the skill again.": "此预览已过期。请重新预览技能。",
+  "The skill changed since the preview. Preview it again.": "技能在预览后发生了变化。请重新预览。",
+  "Replace this skill from a folder or an archive.": "请使用文件夹或压缩包替换此技能。",
+  "Only the owner of this computer can read a folder on it. Upload a .zip or .tar.gz instead.": "只有此计算机的所有者可以读取其文件夹。请上传 .zip 或 .tar.gz 文件。",
+  "SKILL.md needs a name and a one-line description in its frontmatter.": "SKILL.md 的前置元数据需要名称和单行描述。",
+  "Not saved: {reason} ({path}, line {line}). Change the text and save again.": "未保存：{reason}（{path}，第 {line} 行）。请修改文本并重新保存。",
+  "Not saved: {reason} ({path}, line {line}). Name the key in the skill and set its value in Apps or Secrets.": "未保存：{reason}（{path}，第 {line} 行）。请在技能中注明密钥名，并在应用或机密中设置其值。",
   "One-line description": "一句话描述",
   "No skills yet.": "还没有技能。",
   "No skills are active on this Bot.": "这个 Bot 没有启用的技能。",
@@ -4611,6 +4657,16 @@ var HOST_TEMPLATES = [
   "The skill {name} is not active on this Bot. Add it in the Bot's Details, under Skills.",
   { template: "Not saved: {reason} (line {line}). Change the text and save again.", host: ["reason"] },
   { template: "Not saved: {reason} (line {line}). Name the key in the skill and set its value in Apps or Secrets.", host: ["reason"] },
+  "Nested archives are unavailable in skills: {path}",
+  "Skill files must contain UTF-8 text: {path}",
+  "A skill contains a duplicate or conflicting path: {path}",
+  "Unsafe skill path: {path}",
+  "A skill file exceeds its size limit: {path}",
+  "A skill contains a skipped path: {path}",
+  "Only regular skill files and directories are allowed: {path}",
+  "Only regular, single-link skill files and directories are allowed: {path}",
+  { template: "Not saved: {reason} ({path}, line {line}). Change the text and save again.", host: ["reason"] },
+  { template: "Not saved: {reason} ({path}, line {line}). Name the key in the skill and set its value in Apps or Secrets.", host: ["reason"] },
   "A skill named {name} already exists. Edit it, or choose another name.",
   "The name {name} is reserved for the /{name} command. Choose another name.",
   { template: "{name} is held: {reason} Open it on the Skills screen and save it again.", host: ["reason"] },
@@ -4704,6 +4760,72 @@ function language() {
 }
 var dateLocale = () => language().startsWith("zh") ? "zh-CN" : "en-US";
 var DICTIONARY = { zh: ZH2 };
+
+// src/client/learning-card-model.js
+function proposalPlacement(proposal, turns) {
+  const settled = proposal?.outcome !== void 0;
+  if (!Number.isFinite(proposal?.at) || typeof turns?.values !== "function") return { kind: settled ? "none" : "dock" };
+  const lastBy = (time) => {
+    let found;
+    for (const location2 of turns.values()) {
+      const end = location2?.end?.time;
+      if (location2?.status !== "closed" || !Number.isFinite(end) || end > time) continue;
+      if (found === void 0 || end > found.end.time || end === found.end.time && location2.turn > found.turn) found = location2;
+    }
+    return found;
+  };
+  const turn = (lastBy(proposal.at) ?? lastBy(settled ? proposal.settledAt ?? proposal.at : Infinity))?.turn;
+  if (turn === void 0) return { kind: settled ? "none" : "dock" };
+  return { kind: "turn", turn };
+}
+function fileLines(text2) {
+  const body = String(text2 ?? "").replace(/\n+$/, "");
+  return body === "" ? [] : body.split("\n");
+}
+function editLines(text2) {
+  return typeof text2 === "string" ? text2.split(/\r?\n/) : [];
+}
+var DIFF_CELLS = 25e4;
+function lineDiff(before, after) {
+  const a = fileLines(before);
+  const b = fileLines(after);
+  let start2 = 0;
+  while (start2 < a.length && start2 < b.length && a[start2] === b[start2]) start2++;
+  let tail = 0;
+  while (tail < a.length - start2 && tail < b.length - start2 && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+  const midA = a.slice(start2, a.length - tail);
+  const midB = b.slice(start2, b.length - tail);
+  const rows2 = b.slice(0, start2).map((line, index) => ({ kind: "same", line, number: index + 1 }));
+  const added = (j) => ({ kind: "added", line: midB[j], number: start2 + j + 1 });
+  if (midA.length * midB.length > DIFF_CELLS) {
+    rows2.push(...midA.map((line) => ({ kind: "removed", line })), ...midB.map((_, j) => added(j)));
+  } else {
+    const keep = Array.from({ length: midA.length + 1 }, () => new Array(midB.length + 1).fill(0));
+    for (let i2 = midA.length - 1; i2 >= 0; i2--) {
+      for (let j2 = midB.length - 1; j2 >= 0; j2--) {
+        keep[i2][j2] = midA[i2] === midB[j2] ? keep[i2 + 1][j2 + 1] + 1 : Math.max(keep[i2 + 1][j2], keep[i2][j2 + 1]);
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < midA.length || j < midB.length) {
+      if (i < midA.length && j < midB.length && midA[i] === midB[j]) {
+        rows2.push({ kind: "same", line: midB[j], number: start2 + j + 1 });
+        i++;
+        j++;
+      } else if (i < midA.length && (j === midB.length || keep[i + 1][j] >= keep[i][j + 1])) {
+        rows2.push({ kind: "removed", line: midA[i] });
+        i++;
+      } else {
+        rows2.push(added(j));
+        j++;
+      }
+    }
+  }
+  const offset = b.length - tail;
+  rows2.push(...b.slice(offset).map((line, index) => ({ kind: "same", line, number: offset + index + 1 })));
+  return rows2;
+}
 
 // src/client/diagnostics.js
 var MAX = 30;
@@ -5253,9 +5375,14 @@ async function startViewer(boot, signal, prepare, clearNativeDrafts) {
 // src/client/skills-screen.js
 var import_react2 = require("react");
 var SKILLS_PANEL = "automagik-skills";
+var archiveFile = (name) => /\.(?:zip|tar\.gz|tgz)$/i.test(name);
+var archiveAccept = ".zip,.tar.gz,.tgz";
+var treeSkill = (item) => item?.source?.kind === "folder" || item?.source?.kind === "archive";
+var viewerRole = () => mountedViewer()?.role ?? bootView()?.role ?? "owner";
+var treeNote = () => t("Scripts and references are stored with this skill but are not yet available to Bots. A Bot receives only the SKILL.md text.");
 function canManageSkills() {
   if (isRetired()) return false;
-  const role = mountedViewer()?.role ?? bootView()?.role ?? "owner";
+  const role = viewerRole();
   return role === "owner" || role === "admin";
 }
 var EMPTY = { skills: [], active: {} };
@@ -5301,12 +5428,25 @@ async function skillFileBytes(file) {
   for (const byte of bytes) binary2 += String.fromCharCode(byte);
   return btoa(binary2);
 }
-function SkillReport({ report }) {
+async function skillArchiveBytes(file) {
+  const limit = 6 * 1024 * 1024;
+  const tooLarge = () => new Error(t("The skill archive is over 6 MiB."));
+  if (file.size > limit) throw tooLarge();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.length > limit) throw tooLarge();
+  const chunks = [];
+  const chunkSize = 24576;
+  for (let start2 = 0; start2 < bytes.length; start2 += chunkSize) {
+    chunks.push(btoa(String.fromCharCode(...bytes.subarray(start2, start2 + chunkSize))));
+  }
+  return chunks.join("");
+}
+function SkillReport({ report, title }) {
   if (!report) return null;
   return (0, import_react2.createElement)(
     "div",
     { className: "bt-set-row bt-bs-stack", role: "status" },
-    report.refused ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, hostText(report.message)) : report.needsConfirm ? t("Review the warnings, then save again to confirm.") : t("Warnings"),
+    report.refused ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, hostText(report.message)) : title ?? (report.needsConfirm ? t("Review the warnings, then save again to confirm.") : t("Warnings")),
     report.truncated ? (0, import_react2.createElement)(
       "p",
       { className: "bt-set-hint" },
@@ -5328,6 +5468,211 @@ function SkillReport({ report }) {
     })) : null
   );
 }
+function TreeDetails({ view }) {
+  const { tree = [], scripts = [], references = [], skipped } = view;
+  const interpreters = new Map(scripts.map((script) => [script.path, script.interpreter]));
+  const referencePaths = new Set(references);
+  return (0, import_react2.createElement)(
+    "div",
+    { className: "bt-set-row bt-bs-stack" },
+    tree.length ? (0, import_react2.createElement)("ul", null, tree.map(({ path: path2, size }) => {
+      const interpreter = interpreters.get(path2);
+      return (0, import_react2.createElement)(
+        "li",
+        { key: path2 },
+        (0, import_react2.createElement)("code", null, path2),
+        " · ",
+        t("{size} bytes", { size }),
+        interpreter ? ` · ${interpreter}` : null,
+        referencePaths.has(path2) ? ` · ${t("Reference file")}` : null
+      );
+    })) : null,
+    skipped ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, t("Skipped files: {count}", { count: skipped })) : null,
+    tree.length > 1 ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, treeNote()) : null
+  );
+}
+function TreeDiff({ diff }) {
+  if (!diff) return null;
+  const fileGroup = (title, rows2, before, after) => rows2.length ? (0, import_react2.createElement)(
+    "details",
+    null,
+    (0, import_react2.createElement)("summary", null, `${title} · ${rows2.length}`),
+    rows2.map((row2) => {
+      const left = before(row2);
+      const right = after(row2);
+      return (0, import_react2.createElement)(
+        "div",
+        { key: row2.path },
+        (0, import_react2.createElement)("code", null, row2.path),
+        left === void 0 || right === void 0 ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, t("Too large to show line by line.")) : (0, import_react2.createElement)("pre", null, lineDiff(left, right).map(({ kind, line }) => `${kind === "added" ? "+" : kind === "removed" ? "-" : " "} ${line}`).join("\n"))
+      );
+    })
+  ) : null;
+  return (0, import_react2.createElement)(
+    "div",
+    { className: "bt-set-row bt-bs-stack" },
+    diff.findings.new.length ? (0, import_react2.createElement)(SkillReport, { title: t("New findings"), report: { findings: diff.findings.new } }) : null,
+    diff.findings.gone.length ? (0, import_react2.createElement)(SkillReport, { title: t("Gone findings"), report: { findings: diff.findings.gone } }) : null,
+    diff.held ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, t("The saved version could not be verified; this replaces it.")) : null,
+    diff.files ? [
+      fileGroup(t("Added files"), diff.files.added, () => "", (row2) => row2.text),
+      fileGroup(t("Removed files"), diff.files.removed, (row2) => row2.text, () => ""),
+      fileGroup(t("Changed files"), diff.files.changed, (row2) => row2.beforeText, (row2) => row2.afterText)
+    ] : null
+  );
+}
+function useTreePreview({ item, preview, actions, saved }) {
+  const [view, setView] = (0, import_react2.useState)(preview ?? null);
+  const [busy, setBusy] = (0, import_react2.useState)(false);
+  const [error, setError] = (0, import_react2.useState)("");
+  const [typing, setTyping] = (0, import_react2.useState)(false);
+  const [path2, setPath] = (0, import_react2.useState)("");
+  const run3 = async (task) => {
+    setError("");
+    setBusy(true);
+    try {
+      await task();
+    } catch (failure) {
+      setError(hostText(failure.message));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const request = async (input) => {
+    const result = await actions.saveSkill({ ...input, preview: true, ...item ? { edit: true, name: item.name } : {} });
+    setView(result);
+    setTyping(false);
+  };
+  return {
+    view,
+    busy,
+    error,
+    typing,
+    path: path2,
+    setPath,
+    fromFile: (file) => run3(async () => request({ source: "archive", fileName: file.name, fileBytes: await skillArchiveBytes(file) })),
+    fromFolder: () => run3(async () => {
+      const folders = await actions.folders();
+      if (folders?.picker !== "native") {
+        setTyping(true);
+        return;
+      }
+      const path3 = await actions.folderPick();
+      if (path3) await request({ source: "folder", path: path3 });
+    }),
+    usePath: () => run3(() => request({ source: "folder", path: path2 })),
+    confirmStored: (report) => run3(async () => {
+      const result = await actions.saveSkill({ name: item.name, edit: true, reviewHash: item.reviewHash, confirm: report.needsConfirm });
+      if (result.refused || result.needsConfirm) setView(result);
+      else await saved();
+    }),
+    save: () => run3(async () => {
+      const result = await actions.saveSkill({
+        token: view.token,
+        name: view.name,
+        ...view.needsConfirm ? { confirm: view.needsConfirm } : {}
+      });
+      if (result.refused || result.needsConfirm) setView({ ...view, ...result, ...result.refused ? { token: void 0 } : {} });
+      else await saved();
+    })
+  };
+}
+function FolderPath({ tree, disabled }) {
+  return tree.typing ? (0, import_react2.createElement)(
+    "div",
+    { className: "bt-set-row" },
+    (0, import_react2.createElement)(Field, { label: t("Full path of a folder"), value: tree.path, disabled, onChange: tree.setPath }),
+    (0, import_react2.createElement)("button", {
+      type: "button",
+      className: "bt-soft bt-soft-sm",
+      disabled: disabled || !tree.path,
+      onClick: tree.usePath
+    }, t("Use this folder"))
+  ) : null;
+}
+function TreePreview({ tree, onClose, readOnly }) {
+  const { view, busy, error } = tree;
+  return (0, import_react2.createElement)(
+    "div",
+    { className: "bt-set-card bt-task-form" },
+    (0, import_react2.createElement)(
+      "div",
+      { className: "bt-set-row bt-bs-stack" },
+      (0, import_react2.createElement)("strong", null, view.name),
+      (0, import_react2.createElement)("span", { className: "bt-set-hint" }, view.description)
+    ),
+    (0, import_react2.createElement)(TreeDetails, { view }),
+    (0, import_react2.createElement)(TreeDiff, { diff: view.diff }),
+    view.refused || view.findings?.length ? (0, import_react2.createElement)(SkillReport, { report: view }) : null,
+    error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
+    (0, import_react2.createElement)(
+      "div",
+      { className: "bt-set-row bt-task-foot" },
+      (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onClose }, t("Cancel")),
+      view.token && !view.refused ? (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-send bt-soft-sm",
+        disabled: readOnly || busy,
+        onClick: tree.save
+      }, t("Save")) : null
+    )
+  );
+}
+function TreeForm({ item, report, preview, actions, onClose, saved, readOnly }) {
+  const tree = useTreePreview({ item, preview, actions, saved });
+  const input = (0, import_react2.useRef)(null);
+  if (tree.view?.preview) return (0, import_react2.createElement)(TreePreview, { tree, onClose, readOnly });
+  const disabled = readOnly || tree.busy;
+  const current = tree.view ?? report;
+  return (0, import_react2.createElement)(
+    "div",
+    { className: "bt-set-card bt-task-form" },
+    (0, import_react2.createElement)(
+      "div",
+      { className: "bt-set-row bt-bs-stack" },
+      (0, import_react2.createElement)("strong", null, item.name),
+      (0, import_react2.createElement)("span", { className: "bt-set-hint" }, item.description),
+      item.held ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, hostText(item.held)) : null
+    ),
+    (0, import_react2.createElement)(TreeDetails, { view: item }),
+    current ? (0, import_react2.createElement)(SkillReport, { report: current }) : null,
+    (0, import_react2.createElement)(
+      "div",
+      { className: "bt-set-row" },
+      (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled,
+        onClick: () => input.current?.click()
+      }, t("Replace from file")),
+      viewerRole() === "owner" ? (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled,
+        onClick: tree.fromFolder
+      }, t("Replace from folder")) : null,
+      (0, import_react2.createElement)("input", { ref: input, type: "file", accept: archiveAccept, hidden: true, disabled, onChange: (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        if (file) return tree.fromFile(file);
+      } })
+    ),
+    (0, import_react2.createElement)(FolderPath, { tree, disabled }),
+    tree.busy ? (0, import_react2.createElement)("p", { className: "bt-set-hint", role: "status" }, t("Checking the skill…")) : null,
+    tree.error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, tree.error) : null,
+    (0, import_react2.createElement)(
+      "div",
+      { className: "bt-set-row bt-task-foot" },
+      (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onClose }, t("Cancel")),
+      current?.needsConfirm && item.reviewHash ? (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-send bt-soft-sm",
+        disabled,
+        onClick: () => tree.confirmStored(current)
+      }, t("Save")) : null
+    )
+  );
+}
 function SkillForm({ item, initial, actions, onClose, saved, readOnly, report }) {
   const [draft, setDraft] = (0, import_react2.useState)(() => ({
     name: item?.name ?? "",
@@ -5343,15 +5688,17 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
   const [warning, setWarning] = (0, import_react2.useState)(() => report ?? (item?.held && item.check?.verdict === "warn" ? item.check : null));
   const [error, setError] = (0, import_react2.useState)("");
   const fileInput = (0, import_react2.useRef)(null);
+  const tree = useTreePreview({ actions, saved });
   const set2 = (key, value) => {
     setDraft((current) => ({ ...current, [key]: value, reviewHash: void 0 }));
     setWarning(null);
   };
-  const disabled = readOnly || busy;
+  const disabled = readOnly || busy || tree.busy;
   const choose = async (event) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    if (!item && archiveFile(file.name)) return tree.fromFile(file);
     setError("");
     setBusy(true);
     try {
@@ -5387,6 +5734,7 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
       setChecking(false);
     }
   };
+  if (tree.view) return (0, import_react2.createElement)(TreePreview, { tree, onClose, readOnly });
   return (0, import_react2.createElement)(
     "form",
     { className: "bt-set-card bt-task-form", onSubmit: submit },
@@ -5412,9 +5760,16 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
         "aria-pressed": draft.source === "file",
         onClick: () => fileInput.current?.click()
       }, t("From file")),
-      (0, import_react2.createElement)("input", { ref: fileInput, type: "file", accept: ".md,.markdown,.txt", hidden: true, disabled, onChange: choose }),
+      !item && viewerRole() === "owner" ? (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled,
+        onClick: tree.fromFolder
+      }, t("From folder")) : null,
+      (0, import_react2.createElement)("input", { ref: fileInput, type: "file", accept: `.md,.markdown,.txt${item ? "" : "," + archiveAccept}`, hidden: true, disabled, onChange: choose }),
       draft.source === "file" ? (0, import_react2.createElement)("span", { className: "bt-set-hint" }, draft.fileName) : null
     ),
+    (0, import_react2.createElement)(FolderPath, { tree, disabled }),
     draft.fileBytes === void 0 ? (0, import_react2.createElement)(Field, {
       label: t("Skill instructions"),
       value: draft.content,
@@ -5422,9 +5777,9 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
       multiline: true,
       onChange: (value) => set2("content", value)
     }) : null,
-    checking ? (0, import_react2.createElement)("p", { className: "bt-set-hint", role: "status" }, t("Checking the skill…")) : null,
+    checking || tree.busy ? (0, import_react2.createElement)("p", { className: "bt-set-hint", role: "status" }, t("Checking the skill…")) : null,
     SkillReport({ report: warning }),
-    error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
+    error || tree.error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, tree.error || error) : null,
     (0, import_react2.createElement)(
       "div",
       { className: "bt-set-row bt-task-foot" },
@@ -5456,6 +5811,10 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
         const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
         const forms = [];
         for (const { form: initial, ...report } of completed) {
+          if (report.preview) {
+            forms.push({ preview: report });
+            continue;
+          }
           if (report.refused) forms.push({ report });
           if (!report.needsConfirm || !initial) continue;
           const item = initial.reviewHash !== void 0 ? await actions.getSkill(initial.name, signal) : initial.edit ? { name: initial.name } : void 0;
@@ -5505,7 +5864,7 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
     }
   });
   const disabled = readOnly || busy || recovering;
-  const activeForm = form ?? recovered.find((entry) => entry.initial);
+  const activeForm = form ?? recovered.find((entry) => entry.initial || entry.preview);
   const closeForm = () => {
     if (form) setForm(null);
     else setRecovered((current) => current.filter((entry) => entry !== activeForm));
@@ -5521,20 +5880,24 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled, onClick: () => setForm({}) }, t("New skill"))
     ),
     error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
-    recovered.filter((entry) => !entry.initial).map(({ report }, index) => (0, import_react2.createElement)(SkillReport, { key: index, report })),
-    activeForm ? (0, import_react2.createElement)(SkillForm, {
-      key: activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? "",
-      item: activeForm.item,
-      initial: activeForm.initial,
-      report: activeForm.report,
-      actions,
-      readOnly,
-      onClose: closeForm,
-      saved: async () => {
-        closeForm();
-        await refresh();
+    recovered.filter((entry) => !entry.initial && !entry.preview).map(({ report }, index) => (0, import_react2.createElement)(SkillReport, { key: index, report })),
+    activeForm ? (0, import_react2.createElement)(
+      activeForm.preview || treeSkill(activeForm.item) ? TreeForm : SkillForm,
+      {
+        key: activeForm.preview?.token ?? (activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? ""),
+        item: activeForm.item,
+        initial: activeForm.initial,
+        report: activeForm.report,
+        preview: activeForm.preview,
+        actions,
+        readOnly,
+        onClose: closeForm,
+        saved: async () => {
+          closeForm();
+          await refresh();
+        }
       }
-    }) : null,
+    ) : null,
     library.skills.length ? (0, import_react2.createElement)("div", { className: "bt-set-card" }, library.skills.map((skill) => {
       const result = skill.held ? hostText(skill.held) : skill.check?.verdict === "warn" ? t("Warnings") : t("Verified");
       const checked = skill.check?.ranAt ? t("Checked {time}", { time: new Date(skill.check.ranAt).toLocaleString() }) : null;
@@ -5547,11 +5910,19 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
           (0, import_react2.createElement)("span", { className: "bt-connector-name" }, skill.name),
           (0, import_react2.createElement)("span", { className: "bt-connector-status" }, [
             skill.description,
-            skill.source?.kind === "file" ? t("From file") : t("From text"),
+            t({
+              folder: "From folder",
+              archive: "From archive",
+              file: "From file",
+              text: "From text"
+            }[skill.source?.kind] ?? "From text"),
             result,
+            skill.scripts?.length ? t("Scripts: {count}", { count: skill.scripts.length }) : null,
+            skill.references?.length ? t("References: {count}", { count: skill.references.length }) : null,
             skill.review?.status === "done" ? t("Reviewed by a model") : null,
             checked
           ].filter(Boolean).join(" · ")),
+          skill.tree?.length > 1 ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, treeNote()) : null,
           rowReview?.name === skill.name ? rowReview.report ? SkillReport({ report: rowReview.report }) : (0, import_react2.createElement)("span", { className: "bt-set-hint", role: "status" }, t("Checking the skill…")) : null
         ),
         (0, import_react2.createElement)(
@@ -46253,72 +46624,6 @@ function installLoginCommand(ctx, options) {
     scope.effect(() => scope.commandUi.register(loginCommand(options)), "ds-bot: /login command");
   });
   return () => fiber.dispose();
-}
-
-// src/client/learning-card-model.js
-function proposalPlacement(proposal, turns) {
-  const settled = proposal?.outcome !== void 0;
-  if (!Number.isFinite(proposal?.at) || typeof turns?.values !== "function") return { kind: settled ? "none" : "dock" };
-  const lastBy = (time) => {
-    let found;
-    for (const location2 of turns.values()) {
-      const end = location2?.end?.time;
-      if (location2?.status !== "closed" || !Number.isFinite(end) || end > time) continue;
-      if (found === void 0 || end > found.end.time || end === found.end.time && location2.turn > found.turn) found = location2;
-    }
-    return found;
-  };
-  const turn = (lastBy(proposal.at) ?? lastBy(settled ? proposal.settledAt ?? proposal.at : Infinity))?.turn;
-  if (turn === void 0) return { kind: settled ? "none" : "dock" };
-  return { kind: "turn", turn };
-}
-function fileLines(text2) {
-  const body = String(text2 ?? "").replace(/\n+$/, "");
-  return body === "" ? [] : body.split("\n");
-}
-function editLines(text2) {
-  return typeof text2 === "string" ? text2.split(/\r?\n/) : [];
-}
-var DIFF_CELLS = 25e4;
-function lineDiff(before, after) {
-  const a = fileLines(before);
-  const b = fileLines(after);
-  let start2 = 0;
-  while (start2 < a.length && start2 < b.length && a[start2] === b[start2]) start2++;
-  let tail = 0;
-  while (tail < a.length - start2 && tail < b.length - start2 && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
-  const midA = a.slice(start2, a.length - tail);
-  const midB = b.slice(start2, b.length - tail);
-  const rows2 = b.slice(0, start2).map((line, index) => ({ kind: "same", line, number: index + 1 }));
-  const added = (j) => ({ kind: "added", line: midB[j], number: start2 + j + 1 });
-  if (midA.length * midB.length > DIFF_CELLS) {
-    rows2.push(...midA.map((line) => ({ kind: "removed", line })), ...midB.map((_, j) => added(j)));
-  } else {
-    const keep = Array.from({ length: midA.length + 1 }, () => new Array(midB.length + 1).fill(0));
-    for (let i2 = midA.length - 1; i2 >= 0; i2--) {
-      for (let j2 = midB.length - 1; j2 >= 0; j2--) {
-        keep[i2][j2] = midA[i2] === midB[j2] ? keep[i2 + 1][j2 + 1] + 1 : Math.max(keep[i2 + 1][j2], keep[i2][j2 + 1]);
-      }
-    }
-    let i = 0;
-    let j = 0;
-    while (i < midA.length || j < midB.length) {
-      if (i < midA.length && j < midB.length && midA[i] === midB[j]) {
-        rows2.push({ kind: "same", line: midB[j], number: start2 + j + 1 });
-        i++;
-        j++;
-      } else if (i < midA.length && (j === midB.length || keep[i + 1][j] >= keep[i][j + 1])) {
-        rows2.push({ kind: "removed", line: midA[i] });
-        i++;
-      } else {
-        rows2.push(added(j));
-        j++;
-      }
-    }
-  }
-  const offset = b.length - tail;
-  rows2.push(...b.slice(offset).map((line, index) => ({ kind: "same", line, number: offset + index + 1 })));
-  return rows2;
 }
 
 // src/client/learning-card.js

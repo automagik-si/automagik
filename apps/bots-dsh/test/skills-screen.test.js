@@ -491,3 +491,121 @@ test('a held row reviews stored bytes in one click and exposes all findings with
   locale.setLocale('pt-BR')
   assert.match(f.hostText(held), /Nenhum modelo revisou/)
 })
+
+test('#2078 Skills shows owner folders, both tree reports, and submits only a token on Save', async t => {
+  const f = fixture(t, 'owner')
+  const calls = []
+  const scripts = [{ path: 'scripts/run.sh', interpreter: 'bash' }]
+  const references = ['references/guide.md']
+  const tree = [
+    { path: 'SKILL.md', size: 64 },
+    { path: references[0], size: 16 },
+    { path: scripts[0].path, size: 20 },
+  ]
+  const gate = { rule: 'script', line: 1, reason: 'A deterministic warning.', path: scripts[0].path }
+  const model = { area: 'other', line: 1, reason: 'A synthetic finding.', file: references[0], severity: 'low' }
+  let next = { preview: true, name: 'notes', description: 'Fixture notes.', tree, scripts, references, skipped: 1,
+    findings: [gate, model], token: 'fixture-preview-token', needsConfirm: 'fixture-receipt' }
+  const actions = {
+    skillLibrary: async () => group(),
+    folders: async () => ({ picker: 'browse' }),
+    saveSkill: async payload => { calls.push(JSON.parse(JSON.stringify(payload))); return payload.token ? { saved: true } : next },
+  }
+  const props = { actions, rosterSource: { subscribe() {}, getSnapshot: () => ({}) } }
+  const owner = f.mount(f.SkillsScreen, props)()
+  const screen = f.mount(owner.type, owner.props)
+  screen()
+  await flush()
+  match(screen(), 'New skill').props.onClick()
+  const form = walk(screen(), node => node.type?.name === 'SkillForm')[0]
+  const render = f.mount(form.type, form.props)
+  const file = walk(render(), node => node.props?.type === 'file')[0]
+  assert.equal(file.props.accept, '.md,.markdown,.txt,.zip,.tar.gz,.tgz')
+  await match(render(), 'From folder').props.onClick()
+  const picker = walk(render(), node => node.type?.name === 'FolderPath')[0]
+  const entry = picker.type(picker.props)
+  walk(entry, node => node.type?.name === 'Field')[0].props.onChange('/fixture/notes')
+  const path = walk(render(), node => node.type?.name === 'FolderPath')[0]
+  await match(path.type(path.props), 'Use this folder').props.onClick()
+  const expand = render => {
+    const preview = render()
+    assert.equal(preview.type?.name, 'TreePreview')
+    return preview.type(preview.props)
+  }
+  const preview = expand(render)
+  const detail = walk(preview, node => node.type?.name === 'TreeDetails')[0]
+  const detailText = text(detail.type(detail.props))
+  assert.match(detailText, /scripts\/run\.sh.*bash/)
+  assert.match(detailText, /references\/guide\.md.*Reference file/)
+  assert.match(detailText, /Skipped files: 1/)
+  assert.match(detailText, /A Bot receives only the SKILL.md text/)
+  const report = walk(preview, node => node.type?.name === 'SkillReport')[0]
+  assert.match(text(report.type(report.props)), /A deterministic warning.*A synthetic finding/)
+  await match(preview, 'Save').props.onClick()
+  assert.deepEqual(calls, [
+    { source: 'folder', path: '/fixture/notes', preview: true },
+    { token: 'fixture-preview-token', name: 'notes', confirm: 'fixture-receipt' },
+  ])
+
+  next = { ...next, token: undefined, needsConfirm: undefined, refused: true,
+    message: 'Not saved: prompt injection was found. A skill with prompt injection is never accepted.',
+    findings: [{ ...model, injection: true }],
+    diff: { findings: { new: [model], gone: [gate] }, files: { added: [], removed: [],
+      changed: [{ path: references[0], beforeText: 'old guide', afterText: 'new guide' }] } },
+  }
+  const replace = { ...form.props, item: { name: 'notes', source: { kind: 'archive' }, tree, scripts, references } }
+  const row = { ...replace.item, review: { status: 'done' } }
+  actions.skillLibrary = async () => ({ skills: [row], active: {} })
+  actions.getSkill = async () => row
+  const second = f.mount(owner.type, owner.props)
+  second()
+  await flush()
+  match(second(), 'Edit').props.onClick()
+  await flush()
+  const edit = walk(second(), node => node.type?.name === 'TreeForm')[0]
+  const renderEdit = f.mount(edit.type, edit.props)
+  const input = walk(renderEdit(), node => node.props?.type === 'file')[0]
+  const bytes = Uint8Array.from([1, 2, 3, 4])
+  await input.props.onChange({ target: { value: '', files: [{ name: 'fixture.zip', size: bytes.length, arrayBuffer: async () => bytes.buffer }] } })
+  assert.deepEqual(calls.at(-1), { source: 'archive', fileName: 'fixture.zip', fileBytes: 'AQIDBA==', preview: true, edit: true, name: 'notes' })
+  const refused = expand(renderEdit)
+  assert.equal(match(refused, 'Save'), undefined)
+  const refusal = walk(refused, node => node.type?.name === 'SkillReport')[0]
+  assert.match(text(refusal.type(refusal.props)), /Not saved: prompt injection.*Prompt injection/)
+  const diff = walk(refused, node => node.type?.name === 'TreeDiff')[0]
+  const renderedDiff = diff.type(diff.props)
+  assert.match(text(renderedDiff), /Changed files.*- old guide\n\+ new guide/)
+  assert.deepEqual(walk(renderedDiff, node => node.type?.name === 'SkillReport').map(node => node.props.title), ['New findings', 'Gone findings'])
+
+  const locale = fakeLocale()
+  locale.addLanguage({ id: 'pt-BR', label: 'Português (Brasil)', fallback: 'en' })
+  locale.register('omni-ui', 'pt-BR', JSON.parse(readFileSync(
+    new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8')))
+  t.after(f.installLocale(locale))
+  locale.setLocale('zh')
+  assert.match(text(second()), /Bot 只会收到 SKILL.md 的正文/)
+  locale.setLocale('pt-BR')
+  assert.match(text(second()), /O Bot recebe só o texto do SKILL.md/)
+})
+
+test('#2078 Skills presents archive upload to admins and keeps the folder picker owner-only', async t => {
+  const f = fixture(t, 'owner', ({ body }) => {
+    assert.equal(body.endpoint, 'whoami')
+    return { ok: true, json: async () => ({
+      ok: true, value: { role: 'owner', multiuser: true, viewer: { id: 'fixture-admin', role: 'admin' } },
+    }) }
+  })
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  assert.equal((await f.startViewer({ version: 1, role: 'owner' }, abort.signal)).role, 'admin')
+  const owner = f.mount(f.SkillsScreen, { actions: { skillLibrary: async () => group() },
+    rosterSource: { subscribe() {}, getSnapshot: () => ({}) } })()
+  const screen = f.mount(owner.type, owner.props)
+  screen()
+  await flush()
+  match(screen(), 'New skill').props.onClick()
+  const form = walk(screen(), node => node.type?.name === 'SkillForm')[0]
+  const tree = f.mount(form.type, form.props)()
+  assert.equal(match(tree, 'From folder'), undefined)
+  assert.match(walk(tree, node => node.props?.type === 'file')[0].props.accept, /\.zip/)
+})
