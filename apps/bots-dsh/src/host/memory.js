@@ -1662,14 +1662,14 @@ export function install(rt) {
   // Provider diagnostics can quote the request. Keep only the structured code.
   const answerFailure = error => (ownFailure(error) ? error : modelFailure(`The model could not answer (${failureCode(error, 'provider error')}).`))
   const shotSession = (bot, tag) => rt.botRunnerRequired === undefined ? tag?.sessionId : rt.chatOf(bot.id)
-  async function botShot(bot, system, text, tag, dispatch) {
+  async function botShot(bot, system, text, tag, dispatch, backgroundOnly = false) {
     const sessionId = shotSession(bot, tag)
     const chat = rt.chatOf(bot.id)
     const signal = dispatch?.signal ? AbortSignal.any([lifetime.signal, dispatch.signal]) : lifetime.signal
     const checkActive = () => { if (signal.aborted) throw staleShot() }
     checkActive()
     rt.assertShellChoice?.(sessionId ?? chat, bot.id)
-    const mine = await rt.memoryModel(bot)
+    const mine = backgroundOnly ? undefined : await rt.memoryModel(bot)
     const own = splitRef(mine)
     let acp
     if (own?.provider.startsWith('acp-')) {
@@ -1747,6 +1747,12 @@ export function install(rt) {
     throw Object.assign(error, { quota, retryAt })
   }
 
+  function memoryShot(bot, system, text, tag, dispatch) {
+    const provider = splitRef(bot.model)?.provider
+    const backgroundOnly = provider === 'acp-omp' || provider === 'acp-antigravity'
+    return botShot(bot, system, text, tag, dispatch, backgroundOnly)
+  }
+
   /** @type {Map<string, {hash:string, text:string, at:number}>} */
   const summaries = new Map()
   const summarizing = new Map()
@@ -1793,7 +1799,7 @@ export function install(rt) {
       ? groupSummaryRequest({ name: panel.name, lines: linesFor(loaded.group), language })
       : summaryRequest({ name: panel.name, own: linesFor(loaded.own), team: linesFor(loaded.team), language })
     const job = (async () => {
-      const text = await botShot(keeper, SUMMARY_SYSTEM, request, panel.tag)
+      const text = await memoryShot(keeper, SUMMARY_SYSTEM, request, panel.tag)
       const value = { hash, text: text.slice(0, SUMMARY_TEXT_MAX), at: Date.now() }
       summaries.set(panel.id, value)
       summaryFailures.delete(panel.id)
@@ -1848,7 +1854,7 @@ export function install(rt) {
     const text = String(body.text ?? '').trim().slice(0, ASK_TEXT_MAX)
     if (text === '') throw new Error('Type a question or a change first')
     const numbered = await settled(() => Object.entries(panel.scopes).flatMap(([tag, scope]) => allEntries(loadScope(scope)).map(entry => ({ ...entry, scope: tag }))))
-    const answer = parseAsk(await botShot(panel.keeper, askSystem(panel.group), askRequest({ name: panel.name, group: panel.group, numbered, language: languageNow(), text }), panel.tag))
+    const answer = parseAsk(await memoryShot(panel.keeper, askSystem(panel.group), askRequest({ name: panel.name, group: panel.group, numbered, language: languageNow(), text }), panel.tag))
     const meta = { source: 'memory panel', by: 'user', added: today() }
     const home = panel.group ? 'group' : 'own'
     const changes = []
@@ -2212,9 +2218,9 @@ export function install(rt) {
   const { memoryReviews, memoryReviewStatus, forgetCursors, liftMemoryHolds } =
     installReview(rt, { root, reviewOn, mainLimit, TEAM, ownScope, groupScope, keeperOf, writesTeam,
       labelOf, today, writeText, settled, loadScope, addEntry, replaceEntry, removeEntry,
-      entryProblem, secretEntry, botShot, languageNow })
+      entryProblem, secretEntry, botShot: memoryShot, languageNow })
 
-  const { tidyView, undoTidy, tidyNow, memoryTidyStatus } = installTidy(rt, { TEAM, ownScope, groupScope, keeperOf, scopeKey, dirOf, today, queued, recoverPending, writable, settled, loadScope, publish, writeStep, removeStep, writeText, botShot, languageNow, allEntries, entryProblem, USER, changedSince })
+  const { tidyView, undoTidy, tidyNow, memoryTidyStatus } = installTidy(rt, { TEAM, ownScope, groupScope, keeperOf, scopeKey, dirOf, today, queued, recoverPending, writable, settled, loadScope, publish, writeStep, removeStep, writeText, botShot: memoryShot, languageNow, allEntries, entryProblem, USER, changedSince })
 
   async function memoryTidyUndo(body) {
     const panel = panelOf(body)

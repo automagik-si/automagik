@@ -3446,13 +3446,14 @@ test('R2-2 removing the keeper during setup withholds the group batch on both ro
   }
 })
 
-test('R2-4 agy version refusal keeps background quota and the batch through provider expiry', async t => {
+test('R2-4 ACP admission refusal keeps background quota and the batch through provider expiry', async t => {
   const clock = t.mock.timers
   clock.enable({ apis: ['Date'], now: Date.now() })
-  const world = asideWorld(t, { provider: 'acp-antigravity', version: '1.5.17' })
+  const world = asideWorld(t, { permissionMode: 'workspace-write' })
+  await world.ready()
   let recovered = false
-  const h = start({ state: memoryState('acp-antigravity/default'),
-    agents: { 'acp-antigravity': ['default'] }, config: { memoryReviewDelayMs: 0 },
+  const h = start({ state: memoryState('acp-codex/default'),
+    agents: { 'acp-codex': ['default'] }, config: { memoryReviewDelayMs: 0 },
     replyWith: () => recovered ? reviewReply('Use the green fixture notebook.') : quotaFinish,
   })
   t.after(h.stop)
@@ -3462,7 +3463,7 @@ test('R2-4 agy version refusal keeps background quota and the batch through prov
   const at = Date.now()
   const until = at + 60 * minute
   const snapshot = async () => ({
-    hidden: world.events().filter(row => row.event === 'start' && row.args.includes('--agent')).length,
+    hidden: world.events().filter(row => row.event === 'new').length,
     prompts: world.events().filter(row => row.event === 'prompt').length, calls: h.requests.length,
     failure: (await h.call('memory-review-status', { botId: 'b2' })).value.failure,
     cursor: JSON.parse(h.read('reviewed.json'))['chat:b2'], expiry: rt.quotaUntil('deepseek'),
@@ -3668,6 +3669,27 @@ test('memory uses background when saved ACP admission is unsupported (including 
   assert.deepEqual(world.events(), [])
   assert.deepEqual(routes(h.requests), ['deepseek/v4@16384'])
 })
+
+for (const [provider, agent] of [['acp-omp', 'omp'], ['acp-antigravity', 'checked Antigravity']]) {
+  test(`owner routing: ${agent} memory review uses the configured background model`, async t => {
+    const world = asideWorld(t, { provider, reply: { text: reviewReply('Keep the red fixture folder.') } })
+    const fact = 'Keep the blue fixture folder.'
+    const h = start({ state: memoryState(`${provider}/default`, 'deepseek/lite'),
+      agents: { [provider]: ['default'] }, models: ['v4', 'lite'], defaultModel: 'v4',
+      config: { memoryReviewDelayMs: 0 }, replyWith: () => reviewReply(fact),
+    })
+    t.after(h.stop)
+    h.ctx.provided.set('acpAgents', world.service)
+    await h.call('state')
+    reviewIdle(h.ctx)
+    await reviewed(h.call)
+    assert.deepEqual({ prompts: world.events().filter(row => row.event === 'prompt').length,
+      calls: routes(h.requests) }, { prompts: 0, calls: ['deepseek/lite@16384'] })
+    assert.deepEqual(world.events(), [], 'the memory review never launches the ACP agent')
+    assert.ok(h.read('bots', 'b2', 'MEMORY.md').includes(fact))
+    assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'chat:b2': 11 })
+  })
+}
 
 test('an unavailable saved model uses background over applied and DSH default models', async t => {
   const state = memoryState('other/gone', 'deepseek/lite')

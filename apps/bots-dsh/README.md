@@ -395,12 +395,12 @@ The same card can carry DSH itself: a DS Bot release may name the DSH release it
 
 Model providers are set up with dsh's `llm-pi-ai` plugin in `cordis.patch.yml`. Every Bot runs on one model of its own, from the models DSH serves. A new team's first Main Bot has none, and holds its greeting until it has one. With `@automagik/welcome-dsh`, finishing Connect AI with an AI on gives it (and the Omni Bot) the team's default model, and the greeting goes out then. Otherwise its chat offers that model with one press to start and a "change" link to the model menu; with no model that can run, the card offers ways to set one up. The team's default model is DSH's default model when it is served and its provider has its key, else the first model that can run (a provider's `default` alias after the models it names). While a chat holds only the greeting, one line under it names the model and its provider, with "change". Of the Claude models pi-ai serves on `anthropic`, the menus offer each family's newest (Opus, Sonnet, Haiku, Fable); the older versions and dated snapshots stay served, so a Bot already on one keeps it and its menu still shows it. The Create Bot form starts on the DSH default model. The Bot's details panel and settings (or a Main Bot's `update_bot`) change it; a Bot whose model is no longer served shows the card again. A team saved by an older version keeps the model each Bot last ran on.
 
-**Background model.** Memory jobs try the Bot's own model first, including an API model
-or an admitted ACP agent in a hidden, tools-denied session. They use the team's background
-model when the own route is unavailable or fails. Antigravity uses its own agent on the
-checked agy version. Claude Code, ACP Hermes and custom ACP agents use the background
-route. A provider that returned quota is skipped for up to an hour. Automatic review also
-backs off on quota and reports the last failure in Advanced.
+**Background model.** Memory jobs try the Bot's eligible DSH-native model or an admitted
+Codex model in a hidden, tools-denied session first. They use the team's background model
+when the own route is unavailable or fails. Claude Code, omp, Antigravity, ACP Hermes and
+custom ACP agents use the configured background model for memory. A provider that returned
+quota is skipped for up to an hour. Automatic review also backs off on quota and reports
+the last failure in Advanced.
 
 The steward, part note and checkpoint of an ACP chat continue to use the background model.
 Choose it in Settings → Bots → Background jobs. The selection falls through to DSH's
