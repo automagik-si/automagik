@@ -129,14 +129,21 @@ export function resultImageType(bytes, { gif = false } = {}) {
   if (gif && ['GIF87a', 'GIF89a'].includes(bytes.toString('ascii', 0, 6))) return 'image/gif'
 }
 
-function canReadResultEntry(parts, botId, { absolute = false, directory = false } = {}) {
+const managedPart = part => part.toLowerCase() === '.automagik'
+
+function canReadResultEntry(parts, botId, { absolute = false, directory = false, teamWorkspace } = {}) {
   if (parts.some(part => part.toLowerCase() === '.git')) return false
   if (parts.some((part, i) => part.toLowerCase() === 'objects'
     && /^[a-f0-9]{2}$/i.test(parts[i + 1]) && /^(?:[a-f0-9]{62}|[a-f0-9]{64})$/i.test(parts[i + 2]))) return false
-  const managed = parts.findIndex(part => part.toLowerCase() === '.automagik')
+  const workspace = teamWorkspace ? partsOf(teamWorkspace) : []
+  // Skip only the team's own workspace ancestry. A managed folder inside it
+  // still belongs to the Solver that owns it.
+  const ancestry = workspace.at(-2) === 'bots' && parts.findIndex(managedPart) === workspace.length - 3
+    && workspace.every((part, index) => parts[index] === part) ? parts.slice(workspace.length) : parts
+  const managed = ancestry.findIndex(managedPart)
   if (managed === -1) return true
-  if ((!absolute && managed !== 0) || parts.slice(managed + 1).some(part => part.toLowerCase() === '.automagik')) return false
-  const [area, owner, child] = parts.slice(managed + 1)
+  if ((!absolute && managed !== 0) || ancestry.slice(managed + 1).some(managedPart)) return false
+  const [area, owner, child] = ancestry.slice(managed + 1)
   return area === 'bots' && owner === botId && (child === undefined ? directory : child.toLowerCase() !== 'uploads')
 }
 
@@ -169,30 +176,31 @@ const partsOf = path => path.split(sep === '\\' ? /[\\/]/ : '/')
 const cleanPart = part => part !== '' && part !== '.' && part !== '..' && !part.includes('\0')
   && (sep !== '\\' || (!/[<>:"|?*]/.test(part) && !/[ .]$/.test(part)))
 
-const resultRootAllowed = (root, botId, allowPath) => canReadResultEntry(partsOf(root), botId, { absolute: true, directory: true })
+const resultRootAllowed = (root, { botId, allowPath, teamWorkspace }) =>
+  canReadResultEntry(partsOf(root), botId, { absolute: true, directory: true, teamWorkspace })
   && allowPath?.(root) !== false
 
-function resultEntryAllowed(root, parts, botId, allowPath) {
+function resultEntryAllowed(root, parts, { botId, allowPath, teamWorkspace }) {
   const path = join(root, ...parts)
-  return canReadResultEntry(parts, botId) && canReadResultEntry(partsOf(path), botId, { absolute: true })
+  return canReadResultEntry(parts, botId) && canReadResultEntry(partsOf(path), botId, { absolute: true, teamWorkspace })
     && allowPath?.(path) !== false
 }
 
-export function resultPicturePathsAllowed(folder, paths, { botId, allowPath }) {
+export function resultPicturePathsAllowed(folder, paths, scope) {
   if (paths.length === 0) return true
   try {
     if (!isAbsolute(folder) || !entryStat(folder).isDirectory()) return false
     const root = realpathSync.native(folder)
-    return resultRootAllowed(root, botId, allowPath) && paths.every(path => {
+    return resultRootAllowed(root, scope) && paths.every(path => {
       const parts = partsOf(path)
-      return parts.every(cleanPart) && resultEntryAllowed(root, parts, botId, allowPath)
+      return parts.every(cleanPart) && resultEntryAllowed(root, parts, scope)
     })
   } catch {
     return false
   }
 }
 
-export function readResultFile(folder, selector, { botId, maxBytes, signal, allowPath }) {
+export function readResultFile(folder, selector, { maxBytes, signal, ...scope }) {
   if (!folder || !isAbsolute(folder) || typeof selector !== 'string') throw snapshotError('The Solver has no usable result path.')
   const absolute = isAbsolute(selector)
   if (!partsOf(absolute ? selector.slice(parse(selector).root.length) : selector).every(cleanPart)) {
@@ -210,7 +218,7 @@ export function readResultFile(folder, selector, { botId, maxBytes, signal, allo
   }
   const parts = partsOf(name)
   if (isAbsolute(name) || !parts.every(cleanPart)) throw snapshotError('Use a path inside the result folder.')
-  if (!resultRootAllowed(root, botId, allowPath) || !resultEntryAllowed(root, parts, botId, allowPath)) {
+  if (!resultRootAllowed(root, scope) || !resultEntryAllowed(root, parts, scope)) {
     throw snapshotError('The result picture is in a protected folder.')
   }
   const confined = hasDescriptorPaths()
@@ -259,7 +267,7 @@ export function imageBaseline(result) {
     : { v: 1, keys: manifest.entries.map(entry => entry.key.slice(0, 16)).sort() }
 }
 
-export function inspectResult(folder, { manifest = false, botId, managedEntry, signal, allowPath } = {}) {
+export function inspectResult(folder, { manifest = false, managedEntry, signal, ...scope } = {}) {
   if (typeof folder !== 'string' || !isAbsolute(folder)) return { reason: 'The Solver has no usable result folder.' }
   const selectedRoot = resolve(folder)
   let root = selectedRoot
@@ -312,7 +320,7 @@ export function inspectResult(folder, { manifest = false, botId, managedEntry, s
       const changes = [stat.size, stat.mtimeNs, stat.ctimeNs].map(String)
       hash.update(JSON.stringify([...identity, ...changes]))
       const pathInResult = relative(root, locationOfEntry)
-      if (discover && resultEntryAllowed(root, partsOf(pathInResult), botId, allowPath)) {
+      if (discover && resultEntryAllowed(root, partsOf(pathInResult), scope)) {
         try {
           const extension = IMAGE_EXTENSIONS.has(extname(name).toLowerCase())
           if (!descriptorPaths && process.platform === 'linux') throw snapshotError('Confined result reads are unavailable.')
@@ -340,7 +348,7 @@ export function inspectResult(folder, { manifest = false, botId, managedEntry, s
     if (!rootStat.isDirectory()) return { reason: rootStat.isSymbolicLink()
       ? 'The result root is a symbolic link.' : 'The result root is not a directory.' }
     root = realpathSync.native(selectedRoot)
-    discover = manifest && resultRootAllowed(root, botId, allowPath)
+    discover = manifest && resultRootAllowed(root, scope)
     if (manifest && !discover) indeterminate = true
     location = root
     descriptorPaths = hasDescriptorPaths()
@@ -426,6 +434,7 @@ export function solverOutcome(bot, track, review, pending, model, snapshot, visu
   const limit = activeSolverLimit(bot, track)
   if (limit) return { reason: 'limit', limit: { kind: limit.kind, ...(limit.check ? { check: limit.check } : {}) } }
   if (!progress || !passes(progress, snapshot)) return notDone('checks')
+  if (progress.visualReviewRequired) return notDone('review')
   const result = progress.review
   if (legacyResultReview(result) || review !== 'bot' || pending || result?.revision !== progress.revision || result.verdict !== 'SHIP'
     || chosenIdentityOf(result.solverModel) !== model || result.reviewer?.id !== bot.reviewerId

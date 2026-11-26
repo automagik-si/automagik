@@ -15,12 +15,13 @@ import { install as requests } from '../src/host/requests.js'
 import { install as privacy } from '../src/host/private-bots.js'
 import { install as imagegen } from '../src/host/imagegen.js'
 import { install as turns } from '../src/host/turns.js'
+import { install as folders, teamHomeOf } from '../src/host/folders.js'
 import { fakeApproval } from './fake-ctx.js'
 import { createEditInput } from '../src/host/image-input.js'
 import { install as reviewMark } from '../src/host/review-mark.js'
 import { resultSnapshot } from '../src/host/solver-progress.js'
 
-async function fixture(t, { withTools = true } = {}) {
+async function fixture(t, { withTools = true, standalone = false } = {}) {
   const folder = await mkdtemp(join(tmpdir(), 'upload-access-'))
   t.after(() => rm(folder, { recursive: true, force: true }))
   const bots = Object.fromEntries(['a', 'b', 'test-private-bot', 'outside'].map(id => [id, { id, sessionId: id, name: `the test Bot ${id}`, createdAt: 1, ...(id === 'test-private-bot' ? { private: true, workDir: join(folder, 'private') } : {}) }]))
@@ -85,7 +86,8 @@ async function fixture(t, { withTools = true } = {}) {
       rest.unshift(basename(at))
     }
   }
-  const rt = { ctx, state, home: join(folder, 'home'), dshHome: join(folder, 'dsh'), statePath: join(folder, 'state.json'), teamTools: [], live: new Map(), groupOwners: owners,
+  const home = standalone ? teamHomeOf({ AUTOMAGIK_HOME: join(folder, '.automagik') }) : join(folder, 'home')
+  const rt = { ctx, state, home, dshHome: join(folder, 'dsh'), statePath: join(folder, 'state.json'), teamTools: [], live: new Map(), groupOwners: owners,
     botOf: id => bots[id], selfOf: id => bots[id]?.id ?? owners.get(id)?.botId,
     botOfSession: id => bots[id] ?? bots[owners.get(id)?.botId], chatOf: id => bots[id]?.sessionId,
     roomOf: id => rooms[id], findBot: name => Object.values(bots).find(bot => bot.name === name),
@@ -121,8 +123,8 @@ async function fixture(t, { withTools = true } = {}) {
     saves, data, bytes, edits: () => edits }
 }
 
-async function resultFixture(t, { solver = 'a', rootParts = ['result'], normalization } = {}) {
-  const f = await fixture(t)
+async function resultFixture(t, { solver = 'a', rootParts = ['result'], normalization, standalone = false, mountedLookup = false } = {}) {
+  const f = await fixture(t, { standalone })
   f.data = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4AWOUs4n6b8NwhAEADDUCtSU1IikAAAAASUVORK5CYII=',
     'base64',
@@ -130,9 +132,18 @@ async function resultFixture(t, { solver = 'a', rootParts = ['result'], normaliz
   const bot = f.bots[solver]
   bot.role = 'Solver'
   bot.reviewerId = 'b'
-  const root = bot.workDir ?? join(f.folder, ...rootParts)
+  let workspace
+  if (standalone) {
+    const path = join(f.rt.home, 'workspace')
+    workspace = { id: 'registered-workspace', path }
+    f.rt.config = { workspace: path }
+    f.rt.state.workspaceId = workspace.id
+    f.rt.ctx.workspaceRegistry = new Map([[workspace.id, workspace]])
+    folders(f.rt)
+  }
+  const root = bot.workDir ?? join(workspace?.path ?? f.folder, ...rootParts)
   await mkdir(root, { recursive: true })
-  bot.workDir = root
+  if (root !== workspace?.path) bot.workDir = root
   const findBot = f.rt.findBot
   f.rt.findBot = ref => f.bots[ref] ?? findBot(ref)
   f.rt.ownChatLineage = (id, _agent, member) => id === member.id
@@ -148,19 +159,31 @@ async function resultFixture(t, { solver = 'a', rootParts = ['result'], normaliz
   f.rt.dropWork = exchange => { delete f.rt.state.works[exchange] }
   const storeCtx = new Context()
   t.after(() => storeCtx.fiber.dispose())
-  await storeCtx.plugin(LocalAttachmentStore, { dshHome: f.rt.dshHome, ...normalization })
-  const store = storeCtx.get('attachments')
-  const get = f.rt.ctx.get
-  const readImage = store.readImage.bind(store)
-  const saveImage = store.saveImage.bind(store)
-  store.readImage = (ref, signal) => f.bytes.has(ref.attachmentId) ? get('attachments').readImage(ref) : readImage(ref, signal)
-  store.saveImage = async input => {
-    const ref = await saveImage(input)
-    f.bytes.set(ref.attachmentId, Buffer.from((await readImage(ref)).data))
-    f.saves.push(ref)
-    return ref
+  const mountStore = async (dshHome, policy) => {
+    const fiber = storeCtx.plugin(LocalAttachmentStore, { dshHome, ...policy })
+    await fiber
+    return { fiber, store: storeCtx.get('attachments') }
   }
-  f.rt.ctx.get = name => name === 'attachments' ? store : get(name)
+  const first = await mountStore(f.rt.dshHome, normalization)
+  const get = f.rt.ctx.get
+  function recordStore(store) {
+    const readImage = store.readImage.bind(store)
+    const saveImage = store.saveImage.bind(store)
+    store.readImage = (ref, signal) => f.bytes.has(ref.attachmentId) ? get('attachments').readImage(ref) : readImage(ref, signal)
+    store.saveImage = async input => {
+      const ref = await saveImage(input)
+      f.bytes.set(ref.attachmentId, Buffer.from((await readImage(ref)).data))
+      f.saves.push(ref)
+      return ref
+    }
+  }
+  recordStore(first.store)
+  f.rt.ctx.get = name => name === 'attachments' ? (mountedLookup ? storeCtx.get(name) : first.store) : get(name)
+  const replaceStore = async () => {
+    await first.fiber.dispose()
+    const replacement = await mountStore(join(f.folder, 'replacement-store'), normalization)
+    recordStore(replacement.store)
+  }
   reviewMark(f.rt)
   f.rt.reviewCreated(bot, 'Check this result')
   const request = bot.reviewTrack.solver.request
@@ -171,7 +194,7 @@ async function resultFixture(t, { solver = 'a', rootParts = ['result'], normaliz
   const send = (images, signal) => f.call(solver, 'message_bot', {
     to: 'b', message: 'Review the result.', solver_review: 'result', solver_request: request, images,
   }, signal)
-  return { ...f, bot, root, markPassed, send }
+  return { ...f, bot, root, markPassed, send, replaceStore }
 }
 
 async function observeResultRead(t, f, { portable = true, change, target = join(f.root, 'sub', 'visual.png') } = {}) {
@@ -611,6 +634,103 @@ test('2133 source 4 the private ledger authorizes the normalized outgoing ID bef
   assert.deepEqual(authorized, [ref.attachmentId], 'authorize the actual outgoing ID before publication')
   assert.equal(f.rows('b')[0]?.content.find(block => block.type === 'image')?.attachment.attachmentId, ref.attachmentId, outcome)
   assert.deepEqual(f.bot.reviewTrack.solver.review.images.required, [{ path: 'result.png', digest: sourceDigest, attachmentId: ref.attachmentId }])
+})
+
+test('2133 exception 4 mounted Cordis lookups bind publication to the authorized store', async t => {
+  for (const replace of [false, true]) {
+    await t.test(replace ? 'replaced store refuses publication' : 'same store publishes after authorization', async t => {
+      const f = await resultFixture(t, { solver: 'test-private-bot', mountedLookup: true, normalization: { normalizedImageMaxDimension: 1 } })
+      const path = join(f.root, 'result.png')
+      await writeFile(path, f.data)
+      f.markPassed()
+      f.rt.isMain = id => id === 'outside'
+      const first = f.rt.ctx.get('attachments')
+      assert.notEqual(f.rt.ctx.get('attachments'), first, 'pinned lookups return fresh wrappers')
+      let authorized
+      f.rt.ledger.written = async book => {
+        const event = f.books.get(book)?.find(row => row.event === 'picture-forward-authorised')
+        if (!event || authorized) return
+        assert.equal(f.saves.length, 0)
+        assert.equal(f.rows('b').length, 0)
+        authorized = event.images
+        if (replace) await f.replaceStore()
+        const original = Symbol.for('cordis.original')
+        assert.equal(f.rt.ctx.get('attachments')[original] === first[original], !replace)
+      }
+      if (replace) {
+        const receipt = await reviewRefusal(() => f.send([path]))
+        assert.equal(authorized?.length, 1, receipt)
+        assert.match(receipt, /result picture store changed/)
+        assert.equal(f.saves.length, 0)
+        assert.equal(f.rows('b').length, 0)
+        return
+      }
+      assert.match(await f.send([path]).catch(error => error.message), /with 1 picture/)
+      assert.equal(authorized?.length, 1)
+      assert.equal(f.saves.length, 1)
+      assert.notEqual(authorized[0], `sha256:${createHash('sha256').update(f.data).digest('hex')}`)
+      assert.equal(f.saves[0].attachmentId, authorized[0])
+      assert.equal(f.rows('b')[0]?.content.find(block => block.type === 'image')?.attachment.attachmentId, authorized[0])
+    })
+  }
+})
+
+test('2133 exception 3 registered standalone workspace preserves result ancestry checks', async t => {
+  const review = ['.automagik', 'bots', 'a', 'review']
+  for (const [name, rootParts, leaf] of [
+    ['team workspace result', [], ['result.png']],
+    ['own review beneath the workspace', [], [...review, 'result.png']],
+    ['own review as result root', review, ['result.png']],
+  ]) {
+    await t.test(name, async t => {
+      const f = await resultFixture(t, { standalone: true, rootParts })
+      const path = join(f.root, ...leaf)
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, f.data)
+      f.markPassed()
+      assert.match(await f.send([path]).catch(error => error.message), /with 1 picture/)
+      const images = f.bot.reviewTrack.solver.review.images
+      assert.equal(images.kind, 'visual')
+      assert.equal(images.definite, true)
+      assert.equal(f.saves.length, 1)
+      assert.deepEqual(f.bytes.get(f.saves[0].attachmentId), f.data)
+      assert.equal(f.rows('b').length, 1)
+    })
+  }
+  for (const [name, leaf, protect] of [
+    ['unregistered default', 'result.png', f => {
+      f.bot.workDir = f.root
+      f.rt.state.workspaceId = 'unregistered-workspace'
+    }],
+    ['Git folder', '.git/result.png', () => {}],
+    ['Solver uploads', '.automagik/bots/a/uploads/result.png', () => {}],
+    ['another private work folder', 'private-region/result.png', f => { f.bots['test-private-bot'].workDir = join(f.root, 'private-region') }],
+  ]) {
+    await t.test(name, async t => {
+      const f = await resultFixture(t, { standalone: true, rootParts: [] })
+      protect(f)
+      const path = join(f.root, leaf)
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, f.data)
+      f.markPassed()
+      assert.match(await reviewRefusal(() => f.send([path])), /protected folder/)
+      assert.equal(f.saves.length, 0)
+      assert.equal(f.rows('b').length, 0)
+    })
+  }
+  await t.test('linked result root stays refused', async t => {
+    const f = await resultFixture(t, { standalone: true, rootParts: [] })
+    const path = join(f.root, 'result.png')
+    await writeFile(path, f.data)
+    f.markPassed()
+    const alias = join(f.folder, 'linked-workspace')
+    await symlink(f.root, alias, 'dir')
+    f.bot.workDir = alias
+    assert.equal(resultSnapshot(alias), undefined)
+    assert.match(await reviewRefusal(() => f.send([path])), /current passing runs/)
+    assert.equal(f.saves.length, 0)
+    assert.equal(f.rows('b').length, 0)
+  })
 })
 
 test('2133 T4d result discovery and selection skip another private workspace outside Automagik', async t => {

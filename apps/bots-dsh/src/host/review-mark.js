@@ -7,7 +7,7 @@
 // Solver are not marked: only its own chat (and the subagents under it).
 import { chosenIdentity, chosenIdentityOf, originalReviewContent, unverifiedNotice, unverifiedReason, unverifiedText } from '../shared/solver-model.js'
 import { lstatSync, realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { SOLVER_NOTES } from '../shared/solver-method.js'
 import { VERDICTS_KEPT, deliveryMark, verdictOf } from '../shared/review-mark.js'
 import { guardVerdictOf } from '../shared/review-guard.js'
@@ -28,6 +28,10 @@ const WRITE_NAMES = new Set(['write', 'edit', 'str_replace_editor', 'apply_patch
 // Tools that start a worker or a program from outside the tool surface (tool-deny.js).
 const LAUNCHERS = new Set(['start_task', 'attach_capability', 'approve_agent_action'])
 const ACP_WRITE_KINDS = new Set(['edit', 'delete', 'move'])
+
+// Cordis creates a fresh tracing proxy at each lookup of the same service.
+const ORIGINAL = Symbol.for('cordis.original')
+const storeIdentity = store => store?.[ORIGINAL] ?? store
 
 function nativeOutcome(call, value) {
   const outcome = value?.kind === 'execute' ? value.terminalOutcome : undefined
@@ -190,11 +194,21 @@ export function install(rt) {
       && (stat.isDirectory() || (stat.nlink === 1n && created.size === stat.size
         && created.mtimeNs === stat.mtimeNs && created.ctimeNs === stat.ctimeNs))
   }
+  const registeredDefaultWorkspace = () => {
+    const team = rt.teamFolder?.()
+    const fallback = rt.defaultTeamFolder?.()
+    if (!team || !fallback) return
+    try {
+      const workspace = join(realpathSync.native(rt.home), 'workspace')
+      if (realpathSync.native(fallback) === workspace && realpathSync.native(team) === workspace) return workspace
+    } catch { /* The workspace must resolve to the default inside the team's home. */ }
+  }
+  const resultReadScope = bot => ({ allowPath: rt.resultReadAllowed?.(bot.id), teamWorkspace: registeredDefaultWorkspace() })
   const inspect = (bot, options) => inspectResult(folderOf(bot), { botId: bot.id, managedEntry,
-    ...(options?.manifest ? { allowPath: rt.resultReadAllowed?.(bot.id) } : {}), ...options })
+    ...(options?.manifest ? resultReadScope(bot) : {}), ...options })
   const snapshotOf = bot => inspect(bot).snapshot
   const resultPathsAllowed = (bot, paths) => paths.length === 0 || resultPicturePathsAllowed(folderOf(bot), paths,
-    { botId: bot.id, allowPath: rt.resultReadAllowed?.(bot.id) })
+    { botId: bot.id, ...resultReadScope(bot) })
   const assertResultPaths = (bot, paths) => {
     if (!resultPathsAllowed(bot, paths)) throw refusal('The result picture is in a protected folder.')
   }
@@ -280,7 +294,14 @@ export function install(rt) {
       const limit = activeSolverLimit(bot, track) ?? track.solver.limit
       if (question !== undefined && (!limit || limit.question !== question)) return
       track.personAt = Date.now()
-      if (track.solver.plan && !instruction) invalidateResult(track.solver)
+      if (track.solver.plan && !instruction) {
+        const progress = track.solver
+        const result = progress.review
+        // The restored designation can identify visual work until this follow-up invalidates it.
+        if (result && result.images?.v !== 1 && (result.unverified === 'images'
+          || (result.verdict === 'SHIP' && !legacyText(bot, progress)))) progress.visualReviewRequired = true
+        invalidateResult(progress)
+      }
       const directAuto = noProgressTool && instruction && track.solver.origin === 'person' && !track.solver.auto
       if (limit || directAuto) {
         if (limit) resumeProgress(track.solver, limit)
@@ -433,7 +454,7 @@ export function install(rt) {
     const { signal } = pictures ?? {}
     const images = []
     const selected = new Map()
-    const read = selector => readResultPicture(folderOf(bot), { bot, selector, signal, allowPath: rt.resultReadAllowed?.(bot.id) })
+    const read = selector => readResultPicture(folderOf(bot), { bot, selector, signal, ...resultReadScope(bot) })
     for (const selector of pictures?.selectors ?? []) {
       try {
         images.push(await pictures.find(selector))
@@ -460,9 +481,10 @@ export function install(rt) {
       assertResultPaths(bot, selectedPaths)
     }
     assertRelease()
-    let store
+    let store, identity
     if (selected.size > 0) {
       store = rt.ctx.get('attachments')
+      identity = storeIdentity(store)
       const local = await import('@deepseek-ai/dsh-attachment-local').catch(() => undefined)
       assertRelease()
       if (!local || !(store instanceof local.default)) throw refusal('This Automagik cannot prepare result pictures for review.')
@@ -502,7 +524,7 @@ export function install(rt) {
     if (outgoing.size > 0) await pictures.authorize([...outgoing.values()])
     assertRelease()
     for (const result of selected.values()) {
-      if (rt.ctx.get('attachments') !== store) throw refusal('The result picture store changed. Request the review again.')
+      if (storeIdentity(rt.ctx.get('attachments')) !== identity) throw refusal('The result picture store changed. Request the review again.')
       // The pinned store deterministically prepares the same input under its frozen policy.
       const ref = await store.saveImage(result.image)
       if (ref?.attachmentId !== result.ref.attachmentId || ref.bytes !== result.ref.bytes

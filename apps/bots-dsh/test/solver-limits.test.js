@@ -4670,6 +4670,63 @@ test('2133 T2f an already delivered legacy track stays unchanged', async t => {
   assert.deepEqual(f.track(), stored)
 })
 
+test('2133 exception 5 a first follow-up preserves restored visual verification', async t => {
+  for (const legacy of ['visual SHIP', 'unverified images', 'definite text SHIP', 'delivered SHIP']) {
+    await t.test(legacy, async t => {
+      const textOnly = legacy === 'definite text SHIP'
+      const delivered = legacy === 'delivered SHIP'
+      const f = await checkedVisualReview(t, { path: textOnly ? null : reviewPath })
+      const { h, request } = f
+      const { row } = await f.send(h)
+      const restored = structuredClone(f.track())
+      const result = restored.solver.review
+      delete result.images
+      delete restored.solver.imageBase
+      delete restored.solver.visualReviewRequired
+      result.verdict = 'SHIP'
+      result.reviewer = { id: 'reviewer', name: 'reviewer', model: refOf(reviewerModel) }
+      restored.verdicts.push({ verdict: 'SHIP', at: Date.now() + 10 })
+      if (legacy === 'unverified images') {
+        result.verdict = 'unverified'
+        result.unverified = 'images'
+        result.imagesWhy = 'missing'
+      }
+      if (delivered) {
+        restored.delivered = true
+        restored.last = { at: 17, review: 'bot', plan: true, result: true, done: true, resultExchangeId: row.source.exchangeId }
+      }
+      h.rt.botOf('solver').reviewTrack = restored
+      h.rt.dropWork(row.source.exchangeId)
+      await h.rt.reviewRequest('solver', { text: 'Please clarify the checked result.' })
+      if (delivered) {
+        assert.notEqual(await requestOf(h), request)
+        assert.deepEqual(f.track().last, restored.last)
+        assert.equal(f.track().solver.visualReviewRequired, undefined)
+        return
+      }
+      assert.equal(f.track().solver.review, undefined)
+      h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request })
+      assert.equal(f.track().last?.result, textOnly, 'only definite text can keep legacy result credit')
+      assert.equal(f.track().delivered === true, textOnly)
+      assert.equal(f.track().solver.visualReviewRequired === true, !textOnly)
+      if (textOnly) return
+      assert.equal(await requestOf(h), request)
+      assert.match(await checked(h, request, 'fresh-test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+      assert.match(await checked(h, request, 'fresh-diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+      const reviewer = answeringReviewer(t, h, { stored: f.stored })
+      const fresh = await f.send(h, [reviewPath])
+      assert.notEqual(fresh.row.source.exchangeId, row.source.exchangeId)
+      h.finish('solver', 'Waiting for the fresh RESULT review.')
+      reviewer.enter(fresh.row, 7)
+      await reviewer.answer(await reviewer.generate(), 7)
+      assert.equal(f.track().solver.visualReviewRequired, undefined)
+      assert.equal(f.track().last?.done, true)
+      assert.equal(f.track().last?.resultExchangeId, fresh.row.source.exchangeId)
+      assert.equal(f.track().delivered, true)
+    })
+  }
+})
+
 test('2133 T3c an unrelated forwarded image cannot verify the checked result', async t => {
   const f = await checkedVisualReview(t)
   const { h } = f

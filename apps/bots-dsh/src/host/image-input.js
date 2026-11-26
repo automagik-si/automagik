@@ -113,9 +113,9 @@ export function createEditInput({ rt, ctx }) {
   return { resolve, findPicture }
 }
 
-export function readResultPicture(folder, { bot, selector, signal, allowPath }) {
+export function readResultPicture(folder, { bot, selector, signal, allowPath, teamWorkspace }) {
   try {
-    const { bytes, path } = readResultFile(folder, selector, { botId: bot.id, maxBytes: MAX_IMAGE_BYTES, signal, allowPath })
+    const { bytes, path } = readResultFile(folder, selector, { botId: bot.id, maxBytes: MAX_IMAGE_BYTES, signal, allowPath, teamWorkspace })
     const mediaType = resultImageType(bytes)
     if (!mediaType) throw refused('Convert the result picture to PNG, JPEG or WebP.')
     const digest = createHash('sha256').update(bytes).digest('hex')
