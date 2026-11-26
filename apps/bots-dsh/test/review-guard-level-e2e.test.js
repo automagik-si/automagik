@@ -71,7 +71,7 @@ function replayCard(opening, closed) {
   }))
 }
 
-async function world(t, { manual = false, guard = true, attempt } = {}) {
+async function world(t, { manual = false, guard = true, attempt, replaceSessionOnRelease = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'review-guard-2132-'))
   const tracePath = join(dir, 'agent.jsonl')
   const ctx = new Context()
@@ -90,7 +90,8 @@ async function world(t, { manual = false, guard = true, attempt } = {}) {
     catalog: () => ({ defaultPreset: preset }),
   }
   const sandboxPolicy = { defaultMode: FULL, resolve: () => ({ mode: FULL }) }
-  const sessions = { list: () => [session], get: id => id === sessionId ? session : undefined }
+  let registeredSession = session
+  const sessions = { list: () => [registeredSession], get: id => id === sessionId ? registeredSession : undefined }
   for (const [key, service] of Object.entries({
     approval, permissionPresets, sandboxPolicy, sessions,
     systemPrompt: { tools() {}, section() {} },
@@ -118,6 +119,13 @@ async function world(t, { manual = false, guard = true, attempt } = {}) {
   applyAcp(ctx, { fakeAgent: FAKE, claude: false, codex: false, nativeTools: true, dshTools: true }, {
     store: { binOf: () => undefined }, find: () => undefined,
   })
+  if (replaceSessionOnRelease) {
+    const awaitApprovals = adapter.backchannel.awaitApprovals.bind(adapter.backchannel)
+    adapter.backchannel.awaitApprovals = async (...args) => {
+      await awaitApprovals(...args)
+      registeredSession = Session.create(sessionId, undefined, session.header)
+    }
+  }
   const fake = adapter.agents.get('acp-fake')
   adapter.agents.set(PROVIDER, {
     ...fake,
@@ -213,7 +221,7 @@ async function world(t, { manual = false, guard = true, attempt } = {}) {
   }
   const trace = () => readFileSync(tracePath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
   const stopOf = callId => rt.stopsView().find(stop => stop.calls.some(call => call.sessionId === sessionId && call.callId === callId))
-  return { dir, adapter, session, bot, observed, live, execute, step, trace, openOf, closeOf, stopOf }
+  return { dir, adapter, session, sessions, bot, observed, live, execute, step, trace, openOf, closeOf, stopOf }
 }
 
 for (const [label, manual, why] of [
@@ -300,5 +308,29 @@ for (const [label, prompt, command] of [['E6', 'late-command', 'touch late-2132'
     assert.ok(rendered.includes('terminal result'))
     assert.equal(rendered.includes('touch late-2132'), command !== undefined)
     t.diagnostic(JSON.stringify({ opening: args.input, command: closed.data.meta?.command ?? null, view, rendered }))
+  })
+}
+
+for (const guard of [true, false]) {
+  test(`#2132 source release preserves result provenance on ${guard ? 'marked' : 'unmarked'} mirrors`, cases, async t => {
+    const w = await world(t, { guard, replaceSessionOnRelease: true })
+    const callId = await w.execute('late-command')
+    const current = w.sessions.get(w.session.id)
+    assert.equal(current.id, w.session.id)
+    assert.notEqual(current, w.session)
+    assert.equal(w.live().dshAgent.session, w.session)
+    const opening = w.openOf(callId)
+    const closed = w.closeOf(callId)
+    assert.equal(JSON.parse(opening.data.arguments).input, null)
+    assert.equal(w.live().toolIds.get(callId), w.trace().find(event => event.event === 'own-tool-ran')?.toolCallId)
+    assert.equal(closed.data.meta?.text, 'terminal result')
+    if (guard) {
+      const stop = w.stopOf(callId)
+      assert.deepEqual([stop?.ran, stop?.mayHaveRun], [undefined, true])
+    }
+    assert.equal(closed.data.meta?.command, undefined)
+    const rendered = replayCard(opening, closed)
+    assert.ok(rendered.includes('terminal result'))
+    assert.ok(!rendered.includes('touch late-2132'))
   })
 }

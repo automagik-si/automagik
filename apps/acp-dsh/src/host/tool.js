@@ -188,7 +188,7 @@ export const reviewed = new WeakMap()
 /**
  * `images()` is the chat's image keeper (acpAgents.keepImages), or undefined. `attachments()` is
  * DSH's attachment store, where an image a call answers with is kept, or undefined.
- * @param {{ runOf(sessionId: string): { run: import('./acp.js').AgentRun, name: string } | undefined, approval(): any, sandboxPolicy?(): any, permissionPresets?(): any, images?(): { start?(call: object): void, keep(image: object): Promise<{ file: string }>, fail?(call: object): void } | undefined, attachments?(): { saveImage?(input: { data: Buffer, mediaType: string }): Promise<any> } | undefined }} host
+ * @param {{ runOf(sessionId: string): { run: import('./acp.js').AgentRun, name: string } | undefined, ownsSession?(sessionId: string, live: object, agent: object, session: object): boolean, nestedPermissionOf?(callId: string): object | undefined, approval(): any, sandboxPolicy?(): any, permissionPresets?(): any, images?(): { start?(call: object): void, keep(image: object): Promise<{ file: string }>, fail?(call: object): void } | undefined, attachments?(): { saveImage?(input: { data: Buffer, mediaType: string }): Promise<any> } | undefined }} host
  */
 export function mirrorTool(host) {
   return defineTool({
@@ -227,32 +227,39 @@ export function mirrorTool(host) {
       presentationMeta: (_args, value) => value,
     },
     async execute(args, exec) {
-      const session = exec.agent?.session
-      const live = host.runOf(session?.id)
+      const { agent, callId } = exec
+      const session = agent?.session
+      const sessionId = session?.id
+      const dispatched = host.nestedPermissionOf?.(callId)
+      const live = host.runOf(sessionId)
       const run = live?.run
       const tool = run?.tools.get(args.id)
       const observation = exec.reviewGuardUnheld
       const marked = typeof observation?.reason === 'string'
-      const dispatched = live?.nestedPermissions?.get(exec.callId)
       const dispatchNested = marked || dispatched !== undefined
-      const ownsTool = () => typeof session?.id === 'string' && session.id !== '' && exec.agent?.session === session
-        && host.runOf(session.id) === live && live?.run === run && live.calls?.has(exec.callId) === true
-        && tool !== undefined && live.toolIds?.get(exec.callId) === args.id && args.id === tool.id && run.tools.get(tool.id) === tool
-      if (marked && (run?.spec?.provider !== 'acp-claude' || live.native !== true || (tool && !ownsTool()))) {
+      const ownsTool = () => typeof sessionId === 'string' && sessionId !== '' && session.id === sessionId
+        && exec.agent === agent && agent.session === session && exec.callId === callId
+        && host.runOf(sessionId) === live && tool !== undefined && live.run === run
+        && host.ownsSession?.(sessionId, live, agent, session) === true && live.calls?.has(callId) === true
+        && live.toolIds?.get(callId) === args.id && args.id === tool.id && run.tools.get(tool.id) === tool
+      const ownedOnEntry = ownsTool()
+      const matchesQuestion = question => dispatched.live === live && dispatched.session === session && dispatched.run === run
+        && dispatched.tool === tool && dispatched.question === question && ownsTool()
+        && !exec.signal?.aborted && !run.cancelled && !run.disposed
+        && isDeepStrictEqual(dispatched.args, args) && isDeepStrictEqual(exec.arguments, args)
+        && nestedPermissionMatches(tool, question, args)
+      const rejectDispatched = () => dispatched.question.answer(optionFor('rejected', dispatched.question.options))
+      const dispatchCurrent = () => ownsTool() && (tool.permission === undefined || tool.permission === dispatched.question)
+      if (dispatched && !matchesQuestion(dispatched.question)) {
+        rejectDispatched()
+        return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent’s permission question no longer matches this call.' }
+      }
+      if (marked && (run?.spec?.provider !== 'acp-claude' || live.native !== true || (tool && !ownedOnEntry))) {
         observation.mismatch = true
         return { title: args.title, kind: args.kind, status: 'failed', text: observation.reason }
       }
       entered.add(exec)
       const position = openStepOf(session)
-      const matchesQuestion = question => dispatched.session === session && dispatched.run === run
-        && dispatched.tool === tool && dispatched.question === question && ownsTool()
-        && !exec.signal?.aborted && !run.cancelled && !run.disposed
-        && isDeepStrictEqual(dispatched.args, args) && isDeepStrictEqual(exec.arguments, args)
-        && nestedPermissionMatches(tool, question, args)
-      if (dispatched && !matchesQuestion(dispatched.question)) {
-        dispatched.question.answer(optionFor('rejected', dispatched.question.options))
-        return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent’s permission question no longer matches this call.' }
-      }
       if (!tool || tool.retired === true) return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent is no longer running this call.' }
       // The card follows an image being made from its start (the keeper's progress).
       if (isImageCall(tool)) {
@@ -262,6 +269,10 @@ export function mirrorTool(host) {
       try {
         try {
           for (;;) {
+            if (dispatched && !dispatchCurrent()) {
+              rejectDispatched()
+              break
+            }
             if (exec.signal?.aborted) {
               tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
               // The agent may ignore the cancel: the host gives its prompt a bounded time to end.
@@ -269,7 +280,7 @@ export function mirrorTool(host) {
               await live.run.cancel()
               break
             }
-            if (dispatchNested && !ownsTool()) break
+            if (marked && !dispatched && !ownsTool()) break
             const permission = tool.permission
             if (permission && !permission.asked) {
               permission.asked = true
@@ -328,14 +339,16 @@ export function mirrorTool(host) {
           // The card's body is done asking, however it left: a question that comes for the call
           // now has nobody to ask it, and the agent's run answers it as cancelled (acp.js
           // onPermission). One still stored when the body failed is withdrawn the same way.
-          tool.mirrored = true
-          tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
+          if (!dispatched || dispatchCurrent()) {
+            tool.mirrored = true
+            tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
+          }
         }
         if (!exec.signal?.aborted && isTerminal(tool)) {
           try {
             await host.bridgeApprovals?.(exec.agent?.session?.id, position, exec.signal)
           } catch {}
-          if (exec.signal?.aborted) {
+          if (exec.signal?.aborted && (!dispatched || dispatchCurrent())) {
             tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
             host.cancelled?.(exec.agent?.session?.id, live)
             await live.run.cancel()
@@ -343,12 +356,14 @@ export function mirrorTool(host) {
         }
         // Only an image-generation call is answered as a kept image; any other call that answers
         // with an image (a Read, a screenshot) keeps its own result, image blocks included.
-        if (isImageCall(tool)) return await imageResult(host, live, tool, exec)
-        const result = await resultOf(tool, host.attachments?.())
-        if (tool.kind === 'execute') {
+        const image = isImageCall(tool)
+        const result = await (image ? imageResult(host, live, tool, exec) : resultOf(tool, host.attachments?.()))
+        const ownedAtRelease = ownedOnEntry && ownsTool()
+        if (marked && !ownedAtRelease) delete observation.refused
+        if (!image && tool.kind === 'execute') {
           Object.assign(result, terminalResult(live, tool, args, exec))
           const evidence = tool.terminalEvidence
-          if (ownsTool() && typeof run.sessionId === 'string' && run.sessionId !== ''
+          if (ownedAtRelease && typeof run.sessionId === 'string' && run.sessionId !== ''
             && evidence?.sessionId === run.sessionId && !evidence.reason && !tool.retired) {
             if (!commandOf(args.input) && typeof evidence.command === 'string'
               && evidence.command !== '' && evidence.command === commandOf(tool.rawInput)) {

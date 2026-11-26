@@ -1323,7 +1323,10 @@ function guardedMirror(t, { provider = 'acp-claude', native = true, marked = tru
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 1 })
   const level = auto ? 'auto' : 'danger-full-access'
+  const agent = { session }
   const ctx = {
+    agents: new Map([[session.id, agent]]),
+    sessions: new Map([[session.id, session]]),
     get(name) {
       return {
         approval: { effectivePolicy: () => 'never' },
@@ -1336,9 +1339,9 @@ function guardedMirror(t, { provider = 'acp-claude', native = true, marked = tru
   t.after(() => adapter.dispose())
   const run = new AgentRun({ name: 'Guarded ACP', provider })
   run.sessionId = 'guarded-acp'
-  const live = { name: 'Guarded ACP', run, native, calls: new Set(['mirror']), toolIds: new Map([['mirror', 'parent']]) }
+  const live = { name: 'Guarded ACP', run, native, dshAgent: agent, calls: new Set(['mirror']), toolIds: new Map([['mirror', 'parent']]) }
   adapter.live.set(session.id, live)
-  const exec = { name: TOOL_NAME, callId: 'mirror', agent: { session }, signal: t.signal,
+  const exec = { name: TOOL_NAME, callId: 'mirror', agent, signal: t.signal,
     ...(marked ? { reviewGuardUnheld: { reason: 'Held by the guard' } } : {}) }
   async function update(toolCallId, details, sessionId = run.sessionId) {
     return await run.onUpdate({ sessionUpdate: 'tool_call_update', toolCallId, ...details }, sessionId)
@@ -1462,3 +1465,64 @@ test('#2132 AZ-R3 unmarked mirrors omit a late command when the mapping does not
   h.live.toolIds.set('mirror', 'other-call')
   assert.equal((await h.execute(args)).command, undefined)
 })
+
+for (const release of ['current live', 'replacement live at body entry', 'replacement live at pre-body refusal', 'replacement question']) {
+  test('#2132 source dispatch ' + release, async t => {
+    const h = guardedMirror(t)
+    const parent = await h.prepare()
+    h.exec.toolSet = {}
+    h.run.prompting = new Promise(() => {})
+    await h.update('child', { kind: 'read', title: 'Read notes', status: 'pending', rawInput: { path: 'notes.txt' } })
+    const child = h.run.tools.get('child')
+    const original = h.question(child.id)
+    const get = h.adapter.ctx.get
+    let replacement
+    let dispatched = false
+    h.adapter.ctx.get = name => name === 'tools' ? { execute: async ({ calls: [call], agent, signal }) => {
+      dispatched = true
+      h.run.prompting = undefined
+      const args = JSON.parse(call.arguments)
+      const exec = { name: call.name, callId: call.id, arguments: args, agent, signal }
+      if (release.startsWith('replacement live')) {
+        const run = new AgentRun({ name: 'Replacement ACP', provider: 'acp-claude' })
+        const tool = run.seeTool({ toolCallId: child.id, kind: args.kind, title: args.title, status: 'pending', rawInput: args.input })
+        h.adapter.live.set(agent.session.id, {
+          name: run.spec.name, native: true, dshAgent: agent, run,
+          calls: new Set([call.id]), toolIds: new Map([[call.id, tool.id]]),
+        })
+        replacement = run.onPermission({ toolCall: { toolCallId: tool.id }, options: OPTIONS }, signal)
+      } else if (release === 'replacement question') {
+        replacement = h.question(child.id)
+      }
+      try {
+        if (release === 'replacement live at pre-body refusal') h.adapter.refusedFirst(exec)
+        else await h.adapter.tool.execute(args, exec)
+      } finally {
+        await h.update(parent.id, { status: 'completed' })
+      }
+    } } : get(name)
+    await h.execute()
+    assert.equal(dispatched, true)
+    if (replacement) assert.equal(await soon(replacement), 'still waiting', 'the replacement question is untouched')
+    const answer = release === 'current live' ? picked('yes') : release === 'replacement question' ? CANCELLED : picked('no')
+    assert.deepEqual(await original, answer)
+  })
+}
+
+for (const owner of ['current', 'different live Agent', 'different registered Agent', 'missing registered Session']) {
+  test('#2132 source ownership ' + owner + ' at release', async t => {
+    const h = guardedMirror(t)
+    const { agent } = h.exec
+    await h.update('parent', { kind: 'execute', status: 'in_progress', title: 'Parent' })
+    const args = callArguments(h.run.tools.get('parent'))
+    await h.update('parent', { status: 'completed', rawInput: { command: 'echo synthetic-owner' } })
+    h.adapter.backchannel = { awaitApprovals() {
+      if (owner === 'different live Agent') h.live.dshAgent = { session: agent.session }
+      if (owner === 'different registered Agent') h.adapter.ctx.agents.set(agent.session.id, { session: agent.session })
+      if (owner === 'missing registered Session') h.adapter.ctx.sessions.delete(agent.session.id)
+    } }
+    const result = await h.execute(args)
+    assert.equal(result.command, owner === 'current' ? 'echo synthetic-owner' : undefined)
+    assert.equal(h.exec.reviewGuardUnheld.ran, owner === 'current' ? true : undefined)
+  })
+}

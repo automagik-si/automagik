@@ -626,6 +626,9 @@ function withOfferedEfforts(entry, models) {
 }
 
 export class AcpAdapter extends LlmAdapter {
+  // Strict dispatches outlive replacement of a Session's live ACP run.
+  #nestedPermissions = new Map()
+
   /**
    * @param {import('@deepseek-ai/cordis').Context} ctx
    * @param {Map<string, { name: string, catalog: import('./catalog.js').Catalog, installed?(): boolean, spawn(): { command: string, args?: string[], env?: Record<string, string> } }>} agents
@@ -693,6 +696,9 @@ export class AcpAdapter extends LlmAdapter {
     this.tool = mirrorTool({
       sessionFiles: (...args) => this.sessionFiles.ask(...args),
       runOf: sessionId => this.live.get(sessionId),
+      ownsSession: (sessionId, live, agent, session) => live.dshAgent === agent
+        && this.ctx.agents?.get?.(sessionId) === agent && this.ctx.sessions?.get?.(sessionId) === session,
+      nestedPermissionOf: callId => this.#nestedPermissions.get(callId),
       cancelled: (sessionId, live) => this.reap(sessionId, live),
       bridgeApprovals: (sessionId, position, signal) =>
         this.backchannel?.awaitApprovals?.(sessionId, position, signal),
@@ -809,8 +815,7 @@ export class AcpAdapter extends LlmAdapter {
     live.calls.add(id)
     live.toolIds.set(id, nested.id)
     if (boundQuestion) {
-      live.nestedPermissions ??= new Map()
-      live.nestedPermissions.set(id, { session, run, tool: nested, question: boundQuestion, args })
+      this.#nestedPermissions.set(id, { live, session, run, tool: nested, question: boundQuestion, args })
     }
     try {
       await tools.execute({
@@ -823,11 +828,13 @@ export class AcpAdapter extends LlmAdapter {
     } catch (error) {
       this.warn(`a nested call was not recorded: ${error?.message ?? error}`)
     } finally {
+      this.#nestedPermissions.delete(id)
       hide()
       live.calls.delete(id)
       live.toolIds.delete(id)
-      live.nestedPermissions?.delete(id)
-      if (nested.permission === question) nested.cardExecuted = undefined
+      if (nested.cardExecuted === id && nested.permission !== undefined && (boundQuestion || nested.permission === question)) {
+        nested.cardExecuted = undefined
+      }
     }
     return nested.permission !== question
   }
@@ -839,6 +846,8 @@ export class AcpAdapter extends LlmAdapter {
    */
   refusedFirst(exec) {
     try {
+      // The waiting mirror settles the captured question if its strict dispatch never enters.
+      if (exec?.name === TOOL_NAME && this.#nestedPermissions.has(exec.callId)) return
       if (exec?.name === TOOL_NAME && exec.parent === undefined) {
         const live = this.live.get(exec.agent?.session?.id)
         live?.pendingMirrors?.delete(exec.callId)
