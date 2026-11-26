@@ -745,7 +745,7 @@ export function install(rt) {
   ctx.on('tools/execute', async (exec, next) => {
     const session = exec.agent?.session
     const call = calls.get(pair(session?.id, exec.callId))
-    if (!call?.start || call.session !== session) return next()
+    if (!call?.start || call.session !== session) return rt.dispatchSolverProgress?.(exec, next) ?? next()
     if (call.dispatch) {
       demote(call)
       return next()

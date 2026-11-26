@@ -7,8 +7,12 @@
 // can say which task waits, and the task's thread waits in amber. A subagent child's
 // ask is held under its Bot, where the person can answer it.
 import { createHash, randomUUID } from 'node:crypto'
+import { symbols } from '@deepseek-ai/cordis'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { bindTicketDesk } from './grant-ticket.js'
 import { bindGrantDecisions, grantInternals } from './grants.js'
+import { refusal } from './refusal.js'
+import { isTrustedToolRegistration } from './tool-registrations.js'
 
 const claimers = new WeakMap()
 const grantRefusal = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
@@ -37,6 +41,141 @@ const TOLD_MAX = 1000
 export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall', 'show_settings', 'propose_bot_change'])
 export const teamToolOf = name => String(name ?? '').replace(/^mcp__dsh__/, '')
 
+const SOLVER_PROGRESS = 'solver_progress'
+// A live ACP call can span a Bots reinstall. Keep its receipt on DSH's Session,
+// which owns the call, so a fresh runtime can still require a fresh decision.
+const solverProgressReceipts = Symbol.for('@automagik/bots-dsh/solver-progress-receipts')
+
+export const hasRoutineSolverApproval = (session, callId) => session?.[solverProgressReceipts]?.get(callId) != null
+
+const sameBinding = (current, prior) => current !== undefined && current.service === prior.service
+  && current.registration === prior.registration && current.definition === prior.definition
+
+function bindSolverProgressApproval(rt) {
+  const { ctx } = rt
+  const shipped = rt.teamTools?.find(tool => tool.name === SOLVER_PROGRESS)
+  const recorded = new WeakMap()
+  const lifetime = {}
+  const agentOf = id => ctx.get?.('agents')?.get(id)
+  const callOf = (session, id) => rt.live?.get(session?.id)?.calls?.get(id)
+  const toolsOf = () => ctx.get?.('tools') ?? ctx.tools
+  function bindingOf(agent, name, toolSet) {
+    const tools = toolsOf()
+    const registration = tools?.view?.(agent).registrations?.get(name)
+    if (registration === undefined) return undefined
+    const definition = tools.executable(name, agent, toolSet)
+    if (definition === undefined || definition !== registration.definition) return undefined
+    return { service: tools[symbols.original] ?? tools, registration, definition }
+  }
+
+  function shippedBindingOf(agent, name, toolSet) {
+    const binding = bindingOf(agent, name, toolSet)
+    if (binding !== undefined && binding.definition === shipped && isTrustedToolRegistration(binding.registration)
+      && scopeOf(agent.ctx) === agent
+      && binding.service.layers.peek(agent)?.tools.get(SOLVER_PROGRESS) === binding.registration) return binding
+  }
+
+  function ownSolver(agent, session) {
+    const id = session?.id
+    if (typeof id !== 'string' || agent?.session !== session || agent.id !== id || agentOf(id) !== agent
+      || session.header?.origin === 'subagent' || rt.groupOwners.has(id)
+      || rt.state?.tasks?.[id] !== undefined || rt.taskOwners?.has(id)) return undefined
+    const bot = rt.botOfSession(id, agent, { followParents: false })
+    if (bot === undefined || rt.chatOwners.get(id) !== bot.id || rt.chatOf(bot.id) !== id) return undefined
+    const track = bot.reviewTrack
+    if (bot.reviewGuard === true || (track?.requested === true && typeof track.solver?.request === 'string'
+      && track.solver.request !== '')) return bot
+  }
+
+  function recordSolverProgressCall(session, call) {
+    if (teamToolOf(call.name) !== SOLVER_PROGRESS) return
+    try {
+      const agent = agentOf(session.id)
+      if (agent?.session !== session) return
+      const binding = shippedBindingOf(agent, call.name)
+      if (binding !== undefined) recorded.set(call, { ...binding, agent, session })
+    } catch {}
+  }
+
+  // One answer, between the review guard and Auto. The live call, its Agent's
+  // exact registration and the current direct Solver owner must all agree.
+  function answerSolverProgress(request) {
+    try {
+      const { agent, callId, signal, toolName } = request
+      if (typeof toolName !== 'string' || teamToolOf(toolName) !== SOLVER_PROGRESS || typeof callId !== 'string'
+        || request.bridgeCall?.agentAsked !== false || request.mirrorCall !== undefined || !signal || signal.aborted) return undefined
+      const session = agent?.session
+      const call = callOf(session, callId)
+      const binding = recorded.get(call)
+      if (binding?.agent !== agent || binding?.session !== session || call?.name !== toolName
+        || !sameBinding(shippedBindingOf(agent, toolName), binding)) return undefined
+      const bot = ownSolver(agent, session)
+      if (bot === undefined || session[solverProgressReceipts]?.has(callId)) return undefined
+      const args = JSON.stringify(JSON.parse(call.args))
+      if (session[solverProgressReceipts] === undefined) {
+        Object.defineProperty(session, solverProgressReceipts, { value: new Map() })
+      }
+      session[solverProgressReceipts].set(callId, { ...binding, lifetime, bot, call, signal, args })
+      recorded.delete(call)
+      return 'allowed-once'
+    } catch { return undefined }
+  }
+
+  function stillOpen(session, callId, receipt) {
+    if (receipt.lifetime === lifetime) return callOf(session, callId) === receipt.call
+    // A reinstall has a new live-call map. The Session can show whether the
+    // original call is still open for ordinary approval, even across that gap.
+    if (!Number.isInteger(receipt.call.seq)) return false
+    const tail = session.snapshotEvents?.(receipt.call.seq + 1)
+    return tail !== undefined && !tail.some(({ type, data }) =>
+      ['turn/start', 'turn/end', 'step/start', 'step/end'].includes(type)
+      || (type === 'tool/call' && data?.callId === callId)
+      || (type === 'tool/result' && (data?.message?.toolCallId ?? data?.callId) === callId))
+  }
+
+  function dispatchSolverProgress(exec, next) {
+    const session = exec.agent?.session
+    const { callId } = exec
+    const receipts = session?.[solverProgressReceipts]
+    const receipt = receipts?.get(callId)
+    if (receipt === undefined) return undefined
+    if (receipt === null && teamToolOf(exec.name) !== SOLVER_PROGRESS) return undefined
+    const changed = () => refusal('The Solver progress call changed before it ran. Make the call again.')
+    if (receipt === null || receipt.claimed) throw changed()
+    const { agent, bot, call, signal, args } = receipt
+    const matches = () => exec.agent === agent && agent.session === session && agentOf(session.id) === agent
+      && exec.callId === callId && exec.parent === undefined && exec.name === call.name && JSON.stringify(exec.arguments) === args
+      && !exec.signal.aborted && !signal.aborted && receipts.get(callId) === receipt && stillOpen(session, callId, receipt)
+    if (!matches()) throw changed()
+    receipt.claimed = true
+    if (receipt.lifetime === lifetime && ownSolver(agent, session) === bot
+      && sameBinding(shippedBindingOf(agent, exec.name, exec.toolSet), receipt)) return Promise.resolve(next())
+
+    // Ask through DSH as an ordinary request. A policy or a person may decline
+    // it, and the body must still be the one that was offered when DSH asked.
+    const current = bindingOf(agent, exec.name, exec.toolSet)
+    if (current === undefined) throw refusal('The changed Solver progress call is no longer available.')
+    const approval = ctx.get?.('approval')
+    return Promise.resolve(approval?.request({ agent, callId, toolName: exec.name,
+      reason: 'The Solver progress binding changed. Allow this call once?', signal: exec.signal })).then(outcome => {
+      if (outcome !== 'allowed-once' || !matches() || !sameBinding(bindingOf(agent, exec.name, exec.toolSet), current)) {
+        throw refusal('The changed Solver progress call did not receive approval.')
+      }
+      return next()
+    })
+  }
+
+  // A closed receipt carries no proof. Keep only the ID until the next turn
+  // to block delayed dispatch of the closed progress call.
+  const endSolverProgressCall = (session, callId) => {
+    const receipts = session[solverProgressReceipts]
+    if (receipts?.has(callId)) receipts.set(callId, null)
+  }
+  const resetSolverProgressApprovals = session => session[solverProgressReceipts]?.clear()
+  Object.assign(rt, { recordSolverProgressCall, answerSolverProgress, dispatchSolverProgress,
+    endSolverProgressCall, resetSolverProgressApprovals })
+}
+
 export function answerableOwner(rt, owner) {
   return owner?.child === true && rt.botOf?.(owner.botId) !== undefined
     && (owner.kind === 'chat' || owner.kind === 'group' || (owner.kind === 'task' && rt.state?.tasks?.[owner.taskId]?.status === 'working'))
@@ -44,6 +183,7 @@ export function answerableOwner(rt, owner) {
 
 export function install(rt) {
   const { ctx } = rt
+  bindSolverProgressApproval(rt)
   /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string, decidedBy?:string, why?:string)=>boolean}>} */
   const pending = new Map()
   const grantContext = new WeakMap()

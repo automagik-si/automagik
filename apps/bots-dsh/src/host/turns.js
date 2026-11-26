@@ -542,8 +542,12 @@ export function install(rt) {
     if (name !== undefined) setActivity(id, name === 'ask_user' || name === 'show_view' ? undefined : activityOf(name))
     else if (entry.turn !== undefined) setActivity(id, 'thinking')
   }
-  const startCall = (id, entry, callId, name, args) => {
-    if (typeof callId === 'string') (entry.calls ??= new Map()).set(callId, { name, args })
+  const startCall = (id, entry, callId, name, args, session, event) => {
+    if (typeof callId === 'string') {
+      const call = { name, args, turn: event?.data?.turn, step: event?.data?.step, seq: event?.seq }
+      if (session !== undefined) rt.recordSolverProgressCall?.(session, call)
+      ;(entry.calls ??= new Map()).set(callId, call)
+    }
     showCall(id, entry)
   }
   const endCall = (id, entry, callId) => {
@@ -920,7 +924,7 @@ export function install(rt) {
       }
       case 'tool/call': {
         const name = String(event.data?.name ?? '')
-        startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''))
+        startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''), session, event)
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (name !== PROGRAM_TOOL) {
           entry.toolCount = (entry.toolCount ?? 0) + 1
@@ -938,10 +942,25 @@ export function install(rt) {
       case 'tool/ptc-dispatch':
         endCall(id, entry, event.data?.subCallId)
         break
-      case 'tool/result':
-        endCall(id, entry, event.data?.callId)
+      case 'tool/result': {
+        const callId = event.data?.message?.toolCallId ?? event.data?.callId
+        endCall(id, entry, callId)
+        rt.endSolverProgressCall?.(session, callId)
         break
+      }
+      case 'step/end': {
+        let closed = false
+        for (const [callId, call] of entry.calls ?? []) {
+          if (call.turn !== event.data?.turn || call.step !== event.data?.step) continue
+          entry.calls.delete(callId)
+          rt.endSolverProgressCall?.(session, callId)
+          closed = true
+        }
+        if (closed) showCall(id, entry)
+        break
+      }
       case 'turn/start':
+        rt.resetSolverProgressApprovals?.(session)
         setActivity(id, 'thinking')
         setFailed(id, undefined)
         entry.turn = event.data.turn
