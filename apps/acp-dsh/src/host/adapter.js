@@ -923,10 +923,11 @@ export class AcpAdapter extends LlmAdapter {
     const session = dshAgent?.session
     const sessionId = session?.id
     const agyOff = provider === 'acp-antigravity' && live.nativeOff === true
-    const historyLive = () => live.open === true && live.run?.busy === true && live.held === undefined && !live.archived &&
+    const historyLive = (requireRegisteredSession = false) => live.open === true && live.run?.busy === true &&
+      live.held === undefined && !live.archived &&
       this.live.get(sessionId) === live && live.bridge === record && this.agents.get(provider) === providerRow &&
       this.ctx.agents?.get?.(sessionId) === dshAgent && dshAgent.session === session &&
-      (typeof this.ctx.sessions?.get !== 'function' || this.ctx.sessions.get(sessionId) === session) &&
+      (typeof this.ctx.sessions?.get === 'function' ? this.ctx.sessions.get(sessionId) === session : !requireRegisteredSession) &&
       this.historyWanted(providerRow, sessionId, provider, provider === 'acp-antigravity' && live.nativeOff === true)
     const record = this.backchannel.mint({
       sessionId, agent: dshAgent, name, only, skillRefusal, canList, native: live.twinsOff === true,
@@ -938,8 +939,8 @@ export class AcpAdapter extends LlmAdapter {
           ? live.run.restrictedCall(callId, name, prompt, claim) : undefined,
         ...(provider === 'acp-antigravity' && !agyOff && {
           restrictedRequest: (name, prompt) => name === HISTORY_TOOL_NAME && prompt !== undefined &&
-            !prompt.aborted && historyLive() && prompt === live.run.historySignal,
-          restrictedClaim: callId => live.run.restrictedClaim(callId),
+            !prompt.aborted && historyLive(true) && prompt === live.run.historySignal,
+          restrictedClaim: (callId, operation) => live.run.restrictedClaim(callId, operation),
         }),
       }),
     })

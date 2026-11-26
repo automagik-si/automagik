@@ -57,9 +57,8 @@ const requestHistory = (record, name) => name === HISTORY_TOOL_NAME && record.re
 function historyRequestAllowed(record, name, callId, prompt) {
   if (!record.restrictedRequest(name, prompt)) return false
   if (!callId) return true
-  // A verified ACP call claiming the wrong operation becomes a conflict even on this route.
-  record.restrictedCall(callId, name, prompt)
-  const claim = record.restrictedClaim(callId)
+  // A verified operation can conflict even if the ACP call was never bound to a prompt.
+  const claim = record.restrictedClaim(callId, name)
   return claim === 'unknown' || claim === 'live'
 }
 
@@ -548,7 +547,7 @@ export class Backchannel {
    *   historyPrompt?: () => AbortSignal | undefined,
    *   restrictedCall?: (callId: string | undefined, name: string, prompt?: AbortSignal, claim?: { refused?: boolean }) => any,
    *   restrictedRequest?: (name: string, prompt?: AbortSignal) => boolean,
-   *   restrictedClaim?: (callId: string) => 'unknown' | 'retired' | 'conflict' | 'live',
+   *   restrictedClaim?: (callId: string, operation: string) => 'unknown' | 'retired' | 'conflict' | 'live',
    *   promptSkillRefusals?: () => Set<string> | undefined,
    *   native?: boolean, only?: Set<string>, skillRefusal?: boolean, skillOnly?: boolean, canList?: () => boolean }} options
    */

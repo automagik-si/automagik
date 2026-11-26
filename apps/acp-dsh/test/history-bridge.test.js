@@ -161,6 +161,13 @@ test('C2 only the eligible omp Session gets one restricted dsh bridge', async t 
 
 function agyHistory(t, nativeTools, options) {
   const h = agyWorld(t, options)
+  const sessions = h.adapter.ctx.sessions = new Map()
+  const chat = h.chat
+  h.chat = id => {
+    const opened = chat(id)
+    sessions.set(opened.session.id, opened.session)
+    return opened
+  }
   h.service.botIdentity(() => ({ name: 'Fixture Bot', needsDshTools: true, nativeTools, nativeToolsAgent: AGY }))
   h.executed = []
   h.controls.body = () => 'synthetic marker [secret:fixture]'
@@ -360,11 +367,12 @@ function openAgyHistory(h) {
   return chat
 }
 
-function observeAgyBridge(t, h) {
+function observeAgyBridge(t, h, beforeCall) {
   const calls = []
   const bridge = h.adapter.backchannel
   const call = bridge.call
   t.mock.method(bridge, 'call', async (record, request) => {
+    beforeCall?.(record, request)
     const observation = { request, pending: h.approvals.length, permission: h.events('permission-answer').at(-1)?.answer,
       claim: h.adapter.live.get(record.sessionId)?.run.restrictedClaim?.(request.callId) }
     calls.push(observation)
@@ -444,6 +452,98 @@ test('D2d T4a an unseen MCP id keeps its own card and row', agyTest, async t => 
   assert.equal(observed[0].claim, 'unknown')
   assert.equal(h.approvals[0].callId, 'mcp-unseen-1')
   assert.equal(resultRows(chat.session)[0].data.message.toolCallId, 'mcp-unseen-1')
+})
+
+const cancelledHistory = { content: [], isError: true,
+  error: { name: 'BridgeCancelledError', code: 'BRIDGE_CANCELLED' } }
+const emptyMcpReply = { content: [{ type: 'text', text: '' }], isError: true }
+
+test('AD2T-1 verified unbound operation conflict leaves an unknown id independent', agyTest, async t => {
+  const h = agyHistory(t, true)
+  agySkills(h)
+  const chat = openAgyHistory(h)
+  const mismatch = 'synthetic-skill-id'
+  const unknown = 'synthetic-unseen-id'
+  let seeded
+  const observed = observeAgyBridge(t, h, (record, request) => {
+    if (request.callId !== mismatch) return
+    const { run } = h.adapter.live.get(record.sessionId)
+    // Seed only the verified identity. No ACP prompt owned this synthetic Skills claim.
+    const tool = { id: mismatch }
+    run.markCall(tool, { name: 'mcp__dsh__load_skill' }, run.sessionId)
+    run.tools.set(mismatch, tool)
+    seeded = { operation: tool.skillOperation, prompt: tool.skillPrompt, bridge: tool.skillBridge }
+  })
+  const chunks = await chat.turn(agyRequest(
+    { query: 'wrong operation', meta: mismatch, permission: false },
+    { query: 'independent history', meta: unknown, permission: false }))
+  const { run } = h.adapter.live.get(chat.session.id)
+  const wire = h.events('agy-real-result').map(({ answer }) => answer)
+  const allowed = { content: [{ type: 'text', text: maskedLine }], isError: false }
+  assert.deepEqual(seeded, { operation: SKILL, prompt: undefined, bridge: true })
+  assert.deepEqual(observed.map(({ claim }) => claim), ['live', 'unknown'])
+  assert.deepEqual({
+    mismatchClaim: run.restrictedClaim(mismatch),
+    approvals: h.approvals.map(({ callId }) => callId),
+    bodies: h.executed.map(({ id }) => id),
+    replies: observed.map(({ result }) => result),
+    wire,
+    rows: callRows(chat.session).map(({ data }) => data.callId),
+  }, {
+    mismatchClaim: 'conflict',
+    approvals: [unknown],
+    bodies: [unknown],
+    replies: [cancelledHistory, allowed],
+    wire: [emptyMcpReply, allowed],
+    rows: [unknown],
+  })
+  assertAgyRead(chunks, h, 1)
+})
+
+test('AD2T-1 verifies registered Session identity before approval and release', agyTest, async t => {
+  for (const loss of ['unavailable lookup', 'missing Session', 'mismatched Session']) {
+    for (const beforeRelease of [false, true]) {
+      await t.test(`${loss} before ${beforeRelease ? 'release' : 'approval'}`, async t => {
+        const h = agyHistory(t, true)
+        const chat = openAgyHistory(h)
+        const { ctx } = h.adapter
+        const callId = 'synthetic-session-check'
+        const loseRegistration = () => {
+          if (loss === 'unavailable lookup') ctx.sessions = undefined
+          else if (loss === 'missing Session') ctx.sessions.delete(chat.session.id)
+          else ctx.sessions.set(chat.session.id, Session.create(chat.session.id))
+        }
+        let registered
+        const observed = observeAgyBridge(t, h, (record, request) => {
+          if (request.callId !== callId) return
+          registered = ctx.sessions.get(record.sessionId)
+          if (!beforeRelease) loseRegistration()
+        })
+        h.controls.body = () => {
+          if (beforeRelease) loseRegistration()
+          return maskedLine
+        }
+        const chunks = await chat.turn(agyRequest({ query: 'Session check', meta: callId, permission: false }))
+        assert.equal(registered, chat.session)
+        assert.equal(h.adapter.live.get(chat.session.id).dshAgent.session, chat.session)
+        const expectedCalls = beforeRelease ? [callId] : []
+        assert.deepEqual({
+          approvals: h.approvals.map(request => request.callId),
+          bodies: h.executed.map(call => call.id),
+          replies: observed.map(({ result }) => result),
+          wire: h.events('agy-real-result').map(({ answer }) => answer),
+          rowErrors: resultRows(chat.session).map(({ data }) => data.error),
+        }, {
+          approvals: expectedCalls,
+          bodies: expectedCalls,
+          replies: [cancelledHistory],
+          wire: [emptyMcpReply],
+          rowErrors: beforeRelease ? [cancelledHistory.error] : [],
+        })
+        assert.doesNotMatch(JSON.stringify([chunks, chat.session.snapshotEvents()]), /synthetic marker/)
+      })
+    }
+  }
 })
 
 for (const [label, claim] of [['T4b', 'retired'], ['T4c', 'conflict']]) {

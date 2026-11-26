@@ -1095,10 +1095,13 @@ export class AgentRun {
     return tool
   }
 
-  restrictedClaim(callId) {
+  restrictedClaim(callId, operation) {
     const tool = this.tools.get(callId)
     if (tool === undefined) return 'unknown'
     if (tool.retired === true) return 'retired'
+    if (operation !== undefined && tool.skillOperation !== undefined && tool.skillOperation !== operation) {
+      this.conflictSkill(tool)
+    }
     return tool.skillConflict === true ? 'conflict' : 'live'
   }
 
