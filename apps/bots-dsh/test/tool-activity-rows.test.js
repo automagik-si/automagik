@@ -12,6 +12,7 @@ import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-dee
 import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { advertise, Backchannel } from '../../acp-dsh/src/host/backchannel.js'
 import { callerItems } from '../src/host/caller-view.js'
+import { STEER_CUT } from '../src/host/constants.js'
 import { DshChatSource, PREVIEW_MAX, rowIdOf, rowsOf } from '../src/host/pocket-chat.js'
 import { allowlist, fixture, guest, member } from './caller-fixture.js'
 import { afterRound } from './relay-rows.js'
@@ -459,6 +460,7 @@ test('AT-5 mirrors on all other ACP routes, the remote route, and a successful b
       for (let repeat = 0; repeat < 2; repeat++) {
         const outside = await fake.bridge.selfOpenedCall({ agent: fake.agent, controllers: new Set() }, {
           name: 'list_bots', raw: '{}', callId: 'outside', authority: t.signal, ended: () => false,
+          origin: { turn: 1, exchangeId: null },
         })
         assert.equal(outside.isError, false)
       }
@@ -696,11 +698,11 @@ test('round 2 AT-3: Pocket cold history and resume require evidence after hidden
   assert.deepEqual({ history: view(history), resume: view(resumed.rows) }, { history: expected, resume: expected })
 })
 
-function beginReceipt(t, fake, id) {
+function beginReceipt(t, fake, id, origin) {
   const result = Promise.withResolvers()
   t.mock.method(fake.tools, 'execute', () => result.promise)
   const run = fake.bridge.selfOpenedCall({ agent: fake.agent, controllers: new Set() }, {
-    name: 'list_bots', raw: '{}', callId: id, authority: t.signal, ended: () => false,
+    name: 'list_bots', raw: '{}', callId: id, authority: t.signal, ended: () => false, origin,
   })
   return async () => {
     result.resolve({ results: [{ result: { content: [text('Synthetic receipt.')], isError: false } }] })
@@ -721,11 +723,11 @@ test('round 2 AT-3/5/7: delayed receipts keep their own visible turn or exact ro
   const fake = fakeAcp(t, session, 'acp-fixture')
   openTurn(session, 1, privateOpener(0, 'private-origin').data)
   endBeforeReceipt(session, 1)
-  const privateReceipt = beginReceipt(t, fake, 'private-receipt')
+  const privateReceipt = beginReceipt(t, fake, 'private-receipt', { turn: 1, exchangeId: 'private-origin' })
   openTurn(session, 2, user('Visible request.'))
   await privateReceipt()
   endBeforeReceipt(session, 2)
-  const publicReceipt = beginReceipt(t, fake, 'visible-receipt')
+  const publicReceipt = beginReceipt(t, fake, 'visible-receipt', { turn: 2, exchangeId: null })
   openTurn(session, 3, privateOpener(0, 'later-private').data)
   const visible = await publicReceipt()
   const events = session.snapshotEvents()
@@ -754,10 +756,10 @@ test('round 2 AT-3/5/7: delayed receipts keep their own visible turn or exact ro
   }
   startRoom(1, roomSource('first-exchange'))
   endBeforeReceipt(room, 1)
-  const ownRelay = beginReceipt(t, roomFake, 'first-receipt')
+  const ownRelay = beginReceipt(t, roomFake, 'first-receipt', { turn: 1, exchangeId: 'first-exchange' })
   startRoom(2, privateSource('private-room-origin'))
   endBeforeReceipt(room, 2)
-  const outsideRelay = beginReceipt(t, roomFake, 'private-room-receipt')
+  const outsideRelay = beginReceipt(t, roomFake, 'private-room-receipt', { turn: 2, exchangeId: 'private-room-origin' })
   startRoom(3, roomSource('next-exchange'))
   const roomVisible = await ownRelay()
   const roomHidden = await outsideRelay()
@@ -883,4 +885,136 @@ test('round 2 AT-3/5: Pocket deduplicates replays within each invocation of a re
     [2, rowIdOf('b', 9), 'read · other.md'],
     [2, rowIdOf('b', 9), 'Second note.'],
   ])
+})
+
+test('privacy exception 1: a background call needs a confirmed origin for every activity projection', async t => {
+  const f = fixture(t)
+  await f.start()
+  const session = Session.create('b')
+  const fake = fakeAcp(t, session, 'acp-fixture')
+  fake.tools.definitions = () => [{ name: 'list_bots' }]
+  openTurn(session, 1, privateOpener(0, 'earlier-private').data)
+  endBeforeReceipt(session, 1)
+  openTurn(session, 2, user('A later visible request.'))
+  endBeforeReceipt(session, 2)
+  const record = fake.bridge.mint({ sessionId: session.id, agent: fake.agent })
+  const unknown = await fake.bridge.call(record, { name: 'list_bots', callId: 'unattributed' })
+  const confirmed = await fake.bridge.selfOpenedCall(record, {
+    name: 'list_bots', raw: '{}', callId: 'confirmed', authority: t.signal, ended: () => false,
+    origin: { turn: 2, exchangeId: null },
+  })
+  assert.equal(unknown.isError, false)
+  assert.equal(confirmed.isError, false)
+
+  const h = await pocketGroupHost(t)
+  h.rt.ledger.append('group-r1', { event: 'anchor', id: 'room-anchor', from: 1, time: 0 })
+  scopeRoom(h, 'later-room', 'room-anchor')
+  const room = Session.create('gb')
+  const roomFake = fakeAcp(t, room, 'acp-fixture')
+  roomFake.tools.definitions = fake.tools.definitions
+  openTurn(room, 1, privateOpener(0, 'earlier-room-private').data)
+  endBeforeReceipt(room, 1)
+  openTurn(room, 2, createUserMessage({ source: roomSource('later-room'), content: [text('A later room request.')] }))
+  endBeforeReceipt(room, 2)
+  const roomRecord = roomFake.bridge.mint({ sessionId: room.id, agent: roomFake.agent })
+  assert.equal((await roomFake.bridge.call(roomRecord, { name: 'list_bots', callId: 'room-unattributed' })).isError, false)
+  for (const entry of room.snapshotEvents()) {
+    for (const listener of h.ctx.listeners.get('session/event') ?? []) {
+      if (listener.length >= 2) listener(room, entry)
+    }
+  }
+
+  const events = session.snapshotEvents()
+  const proven = events.find(event => event.data?.callId === 'confirmed')
+  assert.equal(proven.data.turn, 2)
+  assert.deepEqual({
+    desktop: projectedActivity(events, {}),
+    history: onlyActivity(f.rt.displayItems('b', events, session, undefined, true)).map(row => row.id),
+    pocket: toolRows(pocket(events)).map(row => row.id),
+    room: onlyActivity(h.rt.ledger.records('group-r1')).map(row => row.id),
+  }, {
+    desktop: [[proven.seq, 'Tool: list_bots']],
+    history: ['confirmed'],
+    pocket: [rowIdOf('b', proven.seq)],
+    room: [],
+  })
+})
+
+test('privacy exception 2: Pocket history and resume omit tool rows from a carried private turn', async t => {
+  const f = fixture(t)
+  await f.start()
+  const add = ({ type, data }) => f.event('b', type, data)
+  const cut = { kind: 'aborted', reason: { kind: 'hook', reason: STEER_CUT } }
+  const events = [add(turnStart(0)), add(privateOpener(0, 'private-origin'))]
+  f.rt.markSteerCut('b')
+  events.push(add(event(0, 'turn/end', { turn: 1, reason: cut })))
+  events.push(...[
+    turnStart(0, 2), personOpener(0), call(0, 'program', 'run_code', { code: 'fixture' }, 2),
+    dispatch(0, 'fixture-subcall', 'read', { path: '/tmp/fixture/private.txt' }),
+    result(0, 2, 'program', 'Private fixture output.'), turnEnd(0, 2),
+    turnStart(0, 3), personOpener(0), call(0, 'visible-read', 'read', readArgs, 3),
+    result(0, 3, 'visible-read', 'Visible fixture output.'), turnEnd(0, 3),
+  ].map(add))
+  assert.equal(f.rt.state.exchangeTurns.b.includes(2), true)
+  f.rt.state.exchangeTurns.b.push(...Array.from({ length: 398 }, (_, i) => i + 10))
+  for (const turn of [408, 409]) {
+    add(turnStart(0, turn))
+    add(privateOpener(0, 'later-private-' + turn))
+    add(turnEnd(0, turn))
+  }
+  assert.equal(f.rt.state.exchangeTurns.b.length, 400)
+  assert.equal(f.rt.state.exchangeTurns.b.includes(2), false)
+
+  const adapter = { events: async (_id, { beforeSeq, maxMessages }) => {
+    const older = events.filter(event => event.seq < beforeSeq)
+    return { records: older.slice(-maxMessages).map(event => ({ event })), hasMore: older.length > maxMessages }
+  } }
+  const source = new DshChatSource({ adapter, bots: () => [{ id: 'b', sessionId: 'b' }],
+    turnHidden: (id, turn) => f.rt.state.exchangeTurns[id]?.includes(turn) })
+  const floor = events.at(-1).seq + 1
+  const entry = { botId: 'b', sessionId: 'b', cursor: floor, floorSeq: floor, rows: [], controller: new AbortController() }
+  const backfilled = await source.backfill(entry, rowIdOf('b', floor), events.length - 3)
+  const resumed = await source.snapshotFor(entry, rowIdOf('b', 0))
+  assert.equal(resumed.reset, false)
+  const activity = rows => toolRows(rows).map(({ turn, kind, summary, input, output }) => [turn, kind, summary, input ?? output])
+  const expected = [
+    [3, 'tool-call', 'read · notes.md', JSON.stringify(readArgs)],
+    [3, 'tool-result', undefined, 'Visible fixture output.'],
+  ]
+  assert.deepEqual({ history: activity(backfilled), resume: activity(resumed.rows) }, { history: expected, resume: expected })
+})
+
+test('privacy exception 3: Pocket approval closure keeps the receipt and leaves cached details private', async () => {
+  let shared = true
+  const bot = { id: 'b', sessionId: 'b', project: '/tmp/fixture/project' }
+  const source = new DshChatSource({
+    adapter: { prompt() {}, cancel() {} }, writable: true, bots: () => [bot], shown: () => shared,
+  })
+  const frames = []
+  const entry = { botId: bot.id, sessionId: bot.sessionId, cursor: 2, rows: [], scope: source.rowScope(bot.sessionId),
+    listeners: new Set([frame => { if (frame.type === 'approval') frames.push(frame.row) }]) }
+  source.entries.set(bot.id, entry)
+  const fixtureCall = call(2, 'synthetic-approval', 'bash', { command: 'fixture '.repeat(PREVIEW_MAX) })
+  for (const event of [turnStart(0), personOpener(1), fixtureCall]) entry.rows.push(...rowsOf(event, entry.scope))
+  const computer = Promise.withResolvers()
+  const outcome = source.raceApproval({
+    agent: { session: { id: bot.sessionId } }, toolName: 'bash',
+    callId: 'synthetic-approval', reason: 'Synthetic approval details',
+  }, () => computer.promise)
+  const opening = frames[0]
+  assert.equal(opening.open, true)
+  assert.ok(opening.input.startsWith('{"command":"fixture '))
+  assert.ok(opening.input.length <= PREVIEW_MAX + 1 && opening.input.length < fixtureCall.data.arguments.length)
+
+  shared = false
+  assert.equal(await source.stillServed(entry), 'not-shown')
+  computer.resolve('rejected')
+  assert.equal(await outcome, 'rejected')
+  assert.equal(frames.length, 2)
+  const closing = frames[1]
+  assert.equal(closing.id, opening.id)
+  assert.equal(closing.open, false)
+  assert.equal(closing.receipt.outcome, 'deny')
+  assert.equal(closing.input ?? '', '', 'the closed frame carries no cached argument preview')
+  assert.doesNotMatch(JSON.stringify(closing), /Synthetic approval details/)
 })

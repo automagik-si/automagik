@@ -49,7 +49,7 @@ import { ATTACH_REQUEST_PREFIX, THUMBNAILS, attachmentCode, effectiveAttachments
 import { startPocketSocket } from './pocket-socket.js'
 import { pocketSettingsOf } from './pocket-settings.js'
 import { homeRegistryPathOf, shownReader } from './shown.js'
-import { SOURCE_KIND } from './constants.js'
+import { SOURCE_KIND, STEER_CUT } from './constants.js'
 import { opensTurn } from './turns.js'
 
 /** The Session Controller methods this source needs (DSH 0.2.2); all of them, or none is used. */
@@ -232,7 +232,10 @@ export function rowsOf(event, scope) {
     case 'turn/start':
       scope.startedTurn = explicitTurn
       scope.openTurn = explicitTurn
-      if (explicitTurn !== undefined) scope.turn = explicitTurn
+      if (explicitTurn !== undefined) {
+        scope.turn = explicitTurn
+        if (scope.carryPrivate) (scope.visibleTurns ??= new Map()).set(explicitTurn, false)
+      }
       return []
     case 'step/start':
       scope.openTurn = explicitTurn
@@ -268,6 +271,11 @@ export function rowsOf(event, scope) {
     case 'turn/end': {
       if (explicitTurn !== undefined) scope.turn = explicitTurn
       const msg = scope.stopOf?.(data.turn ?? scope.turn)
+      // A steer cut carries the previous turn's routing into the next turn. The steer
+      // then appears as a fresh user message even when the carried exchange is private.
+      scope.carryPrivate = data.reason?.kind === 'aborted' &&
+        data.reason.reason?.kind === 'hook' && data.reason.reason.reason === STEER_CUT &&
+        !visible(explicitTurn)
       scope.openTurn = scope.startedTurn = undefined
       return msg ? [{ ...base('stop'), kind: 'status', state: 'error', msg: cut(msg, PREVIEW_MAX) }] : []
     }
@@ -632,25 +640,26 @@ export class DshChatSource {
     return { ok: true }
   }
 
-  async seedOpeningTurn(entry, records) {
+  async seedOpeningTurn(entry, records, scope = entry.scope) {
+    // At a truncated boundary, the preceding turn may have carried a private exchange.
+    scope.carryPrivate = true
     const boundary = records.findIndex(({ event }) => event.type === 'turn/start')
     const initial = boundary < 0 ? records : records.slice(0, boundary)
-    if (!initial.some(({ event }) => event.type === 'tool/call' || event.type === 'tool/result')) return
-    // The follow window can begin mid-turn. Read one preceding page for source evidence,
-    // without adding its rows or treating its tool calls as part of the follow window.
-    const beforeSeq = entry.floorSeq
+    if (boundary !== 0 && !initial.some(({ event }) => event.type === 'tool/call' || event.type === 'tool/result')) return
+    // Read one contiguous preceding page to recover the opener and the preceding cut.
+    // Its tool calls and text remain outside the returned window.
+    const beforeSeq = records[0]?.event.seq
+    if (!Number.isSafeInteger(beforeSeq)) return
     let page
     try {
       page = await this.adapter.events(entry.sessionId, { beforeSeq, maxMessages: PAGE_ROWS }, entry.controller.signal)
     } catch { return }
     const prior = page?.records ?? []
-    const start = prior.findLastIndex(({ event }) => event.type === 'turn/start')
-    if (start < 0) return
-    const turn = prior.slice(start)
-    if (turn.some(({ event }, index) => event.seq !== beforeSeq - turn.length + index)) return
-    for (const { event } of turn) {
+    if (!prior.length || prior.some(({ event }, index) => event.seq !== beforeSeq - prior.length + index)) return
+    scope.carryPrivate = page.hasMore !== false
+    for (const { event } of prior) {
       if (event.type === 'user/message' || event.type === 'turn/start' ||
-        event.type === 'turn/end' || event.type === 'step/start') rowsOf(event, entry.scope)
+        event.type === 'turn/end' || event.type === 'step/start') rowsOf(event, scope)
     }
   }
 
@@ -765,6 +774,7 @@ export class DshChatSource {
     const records = Array.isArray(older?.records) ? older.records : []
     if (!records.length || records[0].event.seq > cursor.seq + 1) return latest
     const scope = this.rowScope(entry.sessionId)
+    if (older.hasMore) await this.seedOpeningTurn(entry, records, scope)
     const missed = records.flatMap(record => rowsOf(record.event, scope)).filter(row => seqOf(row) > cursor.seq && (!attachments || seqOf(row) < floor))
     const current = retained
     const rows = [...rowsFor(missed, attachments), ...(attachments ? current.filter(row => seqOf(row) >= floor) : current)]
@@ -790,8 +800,10 @@ export class DshChatSource {
       : cursor.seq
     if (beforeSeq < 0) return []
     const page = await this.adapter.events(entry.sessionId, { beforeSeq, maxMessages: max }, entry.controller.signal)
+    const records = (page?.records ?? []).filter(record => record.event.seq < beforeSeq)
     const scope = this.rowScope(entry.sessionId)
-    const rows = (page?.records ?? []).filter(record => record.event.seq < beforeSeq).flatMap(record => rowsOf(record.event, scope))
+    if (page?.hasMore) await this.seedOpeningTurn(entry, records, scope)
+    const rows = records.flatMap(record => rowsOf(record.event, scope))
     return pageOf(await this.visibleRows(entry, rowsFor(rows, attachments)), max)
   }
 
@@ -1143,7 +1155,10 @@ export class DshChatSource {
         if (swapped) { try { request.signal = original } catch {} }
       }
       const close = (receipt) => {
-        const closed = { ...shown, open: false, answerable: false, ...(receipt ? { receipt } : {}) }
+        // Sharing may have changed while the request was open. The approval close only
+        // needs to dismiss the card and deliver its receipt.
+        const closing = shown.kind === 'approval' ? { ...shown, tool: '', summary: '', input: '' } : shown
+        const closed = { ...closing, open: false, answerable: false, ...(receipt ? { receipt } : {}) }
         this.emitSession(sessionId, { type: shown.kind, row: closed })
       }
       const keep = (receipt) => {
