@@ -405,7 +405,8 @@ test('confirmed Skills deliveries reach chat activity without changing provider 
     const called = await f.preStep(user(manualPrompt))
     const earlier = answer(provider)
     await f.run([called], { record: [called], reply: earlier })
-    await f.run([called, earlier, user(prompt)])
+    const next = user(prompt)
+    await f.run([called, earlier, next], { record: [next] })
     const sent = f.events('prompt')
     const promptBlock = value => ({ text: value, type: 'text' })
     assert.equal(JSON.stringify(sent.map(event => event.prompt)), JSON.stringify([

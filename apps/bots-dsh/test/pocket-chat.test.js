@@ -8,6 +8,7 @@ import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { test } from 'node:test'
+import { SOURCE_KIND, STEER_CUT } from '../src/host/constants.js'
 import { createAdapter } from '../src/host/pocket-chat-adapter.js'
 import {
   ANSWER_ON_COMPUTER, DshChatSource, KEEP_SENT_IDS, KEEP_SETTLED, PREVIEW_MAX, SEND_TEXT_MAX, cursorOf, hasSessionApi, hasWriteApi, install, ownBots, rowIdOf, rowsOf, statusOf,
@@ -180,7 +181,8 @@ test('a snapshot maps the log to rows in seq order, with the status, and follows
     ['dsh:s-omni-2:6', 'tool-result', null, 'session'],
   ])
   assert.deepEqual(snapshot.rows[2], { id: 'dsh:s-omni-2:4#tokens', turn: 1, at: 1004, source: 'session', kind: 'tokens', input: 10, output: 3, cache: 2 })
-  assert.equal(snapshot.rows[3].tool, 'bash')
+  assert.equal(snapshot.rows[3].tool, 'Tool')
+  assert.equal(snapshot.rows[3].summary, 'bash')
   assert.equal(snapshot.rows[4].call, 'dsh:s-omni-2:5')
   assert.equal(snapshot.rows[4].output, 'a b')
   // An ordinary Session address, a passive follow, and nothing but reads.
@@ -269,6 +271,40 @@ test('Pocket keeps a single name-only activity row live, on reconnect, and in a 
     assert.deepEqual(await handle.backfill('dsh:s-omni-2:9', 2), [])
   } finally { source.close() }
 })
+
+for (const provenance of ['visible', 'carried private', 'noncontiguous']) {
+  test(`live Pocket Skill after a truncated snapshot: ${provenance} opener`, async t => {
+    const sessionId = 's-omni-2'
+    const prior = provenance === 'carried private' ? [
+      event(0, 'turn/start', { turn: 1 }),
+      userAt(1, 'A private Bot request', { kind: SOURCE_KIND, role: 'request', exchangeId: 'private' }),
+      event(2, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: STEER_CUT } } }),
+    ] : []
+    const firstSeq = provenance === 'noncontiguous' ? 6 : 5
+    const records = [...prior, event(3, 'turn/start', { turn: 2 }), userAt(4, 'A person prompt'),
+      event(firstSeq, 'step/start', { turn: 2, step: 0 })]
+    const controller = fakeController({ [sessionId]: { window: 1, records } })
+    const source = sourceOf(controller)
+    t.after(() => source.close())
+    const phone = watcher()
+    const handle = await source.watch('dsh:omni', phone.listener)
+    assert.equal(handle.ok, true)
+    assert.deepEqual(phone.events[0].rows, [])
+
+    const skillSeq = firstSeq + 1
+    const skill = event(skillSeq, SKILL_ACTIVITY_RECORD, { id: 'receipt', name: 'mint', turn: 2, step: 0 })
+    skill.event.ignorable = true
+    controller.append(sessionId, skill)
+    controller.append(sessionId, assistantAt(skillSeq + 1, 'Live reply', { turn: 2 }))
+    await settle()
+    assert.equal(phone.last('rows')?.rows[0].text, 'Live reply', 'the live pump passed the Skill event')
+    const skills = phone.events.flatMap(frame => frame.rows ?? []).filter(row => row.tool === 'Skill')
+    assert.deepEqual(skills, provenance === 'visible' ? [{
+      id: rowIdOf(sessionId, skillSeq), kind: 'tool-call', turn: 2, at: 1_000 + skillSeq,
+      source: 'session', tool: 'Skill', summary: 'mint', input: '', output: '',
+    }] : [])
+  })
+}
 
 test('every write is refused and reaches no controller method', async () => {
   const controller = fakeController(sessions())

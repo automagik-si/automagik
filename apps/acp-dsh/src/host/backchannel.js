@@ -945,7 +945,8 @@ export class Backchannel {
     if (session === undefined || tools?.execute === undefined) return error(`DSH tools are not available to ${record.name}.`)
     let waited
     const waitingTurn = betweenStepTurn(session)
-    if (openStepOf(session) === undefined && betweenSteps(session) && record.promptRunning?.() === true) {
+    const hasStep = openStepOf(session) !== undefined
+    if (!hasStep && waitingTurn !== undefined && record.promptRunning?.() === true) {
       const waiting = new AbortController()
       record.controllers.add(waiting)
       try {
@@ -1289,10 +1290,12 @@ export class Backchannel {
    * DSH turn ended): no step exists and none can be opened out of band, because the agent loop's
    * own turn numbering is private. Manual and Full run it without DSH rows and record a plugin
    * record instead; Auto refuses, because Auto review reads the pending call from its step.
+   * Only a host caller with confirmed provenance may pass an origin. The bridge request
+   * identifies the Session and call but carries no originating turn.
    * @param {any} record
-   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean, skill?: any, onSkillDelivered?: Function }} call
+   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean, skill?: any, onSkillDelivered?: Function, origin?: {turn: number, exchangeId: string | null} }} call
    */
-  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered }) {
+  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered, origin }) {
     const error = text => ({ content: name === 'load_skill' ? [] : [{ type: 'text', text }], isError: true })
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
     const session = record.agent?.session
@@ -1301,7 +1304,8 @@ export class Backchannel {
     const id = bridgeCallId(callId)
     const skills = skill && this.ctx?.get?.('omniTeam')?.skillCalls
     const note = (outcome) => {
-      try { return appendPluginRecord(session, 'plugin:acp-dsh/bridge-outside-step', { callId: id, name, outcome }) } catch {}
+      const position = outcome === 'ran' ? origin : undefined
+      try { return appendPluginRecord(session, 'plugin:acp-dsh/bridge-outside-step', { callId: id, name, outcome, ...position }) } catch {}
     }
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
     if (level.auto) {

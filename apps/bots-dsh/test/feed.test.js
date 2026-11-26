@@ -290,3 +290,143 @@ test('without DSH\'s session projections the run-stats endpoint has nothing to s
   await call('state')
   assert.deepEqual(await call('run-stats', { botId: 'm1' }), { ok: true, value: null })
 })
+
+test('earlier parts replay dedicated cards once and keep activity for calls without a replay card', async (t) => {
+  const { handoffReply, questionReply, viewReply } = await import('../src/host/parts.js')
+  const question = { id: 'q', callId: 'question', question: 'Which draft?', options: [{ label: 'Short' }] }
+  const view = { type: 'options', id: 'lane', options: [{ label: 'Ship now' }] }
+  const part = (seq, name, args, ids) => ({
+    type: ids.subCallId ? 'tool/ptc-dispatch-start' : 'tool/call', seq, time: seq,
+    data: { turn: 1, name, arguments: JSON.stringify(args), ...ids },
+  })
+  const reply = (seq, { text, source }) => ({
+    type: 'user/message', seq, time: seq, data: { source, content: [{ type: 'text', text }] },
+  })
+  const events = [
+    { type: 'turn/start', seq: 1, data: { turn: 1 } },
+    part(2, 'ask_user', question, { subCallId: 'question' }),
+    part(3, 'bash', {}, { subCallId: 'shell' }),
+    part(4, 'ask_user', question, { subCallId: 'closed-question' }),
+    part(5, 'show_view', { title: 'Pick a lane', view }, { subCallId: 'view' }),
+    part(6, 'show_view', { title: 'Refused view', view, await_reply: false }, { callId: 'refused-view' }),
+    part(7, 'request_secret', {}, { callId: 'secret' }),
+    part(8, 'browser_handoff', { reason: 'other' }, { callId: 'handoff' }),
+    reply(9, questionReply(question, { selected: ['Short'] })),
+    reply(10, viewReply({ id: 'v', callId: 'view', title: 'Pick a lane', view }, 'lane', { selected: ['Ship now'] })),
+    reply(11, handoffReply({ callId: 'handoff', reason: 'other' }, 'done')),
+  ]
+  const { call, stop } = start({
+    team: { ...TEAM, closedCards: { m1: { 'closed-question': 'dismissed' } } },
+    pages: { 'm1:end': { records: events.map(event => ({ event })), hasMore: false } },
+  })
+  t.after(stop)
+  await call('state')
+  const page = (await call('earlier', { sessionId: 'm1c' })).value
+  assert.deepEqual(page.items.map(item => [item.kind, item.id ?? item.callId ?? item.seq]), [
+    ['tool-activity', 'shell'],
+    ['closed', 'closed-question'],
+    ['tool-activity', 'refused-view'],
+    ['tool-activity', 'secret'],
+    ['answer', 9],
+    ['answer', 10],
+    ['answer', 11],
+  ])
+  assert.equal(page.items[4].answers[0].selected[0], 'Short')
+  assert.equal(page.items[5].views[0].title, 'Pick a lane')
+  assert.equal(page.items[6].handoff.outcome, 'done')
+})
+
+test('earlier history keeps one activity row for each question refused for unusable options', async (t) => {
+  const { questionReply } = await import('../src/host/parts.js')
+  const asked = { id: 'question', callId: 'answered', question: 'Which draft?', options: [{ label: 'Short' }] }
+  const { source, text } = questionReply(asked, { selected: ['Short'] })
+  const turn = { type: 'turn/start', seq: 1, data: { turn: 1 } }
+  const question = (seq, id, options, dispatch = false) => ({
+    type: dispatch ? 'tool/ptc-dispatch-start' : 'tool/call', seq, time: seq,
+    data: {
+      name: 'ask_user', arguments: dispatch ? { question: asked.question, options } : JSON.stringify({ question: asked.question, options }),
+      ...(dispatch ? { rootCallId: 'program', parentCallId: 'program', subCallId: id } : { callId: id, turn: 1 }),
+    },
+  })
+  const page = (events, hasMore = false) => ({ records: events.map(event => ({ event })), hasMore })
+  const { call, ctx, stop } = start({
+    team: { ...TEAM, closedCards: { m1: { closed: 'dismissed' } } },
+    pages: {
+      'm1:end': page([
+        question(7, 'program:ptc:1', [{ label: ' ' }], true),
+        { type: 'user/message', seq: 8, time: 8, data: { source, content: [{ type: 'text', text }] } },
+      ], true),
+      'm1:7': page([
+        turn,
+        question(2, 'refused', []),
+        question(3, 'answered', asked.options),
+        question(4, 'closed', asked.options, true),
+      ]),
+    },
+  })
+  t.after(stop)
+  const resolve = ctx.sessionController.resolveAgent
+  ctx.sessionController.resolveAgent = async id => {
+    if (id === 'm1') throw new Error('Archived part')
+    return resolve(id)
+  }
+  await call('state')
+  const newest = (await call('earlier', { sessionId: 'm1c' })).value
+  const older = (await call('earlier', { sessionId: 'm1c', cursor: newest.cursor })).value
+  const items = [...older.items, ...newest.items]
+  assert.deepEqual(items.filter(item => item.kind !== 'tool-activity').map(item => item.kind), ['closed', 'answer'])
+  assert.equal(items.find(item => item.kind === 'closed').callId, 'closed')
+  assert.equal(items.find(item => item.kind === 'answer').answers[0].selected[0], 'Short')
+  assert.deepEqual(items.filter(item => item.kind === 'tool-activity'), [
+    { kind: 'tool-activity', label: 'tool', name: 'ask_user', id: 'refused', seq: 2, time: 2, turn: 1 },
+    { kind: 'tool-activity', label: 'tool', name: 'ask_user', id: 'program:ptc:1', seq: 7, time: 7, turn: 1 },
+  ])
+})
+
+test('earlier history keeps one activity row for each computer handoff refused while off', async (t) => {
+  const name = 'computer_handoff'
+  const refused = [{ type: 'text', text: 'Computer use is off for you.' }]
+  const turn = { type: 'turn/start', seq: 1, data: { turn: 1 } }
+  const direct = (seq, callId, tool = name) => ({
+    type: 'tool/call', seq, time: seq, data: { turn: 1, step: 0, name: tool, callId, arguments: '{"reason":"login"}' },
+  })
+  const result = (seq, sourceSeq, toolCallId) => ({
+    type: 'tool/result', seq, time: seq, sourceEventSeqs: [sourceSeq], surfaceOp: 'append',
+    data: { turn: 1, step: 0, message: { role: 'tool', toolCallId, content: refused } },
+  })
+  const program = { rootCallId: 'program', parentCallId: 'program', subCallId: 'program:ptc:1', name, arguments: { reason: 'login' } }
+  const answer = { kind: 'answer_to_pending_handoff', tool: name, callId: 'answered', reason: 'login', outcome: 'done' }
+  const page = (events, hasMore = false) => ({ records: events.map(event => ({ event })), hasMore })
+  const { call, ctx, stop } = start({
+    pages: {
+      'm1:end': page([
+        { type: 'user/message', seq: 6, time: 6, data: { source: { kind: 'user' }, content: [] } },
+        result(7, 2, 'refused'),
+        { type: 'tool/ptc-dispatch-start', seq: 8, time: 8, data: program },
+        { type: 'tool/ptc-dispatch', seq: 9, time: 9, data: { ...program, isError: false, content: refused } },
+        { type: 'user/message', seq: 10, time: 10, data: {
+          source: { kind: 'user-question-reply', callId: 'answered', outcome: 'answered' },
+          content: [{ type: 'text', text: JSON.stringify(answer) }],
+        } },
+      ], true),
+      'm1:6': page([turn, direct(2, 'refused'), direct(3, 'answered'), direct(4, 'shell', 'bash'), result(5, 4, 'shell')]),
+      'm1:3': page([turn, direct(2, 'refused')]),
+    },
+  })
+  t.after(stop)
+  const resolve = ctx.sessionController.resolveAgent
+  ctx.sessionController.resolveAgent = async id => {
+    if (id === 'm1') throw new Error('Archived part')
+    return resolve(id)
+  }
+  await call('state')
+  const newest = (await call('earlier', { sessionId: 'm1c' })).value
+  const older = (await call('earlier', { sessionId: 'm1c', cursor: newest.cursor })).value
+  const items = [...older.items, ...newest.items]
+  assert.deepEqual(items.filter(item => item.kind === 'answer').map(item => item.handoff.callId), ['answered'])
+  assert.deepEqual(items.filter(item => item.kind === 'tool-activity').map(item => [item.name, item.id, item.seq, item.turn]), [
+    ['bash', 'shell', 4, 1],
+    ['computer_handoff', 'refused', 7, 1],
+    ['computer_handoff', 'program:ptc:1', 8, 1],
+  ])
+})

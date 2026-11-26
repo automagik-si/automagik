@@ -77,8 +77,8 @@ export function SettingsCard({ target, note, roster, actions, useUpdate, startOp
 }
 
 // The show_settings call in the transcript: drawn once the host accepted it.
-export function SettingsCall({ args, done, content, isError, roster, actions }) {
-  if (!done || isError || !SHOWN.test(content ?? '')) return h(CellEmpty)
+export function SettingsCall({ args, done, content, isError, roster, actions, fallback }) {
+  if (!done || isError || !SHOWN.test(content ?? '')) return fallback ?? h(CellEmpty)
   const target = settingsTarget({ page: args.text('page'), bot: args.text('bot'), group: args.text('group') }, roster, actions.pluginSettings?.() ?? [])
   return h('div', { className: 'bt-q-inline' }, h(SettingsCard, { target, note: args.text('note'), roster, actions }))
 }
@@ -181,9 +181,9 @@ export function ProposalCard({ proposal, roster, actions }) {
 }
 
 // The propose_bot_change call in the transcript: the checked proposal from its result.
-export function ProposalCall({ done, content, isError, roster, actions }) {
+export function ProposalCall({ done, content, isError, roster, actions, fallback }) {
   const proposal = done && !isError ? parseProposal(content) : undefined
-  if (proposal === undefined) return h(CellEmpty)
+  if (proposal === undefined) return fallback ?? h(CellEmpty)
   return h('div', { className: 'bt-q-inline' }, h(ProposalCard, { proposal, roster, actions }))
 }
 
