@@ -56,7 +56,7 @@ import { crossesHarness } from '../shared/routes.js'
 const PROVIDERS = new Set(['acp-codex', 'acp-claude'])
 // The agents a Bot's chat signs in to (#2048, parity): Claude Code and Codex, plus Antigravity's
 // app sign-in in acp-dsh. Only the five sign-in calls and the ready listener take it; the account
-// controls (switch, sign out, reset, confirm, accounts, noticed) stay Claude Code's and Codex's:
+// Account controls stay Claude Code's and Codex's, except Antigravity's fresh chat switch.
 // acp-dsh has no account read for Antigravity.
 const SIGN_IN_PROVIDERS = new Set([...PROVIDERS, 'acp-antigravity'])
 const SIGN_IN_ACTIONS = new Set(['start', 'current', 'status', 'answer', 'cancel'])
@@ -139,6 +139,8 @@ const ACCOUNT_FIXED = new Map([
     'This installation keeps no record of the Bot account. Sign in again; if it keeps happening, the instance needs its profile repaired.'],
   ['The Bot account cannot be changed here.', 'The Bot account cannot be changed from this session. Use the app on this computer.'],
   ['Install the CLI before changing accounts.', 'Install the coding agent before signing in.'],
+  ['Sign out is not available on Windows. Sign out in Antigravity itself.',
+    'Sign out is not available on Windows. Sign out in Antigravity itself.'],
   ['Sign-out did not finish. Try again.', 'Signing out of the Bot account did not finish. Try again.'],
   ['Sign-out could not be verified. Try again.', 'Signing out of the Bot account could not be verified. Try again.'],
   ['Bot sign-in was reset. Retry sign-in in the app.', 'The Bot account was reset. Press Sign in again.'],
@@ -279,11 +281,11 @@ export function cliAccountView(value) {
 
 const ACTIONS = {
   reset: ['botId', 'provider'],
-  switch: ['botId', 'provider'],
+  switch: ['botId', 'provider', 'keep', 'fresh'],
   signout: ['botId', 'provider'],
   confirm: ['botId', 'provider', 'ref', 'model'],
   start: ['botId', 'provider', 'model'],
-  current: ['botId', 'provider'],
+  current: ['botId', 'provider', 'fresh'],
   status: ['botId', 'provider', 'attemptId'],
   answer: ['botId', 'provider', 'attemptId', 'value'],
   cancel: ['botId', 'provider', 'attemptId'],
@@ -292,8 +294,12 @@ const ACTIONS = {
 function fields(payload, action) {
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw invalid()
   const allowed = new Set(ACTIONS[action])
+  const providers = SIGN_IN_ACTIONS.has(action) || (action === 'switch' && payload.fresh === true)
+    ? SIGN_IN_PROVIDERS : PROVIDERS
   if (Object.keys(payload).some(key => !allowed.has(key)) || typeof payload.botId !== 'string' || !BOT_ID.test(payload.botId)
-    || !(SIGN_IN_ACTIONS.has(action) ? SIGN_IN_PROVIDERS : PROVIDERS).has(payload.provider)
+    || !providers.has(payload.provider)
+    || (Object.hasOwn(payload, 'fresh') && payload.fresh !== true)
+    || (Object.hasOwn(payload, 'keep') && payload.keep !== true)
     || (allowed.has('attemptId') && (typeof payload.attemptId !== 'string' || !ATTEMPT.test(payload.attemptId)))) throw invalid()
   // The model the entry is for: one of this agent's, or none (a view that only attaches).
   if (payload.model !== undefined && (typeof payload.model !== 'string' || !MODEL_REF.test(payload.model) || payload.model.split('/')[0] !== payload.provider)) throw invalid()
@@ -491,15 +497,21 @@ export function install(rt, reservationDeps) {
   // signed out, already consented, or an acp-dsh that keeps no such record. `probe` asks the CLI
   // (acp-dsh's shared, briefly cached check); without it only acp-dsh's last answer is read and
   // nothing is spawned unless that answer already says the account waits.
+  async function signInStatus(service, provider) {
+    try {
+      const rows = (await service?.status?.())?.agents
+      return Array.isArray(rows) ? rows.find(agent => agent?.id === provider) : undefined
+    } catch { return undefined }
+  }
+
   async function pendingAccount(provider, { probe }) {
     const service = acp()
     // Antigravity has no account read and no consent step (#2048): nothing to confirm.
     if (provider === 'acp-antigravity' || typeof service?.account !== 'function') return undefined
     try {
       if (!probe) {
-        const rows = typeof service.status === 'function' ? (await service.status())?.agents : undefined
-        const row = Array.isArray(rows) ? rows.find(agent => agent?.id === provider) : undefined
-        if (row?.signedIn !== true || row.consent !== 'needed') return undefined
+        const status = await signInStatus(service, provider)
+        if (status?.signedIn !== true || status.consent !== 'needed') return undefined
       }
       const seen = await service.account(provider)
       return seen?.id === provider && seen.signedIn === true && seen.consent === 'needed'
@@ -695,6 +707,11 @@ export function install(rt, reservationDeps) {
     }
     if (action === 'current' && (value === undefined || value === null)) {
       const choice = choiceOf(body.botId, body.provider)
+      if (body.fresh) {
+        const row = await signInStatus(service, body.provider)
+        return { id: body.provider, attempt: null,
+          ...(typeof row?.signedIn === 'boolean' ? { signedIn: row.signedIn } : {}), ...(choice ? { choice } : {}) }
+      }
       const account = await pendingAccount(body.provider, { probe: false })
       return { id: body.provider, attempt: null, ...(account ? { account } : {}), ...(choice ? { choice } : {}) }
     }
@@ -726,15 +743,23 @@ export function install(rt, reservationDeps) {
     ...Object.fromEntries(['switch', 'signout', 'reset'].map(action => [
       `cli-login-${action}`, async payload => {
       const body = fields(payload, action)
-      if (!rt.botOf(body.botId)) throw failed('This Bot is no longer available.', 'bot/not-found')
+      const bot = rt.botOf(body.botId)
+      if (!bot) throw failed('This Bot is no longer available.', 'bot/not-found')
+      if (body.fresh && (bot.kind === 'dsh' || (bot.model ?? bot.appliedModel)?.split('/')[0] !== body.provider)) {
+        throw failed('This sign-in is not available for this Bot.', 'bot/invalid')
+      }
       const service = acp()
       const method = { switch: 'accountSwitch', signout: 'accountSignOut',
         reset: 'accountReset' }[action]
-      if (service?.authScope !== 'isolated' || typeof service[method] !== 'function') {
+      if (service?.authScope !== 'isolated' || typeof service[method] !== 'function'
+        || ((body.fresh || body.keep) && service.freshChatLogin !== true)) {
         throw failed('Bot account controls are unavailable. Update Automagik and try again.')
       }
       try {
-        const result = await service[method](body.provider, { label: body.botId })
+        const keep = body.keep || (body.fresh && body.provider !== 'acp-antigravity')
+        const result = await service[method](body.provider, {
+          label: body.botId, ...(keep ? { keep: true } : {}), ...(body.fresh ? { fresh: true } : {}),
+        })
         if (action !== 'switch') return { id: body.provider, signedIn: false }
         // The switch's own attempt (#2064): its id lets the row read it even after it ended.
         try { return { ...cliLoginView(result, body.provider), signedIn: false } } catch { return { id: body.provider, signedIn: false } }

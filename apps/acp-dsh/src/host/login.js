@@ -376,11 +376,11 @@ export class CliLogins {
    * Starts an attempt, or returns the one at work for this agent, whoever opened it.
    * A Switch account (`fresh`, #2064) never joins one: its sign-in always runs and shows its link.
    * @param {string} id
-   * @param {{ label?: string, fresh?: boolean, compare?: boolean }} [options] the view that opens
+   * @param {{ label?: string, fresh?: boolean, compare?: boolean, keep?: boolean }} [options] the view that opens
    *   it (a Bot id), shown on cancel; `fresh` for a Switch account, and `compare` when the account
    *   it signed out of may be compared with the new one.
    */
-  start(id, { label, fresh = false, compare = false } = {}) {
+  start(id, { label, fresh = false, compare = false, keep = false } = {}) {
     if (this.disposed) throw failure('disposed', 'Sign-in is unavailable while Automagik restarts.')
     if (!known(id)) throw terminalOnly(id, this.hintOf(id)) ?? failure('invalid', CHOOSE)
     const previous = this.flows.get(id)
@@ -391,7 +391,7 @@ export class CliLogins {
     }
     if (previous) this.timers.clearTimeout(previous.retained)
     const flow = { id, label: labelOf(label), attemptId: randomUUID(), status: 'starting', deadline: this.now() + this.startupMs,
-      ...(fresh === true ? { fresh: true, compare: compare === true } : {}) }
+      ...(fresh === true ? { fresh: true, compare: compare === true, keep: keep === true } : {}) }
     this.flows.set(id, flow)
     this.armDeadline(flow)
     this.changed()
@@ -607,9 +607,19 @@ export class CliLogins {
     // sign-in is recorded before any view can read `ready`.
     let same = false
     try {
-      await this.onReady(flow.id, flow.selected, { existing: flow.existing === true, fresh: flow.fresh === true,
-        compare: flow.compare === true, valid: () => this.valid(flow), same: () => { same = true } })
-    } catch {}
+      const accepted = await this.onReady(flow.id, flow.selected, { existing: flow.existing === true, fresh: flow.fresh === true,
+        compare: flow.compare === true, ...(flow.keep ? { answered: flow.answering === true } : {}),
+        valid: () => this.valid(flow), same: () => { same = true } })
+      if (accepted === false) {
+        this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
+        return
+      }
+    } catch {
+      if (flow.keep) {
+        this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
+        return
+      }
+    }
     if (this.valid(flow)) {
       if (same) flow.sameAccount = true
       this.finish(flow, 'ready')
@@ -802,7 +812,8 @@ export class CliLogins {
   async settle(flow, selected) {
     let signedIn = flow.signedInAfter
     try {
-      if (signedIn === undefined) {
+      if (signedIn === undefined || flow.keep) {
+        signedIn = undefined
         await this.drain(flow.id)
         if (selected === undefined && !this.disposed) {
           selected = await Promise.resolve().then(() => this.resolve(flow.id)).catch(() => undefined)
@@ -816,8 +827,13 @@ export class CliLogins {
       if (typeof signedIn === 'boolean') flow.signedInAfter = signedIn
       if (!this.disposed) {
         try {
-          await this.onSettled({ id: flow.id, attemptId: flow.attemptId, signedIn,
+          const resumed = await this.onSettled({ id: flow.id, attemptId: flow.attemptId, signedIn,
+            ...(flow.keep ? { selected } : {}),
             valid: () => !this.disposed && selected?.valid?.() !== false })
+          if (flow.keep && resumed === true && signedIn === true && flow.status === 'failed') {
+            flow.message = unchangedMessage
+            flow.cause = FAILURE_CAUSES.get(unchangedMessage)
+          }
         } catch {}
       }
       // Only now: a count that dropped before `onSettled` would let `onChange` end the lock first.

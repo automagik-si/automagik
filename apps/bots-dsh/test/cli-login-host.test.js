@@ -872,3 +872,57 @@ test('the switch hands back its own verified attempt; sign-out and reset answer 
     assert.deepEqual(await h.actions['cli-login-switch']({ botId: 'a', provider: 'acp-codex' }), { id: 'acp-codex', signedIn: false })
   }
 })
+
+test('only explicitly fresh chat intent opens an Antigravity switch', async () => {
+  const h = agyFixture()
+  h.bots.a.model = `${AGY}/default`
+  h.acp.authScope = 'isolated'
+  h.acp.freshChatLogin = true
+  h.acp.accountSwitch = async (id, options) => {
+    h.calls.push(['switch', id, options])
+    return { id, attemptId: ATTEMPT, status: 'waiting', url: AGY_URL }
+  }
+  const switchAccount = h.actions['cli-login-switch']
+  const body = { botId: 'a', provider: AGY }
+  await assert.rejects(switchAccount(body), { code: 'bot/invalid' })
+  assert.deepEqual(h.calls, [])
+  const accepted = await switchAccount({ ...body, fresh: true })
+  assert.equal(accepted.attemptId, ATTEMPT)
+  assert.equal(accepted.url, AGY_URL)
+  assert.deepEqual(h.calls, [['switch', AGY, { label: 'a', fresh: true }]])
+
+  h.bots.a.model = 'acp-codex/default'
+  await assert.rejects(switchAccount({ ...body, fresh: true }), { code: 'bot/invalid' })
+  assert.equal(h.calls.length, 1, 'provider changes are rejected before calling ACP')
+  await assert.rejects(switchAccount({ ...body, provider: 'acp-hermes', fresh: true }), { code: 'bot/invalid' })
+})
+
+test('fresh switch capability is explicit and ordinary Switch keeps its signature', async () => {
+  const h = fixture()
+  const provider = 'acp-codex'
+  h.bots.a.model = `${provider}/default`
+  h.acp.authScope = 'isolated'
+  h.acp.accountSwitch = async (...args) => { h.calls.push(args) }
+  const action = h.actions['cli-login-switch']
+  const body = { botId: 'a', provider }
+  await assert.rejects(action({ ...body, fresh: true, keep: true }), { code: 'bot/refused' })
+  assert.deepEqual(h.calls, [])
+  await action(body)
+  assert.deepEqual(h.calls, [[provider, { label: 'a' }]])
+
+  h.acp.freshChatLogin = true
+  await assert.rejects(action({ ...body, fresh: true, keep: 'true' }), { code: 'bot/invalid' })
+  await action({ ...body, keep: true })
+  assert.deepEqual(h.calls.at(-1), [provider, { label: 'a', keep: true }])
+  await action({ ...body, fresh: true })
+  assert.deepEqual(h.calls.at(-1), [provider, { label: 'a', keep: true, fresh: true }])
+})
+
+test('fresh current returns the cached Boolean and omits account identity before admission', async () => {
+  const h = fixture()
+  const provider = 'acp-claude'
+  h.acp.status = async () => ({ agents: [{ id: provider, signedIn: true, consent: 'needed', email: 'hidden@example.test' }] })
+  h.acp.account = async () => assert.fail('a fresh current read must not query the actual account')
+  const current = await h.actions['cli-login-current']({ botId: 'a', provider, fresh: true })
+  assert.deepEqual(current, { id: provider, attempt: null, signedIn: true })
+})

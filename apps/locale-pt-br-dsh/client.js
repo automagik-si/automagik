@@ -308,6 +308,7 @@ const pack = createPack({
     "Bots: {account}": "Bots: {account}",
     "Sign in again in the app to resume Bots": "Entre de novo no app para retomar os Bots",
     "Terminal: {account}": "Terminal: {account}",
+    "Sign out is not available on Windows. Sign out in Antigravity itself.": "Não é possível sair da conta no Windows. Saia pelo próprio Antigravity.",
     "This stops running Bot work for this account. Continue?": "Isso interrompe o trabalho dos Bots nesta conta. Continuar?",
     "Switch account": "Trocar de conta",
     "Sign out": "Sair",

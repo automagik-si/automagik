@@ -18,7 +18,7 @@ import { retiredHomes, writeRetiredNote } from './retired-home.js'
 import { probeWindowsLogin } from './windows-job-probe.js'
 
 export const HOME_ENV = 'AUTOMAGIK_BOT_CLI_HOME'
-const VERSION_ENV = 'AUTOMAGIK_BOT_CLI_VERSION'
+export const VERSION_ENV = 'AUTOMAGIK_BOT_CLI_VERSION'
 // Antigravity (#2048) has its own home like the other two: agy keeps everything under its
 // HOME's `.gemini` (its own folder name below), and the app's agy never sees the person's.
 const vendors = new Set(['claude', 'codex', 'antigravity'])
@@ -294,11 +294,11 @@ export class CliHomes {
   // Deliberately fail closed after a crashed account operation: the app must not resume on
   // credentials whose logout could not be confirmed. A new attempt can explicitly recover
   // the lock only when its owning process AND every persisted login tree are gone.
-  begin(vendor) {
-    return this.generations.exclusive(vendor, () => this.beginLocked(vendor))
+  begin(vendor, { preserveVersion = false } = {}) {
+    return this.generations.exclusive(vendor, () => this.beginLocked(vendor, preserveVersion))
   }
 
-  beginLocked(vendor) {
+  beginLocked(vendor, preserveVersion) {
     const home = this.home(vendor)
     mkdirSync(home, { recursive: true, mode: 0o700 })
     this.verify(home)
@@ -323,11 +323,21 @@ export class CliHomes {
         }
       }
       writeFileSync(join(home, 'paused'), '', { mode: 0o600 })
-      writeFileSync(join(home, 'version'), randomUUID(), { mode: 0o600 })
+      if (!preserveVersion) this.advanceVersion(vendor)
     } catch (error) {
       this.end(vendor)
       throw error
     }
+  }
+
+  // The lock and pause protect admission while a preserving sign-in runs. A confirmed
+  // account change invalidates launches prepared under the previous version.
+  advanceVersion(vendor) {
+    const home = this.changes.get(vendor)
+    if (home === undefined || home !== this.home(vendor)) throw failure('The Bot account is changing.')
+    const version = randomUUID()
+    writeFileSync(join(home, 'version'), version, { mode: 0o600 })
+    return version
   }
 
   lockSnapshot(lock) {

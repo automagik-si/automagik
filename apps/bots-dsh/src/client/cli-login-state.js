@@ -284,14 +284,17 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
      * `attemptId` is a Switch account's own attempt (#2064): it is read by its id, even after
      * it ended, so a switch that failed fast still shows why.
      */
-    async open({ botId, provider, ref, attemptId }, valid = () => true, owner) {
+    async open({ botId, provider, ref, attemptId, fresh = false }, valid = () => true, owner) {
       nextIntent()
       if (disposed || !valid() || typeof botId !== 'string' || botId === '' || !known(provider)) return false
       const model = typeof ref === 'string' && ref.startsWith(`${provider}/`) ? ref : undefined
       const switched = typeof attemptId === 'string' && attemptId !== ''
       const existing = rowOf(botId)
-      if (!switched && existing?.provider === provider && ['offer', 'attempt', 'account'].includes(existing.stage)) {
-        setRow(botId, { ...existing, reveal: ++sequence, ...(model ? { ref: model } : {}) })
+      const sameProvider = existing?.provider === provider
+      const sameIntent = (existing?.fresh === true) === fresh
+      if (!switched && sameProvider && (existing.stage === 'attempt' || (sameIntent && ['offer', 'account'].includes(existing.stage)))) {
+        const { fresh: _, ...row } = existing
+        setRow(botId, { ...row, reveal: ++sequence, ...(model ? { ref: model } : {}), ...(fresh ? { fresh } : {}) })
         // Another model chosen while the sign-in runs is the latest intent (rule 5): the host
         // keeps it in place of the older one. Start joins the live attempt, never opens a second.
         // A cancel or answer in flight (busy) is left alone, so a start never reopens what it ends.
@@ -308,7 +311,8 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       }
       const seq = ++sequence
       if (owner) owner.seq = seq
-      setRow(botId, { botId, provider, ref: model, stage: 'offer', busy: true, reveal: seq, seq, attempt: null, error: null, confirm: false })
+      setRow(botId, { botId, provider, ref: model ?? (sameProvider && !sameIntent ? existing.ref : undefined),
+        stage: 'offer', busy: true, reveal: seq, seq, attempt: null, error: null, confirm: false, ...(fresh ? { fresh } : {}) })
       if (switched) {
         try {
           const view = await actions.cliLoginStatus(botId, provider, attemptId)
@@ -329,7 +333,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
         return true
       }
       try {
-        const current = await actions.cliLoginCurrent(botId, provider)
+        const current = await actions.cliLoginCurrent(botId, provider, ...(fresh ? [{ fresh }] : []))
         if (!live(botId, seq) || !valid()) return false
         if (current?.attempt && ACTIVE.has(current.attempt.status)) {
           // Joining with a model chosen here keeps that choice for this Bot (start returns the
@@ -338,6 +342,12 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
           if (!live(botId, seq) || !valid()) return false
           setRow(botId, { ...rowOf(botId), stage: 'attempt', busy: false })
           applyView(provider, view)
+          return true
+        }
+        if (fresh) {
+          // Switch admission belongs to the host. The cached status only selects the wording.
+          // Antigravity retires its home on Continue, so it always shows the warning.
+          patchRow(botId, seq, { busy: false, confirm: provider === 'acp-antigravity' || current?.signedIn !== false })
           return true
         }
         // Already signed in on this computer, to an account that waits for the person.
@@ -349,7 +359,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
         // The offer stays: its own Sign in reports what failed.
       }
       if (!valid()) return false
-      patchRow(botId, seq, { busy: false })
+      patchRow(botId, seq, { busy: false, ...(fresh ? { confirm: true } : {}) })
       return true
     },
 
@@ -390,6 +400,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       nextIntent()
       const row = rowOf(botId)
       if (disposed || !valid() || row === undefined || row.busy || !['offer', 'failed', 'interrupted'].includes(row.stage)) return false
+      if (row.fresh) return api.switchFresh(botId, valid)
       const seq = row.seq
       patchRow(botId, seq, { busy: true, error: null })
       try {
@@ -493,20 +504,28 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
      * "Continue": the same host switch again (#2064), never a plain sign-in. Its own attempt is
      * read by its id; only a host that names none is joined through its current attempt.
      */
+    switchFresh(botId, valid = () => true) {
+      if (rowOf(botId)?.fresh !== true) return false
+      return api.switchAgain(botId, valid)
+    },
+
     async switchAgain(botId, valid = () => true) {
       nextIntent()
       const row = rowOf(botId)
-      if (disposed || !valid() || row?.switched !== true || row.stillSignedIn !== true || row.busy
-        || !['failed', 'interrupted'].includes(row.stage) || typeof actions.cliLoginSwitch !== 'function') return false
+      if (disposed || !valid() || !row || row.busy || typeof actions.cliLoginSwitch !== 'function') return false
+      const retry = row.switched === true && row.stillSignedIn === true
+      if (row.fresh ? !['offer', 'failed', 'interrupted'].includes(row.stage)
+        : !retry || !['failed', 'interrupted'].includes(row.stage)) return false
       const { seq, provider } = row
       patchRow(botId, seq, { busy: true, error: null })
       let switched
       try {
-        switched = await actions.cliLoginSwitch(botId, provider)
+        switched = await actions.cliLoginSwitch(botId, provider,
+          ...(row.fresh ? [{ fresh: true, ...(provider === 'acp-antigravity' ? {} : { keep: true }) }] : []))
       } catch (error) {
         // A refused switch keeps the failed row, with the host's sentence: Try again asks again.
         if (!live(botId, seq) || !valid()) return false
-        patchRow(botId, seq, { busy: false, confirm: false, error: messageOf(error) })
+        patchRow(botId, seq, { busy: false, ...(row.fresh && row.stage === 'offer' ? {} : { confirm: false }), error: messageOf(error) })
         return false
       }
       void Promise.resolve().then(() => actions.refreshModels?.()).catch(() => {})
