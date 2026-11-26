@@ -528,9 +528,10 @@ export class Backchannel {
    * `native`: the agent keeps its own tools (native-tools mode), so this bridge offers and runs
    * only DSH's extras, never a twin of one of them (NATIVE_TWIN_TOOLS).
    * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean,
-   *   promptSkillRefusals?: () => Set<string> | undefined, native?: boolean, skillOnly?: boolean }} options
+   *   promptSkillRefusals?: () => Set<string> | undefined, native?: boolean, skillOnly?: boolean,
+   *   canList?: () => boolean }} options
    */
-  mint({ sessionId, agent, name, promptRunning, promptSkillRefusals, native = false, skillOnly = false }) {
+  mint({ sessionId, agent, name, promptRunning, promptSkillRefusals, native = false, skillOnly = false, canList }) {
     const credential = randomBytes(32).toString('hex')
     const record = {
       credential,
@@ -540,6 +541,7 @@ export class Backchannel {
       name: name ?? 'agent',
       promptRunning,
       promptSkillRefusals,
+      canList,
       native: native === true,
       skillOnly,
       generation: 0,
@@ -735,6 +737,9 @@ export class Backchannel {
       return reply(200, { generation: record.generation })
     }
     if (op === 'list') {
+      // A replacement can list before the ACP answer. Let that request finish with an empty
+      // list; readiness then retires the refused bridge without releasing its announcement.
+      if (record.canList?.() === false) return reply(200, { tools: [], generation: record.generation })
       this.refresh(record)
       record.listed = true
       return reply(200, { tools: offeredTools(this.ctx, record.agent, { native: record.native, skillOnly: record.skillOnly }), generation: record.generation })

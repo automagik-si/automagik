@@ -10,8 +10,11 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { createUserMessage, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { Session } from '@deepseek-ai/dsh-session'
 import { apply, SERVICE } from '../index.js'
 import { accountEvidenceOf } from '../src/host/account.js'
+import { AgentRun } from '../src/host/acp.js'
 import { CliGenerations, GENERATION_ENV, POINTER_ENV } from '../src/host/cli-generations.js'
 import { CliHomes, HOME_ENV, releaseRun, trackRun } from '../src/host/cli-homes.js'
 import { CONSENT_FILE, ConsentStore } from '../src/host/consent.js'
@@ -19,6 +22,7 @@ import { recordLogin } from '../src/host/login-ownership.js'
 import { CliLogins } from '../src/host/login.js'
 import { reservationDigests } from '../src/host/reservation-evidence.js'
 import { MODEL_ACCESS_REQUIRED } from '../src/host/names.js'
+import { fileIdentity } from '../src/host/session-files.js'
 import { plantWindowsRecord, proved } from './support/windows-record.js'
 import { loginReadIo, resolveLogin } from '../../../herdr/mods/am-sidebar/loginRecord.js'
 
@@ -1509,3 +1513,249 @@ test('SD2-1: a Claude switch that settles keeps its lock while the Codex count c
   await admitted(h, id)
   assert.equal(h.service.loginStatus(id, attempt.attemptId).signedInAfter, true)
 })
+
+const LIVE_CODEX = 'acp-codex'
+const PENDING_CLAUDE = 'acp-claude'
+const SIGNED_OUT = 'The Bot account changed. Sign in again in the app.'
+const SESSION_HELD = 'This Session is held by the fixture.'
+
+async function signOutLifecycleFixture(t) {
+  const h = fixture(t)
+  await h.login(LIVE_CODEX)
+  await h.login(PENDING_CLAUDE)
+  const { adapter } = h
+  const id = 'same-session'
+  const session = Session.create(id, undefined, { version: 4, id, createdAt: 0, isSeeded: false, cwd: h.root })
+  const agent = { id, session, status: 'idle', ctx: { tools: { register: () => () => {} } } }
+  adapter.ctx.agents.get = sessionId => sessionId === id ? agent : undefined
+  adapter.ctx.sessions = new Map([[id, session]])
+  const services = {
+    approval: { effectivePolicy: () => 'ask' },
+    sandboxPolicy: { resolve: () => ({ mode: 'workspace-write' }) },
+  }
+  adapter.ctx.get = name => services[name]
+  adapter.dshTools = () => true
+  const row = adapter.agents.get(LIVE_CODEX)
+  row.ownMode = undefined
+  t.mock.method(row, 'spawn', () => ({
+    command: 'fake-codex-acp', sessionFileEnabled: true, sessionFileMode: 'default',
+  }))
+  t.mock.method(adapter.agents.get(PENDING_CLAUDE), 'spawn', () => ({ command: 'fake-claude-acp' }))
+  t.mock.method(adapter.backchannel, 'listen', async () => {})
+  const mint = t.mock.method(adapter.backchannel, 'mint')
+  const launch = t.mock.method(AgentRun.prototype, 'start', async function () {
+    this.child = {}
+    this.sessionId = 'fake-acp-session'
+    this.options = []
+  })
+  t.mock.method(AgentRun.prototype, 'setMode', async function (modes) {
+    if (modes !== undefined) this.modes = { currentModeId: modes.at(-1) }
+  })
+  const prompt = t.mock.method(AgentRun.prototype, 'prompt', async function () {
+    this.promptEnded = true
+    this.push({ type: 'end', stopReason: 'end_turn' })
+  })
+  const teardown = t.mock.method(adapter, 'endSession')
+  const path = join(h.root, 'fake.png')
+  writeFileSync(path, 'fake image')
+  const stageGrant = () => {
+    const owner = adapter.sessionFiles.owner(agent, LIVE_CODEX)
+    const grant = { staged: true, ready: Promise.resolve(), files: [fileIdentity(path)] }
+    owner.grant = grant
+    return { owner, grant }
+  }
+
+  const stream = (provider, text) => Array.fromAsync(adapter.stream(markAgentLoopRequest({
+    provider, sessionId: id, model: 'default',
+    messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })],
+  })))
+  const { owner, grant } = stageGrant()
+  assert.equal((await stream(LIVE_CODEX, 'Open the fake image.')).at(-1).reason.kind, 'stop')
+  const live = adapter.live.get(id)
+  assert.equal(live.fileOwner, owner)
+  assert.equal(grant.staged, false)
+  const { run, bridge } = live
+  const { child } = run
+  const assertIntact = () => {
+    assert.equal(adapter.live.get(id), live)
+    assert.equal(run.child, child)
+    assert.equal(run.alive, true)
+    assert.equal(live.bridge, bridge)
+    assert.equal(bridge.closed, false)
+    assert.equal(adapter.backchannel.records.get(bridge.credential), bridge)
+    assert.equal(adapter.sessionFiles.owners.get(id), owner)
+    assert.equal(owner.grant, grant)
+    assert.equal(owner.lifetime.signal.aborted, false)
+  }
+  const assertEnded = () => {
+    assert.equal(adapter.live.has(id), false)
+    assert.equal(run.alive, false)
+    assert.equal(bridge.closed, true)
+    assert.equal(adapter.backchannel.records.has(bridge.credential), false)
+    assert.notEqual(adapter.sessionFiles.owners.get(id), owner)
+    assert.equal(owner.lifetime.signal.aborted, true)
+  }
+  assertIntact()
+
+  async function waitAtGate(provider, gateNumber) {
+    const entered = Promise.withResolvers()
+    const release = Promise.withResolvers()
+    let gates = 0
+    adapter.holds = () => [({ provider: asking, agent: heldAgent, sessionId }) => {
+      if (asking !== provider || ++gates !== gateNumber) return
+      entered.resolve({ heldAgent, sessionId })
+      return release.promise
+    }]
+    const turn = stream(provider, 'Pending turn at a hold gate.')
+    try {
+      const gate = await Promise.race([entered.promise, turn.then(chunks => {
+        assert.fail('Turn ended before the hold gate: ' + JSON.stringify(chunks.at(-1)?.reason))
+      })])
+      assert.deepEqual(gate, { heldAgent: agent, sessionId: id })
+      assert.equal(adapter.starting.get(id).provider, provider)
+    } catch (error) {
+      release.resolve()
+      throw error
+    }
+    return { turn, release: release.resolve }
+  }
+
+  const counts = () => [launch, mint, prompt].map(spy => spy.mock.callCount())
+  const assertNext = async () => {
+    assert.equal((await stream(LIVE_CODEX, 'Continue with the approved image.')).at(-1).reason.kind, 'stop')
+    assert.deepEqual(counts(), [1, 1, 2])
+    assert.equal(prompt.mock.calls[1].this, run)
+    assertIntact()
+  }
+  const signOut = async provider => assert.deepEqual(await h.service.accountSignOut(provider),
+    { id: provider, signedIn: false, authScope: 'isolated' })
+  return { adapter, id, live, owner, assertIntact, assertEnded, waitAtGate, assertNext, counts, signOut, stageGrant, teardown }
+}
+
+function assertHeldTurn(chunks, message) {
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  assert.ok(chunks.some(chunk => JSON.stringify(chunk).includes(message)))
+}
+
+for (const label of ['S1', 'E2']) {
+  test(`${label}: pending Claude sign-out preserves the live Codex child, bridge and image grant`, { timeout: 8000 }, async t => {
+    const h = await signOutLifecycleFixture(t)
+    const gate = await h.waitAtGate(PENDING_CLAUDE, 1)
+    try {
+      h.assertIntact()
+      await h.signOut(PENDING_CLAUDE)
+      h.assertIntact()
+      assert.equal(h.adapter.starting.get(h.id).held, SIGNED_OUT)
+    } finally {
+      gate.release()
+    }
+    assertHeldTurn(await gate.turn, SIGNED_OUT)
+    assert.equal(h.adapter.starting.has(h.id), false)
+    assert.deepEqual(h.counts(), [1, 1, 1])
+    h.assertIntact()
+    await h.assertNext()
+    if (label === 'E2') {
+      await h.signOut(LIVE_CODEX)
+      h.assertEnded()
+    }
+  })
+}
+
+test('S2: signing out live Codex retires its child, bridge and exact grant', { timeout: 8000 }, async t => {
+  const h = await signOutLifecycleFixture(t)
+  await h.signOut(LIVE_CODEX)
+  h.assertEnded()
+})
+
+test('AD-1: a Session-wide veto still ends live Codex while Claude waits', { timeout: 8000 }, async t => {
+  const h = await signOutLifecycleFixture(t)
+  const gate = await h.waitAtGate(PENDING_CLAUDE, 1)
+  try { h.assertIntact() } finally { gate.release(SESSION_HELD) }
+  assertHeldTurn(await gate.turn, SESSION_HELD)
+  h.assertEnded()
+  assert.deepEqual(h.counts(), [1, 1, 1])
+})
+
+test('S3: a sign-out that lands at the late hold gate keeps cleanup scoped to that provider', { timeout: 8000 }, async t => {
+  const h = await signOutLifecycleFixture(t)
+  const gate = await h.waitAtGate(PENDING_CLAUDE, 2)
+  let late
+  let grant
+  let callsAtSignOut
+  try {
+    late = h.adapter.live.get(h.id)
+    assert.equal(late.provider, PENDING_CLAUDE)
+    assert.equal(h.live.run.alive, false, 'the crossing has already retired Codex')
+    assert.equal(h.owner.lifetime.signal.aborted, true)
+    // A new Codex grant belongs to a separate owner even on the same Session and Agent.
+    grant = h.stageGrant()
+    assert.notEqual(grant.owner, h.owner)
+    await h.signOut(PENDING_CLAUDE)
+    assert.equal(late.run.alive, false)
+    assert.equal(late.bridge.closed, true)
+    callsAtSignOut = h.teardown.mock.callCount()
+  } finally {
+    gate.release()
+  }
+  assertHeldTurn(await gate.turn, SIGNED_OUT)
+  assert.equal(h.adapter.live.has(h.id), false)
+  assert.equal(h.adapter.starting.has(h.id), false)
+  assert.equal(h.adapter.sessionFiles.owners.get(h.id), grant.owner)
+  assert.equal(grant.owner.grant, grant.grant)
+  assert.equal(grant.owner.lifetime.signal.aborted, false)
+  assert.deepEqual(h.counts(), [2, 2, 1])
+  assert.deepEqual(h.teardown.mock.calls.slice(callsAtSignOut).map(call => call.arguments[2]), [PENDING_CLAUDE])
+})
+
+test('S4: sign-out clears the starting provider’s exact image grant without a live run', { timeout: 8000 }, async t => {
+  const h = await signOutLifecycleFixture(t)
+  await h.signOut(LIVE_CODEX)
+  h.assertEnded()
+  const { owner } = h.stageGrant()
+  const gate = await h.waitAtGate(LIVE_CODEX, 1)
+  try {
+    assert.equal(h.adapter.live.has(h.id), false)
+    await h.signOut(LIVE_CODEX)
+  } finally {
+    gate.release()
+  }
+  assertHeldTurn(await gate.turn, SIGNED_OUT)
+  assert.equal(owner.lifetime.signal.aborted, true)
+  assert.equal(h.adapter.sessionFiles.owners.has(h.id), false)
+})
+
+for (const replace of [false, true]) {
+  test(`AD-5: provider-scoped gate cleanup ${replace ? 'preserves the replacement owner' : 'clears its exact grant independently of the sign-out sweep'}`, { timeout: 8000 }, async t => {
+    const h = await signOutLifecycleFixture(t)
+    const gate = await h.waitAtGate(LIVE_CODEX, 1)
+    const files = h.adapter.sessionFiles
+    let replacement
+    let callsAtRelease
+    try {
+      const sweep = t.mock.method(files, 'clear', () => {}, { times: 1 })
+      h.adapter.endProvider(LIVE_CODEX, SIGNED_OUT)
+      assert.equal(h.adapter.starting.get(h.id).heldByProvider, LIVE_CODEX)
+      assert.equal(h.adapter.live.has(h.id), false)
+      assert.equal(files.owners.get(h.id), h.owner)
+      assert.deepEqual(sweep.mock.calls.map(call => call.arguments), [[h.id, { owner: h.owner, retire: false }]])
+      if (replace) {
+        files.clear(h.id, { owner: h.owner, retire: false })
+        replacement = h.stageGrant()
+        assert.notEqual(replacement.owner, h.owner)
+      }
+      callsAtRelease = h.teardown.mock.callCount()
+    } finally {
+      gate.release()
+    }
+    assertHeldTurn(await gate.turn, SIGNED_OUT)
+    assert.deepEqual(h.teardown.mock.calls.slice(callsAtRelease).map(call => call.arguments[2]), [LIVE_CODEX])
+    h.assertEnded()
+    if (replacement === undefined) {
+      assert.equal(files.owners.has(h.id), false)
+    } else {
+      assert.equal(files.owners.get(h.id), replacement.owner)
+      assert.equal(replacement.owner.grant, replacement.grant)
+      assert.equal(replacement.owner.lifetime.signal.aborted, false)
+    }
+  })
+}

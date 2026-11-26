@@ -6,8 +6,9 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 import { test } from 'node:test'
+import { Session } from '@deepseek-ai/dsh-session'
 import { apply, SERVICE, SIGNED_IN_TTL_MS } from '../index.js'
 import { AgentRun } from '../src/host/acp.js'
 import { AGENTS } from '../src/host/agents.js'
@@ -694,4 +695,231 @@ test('C1: sameAccount names only the account the record holds; Claude needs its 
   const claudeKey = { kind: 'key', id: 'ck', facets: { kind: 'key', source: 'env:ANTHROPIC_API_KEY' } }
   store.confirm('acp-claude', claudeKey)
   assert.equal(store.sameAccount('acp-claude', claudeKey), false)
+})
+
+const RECONFIRM_CODEX = 'Confirm the account of Codex before using this model.'
+
+async function reforkAccountFixture(t) {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+  const provider = 'acp-codex'
+  const id = 'chat'
+  const h = harness(t, {
+    signedIn: { codex: true }, accounts: { codex: CODEX_WORK },
+    config: { claude: false, codex: true, dshTools: true },
+  })
+  lateBins(h)
+  const adapter = h.registered.adapter
+  const session = Session.create(id)
+  const originalAgent = { ...h.ctx.agents.get(), id, session }
+  let agent = originalAgent
+  h.ctx.agents.get = sessionId => sessionId === id ? agent : undefined
+  h.ctx.sessions = new Map([[id, session]])
+  let catalog = { key: 'first', text: 'First fake Skills catalog' }
+  const skillCalls = { available: () => true, catalog: () => catalog, project: options => options }
+  const tools = { definitions: () => [{ name: 'load_skill', description: 'Load a fake Skill' }] }
+  h.ctx.get = name => name === 'omniTeam' ? { skillCalls } : name === 'tools' ? tools : undefined
+  assert.equal(await adapter.access(provider), RECONFIRM_CODEX)
+  await h.service.accountConfirm(provider)
+
+  t.mock.method(adapter.agents.get(provider), 'spawn', () => ({ command: 'fake-acp' }))
+  t.mock.method(adapter.backchannel, 'listen', async () => {})
+  const mint = t.mock.method(adapter.backchannel, 'mint')
+  const announced = t.mock.method(adapter.backchannel, 'announce')
+  const refork = t.mock.method(adapter, 'refork')
+  const accountRead = Promise.withResolvers()
+  const freshAccount = Promise.withResolvers()
+  const paused = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  let phase
+  let modeError
+  let changedTools = false
+  let originalBridge
+  const pause = async () => { paused.resolve(); await release.promise }
+  const renewals = []
+  const forks = []
+  const requests = []
+  const firstLists = []
+  async function list(record) {
+    const request = Object.assign(Readable.from([Buffer.from('{"op":"list"}')]), {
+      method: 'POST', url: record.path,
+      headers: { authorization: `Bearer ${record.credential}`, 'x-dsh-bridge-attachment': '0'.repeat(32) },
+    })
+    let status
+    let answer
+    await adapter.backchannel.handle(request, {
+      writeHead: code => { status = code }, end: body => { answer = JSON.parse(body) },
+    })
+    assert.equal(status, 200)
+    return { tools: answer.tools.map(tool => tool.name), listed: record.listed, announced: record.announced }
+  }
+  t.mock.method(adapter.backchannel, 'refresh', record => changedTools && record === originalBridge)
+  const launch = t.mock.method(AgentRun.prototype, 'start', async function () {
+    this.child = {}
+    this.sessionId = `fake-start-${launch.mock.callCount() + 1}`
+    this.options = []
+    const replacement = async (route, params, calls) => {
+      calls.push(params.mcpServers.length)
+      if (phase === 'request') await pause()
+      firstLists.push(await list(mint.mock.calls.at(-1).result))
+      requests.push(route)
+      return { sessionId: `fake-${route}` }
+    }
+    this.conn = {
+      cancel: async () => { await pause(); this.prompting = undefined },
+      newSession: params => replacement('renewal', params, renewals),
+      forkSession: params => replacement('fork', params, forks),
+    }
+    await list(mint.mock.calls.at(-1).result)
+    await this.spec.onReady?.(this)
+  })
+  t.mock.method(AgentRun.prototype, 'setMode', async () => {
+    if (phase !== 'mode') return
+    await pause()
+    if (modeError) throw new Error('fake mode failure')
+  })
+  const prompt = t.mock.method(AgentRun.prototype, 'prompt', async function () {
+    this.promptEnded = true
+    this.push({ type: 'end', stopReason: 'end_turn' })
+  })
+  const stream = text => Array.fromAsync(adapter.stream({
+    provider, sessionId: id, model: 'default',
+    messages: [{ id: text, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }],
+  })).then(chunks => chunks.at(-1)?.reason)
+  assert.equal((await stream('Warm the catalog')).kind, 'stop')
+  const live = adapter.live.get(id)
+  assert.equal(live.skillCatalog, 'first')
+  assert.equal(live.run.alive, true)
+  originalBridge = live.bridge
+  assert.equal(originalBridge.closed, false)
+  assert.deepEqual([launch, mint, prompt, announced].map(spy => spy.mock.callCount()), [1, 1, 1, 1])
+
+  async function attempt({ skills, tools, at, account = CODEX_OTHER, failMode = false, replaceAgent = false }) {
+    phase = at
+    modeError = failMode
+    changedTools = tools
+    if (replaceAgent) agent = { ...originalAgent }
+    if (skills) catalog = { key: 'changed', text: 'Changed fake Skills catalog' }
+    if (at === 'before mint') live.run.prompting = release.promise
+    h.accounts.codex = () => { accountRead.resolve(); return freshAccount.promise }
+    t.mock.timers.tick(SIGNED_IN_TTL_MS)
+    const turn = stream('Turn needing a replacement')
+    try {
+      await Promise.race([Promise.all([paused.promise, accountRead.promise]), turn.then(reason => {
+        assert.fail(`Turn finished before ${at}: ${JSON.stringify(reason)}`)
+      })])
+      assert.equal((await h.service.status()).agents.find(row => row.id === provider).consent, 'given')
+      assert.equal(adapter.live.get(id), live)
+      assert.equal(mint.mock.callCount(), at === 'before mint' ? 1 : 2)
+      freshAccount.resolve(account)
+      await settle()
+      assert.equal((await h.service.status()).agents.find(row => row.id === provider).consent,
+        account === CODEX_WORK ? 'given' : 'needed')
+    } finally {
+      freshAccount.resolve(account)
+      release.resolve()
+    }
+    return turn
+  }
+  const counts = () => ({
+    starts: launch.mock.callCount(), mints: mint.mock.callCount() - 1,
+    renewals, forks, reforks: refork.mock.callCount(), prompts: prompt.mock.callCount(),
+  })
+  const ended = () => {
+    assert.equal(adapter.live.has(id), false)
+    assert.equal(live.run.alive, false)
+    assert.equal(originalBridge.closed, true)
+    assert.equal(adapter.backchannel.records.has(originalBridge.credential), false)
+  }
+  const replacement = () => mint.mock.calls[1]?.result
+  const publications = () => announced.mock.calls.slice(1).map(call => call.arguments[0])
+  const reconfirm = () => h.service.accountConfirm(provider)
+  return { attempt, counts, ended, firstLists, live, publications, replacement, reconfirm, requests, stream }
+}
+
+function assertAccountRefused(reason) {
+  assert.deepEqual(reason, { kind: 'error', failure: { code: MODEL_ACCESS_REQUIRED, message: RECONFIRM_CODEX } })
+}
+
+for (const [label, route] of [['R1', 'Skills renewal'], ['T1', 'DSH-tools fork'], ['AD-2', 'Skills renewal']]) {
+  test(`${label}: withdrawal before mint retires the warmed ${route} run`, { timeout: 5000 }, async t => {
+    const h = await reforkAccountFixture(t)
+    const reason = await h.attempt({
+      skills: route === 'Skills renewal', tools: route === 'DSH-tools fork',
+      at: 'before mint', replaceAgent: label === 'AD-2',
+    })
+    assert.deepEqual(h.counts(), { starts: 1, mints: 0, renewals: [], forks: [], reforks: 0, prompts: 1 })
+    assertAccountRefused(reason)
+    h.ended()
+  })
+}
+
+for (const [label, skills] of [['R2', true], ['T2', false]]) {
+  test(`${label}: an eligible account publishes the replacement bridge and prompts`, { timeout: 5000 }, async t => {
+    const h = await reforkAccountFixture(t)
+    const reason = await h.attempt({ skills, tools: !skills, at: 'before mint', account: CODEX_WORK })
+    assert.deepEqual(h.counts(), {
+      starts: 1, mints: 1, renewals: skills ? [1] : [], forks: skills ? [] : [1], reforks: 1, prompts: 2,
+    })
+    assert.equal(reason.kind, 'stop')
+    assert.deepEqual(h.firstLists, [{ tools: ['load_skill'], listed: true, announced: false }])
+    assert.deepEqual(h.publications(), [h.replacement()])
+    assert.equal(h.replacement().listed, true)
+    assert.equal(h.replacement().closed, false)
+    assert.equal(h.live.skillCatalog, skills ? 'changed' : 'first')
+  })
+}
+
+for (const [label, skills] of [['H3', true], ['T3', false]]) {
+  test(`${label}: withdrawal during the replacement request refuses readiness before announce and list`, { timeout: 5000 }, async t => {
+    const h = await reforkAccountFixture(t)
+    const reason = await h.attempt({ skills, tools: !skills, at: 'request' })
+    assert.deepEqual(h.requests, [skills ? 'renewal' : 'fork'])
+    assert.deepEqual(h.firstLists, [{ tools: [], listed: false, announced: false }])
+    assert.deepEqual(h.publications(), [], 'readiness must never announce the replacement')
+    assert.notEqual(h.replacement().listed, true)
+    assert.equal(h.replacement().closed, true)
+    assert.equal(h.counts().mints, 1)
+    assert.equal(h.counts().prompts, 1)
+    assertAccountRefused(reason)
+    h.ended()
+  })
+}
+
+for (const [label, skills] of [['H4', true], ['T4', false]]) {
+  test(`${label}: withdrawal after replacement readiness refuses the next prompt`, { timeout: 5000 }, async t => {
+    const h = await reforkAccountFixture(t)
+    const reason = await h.attempt({ skills, tools: !skills, at: 'mode' })
+    assert.deepEqual(h.publications(), [h.replacement()], 'withdrawal landed after readiness')
+    assert.equal(h.counts().prompts, 1)
+    assertAccountRefused(reason)
+    h.ended()
+  })
+}
+
+for (const account of [CODEX_WORK, CODEX_OTHER]) {
+  test(`AD-3: a mode failure after a fork ${account === CODEX_WORK ? 'keeps an eligible run' : 'retires a withdrawn run'}`, { timeout: 5000 }, async t => {
+    const h = await reforkAccountFixture(t)
+    const reason = await h.attempt({ tools: true, at: 'mode', account, failMode: true })
+    assert.equal(h.counts().prompts, 1)
+    if (account === CODEX_WORK) {
+      assert.match(reason.failure.message, /would not take DSH's permission level: fake mode failure/)
+      assert.equal(h.live.run.alive, true)
+      assert.equal(h.replacement().closed, false)
+    } else {
+      assertAccountRefused(reason)
+      h.ended()
+      assert.equal(h.replacement().closed, true)
+    }
+  })
+}
+
+test('E1: withdrawal ends the old run and reconfirmation permits one fresh turn', { timeout: 5000 }, async t => {
+  const h = await reforkAccountFixture(t)
+  const reason = await h.attempt({ skills: true, tools: true, at: 'before mint' })
+  assert.deepEqual(h.counts(), { starts: 1, mints: 0, renewals: [], forks: [], reforks: 0, prompts: 1 })
+  assertAccountRefused(reason)
+  h.ended()
+  assert.equal((await h.reconfirm()).consent, 'given')
+  assert.equal((await h.stream('Answer after reconfirmation')).kind, 'stop')
+  assert.deepEqual(h.counts(), { starts: 2, mints: 1, renewals: [], forks: [], reforks: 0, prompts: 2 })
 })

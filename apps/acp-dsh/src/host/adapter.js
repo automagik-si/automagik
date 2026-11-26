@@ -1062,7 +1062,10 @@ export class AcpAdapter extends LlmAdapter {
 
   endProvider(provider, why) {
     for (const [id, starting] of this.starting) {
-      if (starting.provider === provider) this.endSession(id, why, provider, candidate => candidate === starting)
+      if (starting.provider !== provider) continue
+      // The pending turn must keep this hold scoped when it returns from an await.
+      if (starting.held === undefined) starting.heldByProvider = provider
+      this.endSession(id, why, provider, candidate => candidate === starting)
     }
     for (const [id, live] of this.live) {
       if (live.provider === provider) this.endSession(id, why, provider, candidate => candidate === live)
@@ -1352,6 +1355,11 @@ export class AcpAdapter extends LlmAdapter {
    */
   async ready(agent, state) {
     const record = state.bridge
+    // fork and renew reach readiness only after receiving the replacement Session.
+    if (state.checkReforkAccount?.() === false) {
+      if (record !== undefined) this.backchannel.revoke(record)
+      return
+    }
     if (record === undefined) return
     this.backchannel.announce(record)
     const deadline = Date.now() + (agent.bridgeReadyMs ?? BRIDGE_READY_MS)
@@ -1377,7 +1385,7 @@ export class AcpAdapter extends LlmAdapter {
    * second bridge. Each of the fork's requests has its own deadline; `signal`, the turn's
    * Stop, ends the wait for all of them.
    */
-  async refork(agent, live, dshAgent, signal, { renew = false } = {}) {
+  async refork(agent, live, dshAgent, signal, { renew = false, checkAccount } = {}) {
     const { bridge: previous, run } = live
     const next = previous === undefined ? undefined : this.backchannel.mint({
       sessionId: dshAgent?.session?.id,
@@ -1387,8 +1395,10 @@ export class AcpAdapter extends LlmAdapter {
       promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
       native: live.twinsOff === true,
       skillOnly: previous?.skillOnly === true,
+      canList: checkAccount,
     })
     live.bridge = next
+    live.checkReforkAccount = checkAccount
     // The source is done running tools before the fork starts.
     if (previous) this.backchannel.revoke(previous)
     try {
@@ -1410,6 +1420,9 @@ export class AcpAdapter extends LlmAdapter {
       if (this.live.get(sessionId) === live) this.live.delete(sessionId)
       if (previous !== undefined) this.backchannel.revoke(previous)
       throw error
+    } finally {
+      if (next !== undefined) next.canList = undefined
+      if (live.checkReforkAccount === checkAccount) delete live.checkReforkAccount
     }
     return next
   }
@@ -1694,29 +1707,44 @@ export class AcpAdapter extends LlmAdapter {
       && this.ctx.agents?.get?.(sessionId) === dshAgent && dshAgent.session === entry.session
       && (typeof this.ctx.sessions?.get !== 'function' || this.ctx.sessions.get(sessionId) === entry.session)
     const startChanged = () => entry.held !== undefined || !ownsStart() || this.agents.get(options.provider) !== agent
-    const stopOwned = (why, expected, owner) => {
+    const stopOwned = (why, expected, { provider, account = false, sessionHold = false } = {}) => {
       if (this.starting.get(sessionId) !== entry) return
-      if (owner?.agent === dshAgent && owner.session === entry.session) {
+      // A warmed run can still belong to this Session after its DSH Agent was replaced.
+      const stopLive = expected !== undefined && this.live.get(sessionId) === expected
+        && (provider === undefined || expected.provider === provider)
+        && (!entry.invalidated || expected === entry.startup)
+        && expected.dshAgent?.session === entry.session
+        && (account || sessionHold || expected.dshAgent === dshAgent)
+      const owner = this.sessionFiles.owners.get(sessionId)
+      if (owner !== undefined && (provider === undefined || owner.provider === provider)
+          && ((!account && owner === entry.fileOwner) || (stopLive && owner === expected.fileOwner))) {
         this.sessionFiles.clear(sessionId, { owner, retire: false })
       }
-      this.endSession(sessionId, why, undefined, candidate => candidate === entry
-        || (candidate === expected && (!entry.invalidated || candidate === entry.startup)
-          && candidate.dshAgent === dshAgent && candidate.dshAgent.session === entry.session))
+      this.endSession(sessionId, why, provider, candidate => candidate === entry || (stopLive && candidate === expected))
     }
     const stopChanged = function* () {
       const why = entry.held ?? live?.held ?? HELD_TEXT
-      stopOwned(why, live, entry.fileOwner)
+      stopOwned(why, live, { provider: entry.heldByProvider })
       if (options.signal?.aborted && why === HELD_TEXT) return yield STOPPED()
       return yield* stopped(why)
     }
-    const firstPromptRefusal = () => {
-      if (live.run.promptEnded !== undefined) return
-      const message = this.currentAccess?.(options.provider)
+    const currentRefusal = () => this.currentAccess?.(options.provider)
+    const accountRefused = (message = currentRefusal()) => {
       if (message === undefined) return
-      stopOwned(message, live, live.fileOwner)
+      stopOwned(message, live, { provider: options.provider, account: true })
       return finish('error', message, MODEL_ACCESS_REQUIRED)
     }
-    const held = await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
+    let reforked = false
+    let readinessRefusal
+    const checkReforkAccount = () => {
+      // A refused list stays binding for this replacement until readiness can retire it.
+      readinessRefusal ??= currentRefusal()
+      return readinessRefusal === undefined
+    }
+    const reforkRefusal = () => reforked ? accountRefused(readinessRefusal) : undefined
+    const firstPromptRefusal = () => live.run.promptEnded === undefined || reforked ? accountRefused() : undefined
+    const sessionHold = await this.heldBack(sessionId, dshAgent, options.provider)
+    const held = sessionHold ?? entry.held
     if (archived()) return yield finish('stop')
     agent = this.agents.get(options.provider)
     if (agent === undefined) return yield finish('error', `No ACP agent is set up as ${options.provider}`, 'NO_ADAPTER')
@@ -1736,7 +1764,10 @@ export class AcpAdapter extends LlmAdapter {
       return yield* stopped(held ?? HELD_TEXT)
     }
     if (held !== undefined) {
-      stopOwned(held, live, entry.fileOwner)
+      stopOwned(held, live, {
+        provider: sessionHold === undefined ? entry.heldByProvider : undefined,
+        sessionHold: sessionHold !== undefined,
+      })
       started()
       return yield* stopped(held)
     }
@@ -1874,7 +1905,7 @@ export class AcpAdapter extends LlmAdapter {
           } catch (error) {
             if (archived()) return yield finish('stop')
             if (startChanged()) return yield* stopChanged()
-            stopOwned(undefined, live, fileOwner)
+            stopOwned(undefined, live)
             return yield finish('error', error.message)
           }
         } else if (this.sessionFiles.owners.has(sessionId)) {
@@ -1982,8 +2013,10 @@ export class AcpAdapter extends LlmAdapter {
       if (live !== undefined && live.skillCatalog !== undefined && live.skillCatalog !== skillCatalog(live)?.key) {
         try {
           if (startChanged()) return yield* stopChanged()
+          const refused = accountRefused()
+          if (refused !== undefined) return yield refused
           if (codexRow && live.nativeOff === true) ensureCatalog(live.offCatalog)
-          await this.refork(agent, live, dshAgent, options.signal, { renew: true })
+          await this.refork(agent, live, dshAgent, options.signal, { renew: true, checkAccount: checkReforkAccount })
         } catch (error) {
           if (archived()) return yield finish('stop')
           if (live.held !== undefined) return yield* stopped(live.held)
@@ -1995,6 +2028,9 @@ export class AcpAdapter extends LlmAdapter {
         }
         if (archived()) return yield finish('stop')
         if (startChanged()) return yield* stopChanged()
+        reforked = true
+        const refused = reforkRefusal()
+        if (refused !== undefined) return yield refused
         live.skillCatalog = undefined
         fresh = renewedForSkills = true
         // The DSH Session and its visible transcript stay in place. Rebuild
@@ -2219,9 +2255,9 @@ export class AcpAdapter extends LlmAdapter {
               refresh: agent.refresh,
               // Keep Antigravity's settings check before a prompt, including when
               // session/new also mounted the Skills bridge.
-              onReady: state.bridge === undefined ? agyReady : async run => {
-                await agyReady?.(run)
-                await this.ready(agent, state)
+              onReady: async run => {
+                if (agyReady !== undefined) await agyReady(run)
+                if (state.bridge !== undefined || state.checkReforkAccount !== undefined) await this.ready(agent, state)
               },
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
               // In native-tools mode a built-in call is the point, not drift: it gets its mirror
@@ -2402,9 +2438,9 @@ export class AcpAdapter extends LlmAdapter {
           }
           try {
             if (startChanged()) return yield* stopChanged()
-            const refusal = firstPromptRefusal()
+            const refusal = accountRefused()
             if (refusal !== undefined) return yield refusal
-            await this.refork(agent, live, dshAgent, options.signal)
+            await this.refork(agent, live, dshAgent, options.signal, { checkAccount: checkReforkAccount })
           } catch (error) {
             if (archived()) return yield finish('stop')
             if (live.held !== undefined) return yield* stopped(live.held)
@@ -2415,6 +2451,9 @@ export class AcpAdapter extends LlmAdapter {
           }
           if (archived()) return yield finish('stop')
           if (startChanged()) return yield* stopChanged()
+          reforked = true
+          const refused = reforkRefusal()
+          if (refused !== undefined) return yield refused
         }
       }
       // A refused model can leave the run alive with no prompt yet. Revalidate when its
@@ -2451,6 +2490,8 @@ export class AcpAdapter extends LlmAdapter {
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
         if (startChanged()) return yield* stopChanged()
+        const refused = reforkRefusal()
+        if (refused !== undefined) return yield refused
         const left = this.abandoned(sessionId, live, agent, error, `taking ${options.model}`)
         if (left !== undefined) return yield left
         const at = options.reasoningEffort ? ` at ${options.reasoningEffort} effort` : ''
@@ -2460,6 +2501,8 @@ export class AcpAdapter extends LlmAdapter {
       }
       if (archived()) return yield finish('stop')
       if (startChanged()) return yield* stopChanged()
+      let refused = reforkRefusal()
+      if (refused !== undefined) return yield refused
       // The model now on a Codex process decides which launch it needed. Every branch that ends
       // here sends no prompt.
       if (codexRow) {
@@ -2506,6 +2549,8 @@ export class AcpAdapter extends LlmAdapter {
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
         if (startChanged()) return yield* stopChanged()
+        refused = reforkRefusal()
+        if (refused !== undefined) return yield refused
         if (own === 'yes' && live.sessionFileEnabled) {
           this.endSession(sessionId)
           return yield finish('error', 'The effective permission mode changed. Send a new message to continue.')
@@ -2516,6 +2561,8 @@ export class AcpAdapter extends LlmAdapter {
             if (archived()) return yield finish('stop')
             if (live.held !== undefined) return yield* stopped(live.held)
             if (startChanged()) return yield* stopChanged()
+            refused = reforkRefusal()
+            if (refused !== undefined) return yield refused
             const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
             if (left !== undefined) return yield left
             own = 'refused'
@@ -2537,11 +2584,15 @@ export class AcpAdapter extends LlmAdapter {
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
         if (startChanged()) return yield* stopChanged()
+        refused = reforkRefusal()
+        if (refused !== undefined) return yield refused
         const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
         if (left !== undefined) return yield left
         if (live.ownSent === true || live.fileOwner) this.end(sessionId, live)
         return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
       }
+      refused = reforkRefusal()
+      if (refused !== undefined) return yield refused
       const currentSkills = personCalls => skills?.project(options, { ...skillOptions, turnStart: inputStart, personCalls }) ?? options
       const beforeUploads = currentSkills()
       const uploads = uploadBlocks(
@@ -2575,10 +2626,14 @@ export class AcpAdapter extends LlmAdapter {
           })
         } catch (error) {
           if (archived()) return yield finish('stop')
+          refused = reforkRefusal()
+          if (refused !== undefined) return yield refused
           if (!uploadValid()) return yield uploadStopped()
           return yield finish('error', `Uploaded image input failed: ${error?.message ?? error}`, 'acp_upload_content')
         }
         if (archived()) return yield finish('stop')
+        refused = reforkRefusal()
+        if (refused !== undefined) return yield refused
         if (!uploadValid()) return yield uploadStopped()
         if (startChanged()) return yield* stopChanged()
       }
@@ -2586,17 +2641,28 @@ export class AcpAdapter extends LlmAdapter {
       // the start, a fork or the mode were awaited) gets no prompt. One that was ended since
       // the step's entry is refused whatever the gate says now: its mode above was read from a
       // level that has changed, and a gate that lets go here must not let this turn through.
-      const late = entry.held ?? live.held ?? await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
+      const alreadyHeld = entry.held ?? live.held
+      const lateSessionHold = alreadyHeld === undefined ? await this.heldBack(sessionId, dshAgent, options.provider) : undefined
+      const late = alreadyHeld ?? lateSessionHold ?? entry.held
       if (archived()) return yield finish('stop')
+      if (lateSessionHold === undefined) {
+        refused = reforkRefusal()
+        if (refused !== undefined) return yield refused
+      }
       if (!uploadValid()) return yield uploadStopped()
       if (late !== undefined) {
-        stopOwned(late, live, live.fileOwner)
+        stopOwned(late, live, {
+          provider: lateSessionHold === undefined ? entry.heldByProvider : undefined,
+          sessionHold: lateSessionHold !== undefined,
+        })
         return yield* stopped(late)
       }
       if (startChanged()) return yield* stopChanged()
       if (own === 'yes') {
         const again = await this.ownAnswer(sessionId, dshAgent, options.provider)
         if (archived()) return yield finish('stop')
+        refused = reforkRefusal()
+        if (refused !== undefined) return yield refused
         if (!uploadValid()) return yield uploadStopped()
         if (live.held !== undefined) return yield* stopped(live.held)
         if (startChanged()) return yield* stopChanged()
@@ -2604,6 +2670,8 @@ export class AcpAdapter extends LlmAdapter {
           own = 'changed'
           try { await live.run.setMode(strict, { signal: options.signal, force: true }) } catch (error) {
             if (archived()) return yield finish('stop')
+            refused = reforkRefusal()
+            if (refused !== undefined) return yield refused
             if (!uploadValid()) return yield uploadStopped()
             if (live.held !== undefined) return yield* stopped(live.held)
             if (startChanged()) return yield* stopChanged()
@@ -2613,6 +2681,8 @@ export class AcpAdapter extends LlmAdapter {
             return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
           }
           if (archived()) return yield finish('stop')
+          refused = reforkRefusal()
+          if (refused !== undefined) return yield refused
           if (!uploadValid()) return yield uploadStopped()
           if (live.held !== undefined) return yield* stopped(live.held)
           if (startChanged()) return yield* stopChanged()
@@ -2640,15 +2710,19 @@ export class AcpAdapter extends LlmAdapter {
         try {
           await this.sessionFiles.activate(live.fileOwner, last, options.signal)
           if (archived()) return yield finish('stop')
+          refused = reforkRefusal()
+          if (refused !== undefined) return yield refused
           if (!uploadValid()) return yield uploadStopped()
           if (startChanged()) return yield* stopChanged()
           if (!this.sessionFiles.valid(live.fileOwner) || this.live.get(sessionId) !== live ||
               (live.sessionFileMode && live.run.modes?.currentModeId !== live.sessionFileMode) || own === 'yes') throw new Error('Image permission changed before the prompt.')
         } catch (error) {
           if (archived()) return yield finish('stop')
+          refused = reforkRefusal()
+          if (refused !== undefined) return yield refused
           if (!uploadValid()) return yield uploadStopped()
           if (startChanged()) return yield* stopChanged()
-          stopOwned(undefined, live, live.fileOwner)
+          stopOwned(undefined, live)
           return yield finish('error', error.message)
         }
       }
