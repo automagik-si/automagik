@@ -180,7 +180,8 @@ test('a snapshot maps the log to rows in seq order, with the status, and follows
     ['dsh:s-omni-2:6', 'tool-result', null, 'session'],
   ])
   assert.deepEqual(snapshot.rows[2], { id: 'dsh:s-omni-2:4#tokens', turn: 1, at: 1004, source: 'session', kind: 'tokens', input: 10, output: 3, cache: 2 })
-  assert.equal(snapshot.rows[3].tool, 'bash')
+  assert.equal(snapshot.rows[3].tool, 'Tool')
+  assert.equal(snapshot.rows[3].summary, 'bash')
   assert.equal(snapshot.rows[4].call, 'dsh:s-omni-2:5')
   assert.equal(snapshot.rows[4].output, 'a b')
   // An ordinary Session address, a passive follow, and nothing but reads.

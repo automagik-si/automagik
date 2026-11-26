@@ -13,6 +13,7 @@ import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
 import { rawTextOf, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
+import { BRIDGE_ACTIVITY_RECORD, toolEventOf } from '../shared/tool-activity.js'
 import { reminderText } from './schedules.js'
 import { modelOf, replyModel } from './solver-progress.js'
 
@@ -588,6 +589,14 @@ export function install(rt) {
   const noting = (id, turn) => rt.handoffNoteTurn?.(id, turn) === true || rt.writingNote?.(id) === true
   // The round counter: a group Session's events keep its round's waiter alive and mark work.
   const countsInRound = id => rt.groupOwners.has(id) && !noting(id, live.get(id)?.turn)
+  const recordRoomTool = (id, entry, event, turn) => {
+    if (!entry.roomToolSource || !Number.isSafeInteger(turn) || entry.turn !== turn || !countsInRound(id)) return
+    const activity = toolEventOf(event)
+    if (activity) {
+      try { rt.roomToolActivity?.(id, entry.roomToolSource, activity) }
+      catch { rt.warn('Group tool activity could not be recorded') }
+    }
+  }
 
   // The group hears what the member says while it works. A text with a tool call goes
   // on at once; one without may be the turn's last, so it waits for the next text or the
@@ -925,6 +934,7 @@ export function install(rt) {
       case 'tool/call': {
         const name = String(event.data?.name ?? '')
         startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''), session, event)
+        recordRoomTool(id, entry, event, event.data?.turn)
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (name !== PROGRAM_TOOL) {
           entry.toolCount = (entry.toolCount ?? 0) + 1
@@ -934,11 +944,15 @@ export function install(rt) {
       }
       case 'tool/ptc-dispatch-start': {
         const name = String(event.data?.name ?? '')
+        recordRoomTool(id, entry, event, entry.calls?.get(event.data?.rootCallId)?.turn)
         startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}))
         entry.toolCount = (entry.toolCount ?? 0) + 1
         if (countsInRound(id)) rt.workRoomTurn?.(id, name)
         break
       }
+      case BRIDGE_ACTIVITY_RECORD:
+        recordRoomTool(id, entry, event, entry.turn)
+        break
       case 'tool/ptc-dispatch':
         endCall(id, entry, event.data?.subCallId)
         break
@@ -979,6 +993,7 @@ export function install(rt) {
         entry.switched = false
         entry.answers = false
         entry.opened = false
+        entry.roomToolSource = undefined
         entry.reviewReplyRequest = undefined
         entry.consumedResult = undefined
         entry.joined = []
@@ -1053,6 +1068,7 @@ export function install(rt) {
         // still claims it as today, a later one only joins it.
         const opened = entry.opened === true
         if (entry.turn !== undefined && !bare(source) && opensTurn(event.data)) {
+          if (!opened && source?.kind === SOURCE_KIND && source.role === 'room') entry.roomToolSource = source
           entry.opened = true
         }
         if (entry.turn !== undefined && opensTurn(event.data)) {
@@ -1317,6 +1333,7 @@ export function install(rt) {
         entry.turn = undefined
         entry.adoptedTurn = undefined
         entry.info = undefined
+        entry.roomToolSource = undefined
         entry.texts = []
         entry.rawTexts = []
         entry.textModels = []

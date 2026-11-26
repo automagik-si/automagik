@@ -78,6 +78,8 @@ const pack = createPack({
     "This skill is not active on this Bot.": "Essa skill não está ativa neste Bot.",
     "Skills": "Skills",
     "Skill: {name}": "Habilidade: {name}",
+    "Tool: {name}": "Ferramenta: {name}",
+    "Plugin: {name}": "Plugin: {name}",
     "Add skill": "Adicionar skill",
     "From text": "Por texto",
     "From file": "Por arquivo",

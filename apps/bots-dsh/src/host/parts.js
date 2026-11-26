@@ -17,6 +17,7 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // read_own_chat searches every part, the condensed messages included.
 import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
 import { skillActivityOf } from '../shared/skill-activity.js'
+import { BRIDGE_ACTIVITY_RECORD, toolEventOf } from '../shared/tool-activity.js'
 import { legacySkillHistory, projectRoomContent } from './skill-library-call.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
@@ -3612,10 +3613,15 @@ export function install(rt) {
   const EARLIER_PAGE = 60
   function displayItems(partId, events, session, seedTurn, activity = false) {
     const hidden = new Set(state.exchangeTurns[partId] ?? [])
+    const showTools = activity && !rt.roomOf(partId) && !(rt.pastOwners.get(partId)?.roomId && !rt.pastOwners.get(partId)?.botId)
+    const seenTools = new Set()
     // Call ids of the page's group_relay calls; their tool/result events carry the
     // round's replies. A result without its call on the page (the page cut between
     // them) draws nothing rather than guessing.
     const relayCalls = new Set()
+    const relayResults = new Set((showTools ? events : []).filter(event => event.type === 'tool/result' &&
+      (relayRange(textOf(event.data?.message?.content)) || parseReplies(textOf(event.data?.message?.content)).replies.length))
+      .map(event => event.data?.message?.toolCallId))
     const items = []
     // The turn/start still in effect. A steered or queued user message stays in
     // it; only another turn/start moves on. A later page does not repeat the
@@ -3627,6 +3633,14 @@ export function install(rt) {
       if (turn !== undefined) item.turn = turn
       items.push(item)
     }
+    const showTool = (event, owningTurn) => {
+      if (!showTools || !Number.isSafeInteger(owningTurn) || hidden.has(owningTurn)) return
+      const row = toolEventOf(event)
+      if (row && !seenTools.has(row.id)) {
+        seenTools.add(row.id)
+        items.push({ ...row, turn: owningTurn })
+      }
+    }
     for (const event of events) {
       if (activity) {
         const item = skillActivityOf(event)
@@ -3637,6 +3651,11 @@ export function install(rt) {
       }
       if (event.type === 'turn/start') {
         if (typeof event.data?.turn === 'number' && Number.isInteger(event.data.turn)) turn = event.data.turn
+        continue
+      }
+      if (event.type === 'turn/end' && Number.isSafeInteger(event.data?.turn)) turn = event.data.turn
+      if (event.type === BRIDGE_ACTIVITY_RECORD || event.type === 'tool/ptc-dispatch-start') {
+        showTool(event, turn)
         continue
       }
       if (event.type === 'assistant/message') {
@@ -3655,6 +3674,7 @@ export function install(rt) {
         // Hidden turns and refused calls never showed a display card. Closed cards
         // stay at the call that asked them, including in a hidden Bot-to-Bot turn.
         const named = event.data?.name
+        const owningTurn = event.data?.turn ?? turn
         if (named === 'show_view' || named === 'ask_user') {
           let args = event.data?.arguments
           if (typeof args === 'string') { try { args = JSON.parse(args) } catch { args = undefined } }
@@ -3662,6 +3682,7 @@ export function install(rt) {
           const closed = callId === null ? undefined : rt.own(rt.own(state.closedCards, partId), callId)
           if (named === 'ask_user') {
             if (closed !== undefined) items.push({ kind: 'closed', closed, question: { question: String(args?.question ?? ''), ...(args?.detail ? { detail: String(args.detail) } : {}), options: Array.isArray(args?.options) ? args.options : [], multiSelect: args?.multiSelect === true }, callId, time: event.time })
+            else showTool(event, owningTurn)
             continue
           }
           const view = normalizeView(args?.view)
@@ -3670,8 +3691,8 @@ export function install(rt) {
             if (!hidden.has(event.data?.turn ?? turn)) items.push({ kind: 'view', title: shown.title, view, callId, time: event.time })
           } else if (shown.error === undefined && closed !== undefined) {
             items.push({ kind: 'closed', closed, title: shown.title, view, callId, time: event.time })
-          }
-        }
+          } else showTool(event, owningTurn)
+        } else if (named !== 'group_relay' || !relayResults.has(event.data?.callId)) showTool(event, owningTurn)
         continue
       }
       if (event.type === 'tool/result') {

@@ -588,6 +588,8 @@ var ZH2 = {
   "This skill is not active on this Bot.": "此技能未在这个 Bot 上启用。",
   "Skills": "技能",
   "Skill: {name}": "技能：{name}",
+  "Tool: {name}": "工具：{name}",
+  "Plugin: {name}": "插件：{name}",
   "Add skill": "添加技能",
   "From text": "文本",
   "From file": "文件",
@@ -5643,13 +5645,13 @@ function isAgentSession(roster, cache, sessionId) {
 }
 var heldCardKey = (kind, requestId) => JSON.stringify([kind, requestId]);
 function countCards(state2, sessionId, callIds, delta) {
-  const own2 = { ...state2[sessionId] };
+  const own3 = { ...state2[sessionId] };
   for (const callId of callIds) {
-    const count = (own2[callId] ?? 0) + delta;
-    if (count > 0) own2[callId] = count;
-    else delete own2[callId];
+    const count = (own3[callId] ?? 0) + delta;
+    if (count > 0) own3[callId] = count;
+    else delete own3[callId];
   }
-  return { ...state2, [sessionId]: own2 };
+  return { ...state2, [sessionId]: own3 };
 }
 
 // src/client/extend.js
@@ -6547,9 +6549,9 @@ function useGlide(key, { axis = "x", selector = CHOSEN, lead = SPRING_LEAD, trai
   const ownBox = (0, import_react6.useRef)(null);
   const box = given ?? ownBox;
   const thumb = (0, import_react6.useRef)(null);
-  const own2 = (0, import_react6.useRef)(null);
-  if (own2.current === null) {
-    own2.current = {
+  const own3 = (0, import_react6.useRef)(null);
+  if (own3.current === null) {
+    own3.current = {
       key: void 0,
       node: null,
       observer: null,
@@ -6572,7 +6574,7 @@ function useGlide(key, { axis = "x", selector = CHOSEN, lead = SPRING_LEAD, trai
     }
     const start2 = axis === "x" ? chosen.offsetLeft : chosen.offsetTop;
     const end = start2 + (axis === "x" ? chosen.offsetWidth : chosen.offsetHeight);
-    const { springs } = own2.current;
+    const { springs } = own3.current;
     const before = springs.target();
     const hidden = knob.dataset.hidden !== void 0;
     if (jump && !hidden && before?.start === start2 && before?.end === end && container.dataset.glide !== void 0) return;
@@ -6582,7 +6584,7 @@ function useGlide(key, { axis = "x", selector = CHOSEN, lead = SPRING_LEAD, trai
     container.dataset.glide = "";
   };
   (0, import_react6.useLayoutEffect)(() => {
-    const state2 = own2.current;
+    const state2 = own3.current;
     const node = box.current;
     if (node === state2.node && key === state2.key) return;
     const fresh = node !== state2.node;
@@ -6596,8 +6598,8 @@ function useGlide(key, { axis = "x", selector = CHOSEN, lead = SPRING_LEAD, trai
     place(fresh);
   });
   (0, import_react6.useEffect)(() => () => {
-    own2.current.observer?.disconnect();
-    own2.current.springs.stop();
+    own3.current.observer?.disconnect();
+    own3.current.springs.stop();
   }, []);
   return { box, thumb };
 }
@@ -9865,8 +9867,8 @@ function effortRows(reasoning) {
 }
 function modelLabel(model) {
   const name = model?.name;
-  const own2 = model?.id === "default" || String(model?.ref ?? "").endsWith("/default");
-  if (!own2 || name !== connectionOf(model)) return name;
+  const own3 = model?.id === "default" || String(model?.ref ?? "").endsWith("/default");
+  if (!own3 || name !== connectionOf(model)) return name;
   return model.resolvesTo ? t("Default ({model})", { model: model.resolvesTo }) : t("Default");
 }
 function offeredModels(models, current) {
@@ -12111,14 +12113,14 @@ function useOptionKeys(count, onPick, ownRef) {
   return count > 0 && listening <= 1;
 }
 function QuestionView({ question, onAnswer, onDismiss, onInteract, busy = false, ownAnswer = false, raised: raised2 = false, enterToSend = true }) {
-  const [own2, setOwn] = (0, import_react22.useState)("");
+  const [own3, setOwn] = (0, import_react22.useState)("");
   const [picked, setPicked] = (0, import_react22.useState)([]);
   const ownRef = (0, import_react22.useRef)(null);
   const titleId = (0, import_react22.useId)();
   const options = optionsOf(question);
   const wording = wordingOf(question);
   const multi = question.multiSelect === true;
-  const custom = own2.trim();
+  const custom = own3.trim();
   const canSubmit = multi ? picked.length > 0 || custom !== "" : custom !== "";
   const choose = (label) => {
     if (busy) return;
@@ -12139,7 +12141,7 @@ function QuestionView({ question, onAnswer, onDismiss, onInteract, busy = false,
   const field = ownAnswer ? (0, import_react22.createElement)("textarea", {
     ref: ownRef,
     rows: 1,
-    value: own2,
+    value: own3,
     readOnly: busy,
     autoComplete: "off",
     spellCheck: false,
@@ -13854,8 +13856,8 @@ function validateViewAnswer(view, action, values) {
   if (inputs.error !== void 0) return inputs;
   const extra = inputs.inputs === void 0 ? {} : { inputs: inputs.inputs };
   if (node.type === "submit") return { ...extra };
-  const own2 = node.type === "options" ? validateOptions(node, values) : node.type === "confirm" ? validateConfirm(values) : validateForm(node, values);
-  return own2.error === void 0 ? { ...own2, ...extra } : own2;
+  const own3 = node.type === "options" ? validateOptions(node, values) : node.type === "confirm" ? validateConfirm(values) : validateForm(node, values);
+  return own3.error === void 0 ? { ...own3, ...extra } : own3;
 }
 function validateInputs(view, sent) {
   const nodes = viewInputs(view);
@@ -20520,6 +20522,217 @@ function skillActivityOf(event) {
   };
 }
 
+// src/host/redact.js
+var CREDENTIAL_MARK = "[hidden]";
+function basicCredential(match, scheme, token) {
+  try {
+    const decoded = atob(token);
+    if (decoded.includes(":") && !/[^\x20-\x7e\x80-\xff]/.test(decoded)) return `${scheme} ${CREDENTIAL_MARK}`;
+  } catch {
+  }
+  return match;
+}
+var CREDENTIALS = Object.freeze([
+  [/\bsk-[A-Za-z0-9_*.-]{6,}/g, "sk-[hidden]"],
+  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bgithub_pat_[A-Za-z0-9_]{16,}/g, CREDENTIAL_MARK],
+  [/\bAKIA[0-9A-Z]{16}\b/g, CREDENTIAL_MARK],
+  [/\bxox[baprs]-[A-Za-z0-9-]{8,}/g, CREDENTIAL_MARK],
+  [/\bAIza[A-Za-z0-9_-]{20,}/g, CREDENTIAL_MARK],
+  [/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, CREDENTIAL_MARK],
+  [/\b(Bearer)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
+  [/(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?Basic\s+)[A-Za-z0-9._~+/=*-]+/gi, `$1${CREDENTIAL_MARK}`],
+  [/\b(Basic)\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9_+/=-])/gi, basicCredential],
+  // Provider and code-host keys whose own prefix the rules above do not cover. Each needs a
+  // long enough body that ordinary words cannot match it.
+  [/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}/g, CREDENTIAL_MARK],
+  [/\bwhsec_[A-Za-z0-9+/=]{12,}/g, CREDENTIAL_MARK],
+  [/\bhf_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bgl(?:pat|oas|rt)-[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bgsk_[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\br8_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bdop_v1_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bshp(?:at|ca|pa|ss)_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bSG\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bya29\.[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\bnfp_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bvercel_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bsbp_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bATBB[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/([?&#](?:token|access[_-]?token|api[_-]?key|apikey|key|secret|password|passwd|auth|authorization|client[_-]?secret|x-api-key|signature|sig|code|ticket)=)[^&#\s"']+/gi, `$1${CREDENTIAL_MARK}`],
+  // npm registry credentials: an access token (8+ chars; shorter is indistinguishable from a
+  // package name), the .npmrc keys as JSON (quoted key or value), their npm_config_* env
+  // spelling, NPM_TOKEN, and any userinfo in an http(s) URL. The userinfo rule is greedy to
+  // the last @ before the path, so a password with an unencoded @ or a token-only userinfo is
+  // covered too.
+  [/\bnpm_[A-Za-z0-9]{8,}/g, "npm_[hidden]"],
+  [/(\bnpm_config_(?:_?authToken|_?auth|_?password)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',}]+)/gi, `$1${CREDENTIAL_MARK}`],
+  [/(\b_(?:authToken|auth|password)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',}]+)/gi, `$1${CREDENTIAL_MARK}`],
+  // Any env name ending in NPM_TOKEN or AUTH_TOKEN (NPM_TOKEN, MY_NPM_TOKEN, NODE_AUTH_TOKEN),
+  // as a key with = or :, JSON-quoted keys included.
+  [/(\b[A-Z0-9_]*(?:NPM_TOKEN|AUTH_TOKEN)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',}]+)/gi, `$1${CREDENTIAL_MARK}`],
+  [/(\bhttps?:\/\/)[^/\s]+@/gi, `$1${CREDENTIAL_MARK}@`],
+  [/(["']?(?:(?:[a-z0-9]+[-_.])*(?:api[_-]?key|authorization|x-api-key|x-auth-token|x-amz-security-token|proxy-authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|secret))["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
+]);
+function redactText(text2) {
+  let out = String(text2 ?? "");
+  for (const [pattern, replacement] of CREDENTIALS) out = out.replace(pattern, replacement);
+  return out;
+}
+function credentialShapes(text2) {
+  return typeof text2 === "string" ? redactText(text2) : text2;
+}
+function redactorFor(ctx) {
+  const team = (() => {
+    try {
+      return ctx?.get?.("omniTeam");
+    } catch {
+      return void 0;
+    }
+  })();
+  const saved = typeof team?.redactSecrets === "function" ? team.redactSecrets : void 0;
+  return (text2) => {
+    if (typeof text2 !== "string") return text2;
+    const shaped = credentialShapes(text2);
+    if (saved === void 0) return shaped;
+    try {
+      return String(saved.call(team, shaped) ?? shaped);
+    } catch {
+      return shaped;
+    }
+  };
+}
+
+// src/shared/tool-activity.js
+var TOOL_ACTIVITY = "tool-activity";
+var BRIDGE_ACTIVITY_RECORD = "plugin:acp-dsh/bridge-outside-step";
+var knownTools = /* @__PURE__ */ new Set([
+  "apply_patch",
+  "ask_user",
+  "ask_user_question",
+  "bash",
+  "browser_handoff",
+  "computer_handoff",
+  "create_bot",
+  "create_group",
+  "delete_bot",
+  "delete_group",
+  "edit",
+  "fetch",
+  "forget",
+  "generate_image",
+  "glob",
+  "grep",
+  "group_relay",
+  "list_bots",
+  "list_dir",
+  "list_groups",
+  "list_secrets",
+  "mail_send",
+  "message_bot",
+  "post_to_group",
+  "propose_bot_change",
+  "pwsh",
+  "read",
+  "read_file",
+  "read_group_chat",
+  "read_image",
+  "read_own_chat",
+  "recall",
+  "remember",
+  "request_connector",
+  "request_secret",
+  "show_settings",
+  "show_view",
+  "start_task",
+  "stop_bot",
+  "str_replace_editor",
+  "subagent",
+  "update_bot",
+  "update_group",
+  "web_fetch",
+  "web_search",
+  "write"
+]);
+var acpOperations = /* @__PURE__ */ new Map([
+  ["execute", "shell"],
+  ["read", "read"],
+  ["edit", "edit"],
+  ["delete", "delete"],
+  ["move", "move"],
+  ["search", "search"],
+  ["fetch", "fetch"]
+]);
+var fileTools = /* @__PURE__ */ new Set(["read", "read_file", "read_image", "write", "edit", "delete", "move", "str_replace_editor", "list_dir"]);
+var webTools = /* @__PURE__ */ new Set(["fetch", "web_fetch"]);
+var identifiedAcpPlugins = /* @__PURE__ */ new Set(["mcp__github__create_issue", "mcp__linear__get_issue"]);
+var privateShape = /(?:^|[./\\_-])(?:password|passwd|credential[s]?|secret[s]?|token[s]?|authorization|auth[_-]?token|api[_-]?key|private[_-]?key|gh[pousr]_|github_pat_|sk[-_]|xox[baprs]-|npm_|\.env(?:$|[./\\])|\.npmrc(?:$|[./\\]))/i;
+var safeText = (value) => !privateShape.test(value) && redactText(value) === value;
+var own = (object, key) => object && Object.hasOwn(object, key) ? object[key] : void 0;
+var isSkillTool = (name) => name === "load_skill" || name === "mcp__dsh__load_skill";
+function argsOf(value) {
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return void 0;
+    }
+  }
+  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+function basenameOf(path2) {
+  if (typeof path2 !== "string" || path2.length > 4096 || !/^(?:[A-Za-z]:[\\/])?[A-Za-z0-9._/\\ -]+$/.test(path2) || !safeText(path2)) return;
+  const name = path2.split(/[\\/]/).at(-1);
+  return /^[A-Za-z0-9][A-Za-z0-9._ -]{0,79}$/.test(name) && name === name.trim() ? name : void 0;
+}
+function hostnameOf(value) {
+  if (typeof value !== "string" || value.length > 4096 || !/^https?:\/\/[^\s\\]+$/i.test(value) || /[\x00-\x1f\x7f]/.test(value)) return;
+  try {
+    const host = new URL(value).hostname;
+    if (/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/i.test(host) && host.length <= 80 && safeText(host)) return host;
+  } catch {
+  }
+}
+function pluginOf(name) {
+  if (name.length > 64 || !safeText(name)) return;
+  const match = /^mcp__([a-z0-9]+(?:[-_][a-z0-9]+)*)__((?:[a-z0-9]+[-_.])*[a-z0-9]+)$/i.exec(name);
+  if (match && match[1] !== "dsh") return { label: "plugin", name: `${match[1]} · ${match[2]}` };
+}
+function toolActivityOf({ name: raw, arguments: args }) {
+  if (typeof raw !== "string" || raw === "" || raw === "ToolSearch" || isSkillTool(raw)) return;
+  const tool = raw.startsWith("mcp__dsh__") ? raw.slice("mcp__dsh__".length) : raw;
+  if (tool === "run_code" || tool === "ToolSearch") return;
+  const data = argsOf(args);
+  const acp = tool === "acp_tool";
+  const title = own(data, "title");
+  const input = acp ? own(data, "input") : data;
+  if (acp) {
+    const server = own(input, "server");
+    const operation = own(input, "tool");
+    if (typeof server === "string" && typeof operation === "string") {
+      const plugin = pluginOf("mcp__" + server + "__" + operation);
+      if (plugin) return plugin;
+    }
+    if (identifiedAcpPlugins.has(title)) return pluginOf(title);
+  }
+  if (!acp && raw.startsWith("mcp__") && raw === tool) return pluginOf(raw) ?? { label: "plugin", name: "tool" };
+  const name = acp ? acpOperations.get(own(data, "kind")) ?? "tool" : knownTools.has(tool) ? tool : "tool";
+  const path2 = own(input, "file_path") ?? own(input, "path") ?? own(input, "notebook_path") ?? (acp ? own(own(data, "locations")?.[0], "path") : void 0);
+  const target = fileTools.has(name) ? basenameOf(path2) : webTools.has(name) ? hostnameOf(own(input, "url")) : void 0;
+  return { label: "tool", name, ...target === void 0 ? {} : { target } };
+}
+function toolEventOf(event) {
+  const { type, data, seq, time } = event ?? {};
+  if (!Number.isSafeInteger(seq) || seq < 0) return;
+  let id;
+  if (type === "tool/call") id = data?.callId;
+  else if (type === "tool/ptc-dispatch-start") id = data?.subCallId;
+  else if (type === BRIDGE_ACTIVITY_RECORD && event.ignorable === true && data?.outcome === "ran") id = data.callId;
+  if (typeof id !== "string" || id === "") return;
+  const activity = toolActivityOf(data);
+  if (activity !== void 0) return { kind: TOOL_ACTIVITY, ...activity, id, seq, time };
+}
+
 // src/client/fold.js
 var import_react46 = require("react");
 var FOLD_AT = { chars: 1500, lines: 25 };
@@ -21896,13 +22109,13 @@ var findBot = (roster, ref) => ref ? roster.byId?.[ref] ?? roster.bots?.find((bo
 var findRoom = (roster, ref) => ref ? roster.roomsById?.[ref] ?? roster.rooms?.find((room2) => normalize(room2.name) === normalize(ref)) : void 0;
 function settingsTarget({ page, bot: botRef, group: groupRef }, roster, plugins = []) {
   const pluginPage = typeof page === "string" && page.startsWith("plugin:") ? plugins.find((section) => `plugin:${section.id}` === page) : void 0;
-  const own2 = SETTINGS_PAGES.find(([key]) => key === page);
-  const known2 = own2 !== void 0 || pluginPage !== void 0 || page === "hermes-remote";
+  const own3 = SETTINGS_PAGES.find(([key]) => key === page);
+  const known2 = own3 !== void 0 || pluginPage !== void 0 || page === "hermes-remote";
   const bot = page === "bots" ? findBot(roster, botRef) : void 0;
   const room2 = page === "groups" ? findRoom(roster, groupRef) : void 0;
   const focusBot = page === "schedules" || page === "usage" ? findBot(roster, botRef) : void 0;
   const id = bot?.id ?? room2?.id ?? (focusBot ? page === "usage" ? `owner:${focusBot.id}` : focusBot.id : null);
-  const label = pluginPage ? pluginPage.label : page === "hermes-remote" ? t("Remote Hermes") : own2 ? t(own2[1]) : String(page ?? "");
+  const label = pluginPage ? pluginPage.label : page === "hermes-remote" ? t("Remote Hermes") : own3 ? t(own3[1]) : String(page ?? "");
   const title = bot?.name ?? room2?.name ?? (focusBot ? `${label} · ${focusBot.name}` : label);
   return { known: known2, page, id, bot, room: room2, pluginPage, label, title };
 }
@@ -22436,6 +22649,99 @@ function ActivityRows({ lines, bot }) {
   )));
 }
 var SkillActivityRow = ({ name, bot }) => (0, import_react50.createElement)(ActivityRows, { lines: [t("Skill: {name}", { name })], bot });
+function ToolActivityRow({ label, name, target, bot }) {
+  const line = label === "plugin" ? t("Plugin: {name}", { name }) : t("Tool: {name}", { name });
+  return (0, import_react50.createElement)(ActivityRows, { lines: [target ? line + " · `" + target + "`" : line], bot });
+}
+var TOOL_ACTIVITY_BOUNDARY = "tool-activity-boundary";
+function registerToolActivity(ctx) {
+  const register = (definition) => ctx.uiConversation?.events?.register?.(definition);
+  const boundary = (event) => ({ id: String(event.seq), role: "start" });
+  const offBoundary = register({
+    kind: TOOL_ACTIVITY_BOUNDARY,
+    match: { "turn/start": boundary, "turn/end": boundary },
+    start: (_context, { event }) => ({ turn: event.data.turn }),
+    update: (context) => context.state
+  });
+  const callKey = (id) => JSON.stringify(["call", id]);
+  const toCall = ({ event, location: location2 }, turn) => {
+    const { callId, subCallId, parentCallId, name, arguments: args } = event.data;
+    return { turn, seq: event.seq, location: location2, root: {
+      phase: "start",
+      callId: subCallId ?? callId,
+      parentCallId,
+      name,
+      argsRaw: typeof args === "string" ? args : JSON.stringify(args),
+      turn,
+      subCalls: []
+    } };
+  };
+  const dispatch = (event) => typeof event.data?.subCallId === "string" ? { id: JSON.stringify(["dispatch", event.data.subCallId]), role: event.type.endsWith("-start") ? "start" : "update" } : null;
+  const offRows = register({
+    kind: TOOL_ACTIVITY,
+    target: "chat",
+    match: {
+      [BRIDGE_ACTIVITY_RECORD]: (event) => toolEventOf(event) ? { id: callKey(event.data.callId), role: "start" } : null,
+      "tool/call": (event) => typeof event.data?.callId === "string" ? { id: callKey(event.data.callId), role: "start" } : null,
+      "tool/result": (event) => {
+        const id = event.data?.message?.toolCallId ?? event.data?.message?.source?.callId;
+        return typeof id === "string" ? { id: callKey(id), role: "update" } : null;
+      },
+      "tool/ptc-dispatch-start": dispatch,
+      "tool/ptc-dispatch": dispatch
+    },
+    start: (_context, match, reader) => {
+      const { event, location: location2 } = match;
+      const turn = event.data?.turn ?? location2.turn?.turn;
+      if (event.type === BRIDGE_ACTIVITY_RECORD) {
+        return {
+          turn: turn ?? reader.previous(TOOL_ACTIVITY_BOUNDARY)?.state.turn,
+          seq: event.seq,
+          location: location2,
+          activity: toolEventOf(event)
+        };
+      }
+      return toCall(match, turn);
+    },
+    update({ state: state2 }, match) {
+      const { event, location: location2 } = match;
+      if (event.type === "tool/call" && state2.activity) return toCall(match, event.data.turn ?? location2.turn?.turn);
+      if (!state2.root || state2.root.kind === "tool-result") return state2;
+      const { parentCallId, message, error, meta } = event.data;
+      if (event.type === "tool/ptc-dispatch" && parentCallId !== state2.root.parentCallId) return state2;
+      if (event.type !== "tool/result" && event.type !== "tool/ptc-dispatch") return state2;
+      const { content, isError } = message ?? event.data;
+      return { ...state2, root: { ...state2.root, kind: "tool-result", content, isError, error, meta } };
+    },
+    buildViewNode({ key, id, start: start2, state: state2, current }) {
+      if (!start2 || !state2) return null;
+      const visible = Number.isSafeInteger(state2.turn) && (state2.root || state2.activity);
+      if (!visible && !current.get("chat")) return null;
+      return {
+        key,
+        id,
+        kind: TOOL_ACTIVITY,
+        target: "chat",
+        anchorSeq: state2.seq,
+        location: state2.location,
+        groupTree: "turn",
+        visibility: visible ? "visible" : "hidden",
+        data: state2
+      };
+    }
+  });
+  return () => {
+    offRows?.();
+    offBoundary?.();
+  };
+}
+function ToolActivityCell({ node, sessionId, useRoster, ...props }) {
+  const { turn, activity, root } = node.data;
+  const hidden = useRoster((roster) => Boolean(roster.roomsById[sessionId]) || isHiddenTurn(roster, sessionId, turn));
+  if (root) return (0, import_react50.createElement)(ToolCell, { ...props, node: { ...node, data: { root } }, sessionId, useRoster, activityDispatch: true });
+  return hidden || !activity ? (0, import_react50.createElement)(CellEmpty) : (0, import_react50.createElement)(ToolActivityRow, activity);
+}
+var OrderedToolCell = (props) => (0, import_react50.createElement)(ToolCell, { ...props, orderedDispatch: true });
 function registerSkillActivity(ctx) {
   return ctx.uiConversation?.events?.register?.({
     kind: SKILL_ACTIVITY,
@@ -22780,6 +23086,8 @@ function chatRow(row2, key, { sessionId, selfId, roster, actions, useUi, onBtwDe
       return (0, import_react50.createElement)(SkillNotice, { key, text: row2.text });
     case SKILL_ACTIVITY:
       return (0, import_react50.createElement)(SkillActivityRow, { key, name: row2.name });
+    case TOOL_ACTIVITY:
+      return (0, import_react50.createElement)(ToolActivityRow, { ...row2, key });
     case "answer":
       return (0, import_react50.createElement)(AnsweredReply, { key, node: { data: row2 } });
     // A question or view card closed without an answer on it.
@@ -22974,8 +23282,8 @@ function TurnProcessCell({ node, sessionId, turnProcess, useRoster, useUi, useTu
   }, [sessionId, turn, start2]);
   const visit = useUi((state2) => state2.visits?.[sessionId]);
   const fresh = useTurnClock((state2) => {
-    const own2 = state2[sessionId]?.[turn];
-    return !hidden && typeof visit?.seen === "number" && own2?.first !== void 0 && own2.first <= visit.seen && own2.end !== void 0 && own2.end > visit.seen && own2.end <= visit.entered;
+    const own3 = state2[sessionId]?.[turn];
+    return !hidden && typeof visit?.seen === "number" && own3?.first !== void 0 && own3.first <= visit.seen && own3.end !== void 0 && own3.end > visit.seen && own3.end <= visit.entered;
   });
   return fresh ? (0, import_react50.createElement)(NewDivider) : (0, import_react50.createElement)(CellEmpty);
 }
@@ -23138,8 +23446,8 @@ function toolActivity(name, arg, findBot3, self) {
 function workPhrase(doing) {
   const { tool, said, note, target, switching, folder } = typeof doing === "string" ? { tool: doing } : doing ?? {};
   if (switching) return folder === true ? t("Switching working folder") : t("Moving to a fresh conversation");
-  const own2 = (said || note)?.replace(/[\s.。…]+$/u, "");
-  if (own2) return own2;
+  const own3 = (said || note)?.replace(/[\s.。…]+$/u, "");
+  if (own3) return own3;
   if (!tool) return t("Thinking about it");
   const label = toolActivity(tool, () => void 0, () => void 0)?.label ?? t("On it");
   return target ? `${label} · ${target}` : label;
@@ -23155,6 +23463,7 @@ function useLiveNote(actions, sessionId, id, entry) {
 function RelayEvent({ reply, bot, roster, sessionId, actions }) {
   if (reply.kind === SKILL_NOTICE) return (0, import_react50.createElement)(SkillNotice, { text: reply.text });
   if (reply.kind === SKILL_ACTIVITY) return (0, import_react50.createElement)(SkillActivityRow, { bot, name: reply.skill });
+  if (reply.kind === TOOL_ACTIVITY) return (0, import_react50.createElement)(ToolActivityRow, { ...reply, bot });
   if (reply.kind === "permission-stop") {
     return (0, import_react50.createElement)(
       "div",
@@ -23233,9 +23542,9 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
     const tick = async () => {
       const result = await actions.roomProgress(sessionId);
       if (stop3) return;
-      const own2 = result?.find((item) => item.callId === callId);
-      const entry = own2 ?? result?.[0];
-      const replies2 = Array.isArray(entry?.replies) ? entry.replies.filter((reply) => own2 !== void 0 || reply?.kind !== SKILL_ACTIVITY) : [];
+      const own3 = result?.find((item) => item.callId === callId);
+      const entry = own3 ?? result?.[0];
+      const replies2 = Array.isArray(entry?.replies) ? entry.replies.filter((reply) => own3 !== void 0 || reply?.kind !== SKILL_ACTIVITY) : [];
       const key = entry ? JSON.stringify([replies2, entry.speaking]) : "";
       if (entry && key !== seen) {
         seen = key;
@@ -23326,7 +23635,8 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
         );
       }
       if (reply.kind !== void 0) {
-        return (0, import_react50.createElement)(RelayEvent, { key: `${reply.botId ?? reply.kind}-${index}`, reply, bot, roster, sessionId, actions });
+        const key = reply.kind === TOOL_ACTIVITY ? reply.id : `${reply.botId ?? reply.kind}-${index}`;
+        return (0, import_react50.createElement)(RelayEvent, { key, reply, bot, roster, sessionId, actions });
       }
       return (0, import_react50.createElement)(GroupMessage, { key: `${reply.botId}-${index}`, bot, texts: texts2, room: room2, roster, actions, msgKey: callId ? `${sessionId}:${callId}:${index}` : void 0, useUi, time, duration: duration2 });
     }),
@@ -23344,7 +23654,6 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
   );
 }
 var isComputerCall = (name) => name === "cua" || name?.startsWith("cua_driver_native__") === true;
-var DRAWN = /* @__PURE__ */ new Set(["start_task", "mcp__dsh__start_task", "message_bot", "stop_bot", "create_bot", "update_bot", "delete_bot", "group_relay", "create_group", "update_group", "delete_group", "post_to_group", "ask_user", "request_secret", "request_connector", "mail_send", "ask_user_question", "show_view", "show_settings", "propose_bot_change", "browser_handoff", "read_group_chat", "remember", "forget", "generate_image"]);
 var CARDS = /* @__PURE__ */ new Set(["ask_user", "request_secret", "request_connector", "mail_send", "show_view", "browser_handoff", "computer_handoff"]);
 var agentImage = (call2) => isAgentImageCall({ name: toolName(call2), image: toolArgs(call2).value("image"), done: call2.kind === "tool-result", content: call2.kind === "tool-result" ? contentText(call2.content) : "" });
 function callTree(root) {
@@ -23515,7 +23824,7 @@ function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSess
   }
 }
 var GUARD_WHYS = /* @__PURE__ */ new Set(["guard", "guard-request", "guard-launch", "limit"]);
-function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions }) {
+function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions, orderedDispatch = false, activityDispatch = false }) {
   const roster = useRoster((value) => value);
   const heldCards = useHeldCards?.((state2) => state2[sessionId]);
   const root = node.data.root;
@@ -23534,14 +23843,14 @@ function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus
   const guardOnly = (call2) => hidden && GUARD_WHYS.has(stops.get(call2.callId)?.why) && !closedCard(call2);
   const calls = hidden ? all.filter((call2) => closedCard(call2) || guardOnly(call2)) : all;
   const readRefused = (call2) => call2.isError === true && call2.error?.code === READ_SCOPE_CODE;
-  const drawn2 = calls.filter((call2) => readRefused(call2) || DRAWN.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.renderer(toolName(call2)) || agentImage(call2) || stops.has(call2.callId));
+  const atThisNode = calls.filter((call2) => !orderedDispatch || call2.phase === "preparing" || (call2.kind === "tool-result" ? call2.callTime == null : !Number.isSafeInteger(turn)));
   const running2 = root.kind === "tool-result" ? void 0 : calls.findLast((call2) => call2.kind !== "tool-result" && !guardOnly(call2));
-  const note = running2 ? toolActivity(toolName(running2), toolArgs(running2).text, findBot3, roster.byId[sessionId]) : null;
+  const note = running2 && !activityDispatch ? toolActivity(toolName(running2), toolArgs(running2).text, findBot3, roster.byId[sessionId]) : null;
   useLiveNote(actions, sessionId, `tool:${root.callId ?? node.key}`, note);
-  useShownCards(actions, sessionId, drawn2.filter((call2) => !guardOnly(call2) && (CARDS.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.asks(toolName(call2))) && call2.callId).map((call2) => call2.callId));
-  if (drawn2.length === 0) return (0, import_react50.createElement)(CellEmpty);
+  useShownCards(actions, sessionId, atThisNode.filter((call2) => !guardOnly(call2) && (CARDS.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.asks(toolName(call2))) && call2.callId).map((call2) => call2.callId));
+  if (atThisNode.length === 0) return (0, import_react50.createElement)(CellEmpty);
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot: findBot3, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } };
-  return (0, import_react50.createElement)(import_react50.Fragment, null, drawn2.map((call2, index) => {
+  return (0, import_react50.createElement)(import_react50.Fragment, null, atThisNode.map((call2, index) => {
     const stop3 = stops.get(call2.callId);
     if (guardOnly(call2)) return (0, import_react50.createElement)("div", { key: call2.callId ?? index, className: "bt-event bt-event-error", role: "status", title: stop3.why }, stop3.line);
     if (readRefused(call2)) {
@@ -23551,10 +23860,14 @@ function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus
         call2.error.reason ?? contentText(call2.content)
       );
     }
+    const card = renderCall(call2, env);
+    const name = toolName(call2);
+    const fallback = !hidden && !roster.roomsById[sessionId] && call2.phase !== "preparing" && !orderedDispatch && (!card || card.type === CellEmpty) && !CARDS.has(name) && !toolCards.asks(name) && !stop3;
+    const activity = fallback ? toolActivityOf({ name, arguments: call2.argsRaw ?? call2.call?.argsRaw }) : void 0;
     return (0, import_react50.createElement)(
       import_react50.Fragment,
       { key: call2.callId ?? index },
-      renderCall(call2, env) ?? (0, import_react50.createElement)(CellEmpty),
+      activity ? (0, import_react50.createElement)(ToolActivityRow, activity) : card ?? (0, import_react50.createElement)(CellEmpty),
       stop3 ? (0, import_react50.createElement)("div", { className: "bt-event bt-event-error", role: "status", title: stop3.why }, stop3.line) : null
     );
   }));
@@ -23968,11 +24281,11 @@ function teamActions({
       mark: () => {
         const older = pickEntries.get(part);
         if (older !== void 0) clearTimeout(older.timer);
-        const own2 = { botId: bot.id, settled: false, timer: void 0 };
-        entry = own2;
-        own2.timer = setTimeout(() => dropPick(part, own2), CROSSING_DEADLINE_MS);
-        own2.timer?.unref?.();
-        pickEntries.set(part, own2);
+        const own3 = { botId: bot.id, settled: false, timer: void 0 };
+        entry = own3;
+        own3.timer = setTimeout(() => dropPick(part, own3), CROSSING_DEADLINE_MS);
+        own3.timer?.unref?.();
+        pickEntries.set(part, own3);
         if (older === void 0 && pickEntries.size === 1 && typeof work?.subscribe === "function") unwatchPicks = work.subscribe(syncPicks);
         picks.set((state2) => state2[part] === true ? state2 : { ...state2, [part]: true });
       },
@@ -24459,10 +24772,10 @@ function teamActions({
     noteLive: (sessionId, id, entry) => {
       if (sessionId === void 0) return;
       live.set((state2) => {
-        const own2 = state2[sessionId] ?? {};
-        const prev = own2[id];
+        const own3 = state2[sessionId] ?? {};
+        const prev = own3[id];
         if (entry === null ? prev === void 0 : prev !== void 0 && JSON.stringify({ ...prev, at: 0 }) === JSON.stringify({ ...entry, at: 0 })) return state2;
-        const next = { ...own2 };
+        const next = { ...own3 };
         if (entry === null) delete next[id];
         else next[id] = { ...entry, at: prev?.at ?? Date.now() };
         return { ...state2, [sessionId]: next };
@@ -26009,8 +26322,8 @@ function botOwnCss(css) {
 `;
       continue;
     }
-    const own2 = selectors.filter(ownSelector);
-    if (own2.length > 0) out += `${own2.join(",")}{${body}}
+    const own3 = selectors.filter(ownSelector);
+    if (own3.length > 0) out += `${own3.join(",")}{${body}}
 `;
   }
   return out;
@@ -27140,8 +27453,8 @@ function botRowStatus(bot) {
 }
 var NO_FOLDS = /* @__PURE__ */ new Set();
 var chatsOf = (channel) => [...channel.chats ?? []].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0));
-var foldedStatusOf = (own2, chats) => {
-  const statuses = [own2, ...chats.map(chatStatusOf)];
+var foldedStatusOf = (own3, chats) => {
+  const statuses = [own3, ...chats.map(chatStatusOf)];
   const worst = worstStatus(statuses);
   return worst === "idle" && statuses.includes("off") ? "off" : worst;
 };
@@ -27150,7 +27463,7 @@ function channelRows(bot, channels = [], folded = NO_FOLDS) {
   for (const channel of channels) {
     const chats = chatsOf(channel);
     const isFolded = channel.chats === void 0 || folded.has(`${bot.id}/${channel.id}`);
-    const own2 = channelStatusOf(channel);
+    const own3 = channelStatusOf(channel);
     rows2.push({
       kind: "channel",
       key: `channel:${bot.id}/${channel.id}`,
@@ -27159,7 +27472,7 @@ function channelRows(bot, channels = [], folded = NO_FOLDS) {
       name: channel.name,
       channel,
       folded: isFolded,
-      status: isFolded ? foldedStatusOf(own2, chats) : own2,
+      status: isFolded ? foldedStatusOf(own3, chats) : own3,
       unread: chats.some((chat) => Number(chat.unread) > 0),
       source: bot.channelSource
     });
@@ -27732,7 +28045,7 @@ function currentKey2(roster, shownId) {
 function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [], front = null }) {
   const main = roster.byId?.[roster.mainBotId];
   const shown2 = (key) => key === current;
-  const unread = (id, key, own2) => !shown2(key) && (own2 || marked[id] === true);
+  const unread = (id, key, own3) => !shown2(key) && (own3 || marked[id] === true);
   const bot = (item) => {
     const key = `bot:${item.id}`;
     if (item.hidden && !shown2(key) && !isMainOf(roster, item.id)) return null;
@@ -28772,9 +29085,9 @@ function AgentSessionRow({ session, agent, actions, renaming, index }) {
 }
 function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi, wide, marked, bare: bare2 = false }) {
   const tasks = agent.kind === "tasks";
-  const own2 = agentRowSessions(agent, roster, useMinute(tasks));
+  const own3 = agentRowSessions(agent, roster, useMinute(tasks));
   const name = tasks ? t("Tasks") : agent.name;
-  const info = useSessions((list2) => JSON.stringify(own2.map((id) => {
+  const info = useSessions((list2) => JSON.stringify(own3.map((id) => {
     const row2 = list2.byId[id];
     return {
       id,
@@ -28785,7 +29098,7 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
       active: (row2?.retainedBy?.mainView ?? 0) > 0
     };
   }).sort((a, b) => b.at - a.at)));
-  const statusInfo = useSessionStatus((map) => JSON.stringify(own2.map((id) => ({
+  const statusInfo = useSessionStatus((map) => JSON.stringify(own3.map((id) => ({
     id,
     running: map.get(id)?.running === true,
     unread: map.get(id)?.completionUnread === true
@@ -28806,7 +29119,7 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
   const running2 = sessions.some((session) => session.running);
   const unread = sessions.some((session) => session.unread) || marked && !active2;
   useMarkedUnread(agent.id, active2, marked, actions);
-  if (tasks && own2.length === 0) return null;
+  if (tasks && own3.length === 0) return null;
   const preview = sessions[0]?.title ?? t("New session");
   const label = [name, running2 ? t("Working") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
   const open = active2 && wide;
@@ -29929,9 +30242,9 @@ function lockComposer(pane, placeholder2) {
 }
 var ownChatPart = (bot, sessionId) => bot !== void 0 && (currentPart(bot) === sessionId || (bot.parts ?? []).includes(sessionId));
 function useSwitchLock({ bot, roster, sessionId, useWork, actions, updateHold, anchor }) {
-  const own2 = ownChatPart(bot, sessionId);
+  const own3 = ownChatPart(bot, sessionId);
   const key = useWork?.((work) => {
-    const switching = own2 ? work?.models?.[bot.id]?.switching : void 0;
+    const switching = own3 ? work?.models?.[bot.id]?.switching : void 0;
     return typeof switching?.to === "string" && Number.isFinite(switching.since) ? `${switching.since}
 ${switching.to}` : "";
   }) ?? "";
@@ -32556,7 +32869,7 @@ var TEAM_TOOLS = /* @__PURE__ */ new Set(["message_bot", "start_task", "stop_bot
 var KEEP_WORKING = "keep_working";
 var ladderOf = (pending) => teamToolOf(pending.toolName) === KEEP_WORKING ? "keep" : hostTemplateOf(pending.reason) === "This step is hard to undo: {step}. Allow it once?" ? "hard" : void 0;
 var isTeamApproval = (pending) => pending?.kind === "approval" && (TEAM_TOOLS.has(teamToolOf(pending.toolName)) || ladderOf(pending) !== void 0);
-function argsOf(reason) {
+function argsOf2(reason) {
   try {
     const value = JSON.parse(String(reason ?? ""));
     return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -32604,9 +32917,9 @@ function TeamApproval({ matched, useRoster }) {
   const root = (0, import_react73.useRef)(null);
   const fromBot = roster.byId?.[pending.botId] ?? roster.byId?.[pending.sessionId] ?? roster.byId?.[roster.tasks?.[pending.sessionId]?.from];
   const ladder = ladderOf(pending);
-  const view = ladder ? { title: hostText(pending.reason), rows: [], ...ladder === "keep" ? { note: t("Allow once lets it keep working: nothing that was refused runs. Reject stops it here.") } : {} } : approvalView(pending.toolName, argsOf(pending.reason), fromBot?.name);
+  const view = ladder ? { title: hostText(pending.reason), rows: [], ...ladder === "keep" ? { note: t("Allow once lets it keep working: nothing that was refused runs. Reject stops it here.") } : {} } : approvalView(pending.toolName, argsOf2(pending.reason), fromBot?.name);
   const quote = view.quote || (pending.child === true ? pending.detail?.code : "");
-  const note = view.note || (pending.child === true ? [pending.detail?.text, Object.keys(argsOf(pending.reason)).length === 0 ? pending.reason : ""].filter(Boolean).join(" · ") : "");
+  const note = view.note || (pending.child === true ? [pending.detail?.text, Object.keys(argsOf2(pending.reason)).length === 0 ? pending.reason : ""].filter(Boolean).join(" · ") : "");
   const toBot = findBot2(roster, view.to);
   const answer = (outcome) => {
     if (answered || !pending.answerable) return;
@@ -32782,8 +33095,8 @@ function headerNavigation(entries2, face) {
     ...source ? { store: source.store } : {},
     inject: (...args) => {
       const navigation = source?.inject(...args) ?? {};
-      const own2 = face();
-      return { ...navigation, ...own2, hooks: { ...navigation.hooks, ...own2.hooks } };
+      const own3 = face();
+      return { ...navigation, ...own3, hooks: { ...navigation.hooks, ...own3.hooks } };
     }
   };
 }
@@ -35297,7 +35610,7 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
   }, [listen]);
   (0, import_react83.useEffect)(() => {
     if (!speech || !catalog || !listen) return void 0;
-    const own2 = turn.current;
+    const own3 = turn.current;
     let capture = null;
     let frame = 0;
     let stopped = false;
@@ -35309,11 +35622,11 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
       try {
         const wave = await current.finish(catalog.maxDurationSeconds);
         const text2 = wave ? await transcribeWave(speech, catalog, wave, new AbortController().signal) : "";
-        if (turn.current !== own2) return;
+        if (turn.current !== own3) return;
         if (text2) submit(text2);
         else setPhase("listening");
       } catch (error) {
-        if (turn.current !== own2) return;
+        if (turn.current !== own3) return;
         setNote(t(CAPTURE_NOTES[error?.kind] ?? "Couldn't hear that"));
         setPhase("listening");
       }
@@ -36856,7 +37169,7 @@ var import_react87 = require("react");
 var BUILTIN_KEY = "role:builtin:genie";
 var COMMUNITY_REASON = "Community roles can be installed once their isolated runtime ships.";
 var UNINSTALL_REASON = "Detach this role from every Bot before uninstalling it.";
-var own = (map, id) => Object.hasOwn(map ?? {}, id) ? map[id] : void 0;
+var own2 = (map, id) => Object.hasOwn(map ?? {}, id) ? map[id] : void 0;
 var actionReason = (row2) => row2.record ? row2.inUse && t(UNINSTALL_REASON) : row2.listed?.installable === false && t(COMMUNITY_REASON);
 var checksum = (sha256) => (0, import_react87.createElement)("code", null, sha256.match(/.{1,16}/g).map((part, index) => (0, import_react87.createElement)("span", { key: index }, index ? (0, import_react87.createElement)("wbr") : null, part)));
 function shopRoles(roster) {
@@ -36870,8 +37183,8 @@ function shopRoles(roster) {
   }
   for (const id of /* @__PURE__ */ new Set([...catalog.keys(), ...Object.keys(roster?.roles ?? {})])) {
     const listed = catalog.get(id);
-    const record = own(roster?.roles, id);
-    const details = own(roster?.roleDetails, id);
+    const record = own2(roster?.roles, id);
+    const details = own2(roster?.roleDetails, id);
     const declarations2 = record ? packageDeclarations({ id, version: record.version }, roster) : details?.catalog;
     rows2.push({
       key: `role:${id}`,
@@ -37129,8 +37442,8 @@ var ACP_ROUTE = Object.freeze({ claude: "acp-claude", codex: "acp-codex" });
 function officialBot(app, roster, installer) {
   const bots = roster?.bots;
   if (!Array.isArray(bots)) return void 0;
-  const own2 = bots.find((bot) => bot.kind === app.id);
-  if (own2 !== void 0) return own2;
+  const own3 = bots.find((bot) => bot.kind === app.id);
+  if (own3 !== void 0) return own3;
   if (app.id === "omni" && !installer?.pending?.("omni")) return roster?.byId?.[roster.mainBotId];
 }
 function officialAcp(app, roster) {
@@ -40525,13 +40838,13 @@ function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false 
   const bot = page === "bots" && id ? roster.byId[id] : void 0;
   const room2 = page === "groups" && id ? roster.roomsById[id] : void 0;
   const extra = actions.pluginSettings?.() ?? [];
-  const own2 = SETTINGS_PAGES.filter(([key]) => key !== "models" || actions.providers !== void 0);
-  own2.splice(own2.findIndex(([key]) => key === (actions.providers === void 0 ? "general" : "models")) + 1, 0, ["accounts", "Accounts"]);
-  own2.splice(own2.findIndex(([key]) => key === "schedules") + 1, 0, ["automations", "Automations"]);
+  const own3 = SETTINGS_PAGES.filter(([key]) => key !== "models" || actions.providers !== void 0);
+  own3.splice(own3.findIndex(([key]) => key === (actions.providers === void 0 ? "general" : "models")) + 1, 0, ["accounts", "Accounts"]);
+  own3.splice(own3.findIndex(([key]) => key === "schedules") + 1, 0, ["automations", "Automations"]);
   const pluginPages = extra.map((section) => [`plugin:${section.id}`, section.label]);
   const agents = pluginPages.findIndex(([key]) => key === "plugin:acp-agents");
   pluginPages.splice(agents < 0 ? pluginPages.length : agents + 1, 0, ["hermes-remote", "Remote Hermes"]);
-  const pages2 = [...own2.filter(([key]) => key !== "about"), ...pluginPages, ...own2.filter(([key]) => key === "about")];
+  const pages2 = [...own3.filter(([key]) => key !== "about"), ...pluginPages, ...own3.filter(([key]) => key === "about")];
   const pluginPage = extra.find((section) => `plugin:${section.id}` === page);
   const shown2 = pages2.some(([key]) => key === page) ? page : "general";
   const usageFocus = shown2 === "usage" && id ? id : null;
@@ -44282,9 +44595,9 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
       ensureTabs(botId);
       dropPlaceholders(botId);
       tabs.set((snapshot2) => {
-        const own2 = snapshot2[botId] ?? { ids: [], active: null };
-        if (own2.ids.includes(tabId)) return snapshot2;
-        return { ...snapshot2, [botId]: { ids: [...own2.ids, tabId], active: tabId } };
+        const own3 = snapshot2[botId] ?? { ids: [], active: null };
+        if (own3.ids.includes(tabId)) return snapshot2;
+        return { ...snapshot2, [botId]: { ids: [...own3.ids, tabId], active: tabId } };
       });
       publish3(tabId, { url: change.url ?? "", title: change.title ?? "", live: true });
       persist(botId);
@@ -44537,8 +44850,8 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
     const tabId = `t${Date.now().toString(36)}-${++serial}`;
     owner.set(tabId, botId);
     tabs.set((state2) => {
-      const own2 = state2[botId] ?? { ids: [], active: null };
-      return { ...state2, [botId]: { ids: [...own2.ids, tabId], active: tabId } };
+      const own3 = state2[botId] ?? { ids: [], active: null };
+      return { ...state2, [botId]: { ids: [...own3.ids, tabId], active: tabId } };
     });
     publish3(tabId, { url: "", title: "", live: false });
     if (typeof url === "string" && url !== "") void navigate(tabId, url);
@@ -49918,7 +50231,9 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => registerSkillActivity(ctx),
     () => shadow("conversation.chat.node", { key: SKILL_ACTIVITY, priority: BOT_PRIORITY, locale: "chat", inject: face }, SkillActivityCell),
     () => shadow("conversation.chat.node", { key: "turn-trigger", priority: BOT_PRIORITY, locale: "chat", inject: face }, TriggerCell),
-    () => shadow("conversation.chat.node", { key: "tool-call", priority: BOT_PRIORITY, locale: "chat", inject: face }, ToolCell),
+    () => registerToolActivity(ctx),
+    () => shadow("conversation.chat.node", { key: TOOL_ACTIVITY, priority: BOT_PRIORITY, locale: "chat", inject: face }, ToolActivityCell),
+    () => shadow("conversation.chat.node", { key: "tool-call", priority: BOT_PRIORITY, locale: "chat", inject: face }, OrderedToolCell),
     () => simpleOnly(() => shadow("conversation.chat.node", { key: "turn-process", priority: BOT_PRIORITY, locale: "chat", inject: face }, TurnProcessCell)),
     // A failed turn shows what the user can do about it instead of the provider's raw text.
     () => shadow("conversation.chat.node", { key: "turn-error", priority: BOT_PRIORITY, locale: "chat", inject: face }, FailureCell),
