@@ -139,6 +139,7 @@ function bindSolverProgressApproval(rt) {
     const receipts = session?.[solverProgressReceipts]
     const receipt = receipts?.get(callId)
     if (receipt === undefined) return undefined
+    if (receipt === null && teamToolOf(exec.name) !== SOLVER_PROGRESS) return undefined
     const changed = () => refusal('The Solver progress call changed before it ran. Make the call again.')
     if (receipt === null || receipt.claimed) throw changed()
     const { agent, bot, call, signal, args } = receipt
@@ -165,7 +166,7 @@ function bindSolverProgressApproval(rt) {
   }
 
   // A closed receipt carries no proof. Keep only the ID until the next turn
-  // so a delayed dispatch in this turn cannot fall through to execution.
+  // to block delayed dispatch of the closed progress call.
   const endSolverProgressCall = (session, callId) => {
     const receipts = session[solverProgressReceipts]
     if (receipts?.has(callId)) receipts.set(callId, null)

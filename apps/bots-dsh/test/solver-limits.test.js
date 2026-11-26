@@ -208,7 +208,7 @@ async function watchSolver(t, home) {
   return events
 }
 
-async function bridgeFixture(t, { pocket = false, extra = {}, withPolicies = false, withTimeout = false } = {}) {
+async function bridgeFixture(t, { pocket = false, extra = {}, withPolicies = false, withTimeout = false, holdDesktopFor } = {}) {
   const root = new Context()
   t.after(() => root.fiber.dispose())
   root.provide('systemPrompt', { tools() {}, section() {}, context() {}, getContextOrder() { return 0 } })
@@ -289,7 +289,8 @@ async function bridgeFixture(t, { pocket = false, extra = {}, withPolicies = fal
   const solver = agentFor('solver')
   root.on('approval/request', (request) => {
     desktop.push({ id: request.agent.session.id, name: request.toolName, callId: request.callId })
-    if (!request.toolName.endsWith(progressName) || request.reason === 'fixture person') return 'allowed-once'
+    if (request.toolName !== holdDesktopFor
+      && (!request.toolName.endsWith(progressName) || request.reason === 'fixture person')) return 'allowed-once'
     return new Promise(resolve => request.signal.addEventListener('abort', () => resolve('cancelled'), { once: true }))
   })
   let unmount
@@ -682,6 +683,42 @@ for (const closesBy of ['result', 'step']) {
     assert.deepEqual(h.desktop, [])
   })
 }
+
+test('AC-6 a different tool can run after ordinary Allow with a closed progress call ID', async t => {
+  const name = 'read'
+  const h = await bridgeFixture(t, { holdDesktopFor: name })
+  let executions = 0
+  h.solver.ctx.tools.register(defineTool({
+    name, description: 'Fixture read', parameters: {},
+    output: { schema: { type: 'string' }, render: (_args, value) => content(value) },
+    execute() {
+      executions += 1
+      return 'fixture read ran'
+    },
+  }))
+
+  const closed = h.start(progressName, { action: 'status' })
+  t.after(() => closed.abort.abort())
+  assert.equal(await closed.approval, 'allowed-once')
+  assert.deepEqual(h.desktop, [])
+  h.solver.session.append('tool/result', { turn: 2, step: 1, message: {
+    toolCallId: closed.callId, content: content('closed'), isError: true,
+  } })
+
+  const read = h.start(name, {}, { callId: closed.callId })
+  t.after(() => read.abort.abort())
+  await immediate()
+  assert.deepEqual(h.desktop, [{ id: h.solver.id, name, callId: closed.callId }])
+  const row = h.rt.approvalsView().find(row => row.callId === closed.callId && row.tool === name)
+  assert.ok(row, 'the reused ID opened an ordinary person card for the other tool')
+  assert.equal(executions, 0)
+  h.rt.answerApproval(row.id, 'allow')
+  const result = await read.run()
+  assert.equal(result.outcome, 'allowed-once')
+  assert.equal(executions, 1, result.text)
+  assert.equal(result.result.isError, false)
+  assert.equal(result.text, 'fixture read ran')
+})
 
 for (const { change, pick } of [
   { change: 'timeout', pick: 'reject' },
