@@ -2,7 +2,7 @@ import { countCards, createSource, detailsSubject, heldCardKey } from './sources
 import { noteClientError } from './diagnostics.js'
 import { CROSSING_DEADLINE_MS, crossesHarness, routeOfRef } from '../shared/routes.js'
 import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-model.js'
-import { mountedViewer } from './viewer.js'
+import { checkViewer, mountedViewer, requestViewer } from './viewer.js'
 
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
 const unfinishedSave = error => error.code === 'NETWORK' || error.code === 'bot/retired' || /^HTTP_50[234]$/.test(error.code ?? '') ||
@@ -32,11 +32,16 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       else skillStorage?.removeItem(scope)
     } catch { /* The current client still has its operation. */ }
   }
-  async function finishSave(scope, job, input, signal) {
+  async function finishSave(scope, job, input, signal, viewerGuard) {
     const poll = { operation: job.id, poll: true, ...(input === undefined ? { recover: true } : {}) }
-    const request = body => {
+    const check = () => {
       signal?.throwIfAborted()
-      if (scope !== skillScope()) throw Object.assign(new Error('The team viewer changed.'), { code: 'bot/viewer-changed' })
+      // A newer mount can have the same viewer ID. It owns recovery of this Save.
+      checkViewer(viewerGuard)
+      if (scope !== skillScope()) throw Object.assign(new Error('The team viewer changed.'), { code: 'bot/retired' })
+    }
+    const request = body => {
+      check()
       return call('skill-library-save', body, signal)
     }
     try {
@@ -50,7 +55,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
         await new Promise(resolve => setTimeout(resolve, 750))
         result = await request(poll)
       }
-      signal?.throwIfAborted()
+      check()
       rememberSave(scope, job, false)
       return result
     } catch (error) {
@@ -59,6 +64,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     }
   }
   async function saveSkill(skill) {
+    const viewerGuard = requestViewer('skill-library-save')
     const scope = skillScope()
     const key = JSON.stringify(skill)
     const existing = storedSaves(scope)
@@ -72,7 +78,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     }
     skillSaves.set(key, job)
     try {
-      const result = await finishSave(scope, job, skill)
+      const result = await finishSave(scope, job, skill, undefined, viewerGuard)
       skillSaves.delete(key)
       return result
     } catch (error) {
@@ -83,7 +89,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
   function resumeSkillSaves(signal) {
     const scope = skillScope()
     return Promise.allSettled(storedSaves(scope).map(async job => {
-      const result = await finishSave(scope, job, undefined, signal)
+      const result = await finishSave(scope, job, undefined, signal, requestViewer('skill-library-save'))
       for (const [key, current] of skillSaves) if (current.id === job.id) skillSaves.delete(key)
       return result
     }))

@@ -239,13 +239,7 @@ function importTeam(home, from) {
   const sourceKey = readConnectorKey(join(from, CONNECTOR_KEY))
   checkImportedCredentials(stateBytes, sourceKey)
   const copySkills = prepareSkillImport(home, from, skillSources.length !== 0)
-  const stateInfo = !sourceKey.missing || copySkills ? fs.statSync(sourceState, { bigint: true }) : undefined
-  const isSourceState = (source, name, alias) => {
-    if (!stateInfo || alias !== 'state.json') return false
-    if (name === 'state.json') return true
-    const info = fs.statSync(source, { bigint: true, throwIfNoEntry: false })
-    return info?.dev === stateInfo.dev && info.ino === stateInfo.ino
-  }
+  const stageState = !sourceKey.missing || copySkills !== undefined
   const copyHome = () => cpSync(from, home, { recursive: true, force: false, filter: source => {
     if (source.endsWith('state.lock') || /[\\/]wake\.jsonl\.[^\\/]*\.tmp$/.test(source)) return false
     if (dirname(source) !== from) return true
@@ -254,7 +248,8 @@ function importTeam(home, from) {
     return !skillImportNames.has(alias) && !alias.startsWith('.skill-import-') &&
       ![skillLibrary.SKILL_REVIEW_KEY, skillLibrary.SKILL_IMPORT_MARK, 'state.json'].some(name => isHostPublicationTemp(alias, name)) &&
       !/^\.write-[a-f0-9-]{36}\.tmp$/.test(alias) &&
-      !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && !isSourceState(source, name, alias)
+      // The destination may treat a distinct source entry as the state file.
+      !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && (!stageState || alias !== 'state.json')
   } })
 
   const publishState = () => {

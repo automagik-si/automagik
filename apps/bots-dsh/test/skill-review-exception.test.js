@@ -15,7 +15,7 @@ import * as skills from '../src/host/skill-library.js'
 import { SKILL_CHECK_HISTORY } from '../src/host/skill-check-version.js'
 import { skillHash, textSkillMd } from '../src/host/skill-library-rules.js'
 import { fakeContext } from './fake-ctx.js'
-import { browser, bundle, load, react, reply, refusal, tick, viewerReply } from './viewer-fixture.js'
+import { browser, bundle, load, manualTimeouts, react, reply, refusal, tick, viewerReply } from './viewer-fixture.js'
 
 const actor = { id: 'fixture-owner', role: 'owner' }
 const form = { name: 'sample-notes', description: 'A sample note.', content: 'Write a sample note.' }
@@ -368,6 +368,182 @@ test('exception 4 case-insensitive state is visible only after the staged librar
     assert.deepEqual({ publishedEarly, recovered: fs.existsSync(join(dest, 'skill-library', 'library.json')) },
       { publishedEarly: false, recovered: true })
     assert.equal(read(join(dest, 'skill-library', 'library.json')).skills['legacy-notes'].name, 'legacy-notes')
+  } finally {
+    for (const mock of mocks) mock.mock.restore()
+    syncBuiltinESMExports()
+  }
+})
+
+test('final exception 1 preserves a native failure behind a normalized stop', async t => {
+  const { openAICompletionsApi } = await import(new URL('node_modules/@earendil-works/pi-ai/dist/api/openai-completions.lazy.js', `file://${process.env.DSH_HARNESS}/`))
+  const api = openAICompletionsApi()
+  // The pinned transport detects OpenRouter compatibility from the provider ID.
+  const model = { ...transportModel, provider: 'openrouter' }
+  const profile = { provider: model.provider, streamIdleTimeoutMs: 3000, modelErrors: new Map(), configuredMaxTokens: new Map() }
+  const profiles = new Map([[model.provider, profile]])
+  const adapter = new PiAiAdapter({ profiles: () => profiles, resolveApiKey: async () => 'fixture-key' })
+  t.mock.method(adapter, 'current', () => ({ profiles, models: { getModel: () => model, streamSimple: api.streamSimple } }))
+  const root = new Context()
+  const llm = new LlmRuntime(root)
+  llm.registerAdapter([model.provider], adapter)
+  t.after(() => root.fiber.dispose())
+  let native = 'end_turn'
+  let requests = 0
+  t.mock.method(globalThis, 'fetch', async url => {
+    assert.equal(String(url), 'https://provider.invalid/v1/chat/completions')
+    requests++
+    const frame = { id: 'fixture', object: 'chat.completion.chunk', created: 1, model: model.id }
+    const row = choice => 'data: ' + JSON.stringify({ ...frame, choices: [{ index: 0, ...choice }] }) + '\n\n'
+    return new Response(row({ delta: { content: clean }, finish_reason: null }) +
+      row({ delta: {}, finish_reason: 'stop', native_finish_reason: native }) + 'data: [DONE]\n\n',
+    { headers: { 'content-type': 'text/event-stream' } })
+  })
+  const f = fixture(t, { llm })
+  f.rt.skillReviewModel = async () => model.provider + '/' + model.id
+  assert.deepEqual(await f.save(), { saved: true })
+  native = 'MALFORMED_RESPONSE'
+  const input = { ...form, name: 'interrupted-notes' }
+  const refused = await f.save(input)
+  const direct = await assembleLlmStream({ llm }, { provider: model.provider, model: model.id,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'A fixture request.' }] }], tools: [] }, { requireProviderFinish: true })
+  const state = read(f.path)
+  assert.deepEqual({ refused: !!refused.refused, skill: state.skills[input.name], seals: Object.keys(state.reviews).length,
+    finish: direct.finish.kind, observed: direct.observedFinish?.kind, requests },
+  { refused: true, skill: undefined, seals: 1, finish: 'error', observed: 'error', requests: 3 })
+})
+
+for (const mode of ['aborted', 'timeout', 'sibling', 'cut report']) {
+  test(`final exception 2 retains independently valid rows before ${mode}`, async t => {
+    const sent = Promise.withResolvers()
+    const release = Promise.withResolvers()
+    t.after(release.resolve)
+    if (mode === 'timeout') t.mock.method(AbortSignal, 'timeout', () => {
+      const deadline = new AbortController()
+      void sent.promise.then(() => deadline.abort(new DOMException('Fixture deadline', 'TimeoutError')))
+      return deadline.signal
+    })
+    // Entries and classifications are synthetic. Nested and quoted rows are inert fixture values.
+    const row = finding('prompt-injection')
+    const prefix = '{"findings":[null,32,' + JSON.stringify(row) + ',[' + row + '],' +
+      finding('prompt-injection', 'wrong.txt') + ','
+    let interrupted = true
+    const f = fixture(t, { async *stream(request) {
+      if (!interrupted) { yield* [delta(clean), stop]; return }
+      if (/ chunk .* path=notes\.txt\n/.test(request.messages[0].content[0].text)) {
+        await sent.promise
+        yield delta('Incomplete fixture report.')
+        yield stop
+        return
+      }
+      yield delta(prefix)
+      yield delta(row.slice(0, 25))
+      yield delta(row.slice(25) + ',{"file":')
+      sent.resolve()
+      if (mode === 'timeout' || mode === 'sibling') await release.promise
+      else yield mode === 'aborted' ? { type: 'finish', reason: { kind: 'aborted' } } : stop
+    } })
+    const entries = [{ path: 'SKILL.md', bytes: textSkillMd(form) }]
+    if (mode === 'sibling') entries.push({ path: 'notes.txt', bytes: Buffer.from('A local note.') })
+    const hash = skillHash(entries)
+    const run = () => mode === 'sibling'
+      ? f.rt.skillLibrary.reviewSkill({ name: form.name, entries, check: { hash, injection: [], verdict: 'pass', findings: [], counts: {} },
+        caller: { identity: actor.id, generation: 1 } })
+      : f.save()
+    const result = await run()
+    const recorded = fs.existsSync(f.path) ? read(f.path).reviewBlocks?.[hash]?.findings : undefined
+    const calls = f.calls()
+    interrupted = false
+    f.restart()
+    const afterReload = await run()
+    const reasons = findings => findings?.map(({ area, reason }) => ({ area, reason }))
+    const expected = [{ area: 'prompt-injection', reason: 'Synthetic classification.' }]
+    assert.deepEqual({ refused: reasons(result.findings), recorded: reasons(recorded), later: reasons(afterReload.findings),
+      additionalCalls: f.calls() - calls, saved: read(f.path).skills[form.name]?.name },
+    { refused: expected, recorded: expected, later: expected, additionalCalls: 0, saved: undefined })
+  })
+}
+
+for (const remountFirst of [false, true]) {
+  test(`final exception 3 preserves the initiating Save between polls (replacement first: ${remountFirst})`, async t => {
+    const f = fixture(t)
+    await f.save()
+    const input = { ...form, edit: true, content: 'A newer sample note.' }
+    const code = await bundle(`
+      export { startViewer } from './src/client/viewer.js'
+      export { call } from './src/client/api.js'
+      export { teamActions } from './src/client/team-actions.js'
+    `)
+    const timers = manualTimeouts()
+    const boot = { version: 1, role: 'owner' }
+    let initial
+    const web = browser({ boot, timers: timers.timers, async fetch({ body }) {
+      if (body.endpoint === 'whoami') return viewerReply('owner', actor.id)
+      assert.equal(body.viewer, actor.id)
+      const result = await f.save(body.payload)
+      if (!body.payload.poll) {
+        assert.equal(result.pending, true)
+        initial = body.payload.operation
+      }
+      return reply(result)
+    } })
+    Object.assign(web.globals, { crypto: globalThis.crypto, TextEncoder })
+    const api = load(code, web.globals)
+    const mount = new AbortController()
+    const replacement = new AbortController()
+    t.after(() => { mount.abort(); replacement.abort() })
+    const client = () => api.teamActions({ call: api.call, after: promise => promise })
+    await api.startViewer(boot, mount.signal)
+    const old = client().saveSkill(input).then(result => ({ result }), error => ({ code: error.code }))
+    await waitForCommit(async () => ({ pending: initial === undefined }))
+    await tick()
+    assert.equal(web.calls.filter(({ body }) => body.endpoint === 'skill-library-save').length, 1)
+    mount.abort()
+    if (remountFirst) await api.startViewer(boot, replacement.signal)
+    assert.deepEqual(await waitForCommit(() => f.save({ operation: initial, poll: true })), { saved: true })
+    timers.advance(750)
+    const retired = await old
+    if (!remountFirst) await api.startViewer(boot, replacement.signal)
+    const recovered = await client().resumeSkillSaves()
+    const ids = web.calls.filter(({ body }) => body.endpoint === 'skill-library-save').map(({ body }) => body.payload.operation)
+    assert.deepEqual({ error: retired.code, recovered: Array.from(recovered, row => row.status === 'fulfilled' && row.value.saved),
+      ids: [...new Set(ids)], reviews: f.calls() - 1, writes: f.writes(form.name) - 1 },
+    { error: 'bot/retired', recovered: [true], ids: [initial], reviews: 1, writes: 1 })
+    assert.equal((await f.endpoint('skill-library-get', { name: form.name })).content, input.content)
+  })
+}
+
+test('final exception 4 publishes canonical state only after mixed-case filesystem staging', async t => {
+  const src = home(t)
+  const dest = home(t)
+  putLegacy(src)
+  fs.writeFileSync(join(src, 'state.json'), '{"version":1,"fixture":"canonical"}', { mode: 0o600 })
+  fs.writeFileSync(join(src, 'STATE.JSON'), '{"version":1,"fixture":"alias"}', { mode: 0o600 })
+  assert.notEqual(fs.statSync(join(src, 'STATE.JSON')).ino, fs.statSync(join(src, 'state.json')).ino)
+  const realExists = fs.existsSync
+  const realCopy = fs.cpSync
+  let interrupt = true
+  const mocks = [
+    t.mock.method(fs, 'existsSync', path => realExists(path) ||
+      (path === join(dest, 'state.json') && realExists(join(dest, 'STATE.JSON')))),
+    t.mock.method(fs, 'cpSync', (from, to, options) => {
+      if (interrupt && from === join(src, 'skill-library')) throw new Error('Fixture interrupted mixed-case staging')
+      return realCopy(from, to, options)
+    }),
+  ]
+  syncBuiltinESMExports()
+  try {
+    assert.throws(() => createRuntime(fakeContext(), { home: dest, importHome: src }), /interrupted mixed-case staging/)
+    const publishedEarly = fs.existsSync(join(dest, 'state.json'))
+    interrupt = false
+    const resumed = createRuntime(fakeContext(), { home: dest, importHome: src })
+    try {
+      const recovered = realExists(join(dest, 'skill-library', 'library.json'))
+      const canonical = join(dest, 'state.json')
+      assert.deepEqual({ publishedEarly, recovered, state: realExists(canonical) ? read(canonical).fixture : undefined },
+        { publishedEarly: false, recovered: true, state: 'canonical' })
+    } finally {
+      try { await resumed.load() } finally { resumed.dispose() }
+    }
   } finally {
     for (const mock of mocks) mock.mock.restore()
     syncBuiltinESMExports()

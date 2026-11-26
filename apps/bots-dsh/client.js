@@ -24079,11 +24079,15 @@ function teamActions({
     } catch {
     }
   }
-  async function finishSave(scope, job, input, signal) {
+  async function finishSave(scope, job, input, signal, viewerGuard) {
     const poll = { operation: job.id, poll: true, ...input === void 0 ? { recover: true } : {} };
-    const request = (body) => {
+    const check = () => {
       signal?.throwIfAborted();
-      if (scope !== skillScope()) throw Object.assign(new Error("The team viewer changed."), { code: "bot/viewer-changed" });
+      checkViewer(viewerGuard);
+      if (scope !== skillScope()) throw Object.assign(new Error("The team viewer changed."), { code: "bot/retired" });
+    };
+    const request = (body) => {
+      check();
       return call2("skill-library-save", body, signal);
     };
     try {
@@ -24097,7 +24101,7 @@ function teamActions({
         await new Promise((resolve2) => setTimeout(resolve2, 750));
         result = await request(poll);
       }
-      signal?.throwIfAborted();
+      check();
       rememberSave(scope, job, false);
       return result;
     } catch (error) {
@@ -24106,6 +24110,7 @@ function teamActions({
     }
   }
   async function saveSkill(skill) {
+    const viewerGuard = requestViewer("skill-library-save");
     const scope = skillScope();
     const key = JSON.stringify(skill);
     const existing = storedSaves(scope);
@@ -24117,7 +24122,7 @@ function teamActions({
     }
     skillSaves.set(key, job);
     try {
-      const result = await finishSave(scope, job, skill);
+      const result = await finishSave(scope, job, skill, void 0, viewerGuard);
       skillSaves.delete(key);
       return result;
     } catch (error) {
@@ -24128,7 +24133,7 @@ function teamActions({
   function resumeSkillSaves(signal) {
     const scope = skillScope();
     return Promise.allSettled(storedSaves(scope).map(async (job) => {
-      const result = await finishSave(scope, job, void 0, signal);
+      const result = await finishSave(scope, job, void 0, signal, requestViewer("skill-library-save"));
       for (const [key, current] of skillSaves) if (current.id === job.id) skillSaves.delete(key);
       return result;
     }));

@@ -140,6 +140,12 @@ function canRetryPolicy(policy, code, retry) {
   return Array.isArray(policy.retryableCodes) && policy.retryableCodes.includes(code) && retry <= policy.maxRetries
 }
 
+// pi-ai encodes differing native reasons as "stop.<native reason>". Only
+// completed provider turns can attest that an entire review frame was read.
+const REVIEW_NATIVE_STOPS = new Set([
+  'stop', 'end', 'end_turn', 'stop_sequence', 'eos', 'complete', 'completed', 'end_of_stream',
+])
+
 // The pinned pi-ai adapter drops the raw provider reason from its finish chunk.
 // Observe it in the OpenAI-compatible transport for this call's snapshot only.
 function skillReviewStream(llm, request, observedFinish) {
@@ -152,8 +158,17 @@ function skillReviewStream(llm, request, observedFinish) {
 
   async function* streamSimple(model, context, options) {
     for await (const event of snapshot.models.streamSimple(model, context, options)) {
-      if (event.type === 'done' && typeof event.message.rawStopReason === 'string' && event.message.rawStopReason.length) {
-        observedFinish()
+      if (event.type === 'done' && event.message.stopReason === 'stop') {
+        const raw = event.message.rawStopReason
+        if (typeof raw === 'string' && raw.length) {
+          const finish = /^(?:stop|end)(?:\.(.+))?$/.exec(raw)
+          if (!finish || (finish[1] && !REVIEW_NATIVE_STOPS.has(finish[1].toLowerCase()))) {
+            yield { type: 'error', reason: 'error', error: { ...event.message, stopReason: 'error',
+              errorMessage: 'Provider reported an unsuccessful finish.' } }
+            return
+          }
+          observedFinish()
+        }
       }
       yield event
     }

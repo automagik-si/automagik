@@ -302,31 +302,29 @@ export function parseReview(text, frame) {
 function interruptedInjection(text, frame) {
   const prefix = /^\s*\{\s*(?:"overflow"\s*:\s*(?:true|false)\s*,\s*)?"findings"\s*:\s*\[/.exec(text)
   if (!prefix) return []
-  const rowToken = /\s*([{,])/y
-  rowToken.lastIndex = prefix[0].length
   const findings = []
-  let first = true
-  for (;;) {
-    if (!first && rowToken.exec(text)?.[1] !== ',') break
-    if (rowToken.exec(text)?.[1] !== '{') break
-    first = false
-    const start = rowToken.lastIndex - 1
-    let depth = 1
-    let string = false
-    let end = start + 1
-    for (; depth && end < text.length; end++) {
-      const char = text[end]
-      if (string && char === '\\') end++
-      else if (char === '"') string = !string
-      else if (!string && char === '{') depth++
-      else if (!string && char === '}') depth--
+  const ends = []
+  let start = prefix[0].length
+  let string = false
+  for (let end = start; end <= text.length; end++) {
+    const char = text[end]
+    if (string && char === '\\') { end++; continue }
+    if (char === '"') string = !string
+    if (string) continue
+    if (char === '{' || char === '[') { ends.push(char === '{' ? '}' : ']'); continue }
+    if (ends.length) {
+      if ((char === '}' || char === ']') && ends.pop() !== char) break
+      continue
     }
-    if (depth) break
-    rowToken.lastIndex = end
+    if (char !== ',' && char !== ']' && char !== undefined) continue
+
+    // A malformed element cannot prevent later complete rows from being checked.
     let row
-    try { row = JSON.parse(text.slice(start, end)) } catch { break }
+    try { row = JSON.parse(text.slice(start, end)) } catch { /* Skip the invalid element. */ }
     const finding = parseFinding(row, frame)
     if (finding?.area === 'prompt-injection') findings.push(finding)
+    if (char !== ',') break
+    start = end + 1
   }
   return findings
 }
