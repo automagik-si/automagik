@@ -211,8 +211,8 @@ test('existing copies use the opened file size instead of a stale lstat size', a
   await mkdir(f.folder, { recursive: true })
   await writeFile(f.path, 'ada', { mode: 0o600 })
   const inspect = fs.lstat
-  const mocked = t.mock.method(fs, 'lstat', async path => {
-    const result = await inspect(path)
+  const mocked = t.mock.method(fs, 'lstat', async (path, options) => {
+    const result = await inspect(path, options)
     if (path === f.path) result.size++
     return result
   })

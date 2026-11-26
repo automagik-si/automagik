@@ -5,7 +5,7 @@
 // see, or no reviewer. It grants and refuses nothing, so it reads the cosmetic marker and the
 // reviewer id the New Solver dialog stores (`reviewerId`). Groups, tasks and scheduled runs of a
 // Solver are not marked: only its own chat (and the subagents under it).
-import { chosenIdentity, chosenIdentityOf, originalReviewContent, unverifiedNotice, unverifiedReason, unverifiedText } from '../shared/solver-model.js'
+import { chosenIdentity, chosenIdentityOf, originalReviewContent, unverifiedNotice, unverifiedReason } from '../shared/solver-model.js'
 import { lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { SOLVER_NOTES } from '../shared/solver-method.js'

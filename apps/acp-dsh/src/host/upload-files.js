@@ -73,9 +73,10 @@ async function existing(path, ref, signal) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0))
   try {
     const opened = await file.stat({ bigint: true })
-    const sameVersion = a => a.isFile() && a.dev === stat.dev && a.ino === stat.ino && a.size === stat.size
-      && a.nlink === 1n && a.mode === stat.mode && a.mtimeNs === stat.mtimeNs && a.ctimeNs === stat.ctimeNs
-    if (!sameVersion(opened) || opened.size !== BigInt(ref.bytes)) {
+    // Path stats confirm identity and change metadata. Only the descriptor supplies the size.
+    const sameVersion = a => a.isFile() && a.dev === opened.dev && a.ino === opened.ino
+      && a.mode === opened.mode && a.mtimeNs === opened.mtimeNs && a.ctimeNs === opened.ctimeNs
+    if (!opened.isFile() || opened.nlink !== 1n || !sameVersion(stat) || opened.size !== BigInt(ref.bytes)) {
       throw new Error('The upload copy already exists with different bytes.')
     }
     const hash = createHash('sha256')
@@ -83,12 +84,15 @@ async function existing(path, ref, signal) {
       signal?.throwIfAborted()
       hash.update(chunk)
     }
-    if (`sha256:${hash.digest('hex')}` !== ref.attachmentId
-      || !sameVersion(await file.stat({ bigint: true })) || !sameVersion(await lstat(path, { bigint: true }))) {
+    const digestMatches = `sha256:${hash.digest('hex')}` === ref.attachmentId
+    const after = digestMatches && await file.stat({ bigint: true })
+    const stable = after && sameVersion(after) && after.nlink === 1n && after.size === opened.size
+    const current = stable && await lstat(path, { bigint: true })
+    if (!current || !sameVersion(current) || current.nlink !== 1n) {
       throw new Error('The upload copy already exists with different bytes.')
     }
+    return opened
   } finally { await file.close() }
-  return stat
 }
 
 async function checkFolder(cwd, folder, ref) {
