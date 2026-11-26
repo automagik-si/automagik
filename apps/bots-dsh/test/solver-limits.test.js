@@ -2313,7 +2313,6 @@ test('Native omp accepts direct person Auto while the host withholds Done withou
 
 const configuredSolver = 'acp-codex/gpt-6-sol'
 const configuredReviewer = 'acp-claude/claude-sonnet-5-5'
-const aliasReviewer = 'acp-claude/sonnet'
 const wireFixture = fileURLToPath(new URL('./fixtures/solver-identity-acp.mjs', import.meta.url))
 
 async function pickDialogModel(node, provider, label, withLevel) {
