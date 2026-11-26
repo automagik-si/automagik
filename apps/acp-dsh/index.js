@@ -438,22 +438,32 @@ export function apply(ctx, config = {}, {
   // The connectors that wait for the account record (see `install`): connector package -> what
   // the status and a turn say meanwhile. Without it the wait showed as "installing" for good.
   const recordWaits = new Map()
+  const accountRecordWait = () => {
+    consents?.settle()
+    if (consents !== undefined && !consents.saved) {
+      return `the account record could not be saved (${consents.saveError ?? 'error'})`
+    }
+  }
+  const connectorStartMessage = (spec, failed) => {
+    const reason = failed ? `the last install failed: ${failed}` : 'send this again in a minute'
+    return `its ACP adapter (${spec.adapter}) is still being installed; ${reason}`
+  }
   const install = (spec, { repair = false } = {}) => {
     // A native agent has no connector: its CLI is the ACP server.
     if (isNative(spec)) return Promise.resolve()
     // The first-run account record is on disk before this version installs a connector, so a
     // connector found with no record always means an earlier version (consent.js).
-    consents?.settle()
+    const wait = accountRecordWait()
     const before = store.binOf(spec.adapter, spec.bin)?.path
     // A record that could not be written: a connector installed now would look, at the next
     // start, like one an earlier version left, and its vendor would be carried unasked. The
     // connector waits for the record (every later install tries the write again). One already
     // installed says nothing new, so its updates go on.
-    if (consents !== undefined && !consents.saved && before === undefined) {
+    if (wait !== undefined && before === undefined) {
       if (!disposed) warn(ctx, `${spec.adapter} not installed yet: the account record could not be saved`)
       // Said as a failed install, so the settings page shows why and offers Retry, which comes
       // back here and tries the record again. Only the write error's code, never a path.
-      recordWaits.set(spec.adapter, { message: `the account record could not be saved (${consents.saveError ?? 'error'})` })
+      recordWaits.set(spec.adapter, { message: wait })
       // Nothing can be installed until the record is saved: no retry waits meanwhile.
       forgetCheckRetry(spec)
       return Promise.resolve()
@@ -611,6 +621,11 @@ export function apply(ctx, config = {}, {
     // goes back to the release before it, when that is still here (install.js). A native agent
     // has no connector in the store, so it has neither: a failed start is only reported.
     ...(isNative(spec) ? {} : {
+      connectorStartFailure: () => {
+        if (store.binOf(spec.adapter, spec.bin) !== undefined) return
+        const failed = store.lastError?.(spec.adapter) ?? accountRecordWait()
+        if (failed) return connectorStartMessage(spec, failed)
+      },
       proven: () => { startFailed.delete(spec.adapter); return store.markGood?.(spec.adapter) },
       repair: (error) => {
         if (disposed) return false
@@ -646,9 +661,7 @@ export function apply(ctx, config = {}, {
         void install(spec)
         // Read after the try above: a record that still cannot be saved is this turn's reason.
         const failed = store.lastError?.(spec.adapter) ?? recordWaits.get(spec.adapter)?.message
-        throw new Error(failed
-          ? `its ACP adapter (${spec.adapter}) is still being installed; the last install failed: ${failed}`
-          : `its ACP adapter (${spec.adapter}) is still being installed; send this again in a minute`)
+        throw new Error(connectorStartMessage(spec, failed))
       }
       // Antigravity's switch (#1564): every start records the version agy answered; an OFF start
       // writes and checks its files in the home this child runs in, before any child exists.
