@@ -216,7 +216,13 @@ export function createAcpActions(ctx) {
     const acp = service()
     if (acp === undefined) return { available: false, agents: [] }
     const status = await ask(acp)
-    return { available: true, agents: (status?.agents ?? []).filter(agent => ACP_IDS.includes(agent?.id)).map(agentView) }
+    const agents = (status?.agents ?? []).filter(agent => ACP_IDS.includes(agent?.id)).map(agentView)
+    if (typeof acp.accountSwitchNative === 'function') {
+      for (const agent of agents) {
+        if (agent.appSignIn && !agent.sharedAccount) agent.atomicAccountSwitch = true
+      }
+    }
+    return { available: true, agents }
   }
 
   return {
@@ -288,22 +294,26 @@ export function createAcpActions(ctx) {
     },
     // Sign out of such an agent: only a row that signs in here, and never one whose account is
     // shared (Windows), where retiring its home would not sign out. acp-dsh refuses that too.
-    'acp-sign-out': async (payload) => {
+    ...Object.fromEntries(['acp-sign-out', 'acp-switch-account'].map(endpoint => [endpoint, async (payload) => {
       const asked = parse(RetryPayload, payload)
       if (asked === undefined) throw invalid('Say which agent.')
       const acp = service()
       if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
-      if (typeof acp.accountSignOutNative !== 'function') throw refused('This ACP agents plugin cannot sign out of that agent here.')
+      const method = endpoint === 'acp-switch-account' ? 'accountSwitchNative' : 'accountSignOutNative'
+      if (typeof acp[method] !== 'function') throw refused('This ACP agents plugin cannot sign out of that agent here.')
       const row = (await acp.status())?.agents?.find(agent => agent?.id === asked.id)
       if (row?.appSignIn !== true) throw refused('Sign out of this agent where you signed in to it.')
       if (row.sharedAccount === true) throw refused(`Sign out is not available on Windows. Sign out in ${row.name ?? 'the agent'} itself.`)
       try {
-        await acp.accountSignOutNative(asked.id)
+        await acp[method](asked.id)
       } catch (error) {
-        if (typeof error?.code === 'string' && error.code.startsWith('acp-account/')) throw refused(String(error.message).slice(0, 300))
+        if (typeof error?.code === 'string' && (error.code.startsWith('acp-account/')
+          || (method === 'accountSwitchNative' && error.code.startsWith('acp-sign-in/')))) {
+          throw refused(String(error.message).slice(0, 300))
+        }
         throw error
       }
       return view(next => next.status())
-    },
+    }])),
   }
 }

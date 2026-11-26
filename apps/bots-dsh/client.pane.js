@@ -9922,6 +9922,7 @@ var ZH2 = {
   "Bots: {account}": "Bot：{account}",
   "Sign in again in the app to resume Bots": "在应用内重新登录以恢复 Bot",
   "Terminal: {account}": "终端：{account}",
+  "Sign out is not available on Windows. Sign out in Antigravity itself.": "Windows 不支持在此退出登录。请在 Antigravity 中退出。",
   "This stops running Bot work for this account. Continue?": "这将停止此账号正在运行的 Bot 工作。继续吗？",
   "Switch account": "切换账号",
   "Sign out": "退出登录",

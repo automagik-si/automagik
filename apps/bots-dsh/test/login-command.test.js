@@ -77,20 +77,20 @@ test('/login opens the existing Claude or Codex row by Bot id without a model re
   assert.deepEqual(calls, [], 'routing is pure')
   command.ui.run({ sessionId: 'current-part' })
   command.ui.run({ sessionId: 'codex' })
-  assert.deepEqual(calls, [['open', 'claude', 'acp-claude'], ['open', 'codex', 'acp-codex']])
+  assert.deepEqual(structuredClone(calls), [['open', 'claude', 'acp-claude', undefined, undefined, { fresh: true }], ['open', 'codex', 'acp-codex', undefined, undefined, { fresh: true }]])
 })
 
 test('/login opens Antigravity\'s row too, by Bot id (#2048, parity)', () => {
   const { roster, actions, calls, command } = fixture()
   assert.deepEqual({ ...loginRoute({ roster: roster.getSnapshot(), sessionId: 'agy', actions }) }, { kind: 'cli', botId: 'agy', provider: 'acp-antigravity' })
   command.ui.run({ sessionId: 'agy' })
-  assert.deepEqual(calls, [['open', 'agy', 'acp-antigravity']])
+  assert.deepEqual(structuredClone(calls), [['open', 'agy', 'acp-antigravity', undefined, undefined, { fresh: true }]])
 })
 
 test('/login shows the generic Settings notice if the existing CLI entry declines', () => {
   const { calls, command } = fixture({ open: false })
   command.ui.run({ sessionId: 'codex' })
-  assert.deepEqual(calls, [['open', 'codex', 'acp-codex'], ['notice', setupAI]])
+  assert.deepEqual(structuredClone(calls), [['open', 'codex', 'acp-codex', undefined, undefined, { fresh: true }], ['notice', setupAI]])
 })
 
 test('/login gives group, missing model, host menu and provider-specific notices', () => {
@@ -126,7 +126,7 @@ test('/login claims the loading gap, then is available only for Bot and group ch
   assert.deepEqual(calls, [['notice', loading]], 'the earlier invocation did not wait')
   for (const sessionId of ['current-part', 'room-part']) assert.equal(command.available({ sessionId }), true)
   command.ui.run({ sessionId: 'codex' })
-  assert.deepEqual(calls, [['notice', loading], ['open', 'codex', 'acp-codex']])
+  assert.deepEqual(structuredClone(calls), [['notice', loading], ['open', 'codex', 'acp-codex', undefined, undefined, { fresh: true }]])
 })
 
 test('the conversation installer registers and withdraws /login through the commandUi scope', () => {

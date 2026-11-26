@@ -1225,6 +1225,7 @@ var ZH2 = {
   "Bots: {account}": "Bot：{account}",
   "Sign in again in the app to resume Bots": "在应用内重新登录以恢复 Bot",
   "Terminal: {account}": "终端：{account}",
+  "Sign out is not available on Windows. Sign out in Antigravity itself.": "Windows 不支持在此退出登录。请在 Antigravity 中退出。",
   "This stops running Bot work for this account. Continue?": "这将停止此账号正在运行的 Bot 工作。继续吗？",
   "Switch account": "切换账号",
   "Sign out": "退出登录",
@@ -24231,7 +24232,7 @@ function teamActions({
     pick4.end(false);
     throw error;
   });
-  const openCliLogin = (botId, provider, ref, attemptId) => {
+  const openCliLogin = (botId, provider, ref, attemptId, { fresh } = {}) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId);
     const manager = loginState?.();
     if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
@@ -24240,7 +24241,8 @@ function teamActions({
       botId: bot.id,
       provider,
       ref: signInProviderOf(ref) === provider ? ref : void 0,
-      ...typeof attemptId === "string" ? { attemptId } : {}
+      ...typeof attemptId === "string" ? { attemptId } : {},
+      ...fresh === true ? { fresh } : {}
     });
     return true;
   };
@@ -24461,7 +24463,7 @@ function teamActions({
       return recovered;
     },
     cliLoginStart: (botId, provider, model) => call2("cli-login-start", loginPayload(botId, provider, model === void 0 ? {} : { model })),
-    cliLoginCurrent: (botId, provider) => call2("cli-login-current", loginPayload(botId, provider)),
+    cliLoginCurrent: (botId, provider, { fresh } = {}) => call2("cli-login-current", loginPayload(botId, provider, fresh === true ? { fresh } : {})),
     cliLoginStatus: (botId, provider, attemptId, signal) => call2("cli-login-status", loginPayload(botId, provider, { attemptId }), signal),
     cliLoginAnswer: (botId, provider, attemptId, value) => call2("cli-login-answer", loginPayload(botId, provider, { attemptId, value })),
     cliLoginCancel: (botId, provider, attemptId) => call2("cli-login-cancel", loginPayload(botId, provider, { attemptId })),
@@ -24475,7 +24477,12 @@ function teamActions({
     }),
     cliLoginRelease: (claimId, rev) => call2("cli-login-release", { claimId, rev }),
     cliLoginReleaseMachine: (machineId) => call2("cli-login-release", { machineId }),
-    cliLoginSwitch: (botId, provider) => call2("cli-login-switch", loginPayload(botId, provider)),
+    cliLoginSwitch: (botId, provider, { keep, fresh } = {}, { confirmed: confirmed2, model } = {}) => call2("cli-login-switch", loginPayload(botId, provider, {
+      ...keep === void 0 ? {} : { keep },
+      ...fresh === true ? { fresh } : {},
+      ...confirmed2 === false ? { withoutWarning: true } : {},
+      ...model ? { model } : {}
+    })),
     cliLoginReset: (botId, provider) => call2("cli-login-reset", loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call2(
       "cli-login-signout",
@@ -45416,10 +45423,26 @@ function CliLoginRow({ bot, row: row2, roster, manager, secretPending, seat, fie
     seat.scrollIntoView?.({ block: "nearest" });
     manager.revealed(bot.id, row2.reveal);
   }, [row2.reveal]);
+  const switchQuestion = (onContinue, onCancel, error) => (0, import_react106.createElement)(
+    import_react106.Fragment,
+    null,
+    (0, import_react106.createElement)("p", null, t("This stops running Bot work for this account. Continue?")),
+    error,
+    (0, import_react106.createElement)(
+      "div",
+      { className: "bt-cli-actions" },
+      (0, import_react106.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row2.busy, onClick: onContinue }, t("Continue")),
+      (0, import_react106.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row2.busy, onClick: onCancel }, t("Cancel"))
+    )
+  );
   const body = (() => {
     switch (row2.stage) {
       case "offer":
-        return (0, import_react106.createElement)(
+        return row2.fresh && row2.confirm ? switchQuestion(
+          () => void manager.switchFresh(bot.id),
+          () => manager.dismiss(bot.id),
+          row2.error ? (0, import_react106.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row2.error)) : null
+        ) : (0, import_react106.createElement)(
           import_react106.Fragment,
           null,
           (0, import_react106.createElement)("p", null, t("To use {name} in this Bot, sign in to your account.", { name })),
@@ -45469,18 +45492,7 @@ function CliLoginRow({ bot, row: row2, roster, manager, secretPending, seat, fie
         const error = row2.error ? (0, import_react106.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row2.error)) : null;
         const close = (0, import_react106.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row2.busy, onClick: () => manager.dismiss(bot.id) }, t("Close"));
         if (row2.switched && row2.stillSignedIn && row2.confirm) {
-          return (0, import_react106.createElement)(
-            import_react106.Fragment,
-            null,
-            (0, import_react106.createElement)("p", null, t("This stops running Bot work for this account. Continue?")),
-            error,
-            (0, import_react106.createElement)(
-              "div",
-              { className: "bt-cli-actions" },
-              (0, import_react106.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row2.busy, onClick: () => void manager.switchAgain(bot.id) }, t("Continue")),
-              (0, import_react106.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row2.busy, onClick: () => manager.keepAttempt(bot.id) }, t("Cancel"))
-            )
-          );
+          return switchQuestion(() => void manager.switchAgain(bot.id), () => manager.keepAttempt(bot.id), error);
         }
         if (row2.switched && row2.stillSignedIn) {
           return (0, import_react106.createElement)(
@@ -45719,7 +45731,10 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     if (provider === "acp-claude" && typeof view.url === "string") rememberLinkState(view.url);
     if (provider === "acp-antigravity" && typeof view.url === "string") rememberCallbackState(view.url);
     if (ACTIVE.has(view.status)) {
-      for (const row2 of attemptRows(provider)) setRow(row2.botId, { ...row2, attempt });
+      for (const row2 of attemptRows(provider)) {
+        const { fresh: _, ...rest2 } = row2;
+        setRow(row2.botId, { ...rest2, attempt, ...view.chatFresh === true ? { fresh: true } : {} });
+      }
       armPoll(provider);
     } else if (view.status === "ready") succeed(provider, view);
     else if (view.status === "confirm") askAccount(provider, view.account);
@@ -45817,6 +45832,11 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
   async function ended(provider) {
     const epoch = providerEpochs.get(provider);
     stopPoll(provider);
+    const last = attempts[provider];
+    if (last?.chatFresh === true || attemptRows(provider).some((row2) => row2.fresh === true)) {
+      applyView(provider, { status: "expired", message: EXPIRED, fresh: true, chatFresh: true });
+      return;
+    }
     let signedIn;
     let connection;
     try {
@@ -45834,7 +45854,6 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       succeed(provider, void 0);
       return;
     }
-    const last = attempts[provider];
     if (last?.expiresAt !== void 0 && last.expiresAt > now()) interrupt(provider);
     else applyView(provider, { status: "expired", message: EXPIRED, ...last?.fresh === true ? { fresh: true } : {} });
   }
@@ -45882,13 +45901,15 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      * `attemptId` is a Switch account's own attempt (#2064): it is read by its id, even after
      * it ended, so a switch that failed fast still shows why.
      */
-    async open({ botId, provider, ref, attemptId }, valid = () => true, owner) {
+    async open({ botId, provider, ref, attemptId, fresh = false }, valid = () => true, owner) {
       nextIntent();
       if (disposed || !valid() || typeof botId !== "string" || botId === "" || !known(provider)) return false;
       const model = typeof ref === "string" && ref.startsWith(`${provider}/`) ? ref : void 0;
       const switched = typeof attemptId === "string" && attemptId !== "";
       const existing = rowOf(botId);
-      if (!switched && existing?.provider === provider && ["offer", "attempt", "account"].includes(existing.stage)) {
+      const sameProvider = existing?.provider === provider;
+      const sameIntent = existing?.fresh === true === fresh;
+      if (!switched && sameProvider && (existing.stage === "attempt" || sameIntent && ["offer", "account"].includes(existing.stage))) {
         setRow(botId, { ...existing, reveal: ++sequence, ...model ? { ref: model } : {} });
         if (existing.stage === "attempt" && model && model !== existing.ref && !existing.busy) {
           const seq2 = existing.seq;
@@ -45903,7 +45924,19 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       }
       const seq = ++sequence;
       if (owner) owner.seq = seq;
-      setRow(botId, { botId, provider, ref: model, stage: "offer", busy: true, reveal: seq, seq, attempt: null, error: null, confirm: false });
+      setRow(botId, {
+        botId,
+        provider,
+        ref: model ?? (sameProvider && !sameIntent ? existing.ref : void 0),
+        stage: "offer",
+        busy: true,
+        reveal: seq,
+        seq,
+        attempt: null,
+        error: null,
+        confirm: false,
+        ...fresh ? { fresh } : {}
+      });
       if (switched) {
         try {
           const view = await actions.cliLoginStatus(botId, provider, attemptId);
@@ -45923,13 +45956,17 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         return true;
       }
       try {
-        const current = await actions.cliLoginCurrent(botId, provider);
+        const current = await actions.cliLoginCurrent(botId, provider, ...fresh ? [{ fresh }] : []);
         if (!live(botId, seq) || !valid()) return false;
         if (current?.attempt && ACTIVE.has(current.attempt.status)) {
           const view = model ? await actions.cliLoginStart(botId, provider, model) : current.attempt;
           if (!live(botId, seq) || !valid()) return false;
           setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false });
           applyView(provider, view);
+          return true;
+        }
+        if (fresh) {
+          patchRow(botId, seq, { busy: false, confirm: provider === "acp-antigravity" || current?.signedIn !== false });
           return true;
         }
         if (current?.account) {
@@ -45939,7 +45976,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       } catch {
       }
       if (!valid()) return false;
-      patchRow(botId, seq, { busy: false });
+      patchRow(botId, seq, { busy: false, ...fresh ? { confirm: true } : {} });
       return true;
     },
     // Settings' confirmed recovery composes the existing owner RPCs. Each RPC retains its
@@ -45975,6 +46012,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       nextIntent();
       const row2 = rowOf(botId);
       if (disposed || !valid() || row2 === void 0 || row2.busy || !["offer", "failed", "interrupted"].includes(row2.stage)) return false;
+      if (row2.fresh) return api.switchFresh(botId, valid);
       const seq = row2.seq;
       patchRow(botId, seq, { busy: true, error: null });
       try {
@@ -46077,18 +46115,35 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      * "Continue": the same host switch again (#2064), never a plain sign-in. Its own attempt is
      * read by its id; only a host that names none is joined through its current attempt.
      */
+    switchFresh(botId, valid = () => true) {
+      if (rowOf(botId)?.fresh !== true) return false;
+      return api.switchAgain(botId, valid);
+    },
     async switchAgain(botId, valid = () => true) {
       nextIntent();
       const row2 = rowOf(botId);
-      if (disposed || !valid() || row2?.switched !== true || row2.stillSignedIn !== true || row2.busy || !["failed", "interrupted"].includes(row2.stage) || typeof actions.cliLoginSwitch !== "function") return false;
+      if (disposed || !valid() || !row2 || row2.busy || typeof actions.cliLoginSwitch !== "function") return false;
+      const retry = row2.switched === true && row2.stillSignedIn === true;
+      if (row2.fresh ? !["offer", "failed", "interrupted"].includes(row2.stage) : !retry || !["failed", "interrupted"].includes(row2.stage)) return false;
       const { seq, provider } = row2;
       patchRow(botId, seq, { busy: true, error: null });
       let switched;
       try {
-        switched = await actions.cliLoginSwitch(botId, provider);
+        switched = await actions.cliLoginSwitch(
+          botId,
+          provider,
+          ...row2.fresh ? [
+            { fresh: true, ...provider === "acp-antigravity" ? {} : { keep: true } },
+            { confirmed: row2.confirm === true, model: row2.ref }
+          ] : []
+        );
       } catch (error) {
         if (!live(botId, seq) || !valid()) return false;
-        patchRow(botId, seq, { busy: false, confirm: false, error: messageOf(error) });
+        if (error?.code === "bot/login-confirmation-required") {
+          patchRow(botId, seq, { stage: "offer", busy: false, confirm: true, error: null });
+          return false;
+        }
+        patchRow(botId, seq, { busy: false, ...row2.fresh && row2.stage === "offer" ? {} : { confirm: false }, error: messageOf(error) });
         return false;
       }
       void Promise.resolve().then(() => actions.refreshModels?.()).catch(() => {
@@ -46103,10 +46158,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
           const current = await actions.cliLoginCurrent(botId, provider);
           if (!live(botId, seq)) return false;
           if (current?.attempt) applyView(provider, current.attempt);
+          else if (row2.fresh) await ended(provider);
           else await readAccount(botId, provider, seq, null);
         }
       } catch (error) {
-        if (live(botId, seq) && !failedCall(provider, error)) await readAccount(botId, provider, seq, messageOf(error));
+        if (live(botId, seq) && !failedCall(provider, error)) {
+          if (row2.fresh) await ended(provider);
+          else await readAccount(botId, provider, seq, messageOf(error));
+        }
       }
       return true;
     },
@@ -46182,7 +46241,18 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== void 0) return;
         const attempt = current?.attempt;
         if (attempt && ACTIVE.has(attempt.status) && attempt.openedBy === botId) {
-          setRow(botId, { botId, provider, stage: "attempt", busy: false, seq: ++sequence, attempt, error: null, confirm: false });
+          const ref = attempt.chatFresh === true && attempt.choice?.state === "pending" ? attempt.choice.ref : void 0;
+          setRow(botId, {
+            botId,
+            provider,
+            stage: "attempt",
+            busy: false,
+            seq: ++sequence,
+            attempt,
+            error: null,
+            confirm: false,
+            ...ref === void 0 ? {} : { ref }
+          });
           applyView(provider, attempt);
           return;
         }
@@ -46241,7 +46311,7 @@ function loginCommand({ roster, actions, t: t2 }) {
       run({ sessionId }) {
         const route = loginRoute({ roster: roster.getSnapshot(), sessionId, actions });
         if (route?.kind === "notice") actions.showNotice(t2(route.key, route.params));
-        else if (route?.kind === "cli" && actions.openCliLogin(route.botId, route.provider) === false) {
+        else if (route?.kind === "cli" && actions.openCliLogin(route.botId, route.provider, void 0, void 0, { fresh: true }) === false) {
           actions.showNotice(t2(SETUP_AI_NOTICE));
         }
       }

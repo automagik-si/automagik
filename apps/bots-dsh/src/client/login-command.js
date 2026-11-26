@@ -49,7 +49,7 @@ export function loginCommand({ roster, actions, t }) {
       run({ sessionId }) {
         const route = loginRoute({ roster: roster.getSnapshot(), sessionId, actions })
         if (route?.kind === 'notice') actions.showNotice(t(route.key, route.params))
-        else if (route?.kind === 'cli' && actions.openCliLogin(route.botId, route.provider) === false) {
+        else if (route?.kind === 'cli' && actions.openCliLogin(route.botId, route.provider, undefined, undefined, { fresh: true }) === false) {
           actions.showNotice(t(SETUP_AI_NOTICE))
         }
       },

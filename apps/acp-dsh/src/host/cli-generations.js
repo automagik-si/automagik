@@ -76,7 +76,7 @@ export function generationAt(pointer) {
     if (error.code === 'ENOENT') {
       const root = dirname(dirname(pointer))
       const vendor = basename(pointer)
-      if (existsSync(`${pointer}.activated`) || existsSync(join(root, 'homes', vendor))
+      if (existsSync(`${pointer}.activated`) || hasSelectedHome(root, vendor)
         || existsSync(join(root, 'retired', vendor))) throw unverifiedLogin()
       return 'legacy'
     }
@@ -84,6 +84,15 @@ export function generationAt(pointer) {
   }
   if (!UUID.test(generation)) throw unverifiedLogin()
   return generation
+}
+
+// A staged chat login has its final physical path but is invisible to selection.
+function hasSelectedHome(root, vendor) {
+  const directory = join(root, 'homes', vendor)
+  if (!existsSync(directory)) return false
+  const staging = join(root, 'login-staging', vendor)
+  return readdirSync(directory).some(name =>
+    !UUID.test(name) || !existsSync(join(staging, name)))
 }
 
 export function assertGeneration(env) {
@@ -120,6 +129,24 @@ export class CliGenerations {
 
   pointer(vendor) { return join(this.root, 'current', vendor) }
   current(vendor) { return generationAt(this.pointer(vendor)) }
+
+  rollbackUnselectedChat(vendor, replacement) {
+    const pointer = this.pointer(vendor)
+    const activated = `${pointer}.activated`
+    if (lstatSync(pointer, { throwIfNoEntry: false }) || hasSelectedHome(this.root, vendor)
+      || existsSync(join(this.root, 'retired', vendor)) || this.currentRecord()?.[vendor]) throw unverifiedLogin()
+    const activation = lstatSync(activated, { throwIfNoEntry: false })
+    const prefix = `${vendor}.`
+    const pending = readdirSync(dirname(pointer)).filter(name => name.startsWith(prefix) && UUID.test(name.slice(prefix.length)))
+    if (!activation?.isFile() || activation.size !== 0 || pending.length !== 1) throw unverifiedLogin()
+    const next = join(dirname(pointer), pending[0])
+    const stat = lstatSync(next)
+    if (!stat.isFile() || stat.size !== replacement.length || readFileSync(next, 'utf8') !== replacement) throw unverifiedLogin()
+    // A pointer rename would consume next. Its exact bytes prove that adoption did not commit.
+    rmSync(activated)
+    rmSync(next)
+    return this.current(vendor)
+  }
   folder(vendor, generation = this.current(vendor)) {
     return generation === 'legacy' ? join(this.root, vendor)
       : join(this.root, 'homes', vendor, generation)
@@ -297,18 +324,34 @@ export class CliGenerations {
     } finally { release() }
   }
 
-  select(vendor, generation) {
+  select(vendor, generation, { previous } = {}) {
     return this.exclusive('generation-record', () => {
       const pointer = this.pointer(vendor)
       mkdirSync(join(this.root, 'current'), { recursive: true, mode: 0o700 })
       // An absent selection after activation is damage, never permission to revive legacy.
-      writeFileSync(`${pointer}.activated`, '', { mode: 0o600 })
+      const activated = `${pointer}.activated`
       const next = `${pointer}.${randomUUID()}`
-      writeFileSync(next, generation, { mode: 0o600 })
-      renameSync(next, pointer)
-      // The pointer is in place first; the record is written last and names it.
-      try { this.writeRecord() } catch (error) {
-        throw new Error('The Bot account pointer moved, but the generation record could not be saved.', { cause: error })
+      let moved = false
+      try {
+        writeFileSync(next, generation, { mode: 0o600 })
+        writeFileSync(activated, '', { mode: 0o600 })
+        renameSync(next, pointer)
+        moved = true
+        // The pointer is in place first; the record is written last and names it.
+        this.writeRecord()
+      } catch (error) {
+        if (previous === 'legacy') {
+          if (moved) rmSync(pointer)
+          rmSync(activated, { force: true })
+        } else if (previous !== undefined && moved) {
+          writeFileSync(next, previous, { mode: 0o600 })
+          renameSync(next, pointer)
+        }
+        if (!moved) throw error
+        const message = previous === undefined
+          ? 'The Bot account pointer moved, but the generation record could not be saved.'
+          : 'The Bot account generation record could not be saved.'
+        throw new Error(message, { cause: error })
       }
     })
   }
