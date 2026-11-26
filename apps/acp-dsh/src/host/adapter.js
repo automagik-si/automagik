@@ -27,7 +27,7 @@ import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './
 import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import {
-  agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, NOTICE_KIND, renderMessage,
+  agentRoute, answered, boundaryNotice, CONTEXT_KINDS, isHandoff, lastProviderOf, missedBy, NOTICE_KIND, renderMessage,
   replayBlocks, turnStart, unreadHandoff,
 } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
@@ -82,6 +82,11 @@ const bridgeRow = message => (
   (message?.role === 'assistant' && message?.source?.synthetic === SYNTHETIC_KIND)
   || (message?.role === 'developer' && message?.source?.kind === SYNTHETIC_KIND)
 )
+
+// Context notes, including the Bot team's fallback clock, can land at any step (#2130).
+const BOT_CONTEXT_KINDS = new Set(['ds-bot-time-context'])
+const contextRow = message => message?.role === 'user'
+  && (CONTEXT_KINDS.has(message.source?.kind) || BOT_CONTEXT_KINDS.has(message.source?.kind))
 
 const permitsNative = level => level?.sandbox === 'workspace-write' || level?.sandbox === 'danger-full-access'
 const OMP_TOOLS_OFF_TEXT = 'omp tried to use a tool while native tools are off, so this answer stopped.'
@@ -1748,7 +1753,7 @@ export class AcpAdapter extends LlmAdapter {
     if (archived()) return yield finish('stop')
     agent = this.agents.get(options.provider)
     if (agent === undefined) return yield finish('error', `No ACP agent is set up as ${options.provider}`, 'NO_ADAPTER')
-    const followsTool = options.messages.findLast(message => !bridgeRow(message))?.role === 'tool'
+    const followsTool = options.messages.findLast(message => !bridgeRow(message) && !contextRow(message))?.role === 'tool'
     if (!ownsStart()) {
       // A disposed agent can still report a known account or connector refusal for its turn.
       if (!followsTool && this.starting.get(sessionId) === entry && (held === undefined || entry.agentDisposed)) {
@@ -1776,11 +1781,11 @@ export class AcpAdapter extends LlmAdapter {
     // The step after a mirror call's result continues the agent's turn. The bridge writes result
     // rows of its own (a DSH tool call's result, or the row that closes a call still open when
     // its step ended, #957). Its advertisement can also follow the mirror result (#1293).
-    // Look back through tool messages and bridge rows for the mirror result.
+    // Look back through tool messages, bridge rows and context notes for the mirror result.
     const mirrorAnswered = (() => {
       for (let i = options.messages.length - 1; i >= 0; i--) {
         const message = options.messages[i]
-        if (bridgeRow(message)) continue
+        if (bridgeRow(message) || contextRow(message)) continue
         if (message?.role !== 'tool') return false
         if (live?.calls.has(message.toolCallId)) return true
       }
