@@ -300,8 +300,9 @@ export function parseReview(text, frame) {
 // Walk the leading findings array of an interrupted JSON document. Only whole,
 // individually valid rows count. A string or nested value cannot supply a row.
 function interruptedInjection(text, frame) {
-  const prefix = /^\s*\{\s*(?:"overflow"\s*:\s*(?:true|false)\s*,\s*)?"findings"\s*:\s*\[/.exec(text)
+  const prefix = /^\s*\{\s*(?:("(?:[^"\\]|\\.)*"\s*:\s*(?:true|false))\s*,\s*)?"(?:[^"\\]|\\.)*"\s*:\s*\[/.exec(text)
   if (!prefix) return []
+  const suffix = prefix[1] ? ']}' : '],"overflow":false}'
   const findings = []
   const ends = []
   let start = prefix[0].length
@@ -318,11 +319,11 @@ function interruptedInjection(text, frame) {
     }
     if (char !== ',' && char !== ']' && char !== undefined) continue
 
-    // A malformed element cannot prevent later complete rows from being checked.
-    let row
-    try { row = JSON.parse(text.slice(start, end)) } catch { /* Skip the invalid element. */ }
-    const finding = parseFinding(row, frame)
-    if (finding?.area === 'prompt-injection') findings.push(finding)
+    // Give each row its own report with the original property spellings.
+    const { findings: rows } = parseReview(prefix[0] + text.slice(start, end) + suffix, frame)
+    for (const finding of rows) {
+      if (finding.area === 'prompt-injection') findings.push(finding)
+    }
     if (char !== ',') break
     start = end + 1
   }

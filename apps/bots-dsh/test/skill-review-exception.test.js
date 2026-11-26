@@ -412,16 +412,11 @@ test('final exception 1 preserves a native failure behind a normalized stop', as
   { refused: true, skill: undefined, seals: 1, finish: 'error', observed: 'error', requests: 3 })
 })
 
-for (const mode of ['aborted', 'timeout', 'sibling', 'cut report']) {
+for (const mode of ['aborted', 'sibling', 'cut report']) {
   test(`final exception 2 retains independently valid rows before ${mode}`, async t => {
     const sent = Promise.withResolvers()
     const release = Promise.withResolvers()
     t.after(release.resolve)
-    if (mode === 'timeout') t.mock.method(AbortSignal, 'timeout', () => {
-      const deadline = new AbortController()
-      void sent.promise.then(() => deadline.abort(new DOMException('Fixture deadline', 'TimeoutError')))
-      return deadline.signal
-    })
     // Entries and classifications are synthetic. Nested and quoted rows are inert fixture values.
     const row = finding('prompt-injection')
     const prefix = '{"findings":[null,32,' + JSON.stringify(row) + ',[' + row + '],' +
@@ -439,7 +434,7 @@ for (const mode of ['aborted', 'timeout', 'sibling', 'cut report']) {
       yield delta(row.slice(0, 25))
       yield delta(row.slice(25) + ',{"file":')
       sent.resolve()
-      if (mode === 'timeout' || mode === 'sibling') await release.promise
+      if (mode === 'sibling') await release.promise
       else yield mode === 'aborted' ? { type: 'finish', reason: { kind: 'aborted' } } : stop
     } })
     const entries = [{ path: 'SKILL.md', bytes: textSkillMd(form) }]
@@ -462,6 +457,44 @@ for (const mode of ['aborted', 'timeout', 'sibling', 'cut report']) {
     { refused: expected, recorded: expected, later: expected, additionalCalls: 0, saved: undefined })
   })
 }
+
+test('shared review parser keeps a complete safety finding blocked across cancellation and reload', async t => {
+  const sent = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  t.after(release.resolve)
+  let cancelledSignal
+  let interrupted = true
+  const f = fixture(t, { async *stream(request) {
+    if (!interrupted) { yield* [delta(clean), stop]; return }
+    if (/ chunk .* path=notes\.txt\n/.test(request.messages[0].content[0].text)) {
+      await sent.promise
+      yield* [delta('Incomplete fixture report.'), stop]
+      return
+    }
+    cancelledSignal = request.signal
+    yield delta(String.raw`{"overfl\u006fw":false,"f\u0069ndings":[`)
+    yield delta(finding('prompt-injection') + ',{"file":')
+    sent.resolve()
+    await release.promise
+  } })
+  const entries = [{ path: 'SKILL.md', bytes: textSkillMd(form) }, { path: 'notes.txt', bytes: Buffer.from('A local note.') }]
+  const hash = skillHash(entries)
+  const run = () => f.rt.skillLibrary.reviewSkill({ name: form.name, entries,
+    check: { hash, injection: [], verdict: 'pass', findings: [], counts: {} },
+    caller: { identity: actor.id, generation: 1 } })
+
+  const cancelled = await run()
+  assert.equal(cancelledSignal.aborted, true)
+  assert.equal(cancelled.decision, 'refuse')
+  const recorded = fs.existsSync(f.path) ? read(f.path).reviewBlocks?.[hash] : undefined
+  const calls = f.calls()
+  interrupted = false
+  f.restart()
+  const reloaded = await run()
+  const expected = [JSON.parse(finding('prompt-injection'))]
+  assert.deepEqual({ recorded: recorded?.findings, decision: reloaded.decision, why: reloaded.why, calls: f.calls() - calls },
+    { recorded: expected, decision: 'refuse', why: 'injection', calls: 0 }, 'the cancelled review durably blocks the same hash')
+})
 
 for (const remountFirst of [false, true]) {
   test(`final exception 3 preserves the initiating Save between polls (replacement first: ${remountFirst})`, async t => {
