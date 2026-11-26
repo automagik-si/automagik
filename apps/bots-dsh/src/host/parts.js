@@ -35,7 +35,9 @@ import { OWN_TOOLS_MODEL_TEXT } from '../shared/own-tools.js'
 import { answerSender, failureLine, opensTurn, turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
 import { routeAllowed, routeLabel } from '../shared/route-policy.js'
+import { hasSolverSetup } from '../shared/solver-agent.js'
 import { ACP_NAME, CROSSING_DEADLINE_MS, commandCapableAgent, crossesHarness, isHermesRoute, routeOfRef, shellHoldText } from '../shared/routes.js'
+import { assertSolverAgent } from './solver-agent.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { readableRoute } from './session-route.js'
@@ -4071,6 +4073,7 @@ export function install(rt) {
           routeUnavailable(bot, model, entry, error)
           throw error
         }
+        if (hasSolverSetup(bot)) assertSolverAgent(target)
         assertRouteAllowed(bot, target, entry)
         const route = splitRef(target)
         if (route === undefined || commandCapableAgent(target)) throw refused('shell', shellHoldText(bot))
@@ -4273,6 +4276,7 @@ export function install(rt) {
       note('refused', 'model or thinking level unavailable')
       throw error
     }
+    if (hasSolverSetup(bot)) assertSolverAgent(target)
     checkOwnTools(target)
     // A saved plan ref can resolve to the CLI the Bot is already using.
     if (crossesHarness(current, target)) assertRouteAllowed(bot, target, entry)

@@ -17,7 +17,7 @@ import { SOLVER_ROLE_ID } from '../shared/solver-method.js'
 import { nameProblem } from '../shared/mentions.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import {
-  SOLVER_LOOKS, createSolver, guardLevelOf, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
+  SOLVER_LOOKS, agentOf, createSolver, guardLevelOf, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
   reviewerPayload, solverAutoHint, solverCandidate, solverCatalog, solverLook, solverPayload, solverStartModel, uncertain,
 } from './solver-draft.js'
 import { CHOOSE_DIFFERENT, chosenIdentityOf } from '../shared/solver-model.js'
@@ -34,11 +34,14 @@ const roleNotes = {
 
 const pick = list => list[Math.floor(Math.random() * list.length)]
 
+// Antigravity cannot run a Solver end to end yet. The host's Solver agent check enforces this too.
+export const solverOwnRoster = roster => ({ ...roster, models: roster.models?.filter(row => agentOf(row.ref) !== 'acp-antigravity') })
+
 export function NewSolver({ roster, actions, brief = '', sectionId = null, onBack, canGoBack = false, onCreated }) {
   const [look, setLook] = useState(() => solverLook())
   const [name, setName] = useState('')
   const pickerRoster = solverCatalog(roster)
-  const [model, setModel] = useState(() => solverStartModel(roster))
+  const [model, setModel] = useState(() => solverStartModel(solverOwnRoster(roster)))
   const [effort, setEffort] = useState(undefined)
   const [folder, setFolder] = useState('')
   const [choiceKey, setChoiceKey] = useState(null)
@@ -114,7 +117,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
           : t('{name} was created, but your request was not sent: {error}', sent))
         return
       }
-      const text = result.error?.message ?? String(result.error)
+      const text = hostText(result.error?.message ?? String(result.error))
       setError(!result.nothing ? text
         : result.step === 4 ? t('Native tools could not be turned on, so nothing was created: {error}', { error: text })
           : t('Nothing was created: {error}', { error: text }))
@@ -166,7 +169,7 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
             : clash ? h('span', { className: 'bt-note bt-danger' }, t('A Bot named {name} already exists', { name: finalName })) : null),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Model')),
-          h(ModelMenu, { bot: { id: 'new-bot', name: finalName, model: model || undefined, effort }, roster: pickerRoster, actions, wide: true, onPick: (ref) => { setModel(ref); setEffort(undefined) }, onPickEffort: picked => setEffort(picked ?? null) }),
+          h(ModelMenu, { bot: { id: 'new-bot', name: finalName, model: model || undefined, effort }, roster: solverOwnRoster(pickerRoster), actions, wide: true, onPick: (ref) => { setModel(ref); setEffort(undefined) }, onPickEffort: picked => setEffort(picked ?? null) }),
           isHermesRemote(model) ? h('span', { className: 'bt-note bt-danger' }, t("This model uses its Hermes profile's own instructions.")) : null),
         h('div', { className: 'bt-field' },
           h('span', { className: 'bt-field-label' }, t('Project folder')),

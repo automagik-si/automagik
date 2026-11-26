@@ -4,7 +4,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { SOLVER_SHAPES } from '../src/client/characters.js'
-import { NewSolver, CommandPalette, teamActions, mount, all, text, settle, plain } from './fixtures/solver-dialog.mjs'
+import { solverPayload } from '../src/client/solver-draft.js'
+import { solverInstructions } from '../src/shared/solver-method.js'
+import { fixture, serviceStub } from './caller-fixture.js'
+import { refusedSolverAgent, serve } from './fixtures/solver-agent-catalog.mjs'
+import { NewSolver, CommandPalette, ModelMenu, settingsModelPicker, teamActions, mount, all, text, settle, plain } from './fixtures/solver-dialog.mjs'
+import { until } from './until.js'
 
 const CLAUDE = 'acp-claude/default'
 const FLASH = 'deepseek/deepseek-v4-flash'
@@ -534,7 +539,7 @@ test('New Solver can create on every offered agent and model with an independent
   const roster = rosterOf({ bots: [reviewer], models: rows, prefs: { defaultBotModel: CLAUDE } })
   const rendered = dialog({ roster })
   assert.equal(rendered.modelMenu('new-bot').props.bot.model, CLAUDE)
-  const offered = rows.filter(row => row.ref !== alias).map(row => row.ref)
+  const offered = rows.filter(row => row.ref !== alias && row.ref !== AGY).map(row => row.ref)
   assert.deepEqual(rendered.modelMenu('new-bot').props.roster.models.map(row => row.ref), offered)
   rendered.pickModel(opus)
   assert.ok(rendered.modelMenu('new-reviewer').props.roster.models.some(row => row.ref === nativeOpus))
@@ -546,6 +551,159 @@ test('New Solver can create on every offered agent and model with an independent
     await ui.create()
     assert.equal(ui.actions.calls.find(([, payload]) => payload?.reviewerId)?.[1].model, model)
   }
+})
+
+function openAntigravity(menu) {
+  const menuElement = menu.type(menu.props)
+  const view = mount(menuElement.type, menuElement.props)
+  const trigger = all(view.render(), node => node.type === 'button' && node.props['aria-haspopup'] === 'menu')[0]
+  assert.ok(trigger)
+  trigger.props.ref.current = { getBoundingClientRect: () => ({ top: 20, bottom: 50, width: 240, right: 260 }) }
+  trigger.props.onClick({ detail: 1 })
+  view.render() // the layout effect measures the anchor
+  const steps = () => {
+    const step = all(view.render(), node => node.type?.name === 'ModelSteps')[0]
+    assert.ok(step)
+    return step.type(step.props)
+  }
+  const acp = all(steps(), node => node.props.role === 'menuitem' && node.props['data-route'] === 'acp')[0]
+  assert.ok(acp)
+  acp.props.onClick()
+  const agent = all(steps(), node => node.props.role === 'menuitem' && text(node).startsWith('Antigravity'))[0]
+  assert.ok(agent)
+  agent.props.onClick()
+  const models = all(steps(), node => node.props.role === 'menuitemradio')
+  assert.ok(models.length > 0, 'the agent row opens its model step')
+  return { agent, models }
+}
+
+for (const native of [false, true]) {
+  test(`T1 and T3 use the real Solver and reviewer menus with Native tools ${native ? 'on' : 'off'}`, () => {
+    const lineup = [CLAUDE, CODEX, AGY].map(ref => ({ ref, reasoning: { efforts: [] } }))
+    const ui = dialog({ roster: rosterOf({ models: lineup }) })
+    ui.tickNative(native)
+    assert.equal(ui.tick().props.checked, native)
+    const own = ui.modelMenu('new-bot')
+    const { agent, models } = openAntigravity(own)
+    assert.match(text(agent), /Not available yet/)
+    assert.deepEqual(plain(own.props.roster.models.map(row => row.ref)), [CLAUDE, CODEX])
+    for (const model of models) {
+      assert.equal(model.props['data-unavailable'], '')
+      assert.match(text(model), /Not available yet/)
+      model.props.onClick()
+    }
+    assert.equal(ui.modelMenu('new-bot').props.bot.model, CLAUDE)
+    const reviewer = openAntigravity(ui.modelMenu('new-reviewer'))
+    const pick = reviewer.models.find(row => row.props.title === AGY)
+    assert.ok(pick)
+    assert.equal(pick.props['data-unavailable'], undefined)
+    pick.props.onClick()
+    assert.equal(ui.modelMenu('new-reviewer').props.bot.model, AGY)
+  })
+}
+
+test('T2 an Antigravity team default falls back to Codex', () => {
+  const roster = models => rosterOf({ models: models.map(ref => ({ ref })), defaultModel: AGY, prefs: { defaultBotModel: AGY } })
+  assert.equal(dialog({ roster: roster([AGY, CODEX]) }).modelMenu('new-bot').props.bot.model, CODEX)
+})
+
+test('AN-5 an Antigravity-only catalog leaves Create disabled', () => {
+  const only = dialog({ roster: rosterOf({ models: [{ ref: AGY }], defaultModel: AGY }) })
+  assert.equal(only.modelMenu('new-bot').props.bot.model, undefined)
+  assert.equal(only.go().props.disabled, true)
+})
+
+test('T3 the existing pending row expands to unavailable models when an agent has no catalog rows', () => {
+  const ui = dialog({ roster: rosterOf({ models: [{ ref: CLAUDE }] }) })
+  const { agent, models } = openAntigravity(ui.modelMenu('new-bot'))
+  assert.match(text(agent), /Not available yet/)
+  assert.ok(models.every(row => row.props['data-unavailable'] === '' && row.props.title === undefined))
+})
+
+test('T4 an existing Antigravity reviewer remains a separate eligible choice', async () => {
+  const roster = rosterOf({ bots: [{ id: 'reviewer', name: 'Antigravity Reviewer', model: AGY }] })
+  const ui = dialog({ roster })
+  assert.ok(ui.modelMenu('new-reviewer').props.roster.models.some(row => row.ref === AGY))
+  assert.ok(all(ui.select(), node => node.type === 'option').some(row => row.props.value === 'bot:reviewer'))
+  ui.choose('bot:reviewer')
+  await ui.create()
+  assert.deepEqual(ui.actions.calls.filter(([kind]) => kind === 'createBot').map(([, payload]) => [payload.model, payload.reviewerId]), [[CLAUDE, 'reviewer']])
+})
+
+test('T5 Claude Code and Codex remain offered and can be saved as Solvers', async () => {
+  for (const ref of [CLAUDE, CODEX]) {
+    const ui = dialog()
+    assert.ok(ui.modelMenu('new-bot').props.roster.models.some(row => row.ref === ref))
+    ui.pickModel(ref)
+    await ui.create()
+    assert.equal(ui.actions.calls.find(([, payload]) => payload?.role === 'Solver')[1].model, ref)
+  }
+})
+
+for (const chat of [false, true]) {
+  test(`Q1 existing Solver ${chat ? 'chat' : 'Settings'} keeps the pending Antigravity row in both Native tools states`, () => {
+    const calls = []
+    const actions = {
+      switchRoute: (...args) => { calls.push(['settings', ...args]); return Promise.resolve() },
+      switchRouteInChat: (...args) => { calls.push(['chat', ...args]); return Promise.resolve() },
+    }
+    const models = [CLAUDE, AGY].map(ref => ({ ref, reasoning: { efforts: [] } }))
+    for (const nativeTools of [false, true]) {
+      const bot = { id: 'saved', name: 'Saved Solver', role: 'Solver', model: CLAUDE, instructions: solverInstructions(), nativeTools }
+      const roster = rosterOf({ bots: [bot], models })
+      const run = promise => promise
+      const props = chat ? { bot, roster, actions, run, chat } : settingsModelPicker({ bot, roster, actions, run })
+      const pending = openAntigravity({ type: ModelMenu, props })
+      assert.match(text(pending.agent), /Not available yet/)
+      for (const row of pending.models) {
+        assert.equal(row.props['data-unavailable'], '')
+        row.props.onClick()
+      }
+    }
+    assert.deepEqual(calls, [])
+  })
+}
+
+test('AN-5 and AN-7 fake E2E saves a supported Solver linked to the Antigravity reviewer picked in the real menu', async t => {
+  const f = fixture(t, { service: serviceStub({ multiuser: false }), seed: state => { state.prefs.roles = false } })
+  serve(f.ctx, [CLAUDE, AGY, 'deepseek/v4'])
+  await f.start()
+  const call = async (endpoint, payload) => {
+    const result = await f.call(endpoint, payload)
+    if (!result.ok) throw refusal(result.error.message, result.error.code)
+    return result.value
+  }
+  const actions = teamActions({ call, after: promise => promise })
+  const roster = await actions.teamState()
+  const ui = dialog({ roster, actions, brief: '', sectionId: null })
+  const own = openAntigravity(ui.modelMenu('new-bot'))
+  const reviewer = openAntigravity(ui.modelMenu('new-reviewer'))
+  const offered = reviewer.models.find(row => row.props.title === AGY)
+  assert.ok(offered, 'the reviewer has a selectable Antigravity model')
+  offered.props.onClick()
+  await ui.create()
+  await until(() => text(ui.go()) !== 'Creating…', { t, label: 'fake host create to finish saving' })
+  assert.equal(text(ui.go()), 'Done', ui.alert())
+  ui.go().props.onClick()
+  assert.equal(ui.created.length, 1)
+  const solver = ui.created[0]
+  assert.equal(Object.hasOwn(solver, 'waitingRole'), false)
+  const before = f.saved().bots
+  const saved = before[solver.id]
+  assert.equal(saved.model, CLAUDE)
+  assert.equal(saved.waitingRole.id, 'solver')
+  assert.equal(before[saved.reviewerId].role, 'Reviewer')
+  assert.equal(before[saved.reviewerId].model, AGY)
+  assert.equal(f.created.length, 2)
+  const { payload } = solverPayload({
+    name: 'Stale Solver Fixture', look: { shape: 'frog', color: 'blue' }, model: AGY,
+  })
+  const stale = await f.call('create-bot', payload)
+  assert.deepEqual({ hint: own.agent.props['data-unavailable'], stale }, {
+    hint: '', stale: refusedSolverAgent,
+  })
+  assert.equal(f.created.length, 2)
+  assert.deepEqual(f.saved().bots, before)
 })
 
 test('both New Solver pickers exclude equal identities and Create refuses a stale equal pick', () => {

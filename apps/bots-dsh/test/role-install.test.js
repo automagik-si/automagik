@@ -16,6 +16,7 @@ import { ROUTE } from '../src/host/constants.js'
 import { installRoles } from '../src/host/roles.js'
 import { fakeContext } from './fake-ctx.js'
 import { entryOf, INDEX, manifestOf, packageOf, SHA256, SIGNATURE, VERSION as PLUGIN_VERSION, signer, solverCutHistory } from './role-fixture.js'
+import { AGY, refusedSolverAgent, serve } from './fixtures/solver-agent-catalog.mjs'
 
 const ID = 'sample-role'
 const VERSION = '1.0.0'
@@ -1186,6 +1187,127 @@ const officialSolver = async f => {
   await immediate()
   return result.value
 }
+
+test('Q3 installs the team Solver package and refuses a new Antigravity pin', async t => {
+  const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: AGY } } } })
+  await officialSolver(f)
+  const before = await f.disk()
+  assert.ok(before.roles.solver)
+  assert.deepEqual(await attachTo(f, BOT.id, 'solver'), refusedSolverAgent)
+  assert.deepEqual((await f.disk()).bots, before.bots)
+})
+
+test('AN-4 preserves a grandfathered Antigravity pin and permits detach', async t => {
+  const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: AGY } } } })
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  bot.roles = [pinOf('solver', PLUGIN_VERSION)]
+  await f.rt.save()
+  assert.deepEqual(await attachTo(f, BOT.id, 'solver'), { ok: true, value: ['solver'] })
+  assert.deepEqual((await f.disk()).bots[BOT.id].roles, bot.roles)
+  assert.equal((await f.call('role-detach', { id: BOT.id })).ok, true)
+  assert.deepEqual((await f.disk()).bots[BOT.id].roles, [])
+  assert.equal((await f.disk()).bots[BOT.id].model, AGY)
+})
+
+test('AN-4 the background settler cannot replace a grandfathered Antigravity Solver method with a new pin', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  const instructions = solverInstructions()
+  Object.assign(bot, { model: AGY, role: 'Solver', instructions, waitingRole: waitFor(instructions) })
+  await f.rt.save()
+  const before = (await f.disk()).bots[BOT.id]
+  const finished = Promise.withResolvers()
+  const attach = f.rt.attachRole
+  t.mock.method(f.rt, 'attachRole', async (...args) => {
+    try { return await attach(...args) }
+    finally { finished.resolve() }
+  })
+  f.rt.solverSettle.schedule()
+  await finished.promise
+  assert.deepEqual((await f.disk()).bots[BOT.id], before)
+})
+
+test('AN-4 an Antigravity model picked during package verification wins over the pending role attachment', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  serve(f.ctx, [AGY, 'deepseek/v4'])
+  const verifying = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  f.hooks.open = async (path, ...args) => {
+    if (path.endsWith('.tgz')) {
+      verifying.resolve()
+      await release.promise
+    }
+    return fs.open(path, ...args)
+  }
+  const attaching = attachTo(f, BOT.id, 'solver')
+  try {
+    await Promise.race([verifying.promise, attaching.then(result => assert.fail(JSON.stringify(result)))])
+    const picked = await f.call('update-bot', { id: BOT.id, model: AGY })
+    assert.equal(picked.ok, true, JSON.stringify(picked))
+  } finally { release.resolve() }
+  assert.deepEqual(await attaching, refusedSolverAgent)
+  const bot = (await f.disk()).bots[BOT.id]
+  assert.equal(bot.model, AGY)
+  assert.equal(bot.sessionId, BOT.id)
+  assert.equal(bot.roles, undefined)
+})
+
+test('AN-4 a Solver pin at its commit owns the slot before a competing Antigravity pick', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  serve(f.ctx, [AGY, 'deepseek/v4'])
+  const saving = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const saveCopy = f.rt.saveCopy
+  t.mock.method(f.rt, 'saveCopy', async (...args) => {
+    saving.resolve()
+    await release.promise
+    return saveCopy(...args)
+  })
+  const attaching = attachTo(f, BOT.id, 'solver')
+  await Promise.race([saving.promise, attaching.then(result => assert.fail(JSON.stringify(result)))])
+  const picking = f.call('update-bot', { id: BOT.id, model: AGY })
+  await immediate()
+  release.resolve()
+  assert.deepEqual(await attaching, { ok: true, value: ['solver'] })
+  assert.deepEqual(await picking, refusedSolverAgent)
+  const bot = (await f.disk()).bots[BOT.id]
+  assert.deepEqual(bot.roles, [pinOf('solver', PLUGIN_VERSION)])
+  assert.equal(bot.model, undefined)
+  assert.equal(bot.sessionId, BOT.id)
+})
+
+test('AN-4 a pending conversation switch to Antigravity prevents attaching a Solver pin', async t => {
+  const current = 'deepseek/v4'
+  const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: current } } } })
+  await officialSolver(f)
+  serve(f.ctx, [AGY, current])
+  const release = Promise.withResolvers()
+  const { agent } = await f.ctx.sessionController.resolveAgent(BOT.id)
+  agent.session.deriveMessages = () => [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Fixture history' }] }]
+  agent.inbox = { nextStep: [], nextTurn: [], remove: () => false }
+  agent.whenIdle = () => release.promise
+  agent.runMaintenance = async () => { throw new Error('Fixture stops the switch after the attachment attempt') }
+  let job
+  try {
+    const picked = await f.call('switch-route', { id: BOT.id, model: AGY })
+    assert.deepEqual(picked, { ok: true, value: { id: BOT.id, model: AGY, status: 'switching' } })
+    ;[job] = f.rt.switchJobs()
+    assert.equal(job.target, AGY)
+    await job.autoCleared
+    await f.rt.save()
+    const before = (await f.disk()).bots[BOT.id]
+    assert.deepEqual(await attachTo(f, BOT.id, 'solver'), refusedSolverAgent)
+    assert.deepEqual((await f.disk()).bots[BOT.id], before)
+  } finally {
+    release.resolve()
+    await job?.finished
+  }
+})
+
 async function catalogSolverFixture(t, options = {}) {
   const bytes = packageOf(manifestOf({ id: 'solver', version: PLUGIN_VERSION, capabilities: [] }))
   const entry = entryOf(bytes, { id: 'solver', version: PLUGIN_VERSION, capabilities: [] })

@@ -10,6 +10,7 @@ import { HostModelMenu } from './host-model-menu.js'
 import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
 import { ACP_NAME, commandCapableAgent, crossesHarness, isHermesRoute, routeOf, selectorRouteOf } from '../shared/routes.js'
 import { OWN_TOOLS_MENU_HINT, OWN_TOOLS_MODEL_TEXT, ownToolsRefused } from '../shared/own-tools.js'
+import { hasSolverSetup, isAntigravityModel } from '../shared/solver-agent.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { HermesRemoteConnect } from './hermes-remote.js'
 
@@ -34,6 +35,8 @@ export function connectionOf(model) {
 // A model a Bot's chat can start on now: its provider has its key, its sign-in is stored or its
 // agent signed in, and no CLI covers its route (the host's catalog marks).
 const usableModel = model => !model.needsKey && !model.needsSignIn && !model.covered
+const isSolver = bot => bot?.canCancelSolverWait === true || hasSolverSetup(bot)
+const solverModel = ({ ref }) => !isAntigravityModel(ref)
 // A model a Bot cannot run on: a key or a sign-in is missing, or its plan signs in only
 // through its CLI (Claude Code, Codex).
 export const unavailableModel = model => model?.needsKey === true || model?.needsSignIn === true || model?.covered === true
@@ -663,6 +666,7 @@ export function RouteConfirm({ bot, roster, current, target, ask, onCancel, onCo
 }
 
 function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, chat = false, bar = false, running = false, onPick, onPickEffort, saved = onPick === undefined, withEfforts = true }) {
+  const solver = isSolver(bot)
   const [view, setView] = useState(MENU_ROOT)
   const [hermes, setHermes] = useState(false)
   const remote = useRef({ generation: 0, active: false, mounted: true })
@@ -732,13 +736,14 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     if (!withEfforts || !isOpen || view.step !== 'models') return undefined
     let on = true
     const route = view.route ?? routeOfProvider(view.provider)
-    const list = route === 'native' ? nativeModels(roster.models, current)
-      : route === 'acp' ? (acpAgents(roster.models).find(agent => agent.provider === view.provider)?.models ?? [])
+    const models = solver ? roster.models?.filter(solverModel) : roster.models
+    const list = route === 'native' ? nativeModels(models, current)
+      : route === 'acp' ? (acpAgents(models).find(agent => agent.provider === view.provider)?.models ?? [])
         : []
     const unknown = list.filter(model => model.ref !== undefined && !offModel(model) && knownEfforts(model) === undefined)
     for (const model of unknown) void askEfforts(model.ref, actions).then(() => { if (on) setAsked(count => count + 1) })
     return () => { on = false }
-  }, [isOpen, view, roster.models, current])
+  }, [isOpen, view, roster.models, current, solver])
   // The step that opens takes the focus when the menu is used from the keyboard (or a row was
   // clicked): its current row, else its first.
   useEffect(() => {
@@ -974,7 +979,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     h(Caret)),
     shownPlace ? createPortal(h('div', { ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== undefined ? ' bt-menu-up' : ''}`, role: 'menu', 'aria-label': t('Model for {name}', { name: bot.name }), 'aria-disabled': switching || undefined, style: shownPlace, 'data-leaving': leaving || undefined, onKeyDown },
       confirmView ?? h(ModelSteps, {
-        roster, bot, view, current, picked, levelName: effortLabel, go, onModel, onLevel, folds, levels: withEfforts,
+        roster: solver ? { ...roster, models: models.filter(solverModel) } : roster,
+        bot, view, current, picked, levelName: effortLabel, go, onModel, onLevel, folds, levels: withEfforts,
         onRemote: openRemote,
         onManage: manage ? () => { finish(); manage() } : undefined,
       }),
@@ -1080,13 +1086,14 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
   // A model whose provider has no API key or sign-in fails every turn, so it is no choice;
   // nor is one another connection already offers, nor one on a route this bot type hides.
   const routes = routesFor(bot, roster)
-  const usable = models.filter(usableModel).filter(model => routes.includes(modelRoute(roster, model.ref).route))
+  const eligible = isSolver(bot) ? models.filter(solverModel) : models
+  const usable = eligible.filter(usableModel).filter(model => routes.includes(modelRoute(roster, model.ref).route))
   const lost = bot.model ? !models.some(model => model.ref === bot.model) : false
   const run = promise => Promise.resolve(promise).then(() => { setError(''); return true }, (failure) => { setError(failure?.message ?? String(failure)); return false })
   // An unknown catalog (none listed) cannot tell a lost model from a slow provider.
   if (bot.model && (!lost || models.length === 0)) return null
   // A window without DSH's own settings takes the missing key here.
-  const keyFor = usable.length === 0 && actions.setProviderKey ? models.find(model => model.needsKey) : undefined
+  const keyFor = usable.length === 0 && actions.setProviderKey ? eligible.find(model => model.needsKey) : undefined
   const manage = manageModels(actions)
   // Settles true once the model is saved, so a level picked with it follows (ModelMenu).
   // A crossing while a reply runs in the chat asks first, as the model menu does; only the

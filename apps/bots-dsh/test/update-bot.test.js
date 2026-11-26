@@ -6,8 +6,9 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
-import { allowlist, code, fixture, member, owners, stranger, workspace } from './caller-fixture.js'
+import { allowlist, code, fixture, member, owners, serviceStub, stranger, workspace } from './caller-fixture.js'
 import { bench as grantBench } from './grants-fixture.js'
+import { AGY, CLAUDE, refusedSolverAgent, serve } from './fixtures/solver-agent-catalog.mjs'
 import { solverInstructions } from '../src/shared/solver-method.js'
 
 const TEAM = {
@@ -86,6 +87,69 @@ test('a Bot cannot change another Bot; a Main Bot can', async (t) => {
   assert.equal(await tool('update_bot', { bot: 'Writer', role: '主笔' }, 'm1'), 'Updated Writer.')
   assert.equal(state().bots.b2.role, '主笔')
   assert.match(await tool('update_bot', { bot: 'Nobody' }, 'm1'), /^No Bot named Nobody/)
+})
+
+const solverPin = { id: 'solver', version: '1.0.0', attachedAt: '2026-01-01T00:00:00.000Z', grants: [] }
+const written = { role: 'Solver', instructions: solverInstructions() }
+
+async function solverEditFixture(t, savedBot) {
+  const f = fixture(t, { service: serviceStub({ multiuser: false }), seed: state => {
+    state.prefs.roles = false
+    Object.assign(state.bots.b, savedBot)
+  } })
+  serve(f.ctx, [CLAUDE, AGY, 'deepseek/v4'])
+  await f.start()
+  return f
+}
+
+for (const [name, bot, patch] of [
+  ['Q1 a written Solver model switch', { ...written, model: CLAUDE }, { model: AGY }],
+  ['AN-2 combined role, instructions and model', { model: CLAUDE }, { role: '  Solver  ', instructions: solverInstructions(), model: AGY }],
+  ['AN-2 a role-only transition', { model: AGY, instructions: solverInstructions() }, { role: 'Solver' }],
+  ['AN-2 an instructions-only transition', { model: AGY, role: 'Solver' }, { instructions: solverInstructions() }],
+  ['AN-2 a cleared model exposing appliedModel', { ...written, model: CLAUDE, appliedModel: AGY }, { model: null }],
+  ['AN-2 a waiting Solver with edited text', { model: CLAUDE, waitingRole: { id: 'solver', instructions: 'old', role: 'Helper' } }, { model: AGY }],
+  ['AN-2 a package-pinned Solver with a custom description', { model: CLAUDE, roles: [solverPin] }, { model: AGY }],
+]) {
+  test(`${name} refuses before changing its record or Session`, async t => {
+    const f = await solverEditFixture(t, bot)
+    const select = t.mock.method(f.ctx.sessionController, 'selectModel', async () => {})
+    const before = f.saved().bots.b
+    const result = await f.call('update-bot', { id: 'b', ...patch })
+    assert.deepEqual(result, refusedSolverAgent)
+    assert.deepEqual(f.saved().bots.b, before)
+    assert.deepEqual(f.created, [])
+    assert.equal(select.mock.callCount(), 0)
+  })
+}
+
+test('AN-1 switch-route resolves the destination before it stops a reply or allocates a part', async t => {
+  const f = await solverEditFixture(t, { ...written, model: CLAUDE })
+  const agent = f.agentOf('b')
+  agent.status = 'running'
+  agent.session.deriveMessages = () => [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Fixture chat' }] }]
+  const cancel = t.mock.method(agent, 'cancel', () => {})
+  const select = t.mock.method(f.ctx.sessionController, 'selectModel', async () => {})
+  const before = f.saved().bots.b
+  const parts = f.readable()
+  const result = await f.call('switch-route', { id: 'b', model: 'Antigravity Fixture', stopReply: true })
+  assert.deepEqual(result, refusedSolverAgent)
+  assert.equal(cancel.mock.callCount(), 0)
+  assert.equal(select.mock.callCount(), 0)
+  assert.deepEqual(f.created, [])
+  assert.deepEqual(f.readable(), parts)
+  assert.deepEqual(f.saved().bots.b, before)
+})
+
+test('AN-2 a grandfathered Solver permits unrelated edits and a switch away', async t => {
+  const f = await solverEditFixture(t, { ...written, model: AGY, appliedModel: AGY })
+  const edit = await f.call('update-bot', { id: 'b', name: 'Grandfathered Fixture' })
+  assert.equal(edit.ok, true, JSON.stringify(edit))
+  assert.equal(f.saved().bots.b.model, AGY)
+  const switched = await f.call('switch-route', { id: 'b', model: CLAUDE })
+  assert.equal(switched.ok, true, JSON.stringify(switched))
+  assert.equal(f.saved().bots.b.model, CLAUDE)
+  assert.equal(f.saved().bots.b.instructions, written.instructions)
 })
 
 test('a group Session changes its own Bot; a Session outside the team changes nothing', async (t) => {

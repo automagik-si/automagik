@@ -103,6 +103,14 @@ test('copy follows the DSH language and stays English without a locale service',
 })
 
 
+test('AN-6 the Solver agent refusal is worded by hostText in Chinese', () => {
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(hostText('Antigravity cannot be a Solver yet. Choose another agent for the Solver.'),
+      'Antigravity 暂时不能用作 Solver。请为 Solver 选择其他智能体。')
+  } finally { off() }
+})
+
 test('the four not-installed reasons are worded in Chinese and Portuguese', () => {
   const GENIE = '@automagik/genie-dsh'
   const reasons = [

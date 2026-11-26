@@ -139,6 +139,24 @@ test('the dock offers the first model that can run when DSH\'s default cannot', 
   assert.equal(document.querySelector('.bt-model-line-text').textContent, 'Using DeepSeek Flash · Native · Ollama')
 })
 
+const antigravity = { ref: 'acp-antigravity/default', provider: 'acp-antigravity', providerName: 'Antigravity', name: 'Antigravity Default' }
+for (const nativeTools of [false, true]) {
+  test(`AN-1 the missing-model dock excludes Antigravity with Native tools ${nativeTools ? 'on' : 'off'}`, async t => {
+    const bot = { id: 'saved', name: 'Waiting Solver', model: 'gone/model', canCancelSolverWait: true, nativeTools }
+    const { document, caught } = await renderDock(t, { models: [antigravity, ...models], recovery: { bot } })
+    assert.deepEqual(caught, [])
+    const chips = [...document.querySelectorAll('.bt-model-choice-chips button')]
+    assert.deepEqual(chips.map(chip => chip.title), models.map(model => model.ref))
+  })
+}
+
+test('AN-1 the no-model Solver dock skips the Antigravity default when suggesting Start', async t => {
+  const bot = { id: 'saved', name: 'Waiting Solver', canCancelSolverWait: true }
+  const { document, caught } = await renderDock(t, { models: [antigravity, ...models], recovery: { bot } })
+  assert.deepEqual(caught, [])
+  assert.equal(document.querySelector('.bt-model-line-text').textContent, 'Using DeepSeek Flash · Native · DeepSeek')
+})
+
 test('the model menu works from the keyboard: arrows move, Right opens a step, Escape goes back one', async (t) => {
   const levels = { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] }
   const { document, picked } = await renderDock(t, { models: [{ ...models[0], reasoning: levels }, models[1]] })
