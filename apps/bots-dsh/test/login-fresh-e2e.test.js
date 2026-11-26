@@ -1,6 +1,7 @@
 // Real chat command, row state, team endpoints and ACP service. Both vendor sign-in
 // protocols and the connector's turns use only the fake account in a scratch home.
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -8,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
+import { promisify } from 'node:util'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
@@ -663,68 +665,142 @@ test('exception: the Windows supervisor admits isolated Claude Code and Codex ho
   }
 })
 
-test('exception: a teardown timeout preserves the answering Session and cleans the exact losing home', { timeout: 20_000 }, async t => {
-  for (const outcome of ['cancelled', 'adopted']) {
-    await t.test(outcome, async t => {
-      const cancel = outcome === 'cancelled'
-      const h = await fixture(t, 'codex', { peers: true, holdLoginStop: cancel })
-      await h.reply(BOT, A)
-      await h.reply(OTHER, OTHER_ACCOUNT)
-      const original = h.session()
-      const other = h.session(OTHER)
-      let finishStop
-      const canStop = new Promise(resolve => { finishStop = resolve })
-      let timedOut = false
-      if (!cancel) {
-        const stop = original.stop.bind(original)
-        t.mock.method(original, 'stop', async () => {
-          if (!timedOut) {
-            timedOut = true
-            throw new Error('Fixture: the old Session did not stop in time')
-          }
-          await canStop
-          await stop()
-        })
-      }
-
-      await h.login.open({ botId: BOT, provider: h.provider, fresh: true })
-      assert.equal(await h.login.switchFresh(BOT), true)
-      await until(() => h.row()?.attempt?.status === 'waiting', 'the isolated sign-in link appeared')
-      const [attempt] = h.launches
-      const winningHome = cancel ? h.home : attempt.home
-      const losingHome = cancel ? attempt.home : h.home
-      try {
-        if (cancel) {
-          attempt.writeAccount()
-          assert.equal(await h.login.cancel(BOT), true)
-        } else attempt.complete()
-        await until(() => h.acp.loginActive() === 0, 'the login settled after teardown timed out')
-        assert.equal(h.selectedHome(h.provider), winningHome)
-        assert.equal(existsSync(join(losingHome, 'account')), true, 'the unproved home was not removed early')
-        if (!cancel) {
-          assert.equal(timedOut, true)
-          await until(() => h.row()?.stage === 'done' || h.row()?.stage === 'failed', 'the confirmed outcome appeared')
-          assert.equal(h.row().stage, 'done')
+for (const outcome of ['cancelled', 'adopted']) {
+  test(`exception: ${outcome} sign-in preserves the answering Session through teardown`, { timeout: 20_000 }, async t => {
+    const cancel = outcome === 'cancelled'
+    const h = await fixture(t, 'codex', { peers: true, holdLoginStop: cancel })
+    await h.reply(BOT, A)
+    await h.reply(OTHER, OTHER_ACCOUNT)
+    const original = h.session()
+    const other = h.session(OTHER)
+    let finishStop
+    const canStop = new Promise(resolve => { finishStop = resolve })
+    let timedOut = false
+    if (!cancel) {
+      const stop = original.stop.bind(original)
+      t.mock.method(original, 'stop', async () => {
+        if (!timedOut) {
+          timedOut = true
+          throw new Error('Fixture: the old Session did not stop in time')
         }
-        await h.reply(BOT, cancel ? A : B)
-        const winningSession = h.session()
-        if (cancel) assert.equal(winningSession, original)
-        else assert.notEqual(winningSession, original)
+        await canStop
+        await stop()
+      })
+    }
 
-        if (cancel) await until(() => h.pendingLoginStops() === 0, 'all bounded stop calls timed out')
-        attempt.exit(0)
-        finishStop()
-        await until(() => !existsSync(losingHome), 'the stopped process let the exact losing home be removed')
-        assert.deepEqual(h.vendorHomes(), [winningHome])
-        await h.reply(BOT, cancel ? A : B)
-        assert.equal(h.session(), winningSession)
-        await verifyOtherVendor(h, other)
-      } finally {
-        attempt.exit(0)
-        finishStop()
+    await h.login.open({ botId: BOT, provider: h.provider, fresh: true })
+    assert.equal(await h.login.switchFresh(BOT), true)
+    const waiting = await until(() => h.row()?.attempt?.status === 'waiting' && h.row().attempt, 'the isolated sign-in link appeared')
+    const [attempt] = h.launches
+    const winningHome = cancel ? h.home : attempt.home
+    const losingHome = cancel ? attempt.home : h.home
+    try {
+      if (cancel) {
+        attempt.writeAccount()
+        assert.equal(await h.login.cancel(BOT), true)
+      } else attempt.complete()
+      if (cancel) await until(() => h.acp.loginActive() === 0, 'the login settled after teardown timed out')
+      else await until(() => timedOut && !existsSync(join(winningHome, 'paused')), 'B resumed after A’s teardown timed out')
+      assert.equal(h.selectedHome(h.provider), winningHome)
+      assert.equal(existsSync(join(losingHome, 'account')), true, 'the unproved home was not removed early')
+      if (!cancel) {
+        assert.equal(timedOut, true)
+        assert.notEqual(h.acp.loginStatus(h.provider, waiting.attemptId).status, 'ready', 'A must be gone before ready')
+        assert.notEqual(h.row().stage, 'done')
+        assert.deepEqual(h.ready, [])
       }
-    })
-  }
+      await h.reply(BOT, cancel ? A : B)
+      const winningSession = h.session()
+      if (cancel) assert.equal(winningSession, original)
+      else assert.notEqual(winningSession, original)
+
+      if (cancel) await until(() => h.pendingLoginStops() === 0, 'all bounded stop calls timed out')
+      attempt.exit(0)
+      finishStop()
+      await until(() => !existsSync(losingHome), 'the stopped process let the exact losing home be removed')
+      assert.deepEqual(h.vendorHomes(), [winningHome])
+      if (!cancel) {
+        await until(() => h.row()?.stage === 'done', 'Done followed the removal of A')
+        assert.deepEqual(h.ready, [h.provider])
+      }
+      await h.reply(BOT, cancel ? A : B)
+      assert.equal(h.session(), winningSession)
+      await verifyOtherVendor(h, other)
+    } finally {
+      attempt.exit(0)
+      finishStop()
+    }
+  })
+}
+
+test('second exception: startup retries the adopted account’s exact old-home removal', { timeout: 15_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'restart-chat-cleanup-'))
+  const homes = new CliHomes(root, { identity: null })
+  t.after(() => {
+    homes.closeRecovery()
+    homes.dispose()
+    rmSync(root, { recursive: true, force: true })
+  })
+  const module = new URL('../../acp-dsh/src/host/cli-homes.js', import.meta.url).href
+  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', `
+    import { writeFileSync } from 'node:fs'
+    import { join } from 'node:path'
+    import { CliHomes } from ${JSON.stringify(module)}
+    const homes = new CliHomes(process.argv[1], { identity: null })
+    const old = homes.environment('codex').HOME
+    const unrelated = homes.environment('claude').HOME
+    writeFileSync(join(old, 'account'), ${JSON.stringify(A)})
+    writeFileSync(join(unrelated, 'account'), ${JSON.stringify(OTHER_ACCOUNT)})
+    homes.begin('codex', { preserveVersion: true })
+    const attempt = homes.stageLogin('codex')
+    const adopted = attempt.env.HOME
+    writeFileSync(join(adopted, 'account'), ${JSON.stringify(B)})
+    attempt.adopt()
+    // Simulate a process exit between publication of B and the first removal of A.
+    console.log(JSON.stringify({ old, adopted, unrelated }))
+  `, root])
+  const { old, adopted, unrelated } = JSON.parse(stdout)
+  assert.equal(homes.home('codex'), adopted)
+  assert.equal(readFileSync(join(old, 'account'), 'utf8'), A)
+  assert.equal(readFileSync(join(adopted, 'account'), 'utf8'), B)
+  homes.startup('codex')
+  await until(() => !existsSync(old), 'startup removed the adopted account’s exact old home')
+  assert.equal(homes.paused('codex'), false)
+  assert.equal(homes.environment('codex').HOME, adopted)
+  assert.equal(readFileSync(join(adopted, 'account'), 'utf8'), B)
+  assert.equal(readFileSync(join(unrelated, 'account'), 'utf8'), OTHER_ACCOUNT)
+})
+
+test('second exception: rejected cancellation cleanup leaves Settings Reset available', { timeout: 15_000 }, async t => {
+  const stageLogin = CliHomes.prototype.stageLogin
+  let rejected = 0
+  t.mock.method(CliHomes.prototype, 'stageLogin', function (vendor) {
+    const staged = stageLogin.call(this, vendor)
+    return { ...staged, discard() {
+      rejected += 1
+      throw new Error('Fixture: the staged home could not be removed')
+    } }
+  })
+  const h = await fixture(t, 'codex', { peers: true })
+  await h.reply(BOT, A)
+  await h.reply(OTHER, OTHER_ACCOUNT)
+  const original = h.session()
+  const unrelated = h.session(OTHER)
+  await h.login.open({ botId: BOT, provider: h.provider, fresh: true })
+  assert.equal(await h.login.switchFresh(BOT), true)
+  const waiting = await until(() => h.row()?.attempt?.status === 'waiting' && h.row().attempt, 'the isolated sign-in link appeared')
+  const [attempt] = h.launches
+  attempt.writeAccount()
+  assert.equal(await h.login.cancel(BOT), true)
+  await until(() => rejected >= 2 && h.acp.loginActive() === 0, 'the deferred discard also rejected')
+  assert.equal(h.acp.loginStatus(h.provider, waiting.attemptId).status, 'cancelled')
+  assert.equal(h.row(), undefined)
+  assert.equal(h.selectedHome(h.provider), h.home)
+  assert.equal(readFileSync(join(attempt.home, 'account'), 'utf8'), B)
+  await h.reply(BOT, A)
+  assert.equal(h.session(), original)
+  assert.equal((await h.acp.accountReset(h.provider)).signedIn, false)
+  await verifyOtherVendor(h, unrelated)
 })
 
 test('exception: Antigravity Try again must show the warning before signing out an active account', { timeout: 15_000 }, async t => {

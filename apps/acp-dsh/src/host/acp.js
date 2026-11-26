@@ -711,15 +711,31 @@ export class AgentRun {
     await this.held(() => this.conn.cancel({ sessionId: this.sessionId })).catch(() => {})
   }
 
+  stopTreeSnapshot() {
+    const child = this.child
+    const deps = snapshotBudget(this.treeDeps)
+    if (!this.grouped || !supportsTree(deps.platform ?? process.platform)
+      || child?.exitCode !== null || child?.signalCode !== null) return undefined
+    if (!this.birth) this.birth = processBirth(child.pid, deps)
+    return descendants(child.pid, this.birth, deps)
+  }
+
+  chatStopEvidence() {
+    // The same tree snapshot will be used when adoption disposes this run. When the
+    // platform cannot prove all survivors, only a completed live stop can clear it.
+    const snapshot = this.chatStopSnapshot ??= this.stopTreeSnapshot()
+    if (snapshot?.complete !== true) return undefined
+    const group = this.child.pid
+    return { group, detached: snapshot.records.filter(record => record.pgid !== group)
+      .map(({ pid, birth }) => ({ pid, birth })) }
+  }
+
   dispose() {
     if (this.disposed === true) return
     this.disposed = true
     const child = this.child
-    const deps = snapshotBudget(this.treeDeps)
-    if (this.grouped && supportsTree(deps.platform ?? process.platform)
-      && child?.exitCode === null && child?.signalCode === null) {
-      if (!this.birth) this.birth = processBirth(child.pid, deps)
-      const snapshot = descendants(child.pid, this.birth, deps)
+    const snapshot = this.chatStopSnapshot ??= this.stopTreeSnapshot()
+    if (snapshot) {
       this.detached = snapshot.records.filter(record => record.pgid !== child.pid)
       if (!snapshot.complete) {
         try {

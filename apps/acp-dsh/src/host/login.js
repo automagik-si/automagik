@@ -623,6 +623,8 @@ export class CliLogins {
       flow.committing = new Promise(resolve => { finishCommit = resolve })
       this.timers.clearTimeout(flow.timeout)
       flow.confirmingUntil = undefined
+      flow.deadline = undefined
+      flow.expiresAt = undefined
     }
     try {
       const accepted = await this.onReady(flow.id, flow.selected, { existing: flow.existing === true, fresh: flow.fresh === true,

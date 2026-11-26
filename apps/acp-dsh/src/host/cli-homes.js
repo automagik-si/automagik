@@ -1,9 +1,12 @@
 // Bot authentication belongs to this installation, never to the terminal (#869).
 import { randomUUID } from 'node:crypto'
 import {
-  closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, writeFileSync,
+  closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import {
+  checkDirectory, completeChatCleanup, oldChatRunsExited, ownedDirectory, readChatCleanup, removeChatHome, writeChatCleanup,
+} from './chat-home-cleanup.js'
 import {
   LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, reclaimWindowsLogins, unverifiedLogin, verifyLoginRecords,
 } from './login-ownership.js'
@@ -53,6 +56,7 @@ export class CliHomes {
     this.changes = new Map()
     this.probe = probe
     this.recovering = new Map()
+    this.cleanupTimers = new Map()
     this.started = new Set()
     this.generations = new CliGenerations(this.root, this.instance, { reader: true })
   }
@@ -162,15 +166,10 @@ export class CliHomes {
     const previous = this.generations.current(vendor)
     const old = this.generations.folder(vendor, previous)
     if (this.changes.get(vendor) !== old) throw failure('The Bot account is changing.')
-    const root = realpathSync(this.root)
     const physical = path => {
-      const stat = lstatSync(path)
-      if (!stat.isDirectory() || realpathSync(path) !== join(root, relative(this.root, path))) throw unverifiedLogin()
-      return stat
-    }
-    const checked = (path, expected) => {
-      const stat = physical(path)
-      if (stat.dev !== expected.dev || stat.ino !== expected.ino) throw unverifiedLogin()
+      const identity = ownedDirectory(this.root, path)
+      if (!identity) throw unverifiedLogin()
+      return identity
     }
     const original = physical(old)
     const generation = randomUUID()
@@ -186,7 +185,7 @@ export class CliHomes {
     const discard = () => {
       if (this.generations.current(vendor) === generation) return
       if (owned) {
-        checked(home, owned)
+        checkDirectory(this.root, home, owned)
         rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
         owned = undefined
       }
@@ -207,32 +206,39 @@ export class CliHomes {
         const release = this.generations.acquire(vendor)
         try {
           if (this.changes.get(vendor) !== old || this.generations.current(vendor) !== previous) throw unverifiedLogin()
+          this.requireNoChatCleanup(vendor)
           this.generations.otherApps(vendor, old)
-          checked(old, original)
-          checked(home, owned)
+          checkDirectory(this.root, old, original)
+          checkDirectory(this.root, home, owned)
           this.verify(old)
           this.verify(home)
           writeFileSync(join(home, 'paused'), '', { mode: 0o600 })
           const instance = join(home, 'instances', this.instance)
           this.generations.publish(instance, LOGIN_RECORD_VERSION)
-          try { this.generations.select(vendor, generation, { previous }) } catch (error) {
+          try {
+            // Publish deletion intent before the pointer can commit adoption. The pointer
+            // authorizes recovery only if it actually selected this replacement.
+            writeChatCleanup(this.root, vendor, {
+              version: 1, vendor, previous, replacement: generation, old: original, adopted: owned,
+              owner: { pid: process.pid, birth: this.generations.birth },
+              runs: chatRunEvidence(old), stopped: false,
+            })
+            this.generations.select(vendor, generation, { previous })
+          } catch (error) {
             this.generations.release(instance)
+            try {
+              if (this.generations.current(vendor) === previous) completeChatCleanup(this.root, vendor)
+            } catch {}
             throw error
           }
           this.registered.set(vendor, home)
-          let removed = false
           return {
             release,
-            removePrevious: () => {
-              if (!removed) {
-                checked(old, original)
-                this.verify(old)
-                this.generations.release(join(old, 'instances', this.instance))
-                rmSync(old, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
-                removed = true
-              }
-              rmSync(marker, { force: true })
-            },
+            removePrevious: () => this.generations.exclusive(vendor, () => {
+              const entry = readChatCleanup(this.root, vendor)
+              if (entry?.replacement !== generation || runCount(old) !== 0) throw unverifiedLogin()
+              this.finishChatCleanup(vendor, entry)
+            }),
           }
         } catch (error) {
           release()
@@ -243,6 +249,59 @@ export class CliHomes {
     } catch (error) {
       discard()
       throw error
+    }
+  }
+
+  finishChatCleanup(vendor, entry) {
+    if (this.generations.current(vendor) !== entry.replacement) throw unverifiedLogin()
+    checkDirectory(this.root, this.generations.folder(vendor, entry.replacement), entry.adopted)
+    const old = this.generations.folder(vendor, entry.previous)
+    if (lstatSync(join(this.root, 'retired', vendor, entry.previous), { throwIfNoEntry: false })) throw unverifiedLogin()
+    if (!entry.stopped) writeChatCleanup(this.root, vendor, { ...entry, stopped: true })
+    const marker = join(this.root, 'login-staging', vendor, entry.replacement)
+    removeChatHome(this.root, old, entry.old, marker, () => {
+      this.generations.peers(join(old, 'instances'), 'home', this.instance)
+      this.verify(old)
+      this.generations.release(join(old, 'instances', this.instance))
+    })
+    completeChatCleanup(this.root, vendor)
+  }
+
+  recoverChatCleanup(vendor) {
+    if (vendor === 'antigravity' || this.recoveryClosed || this.cleanupTimers.has(vendor)) return
+    try {
+      if (!readChatCleanup(this.root, vendor)) return
+      const complete = this.generations.exclusive(vendor, () => {
+        const entry = readChatCleanup(this.root, vendor)
+        if (!entry) return true
+        if (processState(entry.owner.pid, entry.owner.birth) !== 'dead') return false
+        const current = this.generations.current(vendor)
+        if (current === entry.previous) {
+          completeChatCleanup(this.root, vendor)
+          return true
+        }
+        if (current !== entry.replacement) throw unverifiedLogin()
+        const adopted = this.generations.folder(vendor, current)
+        checkDirectory(this.root, adopted, entry.adopted)
+        this.verify(adopted)
+        this.resume(vendor)
+        if (!oldChatRunsExited(entry, this.generations.birth)) return false
+        this.finishChatCleanup(vendor, entry)
+        return true
+      })
+      if (complete) return
+    } catch {} // Unproved or temporarily unavailable directories remain fenced off.
+    const timer = setTimeout(() => {
+      this.cleanupTimers.delete(vendor)
+      this.recoverChatCleanup(vendor)
+    }, 1000)
+    timer.unref?.()
+    this.cleanupTimers.set(vendor, timer)
+  }
+
+  requireNoChatCleanup(vendor) {
+    if (vendor !== 'antigravity' && readChatCleanup(this.root, vendor)) {
+      throw failure('The Bot account is changing. Try again when it finishes.')
     }
   }
 
@@ -298,7 +357,11 @@ export class CliHomes {
     return recovery
   }
 
-  closeRecovery() { this.recoveryClosed = true }
+  closeRecovery() {
+    this.recoveryClosed = true
+    for (const timer of this.cleanupTimers.values()) clearTimeout(timer)
+    this.cleanupTimers.clear()
+  }
 
   // Reset changes only the pointer. Never move the old physical path or reuse it: a vendor
   // that survived the app still has that absolute path in its environment and may write late.
@@ -312,6 +375,7 @@ export class CliHomes {
     if (!vendors.has(vendor)) throw new Error('No isolated home for this agent.')
     const release = this.generations.acquire(vendor)
     try {
+      this.requireNoChatCleanup(vendor)
       let previous
       try { previous = this.generations.current(vendor) } catch {}
       const old = previous === undefined ? this.registered.get(vendor)
@@ -391,6 +455,7 @@ export class CliHomes {
   }
 
   beginLocked(vendor, preserveVersion) {
+    this.requireNoChatCleanup(vendor)
     const home = this.home(vendor)
     mkdirSync(home, { recursive: true, mode: 0o700 })
     this.verify(home)
@@ -506,6 +571,7 @@ export class CliHomes {
         }
       }
     })
+    this.recoverChatCleanup(vendor)
     const retired = this.collect(vendor)
     if (retired.length > 0) {
       try { this.onRetired(vendor, retired) } catch {}
@@ -608,4 +674,15 @@ export function runCount(home) {
 
 export async function stopRuns(home) {
   await Promise.all([...(runs.get(home) ?? [])].map(releaseRun))
+}
+
+function chatRunEvidence(home) {
+  const evidence = []
+  for (const run of runs.get(home) ?? []) {
+    if (run.child && run.child.pid === undefined) continue // No process started.
+    const proof = run.chatStopEvidence?.()
+    if (!proof) return null
+    evidence.push(proof)
+  }
+  return evidence
 }

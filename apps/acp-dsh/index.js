@@ -1256,12 +1256,6 @@ export function apply(ctx, config = {}, {
         try {
           adapter.endProvider(id, 'The Bot account changed. Sign in again in the app.')
           agents.get(id)?.catalog.dispose()
-          const removePrevious = () => stopRuns(preserving.storage.old).then(adoption.removePrevious)
-          try { await removePrevious() } catch (error) {
-            // B is already selected. Resume it even if proving A stopped takes longer.
-            preserving.cleanup = retryChatRemoval(removePrevious, error)
-            void preserving.cleanup.catch(() => {})
-          }
           Object.assign(selected.env, cliEnvironment(AGENTS[id], cliDetails.get(id)))
           if (!current()) return false
           signedOut(id)
@@ -1269,6 +1263,8 @@ export function apply(ctx, config = {}, {
         } finally {
           adoption.release()
         }
+        preserving.cleanup = retryChatRemoval(() => stopRuns(preserving.storage.old).then(adoption.removePrevious))
+        void preserving.cleanup.catch(() => {})
         const beforeEmail = preserving.before.who?.facets?.email
         if (beforeEmail !== undefined && beforeEmail === who.facets?.email) same?.()
       }
@@ -1294,6 +1290,8 @@ export function apply(ctx, config = {}, {
       agents.get(id)?.catalog.refresh()
       if (!current()) return
       publish()
+      // B can answer during teardown. Finish sign-in only after A has been removed.
+      if (preserving) await preserving.cleanup
       if (!current() || consentStates.get(id) === 'needed') return
       try {
         ctx.emit?.('acp-dsh/login-ready', { id, ...(attemptId ? { attemptId } : {}) })
@@ -1972,12 +1970,13 @@ export function apply(ctx, config = {}, {
   const loginBusy = () => accountFailure('busy', 'The Bot account is changing.')
   const loginConfirmation = () => accountFailure('confirmation-required', 'This stops running Bot work for this account. Continue?')
 
-  async function retryChatRemoval(remove, error) {
-    while (error?.code !== 'acp-account/unverified-login') {
+  async function retryChatRemoval(remove) {
+    for (;;) {
+      try { await remove(); return } catch (error) {
+        if (error?.code === 'acp-account/unverified-login') throw error
+      }
       await delay(250, undefined, { ref: false })
-      try { await remove(); return } catch (next) { error = next }
     }
-    throw error
   }
 
   function releaseChatLogin() {
@@ -1993,10 +1992,10 @@ export function apply(ctx, config = {}, {
     if (!attempt.adopted && storage) {
       attempt.cleanup = logins.whenHomeDrained(attempt.id, storage.env[HOME_ENV]).then(storage.discard)
     }
-    void Promise.resolve(attempt.cleanup).then(() => {
-      if (chatLogin === attempt) chatLogin = undefined
-    }, () => {
+    void Promise.resolve(attempt.cleanup).catch(() => {
       warn(ctx, 'The isolated sign-in home could not be removed safely.')
+    }).finally(() => {
+      if (chatLogin === attempt) chatLogin = undefined
     })
   }
 
