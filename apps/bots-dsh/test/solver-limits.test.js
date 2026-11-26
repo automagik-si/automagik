@@ -3733,23 +3733,25 @@ function teamWithSnapshotLink(h) {
 function snapshotFixture(t) {
   const home = mkdtempSync(join(tmpdir(), 'solver-snapshot-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))
-  return home
+  return fs.realpathSync.native(home)
 }
 
 function recordSnapshotAccess(t, run, before = () => {}) {
   const calls = []
   const mocks = []
   const linkText = fs.readlinkSync
+  const capture = (method, original) => (path, ...args) => {
+    if (typeof path === 'string') {
+      const physical = path.replace(/^\/proc\/self\/fd\/\d+/, fd => linkText(fd))
+      calls.push([method, physical, args[0], path])
+      before(method, physical, path)
+    }
+    return original(path, ...args)
+  }
   for (const method of ['lstatSync', 'statSync', 'readlinkSync', 'openSync', 'opendirSync', 'readdirSync', 'readFileSync', 'realpathSync']) {
     const original = fs[method]
-    mocks.push(t.mock.method(fs, method, (path, ...args) => {
-      if (typeof path === 'string') {
-        const physical = path.replace(/^\/proc\/self\/fd\/\d+/, fd => linkText(fd))
-        calls.push([method, physical, args[0]])
-        before(method, physical)
-      }
-      return original(path, ...args)
-    }))
+    mocks.push(t.mock.method(fs, method, capture(method, original)))
+    if (method === 'realpathSync') fs.realpathSync.native = capture(method, original.native)
   }
   syncBuiltinESMExports()
   try { return { value: run(), calls } } finally {
@@ -3757,6 +3759,88 @@ function recordSnapshotAccess(t, run, before = () => {}) {
     syncBuiltinESMExports()
   }
 }
+
+function withoutSnapshotProcfs(t, run) {
+  const statfs = fs.statfsSync
+  const mock = t.mock.method(fs, 'statfsSync', (path, ...args) => {
+    if (path === '/proc/self/fd') throw Object.assign(new Error('No procfs in this fixture'), { code: 'ENOENT' })
+    return statfs(path, ...args)
+  })
+  syncBuiltinESMExports()
+  try { return run() } finally {
+    mock.mock.restore()
+    syncBuiltinESMExports()
+  }
+}
+
+function snapshotProcfsAvailable() {
+  if (process.platform !== 'linux') return false
+  try { return fs.statfsSync('/proc/self/fd').type === 0x9fa0 } catch { return false }
+}
+
+test('Snapshot E option B: a link-free root can be read without procfs', t => {
+  const folder = snapshotFixture(t)
+  mkdirSync(join(folder, 'nested'))
+  writeFileSync(join(folder, 'nested', 'answer.txt'), '42\n')
+  const { value, calls } = withoutSnapshotProcfs(t, () => recordSnapshotAccess(t, () => resultSnapshot(folder)))
+  assert.match(value ?? '', snapshotDigest)
+  assert.ok(calls.some(([method, , , path]) => method === 'opendirSync' && path === join(folder, 'nested')))
+  assert.ok(calls.every(([, , , path]) => !path.startsWith('/proc/self/fd/')))
+})
+
+test('Snapshot E option B: a directory root under a linked ancestor can be read', t => {
+  const folder = snapshotFixture(t)
+  const target = join(folder, 'target')
+  const root = join(target, 'root')
+  const ancestor = join(folder, 'ancestor')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'answer.txt'), '42\n')
+  symlinkSync(target, ancestor, 'junction')
+  const { value, calls } = recordSnapshotAccess(t, () => resultSnapshot(join(ancestor, 'root')))
+  assert.match(value ?? '', snapshotDigest)
+  assert.ok(calls.some(([method, path]) => method === 'opendirSync' && path === root))
+})
+
+test('Snapshot E option B: Linux with procfs enumerates held descriptors and refuses a strict read error',
+  { skip: !snapshotProcfsAvailable() }, t => {
+    const folder = snapshotFixture(t)
+    const nested = join(folder, 'nested')
+    mkdirSync(nested)
+    writeFileSync(join(nested, 'answer.txt'), '42\n')
+    const take = before => recordSnapshotAccess(t, () => resultSnapshot(folder), before)
+    const good = take()
+    assert.match(good.value ?? '', snapshotDigest)
+    const enumerated = good.calls.filter(([method]) => method === 'opendirSync')
+    assert.deepEqual(enumerated.map(([, path]) => path), [folder, nested])
+    for (const [, , , path] of enumerated) assert.match(path, /^\/proc\/self\/fd\/\d+$/)
+
+    const refused = take((method, path, raw) => {
+      if (method === 'opendirSync' && path === nested && raw.startsWith('/proc/self/fd/')) {
+        throw Object.assign(new Error('Strict read refused in this fixture'), { code: 'EACCES' })
+      }
+    })
+    assert.equal(refused.value, undefined)
+    assert.ok(refused.calls.every(([method, , , path]) => method !== 'opendirSync' || path.startsWith('/proc/self/fd/')))
+  })
+
+test('Snapshot E option B: the portable walk refuses an observed directory identity change', t => {
+  const folder = snapshotFixture(t)
+  const nested = join(folder, 'nested')
+  const replacement = join(folder, 'replacement')
+  mkdirSync(nested)
+  mkdirSync(replacement)
+  writeFileSync(join(replacement, 'answer.txt'), '42\n')
+  let replaced = false
+  const attempt = withoutSnapshotProcfs(t, () => recordSnapshotAccess(t, () => resultSnapshot(folder), (method, path) => {
+    if (replaced || method !== 'opendirSync' || path !== nested) return
+    replaced = true
+    renameSync(nested, join(folder, 'original'))
+    renameSync(replacement, nested)
+  }))
+  assert.equal(replaced, true)
+  assert.equal(attempt.value, undefined)
+  assert.ok(attempt.calls.every(([, path]) => path !== join(nested, 'answer.txt')))
+})
 
 function assertNoSnapshotTargetAccess(calls, links, outside) {
   for (const [method, path] of calls) {
@@ -3854,7 +3938,7 @@ test('Snapshot E T3: snapshot access and digest exclude link targets', t => {
   check()
 })
 
-test('Snapshot E AE-2: a directory replaced before traversal does not redirect the walk', t => {
+test('Snapshot E AE-2: a directory replaced before traversal does not redirect the walk', { skip: !snapshotProcfsAvailable() }, t => {
   const folder = snapshotFixture(t)
   const outside = snapshotFixture(t)
   const nested = join(folder, 'nested')

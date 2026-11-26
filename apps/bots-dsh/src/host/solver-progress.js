@@ -1,6 +1,6 @@
 import { chosenIdentity, chosenIdentityOf } from '../shared/solver-model.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readlinkSync, statfsSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readlinkSync, realpathSync, statfsSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { SOLVER_FIX_LIMIT, SOLVER_REPLAN_LIMIT, isSolverBot, isWrittenSolverMethod, solverAutoOn } from '../shared/solver-method.js'
 import { guardVerdictMatch } from '../shared/review-guard.js'
@@ -95,35 +95,43 @@ const sameEntry = (a, b) => a.dev === b.dev && a.ino === b.ino && a.mode === b.m
 const sameVersion = (a, b) => sameEntry(a, b) && a.ctimeNs === b.ctimeNs
 const changedDuringRead = 'It changed while it was read.'
 const tooManyEntries = 'It has more than 20,000 entries.'
-const noSafeTraversal = 'Safe result folder traversal is unavailable on this host.'
 const snapshotError = reason => Object.assign(new Error(reason), { reason })
 
-// A pinned parent descriptor makes a lookup independent of changes to the parent's name.
-// Node offers path-based directory reads, so use procfs as the descriptor-relative path.
-// Only open directories with O_NOFOLLOW, including each component leading to the root.
+function hasDescriptorPaths() {
+  if (process.platform !== 'linux' || !constants.O_DIRECTORY || !constants.O_NOFOLLOW) return false
+  try {
+    return statfsSync(FD_ROOT).type === PROC_SUPER_MAGIC
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR', 'ENOSYS'].includes(error.code)) return false
+    throw error
+  }
+}
+
 export function inspectResult(folder) {
   if (typeof folder !== 'string' || !isAbsolute(folder)) return { reason: 'The Solver has no usable result folder.' }
-  const root = resolve(folder)
+  const selectedRoot = resolve(folder)
+  let root = selectedRoot
   const hash = createHash('sha256')
   let remaining = MAX_RESULT_ENTRIES - 1
   const openDirectory = path => openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
   const fdPath = fd => join(FD_ROOT, String(fd))
   const shown = path => JSON.stringify(relative(root, path) || '.').slice(0, 200)
   let location = root
+  let descriptorPaths
+  let rootStat
   function visit(path, locationOfEntry, name, isRoot = false) {
     location = locationOfEntry
     const stat = entryStat(path)
-    if (isRoot && !stat.isDirectory()) throw snapshotError(stat.isSymbolicLink()
-      ? 'The result root is a symbolic link.' : 'The result root is not a directory.')
+    if (isRoot && !sameVersion(rootStat, stat)) throw snapshotError(changedDuringRead)
     const identity = [name, stat.dev, stat.ino, stat.mode].map(String)
     if (stat.isDirectory()) {
-      const fd = openDirectory(path)
+      const fd = descriptorPaths ? openDirectory(path) : undefined
       try {
-        const opened = directoryStat(fd)
+        const opened = fd === undefined ? entryStat(path) : directoryStat(fd)
         if (!sameVersion(stat, opened)) throw snapshotError(changedDuringRead)
-        const pinned = fdPath(fd)
+        const directoryPath = fd === undefined ? path : fdPath(fd)
         const children = []
-        const directory = opendirSync(pinned)
+        const directory = opendirSync(directoryPath)
         try {
           for (let child; (child = directory.readSync()) !== null;) {
             if (isRoot && child.name === '.git') continue
@@ -133,13 +141,16 @@ export function inspectResult(folder) {
         } finally {
           directory.closeSync()
         }
+        // On the portable path a concurrent swap can expose directory metadata between
+        // the identity checks. Reject observed changes before looking up any child names.
+        if (fd === undefined && !sameVersion(stat, entryStat(path))) throw snapshotError(changedDuringRead)
         children.sort()
-        for (const child of children) visit(join(pinned, child), join(locationOfEntry, child), child)
+        for (const child of children) visit(join(directoryPath, child), join(locationOfEntry, child), child)
         location = locationOfEntry
         if (!sameVersion(stat, entryStat(path))) throw snapshotError(changedDuringRead)
         hash.update(JSON.stringify([...identity, children]))
       } finally {
-        closeSync(fd)
+        if (fd !== undefined) closeSync(fd)
       }
     } else if (stat.isFile()) {
       const changes = [stat.size, stat.mtimeNs, stat.ctimeNs].map(String)
@@ -155,26 +166,33 @@ export function inspectResult(folder) {
   }
   const parents = []
   try {
-    if (process.platform !== 'linux' || !constants.O_DIRECTORY || !constants.O_NOFOLLOW) return { reason: noSafeTraversal }
-    try {
-      if (statfsSync(FD_ROOT).type !== PROC_SUPER_MAGIC) return { reason: noSafeTraversal }
-    } catch {
-      return { reason: noSafeTraversal }
+    rootStat = entryStat(selectedRoot)
+    if (!rootStat.isDirectory()) return { reason: rootStat.isSymbolicLink()
+      ? 'The result root is a symbolic link.' : 'The result root is not a directory.' }
+    root = realpathSync.native(selectedRoot)
+    location = root
+    descriptorPaths = hasDescriptorPaths()
+    let walkRoot = root
+    if (descriptorPaths) {
+      // Procfs keeps lookup and enumeration tied to held directory descriptors. Open
+      // each component of the resolved root with O_NOFOLLOW before walking its entries.
+      const components = root.split('/').filter(Boolean)
+      const name = components.pop()
+      let parent = '/'
+      for (const component of ['', ...components]) {
+        if (!name) break
+        const path = join(parent, component)
+        const fd = openDirectory(path)
+        parents.push({ path, fd })
+        parent = fdPath(fd)
+      }
+      if (name) walkRoot = join(parent, name)
     }
-    const components = root.split('/').filter(Boolean)
-    const name = components.pop()
-    let parent = '/'
-    for (const component of ['', ...components]) {
-      if (!name) break
-      const path = join(parent, component)
-      const fd = openDirectory(path)
-      parents.push({ path, fd })
-      parent = fdPath(fd)
-    }
-    visit(name ? join(parent, name) : '/', root, folder, true)
+    visit(walkRoot, root, folder, true)
     for (const { path, fd } of parents) {
       if (!sameEntry(entryStat(path), directoryStat(fd))) throw snapshotError(changedDuringRead)
     }
+    if (selectedRoot !== root && !sameVersion(rootStat, entryStat(selectedRoot))) throw snapshotError(changedDuringRead)
     return { snapshot: hash.digest('hex') }
   } catch (error) {
     return { reason: error.reason ?? (error.code
