@@ -49,6 +49,28 @@ function keepsGroupMembership(rt, sessionId, botId) {
   return group === undefined || rt.roomOf(group.roomId)?.members?.includes(botId) === true
 }
 
+function hasCurrentRoot(rt, owner) {
+  return (owner.task !== undefined || rt.isBotSession?.(owner.root) === true) &&
+    keepsGroupMembership(rt, owner.root, owner.botId)
+}
+
+function nestedDelegationId(session) {
+  const { header, inheritedEventCount } = session
+  if (header.origin !== 'subagent' || !(header.delegationDepth > 1) ||
+      typeof header.parentSession !== 'string' || !Number.isInteger(inheritedEventCount)) return
+  // DSH writes the descriptor before it queues the initial delegated prompt.
+  // Only that child-owned input is proven when live ancestry is unavailable.
+  let described = false
+  for (let seq = inheritedEventCount; seq < session.seq; seq++) {
+    const event = session.eventAt?.(seq)
+    if (!event || session.isOwnSeq?.(seq) !== true) return
+    if (event.type === 'subagent/descriptor') described = true
+    if (event.type !== 'user/message' || event.data.source?.kind !== 'user') continue
+    if (described && event.surfaceOp === 'append') return event.data.id
+    return
+  }
+}
+
 function recordsOf(rt, owner, { worker = false } = {}) {
   if (owner === undefined) return []
   const task = owner.task
@@ -506,6 +528,7 @@ export function install(rt) {
     const matches = typeof sessionId === 'string' && capturedSession?.id === sessionId && capturedSession.header?.id === sessionId
     const session = capturedSession === undefined ? sessionOf(sessionId) : matches ? capturedSession : undefined
     const owner = capturedSession === undefined || matches ? skillOwner(rt, sessionId, capturedSession) : undefined
+    const detachedDelegation = historyOnly && matches && owner === undefined ? nestedDelegationId(session) : undefined
     const botId = owner?.botId
     const bot = rt.botOf(botId)
     const worker = owner !== undefined && owner.kind !== 'own'
@@ -533,8 +556,9 @@ export function install(rt) {
       if (skillRoomLines?.length) ordinary = projectRoomContent(ordinary, skillRoomLines, current)
       // DSH gives delegated prompts a user source. Both provider input and
       // ACP replay omit gestures on the child's own Bot-authored rows.
-      if (owner?.kind === 'subagent' && row.source?.kind === 'user' &&
-          (!logged || session?.isOwnSeq?.(logged.seq) !== false)) {
+      const delegated = owner?.kind === 'subagent' && (!logged || session?.isOwnSeq?.(logged.seq) !== false) ||
+        detachedDelegation !== undefined && row.id === detachedDelegation
+      if (delegated && row.source?.kind === 'user') {
         const names = new Set(requestedSkills(ordinary).map(({ name }) => name))
         if (names.size > 0) {
           ordinary = ordinary.map(part => part.type === 'text' && !marker(part)
@@ -660,8 +684,7 @@ export function install(rt) {
     snapshot(sessionId, botId, instructionsId) {
       const owner = skillOwner(rt, sessionId)
       if (owner === undefined || owner.botId !== botId || rt.teamCurrent?.() === false ||
-          !keepsGroupMembership(rt, owner.root, botId) ||
-          (owner.task === undefined && rt.isBotSession?.(owner.root) !== true)) return
+          !hasCurrentRoot(rt, owner)) return
       return {
         skillsOwner: owner.botId,
         skillsInstructionsId: instructionsId,
@@ -672,7 +695,7 @@ export function install(rt) {
     },
     workerAvailable(sessionId, agent) {
       const owner = skillOwner(rt, sessionId)
-      return owner !== undefined && owner.kind !== 'own' && permitsWorkerLoad(rt, owner, agent) &&
+      return owner !== undefined && owner.kind !== 'own' && hasCurrentRoot(rt, owner) && permitsWorkerLoad(rt, owner, agent) &&
         automaticOf(recordsOf(rt, owner)).length > 0
     },
     available: sessionId => availableRecords(sessionId).length > 0,
