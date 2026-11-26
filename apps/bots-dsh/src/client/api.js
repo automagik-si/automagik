@@ -48,7 +48,14 @@ export const call = async (endpoint, payload, signal) => {
     if (!vault && !isRetired()) noteClientError(endpoint, error)
     throw error
   }
-  const result = await response.json()
+  let result
+  try { result = await response.json() } catch (error) {
+    checkViewer(active)
+    if (endpoint !== 'skill-library-save' || error?.name === 'AbortError') throw error
+    // Once headers arrived, an interrupted response body can still hide a
+    // completed Save. Keep its operation available for recovery.
+    throw Object.assign(new Error(t('Could not reach DSH. Check that it is still running.'), { cause: error }), { code: 'NETWORK' })
+  }
   if (whoami) signal?.throwIfAborted()
   checkViewer(active)
   const changed = active && viewerChanged(result)

@@ -2,6 +2,7 @@ export const CLEAN_REVIEW = '{"findings":[],"overflow":false}'
 
 export const assembledReview = (answer = CLEAN_REVIEW, kind = 'stop') => ({
   finish: { kind },
+  observedFinish: { kind },
   blocks: () => [{ type: 'text', text: answer }],
 })
 

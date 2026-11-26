@@ -3,12 +3,11 @@ import fs from 'node:fs'
 import { basename, join } from 'node:path'
 import { AUTOMATIC_SKILL_MODE, DEFAULT_SKILL_MODE, isSkillMode } from '../shared/skill-mode.js'
 import { reservedCommandOf } from '../shared/reserved-commands.js'
-import { replaceFile, syncDirectory, syncFile } from './files.js'
+import { hasOnlyHostPublicationLinks, publishHostFile, replaceFile, syncDirectory, syncFile } from './files.js'
 import { checkSkill, parseSkillMd, SKILL_CHECK_FINGERPRINT } from './skill-check.js'
 import { SKILL_CHECK_HISTORY } from './skill-check-version.js'
 import { LIMITS, skillHash, skillName, textSkillMd } from './skill-library-rules.js'
 import { runSkillReview } from './skill-review.js'
-import { writeBytesAtomic } from './supervisor/store.js'
 
 const SKILL_READS = new Set(['skill-library', 'skill-library-get'])
 const SKILL_WRITES = new Set(['skill-library-save', 'skill-library-delete', 'bot-skill-add', 'bot-skill-remove', 'bot-skill-mode'])
@@ -33,15 +32,17 @@ const own = (table, key) => table && Object.hasOwn(table, key) ? table[key] : un
 const reject = (message, code = 'bot/invalid') => Object.assign(new Error(message), { code })
 const notWritable = () => reject('This host can only read the team.', 'bot/read-only')
 const owner = caller => caller?.role === 'owner' || caller?.role === 'admin'
-const findingView = ({ rule, level, reason, line, path, area }) =>
-  ({ rule, level, reason, line, path, area, injection: area === 'prompt-injection' })
+const findingView = ({ rule, level, reason, line, path, area, detail }) =>
+  ({ rule, level, reason, line, path, area, ...(detail === undefined ? {} : { detail }), injection: area === 'prompt-injection' })
 const modelFindingView = finding => ({ ...finding, injection: finding.area === 'prompt-injection' })
 const hashJson = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const equalMac = (left, right) => typeof left === 'string' && /^[a-f0-9]{64}$/.test(left) &&
   timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'))
-const findingKey = finding => JSON.stringify([finding.rule, finding.path, finding.line])
+const findingKey = finding => JSON.stringify(findingView(finding))
 const uniqueFindings = findings => [...new Map(findings.map(finding => [findingKey(finding), finding])).values()]
 const checkFindings = check => uniqueFindings([...check.findings, ...check.injection]).map(findingView)
+const uniqueModelFindings = findings => [...new Map(findings.map(finding => [JSON.stringify(finding), finding])).values()]
+const reportFindings = (check, model) => [...checkFindings(check), ...uniqueModelFindings(model).map(modelFindingView)]
 
 export function mergeSkillChecks(raw, delivered) {
   return { ...raw, verdict: [raw.verdict, delivered.verdict].includes('block') ? 'block'
@@ -165,9 +166,12 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
 
   function hostKey(create = false) {
     if (create && !stat(keyPath)) {
-      try { writeBytesAtomic(keyPath, randomBytes(32), { exclusive: true, durable: true }) }
+      try { publishHostFile(keyPath, randomBytes(32)) }
       catch (error) { if (error.code !== 'EEXIST') throw error }
     }
+    const before = stat(keyPath)
+    if (before && (!before.isFile() || !privateMode(before) || !owned(before) ||
+        !hasOnlyHostPublicationLinks(keyPath, before))) throw notWritable()
     let fd
     try {
       fd = fs.openSync(keyPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0))
@@ -177,15 +181,16 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     }
     try {
       const info = fs.fstatSync(fd)
-      if (!safeFile(info) || info.size !== 32) throw notWritable()
+      if (!info.isFile() || !sameInode(info, before) || !privateMode(info) || !owned(info) ||
+          !hasOnlyHostPublicationLinks(keyPath, info) || info.size !== 32) throw notWritable()
       return fs.readFileSync(fd)
     } finally { fs.closeSync(fd) }
   }
 
   const mac = (key, ...value) => createHmac('sha256', key).update(JSON.stringify(value)).digest('hex')
-  const attestation = (key, review) => mac(key, 'review-v1', hashJson(review))
-  const acceptance = (key, record, fingerprint, digest) =>
-    mac(key, 'accept-v1', record.name, record.source, record.hash, fingerprint, digest)
+  const attestation = (key, review) => mac(key, 'review-v2', hashJson(review))
+  const acceptance = (key, record, fingerprint, digest, findingsDigest) =>
+    mac(key, 'accept-v2', record.name, record.source, record.hash, fingerprint, digest, findingsDigest)
   const verifies = (key, hash, review, seal) => key && review?.status === 'done' && review.hash === hash &&
     Array.isArray(review.findings) && equalMac(seal, attestation(key, review))
   const cachedReview = (data, hash, key) => {
@@ -198,7 +203,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
         equalMac(entry.seal, mac(key, 'injection-v1', hash, hashJson(entry.findings)))) return entry.findings
   }
 
-  function checkedRecord(name, record, data, key, legacyLocal) {
+  function checkedRecord(name, record, data, key) {
     const document = storedDocument(name, record)
     if (!document) return { name, held: CHANGED }
     const { check, parsed, valid } = document
@@ -207,15 +212,20 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     if (!valid) return { name, held: CHANGED }
     const review = verifies(key, check.hash, record.review, record.reviewSeal) ? record.review : undefined
     if (review?.findings.some(finding => finding.area === 'prompt-injection')) return { name, held: HELD_INJECTION }
-    const legacy = legacyLocal && record.source.kind === 'text' && record.review === undefined &&
+    // An old import copied the library verbatim. Only a proof bound to this home
+    // and record can establish local origin for a legacy typed record.
+    const legacy = !holdPreexistingTyped && key && !stat(importMark) &&
+      record.source.kind === 'text' && record.review === undefined &&
       record.reviewSeal === undefined && SKILL_CHECK_HISTORY[record.check?.version] === record.check?.fingerprint &&
       record.check?.fingerprint !== undefined && record.check.fingerprint !== SKILL_CHECK_FINGERPRINT &&
-      check.verdict === 'pass'
+      check.verdict === 'pass' && equalMac(record.localProvenance, mac(key, 'local-legacy-v1',
+        fs.realpathSync(rt.home), name, check.hash, record.check.fingerprint))
     const digest = review && hashJson(review)
     const needsConfirm = review && (check.verdict === 'warn' || review.findings.length) &&
       (record.accepted !== check.hash || record.acceptedReview !== digest ||
-        !equalMac(record.acceptanceSeal, acceptance(key, record, check.fingerprint, digest)))
-    const held = check.truncated ? INCOMPLETE : !review && (holdPreexistingTyped || !legacy) ? REVIEW_NEEDED
+        !equalMac(record.acceptanceSeal, acceptance(key, record, check.fingerprint, digest,
+          hashJson(reportFindings(check, review.findings)))))
+    const held = check.truncated ? INCOMPLETE : !review && !legacy ? REVIEW_NEEDED
       : needsConfirm ? CONFIRM : undefined
     const current = record.check?.version === check.version && record.check?.fingerprint === check.fingerprint
     const source = record.source.kind === 'file' ? { kind: 'file', fileName: record.source.fileName } : { kind: 'text' }
@@ -231,8 +241,9 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     const rootInfo = directory()
     const info = rootInfo && stat(path)
     const stamp = fileStamp(info)
+    const trust = JSON.stringify([fileStamp(stat(keyPath)), fileStamp(stat(importMark))])
     const generation = JSON.stringify(rt.teamGeneration())
-    if (!fresh && cache && cache.stamp === stamp && cache.generation === generation) return cache
+    if (!fresh && cache && cache.stamp === stamp && cache.trust === trust && cache.generation === generation) return cache
     let data = { version: 1, skills: {}, active: {} }
     if (info) {
       if (!safeFile(info)) throw reject('The Skills library file is unavailable.', 'bot/refused')
@@ -251,10 +262,9 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       }
     }
     const key = hostKey()
-    const legacyLocal = !stat(importMark)
     const skills = new Map(Object.entries(data.skills).filter(([name]) => skillName(name))
-      .map(([name, record]) => [name, checkedRecord(name, record, data, key, legacyLocal)]))
-    cache = { data, stamp, generation, skills }
+      .map(([name, record]) => [name, checkedRecord(name, record, data, key)]))
+    cache = { data, stamp, trust, generation, skills }
     return cache
   }
 
@@ -295,18 +305,16 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     }
   }
 
-  function reviewReceipt(check, reviewDigest, identity, generation) {
-    return mac(confirmationKey, 'confirm-v1', identity, generation, check.hash, check.fingerprint, reviewDigest)
+  function reviewReceipt(check, reviewDigest, findingsDigest, identity, generation) {
+    return mac(confirmationKey, 'confirm-v2', identity, generation, check.hash, check.fingerprint, reviewDigest, findingsDigest)
   }
 
   function decisionOf(check, review, blocked, identity, generation) {
-    const gateFindings = checkFindings(check)
-    const modelFindings = [...new Map([...(review?.findings ?? []), ...(blocked ?? [])]
-      .map(finding => [JSON.stringify(finding), finding])).values()]
-    const findings = [...gateFindings, ...modelFindings.map(modelFindingView)]
+    const findings = reportFindings(check, [...(review?.findings ?? []), ...(blocked ?? [])])
     const reviewDigest = review?.status === 'done' ? hashJson(review) : null
-    const out = { findings, review, reviewDigest, truncated: check.truncated || review?.why === 'overflow', counts: check.counts }
-    if (check.injection.length || blocked || modelFindings.some(finding => finding.area === 'prompt-injection')) {
+    const findingsDigest = hashJson(findings)
+    const out = { findings, findingsDigest, review, reviewDigest, truncated: check.truncated || review?.why === 'overflow', counts: check.counts }
+    if (check.injection.length || blocked || findings.some(finding => finding.injection)) {
       return { ...out, decision: 'refuse', why: 'injection', message: INJECTION }
     }
     if (check.verdict === 'block') return { ...out, decision: 'block', message: checkFailure(check).message }
@@ -314,7 +322,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     if (review?.status === 'none') return { ...out, decision: 'refuse', why: 'no-model', message: NO_MODEL }
     if (review?.status !== 'done') return { ...out, decision: 'refuse', why: 'review-failed', message: REVIEW_FAILED }
     if (!findings.length) return { ...out, decision: 'accept' }
-    return { ...out, decision: 'confirm', receipt: reviewReceipt(check, reviewDigest, identity, generation) }
+    return { ...out, decision: 'confirm', receipt: reviewReceipt(check, reviewDigest, findingsDigest, identity, generation) }
   }
 
   async function reviewSkill({ name, entries, check, caller }) {
@@ -344,7 +352,8 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
           ensureCurrent()
           const { data, stamp } = snapshot(true)
           const previous = blockFor(data, check.hash, signingKey) ?? []
-          const all = [...new Map([...previous, ...findings].map(finding => [JSON.stringify(finding), finding])).values()]
+          const all = uniqueModelFindings([...previous, ...findings])
+          if (previous.length === all.length) return
           const seal = mac(signingKey, 'injection-v1', check.hash, hashJson(all))
           await write({ ...data, reviewBlocks: { ...data.reviewBlocks, [check.hash]: { findings: all, seal } } },
             generation, stamp, true)
@@ -381,7 +390,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     if (body.reviewHash !== undefined) {
       const document = storedDocument(name, previous)
       if (!document?.valid || document.check.hash !== body.reviewHash) throw reject(CHANGED, 'bot/refused')
-      const record = checkedRecord(name, previous, data, hostKey(), !stat(importMark))
+      const record = checkedRecord(name, previous, data, hostKey())
       if (!record.reviewHash && !record.held) throw reject(CHANGED, 'bot/refused')
       return { ...document, previous, source: previous.source, frontmatter: previous.frontmatter }
     }
@@ -445,7 +454,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
         if (decision.decision === 'confirm') {
           record.accepted = check.hash
           record.acceptedReview = decision.reviewDigest
-          record.acceptanceSeal = acceptance(key, record, check.fingerprint, decision.reviewDigest)
+          record.acceptanceSeal = acceptance(key, record, check.fingerprint, decision.reviewDigest, decision.findingsDigest)
         }
         await write({ ...data, skills: { ...data.skills, [name]: record } }, generation, stamp)
         audit(action, body, identity, 'allowed', 'review-done')

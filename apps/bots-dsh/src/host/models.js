@@ -144,7 +144,7 @@ function canRetryPolicy(policy, code, retry) {
 // bypass the agent loop's `agent/request-error` hook, so `dsh-llm-retry` never sees
 // their transport or stream-idle failures. Retry those transient codes on the same
 // route with the provider's own retry policy, discarding partial chunks from failed attempts.
-export async function assembleLlmStream(ctx, options, { signal, backoff, random = Math.random, check, dispatch } = {}) {
+export async function assembleLlmStream(ctx, options, { signal, backoff, random = Math.random, check, dispatch, onFailedAttempt } = {}) {
   const fused = options.signal && signal ? AbortSignal.any([options.signal, signal]) : (options.signal ?? signal)
   const request = fused === options.signal ? options : { ...options, signal: fused }
   for (let retry = 1; ; retry += 1) {
@@ -156,11 +156,13 @@ export async function assembleLlmStream(ctx, options, { signal, backoff, random 
       for await (const chunk of ctx.llm.stream(request)) {
         check?.()
         assembler.push(chunk)
+        if (chunk.type === 'finish') assembler.observedFinish = chunk.reason
       }
     } catch (error) {
       thrown = error
     }
     if (thrown !== undefined) {
+      await onFailedAttempt?.(assembler)
       const code = thrown?.failure?.code ?? thrown?.code
       const failure = thrown?.failure ?? { code, message: thrown?.message || String(thrown) }
       if (fused?.aborted || !TRANSIENT_LLM_CODES.has(code)) throw thrown
@@ -172,7 +174,9 @@ export async function assembleLlmStream(ctx, options, { signal, backoff, random 
       continue
     }
     const finish = assembler.finish
-    if (finish.kind !== 'error' || fused?.aborted) return assembler
+    if (finish.kind !== 'error') return assembler
+    await onFailedAttempt?.(assembler)
+    if (fused?.aborted) return assembler
     const failure = finish.failure
     const code = failure?.code
     if (!TRANSIENT_LLM_CODES.has(code)) return assembler
@@ -1042,9 +1046,9 @@ export function install(rt) {
 
   const lifetime = new AbortController()
   ctx.effect?.(() => () => lifetime.abort(), 'ds-bot: auxiliary llm retry')
-  const assembleLlm = async (options, { check, dispatch } = {}) => {
+  const assembleLlm = async (options, { check, dispatch, onFailedAttempt } = {}) => {
     rt.assertBotRunnerProvider?.(options.provider, options.sessionId)
-    return assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff, check, dispatch })
+    return assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff, check, dispatch, onFailedAttempt })
   }
 
   Object.assign(rt, {

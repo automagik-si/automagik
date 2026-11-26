@@ -4826,7 +4826,14 @@ var call = async (endpoint, payload, signal) => {
     if (!vault && !isRetired()) noteClientError(endpoint, error);
     throw error;
   }
-  const result = await response.json();
+  let result;
+  try {
+    result = await response.json();
+  } catch (error) {
+    checkViewer(active2);
+    if (endpoint !== "skill-library-save" || error?.name === "AbortError") throw error;
+    throw Object.assign(new Error(t("Could not reach DSH. Check that it is still running."), { cause: error }), { code: "NETWORK" });
+  }
   if (whoami) signal?.throwIfAborted();
   checkViewer(active2);
   const changed = active2 && viewerChanged(result);
@@ -5301,7 +5308,7 @@ function SkillReport({ report }) {
       { className: "bt-set-hint" },
       t("Only retained findings are shown. This review cannot be confirmed.")
     ) : null,
-    report.findings?.length ? (0, import_react2.createElement)("ul", null, report.findings.map(({ rule, line, reason, path: path2, file, severity, injection }, index) => {
+    report.findings?.length ? (0, import_react2.createElement)("ul", null, report.findings.map(({ rule, line, reason, path: path2, file, severity, injection, detail }, index) => {
       const source = path2 ?? file;
       return (0, import_react2.createElement)(
         "li",
@@ -5310,6 +5317,7 @@ function SkillReport({ report }) {
           injection ? t("Prompt injection") : null,
           severity ? t(severity) : null,
           hostText(reason),
+          detail,
           source ? `${source}${line ? `:${line}` : ""}` : line
         ].filter(Boolean).join(" · ")
       );
@@ -5430,6 +5438,21 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
   const [confirmDelete, setConfirmDelete] = (0, import_react2.useState)(null);
   const [busy, setBusy] = (0, import_react2.useState)(false);
   const [rowReview, setRowReview] = (0, import_react2.useState)(null);
+  const [recovered, setRecovered] = (0, import_react2.useState)([]);
+  (0, import_react2.useEffect)(() => {
+    if (!actions.resumeSkillSaves) return;
+    const controller = new window.AbortController();
+    const { signal } = controller;
+    void actions.resumeSkillSaves(signal).then((results) => {
+      if (signal.aborted) return;
+      const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      setRecovered(completed.filter((value) => value.needsConfirm || value.refused));
+      if (completed.length) void refresh(signal);
+      const failed = results.find((result) => result.status === "rejected" && result.reason.code !== "bot/not-found");
+      if (failed) setError(hostText(failed.reason.message));
+    });
+    return () => controller.abort();
+  }, [actions]);
   const change = async (action) => {
     setBusy(true);
     setError("");
@@ -5471,6 +5494,7 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled, onClick: () => setForm({}) }, t("New skill"))
     ),
     error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
+    recovered.map((report, index) => (0, import_react2.createElement)(SkillReport, { key: index, report })),
     form ? (0, import_react2.createElement)(SkillForm, {
       key: form.item?.name ?? "",
       item: form.item,
@@ -6337,7 +6361,7 @@ var GRADIENTS = { aurora: [[0, "#A4FFB0"], [0.42, "#00F0E4"], [1, "#2E9EF7"]] };
 var ACCENT_INKS = ["deepseek", "charcoal", "graphite", "rose", "sky", "tangerine", "cobalt"];
 var LEGACY_INKS = { kimi: "charcoal", zai: "graphite", minimax: "rose", stepfun: "sky", mimo: "tangerine", qwen: "cobalt" };
 var isHex = (color) => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color);
-var luminance = (hex) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255).map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+var luminance = (hex2) => [1, 3, 5].map((index) => parseInt(hex2.slice(index, index + 2), 16) / 255).map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
 var inkName = (color) => INKS[color] ? color : INKS[LEGACY_INKS[color]] ? LEGACY_INKS[color] : "gray";
 var inkFill = (color) => isHex(color) ? color : `var(--bt-ink-${inkName(color)})`;
 var inkText = (color) => color === "black" ? "var(--bt-ink-gray)" : inkFill(color);
@@ -7059,8 +7083,8 @@ var HUE = { yellow: 54, orange: 30 };
 var GENIE_AURORA = "aurora";
 var GRAY = { gray: "saturate(0) brightness(1.05)", black: "saturate(0) brightness(.42) contrast(1.25)" };
 var EXTRA = { brown: " saturate(.5) brightness(.82)", yellow: " brightness(1.18) saturate(1.1)", orange: " brightness(1.06)" };
-function hueOf(hex) {
-  const [r, g, b] = [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255);
+function hueOf(hex2) {
+  const [r, g, b] = [1, 3, 5].map((index) => parseInt(hex2.slice(index, index + 2), 16) / 255);
   const max = Math.max(r, g, b);
   const span = max - Math.min(r, g, b);
   if (span === 0) return 0;
@@ -21645,7 +21669,7 @@ var THEMES = {
 };
 var DARK_INK = "#141414";
 var accentInk = (accent) => (luminance(accent) + 0.05) ** 2 > 1.05 * (luminance(DARK_INK) + 0.05) ? DARK_INK : "#ffffff";
-var rgba = (hex, alpha) => `rgba(${[1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)).join(",")},${alpha})`;
+var rgba = (hex2, alpha) => `rgba(${[1, 3, 5].map((index) => parseInt(hex2.slice(index, index + 2), 16)).join(",")},${alpha})`;
 function themeVars2(mode, dark2, accent = mode.accent) {
   return {
     "--bt-ink": mode.text,
@@ -23981,6 +24005,8 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
 }
 
 // src/client/team-actions.js
+var hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+var unfinishedSave = (error) => error.code === "NETWORK" || /^HTTP_50[234]$/.test(error.code ?? "") || error.name === "AbortError" || error instanceof SyntaxError;
 function teamActions({
   call: call2,
   after,
@@ -24001,32 +24027,86 @@ function teamActions({
     } catch {
       return null;
     }
+  })(),
+  skillStorage = (() => {
+    try {
+      return globalThis.sessionStorage;
+    } catch {
+      return null;
+    }
   })()
 }) {
   const skillSaves = /* @__PURE__ */ new Map();
-  async function saveSkill(skill) {
-    const key = JSON.stringify(skill);
-    let job = skillSaves.get(key);
-    if (!job) {
-      const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
-      job = { id: Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""), started: false };
-      skillSaves.set(key, job);
-    }
+  const skillScope = () => `automagik.skill-saves.${mountedViewer()?.id ?? "local"}`;
+  function storedSaves(scope) {
     try {
-      let result = await call2("skill-library-save", job.started ? { operation: job.id, poll: true } : { ...skill, operation: job.id });
+      const jobs = JSON.parse(skillStorage?.getItem(scope) ?? "[]");
+      if (Array.isArray(jobs)) return jobs.filter((job) => job && /^[a-f0-9]{32}$/.test(job.id));
+    } catch {
+    }
+    return [];
+  }
+  function rememberSave(scope, job, keep = true) {
+    try {
+      const jobs = storedSaves(scope).filter((entry) => entry.id !== job.id);
+      if (keep) jobs.push(job);
+      if (jobs.length) skillStorage?.setItem(scope, JSON.stringify(jobs));
+      else skillStorage?.removeItem(scope);
+    } catch {
+    }
+  }
+  async function finishSave(scope, job, input, signal) {
+    const poll = { operation: job.id, poll: true };
+    const request = (body) => {
+      signal?.throwIfAborted();
+      if (scope !== skillScope()) throw Object.assign(new Error("The team viewer changed."), { code: "bot/viewer-changed" });
+      return call2("skill-library-save", body, signal);
+    };
+    try {
+      let result = await request(input && !job.started ? { ...input, operation: job.id } : poll);
       while (result.pending) {
-        job.started = true;
+        signal?.throwIfAborted();
+        if (!job.started) {
+          job.started = true;
+          rememberSave(scope, job);
+        }
         await new Promise((resolve2) => setTimeout(resolve2, 750));
-        result = await call2("skill-library-save", { operation: job.id, poll: true });
+        result = await request(poll);
       }
+      signal?.throwIfAborted();
+      rememberSave(scope, job, false);
+      return result;
+    } catch (error) {
+      if (!unfinishedSave(error) && !signal?.aborted) rememberSave(scope, job, false);
+      throw error;
+    }
+  }
+  async function saveSkill(skill) {
+    const scope = skillScope();
+    const key = JSON.stringify(skill);
+    const digest = skillStorage && globalThis.crypto.subtle ? hex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)))) : void 0;
+    let job = skillSaves.get(key) ?? (digest && storedSaves(scope).find((entry) => entry.digest === digest));
+    if (!job) {
+      job = { id: hex(globalThis.crypto.getRandomValues(new Uint8Array(16))), digest, started: false };
+      rememberSave(scope, job);
+    }
+    skillSaves.set(key, job);
+    try {
+      const result = await finishSave(scope, job, skill);
       skillSaves.delete(key);
       return result;
     } catch (error) {
-      if (error.code !== "NETWORK" && !/^HTTP_50[234]$/.test(error.code ?? "") && !(error instanceof SyntaxError)) {
-        skillSaves.delete(key);
-      }
+      if (!unfinishedSave(error)) skillSaves.delete(key);
       throw error;
     }
+  }
+  function resumeSkillSaves(signal) {
+    const scope = skillScope();
+    return Promise.allSettled(storedSaves(scope).map(async (job) => {
+      const result = await finishSave(scope, job, void 0, signal);
+      for (const [key, current] of skillSaves) if (current.id === job.id) skillSaves.delete(key);
+      return result;
+    }));
   }
   const forgetDrafts = (ids) => {
     if (!Array.isArray(ids)) return;
@@ -24493,6 +24573,7 @@ function teamActions({
     skillLibrary: (signal) => call2("skill-library", {}, signal),
     getSkill: (name) => call2("skill-library-get", { name }),
     saveSkill: (skill) => after(saveSkill(skill)),
+    resumeSkillSaves,
     deleteSkill: (name) => after(call2("skill-library-delete", { name })),
     setBotSkill: (id, name, attached, mode) => after(call2(attached ? "bot-skill-add" : "bot-skill-remove", { id, name, mode })),
     setBotSkillMode: (id, name, mode) => after(call2("bot-skill-mode", { id, name, mode })),

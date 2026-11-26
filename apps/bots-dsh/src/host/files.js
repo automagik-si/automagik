@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
 import { open, rename as move } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
 // On Windows a file cannot be replaced while another program has it open: another DSH
@@ -21,6 +24,45 @@ export async function syncDirectory(path) {
   try { await syncPath(path, 'r') } catch (error) {
     if (!NO_DIRECTORY_SYNC.has(error?.code)) throw error
   }
+}
+
+// Startup imports and the review key use synchronous, exclusive publication.
+export function syncDirectorySync(path) {
+  if (process.platform === 'win32') return
+  try {
+    const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0))
+    try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+  } catch (error) {
+    if (!NO_DIRECTORY_SYNC.has(error?.code)) throw error
+  }
+}
+
+const publicationPrefix = name => `.${name}.publish-`
+export const isHostPublicationTemp = (file, name) => file.startsWith(publicationPrefix(name)) &&
+  /^[a-f0-9-]{36}\.tmp$/.test(file.slice(publicationPrefix(name).length))
+
+// The only extra link allowed is the publisher's own private temporary.
+// It can survive a process stop between the link and the unlink.
+export function hasOnlyHostPublicationLinks(path, info) {
+  return info.nlink === 1 || (info.nlink === 2 && fs.readdirSync(dirname(path)).some(name => {
+    if (!isHostPublicationTemp(name, basename(path))) return false
+    const temp = fs.lstatSync(join(dirname(path), name), { throwIfNoEntry: false })
+    return temp?.isFile() && temp.dev === info.dev && temp.ino === info.ino
+  }))
+}
+
+export function publishHostFile(path, bytes) {
+  const dir = dirname(path)
+  const temp = join(dir, `${publicationPrefix(basename(path))}${randomUUID()}.tmp`)
+  const fd = fs.openSync(temp, 'wx', 0o600)
+  try {
+    try {
+      fs.writeFileSync(fd, bytes)
+      fs.fsyncSync(fd)
+    } finally { fs.closeSync(fd) }
+    fs.linkSync(temp, path)
+  } finally { fs.rmSync(temp, { force: true }) }
+  syncDirectorySync(dir)
 }
 
 /**

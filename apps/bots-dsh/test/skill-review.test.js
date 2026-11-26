@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -400,10 +400,16 @@ test('only a complete response for each expected file and part permits a decisio
 
 function putLegacy(f, definitions) {
   fs.mkdirSync(join(f.rt.home, 'skill-library'), { recursive: true, mode: 0o700 })
+  // This fixture represents an independently authenticated local record. The
+  // upgrade itself cannot infer local origin from a legacy library alone.
+  const key = Buffer.alloc(32, 7)
+  fs.writeFileSync(join(f.rt.home, library.SKILL_REVIEW_KEY), key, { mode: 0o600 })
   const skills = Object.fromEntries(definitions.map(([name, kind, content = form.content]) => {
     const record = { ...form, name, content, source: kind === 'text' ? { kind } : { kind, fileName: name + '.md' },
       check: { version: 2, fingerprint: SKILL_CHECK_HISTORY[2], verdict: 'pass' } }
     record.hash = skillHash([{ path: 'SKILL.md', bytes: textSkillMd(record) }])
+    record.localProvenance = createHmac('sha256', key).update(JSON.stringify(
+      ['local-legacy-v1', fs.realpathSync(f.rt.home), name, record.hash, record.check.fingerprint])).digest('hex')
     return [name, record]
   }))
   fs.writeFileSync(f.path, JSON.stringify({ version: 1, skills, active: { b: Object.keys(skills) } }), { mode: 0o600 })

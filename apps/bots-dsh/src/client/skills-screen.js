@@ -58,11 +58,11 @@ function SkillReport({ report }) {
       : report.needsConfirm ? t('Review the warnings, then save again to confirm.') : t('Warnings'),
     report.truncated ? h('p', { className: 'bt-set-hint' },
       t('Only retained findings are shown. This review cannot be confirmed.')) : null,
-    report.findings?.length ? h('ul', null, report.findings.map(({ rule, line, reason, path, file, severity, injection }, index) => {
+    report.findings?.length ? h('ul', null, report.findings.map(({ rule, line, reason, path, file, severity, injection, detail }, index) => {
       const source = path ?? file
       return h('li', { key: `${rule ?? file}:${index}` },
         [injection ? t('Prompt injection') : null, severity ? t(severity) : null, hostText(reason),
-          source ? `${source}${line ? `:${line}` : ''}` : line].filter(Boolean).join(' · '))
+          detail, source ? `${source}${line ? `:${line}` : ''}` : line].filter(Boolean).join(' · '))
     })) : null)
 }
 
@@ -146,6 +146,21 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
   const [confirmDelete, setConfirmDelete] = useState(null)
   const [busy, setBusy] = useState(false)
   const [rowReview, setRowReview] = useState(null)
+  const [recovered, setRecovered] = useState([])
+  useEffect(() => {
+    if (!actions.resumeSkillSaves) return
+    const controller = new window.AbortController()
+    const { signal } = controller
+    void actions.resumeSkillSaves(signal).then(results => {
+      if (signal.aborted) return
+      const completed = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
+      setRecovered(completed.filter(value => value.needsConfirm || value.refused))
+      if (completed.length) void refresh(signal)
+      const failed = results.find(result => result.status === 'rejected' && result.reason.code !== 'bot/not-found')
+      if (failed) setError(hostText(failed.reason.message))
+    })
+    return () => controller.abort()
+  }, [actions])
   const change = async action => {
     setBusy(true)
     setError('')
@@ -175,6 +190,7 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       h('h1', { className: 'bt-section-title' }, t('Skills')),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled, onClick: () => setForm({}) }, t('New skill'))),
     error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null,
+    recovered.map((report, index) => h(SkillReport, { key: index, report })),
     form ? h(SkillForm, { key: form.item?.name ?? '', item: form.item, report: form.report, actions, readOnly,
       onClose: () => setForm(null), saved: async () => { setForm(null); await refresh() } }) : null,
     library.skills.length ? h('div', { className: 'bt-set-card' }, library.skills.map(skill => {
