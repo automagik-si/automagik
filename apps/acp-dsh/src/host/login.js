@@ -903,6 +903,13 @@ export class CliLogins {
       .filter(owned => !owned.retired).map(owned => owned.stop()))
   }
 
+  // A stop may time out before the controller proves exit. Keep the exact home's
+  // controllers until that proof arrives, without waiting on another home's sign-in.
+  async whenHomeDrained(id, home) {
+    await Promise.all([...(this.children?.get(id) ?? [])]
+      .filter(owned => owned.home === home).map(owned => owned.done))
+  }
+
   // Only after Reset published a different physical home: an unproved old controller can
   // keep trying to stop, but cannot prevent sign-in to the new generation. Its durable record
   // and old folder remain; done still clears them only after the original full-tree proof.

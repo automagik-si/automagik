@@ -625,7 +625,9 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
         if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== undefined) return
         const attempt = current?.attempt
         if (attempt && ACTIVE.has(attempt.status) && attempt.openedBy === botId) {
-          setRow(botId, { botId, provider, stage: 'attempt', busy: false, seq: ++sequence, attempt, error: null, confirm: false })
+          const ref = attempt.chatFresh === true && attempt.choice?.state === 'pending' ? attempt.choice.ref : undefined
+          setRow(botId, { botId, provider, stage: 'attempt', busy: false, seq: ++sequence, attempt, error: null, confirm: false,
+            ...(ref === undefined ? {} : { ref }) })
           applyView(provider, attempt)
           return
         }

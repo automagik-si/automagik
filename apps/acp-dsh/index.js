@@ -17,6 +17,7 @@ import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { delimiter, dirname, join, posix, sep } from 'node:path'
 import { homedir } from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
 import z from '@deepseek-ai/schemastery'
 import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js'
 import { AcpAdapter, aside, BRIDGE_PATH, SIDE_MODEL } from './src/host/adapter.js'
@@ -1255,8 +1256,12 @@ export function apply(ctx, config = {}, {
         try {
           adapter.endProvider(id, 'The Bot account changed. Sign in again in the app.')
           agents.get(id)?.catalog.dispose()
-          await stopRuns(preserving.storage.old)
-          adoption.removePrevious()
+          const removePrevious = () => stopRuns(preserving.storage.old).then(adoption.removePrevious)
+          try { await removePrevious() } catch (error) {
+            // B is already selected. Resume it even if proving A stopped takes longer.
+            preserving.cleanup = retryChatRemoval(removePrevious, error)
+            void preserving.cleanup.catch(() => {})
+          }
           Object.assign(selected.env, cliEnvironment(AGENTS[id], cliDetails.get(id)))
           if (!current()) return false
           signedOut(id)
@@ -1965,6 +1970,16 @@ export function apply(ctx, config = {}, {
   }
 
   const loginBusy = () => accountFailure('busy', 'The Bot account is changing.')
+  const loginConfirmation = () => accountFailure('confirmation-required', 'This stops running Bot work for this account. Continue?')
+
+  async function retryChatRemoval(remove, error) {
+    while (error?.code !== 'acp-account/unverified-login') {
+      await delay(250, undefined, { ref: false })
+      try { await remove(); return } catch (next) { error = next }
+    }
+    throw error
+  }
+
   function releaseChatLogin() {
     const attempt = chatLogin
     if (!attempt || attempt.admitting || attempt.draining) return
@@ -1974,10 +1989,14 @@ export function apply(ctx, config = {}, {
     }
     if (logins.current(attempt.id) || logins.settling(attempt.id)) return
     attempt.draining = true
-    void logins.drain(attempt.id).then(() => {
-      if (!attempt.adopted) attempt.storage?.discard()
-    }).catch(() => {}).finally(() => {
+    const { storage } = attempt
+    if (!attempt.adopted && storage) {
+      attempt.cleanup = logins.whenHomeDrained(attempt.id, storage.env[HOME_ENV]).then(storage.discard)
+    }
+    void Promise.resolve(attempt.cleanup).then(() => {
       if (chatLogin === attempt) chatLogin = undefined
+    }, () => {
+      warn(ctx, 'The isolated sign-in home could not be removed safely.')
     })
   }
 
@@ -2029,6 +2048,7 @@ export function apply(ctx, config = {}, {
       reconcile({ kick: false })
       if (clis.get(id) === undefined) throw signInFailure('missing', `Install ${spec.defaultName} first.`)
       if (!attempt.keep) {
+        if (withoutWarning) throw loginConfirmation()
         await signOutNative(id)
         return await nativeLogins.start(id, label, { chatFresh: true })
       }
@@ -2040,9 +2060,7 @@ export function apply(ctx, config = {}, {
       const env = cliEnvironment(spec, cliDetails.get(id))
       const readStatus = () => signedIn(spec, cli, { env }).catch(() => undefined)
       const authenticated = (await readStatus()) ?? await readStatus()
-      if (withoutWarning && authenticated !== false) {
-        throw accountFailure('confirmation-required', 'This stops running Bot work for this account. Continue?')
-      }
+      if (withoutWarning && authenticated !== false) throw loginConfirmation()
       const readAccount = () => account(spec, cli, { env }).catch(() => undefined)
       const who = authenticated === true ? (await readAccount()) ?? await readAccount() : undefined
       restartGuard()
@@ -2271,6 +2289,7 @@ export function apply(ctx, config = {}, {
     let timer
     const work = async () => {
       await Promise.all(consentIds.map(id => logins.stop(id)))
+      await chatLogin?.cleanup
       if (accountChanges.size > 0) return { ok: false, step: 'accounts' }
       if (expired) return { ok: false, step }
       step = 'runs'

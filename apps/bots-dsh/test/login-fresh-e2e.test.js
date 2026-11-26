@@ -1,6 +1,7 @@
 // Real chat command, row state, team endpoints and ACP service. Both vendor sign-in
 // protocols and the connector's turns use only the fake account in a scratch home.
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,6 +14,9 @@ import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { apply as applyAcp } from '../../acp-dsh/index.js'
+import { AgentRun } from '../../acp-dsh/src/host/acp.js'
+import { CliHomes } from '../../acp-dsh/src/host/cli-homes.js'
+import { launchWindowsLogin } from '../../acp-dsh/src/host/windows-login.js'
 import { apply } from '../index.js'
 import { createCliLogin } from '../src/client/cli-login-state.js'
 import { createSource, indexRoster } from '../src/client/sources.js'
@@ -93,7 +97,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 }
 `
 
-function fakeLogin({ vendor, home, next, onSpawn, redeem }) {
+function fakeLogin({ vendor, home, next, onSpawn, redeem, holdStop }) {
   const child = new EventEmitter()
   child.stdin = new PassThrough()
   child.stdout = new PassThrough()
@@ -105,7 +109,7 @@ function fakeLogin({ vendor, home, next, onSpawn, redeem }) {
     child.exitCode = code
     child.emit('close', code)
   }
-  child.kill = () => { queueMicrotask(() => exit(0)); return true }
+  child.kill = () => { if (!holdStop) queueMicrotask(() => exit(0)); return true }
   const complete = () => writeFileSync(join(home, 'account'), next)
   if (vendor === 'claude') {
     setImmediate(() => child.stdout.write(`Visit: ${claudeUrl}\nPaste code here if prompted > `))
@@ -131,7 +135,7 @@ function fakeLogin({ vendor, home, next, onSpawn, redeem }) {
   return child
 }
 
-async function fixture(t, vendor, { peers = false } = {}) {
+async function fixture(t, vendor, { peers = false, holdLoginStop = false, extraModel } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'chat-fresh-'))
   const agent = join(root, 'connector.mjs')
   const provider = `acp-${vendor}`
@@ -150,12 +154,17 @@ async function fixture(t, vendor, { peers = false } = {}) {
   const sandboxPolicy = { defaultMode: 'workspace-write', resolve: () => ({ mode: 'workspace-write' }) }
   const ctx = fakeContext({ services: { sandboxPolicy } })
   ctx.registry = new Map()
+  if (extraModel) {
+    ctx.llm.listProviders = () => [{ id: provider }]
+    ctx.llm.listModels = async () => [{ id: 'default' }, { id: extraModel }]
+  }
   t.after(async () => {
     await ctx.dispose()
     rmSync(root, { recursive: true, force: true })
   })
   ctx.agents = { get: id => ctx.scopeAgent(id), list: () => [] }
   const launches = []
+  let pendingLoginStops = 0
   let next = B
   let redeem = true
   let org
@@ -182,9 +191,17 @@ async function fixture(t, vendor, { peers = false } = {}) {
     loginSpawn: (cli, args, { env }) => {
       assert.equal(cli, join(root, vendor))
       assert.deepEqual(args, vendor === 'claude' ? ['auth', 'login', '--claudeai'] : ['app-server', '--listen', 'stdio://'])
-      return fakeLogin({ vendor, next, home: env.AUTOMAGIK_BOT_CLI_HOME, redeem: () => redeem,
+      return fakeLogin({ vendor, next, home: env.AUTOMAGIK_BOT_CLI_HOME, redeem: () => redeem, holdStop: holdLoginStop,
         onSpawn: attempt => launches.push(attempt) })
     },
+    ...(holdLoginStop ? { loginTimers: {
+      now: Date.now, clearTimeout,
+      setTimeout(fn, ms) {
+        if (ms !== 5000) return setTimeout(fn, ms)
+        pendingLoginStops += 1
+        return setTimeout(() => { pendingLoginStops -= 1; fn() }, 25)
+      },
+    } } : {}),
     logoutRun: () => assert.fail('chat must never log out the fake vendor'),
   })
   const acp = ctx.provided.get('acpAgents')
@@ -200,6 +217,7 @@ async function fixture(t, vendor, { peers = false } = {}) {
   }
   ready.length = 0
   const turns = []
+  const selections = []
   ctx.sessionController = { async prompt({ sessionId, content }) {
     assert.ok(Object.hasOwn(bots, sessionId))
     const ref = rt.botOf(sessionId).model
@@ -209,6 +227,7 @@ async function fixture(t, vendor, { peers = false } = {}) {
       messages: [{ role: 'user', content }] }))) chunks.push(chunk)
     turns.push(chunks)
   } }
+  if (extraModel) ctx.sessionController.selectModel = async selection => { selections.push(selection) }
   apply(ctx, { home: root })
   const rt = ctx.provided.get('omniTeam')
   await rt.load()
@@ -241,7 +260,8 @@ async function fixture(t, vendor, { peers = false } = {}) {
     assert.ok(JSON.stringify(turns.at(-1)).includes(email), `${sessionId} answered as ${email}`)
   }
   return { acp, adapter, call, command, createView, credentialHomes, vendorHomes, home, launches, login, otherHome, otherProvider,
-    profile: email => { next = email }, provider, ready, reply, selectedHome, turns, modelOf: sessionId => rt.botOf(sessionId).model,
+    profile: email => { next = email }, provider, ready, reply, selectedHome, selections, turns, modelOf: sessionId => rt.botOf(sessionId).model,
+    choiceOf: botId => rt.cliLoginChoice(botId, provider), pendingLoginStops: () => pendingLoginStops,
     ignoreCallback: () => { redeem = false }, changeOrg: value => { org = value }, missNextIdentity: () => { skipIdentity = true },
     row: () => login.getSnapshot().rows[BOT], session: (sessionId = BOT) => adapter.live.get(sessionId)?.run }
 }
@@ -600,4 +620,200 @@ test('round 2 finding 5: the rendered row requires Continue when cached signed-o
   await until(() => h.row()?.attempt?.status === 'waiting', 'Continue started sign-in')
   assert.equal(h.launches.length, 1)
   assert.equal(await h.login.cancel(BOT), true)
+})
+
+test('exception: the Windows supervisor admits isolated Claude Code and Codex homes', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'win-staged-login-'))
+  const homes = new CliHomes(root, { identity: null })
+  t.after(() => {
+    homes.dispose()
+    rmSync(root, { recursive: true, force: true })
+  })
+  for (const vendor of ['claude', 'codex']) {
+    await t.test(vendor, async () => {
+      const old = homes.home(vendor)
+      homes.begin(vendor, { preserveVersion: true })
+      const staged = homes.stageLogin(vendor)
+      try {
+        const home = staged.env.AUTOMAGIK_BOT_CLI_HOME
+        assert.notEqual(home, old)
+        assert.equal(homes.home(vendor), old)
+        const launch = randomUUID()
+        const child = new EventEmitter()
+        const started = launchWindowsLogin(join(root, vendor + '.exe'), [], { env: staged.env, cwd: home, launch }, {
+          spawn: (_command, _args, options) => {
+            assert.equal(options.env.HOME, home)
+            assert.equal(options.cwd, home)
+            const request = JSON.parse(options.env.AUTOMAGIK_LOGIN_JOB)
+            assert.equal(request.stop, join(root, 'login-jobs', launch, 'stop'))
+            assert.equal(request.done, join(root, 'login-jobs', launch, 'done'))
+            writeFileSync(request.done, request.nonce)
+            queueMicrotask(() => child.emit('close', 0))
+            return child
+          },
+        })
+        await started.done
+        started.dispose()
+      } finally {
+        staged.discard()
+        homes.resume(vendor)
+        homes.end(vendor)
+      }
+    })
+  }
+})
+
+test('exception: a teardown timeout preserves the answering Session and cleans the exact losing home', { timeout: 20_000 }, async t => {
+  for (const outcome of ['cancelled', 'adopted']) {
+    await t.test(outcome, async t => {
+      const cancel = outcome === 'cancelled'
+      const h = await fixture(t, 'codex', { peers: true, holdLoginStop: cancel })
+      await h.reply(BOT, A)
+      await h.reply(OTHER, OTHER_ACCOUNT)
+      const original = h.session()
+      const other = h.session(OTHER)
+      let finishStop
+      const canStop = new Promise(resolve => { finishStop = resolve })
+      let timedOut = false
+      if (!cancel) {
+        const stop = original.stop.bind(original)
+        t.mock.method(original, 'stop', async () => {
+          if (!timedOut) {
+            timedOut = true
+            throw new Error('Fixture: the old Session did not stop in time')
+          }
+          await canStop
+          await stop()
+        })
+      }
+
+      await h.login.open({ botId: BOT, provider: h.provider, fresh: true })
+      assert.equal(await h.login.switchFresh(BOT), true)
+      await until(() => h.row()?.attempt?.status === 'waiting', 'the isolated sign-in link appeared')
+      const [attempt] = h.launches
+      const winningHome = cancel ? h.home : attempt.home
+      const losingHome = cancel ? attempt.home : h.home
+      try {
+        if (cancel) {
+          attempt.writeAccount()
+          assert.equal(await h.login.cancel(BOT), true)
+        } else attempt.complete()
+        await until(() => h.acp.loginActive() === 0, 'the login settled after teardown timed out')
+        assert.equal(h.selectedHome(h.provider), winningHome)
+        assert.equal(existsSync(join(losingHome, 'account')), true, 'the unproved home was not removed early')
+        if (!cancel) {
+          assert.equal(timedOut, true)
+          await until(() => h.row()?.stage === 'done' || h.row()?.stage === 'failed', 'the confirmed outcome appeared')
+          assert.equal(h.row().stage, 'done')
+        }
+        await h.reply(BOT, cancel ? A : B)
+        const winningSession = h.session()
+        if (cancel) assert.equal(winningSession, original)
+        else assert.notEqual(winningSession, original)
+
+        if (cancel) await until(() => h.pendingLoginStops() === 0, 'all bounded stop calls timed out')
+        attempt.exit(0)
+        finishStop()
+        await until(() => !existsSync(losingHome), 'the stopped process let the exact losing home be removed')
+        assert.deepEqual(h.vendorHomes(), [winningHome])
+        await h.reply(BOT, cancel ? A : B)
+        assert.equal(h.session(), winningSession)
+        await verifyOtherVendor(h, other)
+      } finally {
+        attempt.exit(0)
+        finishStop()
+      }
+    })
+  }
+})
+
+test('exception: Antigravity Try again must show the warning before signing out an active account', { timeout: 15_000 }, async t => {
+  const provider = 'acp-antigravity'
+  const bot = { id: BOT, model: `${provider}/default` }
+  const root = mkdtempSync(join(tmpdir(), 'agy-chat-retry-'))
+  const ctx = fakeContext()
+  t.after(async () => {
+    await ctx.dispose()
+    rmSync(root, { recursive: true, force: true })
+  })
+  let logouts = 0
+  let attempts = 0
+  t.mock.method(AgentRun.prototype, 'start', async function () {
+    if (this.spec.logout) { logouts += 1; return }
+    if (this.spec.authenticate) {
+      attempts += 1
+      await delay(20)
+    }
+    throw new Error('Fixture: the fake sign-in did not finish')
+  })
+  const cliHome = join(root, 'cli-homes')
+  applyAcp(ctx, { antigravity: true, claude: false, codex: false }, {
+    platform: 'darwin', cliHome,
+    store: { home: join(root, 'adapters'), binOf: () => undefined, update: async () => {} },
+    find: name => name === 'agy' ? join(root, 'fake-agy') : undefined,
+  })
+  const acp = ctx.provided.get('acpAgents')
+  const rt = { ctx, botOf: id => id === BOT ? bot : undefined, warn: () => {} }
+  installLoginRoutes(rt)
+  const roster = createSource(indexRoster({ bots: [bot], rooms: [], agents: [], models: [], prefs: {} }))
+  const actions = teamActions({ call: (endpoint, payload) => rt.cliLoginActions[endpoint](payload), roster, loginState: () => login })
+  actions.refreshModels = async () => {}
+  const login = createCliLogin({ actions, pollMs: 10 })
+  t.after(() => login.dispose())
+  const pointer = join(cliHome, 'current', 'antigravity')
+  const row = () => login.getSnapshot().rows[BOT]
+  const render = () => elementsOf(CliLoginRow({ bot, row: row(), manager: login }))
+  const button = label => render().find(node => node.type === 'button' && node.children[0] === label)
+  await login.open({ botId: BOT, provider, fresh: true })
+  button('Continue').props.onClick()
+  await until(() => row()?.stage === 'failed' && acp.loginActive() === 0, 'the first fake attempt failed')
+  assert.equal(attempts, 1)
+  const previous = readFileSync(pointer, 'utf8')
+  const account = join(cliHome, 'homes', 'antigravity', previous, 'account')
+  writeFileSync(account, A) // A synthetic account signed in through Settings while the failed row was open.
+  const beforeRetry = logouts
+  button('Try again').props.onClick()
+  await until(() => !row()?.busy, 'the retry button was handled')
+  assert.equal(logouts, beforeRetry, 'no logout before Continue')
+  assert.equal(readFileSync(pointer, 'utf8'), previous)
+  assert.equal(readFileSync(account, 'utf8'), A)
+  assert.ok(render().some(node => node.type === 'p' && node.children[0] === 'This stops running Bot work for this account. Continue?'))
+  button('Continue').props.onClick()
+  await until(() => attempts === 2 && acp.loginActive() === 0, 'Continue launched the retry')
+  assert.equal(logouts, beforeRetry + 1)
+  assert.notEqual(readFileSync(pointer, 'utf8'), previous)
+})
+
+test('exception: the initiating Bot keeps its model through a reload, failure and successful retry', { timeout: 15_000 }, async t => {
+  const model = 'fake-selected'
+  const h = await fixture(t, 'codex', { peers: true, extraModel: model })
+  const ref = `${h.provider}/${model}`
+  const baseline = h.modelOf(BOT)
+  const other = h.modelOf(OTHER)
+  await h.login.open({ botId: BOT, provider: h.provider, ref })
+  h.command.ui.run({ sessionId: BOT })
+  await until(() => h.row()?.confirm && !h.row().busy, 'the warning appeared')
+  assert.equal(await h.login.switchFresh(BOT), true)
+  await until(() => h.row()?.attempt?.status === 'waiting', 'the initial link appeared')
+  h.login.dispose()
+  const restored = h.createView()
+  await restored.restore(BOT)
+  await restored.restore(PEER)
+  assert.equal(restored.getSnapshot().rows[PEER], undefined)
+  h.launches[0].exit(1)
+  const row = () => restored.getSnapshot().rows[BOT]
+  await until(() => row()?.stage === 'failed' && row().stillSignedIn, 'the restored attempt failed')
+  assert.equal(h.modelOf(BOT), baseline)
+  restored.askSwitch(BOT)
+  assert.equal(await restored.switchAgain(BOT), true)
+  await until(() => row()?.attempt?.status === 'waiting', 'the retry link appeared')
+  h.launches[1].complete()
+  await until(() => row()?.stage === 'done' && h.acp.loginActive() === 0, 'the retry signed in')
+  await until(() => h.choiceOf(BOT)?.state !== 'pending', 'the model choice settled')
+  const applied = await h.call('cli-login-current', { botId: BOT, provider: h.provider })
+  assert.deepEqual(applied.choice, { ref, state: 'applied' })
+  assert.deepEqual(h.selections.filter(selection => selection.model === model), [{ sessionId: BOT, provider: h.provider, model }])
+  assert.equal(h.modelOf(BOT), ref)
+  assert.equal(h.modelOf(PEER), baseline)
+  assert.equal(h.modelOf(OTHER), other)
 })

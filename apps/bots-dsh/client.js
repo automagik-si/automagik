@@ -46015,7 +46015,18 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== void 0) return;
         const attempt = current?.attempt;
         if (attempt && ACTIVE.has(attempt.status) && attempt.openedBy === botId) {
-          setRow(botId, { botId, provider, stage: "attempt", busy: false, seq: ++sequence, attempt, error: null, confirm: false });
+          const ref = attempt.chatFresh === true && attempt.choice?.state === "pending" ? attempt.choice.ref : void 0;
+          setRow(botId, {
+            botId,
+            provider,
+            stage: "attempt",
+            busy: false,
+            seq: ++sequence,
+            attempt,
+            error: null,
+            confirm: false,
+            ...ref === void 0 ? {} : { ref }
+          });
           applyView(provider, attempt);
           return;
         }

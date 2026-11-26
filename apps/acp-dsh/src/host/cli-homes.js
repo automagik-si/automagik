@@ -187,7 +187,7 @@ export class CliHomes {
       if (this.generations.current(vendor) === generation) return
       if (owned) {
         checked(home, owned)
-        rmSync(home, { recursive: true, force: true })
+        rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
         owned = undefined
       }
       if (newContainer) try { rmdirSync(container) } catch {}
@@ -199,6 +199,10 @@ export class CliHomes {
       mkdirSync(home, { mode: 0o700 })
       owned = physical(home)
       const env = this.environmentAt(vendor, home, process.env)
+      // Windows places Job control files beside the generation pointers. Supplying the
+      // staged generation does not select it, so ordinary Bot runs still cannot use it.
+      env[POINTER_ENV] = this.generations.pointer(vendor)
+      env[GENERATION_ENV] = generation
       const adopt = () => {
         const release = this.generations.acquire(vendor)
         try {
@@ -216,13 +220,17 @@ export class CliHomes {
             throw error
           }
           this.registered.set(vendor, home)
+          let removed = false
           return {
             release,
             removePrevious: () => {
-              checked(old, original)
-              this.verify(old)
-              this.generations.release(join(old, 'instances', this.instance))
-              rmSync(old, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+              if (!removed) {
+                checked(old, original)
+                this.verify(old)
+                this.generations.release(join(old, 'instances', this.instance))
+                rmSync(old, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+                removed = true
+              }
               rmSync(marker, { force: true })
             },
           }
