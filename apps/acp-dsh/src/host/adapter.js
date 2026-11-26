@@ -918,25 +918,25 @@ export class AcpAdapter extends LlmAdapter {
     return only
   }
 
-  mintBridge(live, dshAgent, only, name = live.name, canList) {
+  mintBridge(live, dshAgent, only, name = live.name, skillRefusal = false, canList) {
     const { provider, providerRow } = live
     const session = dshAgent?.session
     const sessionId = session?.id
     const record = this.backchannel.mint({
-      sessionId, agent: dshAgent, name, only, canList, native: live.twinsOff === true,
+      sessionId, agent: dshAgent, name, only, skillRefusal, canList, native: live.twinsOff === true,
       promptRunning: () => live.open === true && live.run?.busy === true,
       promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
-      ...(only?.has(HISTORY_TOOL_NAME) && { historyPrompt: callId => {
-        if (live.open !== true || live.run?.busy !== true || live.held !== undefined || live.archived ||
-            this.live.get(sessionId) !== live || live.bridge !== record || this.agents.get(provider) !== providerRow ||
-            this.ctx.agents?.get?.(sessionId) !== dshAgent || dshAgent.session !== session ||
-            (typeof this.ctx.sessions?.get === 'function' && this.ctx.sessions.get(sessionId) !== session) ||
-            !this.historyWanted(providerRow, sessionId, provider)) return undefined
-        const call = live.run.tools.get(callId)
-        if (call?.retired || call?.skillConflict) return undefined
-        if (call?.skillOperation !== HISTORY_TOOL_NAME && (call?.structuredName !== undefined || call?.skillOperation !== undefined)) return undefined
-        return live.run.historySignal
-      } }),
+      ...(only?.has(HISTORY_TOOL_NAME) && {
+        historyPrompt: () => live.run?.historySignal,
+        restrictedCall: (callId, name, prompt) => {
+          if (live.open !== true || live.run?.busy !== true || live.held !== undefined || live.archived ||
+              this.live.get(sessionId) !== live || live.bridge !== record || this.agents.get(provider) !== providerRow ||
+              this.ctx.agents?.get?.(sessionId) !== dshAgent || dshAgent.session !== session ||
+              (typeof this.ctx.sessions?.get === 'function' && this.ctx.sessions.get(sessionId) !== session) ||
+              !this.historyWanted(providerRow, sessionId, provider)) return undefined
+          return live.run.restrictedCall(callId, name, prompt)
+        },
+      }),
     })
     return record
   }
@@ -1441,13 +1441,18 @@ export class AcpAdapter extends LlmAdapter {
     const sessionId = dshAgent?.session?.id
     const agyOff = live.provider === 'acp-antigravity' && live.nativeOff === true
     const only = previous !== undefined && previous.only === undefined ? undefined
-      : this.restrictedTools(agent, sessionId, live.provider, agyOff, live.agySkillsVersion !== undefined, previous?.only)
-    const next = only?.size === 0 ? undefined : this.mintBridge(live, dshAgent, only, agent.name, checkAccount)
+      : this.restrictedTools(agent, sessionId, live.provider, agyOff, live.agySkillsVersion !== undefined)
+    // A request from the old Skills catalog still needs its checked refusal.
+    // The replacement lists only current tools, so it may have an empty bridge.
+    const skillRefusal = only?.size === 0 && !agyOff && (previous?.skillOnly === true || previous?.skillRefusal === true)
+    const next = only?.size === 0 && !skillRefusal ? undefined
+      : this.mintBridge(live, dshAgent, only, agent.name, skillRefusal, checkAccount)
     live.bridge = next
     live.checkReforkAccount = checkAccount
     if (run.spec !== undefined) {
       run.spec.skillBridge = next !== undefined && SKILL_BRIDGE_PROVIDERS.has(live.provider)
       run.spec.skillTools = next?.only
+      run.spec.skillRefusal = next?.skillRefusal
     }
     // The source is done running tools before the fork starts.
     if (previous) this.backchannel.revoke(previous)
@@ -2002,11 +2007,12 @@ export class AcpAdapter extends LlmAdapter {
       // Antigravity OFF selects its exact tool list at process launch. When
       // eligibility or executable proof changes, replace the child and replay delivered history.
       const relaunchForSkills = agyOffLive && live.agySkillsVersion !== wantedAgyVersion
+      const historyBridge = live?.bridge?.only?.has(HISTORY_TOOL_NAME) === true
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       // A new tool set or role needs a new agent session.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
-        || (live.run.promptEnded === undefined && (live.dshAgent !== dshAgent
-          || (live.providerRow !== undefined && live.providerRow !== agent)))
+        || ((historyBridge || live.run.promptEnded === undefined) && (live.dshAgent !== dshAgent
+          || (historyBridge && live.session !== session) || (live.providerRow !== undefined && live.providerRow !== agent)))
         || bridgeGone || toolsChanged || relaunchForSkills || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
       if (remade) {
         if (roleChanged) {
@@ -2922,7 +2928,7 @@ export class AcpAdapter extends LlmAdapter {
         // left to the bridge too; its own tools keep their cards.
         // `ToolSearch` is the adapter's own deferred-tool loader (it stays with `tools: []`); it
         // is not a DSH tool and gets no card or dialog either.
-        const skip = tool.skillBridge === true || tool.skillOperation === HISTORY_TOOL_NAME || (live.bridge?.only === undefined && (
+        const skip = tool.skillBridge === true || tool.restrictedIdentity === true || (live.bridge?.only === undefined && (
           tool.drift === true || tool.structuredName === 'ToolSearch'
           || (!tool.skillConflict && (tool.bridge === true || (agent.refresh === 'fork' && tool.mcp === true)))))
         if (live.bridge !== undefined && skip) {

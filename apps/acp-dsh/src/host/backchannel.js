@@ -534,10 +534,12 @@ export class Backchannel {
    * `native`: the agent keeps its own tools (native-tools mode), so this bridge offers and runs
    * only DSH's extras, never a twin of one of them (NATIVE_TWIN_TOOLS).
    * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean,
-   *   historyPrompt?: (callId?: string) => AbortSignal | undefined, promptSkillRefusals?: () => Set<string> | undefined,
-   *   native?: boolean, only?: Set<string>, skillOnly?: boolean, canList?: () => boolean }} options
+   *   historyPrompt?: () => AbortSignal | undefined, restrictedCall?: (callId: string | undefined, name: string, prompt?: AbortSignal) => any,
+   *   promptSkillRefusals?: () => Set<string> | undefined,
+   *   native?: boolean, only?: Set<string>, skillRefusal?: boolean, skillOnly?: boolean, canList?: () => boolean }} options
    */
-  mint({ sessionId, agent, name, promptRunning, historyPrompt, promptSkillRefusals, native = false, only, skillOnly = false, canList }) {
+  mint({ sessionId, agent, name, promptRunning, historyPrompt, restrictedCall, promptSkillRefusals,
+    native = false, only, skillRefusal = false, skillOnly = false, canList }) {
     if (only === undefined && skillOnly) only = new Set(['load_skill'])
     const credential = randomBytes(32).toString('hex')
     const record = {
@@ -549,10 +551,13 @@ export class Backchannel {
       name: name ?? 'agent',
       promptRunning,
       historyPrompt,
+      restrictedCall,
+      restrictedCalls: restrictedCall === undefined ? undefined : new WeakSet(),
       promptSkillRefusals,
       canList,
       native: native === true,
       only: only === undefined ? undefined : new Set(only),
+      skillRefusal,
       get skillOnly() { return this.only?.size === 1 && this.only.has('load_skill') },
       generation: 0,
       signature: signatureOf(this.ctx, agent, { native: native === true, only }),
@@ -756,7 +761,9 @@ export class Backchannel {
       return reply(200, { tools: offeredTools(this.ctx, record.agent, record), generation: record.generation })
     }
     if (op === 'call') {
-      if (record.only !== undefined && !record.only.has(body.name)) return reply(403, { error: 'refused', isError: true })
+      if (record.only !== undefined && !record.only.has(body.name) && !(record.skillRefusal && body.name === 'load_skill')) {
+        return reply(403, { error: 'refused', isError: true })
+      }
       const attachment = record.attachment
       const attachmentSignal = record.attachmentAbort?.signal
       // The bridge puts no deadline on a call (a long wait, a slow command and an open approval
@@ -780,7 +787,7 @@ export class Backchannel {
           callId,
           signal: gone.signal,
           attachmentSignal,
-          historyRequest: { prompt: historyPrompt, requestId: body.requestId, attachment },
+          historyRequest: { prompt: historyPrompt },
           onSkillDelivered: confirm => { confirmSkill = confirm },
         })
       } finally {
@@ -790,8 +797,8 @@ export class Backchannel {
       this.diagnostics?.bridgeCall(record, result)
       // A call that lost its authority while running answers with a refusal.
       if (record.closed || attachmentSignal?.aborted || result?.revoked === true) return reply(401, { error: 'refused' })
-      if (record.only?.has(HISTORY_TOOL_NAME) && body.name === HISTORY_TOOL_NAME &&
-          (historyPrompt === undefined || historyPrompt.aborted || historyPrompt !== record.historyPrompt?.(callId))) {
+      if (record.only?.has(HISTORY_TOOL_NAME) &&
+          !record.restrictedCall?.(callId, body.name, historyPrompt)) {
         return reply(200, historyCancelled())
       }
       if (confirmSkill === undefined || result?.isError !== false) return reply(200, result)
@@ -945,12 +952,13 @@ export class Backchannel {
    * call and its result; the bridge's call is the single record for it.
    * @param {any} record
    * @param {{ name: string, arguments: any, callId?: string, signal?: AbortSignal, attachmentSignal?: AbortSignal,
-   *   historyRequest?: { prompt?: AbortSignal, requestId?: unknown, attachment?: string }, onSkillDelivered?: Function }} call
+   *   historyRequest?: { prompt?: AbortSignal }, onSkillDelivered?: Function }} call
    */
   async call(record, { name, arguments: args, callId, signal: callerGone,
     attachmentSignal = record.attachmentAbort?.signal, historyRequest = { prompt: record.historyPrompt?.() }, onSkillDelivered }) {
     const error = (text) => ({ content: name === 'load_skill' ? [] : [{ type: 'text', text }], isError: true })
-    if (record.only !== undefined && !record.only.has(name)) return error('Unknown tool')
+    const offeredByRecord = record.only === undefined || record.only.has(name)
+    if (!offeredByRecord && !(record.skillRefusal && name === 'load_skill')) return error('Unknown tool')
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
     const recordFailed = (text, code = 'BRIDGE_RECORD_FAILED') => ({ ...error(text), error: { name: 'BridgeRecordError', code } })
     // Stop and a closed caller end individual calls. Detachment and revocation take away
@@ -959,26 +967,24 @@ export class Backchannel {
     const ended = () => record.closed || authority.aborted
     if (ended()) return { revoked: true }
     const skill = skillRequest(this.ctx, record, name, args?.name)
+    if (!offeredByRecord) return skill?.refuse() ?? error('Unknown tool')
     const session = record.agent?.session
-    const restrictedHistory = record.only !== undefined && name === HISTORY_TOOL_NAME
-    const prompt = restrictedHistory ? historyRequest.prompt : undefined
-    const historyAllowed = () => !restrictedHistory || (
-      prompt !== undefined && !prompt.aborted && !callerGone?.aborted && !ended() &&
+    const restricted = record.only?.has(HISTORY_TOOL_NAME) === true
+    const restrictedHistory = restricted && name === HISTORY_TOOL_NAME
+    const prompt = restricted ? historyRequest.prompt : undefined
+    const binding = typeof callId === 'string' && callId !== '' && prompt !== undefined
+      ? record.restrictedCall?.(callId, name, prompt) : undefined
+    const claim = binding?.skillAbort?.signal
+    const restrictedAllowed = () => !restricted || (
+      binding !== undefined && !prompt.aborted && !claim?.aborted && !callerGone?.aborted && !ended() &&
       session?.id === record.sessionId && session === record.session && record.agent.session === session &&
-      prompt === record.historyPrompt?.(callId)
+      binding === record.restrictedCall(callId, name, prompt)
     )
-    if (!historyAllowed()) return historyCancelled()
-    if (restrictedHistory) {
-      // A retried MCP call cannot reuse its grant. Calls without an ACP call ID can use the
-      // MCP request ID, scoped to the attachment. The next prompt starts with an empty set.
-      if (record.historyCalls?.prompt !== prompt) record.historyCalls = { prompt, ids: new Set() }
-      const { requestId, attachment } = historyRequest
-      if (callId || typeof requestId === 'string' || Number.isFinite(requestId)) {
-        const identity = callId ? ['call', callId] : ['request', attachment, requestId]
-        const key = createHash('sha256').update(JSON.stringify(identity)).digest('hex')
-        if (record.historyCalls.ids.has(key)) return historyCancelled()
-        record.historyCalls.ids.add(key)
-      }
+    if (!restrictedAllowed()) return historyCancelled()
+    if (restricted) {
+      // The verified ACP call owns one MCP execution, regardless of retries or attachment changes.
+      if (record.restrictedCalls.has(binding)) return historyCancelled()
+      record.restrictedCalls.add(binding)
     }
     const tools = this.ctx?.get?.('tools')
     if (session === undefined || tools?.execute === undefined) return error(`DSH tools are not available to ${record.name}.`)
@@ -989,9 +995,9 @@ export class Backchannel {
       const waiting = new AbortController()
       record.controllers.add(waiting)
       try {
-        waited = await this.waitForStep(record, waitingTurn, [authority, waiting.signal, callerGone, prompt].filter(Boolean))
+        waited = await this.waitForStep(record, waitingTurn, [authority, waiting.signal, callerGone, prompt, claim].filter(Boolean))
         if (ended()) return { revoked: true }
-        if (!historyAllowed()) return historyCancelled()
+        if (!restrictedAllowed()) return historyCancelled()
         // Stop can arrive after the step wakes us but before this continuation runs.
         if (waiting.signal.aborted || callerGone?.aborted) {
           if (openStepOf(session)?.turn === waitingTurn || betweenStepTurn(session) === waitingTurn) {
@@ -1060,8 +1066,8 @@ export class Backchannel {
     if (callerGone?.aborted) onGone()
     else callerGone?.addEventListener('abort', onGone, { once: true })
     record.controllers.add(own)
-    const stopped = AbortSignal.any([authority, own.signal, ...(prompt === undefined ? [] : [prompt])])
-    const cancelled = () => settle(restrictedHistory ? [] : [{ type: 'text', text: `${name} was stopped before it finished.` }], true, CANCELLED_INFO)
+    const stopped = AbortSignal.any([authority, own.signal, prompt, claim].filter(Boolean))
+    const cancelled = () => settle(restricted ? [] : [{ type: 'text', text: `${name} was stopped before it finished.` }], true, CANCELLED_INFO)
     const leave = () => {
       record.controllers.delete(own)
       callerGone?.removeEventListener('abort', onGone)
@@ -1108,16 +1114,19 @@ export class Backchannel {
     const settle = async (resultContent, isError, rawInfo) => {
       let content = checkedSkillContent(this.ctx, record, name, args?.name, resultContent)
       let historyContent
-      if (restrictedHistory) {
-        if (historyAllowed() && !stopped.aborted) historyContent = await contentOf(content, this.ctx?.get?.('attachments'))
-        if (!historyAllowed() || stopped.aborted) {
+      if (restricted) {
+        if (restrictedHistory && restrictedAllowed() && !stopped.aborted) {
+          historyContent = await contentOf(content, this.ctx?.get?.('attachments'))
+        }
+        if (!restrictedAllowed() || stopped.aborted) {
           content = []
           historyContent = []
           isError = true
           if (!ended()) rawInfo = CANCELLED_INFO
         }
       }
-      const terminal = skill && content.length === 0 && (!isError || (rawInfo === undefined && !skill.available()))
+      const terminal = skill && content.length === 0 && (!isError || (rawInfo === undefined && !skill.available())) &&
+          (!restricted || (restrictedAllowed() && !stopped.aborted))
         ? skill.refuse() : undefined
       if (terminal) isError = true
       // The row is plain JSON with string fields: a tool's own error object is not trusted to be.
@@ -1179,6 +1188,8 @@ export class Backchannel {
     }
     let unwatch
     let unwatchPre
+    let unwatchPrepare
+    let unwatchPost
     let timer
     let timedOut = false
     let levelChanged = false
@@ -1205,7 +1216,7 @@ export class Backchannel {
           outcome = 'unavailable'
           this.log(`approval for ${name} failed: ${cause?.message ?? cause}`)
         }
-        if (!historyAllowed() && !ended()) return await cancelled()
+        if (!restrictedAllowed() && !ended()) return await cancelled()
         if (outcome !== 'allowed-once') {
           // If the call lost its authority during the ask, close its row as revoked even
           // when the dialog returned a different outcome.
@@ -1223,7 +1234,7 @@ export class Backchannel {
       // dispatch, since a tool body may ignore the abort signal.
       if (ended()) return await revoked()
       // Stopped while it waited for its approval: nothing may start now.
-      if (own.signal.aborted || !historyAllowed()) return await cancelled()
+      if (own.signal.aborted || !restrictedAllowed()) return await cancelled()
       if (skill && !skill.available()) return await settle([], false)
       if (level.auto) {
         // A level that stopped being Auto before dispatch would let this call run unreviewed.
@@ -1265,13 +1276,24 @@ export class Backchannel {
       }
       // Auto can wait for a policy or approval inside tools.execute. Validate again at the
       // execute waterfall, after that wait, and allow this call's body through only once.
-      if ((level.auto || restrictedHistory) && typeof this.ctx?.on === 'function') {
+      const signal = controller === undefined ? stopped : AbortSignal.any([stopped, controller.signal])
+      const sameCall = exec => exec?.callId === id && exec.parent === undefined && exec.agent === record.agent
+      let execution
+      const matches = exec => sameCall(exec) && (!restricted || (exec.name === name &&
+        (exec === execution || exec.signal === signal)))
+      if (restricted && typeof this.ctx?.on === 'function') {
+        // Capture the registry execution before dispatch wrappers can substitute its signal.
+        unwatchPrepare = this.ctx.on('tools/pre-execute', (exec, next) => {
+          if (matches(exec)) execution = exec
+          return next()
+        }, { prepend: true })
+      }
+      if ((level.auto || restricted) && typeof this.ctx?.on === 'function') {
         let dispatched = false
         unwatchPre = this.ctx.on('tools/execute', (exec, next) => {
-          if (exec?.callId !== id || exec.parent !== undefined || exec.agent !== record.agent ||
-              (restrictedHistory && exec.name !== name)) return next()
-          if (restrictedHistory && (dispatched || stopped.aborted || !historyAllowed())) {
-            throw new Error('The history call lost its prompt authorization.')
+          if (!matches(exec)) return next()
+          if (restricted && (dispatched || stopped.aborted || !restrictedAllowed())) {
+            throw new Error('The restricted call lost its prompt authorization.')
           }
           dispatched = true
           clearTimeout(timer)
@@ -1281,13 +1303,32 @@ export class Backchannel {
           return next()
         })
       }
+      if (restrictedHistory && typeof this.ctx?.on === 'function') {
+        // DSH's spill policy waits for downstream policy, then saves oversized content to
+        // a store without cancellation. Keep this call's content inline. Restore it after
+        // the policy chain only if this exact call still holds its prompt authorization.
+        const withheld = []
+        let inline
+        const hide = this.ctx.on('tools/post-execute', async (exec, result, next) => {
+          const decision = await next()
+          if (!matches(exec) || decision.kind !== 'accept' || Object.hasOwn(decision, 'value')) return decision
+          inline = decision.content ?? result.content
+          return { ...decision, content: withheld }
+        })
+        const finish = this.ctx.on('tools/post-execute', async (exec, _result, next) => {
+          const decision = await next()
+          if (!matches(exec)) return decision
+          if (stopped.aborted || !restrictedAllowed()) return { kind: 'block', feedback: [], info: CANCELLED_INFO }
+          return decision.content === withheld ? { ...decision, content: inline } : decision
+        }, { prepend: true })
+        unwatchPost = () => { finish(); hide() }
+      }
       if (levelChanged) {
         return await settle([{ type: 'text', text: `Auto review cannot finish ${name}: the permission level changed.` }], true, { name: 'AutoReviewUnavailableError', code: 'AUTO_REVIEW_LEVEL_CHANGED' })
       }
-      const signal = controller === undefined ? stopped : AbortSignal.any([stopped, controller.signal])
       let settled
       try {
-        if (!historyAllowed() || (restrictedHistory && stopped.aborted)) return await cancelled()
+        if (!restrictedAllowed() || (restricted && stopped.aborted)) return await cancelled()
         settled = await tools.execute({
           calls: [{ id, name, arguments: raw }],
           agent: record.agent,
@@ -1301,7 +1342,7 @@ export class Backchannel {
         if (levelChanged) {
           return await settle([{ type: 'text', text: `Auto review cannot finish ${name}: the permission level changed.` }], true, { name: 'AutoReviewUnavailableError', code: 'AUTO_REVIEW_LEVEL_CHANGED' })
         }
-        if (own.signal.aborted || !historyAllowed()) return await cancelled()
+        if (own.signal.aborted || !restrictedAllowed()) return await cancelled()
         const text = `Error: ${thrownText(cause)}`
         // The info lands in the tool/result row, which must be plain JSON: an Error with no
         // string code (or a non-string name) would leave an undefined field, the row would be
@@ -1321,7 +1362,7 @@ export class Backchannel {
         return await settle([{ type: 'text', text: `Auto review cannot finish ${name}: the permission level changed.` }], true, { name: 'AutoReviewUnavailableError', code: 'AUTO_REVIEW_LEVEL_CHANGED' })
       }
       // Stopped while the body ran: a body that ignored its signal is not reported as a result.
-      if (own.signal.aborted || !historyAllowed()) return await cancelled()
+      if (own.signal.aborted || !restrictedAllowed()) return await cancelled()
       const result = settled?.results?.[0]?.result
       if (result === undefined) return await settle([{ type: 'text', text: 'The tool returned no result.' }], true)
       const info = result.isError === true ? (result.error?.info ?? (typeof result.error?.code === 'string' ? result.error : undefined)) : undefined
@@ -1338,6 +1379,8 @@ export class Backchannel {
       clearTimeout(timer)
       unwatch?.()
       unwatchPre?.()
+      unwatchPrepare?.()
+      unwatchPost?.()
       // After its step ended this writes nothing: the write guard hid the block there.
       hideSynthetic()
       releaseApproval()
@@ -1356,7 +1399,7 @@ export class Backchannel {
    * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean, skill?: any, onSkillDelivered?: Function, origin?: {turn: number, exchangeId: string | null} }} call
    */
   async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered, origin }) {
-    if (record.only !== undefined && name === HISTORY_TOOL_NAME) return historyCancelled()
+    if (record.only?.has(HISTORY_TOOL_NAME)) return historyCancelled()
     const error = text => ({ content: name === 'load_skill' ? [] : [{ type: 'text', text }], isError: true })
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
     const session = record.agent?.session

@@ -1,14 +1,23 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session } from '@deepseek-ai/dsh-session'
+import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
+import { apply as applySpill, inject as spillInject } from '@deepseek-ai/dsh-spill-policy'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { apply as applyExecutor, inject as executorInject } from '@deepseek-ai/dsh-tool-executor-native'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { AcpAdapter, BRIDGE_PATH } from '../src/host/adapter.js'
 import { Backchannel, signatureOf } from '../src/host/backchannel.js'
+import { codexWorld, scheduled, turnOn } from './fixtures/codex-native-world.js'
+import { CLAUDE, nativeWorld, person } from './fixtures/managed-native-world.js'
 import { ompWorld, OMP } from './fixtures/omp-world.js'
 import { CANCELLED, picked, probe, soon } from './support/state-probe.js'
 
@@ -57,7 +66,8 @@ function world(t, { level = 'manual', only = new Set([HISTORY]), sandbox = level
         const exec = { agent, callId: call.id, name: call.name, signal }
         const dispatch = async () => {
           executed.push(call)
-          return { content: [{ type: 'text', text: await controls.body() }], isError: false }
+          const value = await controls.body(call)
+          return { content: Array.isArray(value) ? value : [{ type: 'text', text: value }], isError: false }
         }
         const execute = [...(events.get('tools/execute') ?? [])].reduceRight(
           (next, listener) => () => listener(exec, next), dispatch)
@@ -77,12 +87,19 @@ function world(t, { level = 'manual', only = new Set([HISTORY]), sandbox = level
   const backchannel = new Backchannel({ ctx })
   t.after(() => backchannel.dispose())
   let prompt = new AbortController()
+  const claims = new Map()
   const record = backchannel.mint({
     sessionId: session.id, agent, only, promptRunning: () => !prompt.signal.aborted,
     historyPrompt: () => prompt.signal,
+    restrictedCall: (id, name, signal) => {
+      if (id === undefined || signal !== prompt.signal || signal.aborted) return
+      if (!claims.has(id)) claims.set(id, { name, signal })
+      const claim = claims.get(id)
+      if (claim.signal === signal && claim.name === name) return claim
+    },
   })
   return {
-    ctx, backchannel, record, requests, executed, session, agent, controls,
+    ctx, services, backchannel, record, requests, executed, session, agent, controls,
     stop: () => { prompt.abort(); backchannel.cancel(record) },
     replacePrompt: () => { prompt = new AbortController() },
     call: (callId, name = HISTORY) => backchannel.call(record, { name, arguments: { query: 'marker' }, callId }),
@@ -392,8 +409,8 @@ function mcp(t, backchannel, record) {
   t.after(() => { if (child.exitCode === null) child.kill() })
   let id = 0
   return {
-    async ask(method) {
-      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params: {} }) + '\n')
+    async ask(method, params = {}) {
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) + '\n')
       return JSON.parse((await soon(lines.next())).value)
     },
     async close() { child.stdin.end(); return (await soon(closed))[0] },
@@ -447,12 +464,12 @@ test('AD-4 the verified operation survives updates, permissions and retirement f
   ]) {
     const p = probe(t, { provider, skillBridge: true, skillTools: only })
     const end = p.begin()
-    await p.see('verified', initial)
+    await p.run.onUpdate({ sessionUpdate: 'tool_call', toolCallId: 'verified', ...initial }, 'current')
     await p.run.onUpdate({ sessionUpdate: 'tool_call_update', toolCallId: 'verified', status: 'in_progress' }, 'current')
     const seen = p.run.tools.get('verified')
     assert.equal(seen.skillOperation, op)
     assert.equal(seen.status, 'in_progress')
-    assert.deepEqual(await soon(p.ask('verified')), picked('yes'))
+    assert.deepEqual(await soon(p.ask('verified', { sessionId: 'current' })), picked('yes'))
     await end()
     const endNext = p.begin()
     const retired = p.run.tools.get('verified')
@@ -526,4 +543,318 @@ test('AD-4 fork recomputes eligibility, revokes the source, and verifies the for
   assert.equal(live.run.spec.skillTools, next.only)
   assert.deepEqual(h.events('fork').at(-1).servers, ['dsh'])
   assert.deepEqual(h.events('mcp-list').at(-1).tools, [SKILL])
+})
+
+test('round 2: revocation during the pinned spill policy leaves only ordinary spill data', async t => {
+  const h = world(t, { level: 'full' })
+  const dir = mkdtempSync(join(tmpdir(), 'history-spill-'))
+  const harness = new Context()
+  t.after(async () => {
+    await harness.fiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  })
+  const root = join(dir, 'spill')
+  await harness.plugin(SystemPrompt)
+  await harness.plugin(ToolRuntime)
+  await harness.plugin({ apply: applyExecutor, inject: executorInject })
+  await harness.plugin(LocalSpillStore, { root, cleanupPeriodDays: 0 })
+  await harness.plugin({ apply: applySpill, inject: spillInject }, { maxInlineTokens: 256 })
+  await harness.inject(['tools'], ctx => { h.agent.ctx = createScope(ctx, h.agent).ctx })
+  h.services.tools = harness.tools
+  const attach = h.ctx.on
+  h.ctx.on = (event, listener, options) => event.startsWith('tools/')
+    ? harness.on(event, listener, options) : attach(event, listener, options)
+
+  const ordinary = 'ordinary-spill-marker '.repeat(2048)
+  const history = 'revoked-history-marker '.repeat(2048)
+  const allowedHistory = 'authorized-history-marker '.repeat(2048)
+  const replies = new Map([['ordinary-spill', ordinary], ['spill-revoked', history], ['spill-authorized', allowedHistory]])
+  h.agent.ctx.tools.register({
+    name: HISTORY,
+    description: 'Return oversized fixture text.',
+    parameters: { type: 'object' },
+    output: { schema: { type: 'string' }, render: (_, text) => [{ type: 'text', text }] },
+    execute: (_, exec) => replies.get(exec.callId),
+  })
+  await h.backchannel.listen()
+  const full = h.backchannel.mint({ sessionId: h.session.id, agent: h.agent })
+  const fullPost = wire(h.backchannel, full)
+  await fullPost('list')
+  const ordinaryResult = await fullPost('call', { name: HISTORY, callId: 'ordinary-spill' })
+  assert.equal(ordinaryResult.body.isError, false)
+  assert.match(JSON.stringify(ordinaryResult.body), /Use read with offset\/limit/)
+  function spills() {
+    return readdirSync(root, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile())
+      .map(entry => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+  }
+  assert.deepEqual(spills(), [ordinary])
+
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  harness.on('tools/post-execute', async (exec, result, next) => {
+    const decision = await next()
+    if (exec.callId !== 'spill-revoked') return decision
+    entered.resolve(result.content[0]?.text === history)
+    await release.promise
+    return decision
+  })
+
+  const post = wire(h.backchannel, h.record)
+  await post('list')
+  const pending = post('call', { name: HISTORY, callId: 'spill-revoked' })
+  try {
+    assert.equal(await soon(entered.promise), true, 'the actual oversized result reached post-processing')
+    h.backchannel.revoke(h.record)
+  } finally {
+    release.resolve()
+  }
+  const reply = await pending
+  assert.equal(reply.status, 401)
+  const rows = h.session.snapshotEvents()
+  const result = rows.findLast(row => row.type === 'tool/result')
+  assert.equal(result?.data.error.code, 'BRIDGE_REVOKED')
+  assert.doesNotMatch(JSON.stringify({ rows, reply }), /revoked-history-marker/)
+  const saved = spills()
+  t.diagnostic(JSON.stringify({ ordinarySpills: saved.filter(text => text === ordinary).length, withdrawnSpills: saved.filter(text => text === history).length }))
+  assert.equal(saved.length, 1, 'the restricted call must leave no second, durable copy')
+
+  const authorized = h.backchannel.mint({
+    sessionId: h.session.id, agent: h.agent, only: new Set([HISTORY]),
+    historyPrompt: h.record.historyPrompt, restrictedCall: h.record.restrictedCall,
+  })
+  const authorizedPost = wire(h.backchannel, authorized, 'b'.repeat(32))
+  await authorizedPost('list')
+  const allowed = await authorizedPost('call', { name: HISTORY, callId: 'spill-authorized' })
+  assert.equal(allowed.body.isError, false)
+  assert.match(JSON.stringify(allowed.body), /authorized-history-marker/)
+  assert.deepEqual(spills(), [ordinary], 'authorized history stays inline while ordinary spill remains recoverable')
+})
+
+for (const provider of [CLAUDE, 'acp-codex']) {
+  test(`round 2: ${provider} full-bridge history keeps one approval and the same agent Session`, async t => {
+    const w = provider === CLAUDE ? nativeWorld(t) : codexWorld(t, { identity: () => ({ name: 'Fake Bot' }), dshTools: true })
+    w.services.tools.definitions = () => definitions
+    w.services.tools.executable = name => definitions.find(tool => tool.name === name)
+    const ask = t.mock.method(w.services.approval, 'request')
+    const chat = w.chat('full-history')
+    const send = text => provider === CLAUDE ? chat.turn(person(text), provider) : turnOn(w, chat, scheduled(text))
+    const chunks = await send(provider === CLAUDE ? 'bridge-permit read_own_chat' : 'codex-bridge read_own_chat {"query":"fixture"}')
+    t.diagnostic(JSON.stringify({ finish: chunks.at(-1)?.reason, executions: w.executed, asks: ask.mock.callCount() }))
+    assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+    const answer = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
+    assert.match(answer, /ran read_own_chat/)
+    if (provider === CLAUDE) assert.match(answer, /permit yes/)
+    const live = w.adapter.live.get(chat.session.id)
+    assert.ok(live?.bridge)
+    assert.equal(live.bridge.only, undefined)
+    if (provider !== CLAUDE) assert.equal(live.nativeOff, true)
+    assert.deepEqual(w.executed, [HISTORY])
+    assert.deepEqual(ask.mock.calls.map(({ arguments: [request] }) => request.toolName), [HISTORY])
+    assert.deepEqual(chat.history.flatMap(row => row.content ?? []).filter(block => block.type === 'tool-call'), [])
+    assert.deepEqual(chat.session.snapshotEvents().filter(row => row.type === 'tool/call').map(row => row.data.name), [HISTORY])
+    assert.equal((await send('plain next prompt')).at(-1)?.reason.kind, 'stop')
+    assert.equal(w.adapter.live.get(chat.session.id), live)
+    assert.equal(w.events('new-session').length, 1)
+  })
+}
+
+async function combined(t, { off = false } = {}) {
+  const only = new Set([HISTORY, SKILL])
+  const h = world(t, { level: 'full', only })
+  h.backchannel.revoke(h.record)
+  const providerRow = { bridge: false }
+  const adapter = new AcpAdapter(h.ctx, new Map([[OMP, providerRow]]), {
+    backchannel: h.backchannel, botIdentity: () => ({ needsDshTools: true }), dshTools: () => true,
+  })
+  t.after(() => adapter.dispose())
+  h.ctx.sessions = new Map([[h.session.id, h.session]])
+  const p = probe(t, { provider: OMP, skillBridge: true, skillTools: only, refuseTools: off })
+  const live = { provider: OMP, providerRow, dshAgent: h.agent, session: h.session, run: p.run, open: true }
+  adapter.live.set(h.session.id, live)
+  live.bridge = adapter.mintBridge(live, h.agent, only)
+  await h.backchannel.listen()
+  const child = mcp(t, h.backchannel, live.bridge)
+  assert.deepEqual((await child.ask('tools/list')).result.tools.map(tool => tool.name), [HISTORY, SKILL])
+  const send = (id, update = {}, session = 'current') => p.run.onUpdate({
+    sessionUpdate: 'tool_call', toolCallId: id, ...update,
+  }, session)
+  const seen = (id, name, session) => send(id, { name: `mcp__dsh_${name}` }, session)
+  const call = async (id, name = HISTORY) => (await child.ask('tools/call', {
+    name, arguments: { name: 'marker', query: 'marker' },
+    ...(id === undefined ? {} : { _meta: { callId: id } }),
+  })).result
+  const skill = { type: 'text', text: 'checked fixture skill', automagikSkill: { kind: 'automagik-skill', use: 'load',
+    name: 'marker', hash: 'fixture', botId: 'fixture' } }
+  h.services.omniTeam = { skillCalls: { load: () => skill, unavailable: 'The fixture skill is unavailable.', admit() {} } }
+  h.controls.body = ({ name }) => name === SKILL ? [skill] : 'private history'
+  return { ...h, p, live, seen, send, call }
+}
+
+for (const [failure, id] of [['missing', undefined], ['unknown', 'unknown'], ['unverified', 'unverified'], ['foreign-session', 'foreign']]) {
+  test(`round 2: combined bridge rejects ${failure} ACP bindings before execution`, async t => {
+    const h = await combined(t)
+    const end = h.p.begin()
+    try {
+      await h.send('unverified', { title: 'Ordinary metadata' })
+      await h.seen('foreign', HISTORY, 'wrong-acp-session')
+      const refused = [await h.call(id), await h.call(id, SKILL)]
+      assert.deepEqual(refused.map(result => result.isError), [true, true])
+      assert.doesNotMatch(JSON.stringify(refused), /private history|checked fixture skill/)
+      assert.deepEqual(h.executed, [])
+      assert.equal(h.p.run.tools.get('unverified').title, 'Ordinary metadata')
+    } finally { await end() }
+  })
+}
+
+test('round 2: combined bridge binds each operation across both protocols and consumes it once', async t => {
+  const h = await combined(t)
+  const end = h.p.begin()
+  try {
+    await h.seen('wrong-skill', HISTORY)
+    await h.seen('wrong-history', SKILL)
+    const wrongSkill = await h.call('wrong-skill', SKILL)
+    const wrongHistory = await h.call('wrong-history', HISTORY)
+    const claimedAgain = await h.call('wrong-skill')
+    t.diagnostic(JSON.stringify({ wrongSkill: wrongSkill.isError, wrongHistory: wrongHistory.isError, claimedAgain: claimedAgain.isError }))
+    assert.equal(wrongSkill.isError, true, 'a history identity cannot dispatch a Skill')
+    assert.equal(wrongHistory.isError, true, 'a Skills identity cannot dispatch history')
+    assert.equal(claimedAgain.isError, true, 'the first MCP conflict is sticky')
+    assert.deepEqual(h.executed, [])
+
+    for (const name of [HISTORY, SKILL]) {
+      await h.seen(name, name)
+      assert.deepEqual(await h.p.ask(name, { sessionId: 'current' }), picked('yes'))
+      assert.equal((await h.call(name, name)).isError, false)
+      assert.equal((await h.call(name, name)).isError, true, 'another MCP request cannot reuse the ACP identity')
+    }
+    assert.deepEqual(h.executed.map(row => row.name), [HISTORY, SKILL])
+  } finally { await end() }
+
+  const next = h.p.begin()
+  try {
+    assert.equal((await h.call(HISTORY)).isError, true)
+    assert.equal((await h.call(SKILL, SKILL)).isError, true)
+  } finally { await next() }
+})
+
+test('round 2: combined bridge rechecks a known call after the originating Session changes', async t => {
+  const h = await combined(t)
+  const end = h.p.begin()
+  try {
+    await h.seen('old-skills', SKILL)
+    h.ctx.sessions.set(h.session.id, Session.create(h.session.id))
+    assert.equal((await h.call('old-skills', SKILL)).isError, true)
+    assert.deepEqual(h.executed, [])
+  } finally { await end() }
+})
+
+test('round 2: omp OFF remembers a permission-first conflict and accepts status metadata', async t => {
+  const h = await combined(t, { off: true })
+  const end = h.p.begin()
+  const status = (id, details) => h.p.run.onUpdate({ sessionUpdate: 'tool_call_update', toolCallId: id, ...details }, 'current')
+  try {
+    const ask = (id, toolCall = { toolCallId: id }) => h.p.ask(id, { sessionId: 'current', toolCall })
+    assert.deepEqual(await ask('conflict', { toolCallId: 'conflict', name: 'mcp__dsh_read_own_chat',
+      rawInput: { server: 'dsh', tool: SKILL } }), picked('no'))
+    await h.seen('conflict', HISTORY)
+    const conflict = h.p.run.tools.get('conflict')
+    assert.equal(conflict?.skillConflict, true)
+    assert.deepEqual(await ask('conflict'), picked('no'))
+    assert.equal((await h.call('conflict')).isError, true)
+
+    await h.seen('verified-status', HISTORY)
+    await status('verified-status', { status: 'in_progress', _meta: { terminal_output: { data: 'started normally' } } })
+    await status('verified-status', { name: 'mcp__dsh_load_skill', status: 'failed' })
+    assert.equal((await h.call('verified-status')).isError, true)
+    await status('verified-status', { status: 'completed', _meta: { terminal_output: { data: ' and settled' } } })
+    const verified = h.p.run.tools.get('verified-status')
+    assert.equal(verified.skillOperation, HISTORY)
+    assert.equal(verified.status, 'completed')
+    assert.equal(verified.output, 'started normally and settled')
+    assert.equal(verified.skillConflict, true)
+    assert.deepEqual(h.executed, [])
+  } finally { await end() }
+})
+
+for (const change of ['provider row', 'DSH Agent', 'Session']) {
+  test(`round 2: replacing the exact ${change} after a completed prompt replaces the history credential`, async t => {
+    const h = omp(t)
+    const id = 'history-reuse-owner'
+    const chat = h.chat(id)
+    h.services.tools.execute = async ({ calls: [call] }) => ({
+      results: [{ result: { content: [{ type: 'text', text: `history for ${JSON.parse(call.arguments).query}` }] } }],
+    })
+    assert.equal((await chat.turn('history-lookup omp warm')).at(-1)?.reason.kind, 'stop')
+    assert.match(JSON.stringify(h.events('mcp-history-result').at(-1)?.answer.content), /history for warm/)
+    const before = h.adapter.live.get(id)
+    assert.equal(before.run.promptEnded, true)
+    if (change === 'provider row') h.adapter.agents.set(OMP, { ...h.adapter.agents.get(OMP) })
+    if (change === 'DSH Agent') {
+      const get = h.adapter.ctx.agents.get
+      const agent = { ...get(id) }
+      h.adapter.ctx.agents.get = key => key === id ? agent : get(key)
+    }
+    if (change === 'Session') {
+      const replacement = Session.create(id, undefined, chat.session.header)
+      replacement.append('turn/start', { turn: 1 })
+      replacement.append('step/start', { turn: 1, step: 1 })
+      before.dshAgent.session = replacement
+    }
+
+    const chunks = await chat.turn('history-lookup omp fixture')
+    const after = h.adapter.live.get(id)
+    const result = h.events('mcp-history-result').at(-1)?.answer
+    t.diagnostic(JSON.stringify({ replaced: after !== before, originalClosed: before.bridge.closed, readSucceeded: result?.isError === false }))
+    assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+    assert.notEqual(after, before)
+    assert.notEqual(after.bridge.credential, before.bridge.credential)
+    assert.equal(before.bridge.closed, true)
+    assert.equal((await wire(h.adapter.backchannel, before.bridge)('list')).status, 401)
+    assert.equal(result?.isError, false)
+    assert.match(JSON.stringify(result.content), /history for fixture/)
+    assert.deepEqual(h.conversation('history-lookup omp fixture').servers, ['dsh'])
+  })
+}
+
+test('fresh fork after withdrawal of the last Automatic skill', async t => {
+  const h = ompWorld(t)
+  const name = 'load_skill'
+  let automatic = true
+  const unavailable = 'This fake Automatic skill was withdrawn.'
+  h.adapter.dshTools = () => true
+  h.service.botIdentity(() => ({ name: 'Fake Bot', needsDshTools: false }))
+  h.services.omniTeam = { skillCalls: {
+    available: () => automatic, unavailable, catalog: () => undefined, project: options => options,
+    load: () => undefined, admit() {},
+  } }
+  h.services.tools = {
+    definitions: () => [{ name, description: 'Load a skill', parameters: { type: 'object' } }],
+    execute: () => assert.fail('a withdrawn skill must never execute'),
+  }
+  const id = 'withdraw-last-automatic'
+  const chat = h.chat(id)
+  assert.equal((await chat.turn('plain warm-up')).at(-1).reason.kind, 'stop')
+  const live = h.adapter.live.get(id)
+  const previous = live.bridge
+  assert.equal(previous.skillOnly, true)
+  assert.deepEqual(h.events('mcp-list').at(-1).tools, [name])
+  const row = h.adapter.agents.get(OMP)
+  automatic = false
+  const old = await h.adapter.backchannel.call(previous, { name, arguments: { name: 'fake' } })
+  assert.equal(old.isError, true)
+  assert.match(JSON.stringify(old), /fake Automatic skill was withdrawn/)
+  const next = await h.adapter.refork(row, live, live.dshAgent)
+  const fork = h.events('fork').at(-1)
+  const listed = h.events('mcp-list').filter(event => event.sessionId === fork.sessionId)
+  t.diagnostic(JSON.stringify({
+    accountChanged: false, sameProviderRow: h.adapter.agents.get(OMP) === row, oldRefused: old.isError,
+    oldClosed: previous.closed, minted: next !== undefined, skillOnly: next?.skillOnly,
+    servers: fork.servers, listed: listed.map(event => event.tools),
+  }))
+  assert.equal(previous.closed, true)
+  assert.deepEqual(fork.servers, ['dsh'])
+  assert.deepEqual(listed.map(event => event.tools), [[]], 'the fresh fork must not advertise the withdrawn Skill')
+  const refusal = await wire(h.adapter.backchannel, next, next.attachment)('call', { name, arguments: { name: 'fake' } })
+  assert.equal(refusal.status, 200)
+  assert.deepEqual(refusal.body, old, 'a stale request still gets the checked refusal')
 })

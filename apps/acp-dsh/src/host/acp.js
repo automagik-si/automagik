@@ -58,14 +58,16 @@ function skillIdentity(spec, tool, update) {
   const agyPair = op => pair(op) || (serverName === BRIDGE_NAME && toolName === op)
   const op = tool.skillOperation ?? SKILL_OPERATIONS.find(op => names.some(name => exact(name, op)) ||
     pair(op) || (agy && agyPair(op)))
-  if (op === undefined) return undefined
+  // History on a full bridge has the same routing as other ordinary DSH tools.
+  if (op === undefined || (op === HISTORY_TOOL_NAME && skillTools === undefined)) return undefined
   const disagrees = !names.every(name => exact(name, op)) ||
     (tool.skillOperation === undefined && tool.structuredName !== undefined && !exact(tool.structuredName, op)) ||
     (server !== undefined && server !== BRIDGE_NAME) ||
     (serverName !== undefined && serverName !== BRIDGE_NAME) ||
     (rawTool !== undefined && rawTool !== op) ||
     (toolName !== undefined && toolName !== op)
-  if (disagrees || !(skillTools === undefined ? op === 'load_skill' : skillTools.has(op))) return 'conflict'
+  const refusal = op === 'load_skill' && spec.skillRefusal === true
+  if (disagrees || (skillTools !== undefined && !skillTools.has(op) && !refusal)) return 'conflict'
   // Codex's MCP updates omit the name. Its adapter labels this RPC as MCP and
   // supplies the server and operation outside the tool's own arguments.
   // Antigravity's flat MCP name can collide with a different server/tool pair.
@@ -165,7 +167,7 @@ export function contentImages(content) {
 // Saved image paths still scrub later replies; the image bytes and other output can go.
 function retiredTool(tool) {
   const record = { id: tool.id, retired: true, unanswerable: true }
-  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'skillOperation', 'skillBridge', 'skillConflict', 'drift', 'refused', 'mirrored']) {
+  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'skillOperation', 'skillBridge', 'skillConflict', 'restrictedIdentity', 'drift', 'refused', 'mirrored']) {
     if (tool[key] !== undefined) record[key] = tool[key]
   }
   record.listeners = new Set()
@@ -556,11 +558,12 @@ export class AgentRun {
       this.retired.add(id)
     }
     this.turn = new Set()
-    // An update for a call more than 1024 calls old is treated as new; no session restart.
+    // An update for an ordinary call more than 1024 calls old is treated as new.
     while (this.retired.size > RETIRED_MAX) {
       const id = this.retired.values().next().value
       this.retired.delete(id)
-      this.tools.delete(id)
+      // A restricted call ID must not regain authority when its ordinary history ages out.
+      if (!this.tools.get(id)?.restrictedIdentity) this.tools.delete(id)
     }
     this.holdOn()
     const carried = this.identityPreamble !== undefined
@@ -930,11 +933,11 @@ export class AgentRun {
       }
       case 'tool_call':
         this.confirmPromptDelivery()
-        if (this.seeTool(update, observedAt) === undefined) return
+        if (this.seeTool(update, observedAt, sessionId) === undefined) return
         break
       case 'tool_call_update': {
-        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update, observedAt)
-        if (tool !== undefined && !this.changeTool(tool, update)) return
+        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update, observedAt, sessionId)
+        if (tool !== undefined && !this.changeTool(tool, update, sessionId)) return
         break
       }
       case 'config_option_update':
@@ -954,26 +957,31 @@ export class AgentRun {
     }
   }
 
-  seeTool(update, observedAt = performance.now()) {
+  seeTool(update, observedAt = performance.now(), sessionId) {
     if (!isToolId(update?.toolCallId)) {
       this.ignored('a tool update', update)
       return undefined
     }
     const known = this.tools.get(update.toolCallId)
-    if (known) return known.retired === true || this.changeTool(known, update) ? known : undefined
-    if (this.spec.refuseTools === true && !verifiedSkill(skillIdentity(this.spec, {}, update))) {
+    if (known) return known.retired === true || this.changeTool(known, update, sessionId) ? known : undefined
+    const identity = skillIdentity(this.spec, {}, update)
+    if (this.spec.refuseTools === true && !verifiedSkill(identity)) {
+      this.rememberSkillConflict(update, identity)
       this.forbidTool(update)
       return undefined
     }
     if (this.reviews?.last) this.reviews.after = true
     const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now(), observedAt }
+    if (this.historySignal !== undefined && isToolId(sessionId) && sessionId === this.sessionId) {
+      tool.originPrompt = this.historySignal
+    }
     // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
     const parent = parentToolOf(update)
     if (parent !== undefined && parent !== tool.id) tool.parent = parent
     // First seen after its prompt ended: its event lands behind the prompt's end, where no step
     // reads it, and the next prompt drops it. No card will ever ask its question.
     if (this.promptEnded === true) tool.unanswerable = true
-    this.markCall(tool, update)
+    this.markCall(tool, update, sessionId)
     // Drift known at first sight, before its event is queued: the adapter reads the same mark
     // when it takes the event and makes no card for it. Drift found later is marked there
     // if the event is still queued; an existing card keeps its question for its body to ask.
@@ -993,12 +1001,22 @@ export class AgentRun {
   }
 
   /** What an update says the call is: its structured name, whether it is MCP, the bridge's. */
-  markCall(tool, update) {
+  markCall(tool, update, sessionId) {
     if (this.spec.skillBridge) {
       const identity = skillIdentity(this.spec, tool, update)
       tool.skillConflict ||= identity === 'conflict'
       tool.skillBridge = !tool.skillConflict && verifiedSkill(identity)
-      if (tool.skillBridge) tool.skillOperation = identity
+      if (this.spec.skillTools?.has(HISTORY_TOOL_NAME) && (tool.skillBridge || tool.skillConflict)) {
+        tool.restrictedIdentity = true
+      }
+      if (tool.skillBridge && tool.skillOperation === undefined) {
+        tool.skillOperation = identity
+        if (tool.originPrompt !== undefined && tool.originPrompt === this.historySignal && sessionId === this.sessionId) {
+          tool.skillPrompt = tool.originPrompt
+          tool.skillSession = sessionId
+          tool.skillAbort = new AbortController()
+        }
+      }
     }
     const name = structuredNameOf(update)
     if (name !== undefined) tool.structuredName = name
@@ -1022,15 +1040,41 @@ export class AgentRun {
     this.spec.onForbiddenTool?.(update)
   }
 
-  checkSkillClaim(tool, update, notify = true) {
-    if (skillIdentity(this.spec, tool, update) !== 'conflict') return true
+  rememberSkillConflict(update, identity) {
+    if (identity !== 'conflict' || !this.spec.skillTools?.has(HISTORY_TOOL_NAME)) return
+    const id = update.toolCallId
+    this.tools.set(id, {
+      id, skillConflict: true, skillBridge: false, restrictedIdentity: true, unanswerable: true,
+      status: update.status ?? 'pending', listeners: new Set(),
+    })
+    this.turn.add(id)
+  }
+
+  restrictedCall(callId, operation, prompt) {
+    if (!isToolId(callId) || prompt === undefined || prompt.aborted || prompt !== this.historySignal) return
+    const tool = this.tools.get(callId)
+    if (tool?.skillPrompt !== prompt || tool.skillSession !== this.sessionId || tool.retired || tool.skillConflict) return
+    if (tool.skillOperation !== operation) {
+      this.conflictSkill(tool)
+      return
+    }
+    return tool
+  }
+
+  conflictSkill(tool) {
     tool.skillConflict = true
     tool.skillBridge = false
+    tool.skillAbort?.abort()
+  }
+
+  checkSkillClaim(tool, update, notify = true) {
+    if (skillIdentity(this.spec, tool, update) !== 'conflict') return true
+    this.conflictSkill(tool)
     if (notify && this.spec.refuseTools === true) this.forbidTool(update)
     return false
   }
 
-  changeTool(tool, update) {
+  changeTool(tool, update, sessionId) {
     if (!this.checkSkillClaim(tool, update) && (tool.skillOperation !== undefined || this.spec.refuseTools === true)) return false
     // A command's output, for a client with no terminal of its own (Zed's terminal_output
     // extension, which codex-acp sends): kept as the call's output.
@@ -1053,7 +1097,7 @@ export class AgentRun {
       this.reviews.last = status
       this.reviews.after = false
     }
-    this.markCall(tool, update)
+    this.markCall(tool, update, sessionId)
     for (const listener of tool.listeners) listener()
     return true
   }
@@ -1118,15 +1162,18 @@ export class AgentRun {
     const identity = skillIdentity(this.spec, known ?? {}, params.toolCall)
     if (known) this.checkSkillClaim(known, params.toolCall, false)
     if (this.spec.refuseTools === true && (known?.skillConflict || !verifiedSkill(identity))) {
+      if (!known) this.rememberSkillConflict(params.toolCall, identity)
       return Promise.resolve(refusal('rejected', params.options ?? []))
     }
-    const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall })
+    const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall }, undefined, params.sessionId)
     if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
     const { title, ...details } = params.toolCall ?? {}
-    if (tool.retired !== true && identity !== 'conflict') this.changeTool(tool, { ...details, status: undefined })
-    if (tool.skillOperation === HISTORY_TOOL_NAME &&
-        (tool.skillConflict || tool.retired || !this.busy || this.cancelled || this.disposed)) return Promise.resolve(CANCELLED)
+    if (tool.retired !== true && identity !== 'conflict') this.changeTool(tool, { ...details, status: undefined }, params.sessionId)
+    if (tool.restrictedIdentity && (!this.busy || this.cancelled || this.disposed ||
+        params.sessionId !== this.sessionId || !this.restrictedCall(tool.id, tool.skillOperation, this.historySignal))) {
+      return Promise.resolve(CANCELLED)
+    }
     // The queued tool event is read after this synchronous handler: mark standalone approvals
     // before the adapter can turn one into a mirror card.
     if (identity !== 'conflict' && params._meta?.is_mcp_tool_approval === true) {
