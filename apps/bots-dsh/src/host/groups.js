@@ -242,7 +242,8 @@ export function install(rt) {
   const warnedOpening = new Set()
   let openingStopped = false
   const currentRoom = (id, room, generation) => !openingStopped && room !== undefined
-    && rt.readOnly() === undefined && rt.sameTeam(generation) && rt.roomOf(id) === room && rt.sessionOfRoom(room) === id
+    && rt.readOnly() === undefined && rt.sameTeam(generation) && rt.teamCurrent()
+    && rt.roomOf(id) === room && rt.sessionOfRoom(room) === id
   const liveSession = id => ctx.sessions?.get(id)
   const liveAgent = id => ctx.get?.('agents')?.get(id)
 

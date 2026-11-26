@@ -22462,14 +22462,64 @@ var READ_SCOPE_CODE = "SESSION_READ_SCOPE_DENIED";
 var import_react50 = require("react");
 var import_react_dom7 = require("react-dom");
 var OPENING_TURN = 1;
-function isOpeningTurn(roster, sessionId, turn) {
-  if (turn !== OPENING_TURN) return false;
-  const opened = roster.roomsById?.[sessionId]?.opened;
-  return opened?.part === sessionId && opened?.turn === turn;
+var canDeriveOpening = (room2, id) => room2 !== void 0 && room2.opened === void 0 && (room2.sessionId ?? room2.id) === id;
+var openingBinding = (sessions, id) => {
+  const binding = sessions?.binding?.(id);
+  return binding?.sessionId === id ? binding : void 0;
+};
+function roomOpeningTurn(room2, id, sessions) {
+  if (id === void 0) return void 0;
+  if (room2?.opened?.part === id && room2.opened.turn === OPENING_TURN) return OPENING_TURN;
+  if (!canDeriveOpening(room2, id)) return void 0;
+  const window2 = openingBinding(sessions, id)?.eventSource?.getSnapshot();
+  if (window2?.hasMore !== false || !Array.isArray(window2.entries)) return void 0;
+  for (let seq = 0; seq < window2.entries.length; seq++) {
+    const entry = window2.entries[seq];
+    const event = entry?.event;
+    if (entry?.type !== "event" || event?.seq !== seq || typeof event.type !== "string") return void 0;
+    if (["agent/inbox/spliced", "user/message", "turn/end"].includes(event.type) || event.type.startsWith("step/")) return void 0;
+    if (event.type !== "turn/start") continue;
+    const end = window2.entries[seq + 1];
+    if (event.data?.turn === OPENING_TURN && end?.type === "event" && end.event?.seq === seq + 1 && end.event.type === "turn/end" && end.event.data?.turn === OPENING_TURN && ["completed", "interrupted"].includes(end.event.data.reason?.kind)) return OPENING_TURN;
+    return void 0;
+  }
+}
+function watchRoomOpeningBinding(sessions, currentId, notify) {
+  let watching = true;
+  let binding;
+  let offEvents;
+  const sync = () => {
+    if (!watching) return;
+    const id = currentId();
+    const next = id === void 0 ? void 0 : openingBinding(sessions, id);
+    if (next !== binding) {
+      offEvents?.();
+      binding = next;
+      offEvents = next?.eventSource?.subscribe(sync);
+    }
+    notify();
+  };
+  const offList = sessions?.list?.subscribe(sync);
+  sync();
+  return () => {
+    watching = false;
+    offList?.();
+    offEvents?.();
+  };
+}
+var noSubscription = () => () => {
+};
+function useRoomOpeningTurn({ useRoster, sessionId, openingSessions }) {
+  const room2 = useRoster((roster) => roster.roomsById?.[sessionId]);
+  const sessions = canDeriveOpening(room2, sessionId) ? openingSessions : void 0;
+  const subscribe = (0, import_react50.useMemo)(() => sessions === void 0 ? noSubscription : (notify) => watchRoomOpeningBinding(sessions, () => sessionId, notify), [sessions, sessionId]);
+  const read = () => roomOpeningTurn(room2, sessionId, sessions);
+  return (0, import_react50.useSyncExternalStore)(subscribe, read, read);
 }
 function withoutOpeningTurn(Cell, turnOf) {
   return function RoomTurnCell(props) {
-    const hidden = props.useRoster((roster) => isOpeningTurn(roster, props.sessionId, turnOf(props)));
+    const opening = useRoomOpeningTurn(props);
+    const hidden = opening !== void 0 && opening === turnOf(props);
     return hidden ? (0, import_react50.createElement)(CellEmpty) : (0, import_react50.createElement)(Cell, props);
   };
 }
@@ -23302,8 +23352,9 @@ function GuardOffLine({ sessionId, useRoster }) {
   const notice = guardOffNoticeOf(bot, sessionId);
   return notice === void 0 ? null : (0, import_react50.createElement)(UpgradeLine, { name: bot.name, off: notice.kind });
 }
-function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, useUi, actions }) {
+function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, useUi, actions, openingSessions }) {
   const roster = useRoster((value) => value);
+  const opened = useRoomOpeningTurn({ useRoster, sessionId, openingSessions });
   const data = node.data;
   const source = data.source !== null && typeof data.source === "object" ? data.source : {};
   const selfId = roster.byId[sessionId]?.id ?? sessionId;
@@ -23315,7 +23366,7 @@ function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, us
   }, [relayed, sessionId, turn, source.senderSessionId]);
   const order = useSessions((list) => {
     const outline = list.projectionsBySession?.[sessionId]?.values?.turnOutline ?? list.byId[sessionId]?.projectionValues?.turnOutline;
-    return Array.isArray(outline) ? outline.filter((entry) => !isOpeningTurn(roster, sessionId, entry.turn)).map((entry) => entry.turn).join(",") : "";
+    return Array.isArray(outline) ? outline.filter((entry) => entry.turn !== opened).map((entry) => entry.turn).join(",") : "";
   });
   const peers = useTurnClock((state2) => {
     if (!relayed) return "";
@@ -23325,7 +23376,7 @@ function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, us
   const visit = useUi((state2) => state2.visits?.[sessionId]);
   const hiddenTurns = roster.exchangeTurns[sessionId];
   const unreadOpening = useTurnClock((state2) => {
-    const first = openingTurn(state2[sessionId], order, hiddenTurns, isOpeningTurn(roster, sessionId, OPENING_TURN));
+    const first = openingTurn(state2[sessionId], order, hiddenTurns, opened !== void 0);
     return first?.turn === turn && unseenSince(visit, first.start) ? clockLabel(first.start) : "";
   });
   const body = triggerBody();
@@ -33370,13 +33421,12 @@ function installHeaderNavigation(slots, face, component, priority) {
 var import_react74 = require("react");
 var SLOT = "settings.onboarding";
 var FLAGS = ["companionDone", "teamDone", "migrateDone", "connectAiDone"];
-var isBotChat = (roster, id) => Boolean(roster.byId?.[id] || roster.agentOf?.[id]);
-function suppressed(roster, mainId, firstRunDone = "pending") {
-  if (mainId === void 0) return false;
-  if (roster.ready !== true) return "pending";
-  if (roster.roomsById?.[mainId] || roster.tasks?.[mainId] || roster.rooms?.some((room2) => room2.parts?.includes(mainId))) return true;
-  if (isBotChat(roster, mainId)) return firstRunDone;
-  return false;
+function classify(roster, mainId, hasPendingAdoption) {
+  if (mainId === void 0) return "personal";
+  if (roster.ready !== true) return "waiting";
+  if (roster.roomsById?.[mainId] || roster.tasks?.[mainId] || roster.rooms?.some((room2) => room2.parts?.includes(mainId))) return "team";
+  if (roster.byId?.[mainId] || roster.agentOf?.[mainId]) return "owned";
+  return hasPendingAdoption?.(mainId) ? "adopting" : "personal";
 }
 async function readFirstRun(signal) {
   const response = await fetch("api/omni-ai", {
@@ -33390,56 +33440,56 @@ async function readFirstRun(signal) {
   const result = await response.json();
   return result.ok === true && FLAGS.every((flag) => result.value?.[flag] === true);
 }
-function useFirstRunDone(read) {
-  const [done, setDone] = (0, import_react74.useState)("pending");
+function OnboardingGate({ explicit, complete, classification, flags, read, current }) {
+  const firstRunDone = (0, import_react74.useSyncExternalStore)(flags.subscribe, flags.getSnapshot);
   (0, import_react74.useEffect)(() => {
-    if (read === void 0) return;
-    let mounted = true;
-    void read().then((value) => {
-      if (mounted) setDone(value);
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [read]);
-  return done;
-}
-function OnboardingGate({ explicit, complete, roster, mainId, read }) {
-  const state2 = (0, import_react74.useSyncExternalStore)(roster.subscribe, roster.getSnapshot);
-  const firstRunDone = useFirstRunDone(!explicit && state2.ready && isBotChat(state2, mainId) ? read : void 0);
-  const decision = suppressed(state2, mainId, firstRunDone);
-  (0, import_react74.useEffect)(() => {
-    if (explicit || decision === false) complete();
-  }, [explicit, complete, decision]);
+    if (!current()) return;
+    if (!explicit && classification === "owned") read();
+    if (explicit || classification === "personal" || classification === "owned" && firstRunDone === false) complete();
+  }, [explicit, complete, classification, firstRunDone, read, current]);
   return null;
 }
-function installOnboardingGate(ctx, { roster, mainView, sessions }) {
+function installOnboardingGate(ctx, { roster, mainView, sessions, adoption, hasPendingAdoption }) {
   let sequence = 0;
   return ctx.slots.inject(SLOT, () => {
-    let previous;
+    let view;
+    let previousClass;
     let offGate;
     const sync = () => {
-      const mainId = mainView();
-      if (offGate !== void 0 && previous === mainId) return;
+      const id = mainView();
+      const classification = classify(roster.getSnapshot(), id, hasPendingAdoption);
+      if (view !== void 0 && view.id === id && previousClass === classification) return;
+      if (view === void 0 || view.id !== id) {
+        view?.request.abort();
+        const request = new AbortController();
+        const flags2 = createSource("pending");
+        let pending;
+        const read2 = () => pending ??= readFirstRun(request.signal).catch(() => false).then((value) => {
+          if (!request.signal.aborted) flags2.set(value);
+        });
+        view = { id, request, flags: flags2, read: read2 };
+      }
       const offPrevious = offGate;
-      previous = mainId;
-      const request = new AbortController();
-      let flags;
-      const read = () => flags ??= readFirstRun(request.signal).catch(() => false);
-      const dispose = ctx.slots.register(
-        { name: SLOT, id: `bot-team-gate-${++sequence}`, order: -1e3 },
-        (props) => (0, import_react74.createElement)(OnboardingGate, { ...props, roster, mainId, read })
+      previousClass = classification;
+      const key = ++sequence;
+      const { flags, read } = view;
+      const current = () => view !== void 0 && key === sequence;
+      offGate = ctx.slots.register(
+        { name: SLOT, id: `bot-team-gate-${key}`, order: -1e3 },
+        (props) => (0, import_react74.createElement)(OnboardingGate, { ...props, classification, flags, read, current })
       );
-      offGate = () => {
-        request.abort();
-        dispose();
-      };
       offPrevious?.();
     };
-    sync();
     const offSessions = sessions.subscribe(sync);
+    const offRoster = roster.subscribe(sync);
+    const offAdoption = adoption?.subscribe(sync);
+    sync();
     return () => {
       offSessions();
+      offRoster();
+      offAdoption?.();
+      view?.request.abort();
+      view = void 0;
       offGate?.();
     };
   });
@@ -46669,14 +46719,14 @@ var NO_MODEL_NOTICE = "Choose an AI for this Bot first.";
 var SETUP_AI_NOTICE = "Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up this AI in Settings.";
 var SETUP_PROVIDER_NOTICE = "Sign-in from the chat is for Claude Code, Codex and Antigravity. Set up {provider} in Settings.";
 var loginNotice = (key, params) => ({ kind: "notice", key, params });
-var isBotChat2 = (roster, sessionId) => {
+var isBotChat = (roster, sessionId) => {
   const bot = roster.byId?.[sessionId];
   return Boolean(bot) && bot.kind !== "dsh";
 };
 function loginRoute({ roster, sessionId, actions }) {
   if (!roster?.ready) return loginNotice(LOADING_NOTICE);
   if (roster.roomsById?.[sessionId]) return loginNotice(GROUP_NOTICE);
-  if (!isBotChat2(roster, sessionId)) return void 0;
+  if (!isBotChat(roster, sessionId)) return void 0;
   const target = targetOf(roster, sessionId);
   if (!target) return loginNotice(NO_MODEL_NOTICE);
   if (target.host !== void 0) return loginNotice(SETUP_AI_NOTICE);
@@ -46694,7 +46744,7 @@ function loginCommand({ roster, actions, t: t2 }) {
     description: () => t2("Sign in to this chat's AI provider"),
     available({ sessionId }) {
       const view = roster.getSnapshot();
-      return !view.ready || isBotChat2(view, sessionId) || Boolean(view.roomsById?.[sessionId]);
+      return !view.ready || isBotChat(view, sessionId) || Boolean(view.roomsById?.[sessionId]);
     },
     ui: {
       kind: "action",
@@ -49318,13 +49368,11 @@ var ROOM_OPENING_RAIL_CSS = `
 html[data-bot-opening="rail"] ${ROOM_RAIL},
 html[data-bot-opening="first"] ${ROOM_RAIL} button[data-index="0"] { display: none !important }
 `;
-function installRoomOpeningRail({ roster, sessions, mainView }) {
+function installRoomOpeningRail({ roster, sessions, mainView, openingSessions = { list: sessions } }) {
   const root = document.documentElement;
   const sync = () => {
     const id = mainView();
-    const current = roster.getSnapshot();
-    const turn = current.roomsById?.[id]?.opened?.turn;
-    if (isOpeningTurn(current, id, turn)) {
+    if (roomOpeningTurn(roster.getSnapshot().roomsById?.[id], id, openingSessions) !== void 0) {
       const list = sessions.getSnapshot();
       const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline;
       if (Array.isArray(outline) && outline.length >= 2) {
@@ -49336,8 +49384,7 @@ function installRoomOpeningRail({ roster, sessions, mainView }) {
   };
   const style = installStyles(ROOM_OPENING_RAIL_CSS, "room-opening-rail");
   const offRoster = roster.subscribe(sync);
-  const offSessions = sessions.subscribe(sync);
-  sync();
+  const offSessions = watchRoomOpeningBinding(openingSessions, mainView, sync);
   return () => {
     offSessions();
     offRoster();
@@ -49348,11 +49395,8 @@ function installRoomOpeningRail({ roster, sessions, mainView }) {
 var RoomTurnProcess = withoutOpeningTurn(TurnProcessCell, ({ node }) => node?.location?.turn?.turn ?? node?.data?.turn);
 var RoomTurnTail = withoutOpeningTurn(TurnTailCell, ({ turn }) => turn.turn);
 function OpeningAwareHeader(props) {
-  const { sessionId: id, useRoster, useSessions } = props;
-  const opened = useRoster((roster) => {
-    const turn = roster.roomsById?.[id]?.opened?.turn;
-    return isOpeningTurn(roster, id, turn) ? turn : void 0;
-  });
+  const { sessionId: id, useSessions, useTurnClock } = props;
+  const opened = useRoomOpeningTurn(props);
   const useVisibleSessions = (select) => useSessions((list) => {
     if (opened === void 0) return select(list);
     const projection = list.projectionsBySession?.[id];
@@ -49368,7 +49412,12 @@ function OpeningAwareHeader(props) {
     }
     return select(list);
   });
-  return (0, import_react113.createElement)(HeaderPill, { ...props, useSessions: useVisibleSessions });
+  const useVisibleClock = (select) => useTurnClock((state2) => {
+    if (opened === void 0 || state2[id]?.[opened] === void 0) return select(state2);
+    const { [opened]: _opening, ...turns } = state2[id];
+    return select({ ...state2, [id]: turns });
+  });
+  return (0, import_react113.createElement)(HeaderPill, { ...props, useSessions: useVisibleSessions, useTurnClock: useVisibleClock });
 }
 var currentFace = null;
 var omni = Object.freeze({
@@ -49502,11 +49551,29 @@ function applyOwner(ctx, { gated = false } = {}) {
   }
   const pendingAdopt = /* @__PURE__ */ new Map();
   const pendingBot = /* @__PURE__ */ new Map();
+  const adoption = createSource(0);
+  const hasPendingAdoption = (id) => pendingBot.has(id) || pendingAdopt.has(id);
+  const adoptionChanged = () => adoption.set((revision) => revision + 1);
+  const clearAdoption = (pending, id, operation) => {
+    if (pending.get(id) !== operation) return;
+    pending.delete(id);
+    adoptionChanged();
+  };
+  const reconcileAdoptions = (listed, snapshot2) => {
+    for (const [id, operation] of pendingAdopt) {
+      if (snapshot2?.agentOf[id] !== void 0 || listed[id] === void 0) clearAdoption(pendingAdopt, id, operation);
+    }
+    for (const [id, operation] of pendingBot) {
+      if (operation.awaitingRoster && (snapshot2?.byId[id] !== void 0 || listed[id] === void 0)) {
+        clearAdoption(pendingBot, id, operation);
+      }
+    }
+  };
   let nativeDestination;
   const pendingAgentSession = /* @__PURE__ */ new Map();
   const agentNewInFlight = /* @__PURE__ */ new Map();
   const isAgentSessionId = (id) => isAgentSession(roster.getSnapshot(), agentSessionCache, id) || pendingAdopt.has(id) || pendingBot.has(id) || id !== void 0 && id === nativeDestination;
-  const agentOfSession = (id) => roster.getSnapshot().agentOf[id] ?? pendingAdopt.get(id);
+  const agentOfSession = (id) => roster.getSnapshot().agentOf[id] ?? pendingAdopt.get(id)?.agentId;
   const workspaces = ctx.get("workspaces");
   const workspaceOf = (sessionId) => {
     const items = workspaces?.list?.getSnapshot()?.items ?? [];
@@ -49621,7 +49688,8 @@ function applyOwner(ctx, { gated = false } = {}) {
       return;
     }
     if (Object.keys(seenAt).length === 0) leaveVisits([...value.bots, ...value.rooms].map((entry) => entry.id));
-    roster.set(indexRoster(value));
+    const nextRoster = indexRoster(value);
+    roster.set(nextRoster);
     void drafts.run();
     try {
       const ids = (value.agents ?? []).flatMap((agent) => agent.sessions ?? []);
@@ -49630,9 +49698,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     } catch {
     }
     const listed = ctx.sessions.list.getSnapshot().byId ?? {};
-    for (const id of pendingAdopt.keys()) {
-      if (roster.getSnapshot().agentOf[id] !== void 0 || listed[id] === void 0) pendingAdopt.delete(id);
-    }
+    reconcileAdoptions(listed, nextRoster);
     for (const [agentId, sessionId] of pendingAgentSession) {
       if (listed[sessionId] !== void 0 || roster.getSnapshot().agentOf[sessionId] !== agentId) pendingAgentSession.delete(agentId);
     }
@@ -49660,6 +49726,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     seenAt = savedPrefs = {};
     agentSessionCache.clear();
     for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear();
+    adoptionChanged();
   }), "ds-bot: clear owner state on retirement");
   ctx.effect(() => {
     let stopped = false;
@@ -49885,12 +49952,11 @@ function applyOwner(ctx, { gated = false } = {}) {
     const snapshot2 = roster.getSnapshot();
     const agent = snapshot2.agentsById[agentId];
     const ids = agent === void 0 ? [] : [...agentRowSessions(agent, snapshot2, Date.now())];
-    for (const [id, owner] of pendingAdopt) if (owner === agentId && !ids.includes(id)) ids.push(id);
+    for (const [id, operation] of pendingAdopt) if (operation.agentId === agentId && !ids.includes(id)) ids.push(id);
     return ids;
   };
   const latestAgentSession = (agentId, list) => agentSessions(agentId).sort((a, b) => (list.byId[b]?.updatedAt ?? 0) - (list.byId[a]?.updatedAt ?? 0))[0];
   const mainView = () => Object.values(ctx.sessions.list.getSnapshot().byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id;
-  ctx.effect(() => installOnboardingGate(ctx, { roster, mainView, sessions: ctx.sessions.list }), "ds-bot: gate Settings onboarding");
   const show2 = listedOpener({ list: ctx.sessions.list, refresh: () => Promise.resolve(ctx.sessions.refresh?.()).catch(quietly("refresh sessions")), open: (target) => {
     expected2 = target;
     ctx.uiWorkspace.openSession(target);
@@ -50290,6 +50356,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     });
   }
   const face = () => ({ actions, hooks: { roster, ui: ui2, activity, work, memoryNews, registry: registry2, turnClock, live, computer, cards: cards2, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } });
+  const openingFace = () => ({ ...face(), openingSessions: ctx.sessions });
   const ownerViewer = gated ? requestViewer("whoami") : void 0;
   const updateQueue = async (sessionId, itemId, action) => {
     if (ownerViewer) {
@@ -50436,7 +50503,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   };
   const controlSources = () => [ctx.sessions.list, ctx.get("sidebarRight")?.mounted];
   const simpleOnly = (install) => installSimpleControls({ roster, sources: controlSources(), sessionId: controlSession, install });
-  const installHeader = () => simpleOnly(() => ctx.slots.inject("conversation.session.header", () => installHeaderNavigation(ctx.slots, face, OpeningAwareHeader, BOT_PRIORITY)));
+  const installHeader = () => simpleOnly(() => ctx.slots.inject("conversation.session.header", () => installHeaderNavigation(ctx.slots, openingFace, OpeningAwareHeader, BOT_PRIORITY)));
   Object.assign(actions, sidebarActions({
     sidebar: () => ctx.get("sidebarRight"),
     shown: mainView,
@@ -50661,7 +50728,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     // composer card is two-row from its first paint, before DSH mounts its input slots (#322).
     () => markConversation(),
     () => installUserTimes(),
-    () => installRoomOpeningRail({ roster, sessions: ctx.sessions.list, mainView }),
+    () => installRoomOpeningRail({ roster, sessions: ctx.sessions.list, mainView, openingSessions: ctx.sessions }),
     () => installCompiledStyles(COMPOSER_PACK_CSS, "composer-packs"),
     () => installCompiledStyles(CONVERSATION_CSS, "conversation"),
     () => installCompiledStyles(TURN_ERROR_CSS, "turn-errors"),
@@ -50677,16 +50744,16 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => shadow("conversation.chat.node", { key: "assistant-step", priority: BOT_PRIORITY, locale: "chat", inject: assistantFace }, AssistantCell),
     () => registerSkillActivity(ctx),
     () => shadow("conversation.chat.node", { key: SKILL_ACTIVITY, priority: BOT_PRIORITY, locale: "chat", inject: face }, SkillActivityCell),
-    () => shadow("conversation.chat.node", { key: "turn-trigger", priority: BOT_PRIORITY, locale: "chat", inject: face }, TriggerCell),
+    () => shadow("conversation.chat.node", { key: "turn-trigger", priority: BOT_PRIORITY, locale: "chat", inject: openingFace }, TriggerCell),
     () => registerToolActivity(ctx),
     () => shadow("conversation.chat.node", { key: TOOL_ACTIVITY, priority: BOT_PRIORITY, locale: "chat", inject: face }, ToolActivityCell),
     () => shadow("conversation.chat.node", { key: "tool-call", priority: BOT_PRIORITY, locale: "chat", inject: face }, OrderedToolCell),
-    () => simpleOnly(() => shadow("conversation.chat.node", { key: "turn-process", priority: BOT_PRIORITY, locale: "chat", inject: face }, RoomTurnProcess)),
+    () => simpleOnly(() => shadow("conversation.chat.node", { key: "turn-process", priority: BOT_PRIORITY, locale: "chat", inject: openingFace }, RoomTurnProcess)),
     // A failed turn shows what the user can do about it instead of the provider's raw text.
-    () => shadow("conversation.chat.node", { key: "turn-error", priority: BOT_PRIORITY, locale: "chat", inject: face }, FailureCell),
+    () => shadow("conversation.chat.node", { key: "turn-error", priority: BOT_PRIORITY, locale: "chat", inject: openingFace }, FailureCell),
     // DSH's own turn tail stays, so what other plugins add there shows, such as the
     // cards of the files a turn delivered; its copy and branch row is hidden.
-    () => shadow("conversation.chat.turnTail", { id: "bot-turn-separators", order: 1e3, inject: face }, RoomTurnTail),
+    () => shadow("conversation.chat.turnTail", { id: "bot-turn-separators", order: 1e3, inject: openingFace }, RoomTurnTail),
     // A side question is not a transcript row. After its snapshot turn closes it
     // sits on that turn's tail, ahead of the time separator.
     () => shadow("conversation.chat.turnTail", { id: "bot-btw", order: 800, priority: BOT_PRIORITY, inject: face }, BtwTurnTail),
@@ -50801,18 +50868,19 @@ function applyOwner(ctx, { gated = false } = {}) {
       if (surface.getSnapshot().mode !== "bot") return;
       if (pendingBot.has(main)) return;
       if (nativeCandidate) {
-        const operation = { botId, forkSource: destination?.blank !== true && parentId === before ? pendingSource : void 0 };
-        pendingBot.set(main, operation);
+        const operation2 = { botId, forkSource: destination?.blank !== true && parentId === before ? pendingSource : void 0 };
+        pendingBot.set(main, operation2);
         nativeDestination = main;
         setPlain(true);
         dropPanels();
-        operation.done = Promise.resolve(pendingSource?.done ?? before).then(async (sourceSessionId) => {
+        operation2.done = Promise.resolve(pendingSource?.done ?? before).then(async (sourceSessionId) => {
           const current = mainView();
           let required = pendingBot.get(current);
-          while (required !== void 0 && required !== operation) required = required.forkSource;
-          if (current !== void 0 && current !== main && required !== operation || surface.getSnapshot().mode !== "bot") return sourceSessionId;
+          while (required !== void 0 && required !== operation2) required = required.forkSource;
+          if (current !== void 0 && current !== main && required !== operation2 || surface.getSnapshot().mode !== "bot") return sourceSessionId;
           await call("bot-session-adopt", { botId, sessionId: main, sourceSessionId });
-          await pull();
+          operation2.awaitingRoster = true;
+          await pull().catch(quietly("observe Bot adoption"));
           return main;
         }).catch((error) => {
           console.warn("[ds-bot] bot-session-adopt", error);
@@ -50820,10 +50888,11 @@ function applyOwner(ctx, { gated = false } = {}) {
           actions.reportError(error, "bot-session-adopt");
           throw error;
         }).finally(() => {
-          if (pendingBot.get(main) === operation) pendingBot.delete(main);
+          if (!operation2.awaitingRoster || roster.getSnapshot().byId[main] !== void 0 || ctx.sessions.list.getSnapshot().byId[main] === void 0) clearAdoption(pendingBot, main, operation2);
         });
-        void operation.done.catch(() => {
+        void operation2.done.catch(() => {
         });
+        adoptionChanged();
         return;
       }
       const agentId = before !== void 0 ? agentOfSession(before) : void 0;
@@ -50834,23 +50903,33 @@ function applyOwner(ctx, { gated = false } = {}) {
       const parent = row2?.parentId ?? row2?.parentSessionId;
       const forkedFromAgent = parent !== void 0 && agentOfSession(parent) === agentId;
       if (row2?.blank !== true && !forkedFromAgent) return;
-      pendingAdopt.set(main, agentId);
+      const operation = { agentId };
+      pendingAdopt.set(main, operation);
       setPlain(true);
+      adoptionChanged();
       void call("agent-adopt", { agentId, sessionId: main }).then(async () => {
-        await pull();
+        try {
+          await pull();
+        } catch (error) {
+          quietly("observe Agent adoption")(error);
+          return;
+        }
         const next = workspaceOf(main);
         if (list.byId[before]?.blank === true && next !== void 0 && workspaceOf(before) !== next) {
           await call("agent-archive", { agentId, sessionId: before }).then(() => pull()).catch(() => {
           });
         }
       }).catch((error) => {
-        pendingAdopt.delete(main);
+        clearAdoption(pendingAdopt, main, operation);
         console.warn("[ds-bot] agent-adopt", error);
         sync();
         actions.reportError(error, "agent-adopt");
       });
     };
-    const offList = ctx.sessions.list.subscribe(sync);
+    const offList = ctx.sessions.list.subscribe(() => {
+      sync();
+      reconcileAdoptions(ctx.sessions.list.getSnapshot().byId ?? {});
+    });
     const offRoster = roster.subscribe(sync);
     sync();
     return () => {
@@ -50858,6 +50937,13 @@ function applyOwner(ctx, { gated = false } = {}) {
       offRoster();
     };
   }, "ds-bot: agent surface");
+  ctx.effect(() => installOnboardingGate(ctx, {
+    roster,
+    mainView,
+    sessions: ctx.sessions.list,
+    adoption,
+    hasPendingAdoption
+  }), "ds-bot: gate Settings onboarding");
   let chatReopen;
   ctx.effect(() => {
     chatReopen = watchChatReopen({

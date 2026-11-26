@@ -129,6 +129,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on system-prompt/assemble',
     'on session/event',
     'effect ds-bot: chat index',
+    'effect omni-ui: reconcile room opening records',
+    'on agent/created',
     'effect omni-ui: group rounds',
     'effect omni-ui: group step lines',
     'on llm/stream',

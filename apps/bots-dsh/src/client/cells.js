@@ -42,18 +42,75 @@ import { READ_SCOPE_CODE } from '../shared/read-scope.js'
 
 export { clockLabel }
 
-// Keep this in step with OPENING_TURN in host/groups.js. A real turn 1 has no marker.
+// Keep the first-turn proof in step with openingTurnOf in host/groups.js.
 const OPENING_TURN = 1
-export function isOpeningTurn(roster, sessionId, turn) {
-  if (turn !== OPENING_TURN) return false
-  const opened = roster.roomsById?.[sessionId]?.opened
-  return opened?.part === sessionId && opened?.turn === turn
+const canDeriveOpening = (room, id) => room !== undefined && room.opened === undefined
+  && (room.sessionId ?? room.id) === id
+const openingBinding = (sessions, id) => {
+  const binding = sessions?.binding?.(id)
+  return binding?.sessionId === id ? binding : undefined
+}
+
+export function roomOpeningTurn(room, id, sessions) {
+  if (id === undefined) return undefined
+  if (room?.opened?.part === id && room.opened.turn === OPENING_TURN) return OPENING_TURN
+  if (!canDeriveOpening(room, id)) return undefined
+  const window = openingBinding(sessions, id)?.eventSource?.getSnapshot()
+  if (window?.hasMore !== false || !Array.isArray(window.entries)) return undefined
+  for (let seq = 0; seq < window.entries.length; seq++) {
+    const entry = window.entries[seq]
+    const event = entry?.event
+    if (entry?.type !== 'event' || event?.seq !== seq || typeof event.type !== 'string') return undefined
+    if (['agent/inbox/spliced', 'user/message', 'turn/end'].includes(event.type) || event.type.startsWith('step/')) return undefined
+    if (event.type !== 'turn/start') continue
+    const end = window.entries[seq + 1]
+    if (event.data?.turn === OPENING_TURN && end?.type === 'event' && end.event?.seq === seq + 1
+      && end.event.type === 'turn/end' && end.event.data?.turn === OPENING_TURN
+      && ['completed', 'interrupted'].includes(end.event.data.reason?.kind)) return OPENING_TURN
+    return undefined
+  }
+}
+
+export function watchRoomOpeningBinding(sessions, currentId, notify) {
+  let watching = true
+  let binding
+  let offEvents
+  const sync = () => {
+    if (!watching) return
+    const id = currentId()
+    const next = id === undefined ? undefined : openingBinding(sessions, id)
+    if (next !== binding) {
+      offEvents?.()
+      binding = next
+      offEvents = next?.eventSource?.subscribe(sync)
+    }
+    notify()
+  }
+  const offList = sessions?.list?.subscribe(sync)
+  sync()
+  return () => {
+    watching = false
+    offList?.()
+    offEvents?.()
+  }
+}
+
+const noSubscription = () => () => {}
+
+export function useRoomOpeningTurn({ useRoster, sessionId, openingSessions }) {
+  const room = useRoster(roster => roster.roomsById?.[sessionId])
+  const sessions = canDeriveOpening(room, sessionId) ? openingSessions : undefined
+  const subscribe = useMemo(() => sessions === undefined ? noSubscription
+    : notify => watchRoomOpeningBinding(sessions, () => sessionId, notify), [sessions, sessionId])
+  const read = () => roomOpeningTurn(room, sessionId, sessions)
+  return useSyncExternalStore(subscribe, read, read)
 }
 
 // Keep hook order stable when a recovered opening marker arrives after a row mounts.
 export function withoutOpeningTurn(Cell, turnOf) {
   return function RoomTurnCell(props) {
-    const hidden = props.useRoster(roster => isOpeningTurn(roster, props.sessionId, turnOf(props)))
+    const opening = useRoomOpeningTurn(props)
+    const hidden = opening !== undefined && opening === turnOf(props)
     return hidden ? h(CellEmpty) : h(Cell, props)
   }
 }
@@ -848,8 +905,9 @@ export function GuardOffLine({ sessionId, useRoster }) {
   return notice === undefined ? null : h(UpgradeLine, { name: bot.name, off: notice.kind })
 }
 
-export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, useUi, actions }) {
+export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnClock, useUi, actions, openingSessions }) {
   const roster = useRoster(value => value)
+  const opened = useRoomOpeningTurn({ useRoster, sessionId, openingSessions })
   const data = node.data
   const source = data.source !== null && typeof data.source === 'object' ? data.source : {}
   // Team state (exchanges) is keyed by the Bot id; Session state by the part shown.
@@ -867,7 +925,7 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
   const order = useSessions((list) => {
     const outline = list.projectionsBySession?.[sessionId]?.values?.turnOutline ?? list.byId[sessionId]?.projectionValues?.turnOutline
     return Array.isArray(outline)
-      ? outline.filter(entry => !isOpeningTurn(roster, sessionId, entry.turn)).map(entry => entry.turn).join(',')
+      ? outline.filter(entry => entry.turn !== opened).map(entry => entry.turn).join(',')
       : ''
   })
   const peers = useTurnClock((state) => {
@@ -880,7 +938,7 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
   const visit = useUi(state => state.visits?.[sessionId])
   const hiddenTurns = roster.exchangeTurns[sessionId]
   const unreadOpening = useTurnClock((state) => {
-    const first = openingTurn(state[sessionId], order, hiddenTurns, isOpeningTurn(roster, sessionId, OPENING_TURN))
+    const first = openingTurn(state[sessionId], order, hiddenTurns, opened !== undefined)
     return first?.turn === turn && unseenSince(visit, first.start) ? clockLabel(first.start) : ''
   })
   const body = triggerBody()

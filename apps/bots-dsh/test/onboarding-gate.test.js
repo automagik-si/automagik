@@ -103,7 +103,7 @@ const listFor = (id, blank = true) => ({
   phase: 'ready', byId: id === undefined ? {} : { [id]: { id, blank, retainedBy: { mainView: 1 } } },
 })
 
-export function mountSettings(browser, { roster, sessions, mainView, flagState = () => ({}) }) {
+export function mountSettings(browser, { roster, sessions, mainView, flagState = () => ({}), installGate = true }) {
   const { h, seeds, load, evaluate, root, window, cleanups } = browser
   const ctx = new seeds['@deepseek-ai/cordis'].Context()
   cleanups.push(() => ctx.fiber.dispose())
@@ -121,7 +121,7 @@ export function mountSettings(browser, { roster, sessions, mainView, flagState =
     name: 'root', children: { 'sidebar.settings': { kind: 'single', scope: 'root' } },
   }, ({ renderSlot }) => h('main', {}, renderSlot('sidebar.settings', { wide: true })))
   load('@deepseek-ai/dsh-client-ui-settings-general').apply(ctx)
-  if (gate !== undefined) cleanups.push(evaluate(gate).installOnboardingGate(ctx, { roster, mainView, sessions }))
+  if (installGate && gate !== undefined) cleanups.push(evaluate(gate).installOnboardingGate(ctx, { roster, mainView, sessions }))
 
   const rendered = []
   for (const [id, order] of [...WELCOME, ['deepseek-official', 0]]) {
@@ -172,6 +172,126 @@ function fixture(t, { id, initial = ready, flags = {}, failure = false } = {}) {
   return {
     ...browser, ...settings, roster, reads, finishFlags: () => { value = allDone },
     show(next) { id = next; sessions.set(listFor(id)) },
+  }
+}
+
+let navigationBuild
+async function adoptionFixture(t, kind) {
+  navigationBuild ??= build({
+    stdin: {
+      contents: [
+        "export { apply, omni } from './src/client/index.js'",
+        "export { clientErrors } from './src/client/diagnostics.js'",
+      ].join('\n'),
+      resolveDir: plugin,
+    },
+    bundle: true, format: 'cjs', platform: 'browser',
+    write: false, external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+  })
+  const { outputFiles: [client] } = await navigationBuild
+  const sessions = source({ phase: 'ready', byId: {} })
+  const entered = Promise.withResolvers()
+  const reply = Promise.withResolvers()
+  const rosterRequest = Promise.withResolvers()
+  const rosterReply = Promise.withResolvers()
+  const reads = []
+  const adoptions = []
+  let selected = 'source'
+  let revision = 1
+  let owned = false
+  let holdObservation = false
+  const show = id => {
+    selected = id
+    const byId = Object.fromEntries(['source', 'destination'].map(key => [key, {
+      id: key, blank: key === 'destination', retainedBy: { mainView: id === key ? 1 : 0 },
+    }]))
+    sessions.set({ phase: 'ready', byId })
+  }
+  show(selected)
+  const answer = value => ({ ok: true, json: async () => ({ ok: true, value }) })
+  const browser = browserFixture(t, async (url, request) => {
+    const { endpoint, payload } = JSON.parse(request.body)
+    if (url === 'api/omni-ai') {
+      assert.equal(endpoint, 'state')
+      reads.push(selected)
+      return answer(allDone)
+    }
+    assert.equal(url, 'api/omni-ui')
+    if (endpoint === 'bot-session-adopt' || endpoint === 'agent-adopt') {
+      adoptions.push({ endpoint, payload })
+      entered.resolve()
+      return reply.promise
+    }
+    if (endpoint === 'state') {
+      if (holdObservation) {
+        rosterRequest.resolve()
+        if (await rosterReply.promise === false) throw new Error('fixture roster refresh unavailable')
+      }
+      const bots = kind === 'Bot' ? [{
+        id: 'source', kind: 'dsh', name: 'Source', sessionId: owned ? 'destination' : 'source',
+      }] : []
+      const agents = kind === 'Agent' || owned && kind === 'late' ? [{
+        id: 'agent', sessions: owned ? ['source', 'destination'] : ['source'],
+      }] : []
+      return answer({ revision, bots, rooms: [], agents, exchangeTurns: {}, mainBotIds: [] })
+    }
+    assert.fail(`unexpected fixture endpoint ${endpoint}`)
+  })
+  const settings = mountSettings(browser, { sessions, installGate: false })
+  const effects = []
+  const slots = settings.ctx.slots
+  const api = browser.evaluate(client.text)
+  api.apply({
+    effect(fn, label) { effects.push({ fn, label }) },
+    get: () => undefined, inject: () => () => {}, sessions: { list: sessions },
+    uiWorkspace: {}, uiConversation: {}, layout: { panelInfo: source({}) },
+    slots: {
+      inject: (name, fn) => name === 'settings.onboarding' ? slots.inject(name, fn) : () => {},
+      register: (...args) => slots.register(...args),
+    },
+  })
+  for (const { fn, label } of effects) {
+    if (['ds-bot: roster poll', 'ds-bot: agent surface', 'ds-bot: gate Settings onboarding',
+      'ds-bot: face for other Omni plugins'].includes(label)) {
+      const dispose = fn()
+      if (dispose) browser.cleanups.push(dispose)
+    }
+  }
+  const roster = api.omni.face().hooks.roster
+  await browser.tick()
+  assert.equal(roster.getSnapshot().ready, true)
+  const publish = async (value = owned) => {
+    owned = value
+    revision++
+    browser.window.document.dispatchEvent(new browser.window.Event('visibilitychange'))
+    await browser.tick()
+    assert.equal(roster.getSnapshot().revision, revision)
+  }
+  const finish = async (success, { failObservation = false } = {}) => {
+    if (success) {
+      holdObservation = true
+      owned = true
+      revision++
+      reply.resolve(answer({ sessionId: 'destination' }))
+      await rosterRequest.promise
+      await browser.tick()
+      const stepBeforeRoster = settings.step()
+      holdObservation = false
+      rosterReply.resolve(!failObservation)
+      await browser.tick()
+      assert.equal(roster.getSnapshot().revision, failObservation ? revision - 1 : revision)
+      return stepBeforeRoster
+    }
+    reply.resolve({ ok: true, json: async () => ({ ok: false, error: { message: 'fixture adoption refused' } }) })
+    await browser.tick()
+  }
+  return {
+    ...settings, ...browser, selected: () => selected, show, adoptions, reads, entered, publish, finish,
+    diagnostics: api.clientErrors,
+    owner: () => {
+      const { byId, agentOf } = roster.getSnapshot()
+      return byId.destination?.id ?? agentOf.destination
+    },
   }
 }
 
@@ -255,5 +375,81 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const bundle = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
     assert.match(bundle, /bot-team-gate-/)
     assert.match(bundle, /gate Settings onboarding/)
+  })
+
+  for (const kind of ['Bot', 'Agent']) {
+    for (const success of [true, false]) {
+      test(`T8 race holds ${kind} adoption on the same blank view through ${success ? 'ownership' : 'refusal'}`, { timeout: 8_000 }, async t => {
+        const ui = await adoptionFixture(t, kind)
+        ui.show('destination')
+        await ui.entered.promise
+        await ui.tick()
+        const during = { step: ui.step(), inert: ui.root.inert, rendered: [...ui.rendered], reads: [...ui.reads] }
+        const pendingId = ui.gateIds()[0].id
+        const stepBeforeRoster = await ui.finish(success)
+        assert.deepEqual(ui.adoptions, [kind === 'Bot'
+          ? { endpoint: 'bot-session-adopt', payload: { botId: 'source', sessionId: 'destination', sourceSessionId: 'source' } }
+          : { endpoint: 'agent-adopt', payload: { agentId: 'agent', sessionId: 'destination' } }])
+        assert.equal(ui.selected(), 'destination')
+        assert.deepEqual(during, { step: undefined, inert: false, rendered: [], reads: [] },
+          'welcome completed or rendered while native adoption was pending')
+        assert.equal(stepBeforeRoster, undefined)
+        assert.equal(ui.step(), success ? undefined : 'omni-companion')
+        assert.deepEqual(ui.reads, success ? ['destination'] : [])
+        assert.notEqual(ui.gateIds()[0].id, pendingId)
+        if (success) {
+          assert.deepEqual(ui.rendered, [])
+          assert.equal(ui.root.inert, false)
+          ui.openExplicit()
+          await ui.tick()
+          assert.equal(ui.step(), 'deepseek-official')
+          assert.deepEqual(ui.reads, ['destination'])
+        }
+      })
+    }
+
+    test(`T8 race keeps successful ${kind} adoption pending after a failed roster refresh`, { timeout: 8_000 }, async t => {
+      const ui = await adoptionFixture(t, kind)
+      ui.show('destination')
+      await ui.entered.promise
+      const stepBeforeRoster = await ui.finish(true, { failObservation: true })
+      assert.equal(ui.selected(), 'destination')
+      assert.equal(ui.step(), undefined, 'an observation failure released the successfully adopted blank view')
+      assert.equal(stepBeforeRoster, undefined)
+      assert.equal(ui.root.inert, false)
+      assert.deepEqual(Array.from(ui.diagnostics(), ({ code, text }) => ({ code, text })), [
+        { code: 'NETWORK', text: 'state: network error: fixture roster refresh unavailable' },
+      ])
+      assert.deepEqual(ui.reads, [])
+      await ui.publish()
+      assert.equal(ui.selected(), 'destination')
+      assert.equal(ui.owner(), kind === 'Bot' ? 'source' : 'agent')
+      assert.equal(ui.step(), undefined)
+      assert.deepEqual(ui.rendered, [])
+      assert.deepEqual(ui.reads, ['destination'])
+    })
+  }
+
+  test('T8 race reclassifies an already completed blank view when late ownership arrives', { timeout: 8_000 }, async t => {
+    const ui = await adoptionFixture(t, 'late')
+    ui.show('destination')
+    await ui.tick()
+    assert.equal(ui.step(), 'omni-companion', 'the personal view completed its gate before ownership arrived')
+    const personal = ui.gateIds()[0].id
+    await ui.publish(true)
+    assert.equal(ui.selected(), 'destination')
+    assert.equal(ui.step(), undefined, 'late ownership left welcome over the adopted Session')
+    assert.equal(ui.root.inert, false)
+    const firstOwned = ui.gateIds()[0].id
+    assert.notEqual(firstOwned, personal)
+    await ui.publish()
+    assert.equal(ui.gateIds()[0].id, firstOwned, 'an unchanged classification re-registered the gate')
+    await ui.publish(false)
+    assert.equal(ui.step(), 'omni-companion')
+    await ui.publish(true)
+    assert.notEqual(ui.gateIds()[0].id, firstOwned)
+    assert.equal(ui.step(), undefined)
+    assert.deepEqual(ui.reads, ['destination'], 'same-view reclassification repeated the flags read')
+    assert.deepEqual(ui.adoptions, [])
   })
 }

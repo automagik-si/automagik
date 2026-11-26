@@ -1,16 +1,15 @@
-import { createElement as h, useEffect, useState, useSyncExternalStore } from 'react'
+import { createElement as h, useEffect, useSyncExternalStore } from 'react'
+import { createSource } from './sources.js'
 
 const SLOT = 'settings.onboarding'
 const FLAGS = ['companionDone', 'teamDone', 'migrateDone', 'connectAiDone']
-const isBotChat = (roster, id) => Boolean(roster.byId?.[id] || roster.agentOf?.[id])
-
-export function suppressed(roster, mainId, firstRunDone = 'pending') {
-  if (mainId === undefined) return false
-  if (roster.ready !== true) return 'pending'
+function classify(roster, mainId, hasPendingAdoption) {
+  if (mainId === undefined) return 'personal'
+  if (roster.ready !== true) return 'waiting'
   if (roster.roomsById?.[mainId] || roster.tasks?.[mainId]
-    || roster.rooms?.some(room => room.parts?.includes(mainId))) return true
-  if (isBotChat(roster, mainId)) return firstRunDone
-  return false
+    || roster.rooms?.some(room => room.parts?.includes(mainId))) return 'team'
+  if (roster.byId?.[mainId] || roster.agentOf?.[mainId]) return 'owned'
+  return hasPendingAdoption?.(mainId) ? 'adopting' : 'personal'
 }
 
 async function readFirstRun(signal) {
@@ -26,49 +25,58 @@ async function readFirstRun(signal) {
   return result.ok === true && FLAGS.every(flag => result.value?.[flag] === true)
 }
 
-function useFirstRunDone(read) {
-  const [done, setDone] = useState('pending')
+function OnboardingGate({ explicit, complete, classification, flags, read, current }) {
+  const firstRunDone = useSyncExternalStore(flags.subscribe, flags.getSnapshot)
   useEffect(() => {
-    if (read === undefined) return
-    let mounted = true
-    void read().then(value => { if (mounted) setDone(value) })
-    return () => { mounted = false }
-  }, [read])
-  return done
-}
-
-function OnboardingGate({ explicit, complete, roster, mainId, read }) {
-  const state = useSyncExternalStore(roster.subscribe, roster.getSnapshot)
-  const firstRunDone = useFirstRunDone(!explicit && state.ready && isBotChat(state, mainId) ? read : undefined)
-  const decision = suppressed(state, mainId, firstRunDone)
-  useEffect(() => {
-    if (explicit || decision === false) complete()
-  }, [explicit, complete, decision])
+    if (!current()) return
+    if (!explicit && classification === 'owned') read()
+    if (explicit || classification === 'personal' || (classification === 'owned' && firstRunDone === false)) complete()
+  }, [explicit, complete, classification, firstRunDone, read, current])
   return null
 }
 
-export function installOnboardingGate(ctx, { roster, mainView, sessions }) {
+export function installOnboardingGate(ctx, { roster, mainView, sessions, adoption, hasPendingAdoption }) {
   let sequence = 0
   return ctx.slots.inject(SLOT, () => {
-    let previous
+    let view
+    let previousClass
     let offGate
     const sync = () => {
-      const mainId = mainView()
-      if (offGate !== undefined && previous === mainId) return
+      const id = mainView()
+      const classification = classify(roster.getSnapshot(), id, hasPendingAdoption)
+      if (view !== undefined && view.id === id && previousClass === classification) return
+      if (view === undefined || view.id !== id) {
+        view?.request.abort()
+        const request = new AbortController()
+        const flags = createSource('pending')
+        let pending
+        const read = () => (pending ??= readFirstRun(request.signal).catch(() => false).then(value => {
+          if (!request.signal.aborted) flags.set(value)
+        }))
+        view = { id, request, flags, read }
+      }
       const offPrevious = offGate
-      previous = mainId
-      // SettingsRoot retains completed step IDs across blank-to-blank navigation.
+      previousClass = classification
+      // SettingsRoot retains completed step IDs across navigation and roster changes.
       // Register the new ID before withdrawing the old one.
-      const request = new AbortController()
-      let flags
-      const read = () => (flags ??= readFirstRun(request.signal).catch(() => false))
-      const dispose = ctx.slots.register({ name: SLOT, id: `bot-team-gate-${++sequence}`, order: -1000 },
-        props => h(OnboardingGate, { ...props, roster, mainId, read }))
-      offGate = () => { request.abort(); dispose() }
+      const key = ++sequence
+      const { flags, read } = view
+      const current = () => view !== undefined && key === sequence
+      offGate = ctx.slots.register({ name: SLOT, id: `bot-team-gate-${key}`, order: -1000 },
+        props => h(OnboardingGate, { ...props, classification, flags, read, current }))
       offPrevious?.()
     }
-    sync()
     const offSessions = sessions.subscribe(sync)
-    return () => { offSessions(); offGate?.() }
+    const offRoster = roster.subscribe(sync)
+    const offAdoption = adoption?.subscribe(sync)
+    sync()
+    return () => {
+      offSessions()
+      offRoster()
+      offAdoption?.()
+      view?.request.abort()
+      view = undefined
+      offGate?.()
+    }
   })
 }

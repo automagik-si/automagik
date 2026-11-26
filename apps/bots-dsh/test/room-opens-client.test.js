@@ -3,9 +3,10 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { build } from 'esbuild'
 import { browserFixture, mountSettings, source } from './onboarding-gate.test.js'
-import { makeHome, mountHost, settleTurn, tornAdmission, waitFor } from './room-opens.test.js'
+import { makeColdRoom, makeHome, mountHost, settleTurn, tornAdmission, waitFor } from './room-opens.test.js'
 import { GroupSource, roomTerminalOf } from '../src/host/pocket-groups.js'
 
 const plugin = fileURLToPath(new URL('..', import.meta.url))
@@ -17,6 +18,7 @@ const { outputFiles: [botClient] } = await build({
       "export { listedOpener } from './src/client/open-listed.js'",
       "export { indexRoster } from './src/client/sources.js'",
       "export { TriggerCell, TurnProcessCell, TurnTailCell } from './src/client/cells.js'",
+      "export * as openingCells from './src/client/cells.js'",
       "export { FailureCell } from './src/client/turn-error.js'",
       "export * as opening from './src/client/index.js'",
     ].join('\n'),
@@ -28,7 +30,7 @@ const { outputFiles: [botClient] } = await build({
     builder.onLoad({ filter: /\/src\/client\/(sidebar|index)\.js$/ }, async ({ path }) => {
       const js = await readFile(path, 'utf8')
       if (path.endsWith('/sidebar.js')) return { contents: `${js}\nexport { RoomRow }` }
-      const keys = ['installRoomOpeningRail', 'RoomTurnProcess', 'RoomTurnTail'].filter(key =>
+      const keys = ['installRoomOpeningRail', 'OpeningAwareHeader', 'RoomTurnProcess', 'RoomTurnTail'].filter(key =>
         new RegExp(`(?:function|const) ${key}\\b`).test(js))
       return keys.length ? { contents: `${js}\nexport { ${keys.join(', ')} }` } : undefined
     })
@@ -42,6 +44,11 @@ const t = (key, { turn } = {}) => turn === undefined ? key : `Turn ${turn}`
 const roomTurns = events => events.filter(event => event.type === 'turn/start').map(event => event.data.turn)
 const textOccurrence = (text, phrase) => text.split(phrase).length - 1
 
+function eventWindow() {
+  const window = source({ entries: [], hasMore: false })
+  return { ...window, replace: (entries, hasMore) => window.set({ entries, hasMore }) }
+}
+
 function visible(element, window) {
   for (let current = element; current; current = current.parentElement) {
     if (current.hidden || window.getComputedStyle(current).display === 'none') return false
@@ -54,7 +61,7 @@ function visible(element, window) {
   return true
 }
 
-function fixture(tst, host) {
+function fixture(tst, host, { withHeader = false } = {}) {
   const browser = browserFixture(tst, url => {
     assert.equal(url, 'api/omni-ai')
     return Promise.resolve({ ok: true, json: async () => ({ ok: true, value: {} }) })
@@ -95,6 +102,8 @@ function fixture(tst, host) {
   const { ChatView, registerConversationNodes } = load('@deepseek-ai/dsh-client-ui-chat', ['ChatView', 'registerConversationNodes'])
   const list = source({ phase: 'ready', byId: {} })
   const roster = source(api.indexRoster({ bots: [], rooms: [], exchangeTurns: {}, prefs: {} }))
+  const bindings = new Map()
+  const openingSessions = { list, binding: id => bindings.get(id) }
   const selected = source(undefined)
   const newChat = source(false)
   const noted = source({})
@@ -104,6 +113,7 @@ function fixture(tst, host) {
   const opened = []
   let pending
   let showError
+  let holdRoster = false
   const use = (src, select) => select(seeds.react.useSyncExternalStore(src.subscribe, src.getSnapshot))
   const useList = select => use(list, select)
   const mainView = () => Object.values(list.getSnapshot().byId).find(s => s.retainedBy.mainView > 0)?.id
@@ -122,8 +132,10 @@ function fixture(tst, host) {
   } })
   const prompts = () => host.rt.state.rooms
   async function sync(id = mainView()) {
-    const nextRoster = await host.call('state', {})
-    roster.set(api.indexRoster(nextRoster))
+    if (!holdRoster) {
+      const nextRoster = await host.call('state', {})
+      roster.set(api.indexRoster(nextRoster))
+    }
     const byId = Object.fromEntries((await host.controller.list({})).items.map(row => [row.sessionId, {
       ...row, id: row.sessionId, projectionValues: row.projections?.values, retainedBy: { mainView: row.sessionId === id ? 1 : 0 },
     }]))
@@ -135,8 +147,15 @@ function fixture(tst, host) {
   }
   async function snapshot(id) {
     const agent = await host.resolve(id)
+    let binding = bindings.get(id)
+    if (binding === undefined) {
+      binding = { sessionId: id, eventSource: eventWindow() }
+      bindings.set(id, binding)
+    }
+    binding.eventSource.replace(agent.session.snapshotEvents().map(event => ({ type: 'event', event })), false)
     const assembler = new native.ConversationNodeAssembler(definitions, views)
-    assembler.replaceWindow(agent.session.snapshotEvents().map(event => ({ type: 'committed', event })), false)
+    const { entries, hasMore } = binding.eventSource.getSnapshot()
+    assembler.replaceWindow(entries, hasMore)
     assembler.activateTarget('chat')
     assembler.flush()
     return assembler
@@ -176,6 +195,9 @@ function fixture(tst, host) {
       noted.set({ ...clock, [id]: { ...clock[id], [turn]: { ...clock[id]?.[turn], [side]: time } } })
     },
     noteTurnPeer: nothing,
+    clearLive: nothing,
+    beginVisit: nothing,
+    endVisit: nothing,
   }
 
   function ActiveConversation({ id, assembler }) {
@@ -204,6 +226,7 @@ function fixture(tst, host) {
       select(value.projectionsBySession?.[id]?.values[key] ?? value.byId[id]?.projectionValues?.[key]))
     const cellProps = {
       sessionId: id, useRoster: select => use(roster, select), useSessions: useList,
+      openingSessions,
       useTurnClock: select => use(noted, select),
       useUi: select => use(visits, value => select({ visits: value })), actions,
     }
@@ -232,6 +255,10 @@ function fixture(tst, host) {
       chatScroll: { read: () => null, save: nothing }, renderSlot: slot, t,
     })
     return h('section', { 'data-active-session': id },
+      withHeader ? h(api.opening.OpeningAwareHeader, {
+        ...cellProps, useSession, useSessionStatus: select => select(new Map()),
+        useActivity: select => select({}), useLive: select => select({}),
+      }) : null,
       h(native.ConversationSession, {
         view: 'chat', useSession, useConversation, useConversationViews: select => select(empty),
         inputActions: input.actions, useStore: select => select({}), actions: { setDraft: nothing },
@@ -261,7 +288,7 @@ function fixture(tst, host) {
       adding ? h(api.NewChat, { mode: 'group', roster: team, actions }) : null,
       current ? h(ActiveConversation, { key: current.id, ...current }) : null)
   }
-  if (api.opening.installRoomOpeningRail) cleanups.push(api.opening.installRoomOpeningRail({ roster, sessions: list, mainView }))
+  if (api.opening.installRoomOpeningRail) cleanups.push(api.opening.installRoomOpeningRail({ roster, sessions: list, mainView, openingSessions }))
   seeds['react-dom'].flushSync(() => rendered.render(h(Page)))
   const refresh = async () => {
     const id = mainView()
@@ -270,7 +297,10 @@ function fixture(tst, host) {
     await browser.tick()
   }
   return {
-    ...browser, stage, settings, sync, afterShow, refresh, requests, opened, list, prompts, newChat, noted, visits,
+    ...browser, stage, settings, sync, afterShow, refresh, requests, opened, list, roster, prompts, newChat, noted, visits,
+    openingSessions,
+    holdRoster: () => { holdRoster = true },
+    catchUpRoster: async () => { holdRoster = false; await sync(); await browser.tick() },
     show: id => { actions.openSession(id); return afterShow(id) },
     selectRoom: id => stage.querySelector(`button[data-room-id="${id}"]`),
     type: text => inputs.get(mainView()).actions.setDraft(text),
@@ -433,4 +463,122 @@ test('T6 control shows the first visible kickoff with its opening time and unrea
   assert.ok(ui.stage.querySelector('.bt-turn-time'))
   assert.ok(ui.stage.querySelector('.bt-time-sep'), JSON.stringify({ clock: ui.noted.getSnapshot(), nodes: [...ui.stage.querySelectorAll('[data-chat-flow-kind]')].map(node => [node.dataset.chatFlowKind, node.dataset.chatTurn]) }))
   assert.ok(ui.stage.querySelector('.bt-new-sep'))
+})
+
+const openingRows = '[data-chat-flow-kind="turn-error"] .bt-fail, .bt-turn-time, .bt-time-sep, .bt-new-sep'
+
+test('T6 race keeps a resumed opening hidden across paints with the old roster', async tst => {
+  let ui
+  let oldRoster
+  const host = await tornAdmission(tst, { beforeResume: async (cold, id) => {
+    ui = fixture(tst, cold, { withHeader: true })
+    await ui.sync()
+    oldRoster = ui.roster.getSnapshot()
+    assert.equal(oldRoster.roomsById[id].opened, undefined)
+    ui.holdRoster()
+  } })
+  const flashes = []
+  const observer = new ui.window.MutationObserver(records => {
+    for (const { addedNodes } of records) {
+      for (const node of addedNodes) {
+        const row = node.matches?.(openingRows) ? node : node.querySelector?.(openingRows)
+        if (row) flashes.push(row.className)
+      }
+    }
+  })
+  observer.observe(ui.stage, { childList: true, subtree: true })
+  ui.cleanups.push(() => observer.disconnect())
+  await ui.show(host.id)
+  assert.ok(ui.stage.querySelector('[data-chat-flow]'), 'the first paint includes the native chat')
+  for (let frame = 0; frame < 3; frame++) {
+    assert.strictEqual(ui.roster.getSnapshot(), oldRoster)
+    assert.equal(ui.stage.querySelector(openingRows)?.className, undefined, 'an opening error, time or divider reached a paint')
+    assert.equal(ui.window.document.body.style.getPropertyValue('--bt-first-sep'), '')
+    await ui.tick()
+  }
+  assert.deepEqual(flashes, [])
+  assert.equal(ui.noted.getSnapshot()[host.id]?.[1], undefined)
+  observer.disconnect()
+
+  await host.prompt(host.id, 'visible during roster lag')
+  await settleTurn(host, host.id)
+  await ui.refresh()
+  assert.strictEqual(ui.roster.getSnapshot(), oldRoster)
+  assert.ok(ui.stage.querySelector('[data-chat-turn="2"] .bt-turn-time'))
+  assert.ok(!ui.firstNav() || !visible(ui.firstNav(), ui.window), 'the rail omits the opening before roster catch-up')
+  assert.notEqual(ui.window.document.body.style.getPropertyValue('--bt-first-sep'), '', 'the header uses the first visible turn')
+  await ui.catchUpRoster()
+  assert.deepEqual({ ...ui.roster.getSnapshot().roomsById[host.id].opened }, { part: host.id, turn: 1 })
+  assert.equal(ui.stage.querySelector('[data-chat-turn="1"] :is(.bt-fail, .bt-turn-time, .bt-time-sep, .bt-new-sep)'), null)
+  assert.equal(ui.noted.getSnapshot()[host.id]?.[1], undefined)
+  assert.ok(!ui.firstNav() || !visible(ui.firstNav(), ui.window))
+})
+
+test('T6 race control keeps a genuine first interruption with an initiating splice visible', async tst => {
+  const inserted = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'interrupted post' }] })]
+  const { home, id } = await makeColdRoom(tst, { tail: [
+    { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted } },
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } },
+  ] })
+  const host = await mountHost(tst, home)
+  const ui = fixture(tst, host)
+  await ui.sync()
+  ui.holdRoster()
+  await ui.show(id)
+  assert.equal(host.rt.roomOf(id).opened, undefined)
+  assert.ok(ui.stage.querySelector('[data-chat-flow-kind="turn-error"][data-chat-turn="1"] .bt-fail'))
+  assert.ok(ui.stage.querySelector('[data-chat-turn="1"] .bt-turn-time'))
+  await ui.catchUpRoster()
+  assert.equal(ui.roster.getSnapshot().roomsById[id].opened, undefined)
+  assert.ok(ui.stage.querySelector('[data-chat-flow-kind="turn-error"][data-chat-turn="1"] .bt-fail'))
+})
+
+test('T6 race control requires an exact committed prefix and follows the retained rail binding', tst => {
+  const ui = browserFixture(tst)
+  const api = ui.evaluate(botClient.text)
+  const { roomOpeningTurn } = api.openingCells
+  const event = (seq, type, data) => ({ type: 'event', event: { seq, type, data, time: 1 } })
+  const start = event(0, 'turn/start', { turn: 1 })
+  const end = event(1, 'turn/end', { turn: 1, reason: { kind: 'interrupted' } })
+  const entries = [start, end]
+  const id = 'room'
+  const room = { id }
+  const roster = source({ roomsById: { [id]: room } })
+  const list = source({ byId: { [id]: { projectionValues: { turnOutline: [{ turn: 1 }, { turn: 2 }] } } } })
+  const current = eventWindow()
+  let binding = { sessionId: id, eventSource: current }
+  const openingSessions = { list, binding: key => key === id ? binding : undefined }
+  const read = () => roomOpeningTurn(room, id, openingSessions)
+  const rail = () => ui.window.document.documentElement.getAttribute('data-bot-opening')
+  ui.cleanups.push(api.opening.installRoomOpeningRail({ roster, sessions: list, mainView: () => id, openingSessions }))
+  for (const [window, older] of [
+    [entries, true],
+    [[start], false],
+    [[start, event(2, 'turn/end', end.event.data)], false],
+    [[{ ...start, type: 'transient' }, end], false],
+    [[event(0, 'turn/start', { turn: 2 }), end], false],
+    [[event(0, 'user/message', {}), event(1, 'turn/start', start.event.data), event(2, 'turn/end', end.event.data)], false],
+  ]) {
+    current.replace(window, older)
+    assert.equal(read(), undefined)
+    assert.equal(rail(), null)
+  }
+  current.replace(entries, false)
+  assert.equal(read(), 1)
+  assert.equal(rail(), 'rail', 'the rail heard the committed window on the active binding')
+  assert.equal(roomOpeningTurn({ ...room, sessionId: 'new-part' }, id, openingSessions), undefined)
+  assert.equal(roomOpeningTurn(room, id), undefined)
+  assert.equal(roomOpeningTurn({ ...room, opened: { part: id, turn: 1 } }, id), 1)
+  const replacement = eventWindow()
+  binding = { sessionId: 'foreign', eventSource: replacement }
+  replacement.replace(entries, false)
+  list.set({ ...list.getSnapshot() })
+  assert.equal(read(), undefined)
+  assert.equal(rail(), null)
+  current.replace(entries, false)
+  assert.equal(rail(), null, 'the retired binding cannot restore the opening marker')
+  binding = { sessionId: id, eventSource: replacement }
+  list.set({ ...list.getSnapshot() })
+  assert.equal(rail(), 'rail')
 })

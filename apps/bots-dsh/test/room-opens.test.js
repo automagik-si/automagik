@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -227,7 +227,7 @@ export async function settleTurn(host, id) {
   return agent
 }
 
-export async function tornAdmission(t, { checkMarker = true } = {}) {
+export async function tornAdmission(t, { checkMarker = true, beforeResume } = {}) {
   const { home, id } = await makeColdRoom(t, { tail: [turnStart(1)] })
   const scanned = []
   const host = await mountHost(t, home, { beforeTeam({ persistence }) {
@@ -247,6 +247,7 @@ export async function tornAdmission(t, { checkMarker = true } = {}) {
   const startupRead = scanned.length > 0
   assert.equal(host.rt.roomOf(id).opened, undefined, 'startup found only the lone start')
   assert.deepEqual(boundary(await host.raw(id)), [turnStart(1)])
+  await beforeResume?.(host, id)
   const agent = await host.resolve(id)
   assert.deepEqual(boundary(agent.session.snapshotEvents()), [turnStart(1), turnEnd(1, 'interrupted')])
   if (checkMarker) {
@@ -409,7 +410,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     assert.deepEqual((await host.call('state', {})).rooms, [])
   })
 
-  for (const changed of ['part', 'team']) {
+  for (const changed of ['part', 'team', 'disk roster']) {
     test(`T3 a ${changed} change during persistence admission prevents a cold write`, async t => {
       const { home, id } = await makeColdRoom(t)
       const entered = Promise.withResolvers()
@@ -440,12 +441,37 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       } })
       assert.equal(await Promise.race([entered.promise.then(() => true), wait(500).then(() => false)]), true,
         'cold repair did not request a write lease')
-      if (changed === 'part') host.rt.roomOf(id).sessionId = 'session-newer-part'
-      else t.mock.method(host.rt, 'sameTeam', () => false)
-      proceed.resolve()
+      const room = host.rt.roomOf(id)
+      let replacement
+      try {
+        if (changed === 'part') room.sessionId = 'session-newer-part'
+        else if (changed === 'team') t.mock.method(host.rt, 'sameTeam', () => false)
+        else {
+          const generation = host.rt.teamGeneration()
+          const { statePath } = host.rt
+          const nextPath = join(home, 'team', 'retired-room.json')
+          replacement = JSON.parse(await readFile(statePath, 'utf8'))
+          assert.equal(host.rt.teamCurrent(), true)
+          delete replacement.rooms[id]
+          replacement.revision++
+          await writeFile(nextPath, JSON.stringify(replacement))
+          await rename(nextPath, statePath)
+          assert.equal(host.rt.teamCurrent(), false)
+          assert.equal(host.rt.readOnly(), undefined)
+          assert.equal(host.rt.sameTeam(generation), true)
+          assert.strictEqual(host.rt.roomOf(id), room)
+          assert.equal(host.rt.sessionOfRoom(room), id)
+        }
+      } finally {
+        proceed.resolve()
+      }
       await closed.promise
       assert.deepEqual(boundary(await host.raw(id)), [])
       assert.equal(host.rt.state.rooms[id].opened, undefined)
+      if (replacement) {
+        assert.equal(room.opened, undefined)
+        assert.deepEqual(JSON.parse(await readFile(host.rt.statePath, 'utf8')), replacement)
+      }
     })
   }
 
