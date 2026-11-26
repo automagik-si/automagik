@@ -10,17 +10,17 @@
 // approved .herdr/bots.json and `sha256` their digest. Mode 0600, folder 0700.
 //
 // The sandbox binds the data root read-only as one parent mount, so a sandboxed bot cannot
-// write the record. It can still ask an unsandboxed in-team pane to run approve: the printed
-// diff is the check, and approving is the person's act.
+// write the record. It can still ask an unsandboxed in-team pane to run approve: the preview
+// is the check, and confirming its digest is the person's act.
 //
 // Apache-2.0.
 
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync,
-  unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync,
+  readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseBots } from "./model.js";
+import { isSendGrantRole, parseBots, roleOf, workerHomeOf } from "./model.js";
 import { dataRootOf } from "./workers.js";
 
 /** The record shape this pack writes and reads. */
@@ -41,7 +41,33 @@ export const approvedRootOf = (env = process.env) => join(dataRootOf(env), APPRO
 export const approvedSettingsDir = (env = process.env) => join(approvedRootOf(env), "agy-settings");
 
 /** The digest an approved roster and a working file are compared by. */
-export const sha256Of = (text) => createHash("sha256").update(String(text)).digest("hex");
+export const sha256Of = (value) =>
+  createHash("sha256").update(Buffer.isBuffer(value) ? value : String(value)).digest("hex");
+
+export const APPROVAL_REVIEW =
+  "review with `am proxy approve --project <dir>`, then confirm with `--confirm <digest>`";
+
+/** Quote terminal controls without changing the strings in JSON output. */
+export function escapeForTerminal(text) {
+  return String(text)
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`)
+    .replace(/[\u202a-\u202e\u2066-\u2069]/g, (ch) => `\\u{${ch.charCodeAt(0).toString(16)}}`);
+}
+
+/** `w` as one shell word. */
+export const shellWord = (w) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${String(w).replace(/'/g, "'\\''")}'`);
+
+/** Quote a project path for the confirmation command, including terminal controls in it. */
+export function approvalProjectWord(project) {
+  // ANSI-C quoting keeps each control intact in the shell without sending it to the terminal.
+  if (project === escapeForTerminal(project)) return shellWord(project);
+  const escaped = [...project].map((ch) => {
+    if (ch === "'" || ch === "\\") return `\\${ch}`;
+    if (ch === escapeForTerminal(ch)) return ch;
+    return Array.from(Buffer.from(ch), (byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("");
+  }).join("");
+  return "$'" + escaped + "'";
+}
 
 /** A project's canonical folder (symlinks resolved); throws when it is not a folder. */
 export function canonicalProject(project) {
@@ -78,12 +104,13 @@ export function recordFor({ project, roster, approvedAt, approvedBy }) {
 /** A record as its file bytes: two-space JSON and a final newline. */
 export const recordText = (record) => `${JSON.stringify(record, null, 2)}\n`;
 
-function missingRecord(project) {
-  const error = new Error(`no approved roster for ${project}: run `
-    + `\`am proxy approve --project ${project}\` from an unsandboxed terminal, `
-    + "then restart the pane");
-  error.code = "ENOENT";
-  return error;
+export class MissingApprovedRecord extends Error {
+  constructor(project) {
+    super(`no approved roster for ${project}: run `
+      + `\`am proxy approve --project ${project}\` from an unsandboxed terminal, `
+      + `then restart the pane; ${APPROVAL_REVIEW}`);
+    this.code = "ENOENT";
+  }
 }
 
 /** The checked record in `text` for `project`; throws when it is corrupt or for another project. */
@@ -118,28 +145,39 @@ function checkedRecord(text, project) {
 
 /**
  * Read and check one project's approved record. Returns { record, file, path, text } where
- * `file` is the parsed roster. A missing record throws with code ENOENT; a corrupt one throws
- * without it, so the proxy and approve can tell them apart.
+ * `file` is the parsed roster. An absent record throws MissingApprovedRecord (ENOENT).
  */
-export function readApprovedRecord({ project, env = process.env, path = undefined }) {
+export function readApprovedRecord({ project, env = process.env, path = undefined, exactMode = false }) {
   const main = canonicalProject(project);
   const file = path ?? recordFileOf(main, env);
   let text;
   try {
-    const info = lstatSync(file);
+    const info = lstatSync(file, { throwIfNoEntry: false });
+    if (!info) throw new MissingApprovedRecord(main);
     if (!info.isFile()) throw new Error(`the approved record ${file} is not a regular file`);
-    if ((info.mode & 0o077) !== 0) {
+    if ((info.mode & 0o077) !== 0 || (exactMode && (info.mode & 0o7777) !== 0o600)) {
       throw new Error(`the approved record ${file} is not 0600; run `
-        + `\`am proxy approve --project ${main}\` again`);
+        + `\`am proxy approve --project ${main}\` again; ${APPROVAL_REVIEW}`);
     }
     text = readFileSync(file, "utf8");
   } catch (e) {
-    if (e?.code === "ENOENT" || e?.code === "ENOTDIR") throw missingRecord(main);
     if (e?.code === "EACCES")
       throw new Error(`cannot read the approved record ${file}: permission denied`);
     throw e;
   }
   return { ...parseApprovedRecord(text, main), path: file, text };
+}
+
+/** A grant must agree with both rosters, including any name used to select the bot. */
+export function approvedGrant({ project, botId, workingFile, env, matches = () => true }) {
+  try {
+    const { record, file } = readApprovedRecord({ project, env, exactMode: true });
+    const role = roleOf(file, botId);
+    if (isSendGrantRole(role) && roleOf(workingFile, botId) === role && matches(file) && matches(workingFile)) {
+      return { role, sha256: record.sha256, project: record.project };
+    }
+  } catch { /* a missing, changed or unreadable approval grants nothing */ }
+  return null;
 }
 
 /** Check record bytes read on the project's own computer (including linked reads). */
@@ -173,24 +211,36 @@ export function approvedProxyState({ project, bot, env = process.env }) {
   }
 }
 
+/**
+ * Whether the approved snapshot's bot names `worker.agentHome` at all (#1208): the hc proxy
+ * refuses such a bot's worker start, so the CLI refuses a proxied one before anything is made.
+ * Presence counts, even a value the snapshot can't use; no record (or an unreadable one) is false.
+ */
+export function approvedWorkerHome({ project, bot, env = process.env }) {
+  let file;
+  try { file = readApprovedRecord({ project, env }).file; } catch { return false; }
+  const approved = file.bots.find((entry) => entry.id === bot.id);
+  return approved ? workerHomeOf(approved).present : false;
+}
+
 /** Invalid approval cannot supply a value: only a working opt-in refuses. Callers warn off. */
 export function approvedProxyEnabled(state, platform = process.platform) {
   if (platform !== "linux") return false;
   if (state.error) {
     if (state.working) {
-      throw new Error(`hc proxy: ${state.error}; run am proxy approve first`);
+      throw new Error(`hc proxy: ${state.error}; run am proxy approve first; ${APPROVAL_REVIEW}`);
     }
     return false;
   }
   if (state.working && state.approved !== true) {
     throw new Error("hc proxy: working switch is on but approval is off or missing; "
-      + "run am proxy approve first");
+      + `run am proxy approve first; ${APPROVAL_REVIEW}`);
   }
   return state.approved === true;
 }
 
 /** Write one record atomically with mode 0600; returns the path. */
-export function writeApprovedRecord(record, env = process.env) {
+export function writeApprovedRecord(record, env = process.env, { rename = renameSync } = {}) {
   const root = approvedRootOf(env);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   chmodSync(root, 0o700);
@@ -203,13 +253,24 @@ export function writeApprovedRecord(record, env = process.env) {
     if (e?.code !== "ENOENT") throw e;
   }
   const tmp = join(root, `.${randomBytes(8).toString("hex")}.tmp`);
+  let fd;
+  let created = false;
   try {
-    writeFileSync(tmp, recordText(record), { mode: 0o600 });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, path);
-    chmodSync(path, 0o600);
+    fd = openSync(tmp, "wx", 0o600);
+    created = true;
+    writeFileSync(fd, recordText(record));
+    if ((fstatSync(fd).mode & 0o777) !== 0o600) {
+      fchmodSync(fd, 0o600);
+      if ((fstatSync(fd).mode & 0o777) !== 0o600)
+        throw new Error(`the temporary approved record ${tmp} is not 0600`);
+    }
+    const written = fd;
+    fd = undefined;
+    closeSync(written);
+    rename(tmp, path);
   } catch (e) {
-    try { unlinkSync(tmp); } catch { /* gone */ }
+    if (fd !== undefined) try { closeSync(fd); } catch { /* keep the write error */ }
+    if (created) try { unlinkSync(tmp); } catch { /* gone */ }
     throw e;
   }
   return path;
@@ -247,39 +308,140 @@ export function rosterDiff(previousText, rosterText) {
   return lines;
 }
 
-/**
- * `proxy approve`: read the project's working .herdr/bots.json, diff it against the previous
- * record, then write the new record 0600. Approving is the person's act; this is the only
- * writer. Returns { path, record, diff, previous, note }.
- */
-export function approveProject({ project, env = process.env, approvedAt = new Date().toISOString(),
-  approvedBy = approverOf(env), beforeWrite = null } = {}) {
-  const main = canonicalProject(project);
+/** Read one snapshot of the working roster, without following a symlink or waiting on a FIFO. */
+export function readRosterBytes(main) {
   const working = join(main, ".herdr", "bots.json");
-  let roster;
+  let bytes;
   try {
-    roster = readFileSync(working, "utf8");
+    const fd = openSync(working, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error("the working roster is not a regular file");
+      bytes = readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   } catch (e) {
     if (e?.code === "ENOENT" || e?.code === "ENOTDIR") {
       throw new Error(`no working roster at ${working}`);
     }
+    if (e?.code === "ELOOP") throw new Error("the working roster is a symlink; use a regular file");
+    if (e?.code === "ENXIO") throw new Error("the working roster is not a regular file");
     throw new Error(`cannot read the working roster ${working}: ${e?.message ?? e}`);
   }
-  parseBots(roster);
+  if (bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])))
+    throw new Error("the roster starts with a byte-order mark; remove it");
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error("the roster is not valid UTF-8");
+  }
+  parseBots(text);
+  return { bytes, text, digest: sha256Of(bytes) };
+}
+
+const summarizedBotKeys = new Set(["rank", "lead", "kind", "hcProxy"]);
+
+function entryChanges(lines, prefix, before, after, skip) {
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (skip.has(key)) continue;
+    const old = Object.hasOwn(before, key) ? JSON.stringify(before[key]) : "absent";
+    const next = Object.hasOwn(after, key) ? JSON.stringify(after[key]) : "absent";
+    if (old !== next) lines.push(`~ ${prefix}: ${key} ${old} -> ${next}`);
+  }
+}
+
+function rosterEntries(before, after) {
+  const old = new Map(before?.file.bots.map((bot) => [bot.id, bot]));
+  const lines = [];
+  for (const bot of after.file.bots) {
+    const was = old.get(bot.id);
+    if (was) entryChanges(lines, `${bot.id} ${bot.name}`, was, bot, summarizedBotKeys);
+    else lines.push(JSON.stringify(bot));
+  }
+  entryChanges(lines, "roster", before?.raw ?? {}, after.raw, new Set(["bots"]));
+  return lines;
+}
+
+function rawRosterDiff(previous, candidate) {
+  if (previous === candidate) return [];
+  // Keep terminators for comparison so adding or removing a final newline is visible.
+  const old = previous.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const next = candidate.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const removed = (i) => `-${i + 1}: ${old[i].replace(/\n$/, "")}`;
+  const added = (i) => `+${i + 1}: ${next[i].replace(/\n$/, "")}`;
+  if (!old.length || !next.length || old.length * next.length > 4_000_000)
+    return [...old.map((_, i) => removed(i)), ...next.map((_, i) => added(i))];
+
+  const width = next.length + 1;
+  const lcs = new Uint32Array((old.length + 1) * width);
+  for (let i = old.length - 1; i >= 0; i--) {
+    for (let j = next.length - 1; j >= 0; j--) {
+      const at = i * width + j;
+      lcs[at] = old[i] === next[j] ? 1 + lcs[at + width + 1]
+        : Math.max(lcs[at + width], lcs[at + 1]);
+    }
+  }
+  const lines = [];
+  let i = 0, j = 0;
+  while (i < old.length || j < next.length) {
+    if (i < old.length && j < next.length && old[i] === next[j]) {
+      i++;
+      j++;
+    } else if (i < old.length && (j === next.length || lcs[(i + 1) * width + j] >= lcs[i * width + j + 1])) {
+      lines.push(removed(i++));
+    } else {
+      lines.push(added(j++));
+    }
+  }
+  return lines;
+}
+
+function approvalChanges(project, text, env, preview) {
   let previous = null;
   let note = null;
   try {
-    previous = readApprovedRecord({ project: main, env }).record;
+    previous = readApprovedRecord({ project, env }).record;
   } catch (e) {
     if (e?.code !== "ENOENT") {
-      note = `the previous record was unreadable (${e?.message ?? e}); replaced`;
+      const reason = e?.message ?? e;
+      note = preview ? `the previous record is unreadable (${reason}); confirming replaces it`
+        : `the previous record was unreadable (${reason}); replaced`;
     }
   }
-  const diff = rosterDiff(previous ? previous.roster : null, roster);
-  const record = recordFor({ project: main, roster, approvedAt, approvedBy });
-  // The command prints the diff before the record exists: the check comes first, the write is
-  // the person's act. A later write error leaves the printed diff to read, no record.
-  if (beforeWrite) beforeWrite({ diff, record, previous: Boolean(previous), note });
-  const path = writeApprovedRecord(record, env);
-  return { path, record, diff, previous: Boolean(previous), note };
+  const before = previous ? parseBots(previous.roster) : null;
+  const after = parseBots(text);
+  return { previous: Boolean(previous), note, warnings: after.warnings,
+    diff: rosterDiff(previous?.roster ?? null, text), entries: rosterEntries(before, after),
+    raw_diff: rawRosterDiff(previous?.roster ?? "", text) };
+}
+
+/** Read and describe the candidate without writing an approval or creating its folder. */
+export function previewApproval({ project, env = process.env }) {
+  const main = canonicalProject(project);
+  const { text, digest } = readRosterBytes(main);
+  const key = projectKey(main);
+  return { preview: true, project: main, key, record: join(approvedRootOf(env), `${key}.json`),
+    digest, ...approvalChanges(main, text, env, true) };
+}
+
+/** Persist only the working bytes named by the person's confirmation. */
+export function commitApproval({ project, digest, env = process.env,
+  approvedAt = new Date().toISOString(), approvedBy = approverOf(env), beforeWrite, writeOptions }) {
+  const main = canonicalProject(project);
+  const { text, digest: actual } = readRosterBytes(main);
+  if (actual !== digest)
+    throw new Error("the roster changed since the preview; run `am proxy approve --project <dir>` again");
+  const { previous, note, diff, entries, raw_diff } = approvalChanges(main, text, env, false);
+  const record = recordFor({ project: main, roster: text, approvedAt, approvedBy });
+  beforeWrite?.({ diff, record, previous, note });
+  const path = writeApprovedRecord(record, env, writeOptions);
+  return { path, record, diff, previous, note, digest, entries, raw_diff };
+}
+
+/** One-step programmatic approval for callers that already control the roster. */
+export function approveProject({ project, env = process.env, approvedAt, approvedBy, beforeWrite } = {}) {
+  const preview = previewApproval({ project, env });
+  return commitApproval({ project: preview.project, digest: preview.digest, env,
+    approvedAt, approvedBy, beforeWrite });
 }

@@ -92,9 +92,9 @@ export const ES = {
   'The Bot team could not start. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'El equipo de Bots no pudo iniciarse. La salida de inicio del motor —su consola o el cuadro de error de inicio de la aplicación— indica la causa.',
   'The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'El equipo de Bots no pudo iniciarse. {error}. La salida de inicio del motor —su consola o el cuadro de error de inicio de la aplicación— indica la causa.',
   'Automation tasks': 'Tareas de automatización',
-  Connectors: 'Conectores',
-  'Search connectors': 'Buscar conectores',
-  'No connectors': 'Sin conectores',
+  Apps: 'Apps',
+  'Search apps': 'Buscar apps',
+  'No apps': 'Sin apps',
   IM: 'IM',
   'via {platform}': 'vía {platform}',
   'Your IM bots': 'Tus bots de IM',
@@ -613,7 +613,8 @@ export const ES = {
   Whale: 'Ballena', Star: 'Estrella', Moon: 'Luna', Wave: 'Onda', Squircle: 'Cuadrículo', Bull: 'Toro', Blossom: 'Flor',
   Gumdrop: 'Gominola', Peanut: 'Cacahuete', Bubbles: 'Burbujas', Saucer: 'Platillo', Sprout: 'Brote', Bunny: 'Conejo',
   Kitty: 'Gatito', Beacon: 'Faro', Plus: 'Más', Magnet: 'Imán', Acorn: 'Bellota', Pebbles: 'Guijarros', Cushion: 'Cojín',
-  Ring: 'Anillo', Gem: 'Gema',
+  Ring: 'Anillo', Gem: 'Gema', Puff: 'Pompón', Cap: 'Seta', Bell: 'Campana', Cloud: 'Nube', Spike: 'Púas', Floppy: 'Orejas caídas',
+  Antenna: 'Antena', Cactus: 'Cactus', Bulb: 'Bombilla', Chick: 'Pollito', Frog: 'Rana',
 
   // Colors
   Black: 'Negro', Brown: 'Marrón', Red: 'Rojo', Orange: 'Naranja', Yellow: 'Amarillo', Green: 'Verde', Cyan: 'Cian', Blue: 'Azul',
@@ -1203,9 +1204,9 @@ export const ES = {
   // About
   'About Omni': 'Acerca de Omni',
   'Version {version}': 'Versión {version}',
-  'Star Omni on GitHub': 'Dar una estrella a Omni en GitHub',
+  'Star Automagik on GitHub': 'Dar una estrella a Automagik en GitHub',
   '{count} stars': '{count} estrellas',
-  'If Omni helps you, a star on GitHub helps more people find it.': 'Si Omni te resulta útil, una estrella en GitHub ayuda a que más personas lo descubran.',
+  'If Automagik helps you, a star on GitHub helps more people find it.': 'Si Automagik te resulta útil, una estrella en GitHub ayuda a que más personas lo descubran.',
   Updates: 'Actualizaciones',
   'Check for updates': 'Buscar actualizaciones',
   'Checking…': 'Comprobando…',
@@ -1286,7 +1287,7 @@ export const ES = {
   'Who to chat with…': 'Con quién chatear…',
   'Add at least one more Bot': 'Añade al menos un Bot más',
   Members: 'Miembros',
-  // Connectors and scheduled tasks
+  // Apps and scheduled tasks
   'Scheduled tasks': 'Tareas programadas',
   'Every day': 'Cada día',
   'Every {count} days': 'Cada {count} días',
@@ -1489,7 +1490,7 @@ export const ES = {
   'Design': 'Diseño',
   'Data': 'Datos',
   'Commerce': 'Comercio',
-  'No connectors connected': 'No hay conectores conectados',
+  'No apps connected': 'No hay apps conectadas',
   '{bot} needs {name}': '{bot} necesita {name}',
   '{bot} wants to send an email': '{bot} quiere enviar un correo',
   'Mail': 'Correo',

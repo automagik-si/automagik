@@ -1,5 +1,6 @@
-// The power shortcut in the Bot team's sidebar (src/client/power-shortcut.js), the power store it
-// shares with the team step (src/client/power-store.js), and the team step opened on purpose.
+// The power model the welcome shares with the Bot team (src/client/power-shortcut.js): the
+// rows' states and words, the power store, and the card each built-in Bot's settings draws.
+// The sidebar's power shortcut is gone; a Bot's power lives in that Bot's settings card.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { dirname } from 'node:path'
@@ -63,12 +64,10 @@ const fetchStub = async (_route, init) => {
   const value = typeof answers[endpoint] === 'function' ? answers[endpoint](payload) : answers[endpoint] ?? {}
   return { ok: true, json: async () => ({ ok: true, value }) }
 }
-const storage = new Map()
-const sessionStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)), removeItem: key => storage.delete(key) }
 const client = { exports: {} }
 runInNewContext(bundle.outputFiles[0].text, {
   module: client, exports: client.exports, URL, setTimeout, clearTimeout, AbortController, Promise, JSON,
-  fetch: fetchStub, sessionStorage, matchMedia: () => ({ matches: true }),
+  fetch: fetchStub, matchMedia: () => ({ matches: true }),
   require: name => ({ react, 'react-dom': { createPortal: node => node } })[name],
 })
 const shortcut = client.exports
@@ -96,13 +95,13 @@ function findAll(node, match, out = []) {
 
 const OMNI_BOT = { id: 'omni', kind: 'omni', name: 'Omni' }
 const GENIE_BOT = { id: 'genie', kind: 'genie', name: 'Genie' }
+const UNFOLD_BOT = { id: 'unfold', kind: 'unfold', name: 'Unfold' }
 const plain = value => JSON.parse(JSON.stringify(value))
 const row = (kind, phase, context, detail = null) => shortcut.powerRow(kind, { phase, detail }, context)
 
 test('each product\'s row follows the plan\'s state table', () => {
   const linked = { bots: [OMNI_BOT, GENIE_BOT], omniLinked: true }
-  // On: Omni linked with its Bot, Genie with a Bot of its kind; the action powers it off. No Open
-  // beside it: the Bot sits in the sidebar already.
+  // On: Omni linked with its Bot, Genie with a Bot of its kind; the action powers it off.
   const omniOn = row('omni', 'asleep', { roster: linked })
   assert.deepEqual([omniOn.state, omniOn.action, omniOn.pressed, omniOn.locked, omniOn.secondary], ['on', 'off', true, false, null])
   assert.equal(shortcut.actionLabel(omniOn), 'Power Omni off')
@@ -170,24 +169,10 @@ test('several Genie Bots: on, and the row wears the Main one\'s mark', () => {
   assert.equal(row('genie', 'asleep', { roster: { bots: [GENIE_BOT, { id: 'genie-2', kind: 'genie' }] } }).bot.id, 'genie')
 })
 
-test('Unfold shows only in its own instance, read-only, after Unfold', () => {
-  assert.deepEqual(plain(shortcut.kindsOf({})), ['omni', 'genie'])
-  assert.deepEqual(plain(shortcut.kindsOf({ preload: 'genie' })), ['genie', 'omni'])
-  assert.deepEqual(plain(shortcut.kindsOf({ preload: 'unfold' })), ['omni', 'genie'])
-  assert.deepEqual(plain(shortcut.kindsOf({ host: 'unfold', preload: 'unfold' })), ['unfold', 'omni', 'genie'])
-  const unfold = row('unfold', 'asleep', { roster: { bots: [{ id: 'u', kind: 'unfold' }] } })
+test('Unfold is a read-only row: on when its Bot is there, with no action', () => {
+  const unfold = row('unfold', 'asleep', { roster: { bots: [UNFOLD_BOT] } })
   assert.deepEqual([unfold.state, unfold.action, unfold.text], ['on', null, 'On your team'])
-})
-
-test('the button names each product\'s state, and badges only work and errors', () => {
-  const rows = [row('omni', 'asleep', { roster: { bots: [OMNI_BOT], omniLinked: true } }), row('genie', 'asleep', { roster: { bots: [] } })]
-  assert.equal(shortcut.buttonLabel(rows), 'Omni on, Genie off')
-  assert.equal(shortcut.buttonLabel([row('omni', 'installing', {}), row('genie', 'failed', {})]), 'Omni working, Genie needs you')
-  assert.equal(shortcut.badgeOf(['asleep', 'asleep']), null)
-  assert.equal(shortcut.badgeOf(['found', 'linked']), null)
-  assert.equal(shortcut.badgeOf(['starting', 'failed']), 'working')
-  assert.equal(shortcut.badgeOf(['restart', 'ready']), 'error')
-  assert.equal(shortcut.badgeOf(['asleep', 'failed']), 'error')
+  assert.deepEqual([row('unfold', 'asleep', { roster: { bots: [] } }).state, row('unfold', 'asleep', { roster: { bots: [] } }).action], ['off', null])
 })
 
 test('a power-on keeps running in the store after its view goes, and a second press starts nothing', async () => {
@@ -228,146 +213,77 @@ test('a power-on keeps running in the store after its view goes, and a second pr
   shortcut.resetPower()
 })
 
-test('each action does its one thing', async () => {
-  const calls = []
-  const actions = {
-    openSession: id => calls.push(['openSession', id]),
-    openHarnessOnboarding: id => calls.push(['onboarding', id]),
-    selectPanel: id => calls.push(['panel', id]),
-    addOmni: async () => { calls.push(['addOmni']); return { id: 'omni-new' } },
-  }
-  const close = () => calls.push(['close'])
-  const problems = []
-  const onProblem = (kind, message) => { if (message) problems.push([kind, message]) }
-  const started = []
-  const start = (kind, run) => { started.push([kind, run.name]) }
-  const options = { actions, close, onProblem, start }
-  const stopped = []
-  options.stop = kind => stopped.push(kind)
-  shortcut.actOn({ kind: 'omni', action: 'power' }, options)
-  shortcut.actOn({ kind: 'genie', action: 'retry' }, options)
-  shortcut.actOn({ kind: 'genie', action: 'install' }, options)
-  assert.deepEqual(started, [['omni', 'powerOn'], ['genie', 'geniePowerOn'], ['genie', 'geniePowerOn']])
-  // Off is the team step's own power-off; a held one does nothing.
-  shortcut.actOn({ kind: 'omni', action: 'off' }, options)
-  shortcut.actOn({ kind: 'genie', action: 'off', locked: true }, options)
-  assert.deepEqual(stopped, ['omni'])
-  shortcut.actOn({ kind: 'omni', action: 'plugins' }, options)
-  await shortcut.actOn({ kind: 'omni', action: 'add' }, options)
-  // Where Omni lives: the team step, with the shortcut's intent to power Omni on.
-  shortcut.actOn({ kind: 'omni', action: 'choose' }, options)
-  assert.deepEqual(calls, [['close'], ['panel', 'plugins'], ['addOmni'], ['close'], ['openSession', 'omni-new'], ['close'], ['onboarding', 'omni-team']])
-  const intent = shortcut.takeTeamIntent()
-  assert.equal(intent.power, 'omni')
-  assert.equal(shortcut.takeTeamIntent(), null, 'the intent is one-shot')
-  // Open team setup: the intent without a card to power on.
-  shortcut.openTeamSetup({ actions, close })
-  assert.equal(shortcut.takeTeamIntent().power, null)
-  // A failed Add Omni says why on its row.
-  await shortcut.actOn({ kind: 'omni', action: 'add' }, { ...options, actions: { ...actions, addOmni: async () => { throw new Error('read only') } } })
-  assert.deepEqual(problems, [['omni', 'read only']])
-})
-
-test('the intent lives a minute, and survives a fresh module through sessionStorage', () => {
-  shortcut.setTeamIntent('omni', 1000)
-  assert.equal(shortcut.takeTeamIntent(1000 + shortcut.INTENT_MS), null)
-  shortcut.setTeamIntent(null, 1000)
-  storage.set('automagik.welcome.team-intent', JSON.stringify({ power: 'omni', at: 2000 }))
-  shortcut.resetPower()
-  assert.equal(shortcut.takeTeamIntent(2500).power, 'omni')
-  assert.equal(storage.has('automagik.welcome.team-intent'), false)
-})
-
-test('the button draws a spinner while working, the cloud\'s dot on an error, and the card opens per the state table', () => {
-  shortcut.resetPower()
-  const roster = { bots: [OMNI_BOT], omniLinked: true }
-  const actions = {}
-  let view = mount(shortcut.PowerShortcut, { roster, actions })
-  let tree = view.render()
-  const button = findAll(tree, node => node.type === 'button')[0]
-  assert.equal(button.props.className, 'bt-round bt-side-tool bt-power')
-  assert.equal(button.props['aria-haspopup'], 'dialog')
-  assert.equal(button.props['aria-expanded'], false)
-  assert.equal(button.props['aria-label'], 'Omni on, Genie off')
-  assert.equal(findAll(tree, node => node.props?.className === 'bt-update-dot').length, 0)
-  shortcut.showPower('genie', 'installing')
-  view = mount(shortcut.PowerShortcut, { roster, actions })
-  tree = view.render()
-  assert.equal(findAll(tree, node => node.props?.className === 'bt-thread-spin').length, 1)
-  shortcut.showPower('genie', 'failed', { message: 'no git' })
-  view = mount(shortcut.PowerShortcut, { roster, actions })
-  tree = view.render()
-  assert.equal(findAll(tree, node => node.props?.className === 'bt-update-dot').length, 1)
-  shortcut.resetPower()
-})
-
 test('the team step opened on purpose only closes on Continue: no team-save, no rename', async () => {
-  for (const [explicit, intent, saves] of [[true, null, false], [false, 'omni', false], [false, null, true]]) {
+  for (const [explicit, saves] of [[true, false], [false, true]]) {
     shortcut.resetPower()
     fetched.length = 0
     answers = { state: { companionName: 'Otto', teamDone: false, preload: null }, 'team-save': { omni: false, genie: false } }
-    if (intent) shortcut.setTeamIntent(intent)
     let completed = 0
     const props = { stepId: 'omni-team', explicit, complete: () => { completed += 1 } }
     const view = mount(shortcut.TeamStep, props)
     view.render()
     await settle()
     const tree = view.render()
-    assert.ok(tree, `the step shows (explicit ${explicit}, intent ${intent})`)
+    assert.ok(tree, `the step shows (explicit ${explicit})`)
     const go = findAll(tree, node => node.type === 'button' && String(node.props.className).includes('oai-primary'))[0]
     go.props.onClick()
     await settle()
     await settle()
     assert.equal(fetched.some(call => call.endpoint === 'team-save'), saves)
     if (!saves) assert.equal(completed, 1)
-    // The intent's Omni powers on by itself.
-    if (intent === 'omni') assert.notEqual(shortcut.powerOf('omni').phase, 'asleep')
   }
   shortcut.resetPower()
-  assert.equal(shortcut.explicitOf({ explicit: true }, null), true)
-  assert.equal(shortcut.explicitOf({}, { power: null, at: 0 }), true)
-  assert.equal(shortcut.explicitOf({}, null), false)
+  assert.equal(shortcut.explicitOf({ explicit: true }), true)
+  assert.equal(shortcut.explicitOf({}), false)
 })
 
-test('without the Bot team\'s opener, team setup only closes and leaves no intent behind', () => {
+test('the Genie preload powers on only on the first-run team step', async (t) => {
+  t.after(shortcut.resetPower)
+  for (const explicit of [true, false]) {
+    shortcut.resetPower()
+    fetched.length = 0
+    answers = {
+      state: { companionName: 'Ada', teamDone: false, preload: 'genie' },
+      'genie-plugin': { ready: false, plugin: { installed: false } },
+      'genie-plugin-install': { ready: true, bot: GENIE_BOT },
+    }
+    const view = mount(shortcut.TeamStep, { stepId: 'omni-team', explicit })
+    view.render()
+    await settle()
+    assert.ok(view.render())
+    await settle()
+    const installs = fetched.filter(call => call.endpoint.endsWith('-install'))
+    assert.deepEqual(installs.map(call => call.endpoint), explicit ? [] : ['genie-plugin-install'])
+    assert.equal(shortcut.powerOf('genie').phase, explicit ? 'asleep' : 'ready')
+  }
+})
+
+test('the Omni and Unfold preloads power on only on the first-run team step', async () => {
   shortcut.resetPower()
-  let closed = 0
-  shortcut.openTeamSetup({ actions: {}, close: () => { closed += 1 } }, 'omni')
-  assert.equal(closed, 1)
-  assert.equal(shortcut.takeTeamIntent(), null)
+  for (const kind of ['omni', 'unfold']) {
+    for (const explicit of [true, false]) {
+      fetched.length = 0
+      answers = { state: { companionName: 'Ada', teamDone: false, preload: kind } }
+      const view = mount(shortcut.TeamStep, { stepId: 'omni-team', explicit })
+      const context = `${kind} (explicit ${explicit})`
+      try {
+        view.render()
+        await settle()
+        assert.ok(view.render())
+        // Check the first-run wake before reduced motion advances it.
+        if (explicit) await settle()
+        const { phase } = shortcut.powerOf(kind)
+        if (explicit) assert.equal(phase, 'asleep', context)
+        else assert.notEqual(phase, 'asleep', context)
+        assert.equal(fetched.some(call => call.endpoint.endsWith('-install')), false, context)
+      } finally {
+        shortcut.resetPower()
+      }
+    }
+  }
 })
 
-test('the instance and the plugins are read on mount, so the button\'s name is right before the card opens', async () => {
-  shortcut.resetPower()
-  fetched.length = 0
-  answers = { state: { host: 'unfold', preload: 'unfold' } }
-  const view = mount(shortcut.PowerShortcut, { roster: { bots: [] }, actions: {} })
-  view.render()
-  await settle()
-  const tree = view.render()
-  // The plugins once on mount (an install running on the host is picked up), then only when the card opens.
-  assert.deepEqual(fetched.map(call => call.endpoint), ['state', 'omni-plugins', 'genie-plugin'])
-  view.render()
-  await settle()
-  assert.equal(fetched.length, 3, 'no read again while the card stays closed')
-  assert.equal(findAll(tree, node => node.type === 'button')[0].props['aria-label'], 'Unfold off, Omni off, Genie off')
-  shortcut.resetPower()
-})
-
-test('Power on waits for the plugins\' read, which may say Open Plugins instead', () => {
-  const powers = { omni: { phase: 'asleep', detail: null }, genie: { phase: 'asleep', detail: null } }
-  const roster = { bots: [] }
-  const before = shortcut.cardRows(['omni', 'genie'], powers, { roster, read: { checked: false } })
-  assert.deepEqual(before.map(entry => entry.action), [null, null])
-  const off = { ready: false, canInstall: false }
-  const after = shortcut.cardRows(['omni', 'genie'], powers, { roster, read: { omni: off, genie: { ready: false, canInstall: true }, checked: true } })
-  assert.deepEqual(after.map(entry => entry.action), ['plugins', 'power'])
-  // A failure still offers Try again before the read; a problem shows on its row.
-  const failed = shortcut.cardRows(['omni'], { omni: { phase: 'failed', detail: { message: 'x' } } }, { roster, problems: { omni: 'read only' } })
-  assert.deepEqual([failed[0].action, failed[0].alert], ['retry', 'read only'])
-})
-
-test('powering off from the shortcut is the team step\'s own off: the run stops, nothing else is undone', async () => {
+test('powering off from a card is the team step\'s own off: the run stops, nothing else is undone', async () => {
   shortcut.resetPower()
   fetched.length = 0
   // A linked Omni: off only puts its box to sleep. No unlink, no Bot removed, no host call.
@@ -395,110 +311,452 @@ test('powering off from the shortcut is the team step\'s own off: the run stops,
   shortcut.resetPower()
 })
 
-test('each row leads with the Bot team\'s mark: its Bot, or the look that Bot is made with', () => {
-  const Mark = () => null
-  const own = shortcut.RowMark({ Mark, row: { kind: 'omni', bot: OMNI_BOT } })
-  assert.deepEqual([own.type, own.props.bot, own.props.size, own.props.live], [Mark, OMNI_BOT, 28, false])
-  // Not on the team yet: the look its Bot is made with (the welcome's Omni Bot, Genie's kind).
-  assert.deepEqual(plain(shortcut.RowMark({ Mark, row: { kind: 'omni', bot: null } }).props.bot), { id: 'omni', kind: 'omni', color: 'deepseek', avatar: { shape: 'octopus' } })
-  assert.deepEqual(plain(shortcut.RowMark({ Mark, row: { kind: 'genie', bot: null } }).props.bot), { id: 'genie', kind: 'genie' })
-  // Without the Bot team's mark, the row has none.
-  assert.equal(shortcut.RowMark({ Mark: null, row: { kind: 'omni' } }), null)
+// The Bot team's pieces, as its settings page draws them. The test reads the component's own
+// props: it does not mount the Bot team's React.
+const Card = ({ title, children }) => ({ type: Card, props: { title }, children })
+const Row = ({ label, hint, children }) => ({ type: Row, props: { label, hint }, children })
+const SwitchRow = ({ label, hint, on, disabled, onChange }) => ({ type: SwitchRow, props: { label, hint, on, disabled, onChange }, children: [] })
+const cardProps = (bot, roster, extra = {}) => ({ bot, roster, Card, Row, SwitchRow, ...extra })
+const drawCard = (bot, roster, extra = {}) => mount(shortcut.PowerSettingsCard, cardProps(bot, roster, extra)).render()
+const switchOf = tree => findAll(tree, node => node.type === SwitchRow)[0]
+
+test('the power card is offered for omni, genie and unfold, and for no other kind', () => {
+  for (const [kind, bot] of [['omni', OMNI_BOT], ['genie', GENIE_BOT], ['unfold', UNFOLD_BOT]]) {
+    shortcut.resetPower()
+    const tree = drawCard(bot, { bots: [bot] })
+    assert.equal(switchOf(tree)?.props.label, 'Power', `${kind} gets the card`)
+  }
+  shortcut.resetPower()
+  const other = { id: 'x', kind: 'agent', name: 'X' }
+  assert.equal(drawCard(other, { bots: [other] }), null)
 })
 
-test('the shortcut takes the Bot team\'s BotMark when it registers', () => {
-  const registered = []
-  const BotMark = () => null
-  const off = shortcut.installPowerShortcut(() => ({ omni: { sidebarTools: { register: entry => { registered.push(entry); return () => {} } }, ui: { BotMark } } }))
+test('the card\'s switch calls the existing power-on and power-off', () => {
+  shortcut.resetPower()
+  const started = []
+  const stopped = []
+  const start = (kind, run) => { started.push([kind, run.name]) }
+  const stop = kind => { stopped.push(kind) }
+  const omni = { ...OMNI_BOT }
+  let sw = switchOf(drawCard(omni, { bots: [omni], omniLinked: true }, { start, stop }))
+  assert.equal(sw.props.on, true)
+  sw.props.onChange(false)
+  assert.deepEqual(stopped, ['omni'])
+  shortcut.resetPower()
+  sw = switchOf(drawCard(omni, { bots: [omni] }, { start, stop }))
+  assert.equal(sw.props.on, false)
+  sw.props.onChange(true)
+  assert.deepEqual(started, [['omni', 'powerOn']])
+  shortcut.resetPower()
+  sw = switchOf(drawCard(GENIE_BOT, { bots: [] }, { start, stop }))
+  assert.equal(sw.props.on, false)
+  sw.props.onChange(true)
+  shortcut.resetPower()
+  sw = switchOf(drawCard(UNFOLD_BOT, { bots: [] }, { start, stop }))
+  assert.equal(sw.props.on, false)
+  sw.props.onChange(true)
+  assert.deepEqual(started, [['omni', 'powerOn'], ['genie', 'geniePowerOn'], ['unfold', 'unfoldPowerOn']])
+})
+
+test('the card\'s label follows the power state, in the existing words', () => {
+  shortcut.resetPower()
+  let sw = switchOf(drawCard(OMNI_BOT, { bots: [OMNI_BOT], omniLinked: true }))
+  assert.equal(sw.props.on, true)
+  assert.equal(sw.props.hint, 'On · Connected')
+  shortcut.showPower('omni', 'linked', { origin: 'omni.example.com' })
+  sw = switchOf(drawCard(OMNI_BOT, { bots: [OMNI_BOT], omniLinked: true }))
+  assert.equal(sw.props.hint, 'On · Connected to omni.example.com')
+  shortcut.resetPower()
+  sw = switchOf(drawCard(OMNI_BOT, { bots: [] }))
+  assert.deepEqual([sw.props.on, sw.props.hint, sw.props.disabled], [false, 'Powered off', false])
+  // Working: the switch is on its way on, and held.
+  shortcut.showPower('omni', 'waking')
+  sw = switchOf(drawCard(OMNI_BOT, { bots: [] }))
+  assert.deepEqual([sw.props.on, sw.props.hint, sw.props.disabled], [true, 'Waking up…', true])
+  // Waiting on the phone is on too; its switch is the way to cancel it.
+  shortcut.showPower('omni', 'pairing', { pairing: { code: 'X' } })
+  sw = switchOf(drawCard(OMNI_BOT, { bots: [] }))
+  assert.deepEqual([sw.props.on, sw.props.hint, sw.props.disabled], [true, 'Approve this device on your phone', false])
+  // Genie, once on the team, is on and held; its note says why.
+  shortcut.resetPower()
+  shortcut.showPower('genie', 'ready', { bot: GENIE_BOT })
+  const genie = drawCard(GENIE_BOT, { bots: [GENIE_BOT] })
+  sw = switchOf(genie)
+  assert.deepEqual([sw.props.on, sw.props.hint, sw.props.disabled], [true, 'On · Ready for a wish', true])
+  assert.ok(findAll(genie, node => node.props?.className === 'bt-bs-shell-note').some(node => [].concat(node.children).join('') === 'Genie stays on once it joins your team.'))
+})
+
+test('a read-only team\'s card is text only, with the same state line', () => {
+  shortcut.resetPower()
+  const tree = drawCard(OMNI_BOT, { bots: [OMNI_BOT], omniLinked: true, readOnly: 'Read only' })
+  assert.equal(findAll(tree, node => node.type === SwitchRow).length, 0)
+  const text = findAll(tree, node => node.type === Row)[0]
+  assert.deepEqual([text.props.label, text.props.hint], ['Power', 'On · Connected'])
+})
+
+test('the settings card registers on the Bot team\'s botSettings, and leaves with its disposer', () => {
+  const entries = []
+  const botSettings = { register: (entry) => { entries.push(entry); return () => entries.splice(entries.indexOf(entry), 1) } }
+  const off = shortcut.installPowerSettings(() => ({ omni: { botSettings } }))
   assert.equal(typeof off, 'function')
-  const drawn = registered[0].Component({ roster: {}, actions: {} })
-  assert.equal(drawn.type, shortcut.PowerShortcut)
-  assert.equal(drawn.props.Mark, BotMark)
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].id, 'welcome-power')
+  assert.equal(entries[0].Component, shortcut.PowerSettingsCard)
+  off()
+  assert.equal(entries.length, 0)
 })
 
-// The host's Genie job, as genie-plugin answers it (bot-types.js genieStatus), at its second of three steps.
-const GENIE_INSTALLING = { ready: false, plugin: { installed: false }, canInstall: true, install: { phase: 'installing', steps: ['git', 'team', 'genie'], current: 'team', done: ['git'], error: null } }
-// A start that runs the resumed power-on with a stand-in host and no waits.
-const resumedWith = (ai, polls = []) => (kind, run) => shortcut.startPower(kind, options => run({ ...options, genieAi: ai, omniAi: ai, omniUi: ai, wait: async (ms) => { polls.push(ms) }, quick: true }))
+test('without the Bot team, or with a client that has no botSettings, there is no card and nothing throws', () => {
+  for (const botTeam of [
+    () => { throw new Error('Module @automagik/bots-dsh/client is not registered') },
+    () => undefined,
+    () => ({}),
+    () => ({ omni: null }),
+    () => ({ omni: {} }),
+  ]) {
+    const off = shortcut.installPowerSettings(botTeam)
+    assert.equal(typeof off, 'function')
+    off()
+  }
+})
 
-test('an install the host runs is picked up after a reload: its step and place, polled to the end, and no second install', async () => {
+const GENIE_MISSING = { ready: false, plugin: { installed: false }, canInstall: true }
+const OMNI_MISSING = { ready: false, installed: false, canInstall: true }
+const GENIE_INSTALLING = {
+  ...GENIE_MISSING,
+  install: { phase: 'installing', steps: ['git', 'team', 'genie'], current: 'team', done: ['git'] },
+}
+
+// Run the power-on with a fake host and skip the waits.
+const startWith = (ai, polls = []) => (kind, run) => shortcut.startPower(kind, options => run({
+  ...options, genieAi: ai, omniAi: ai, omniUi: ai, quick: true,
+  wait: async ms => { polls.push(ms) },
+}))
+
+test('a running Genie install is picked up, polled to the end, and started only by the host',
+  async (t) => {
+    shortcut.resetPower()
+    t.after(shortcut.resetPower)
+    const asked = []
+    const replies = [GENIE_INSTALLING, { ready: true, bot: GENIE_BOT }]
+    const polls = []
+    const start = startWith(async endpoint => {
+      asked.push(endpoint)
+      return replies.shift()
+    }, polls)
+    assert.equal(shortcut.resumeInstall('genie', { install: { phase: 'done' } }, start), null)
+    assert.equal(shortcut.resumeInstall('genie', null, start), null)
+    assert.equal(shortcut.resumeInstall('unfold', GENIE_INSTALLING, start), null)
+    assert.deepEqual(asked, [])
+    assert.ok(shortcut.resumeInstall('genie', GENIE_INSTALLING, start))
+    assert.equal(shortcut.powerOf('genie').phase, 'installing')
+    assert.equal(shortcut.resumeInstall('genie', GENIE_INSTALLING, start), null)
+    await settle()
+    assert.deepEqual(asked, ['genie-plugin', 'genie-plugin'])
+    assert.deepEqual(polls, [shortcut.POLL_MS, shortcut.POLL_MS])
+    assert.equal(shortcut.powerOf('genie').phase, 'ready')
+  })
+
+test('Omni resumes by polling the host and shows a failed install', async (t) => {
   shortcut.resetPower()
+  t.after(shortcut.resetPower)
   const asked = []
-  const replies = [GENIE_INSTALLING, { ...GENIE_INSTALLING, install: { ...GENIE_INSTALLING.install, phase: 'done', current: null, done: ['git', 'team', 'genie'] }, ready: true, bot: GENIE_BOT }]
-  const ai = async (endpoint) => { asked.push(endpoint); return replies.shift() }
-  const polls = []
-  // Nothing running: nothing picked up.
-  assert.equal(shortcut.resumeInstall('genie', { ...GENIE_INSTALLING, install: { phase: 'done' } }, resumedWith(ai, polls)), null)
-  assert.equal(shortcut.resumeInstall('genie', null, resumedWith(ai, polls)), null)
-  // A fresh window: the store says asleep, the host says installing. At once, the working row.
-  assert.equal(shortcut.powerOf('genie').phase, 'asleep')
-  assert.ok(shortcut.resumeInstall('genie', GENIE_INSTALLING, resumedWith(ai, polls)))
-  assert.equal(shortcut.powerOf('genie').phase, 'installing')
-  const working = shortcut.powerRow('genie', shortcut.powerOf('genie'), { roster: { bots: [] } })
-  assert.deepEqual([working.state, working.text, working.working], ['working', 'Installing Genie · 2 of 3 · Bot team', true])
-  assert.equal(shortcut.badgeOf([shortcut.powerOf('genie').phase]), 'working')
-  // A second pickup (the card opening) starts nothing while it works.
-  assert.equal(shortcut.resumeInstall('genie', GENIE_INSTALLING, resumedWith(ai, polls)), null)
-  for (let i = 0; i < 4; i += 1) await settle()
-  // Polled with the team step's interval until done; the install was never asked for again.
-  assert.deepEqual(asked, ['genie-plugin', 'genie-plugin'])
-  assert.ok(polls.every(ms => ms === shortcut.POLL_MS || ms === 0))
-  assert.ok(polls.includes(shortcut.POLL_MS))
+  const installing = {
+    ...OMNI_MISSING,
+    plugins: [{ name: 'a', title: 'Omni tools' }, { name: 'b', title: 'Omni channels' }],
+    install: { phase: 'installing', current: 'b', done: ['a'] },
+  }
+  const start = startWith(async endpoint => {
+    asked.push(endpoint)
+    return { ...installing, install: { phase: 'failed', error: 'git was not found' } }
+  })
+  assert.ok(shortcut.resumeInstall('omni', installing, start))
+  assert.equal(shortcut.powerOf('omni').phase, 'installing')
+  await settle()
+  assert.deepEqual(asked, ['omni-plugins'])
+  assert.deepEqual(plain(shortcut.powerOf('omni')), {
+    phase: 'failed', detail: { message: 'git was not found' },
+  })
+})
+
+test('a failed plugin read leaves the other answer intact', async () => {
+  const asked = []
+  const result = await shortcut.readPlugins(async endpoint => {
+    asked.push(endpoint)
+    if (endpoint === 'omni-plugins') throw new Error('read failed')
+    return GENIE_MISSING
+  })
+  assert.deepEqual(asked, ['omni-plugins', 'genie-plugin'])
+  assert.deepEqual(Array.from(result), [null, GENIE_MISSING])
+})
+
+const appRow = (kind, phase, { checked = true, status = null, roster, actions, detail } = {}) =>
+  shortcut.officialRow(kind, { phase, detail }, { roster, read: { checked, status }, actions })
+
+test('the Apps row waits for a read, then offers install, power or Plugins', () => {
+  assert.deepEqual(plain(appRow('genie', 'asleep', { checked: false })), {
+    text: null, label: null, alert: null, action: null,
+  })
+  const install = appRow('genie', 'asleep', { status: GENIE_MISSING })
+  assert.deepEqual([install.text, install.label, install.action], [
+    null, 'Install Genie', 'install',
+  ])
+  assert.equal(appRow('omni', 'asleep', { status: OMNI_MISSING }).label, 'Install Omni')
+  assert.equal(appRow('omni', 'asleep').label, 'Power Omni on')
+  for (const hasPlugins of [true, false]) {
+    const plugins = appRow('omni', 'asleep', {
+      status: { ...OMNI_MISSING, canInstall: false }, actions: { hasPlugins: () => hasPlugins },
+    })
+    assert.equal(plugins.label, hasPlugins ? 'Open Plugins' : null)
+  }
+})
+
+test('Apps offers to install a missing Omni plugin when Omni is linked', () => {
+  const context = { roster: { omniLinked: true }, status: OMNI_MISSING }
+  const read = { checked: true, status: context.status }
+  for (const power of [null, { phase: 'asleep' }]) {
+    const install = shortcut.officialRow('omni', power, { roster: context.roster, read })
+    assert.deepEqual(plain(install), {
+      text: null, label: 'Install Omni', alert: null, action: 'install',
+    })
+  }
+  assert.equal(appRow('omni', 'looking', context).action, null)
+  assert.equal(appRow('omni', 'failed', context).action, 'retry')
+  assert.equal(row('omni', 'asleep', context).action, 'off')
+})
+
+test('the Apps row shows progress and only offers actions that belong there', () => {
+  const working = appRow('genie', 'installing', { detail: { genie: GENIE_INSTALLING } })
+  assert.equal(working.text, 'Installing Genie · 2 of 3 · Bot team')
+  assert.equal(working.label, null)
+  assert.equal(appRow('omni', 'looking').label, null)
+  const failed = appRow('genie', 'failed', { detail: { message: 'git was not found' } })
+  assert.deepEqual([failed.label, failed.alert, failed.action], [
+    'Try again', 'git was not found', 'retry',
+  ])
+  for (const phase of ['found', 'none']) {
+    assert.equal(appRow('omni', phase).label, null)
+    const choose = appRow('omni', phase, { actions: { openHarnessOnboarding() {} } })
+    assert.equal(choose.label, 'Choose where Omni lives')
+  }
+  for (const phase of ['restart', 'pairing', 'linked']) {
+    assert.equal(appRow('omni', phase).label, null, phase)
+  }
+  assert.equal(appRow('genie', 'ready').label, null)
+  const readOnly = { roster: { readOnly: true }, status: GENIE_MISSING }
+  assert.equal(appRow('genie', 'asleep', readOnly).label, null)
+  assert.equal(appRow('genie', 'failed', readOnly).label, null)
+})
+
+function officialRegistration(options) {
+  const entries = new Set()
+  const officialInstall = {
+    register(entry) {
+      entries.add(entry)
+      return () => entries.delete(entry)
+    },
+  }
+  const dispose = shortcut.installOfficialInstall(() => ({ omni: { officialInstall } }), options)
+  return { entry: [...entries][0], entries, dispose }
+}
+
+test('an Apps install starts the kind once, even if its Install button is clicked twice',
+  async (t) => {
+    t.after(shortcut.resetPower)
+    for (const [kind, read, missing, installed] of [
+      ['omni', 'omni-plugins', OMNI_MISSING, { ready: true, installed: true }],
+      ['genie', 'genie-plugin', GENIE_MISSING, { ready: true, bot: GENIE_BOT }],
+    ]) {
+      shortcut.resetPower()
+      const asked = []
+      let finish
+      const start = startWith(async endpoint => {
+        asked.push(endpoint)
+        if (endpoint === read) return missing
+        if (endpoint === `${read}-install`) return new Promise(resolve => { finish = resolve })
+        return { linked: true }
+      })
+      const { entry, dispose } = officialRegistration({ start, ask: async () => missing })
+      t.after(dispose)
+      await entry.refresh()
+      const ctx = { roster: { bots: [] }, actions: {} }
+      const row = entry.row(kind, ctx)
+      assert.equal(row.action, 'install')
+      assert.ok(shortcut.actOfficial(kind, row, { ...ctx, start }))
+      assert.equal(entry.act(kind, ctx), undefined)
+      assert.equal(shortcut.actOfficial(kind, row, { ...ctx, start }), null)
+      await settle()
+      assert.deepEqual(asked, [read, `${read}-install`])
+      finish(installed)
+      await settle()
+      assert.equal(shortcut.powerOf(kind).phase, kind === 'omni' ? 'linked' : 'ready')
+    }
+  })
+
+test('the Apps power and retry actions use each kind\'s power-on', () => {
+  const calls = []
+  const start = (kind, run) => {
+    calls.push([kind, typeof run])
+    return kind
+  }
+  assert.equal(shortcut.actOfficial('omni', { action: 'power' }, { start }), 'omni')
+  assert.equal(shortcut.actOfficial('genie', { action: 'retry' }, { start }), 'genie')
+  assert.deepEqual(calls, [['omni', 'function'], ['genie', 'function']])
+})
+
+test('the Apps actions open the team choice and the Plugins page', () => {
+  const calls = []
+  const actions = {
+    closeSettings: () => calls.push('close'),
+    openHarnessOnboarding: id => calls.push(id),
+    hasPlugins: () => true,
+    openPlugins: () => calls.push('plugins'),
+  }
+  const choose = appRow('omni', 'none', { actions })
+  shortcut.actOfficial('omni', choose, { actions })
+  const plugins = appRow('genie', 'asleep', {
+    status: { ...GENIE_MISSING, canInstall: false }, actions,
+  })
+  shortcut.actOfficial('genie', plugins, { actions })
+  assert.deepEqual(calls, ['close', 'omni-team', 'close', 'plugins'])
+})
+
+test('official installers register unchecked and track reads and power changes', async (t) => {
+  shortcut.resetPower()
+  t.after(shortcut.resetPower)
+  const asked = []
+  const starts = []
+  const ask = async endpoint => {
+    asked.push(endpoint)
+    return endpoint === 'omni-plugins' ? OMNI_MISSING : GENIE_MISSING
+  }
+  const start = kind => starts.push(kind)
+  const { entry, dispose, entries } = officialRegistration({ ask, start })
+  t.after(dispose)
+  assert.equal(entry.id, 'welcome-install')
+  assert.equal(entry.order, 0)
+  assert.deepEqual(Array.from(entry.kinds), ['omni', 'genie'])
+  const ctx = { roster: { bots: [] }, actions: {} }
+  assert.equal(entry.row('omni', ctx).label, null)
+  assert.equal(entry.pending('omni'), false)
+  assert.deepEqual(asked, [])
+  const seen = []
+  const unsubscribe = entry.subscribe(() => seen.push(entry.version()))
+  const read = entry.refresh()
+  assert.equal(entry.refresh(), read)
+  await read
+  assert.deepEqual(asked, ['omni-plugins', 'genie-plugin'])
+  assert.deepEqual(starts, [])
+  assert.deepEqual(seen, [1])
+  assert.equal(entry.row('omni', ctx).label, 'Install Omni')
+  assert.equal(entry.pending('omni'), true)
+  assert.equal(entry.pending('genie'), true)
+  const second = officialRegistration()
+  t.after(second.dispose)
+  assert.equal(second.entry.row('omni', ctx).label, null)
+  assert.equal(second.entry.pending('omni'), false)
+  for (const phase of ['waking', 'failed', 'restart', 'found', 'none']) {
+    shortcut.showPower('omni', phase)
+    assert.equal(second.entry.pending('omni'), true, phase)
+  }
+  assert.deepEqual(seen, [1, 2, 3, 4, 5, 6])
+  assert.equal(entry.version(), 6)
+  unsubscribe()
+  dispose()
+  assert.equal(entries.size, 0)
+  shortcut.showPower('omni', 'asleep')
+  assert.equal(entry.version(), 6)
+  assert.equal(second.entry.pending('omni'), false)
+})
+
+test('Omni pairing stays pending after the host confirms the plugins are installed', async (t) => {
+  shortcut.resetPower()
+  t.after(shortcut.resetPower)
+  const { entry, dispose } = officialRegistration({ ask: async () => ({ installed: true }) })
+  t.after(dispose)
+  await entry.refresh()
+  assert.equal(entry.pending('omni'), false)
+  shortcut.showPower('omni', 'pairing', { pairing: { code: 'X' } })
+  assert.equal(entry.pending('omni'), true)
+  const pairing = entry.row('omni', { roster: { bots: [] }, actions: {} })
+  assert.equal(pairing.text, 'Approve this device on your phone')
+  assert.equal(pairing.label, null)
+})
+
+test('a linked Omni run supersedes the Apps read that said Omni was missing', async (t) => {
+  shortcut.resetPower()
+  t.after(shortcut.resetPower)
+  const start = startWith(async endpoint => ({
+    'omni-plugins': OMNI_MISSING,
+    'omni-plugins-install': { ready: true, installed: true },
+    'omni-link': { linked: true },
+  })[endpoint])
+  const { entry, dispose } = officialRegistration({
+    ask: async endpoint => endpoint === 'omni-plugins' ? OMNI_MISSING : GENIE_MISSING,
+    start,
+  })
+  t.after(dispose)
+  const ctx = { roster: { omniLinked: true }, actions: {} }
+  await entry.refresh()
+  assert.equal(entry.pending('omni'), true)
+  assert.equal(entry.row('omni', ctx).action, 'install')
+
+  assert.ok(entry.act('omni', ctx))
+  await settle()
+  assert.equal(shortcut.powerOf('omni').phase, 'linked')
+  assert.equal(entry.pending('omni'), false)
+  assert.deepEqual(plain(entry.row('omni', ctx)), {
+    text: 'On · Connected', label: null, alert: null, action: null,
+  })
+})
+
+test('official install is optional for a missing or older Bot team', () => {
+  for (const load of [
+    () => { throw new Error('missing module') },
+    () => undefined,
+    () => ({ omni: {} }),
+  ]) {
+    const dispose = shortcut.installOfficialInstall(load)
+    assert.equal(typeof dispose, 'function')
+    dispose()
+  }
+})
+
+test('refresh follows a host install and drops a reply received after disposal', async (t) => {
+  shortcut.resetPower()
+  t.after(shortcut.resetPower)
+  const asked = []
+  let reply = GENIE_MISSING
+  const ask = async endpoint => {
+    asked.push(endpoint)
+    return endpoint === 'genie-plugin' ? reply : null
+  }
+  const polled = []
+  const start = startWith(async endpoint => {
+    polled.push(endpoint)
+    return { ready: true, bot: GENIE_BOT }
+  })
+  const { entry, dispose } = officialRegistration({ ask, start })
+  t.after(dispose)
+  await entry.refresh()
+  assert.deepEqual(polled, [])
+  reply = GENIE_INSTALLING
+  await entry.refresh()
+  await settle()
+  assert.deepEqual(asked, ['omni-plugins', 'genie-plugin', 'omni-plugins', 'genie-plugin'])
+  assert.deepEqual(polled, ['genie-plugin'])
   assert.equal(shortcut.powerOf('genie').phase, 'ready')
-  assert.equal(shortcut.powerRow('genie', shortcut.powerOf('genie'), { roster: { bots: [] } }).state, 'on')
-  shortcut.resetPower()
-})
 
-test('a picked-up install that fails shows why, with Try again; Omni\'s plugin install is picked up the same way', async () => {
-  shortcut.resetPower()
-  const failed = { ...GENIE_INSTALLING, install: { ...GENIE_INSTALLING.install, phase: 'failed', error: 'git was not found' } }
-  const genieAsked = []
-  shortcut.resumeInstall('genie', GENIE_INSTALLING, resumedWith(async (endpoint) => { genieAsked.push(endpoint); return failed }))
-  for (let i = 0; i < 4; i += 1) await settle()
-  const row = shortcut.powerRow('genie', shortcut.powerOf('genie'), { roster: { bots: [] } })
-  assert.deepEqual([row.state, row.action, row.alert], ['attention', 'retry', 'git was not found'])
-  assert.ok(!genieAsked.includes('genie-plugin-install'))
-  // Omni: its plugins' job, at the second of two plugins.
-  const plugins = [{ name: 'a', title: 'Omni tools' }, { name: 'b', title: 'Omni channels' }]
-  const omniInstalling = { ready: false, installed: false, canInstall: true, plugins, install: { phase: 'installing', current: 'b', done: ['a'] } }
-  const omniAsked = []
-  const omniAi = async (endpoint) => { omniAsked.push(endpoint); return endpoint === 'omni-plugins' ? { ...omniInstalling, install: { phase: 'failed', error: 'no network' } } : {} }
-  shortcut.resumeInstall('omni', omniInstalling, resumedWith(omniAi))
-  assert.equal(shortcut.powerRow('omni', shortcut.powerOf('omni'), { roster: { bots: [] } }).text, 'Installing Omni · 2 of 2 · Omni channels')
-  for (let i = 0; i < 4; i += 1) await settle()
-  assert.deepEqual(omniAsked, ['omni-plugins'])
-  assert.deepEqual(plain(shortcut.powerOf('omni')), { phase: 'failed', detail: { message: 'no network' } })
-  shortcut.resetPower()
-})
-
-test('the shortcut picks up a running install when it mounts', async () => {
-  shortcut.resetPower()
-  fetched.length = 0
-  answers = { state: { host: null, preload: null }, 'genie-plugin': GENIE_INSTALLING, 'omni-plugins': { ready: true, installed: true, canInstall: true } }
-  const view = mount(shortcut.PowerShortcut, { roster: { bots: [] }, actions: {} })
-  view.render()
-  await settle()
-  await settle()
-  assert.equal(shortcut.powerOf('genie').phase, 'installing')
-  const tree = view.render()
-  const button = findAll(tree, node => node.type === 'button')[0]
-  assert.match(button.props['aria-label'], /Genie working/)
-  assert.equal(findAll(button, node => node.props?.className === 'bt-thread-spin').length, 1)
-  assert.ok(!fetched.some(call => call.endpoint.endsWith('-install')), 'no second install')
-  shortcut.resetPower()
-})
-
-test('Open team setup and Choose where Omni lives are offered only with the Bot team\'s onboarding opener', () => {
-  shortcut.resetPower()
-  assert.equal(shortcut.canOpenTeamSetup({ openHarnessOnboarding: () => {} }), true)
-  assert.equal(shortcut.canOpenTeamSetup({}), false)
-  assert.equal(shortcut.canOpenTeamSetup(undefined), false)
-  const powers = { omni: { phase: 'found', detail: { omnis: [] } } }
-  assert.equal(shortcut.cardRows(['omni'], powers, { roster: { bots: [] }, read: { checked: true } })[0].action, 'choose')
-  assert.equal(shortcut.cardRows(['omni'], powers, { roster: { bots: [] }, read: { checked: true }, teamSetup: false })[0].action, null)
-  // With the opener, it opens the welcome's team step.
-  const opened = []
-  shortcut.openTeamSetup({ actions: { openHarnessOnboarding: id => opened.push(id) }, close: () => {} })
-  assert.deepEqual(opened, ['omni-team'])
-  shortcut.resetPower()
+  let resolve
+  let starts = 0
+  const late = officialRegistration({
+    ask: endpoint => endpoint === 'genie-plugin' ? new Promise(done => { resolve = done }) : null,
+    start: () => { starts += 1 },
+  })
+  const read = late.entry.refresh()
+  late.dispose()
+  resolve(GENIE_INSTALLING)
+  await read
+  assert.equal(starts, 0)
+  assert.equal(late.entry.version(), 0)
 })

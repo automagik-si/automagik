@@ -66,7 +66,7 @@ export function pinPatchVersions(patches, version) {
 // The plugins whose tests pin a DSH and whose manifest declares the range. None of Unfold's is
 // one: they are built and tested here but Unfold's own release ships them (Refs marketplace/unfold),
 // so their harness pins are not moved with the desktop's until that release carries them.
-export const PLUGINS = Object.freeze(['bots-dsh', 'welcome-dsh', 'acp-dsh', 'locale-pt-br-dsh'])
+export const PLUGINS = Object.freeze(['bots-dsh', 'welcome-dsh', 'acp-dsh', 'locale-pt-br-dsh', 'vault-dsh'])
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const all = process.argv[2] === '--all'

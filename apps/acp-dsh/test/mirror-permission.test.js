@@ -27,6 +27,10 @@ const OPTIONS = [
   { kind: 'allow_once', optionId: 'yes', name: 'Allow' },
   { kind: 'reject_once', optionId: 'no', name: 'Reject' },
 ]
+const ALLOW_ALWAYS = { kind: 'allow_always', optionId: 'always', name: 'Always' }
+const REJECT_ALWAYS = { kind: 'reject_always', optionId: 'never', name: 'Never' }
+const LASTING_OPTIONS = [ALLOW_ALWAYS, OPTIONS[1]]
+const LASTING_REASON = 'Test ACP offered to allow Read README.md only from now on ("Always"), not just once, so Automagik did not approve it.'
 const CANCELLED = { outcome: { outcome: 'cancelled' } }
 const picked = optionId => ({ outcome: { outcome: 'selected', optionId } })
 const tick = () => new Promise(resolve => setImmediate(resolve))
@@ -118,8 +122,8 @@ async function world(t, { preset = 'auto', decision = ALLOW, override = 'ask', a
     run.refuse = (...args) => { refusals.push(args); return refuse.apply(run, args) }
     const live = { provider: PROVIDER, run, name: 'Test ACP', calls: new Set(), toolIds: new Map(), open: true }
     adapter.live.set(session.id, live)
-    const made = calls.map(({ callId = 'acp-call', remote = 'remote-call', path = 'README.md', question = true, known = true, argumentsId }, index) => {
-      const tool = run.seeTool({ toolCallId: remote, title: `Read ${path}`, kind: 'read', status: 'pending', rawInput: { path } })
+    const made = calls.map(({ callId = 'acp-call', remote = 'remote-call', path = 'README.md', title = `Read ${path}`, kind = 'read', question = true, known = true, argumentsId }, index) => {
+      const tool = run.seeTool({ toolCallId: remote, title, kind, status: 'pending', rawInput: { path } })
       // As the adapter's stream does at the agent's tool call.
       if (known) {
         live.calls.add(callId)
@@ -163,6 +167,75 @@ const refusedExec = (c, one = c.call) => ({ name: TOOL_NAME, callId: one.callId,
 
 // A gate of another plugin on `tools/pre-execute`, denying the DSH call ids it is given.
 const denyGate = (ctx, callIds, reason = 'not here') => ctx.on('tools/pre-execute', (exec, next) => (callIds.includes(exec.callId) ? { kind: 'deny', reason } : next()))
+
+const parentStamp = parent => ({ _meta: { claudeCode: { parentToolUseId: parent } } })
+
+for (const [label, prepare] of [
+  ['the question names a different parent from the row and live call', (c) => {
+    const { tool } = c.call
+    c.run.changeTool(tool, parentStamp('A'))
+    const args = callArguments(tool)
+    const asking = c.call.ask()
+    // Isolate the three-way comparison from the live call's overwrite guard.
+    tool.permission.call.parent = 'B'
+    return { args, asking }
+  }],
+  ['an A-to-B overwrite stays latched even when A comes back', (c) => {
+    const { tool } = c.call
+    c.run.changeTool(tool, parentStamp('A'))
+    const args = callArguments(tool)
+    const asking = c.call.ask()
+    c.run.seeTool({ toolCallId: tool.id, ...parentStamp('B') })
+    assert.equal(tool.parent, 'B')
+    assert.equal(tool.parentConflict, true)
+    c.run.changeTool(tool, parentStamp('A'))
+    assert.equal(tool.parent, 'A')
+    assert.equal(tool.parentConflict, true)
+    return { args, asking }
+  }],
+  ['a late stamp accompanies a change to input.parent', (c) => {
+    const { tool } = c.call
+    c.run.changeTool(tool, { rawInput: { path: 'README.md', parent: 'input-A' } })
+    const args = callArguments(tool)
+    const asking = c.call.ask()
+    c.run.changeTool(tool, { ...parentStamp('A'), rawInput: { path: 'README.md', parent: 'input-B' } })
+    return { args, asking }
+  }],
+  ['the reviewed row has a non-string parent', (c) => ({
+    args: { ...callArguments(c.call.tool), parent: null },
+    asking: c.call.ask(),
+  })],
+]) {
+  test(`Auto asks the person when ${label}`, async (t) => {
+    const w = await world(t, { answer: 'rejected' })
+    const c = w.chat('s1', [{ question: false }])
+    const { args, asking } = prepare(c)
+    const exec = { name: TOOL_NAME, agent: c.agent, callId: c.call.callId, signal: new AbortController().signal }
+    c.session.append('tool/call', { turn: 1, step: 0, name: TOOL_NAME, callId: exec.callId, arguments: JSON.stringify(args) })
+    // Supply the review record directly, including for a malformed row the pipeline would reject.
+    w.adapter.reviewedGate(exec, () => {})
+    const running = w.adapter.tool.execute(callArguments(c.call.tool), exec)
+    const answer = await soon(asking)
+    assert.deepEqual(answer, picked('no'))
+    assert.equal(w.asked.length, 1)
+    c.call.close(answer)
+    await running
+  })
+}
+
+test('Auto answers once when an otherwise identical call gets a parent during review', async (t) => {
+  const w = await world(t, { decision: () => {
+    assert.equal(c.call.tool.permission.call.parent, undefined)
+    c.run.changeTool(c.call.tool, parentStamp('A'))
+    return ALLOW
+  }, answer: 'rejected' })
+  const c = w.chat('s1')
+  const results = await c.execute()
+  assert.equal(w.reviews.length, 1)
+  assert.equal(w.asked.length, 0)
+  assert.deepEqual(c.call.answers, [picked('yes')])
+  assert.equal(results[0].isError, false)
+})
 
 // --- the harness itself ------------------------------------------------------------------
 
@@ -396,15 +469,46 @@ test('Auto: arguments that name another tool never carry the allow to it', async
   assert.equal(w.asked.length, 1, "the other call's question went to the person")
 })
 
-test('Auto: an agent that offers no allow_once is asked as today; the allow never becomes allow_always', async (t) => {
+test('Auto: an agent that offers no allow_once is refused, never asked, and never sent allow_always', async (t) => {
   const w = await world(t)
   const c = w.chat('s1', [{ question: false }])
-  const asked = c.call.ask([{ kind: 'allow_always', optionId: 'always', name: 'Always' }, { kind: 'reject_once', optionId: 'no', name: 'Reject' }])
+  const asked = c.call.ask(LASTING_OPTIONS)
   const running = c.execute()
-  assert.deepEqual(await soon(asked), picked('always'), "the person's answer, mapped as today")
+  assert.deepEqual(await soon(asked), picked('no'))
+  assert.equal(w.asked.length, 0)
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(result.isError, false)
+  assert.equal(result.meta.status, 'failed')
+  assert.deepEqual(result.content, [{ type: 'text', text: LASTING_REASON }])
+})
+
+test("Auto: the person's approval of an escalation still leaves a lasting-only question refused", async (t) => {
+  const w = await world(t, { decision: DENY })
+  const c = w.chat('s1', [{ question: false }])
+  const asked = c.call.ask(LASTING_OPTIONS)
+  const running = c.execute()
+  assert.deepEqual(await soon(asked), picked('no'))
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(w.reviews.length, 1)
   assert.equal(w.asked.length, 1)
-  c.call.close(picked('yes'))
-  assert.equal((await running)[0].isError, false)
+  assert.match(w.asked[0].reason, /^Auto review denied tool "acp_tool"/)
+  assert.equal(result.meta.status, 'failed')
+  assert.deepEqual(result.content, [{ type: 'text', text: LASTING_REASON }])
+})
+
+test('Auto: a denial before the body can still use the agent\'s reject_always', async (t) => {
+  const w = await world(t, { override: 'never', decision: DENY })
+  const c = w.chat('s1', [{ question: false }])
+  const asked = c.call.ask([ALLOW_ALWAYS, REJECT_ALWAYS])
+  const [result] = await c.execute()
+  assert.equal(result.isError, true)
+  assert.equal(result.error.info.code, 'AUTO_REVIEW_DENIED')
+  assert.deepEqual(await soon(asked), picked('never'))
+  assert.deepEqual(c.refusals, [['remote-call', false]])
+  assert.equal(c.call.tool.lastingReason, undefined)
+  assert.doesNotMatch(JSON.stringify(result.content), /offered to allow/)
 })
 
 test('Auto: a question the record check cannot read (a null location) is asked as today', async (t) => {
@@ -488,6 +592,246 @@ test('Full access is not asked and not refused when a question comes late, as to
   assert.equal(w.asked.length, 0)
   assert.deepEqual(c.refusals, [])
 })
+
+for (const [preset, level] of [['workspace-write', 'Manual'], ['danger-full-access', 'Full access']]) {
+  test(`${level}: a lasting-only question is refused without a dialog`, async (t) => {
+    const w = await world(t, { preset })
+    const c = w.chat('s1', [{ question: false }])
+    const asked = c.call.ask(LASTING_OPTIONS)
+    const running = c.execute()
+    assert.deepEqual(await soon(asked), picked('no'))
+    c.call.close(await asked)
+    const [result] = await running
+    assert.equal(w.asked.length, 0)
+    assert.equal(result.meta.status, 'failed')
+    assert.deepEqual(result.content, [{ type: 'text', text: LASTING_REASON }])
+  })
+}
+
+test('Manual: a lasting-only question with only reject_always is cancelled', async (t) => {
+  const w = await world(t, { preset: 'workspace-write' })
+  const c = w.chat('s1', [{ question: false }])
+  const asked = c.call.ask([ALLOW_ALWAYS, REJECT_ALWAYS])
+  const running = c.execute()
+  assert.deepEqual(await soon(asked), CANCELLED)
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(w.asked.length, 0)
+  assert.equal(result.meta.text, LASTING_REASON)
+})
+
+test('Manual: a reject-only question still goes to the person', async (t) => {
+  const w = await world(t, { preset: 'workspace-write', answer: 'rejected' })
+  const c = w.chat('s1', [{ question: false }])
+  const asked = c.call.ask([REJECT_ALWAYS])
+  const running = c.execute()
+  assert.deepEqual(await soon(asked), picked('never'))
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(w.asked.length, 1)
+  assert.equal(w.asked[0].mirrorCall.allowOnce, false)
+  assert.equal(result.meta.text, '')
+})
+
+test('a lasting-only image question uses its refusal reason as the image failure text', async (t) => {
+  const w = await world(t, { preset: 'workspace-write' })
+  const c = w.chat('s1', [{ title: 'Image generation', kind: 'other', question: false }])
+  const asked = c.call.ask([{ ...ALLOW_ALWAYS, optionId: 'first-always', name: 'Always\n  allow' }, ...LASTING_OPTIONS])
+  const running = c.execute()
+  assert.deepEqual(await soon(asked), picked('no'))
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(w.asked.length, 0)
+  assert.equal(result.meta.status, 'failed')
+  assert.deepEqual(result.content, [{ type: 'text', text: 'Test ACP offered to allow Image generation only from now on ("Always allow"), not just once, so Automagik did not approve it.' }])
+})
+
+// A native Agent card waits while its child asks. The child has no DSH call id yet.
+async function waitingParent(w) {
+  const c = w.chat('s1', [
+    { title: 'Look around', kind: 'other', question: false },
+    { callId: 'acp-child', remote: 'remote-child', question: false, known: false },
+  ])
+  c.live.native = true
+  const [parent, child] = c.calls
+  const running = c.execute({ only: [parent] })
+  await until(() => c.run.askListeners.size > 0)
+  assert.equal(c.run.askListeners.size, 1)
+  return { c, parent, child, running }
+}
+
+test('Manual: a waiting parent refuses a nested question that only offers allow_always', async (t) => {
+  const w = await world(t, { preset: 'workspace-write' })
+  const { c, parent, child, running } = await waitingParent(w)
+  const asked = child.ask([{ kind: 'allow_always', optionId: 'always' }])
+  assert.deepEqual(await soon(asked), CANCELLED)
+  child.close(await asked)
+  parent.close(picked('yes'))
+  const [parentResult] = await running
+  const [childResult] = await c.execute({ only: [child] })
+  assert.equal(w.asked.length, 0)
+  assert.equal(parentResult.meta.text, '')
+  assert.equal(childResult.meta.status, 'failed')
+  assert.equal(childResult.meta.text, 'Test ACP offered to allow Read README.md only from now on, not just once, so Automagik did not approve it.')
+})
+
+// bots-dsh's review guard (RFC 0048 delivery 1.5) refuses a held native subagent step at this
+// approval request: a pin of the contract it relies on. At Manual, a waiting Agent card's nested
+// question reaches approval.request as `acp_tool` with the nested call's kind and input, and a
+// `rejected` answer gives the agent its own reject option and asks nothing more.
+test('Manual: a waiting parent\'s nested question reaches the approval request with its call, and a rejection answers the agent', async (t) => {
+  const w = await world(t, { preset: 'workspace-write', answer: 'rejected' })
+  const { parent, child, running } = await waitingParent(w)
+  const asked = child.ask()
+  assert.deepEqual(await soon(asked), picked('no'))
+  assert.equal(w.asked.length, 1)
+  assert.equal(w.asked[0].toolName, TOOL_NAME)
+  assert.equal(w.asked[0].mirrorCall.kind, 'read')
+  assert.deepEqual(w.asked[0].mirrorCall.input, { path: 'README.md' })
+  child.close(await asked)
+  parent.close(picked('yes'))
+  await running
+  assert.equal(w.asked.length, 1)
+})
+
+test('Auto: a lasting-only question spends the review, so a second one-shot question is asked', async (t) => {
+  const w = await world(t)
+  const c = w.chat('s1', [{ question: false }])
+  const first = c.call.ask(LASTING_OPTIONS)
+  const running = c.execute()
+  assert.deepEqual(await soon(first), picked('no'))
+  assert.equal(w.asked.length, 0)
+  const second = c.call.ask()
+  assert.deepEqual(await soon(second), picked('yes'))
+  assert.equal(w.asked.length, 1, 'the review answered only the first question')
+  assert.equal(w.asked[0].mirrorCall.allowOnce, true)
+  c.run.changeTool(c.call.tool, { rawOutput: 'Read complete.' })
+  c.call.close(await second)
+  const [result] = await running
+  assert.equal(w.reviews.length, 1)
+  assert.equal(result.meta.status, 'completed')
+  assert.deepEqual(result.content, [{ type: 'text', text: 'Read complete.' }], 'the lasting-only reason is gone')
+})
+
+// --- Codex profile confinement -------------------------------------------------------------
+
+const CODEX_EXEC_OPTIONS = [
+  { optionId: 'allow_once', kind: 'allow_once', name: 'Yes, proceed' },
+  { optionId: 'accept_execpolicy_amendment', kind: 'allow_always', name: "Yes, and don't ask again ..." },
+  { optionId: 'cancel', kind: 'reject_once', name: 'No, and tell Codex what to do differently' },
+]
+const codexProfile = level => `permission-profile:automagik-${level}-${'a'.repeat(32)}`
+
+async function askCodex(t, { mode = codexProfile('read'), kind = 'execute', title = 'touch /x/probe.txt', input = {}, answer: dialogAnswer } = {}) {
+  const w = await world(t, { preset: 'workspace-write', answer: dialogAnswer })
+  const c = w.chat('s1', [{ question: false }])
+  const { tool, block } = c.call
+  c.live.own = true
+  c.run.modes = { currentModeId: mode }
+  const rawInput = { command: title, cwd: '/w', ...input }
+  c.run.changeTool(tool, { status: 'in_progress', kind, title, rawInput })
+  block.arguments = JSON.stringify(callArguments(tool))
+  const question = c.call.ask(CODEX_EXEC_OPTIONS, { kind, status: 'pending', title, rawInput })
+  const running = c.execute()
+  const answer = await soon(question)
+  if (answer.outcome?.optionId === 'allow_once') {
+    c.run.changeTool(tool, { status: 'completed' })
+  } else {
+    c.run.endPrompt({ type: 'end', stopReason: 'cancelled' })
+  }
+  const [result] = await running
+  return { answer, asked: w.asked, result, w, c }
+}
+
+async function finishCodexTurn({ w, c, result }) {
+  // chat() already made and logged the mirror block that the queued tool event would emit.
+  assert.equal((await c.run.next()).type, 'tool')
+  w.ctx.provide('agents', { get: id => (id === c.session.id ? c.agent : undefined), list: () => [c.agent] })
+  const messages = [{ role: 'tool', toolCallId: c.call.callId, content: result.content }]
+  const chunks = []
+  for await (const chunk of w.adapter.stream({ provider: PROVIDER, model: 'default', sessionId: c.session.id, messages })) chunks.push(chunk)
+  return chunks
+}
+
+for (const [level, name] of [['read', 'Read only'], ['workspace', 'Workspace']]) {
+  test(`confined: a ${name} profile refuses an exec escalation without a dialog`, async (t) => {
+    const { answer, asked, result } = await askCodex(t, { mode: codexProfile(level) })
+    assert.deepEqual(answer, picked('cancel'))
+    assert.equal(asked.length, 0)
+    assert.equal(result.meta.status, 'failed')
+    assert.deepEqual(result.content, [{
+      type: 'text',
+      text: "Test ACP runs inside its own folder at this Bot's level, so an approval cannot run touch /x/probe.txt outside it. Raise the Bot's level to Full access to run it.",
+    }])
+  })
+}
+
+test('a confined Codex escalation ends the turn with the refusal reason and finishes with stop', async t => {
+  const turn = await askCodex(t, { mode: codexProfile('workspace'), answer: 'rejected' })
+  const chunks = await finishCodexTurn(turn)
+  const reason = "Test ACP runs inside its own folder at this Bot's level, so an approval cannot run touch /x/probe.txt outside it. Raise the Bot's level to Full access to run it."
+  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } })
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text), [`[${reason}]`])
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block), [{ type: 'text', text: `[${reason}]` }])
+  assert.deepEqual(turn.answer, picked('cancel'))
+  assert.equal(turn.asked.length, 0)
+  assert.equal(turn.result.meta.status, 'failed')
+  assert.deepEqual(turn.result.content, [{ type: 'text', text: reason }])
+})
+
+test('a cancelled Codex prompt without a confined refusal still finishes aborted', async t => {
+  const turn = await askCodex(t, { mode: 'read-only', answer: 'rejected' })
+  const chunks = await finishCodexTurn(turn)
+  assert.deepEqual(turn.answer, picked('cancel'))
+  assert.equal(turn.asked.length, 1)
+  assert.deepEqual(chunks, [{ type: 'finish', reason: { kind: 'aborted', failure: { message: 'Stopped', code: 'ABORTED' } } }])
+})
+
+test('confined: a command mentioning network access is still refused under the profile', async (t) => {
+  const title = "touch /x/probe.txt || echo 'network access to proxy failed'"
+  const { answer, asked } = await askCodex(t, { title })
+  assert.deepEqual(answer, picked('cancel'))
+  assert.equal(asked.length, 0)
+})
+
+for (const [name, call] of [
+  ['the built-in read-only mode still asks the person', { mode: 'read-only' }],
+  ['a file edit under the profile still asks', { kind: 'edit' }],
+  ['a network question under the profile still asks', { input: { url: 'https://example.com' } }],
+  ['an additional-permissions question under the profile still asks', { input: { additionalPermissions: { network: { enabled: true } } } }],
+]) {
+  test(`confined: ${name}`, async (t) => {
+    const { answer, asked } = await askCodex(t, call)
+    assert.deepEqual(answer, picked('allow_once'))
+    assert.equal(asked.length, 1)
+  })
+}
+
+for (const [name, update, questionUpdate] of [
+  ['an MCP question under the profile still asks', {
+    _meta: { is_mcp_tool_call: true },
+  }, { kind: 'execute', status: 'pending' }],
+  ['a SOCKS network question under the profile still asks', {
+    title: 'curl x', rawInput: { command: 'curl x', cwd: '/w' },
+  }, { kind: 'execute', status: 'pending', title: 'socks5Tcp network access to proxy.example:1080' }],
+  ['a question that is not execute/pending under the profile still asks', {}, {}],
+]) {
+  test(`confined: ${name}`, async (t) => {
+    const w = await world(t, { preset: 'workspace-write' })
+    const c = w.chat('s1', [{ question: false }])
+    const { tool, block } = c.call
+    c.run.modes = { currentModeId: codexProfile('read') }
+    c.run.changeTool(tool, { status: 'in_progress', kind: 'execute', title: 'touch /x/probe.txt', rawInput: { command: 'touch /x/probe.txt', cwd: '/w' }, ...update })
+    block.arguments = JSON.stringify(callArguments(tool))
+    const question = c.call.ask(CODEX_EXEC_OPTIONS, { title: tool.title, rawInput: tool.rawInput, ...questionUpdate })
+    const running = c.execute()
+    const answer = await soon(question)
+    c.run.changeTool(tool, { status: answer.outcome?.optionId === 'allow_once' ? 'completed' : 'failed' })
+    await running
+    assert.deepEqual(answer, picked('allow_once'))
+    assert.equal(w.asked.length, 1)
+  })
+}
 
 // --- other refusals before the body --------------------------------------------------------
 

@@ -5,15 +5,18 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { drawImage, IMAGE_PROFILE_GRANTS, UNAVAILABLE } from '../src/host/image.js'
+import { drawImage, IMAGE_PROFILE_GRANTS, imageProfileFor, UNAVAILABLE } from '../src/host/image.js'
 import { chatProfilesConfig, ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { realpathSync } from 'node:fs'
 import { AcpAdapter } from '../src/host/adapter.js'
 import { AgentRun } from '../src/host/acp.js'
+import { imageWith20261111Policy } from './support/image-policy-2026-11-11.mjs'
 
 const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+const { drawImage: drawWith20261111Policy } = await imageWith20261111Policy()
+const policies = [['shipped', drawImage], ['2026-11-11', drawWith20261111Policy]]
 
-for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its locked profile ${mode} retains UNAVAILABLE and a reason and sends no prompt`, async t => {
+for (const [policy, draw] of policies) for (const mode of ['not-offered', 'selection-rejected']) test(`${policy}: an edit with its locked profile ${mode} retains UNAVAILABLE and a reason and sends no prompt`, async t => {
   const home = await mkdtemp(join(tmpdir(), 'edit-wording-'))
   t.after(() => rm(home, { recursive: true, force: true }))
   const profileModes = ensureChatProfiles(home, { platform: 'linux' })
@@ -23,10 +26,18 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
   const checked = []
   const mock = t.mock.method(childProcess, 'execFile', (_command, args, _opts, callback) => {
     checked.push(args)
+    // The switch's effect is read too: with one required feature on, its tool must appear.
+    const table = args.find((arg, index) => args[index - 1] === '-c' && arg.startsWith('features=')) ?? ''
+    const on = name => new RegExp(`(?:^|[ {,])${name} = true`).test(table)
+    const nested = ['apply_patch', ...(on('shell_tool') ? ['exec_command'] : []), ...(on('view_image') ? ['view_image'] : [])]
+    const tools = [
+      { type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'imagegen', description: '', parameters: { type: 'object' } }] },
+      { type: 'namespace', name: 'functions', description: '', tools: [{ type: 'custom', name: 'exec', description: nested.map(name => `declare const tools: { ${name}(args: {}): Promise<unknown>; };`).join('\n') }] },
+    ]
     const answer = args.includes('features')
       ? 'shell_tool stable false\nview_image stable false\nimage_generation stable true\n'
       : args.includes('debug')
-        ? JSON.stringify([{ type: 'additional_tools', role: 'developer', tools: [{ type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'imagegen', description: '', parameters: { type: 'object' } }] }] }, { type: 'message', content: [{ type: 'input_text', text: `<permission_profile type="managed"><file_system type="restricted"><entry access="deny" escalatable="false"><special>:root</special></entry><entry access="read"><path>${_opts.cwd}</path></entry><entry access="read"><path>${realpathSync(home)}/tmp/arg0-linux/codex-arg0hEg6rp</path></entry></file_system></permission_profile>` }] }])
+        ? JSON.stringify([{ type: 'additional_tools', role: 'developer', tools }, { type: 'message', content: [{ type: 'input_text', text: `<permission_profile type="managed"><file_system type="restricted"><entry access="deny" escalatable="false"><special>:root</special></entry><entry access="read"><path>${_opts.cwd}</path></entry><entry access="read"><path>${realpathSync(home)}/tmp/arg0-linux/codex-arg0hEg6rp</path></entry></file_system></permission_profile>` }] }])
         : '[]'
     queueMicrotask(() => callback(null, answer, ''))
     return { kill() {} }
@@ -47,7 +58,7 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
     async prompt() { prompts++; assert.fail('the isolation check must refuse first') }
     dispose() {}
   }
-  await assert.rejects(drawImage({
+  await assert.rejects(draw({
     spawn: () => ({ command: 'test-codex', args: [], profileModes, env: { CODEX_HOME: home } }),
     scratch: () => mkdtemp(join(home, 'scratch-')), Run, log: line => t.diagnostic(line),
     input: { data: PNG, mimeType: 'image/png' }, prompt: 'Make the background blue',
@@ -58,9 +69,13 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
     return true
   })
   assert.equal(prompts, 0)
-  assert.equal(checked.length, 3)
-  assert.equal(selected.at(-1), 'read-only')
-  assert.equal(selected.length, mode === 'selection-rejected' ? 2 : 1)
+  assert.equal(checked.length, 6)
+  if (policy === 'shipped') {
+    assert.deepEqual(selected, mode === 'selection-rejected' ? [imageProfileFor(profileModes).mode] : [])
+  } else {
+    assert.equal(selected.at(-1), 'read-only')
+    assert.equal(selected.length, mode === 'selection-rejected' ? 2 : 1)
+  }
 })
 
 test('the per-image profile still denies the filesystem root and reads only its scratch workspace', () => {

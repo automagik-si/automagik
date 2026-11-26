@@ -2,8 +2,15 @@ name = "automagik-id"
 main = "src/index.ts"
 compatibility_date = "2025-11-18"
 compatibility_flags = ["nodejs_compat"]
-workers_dev = true
+# The service answers only on its name under automagik.si, id.automagik.si (see DEPLOY.md);
+# a workers.dev address can never carry the automagik.si passkey site name. The
+# deployment script adds that name as the Worker's Custom Domain route.
+workers_dev = false
 preview_urls = false
+
+# Hourly removal of accounts whose passkey ceremony was abandoned (src/cleanup.ts).
+[triggers]
+crons = ["17 * * * *"]
 
 # Copy to ignored wrangler.local.toml; the deployment script supplies the binding.
 # No account, database or zone identifiers belong in this file.

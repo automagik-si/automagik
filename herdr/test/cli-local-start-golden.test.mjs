@@ -1,10 +1,12 @@
+import { startFakeCore } from "./fake-core.mjs";
 // A local start's command, byte for byte (#582): the linked-machine briefing and pane-env must
 // never change what a bot started on this computer gets. For a Claude bot (the briefing file and
 // the per-turn hook), an omp bot (the briefing as text) and a Hermes bot (the briefing in its
 // environment): the `hc run` argv with its `/usr/bin/env` words, the briefing file and the
 // project's settings.local.json, scratch paths written as <root>. The project holds a
 // .herdr/pane-env, which a local start never reads (it is for a linked machine's panes). The
-// fixture is recorded from origin/dev in a fresh copy (AUTOMAGIK_GOLDEN_RECORD=1; the commit is
+// fixture is recorded from origin/dev in a fresh copy (AUTOMAGIK_GOLDEN_RECORD=1; re-recorded for
+// #1556, one handoff line in a main bot's briefing; the commit is
 // named in the PR); every later run compares. #650 adds the CLI's own HERDR_APP_HOME beside
 // PATH when the CLI has it set (this scene does), and only that word: with it unset, the bytes
 // stay as they were (cli-local-app-home.test.mjs holds the fixture recorded before the fix).
@@ -63,6 +65,8 @@ function startOne(t, bot, { bots = BOTS, override = null } = {}) {
   writeFileSync(logPath, "");
   // A pinned PATH, so the pane's PATH is the same on every runner.
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C", GIT_CEILING_DIRECTORIES: root };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const r = spawnSync(process.execPath, [CLI, "start", bot.name, "--json"], { cwd: project, env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   // The briefing file's name starts with a hash of the project's folder, a new temp folder each run.

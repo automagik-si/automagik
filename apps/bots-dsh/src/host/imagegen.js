@@ -1,6 +1,13 @@
 // Image generation for the Bots (the generate_image tool), through what the person connected,
 // in this order (owner decision D-g; the welcome's companion step draws through the same):
-// 1. an OpenAI API key (the Images API), exactly as before;
+// 1. an OpenAI API key the person gave the app: the key record saved in the app, or
+//    OPENAI_API_KEY from DSH's credential file or the app's own `.env` files. One inherited
+//    from the environment Automagik was started in (DSH's `env` credential layer) is not used
+//    for images, nor one whose source DSH does not name: decided by the owner's delegate,
+//    2026-11-21 (#869 delivery B), a key the person gave the app is the explicit opt-in and
+//    there is no new setting. An exported variable hides the app's `.env` keys, so the remedy
+//    is saving the key in Settings → Models. A vault mapping would count too, but it never
+//    reaches this selector;
 // 2. the Codex CLI on its own ChatGPT sign-in, through acp-dsh's `acpAgents.generateImage` (a
 //    one-off read-only Codex session that uses Codex's built-in image tool). Nothing here reads
 //    or copies the CLI's sign-in: Codex holds it;
@@ -23,6 +30,18 @@ import { uploadOsText } from './shared-uploads.js'
 export const CODEX_RECORD = 'llm-pi-ai/openai-codex'
 export const OPENAI_RECORD = 'llm-pi-ai/openai'
 export const OPENAI_ENV = 'OPENAI_API_KEY'
+
+// DSH's credential layers (dsh-credentials ResolvedCredential.source): `env` is the
+// environment Automagik inherited. Only a key the person gave the app draws (#869 delivery B).
+export const INHERITED_SOURCE = 'env'
+/** Whether a resolved OPENAI_API_KEY is one the person gave the app: a value from a named
+ *  layer other than the inherited environment. A resolution with no named layer is not. */
+export const givenKey = resolved => typeof resolved?.value === 'string' && resolved.value !== ''
+  && typeof resolved.source === 'string' && resolved.source !== '' && resolved.source !== INHERITED_SOURCE
+/** Whether a resolved OPENAI_API_KEY is one only inherited from the environment (skipped). */
+export const inheritedKey = resolved => typeof resolved?.value === 'string' && resolved.value !== ''
+  && resolved.source === INHERITED_SOURCE
+
 export const CODEX_IMAGES = 'https://chatgpt.com/backend-api/codex/images/generations'
 export const CODEX_IMAGE_MODEL = 'gpt-image-2'
 export const OPENAI_IMAGES = 'https://api.openai.com/v1/images/generations'
@@ -46,6 +65,38 @@ const KEEP_MS = 5 * 60_000
 export const IMAGE_ID = /^img-[a-z0-9-]{8,64}$/
 
 const refused = message => Object.assign(new Error(message), { code: 'bot/unavailable' })
+// An edit whose Codex locked run could not be set up. `reason` is the contract bots-dsh's
+// generate_image answers with: it saves the Bot's own read-only copy of the picture and tells
+// the Bot to make the change itself. `detail` names the check that stopped it, never a key.
+const editWithoutLockedRun = (detail, message) => Object.assign(refused(message), { reason: 'edit-not-isolated', detail })
+// Why Codex cannot edit now, in words the Bot can hand the person beside its own copy's path.
+// The legacy-grant branch is reached for any not-ready shared Codex, so the state decides the
+// sentence: a configuration failure is never reported as a missing sign-in, and vice versa.
+const codexEditDetail = (codex) => {
+  if (codex === undefined) return 'no image service is connected'
+  if (codex?.reason === 'account') return 'its account is not confirmed for Automagik'
+  if (codex?.unsupported === true) return 'this Codex version does not take the locked image run'
+  if (codex?.reason === 'config') return 'Codex could not load its own configuration'
+  if (codex?.reason === 'unreadable') return 'Codex could not be checked for safe editing'
+  if (codex?.signedIn === false) return 'Codex is not signed in here'
+  return 'Codex is not ready to edit here'
+}
+// #869 delivery B: why an inherited key did not draw, and where the person's own key goes.
+// Codex stays the first remedy; nothing here suggests getting a key.
+const ENV_KEY_NOTE = 'an OPENAI_API_KEY inherited from the environment Automagik was started in is not used for images; to use that key, save it in Settings → Models'
+const ENV_KEY_REFUSAL = 'No image service is connected: an OPENAI_API_KEY inherited from the environment Automagik was started in is not used for images. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI), or to save that key in Settings → Models; then generate_image can draw.'
+// A Codex-specific refusal keeps its own text first; the inherited-key note follows it.
+const withEnvKeyNote = (environmentKey, text) => environmentKey ? `${text} Also, ${ENV_KEY_NOTE}.` : text
+
+// What the person can do about it, naming the same access state and never a key.
+const codexEditGuidance = (codex) => {
+  if (codex?.reason === 'account') return 'Editing a picture needs Codex\'s account confirmed. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there), then try again.'
+  if (codex?.unsupported === true) return 'Editing a picture needs a Codex that takes the locked image run. Ask the user to update Automagik, then try again.'
+  if (codex?.reason === 'config') return 'Editing a picture needs Codex to load its configuration. Ask the user to fix Codex\'s config file, then try again.'
+  if (codex?.reason === 'unreadable') return 'Editing a picture needs Codex checked for safe editing. Ask the user to try again later.'
+  if (codex?.signedIn === false) return 'Editing a picture needs Codex signed in. Ask the user to sign in to Codex from a Bot\'s chat, then try again.'
+  return 'Editing a picture needs Codex ready on this computer. Ask the user to check Codex and try again.'
+}
 
 /** The ChatGPT account id inside an access token, or undefined. */
 export function accountIdOf(token) {
@@ -86,7 +137,10 @@ export async function* sseEvents(body) {
 
 // `credentials` answers DSH's credential service (the plugin does not require one: ctx.get),
 // `codex` acp-dsh's acpAgents service (or undefined), and `folder` the team workspace.
-export function createImageGen({ credentials: credentialsOf, codex: codexOf = () => undefined, folder, fetch = globalThis.fetch, now = () => Date.now(), warn = () => {} }) {
+export function createImageGen({
+  credentials: credentialsOf, codex: codexOf = () => undefined, folder,
+  reservation = () => undefined, fetch = globalThis.fetch, now = () => Date.now(), warn = () => {},
+}) {
   const progress = new Map()
   // Whether the ChatGPT backend took a streamed request; it is asked once per run.
   let chatgptStreams = true
@@ -124,40 +178,56 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     }
   }
 
-  /**
-   * What draws images here: { kind: 'openai', token }, { kind: 'codex', service }, or the
-   * earlier ChatGPT grant { kind: 'chatgpt', token, accountId? }; undefined when nothing does.
-   */
-  async function source({ refresh = true } = {}) {
+  async function pick({ refresh = true } = {}) {
     const credentials = credentialsOf()
     const record = await credentials?.readRecord?.(OPENAI_RECORD).catch(() => undefined)
-    if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key !== '') return { kind: 'openai', token: record.key }
+    if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key !== '') return { found: { kind: 'openai', token: record.key }, environmentKey: false }
     const env = await credentials?.resolve?.(OPENAI_ENV).catch(() => undefined)
-    if (typeof env?.value === 'string' && env.value !== '') return { kind: 'openai', token: env.value }
+    if (givenKey(env)) return { found: { kind: 'openai', token: env.value }, environmentKey: false }
+    // A skipped key is never kept: only whether it came from the inherited environment.
+    const environmentKey = inheritedKey(env)
+    const check = reservation()
+    if (check && await check.imageGate?.('acp-codex')) return { found: undefined, environmentKey }
     const service = codexService()
     const access = await service?.imageAccess().catch(() => undefined)
     if (access?.ready === true) return {
-      kind: 'codex', service, accountGeneration: access.accountGeneration,
+      found: { kind: 'codex', service, accountGeneration: access.accountGeneration }, environmentKey,
     }
     // Legacy shared hosts must positively declare their scope. Missing/reloading/unreadable
     // ACP cannot authorize billing an older grant; the shipped ACP only declares isolated.
-    if (service?.authScope !== 'shared' || access === undefined) return undefined
+    if (service?.authScope !== 'shared' || access === undefined) return { found: undefined, environmentKey }
     const grant = await credentials?.readRecord?.(CODEX_RECORD).catch(() => undefined)
     const payload = grant?.kind === 'grant' ? grant.payload : undefined
     if (payload && typeof payload.access === 'string') {
       const live = refresh ? await chatgptToken(payload) : payload
-      if (live) return { kind: 'chatgpt', token: live.access, accountId: live.accountId ?? accountIdOf(live.access) }
+      if (live) return { found: { kind: 'chatgpt', token: live.access, accountId: live.accountId ?? accountIdOf(live.access), access }, environmentKey }
     }
-    return undefined
+    return { found: undefined, environmentKey }
   }
+
+  /**
+   * What draws images here: { kind: 'openai', token }, { kind: 'codex', service }, or the
+   * earlier ChatGPT grant { kind: 'chatgpt', token, accountId? }; undefined when nothing does.
+   */
+  async function source(options) {
+    return (await pick(options)).found
+  }
+
+  // Codex chooses its own image model.
+  const viewOf = found => found.kind === 'codex' ? { kind: 'codex' }
+    : { kind: found.kind, model: found.kind === 'chatgpt' ? CODEX_IMAGE_MODEL : OPENAI_IMAGE_MODEL }
 
   /** For settings and the tool's refusal: how images are made here, never what is stored. */
   async function access() {
-    const found = await source({ refresh: false })
-    if (!found) return null
-    // Codex chooses its own image model.
-    if (found.kind === 'codex') return { kind: 'codex' }
-    return { kind: found.kind, model: found.kind === 'chatgpt' ? CODEX_IMAGE_MODEL : OPENAI_IMAGE_MODEL }
+    const { found } = await pick({ refresh: false })
+    return found ? viewOf(found) : null
+  }
+
+  /** For Settings → Bots: `access` as above, and `environmentKey: 'ignored'` when nothing draws
+   *  and an OPENAI_API_KEY inherited from the environment was skipped. Never a value. */
+  async function accessDetail() {
+    const { found, environmentKey } = await pick({ refresh: false })
+    return { access: found ? viewOf(found) : null, ...(!found && environmentKey ? { environmentKey: 'ignored' } : {}) }
   }
 
   const note = (callId, patch) => {
@@ -226,29 +296,52 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
    * Draws one image and keeps it. Returns { id, file, via, bytes }. `callId` names the card
    * that follows its progress.
    */
-  async function generate({ prompt, size = 'auto', quality = 'auto', background = 'auto', callId, signal, input }) {
+  async function generate(options) {
+    const done = reservation()?.workStarted?.('acp-codex')
+    try { return await generateHeld(options) } finally { done?.() }
+  }
+
+  const reservationRefusal = (input, held) => refused(
+    `Codex cannot ${input ? 'edit the picture' : 'draw'} here: ${held}`,
+  )
+
+  async function generateHeld({
+    prompt, size = 'auto', quality = 'auto', background = 'auto', callId, signal, input,
+  }) {
     const text = String(prompt ?? '').trim().slice(0, PROMPT_MAX)
     if (text === '') throw Object.assign(new Error('Say what to draw.'), { code: 'bot/invalid' })
-    const found = await source(input ? { refresh: false } : undefined)
+    const { found, environmentKey } = await pick(input ? { refresh: false } : undefined)
     if (!found) {
+      const check = reservation()
+      const held = check && await check.imageGate?.('acp-codex')
+      if (held) throw reservationRefusal(input, held)
       // A signed-in Codex that acp-dsh does not let draw (a safety check of its image run did
       // not hold) is not a missing sign-in: say what helps.
       const codex = await codexService()?.imageAccess().catch(() => undefined)
-      if (codex?.reason === 'account') throw refused('Codex is signed in on this computer, but the user has not confirmed its account for Bots. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there); then generate_image can draw.')
-      if (codex?.unsupported === true) throw refused('Codex is signed in, but this Codex version is not supported for drawing yet. Ask the user to update Automagik; then generate_image can draw.')
-      if (codex?.reason === 'config') throw refused('Codex is signed in, but it could not load its own configuration, so it cannot draw. Ask the user to fix Codex\'s config file; then generate_image can draw.')
-      if (codex?.reason === 'unreadable') throw refused('Codex is signed in, but it could not be checked for safe drawing, so it cannot draw now. Ask the user to try again later.')
-      throw refused('No image service is connected. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI); then generate_image can draw.')
+      // An edit does not need Codex to draw: when its locked run cannot be set up, the Bot is
+      // given its own verified copy and the change is made on the file (the tool's fallback).
+      if (input) {
+        const detail = environmentKey ? `${codexEditDetail(codex)}; ${ENV_KEY_NOTE}` : codexEditDetail(codex)
+        throw editWithoutLockedRun(detail, `Codex could not edit the picture here: ${detail}.`)
+      }
+      if (codex?.reason === 'account') throw refused(withEnvKeyNote(environmentKey, 'Codex is signed in on this computer, but the user has not confirmed its account for Bots. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there); then generate_image can draw.'))
+      if (codex?.unsupported === true) throw refused(withEnvKeyNote(environmentKey, 'Codex is signed in, but this Codex version is not supported for drawing yet. Ask the user to update Automagik; then generate_image can draw.'))
+      if (codex?.reason === 'config') throw refused(withEnvKeyNote(environmentKey, 'Codex is signed in, but it could not load its own configuration, so it cannot draw. Ask the user to fix Codex\'s config file; then generate_image can draw.'))
+      if (codex?.reason === 'unreadable') throw refused(withEnvKeyNote(environmentKey, 'Codex is signed in, but it could not be checked for safe drawing, so it cannot draw now. Ask the user to try again later.'))
+      throw refused(environmentKey ? ENV_KEY_REFUSAL : 'No image service is connected. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI); then generate_image can draw.')
     }
     const chatgpt = found.kind === 'chatgpt'
     note(callId, { phase: 'generating', via: found.kind, partials: [], started: now(), error: undefined })
     if (input && chatgpt) {
-      const error = refused('Editing a picture needs Codex signed in. Ask the user to sign in to Codex from a Bot\'s chat.')
+      const access = found.access
+      const detail = codexEditDetail(access)
+      const error = editWithoutLockedRun(detail, codexEditGuidance(access))
       note(callId, { phase: 'failed', error: error.message })
       throw error
     }
-    if (found.kind === 'codex') return drawWithCodex(found.service, {
-      text, size, quality, background, callId, signal, input, accountGeneration: found.accountGeneration,
+    if (found.kind === 'codex') return await drawWithCodex(found.service, {
+      text, size, quality, background, callId, signal, input,
+      accountGeneration: found.accountGeneration,
     })
     const base = {
       model: chatgpt ? CODEX_IMAGE_MODEL : OPENAI_IMAGE_MODEL,
@@ -267,6 +360,8 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
       note(callId, { partials })
     }
     try {
+      const late = chatgpt && reservation()?.held?.('acp-codex')
+      if (late) throw reservationRefusal(input, late)
       let response = input ? await requestEdit(found, streamed, input, signal)
         : await request(found, chatgpt && !chatgptStreams ? base : streamed, signal)
       // A backend that does not take a streamed request answers 400 naming it: asked again whole.
@@ -308,7 +403,11 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     text, size, quality, background, callId, signal, input, accountGeneration,
   }) {
     try {
-      if (input && typeof service.editImage !== 'function') throw refused('Editing a picture with Codex needs a newer Automagik. Ask the user to update.')
+      const late = reservation()?.held?.('acp-codex')
+      if (late) throw reservationRefusal(input, late)
+      if (input && typeof service.editImage !== 'function') {
+        throw editWithoutLockedRun('this Automagik\'s Codex service cannot edit pictures', 'Editing a picture with Codex needs a newer Automagik. Ask the user to update.')
+      }
       const fields = {
         prompt: text,
         size: SIZES.includes(size) ? size : 'auto',
@@ -359,7 +458,7 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     return readFile(join(dir, 'images', `${id}.png`)).catch(() => undefined)
   }
 
-  return { access, generate, progress: progressOf, imageFile, source, agentImages }
+  return { access, accessDetail, generate, progress: progressOf, imageFile, source, agentImages }
 }
 
 // The generate_image tool, for every Bot (Genie and Omni among them), and `rt.images` for the
@@ -370,6 +469,7 @@ export function install(rt) {
     credentials: () => { try { return ctx.get?.('credentials') } catch { return undefined } },
     codex: () => { try { return ctx.get?.('acpAgents') } catch { return undefined } },
     folder: () => rt.teamFolder?.(),
+    reservation: () => rt.machineReservations,
     warn: (...args) => rt.warn?.(...args),
   })
   const editInput = createEditInput({ rt, ctx })
@@ -410,7 +510,7 @@ export function install(rt) {
           const saved = await rt.sharedUploads?.save(input.ref, { sessionId, name: input.name, data: input.data, signal: exec.signal })
           let readOnly = false
           try { readOnly = ctx.get?.('sandboxPolicy')?.resolve?.({ session: exec.agent?.session })?.mode === 'read-only' } catch {}
-          const first = 'Codex could not edit the picture here: its locked image run could not be set up on this computer, so no edited image was made.'
+          const first = `Codex could not edit the picture here: its locked image run could not be set up on this computer${typeof error?.detail === 'string' ? ` (${error.detail})` : ''}, so no edited image was made.`
           if (saved?.path) {
             const copy = `${first} Your copy of the picture is at ${JSON.stringify(saved.path)} (read-only).`
             return readOnly

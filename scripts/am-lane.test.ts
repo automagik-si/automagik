@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { KEY_ID, KEYS_FILE, SLOTS, keyVerdict, ownHalfPost, pointer, postedProblem, signPointer, slotFor, verify } from './am-lane';
+import { KEY_ID, KEYS_FILE, SLOTS, keyVerdict, ownHalfPost, pointer, postedProblem, signPointer, slotFor, verify, writeKeyFiles } from './am-lane';
 
 // A throwaway key, made for this run only: no private key is ever committed.
 const pair = () => {
@@ -95,6 +95,18 @@ describe('the am lane', () => {
     expect(SLOTS).toEqual(['AM_LANE_KEY', 'AM_LANE_KEY_NEXT']);
   });
 
+  test('keygen writes the same public keys to am and the pack', () => {
+    const files = [join(dir, 'am-keys.json'), join(dir, 'pack-am-keys.json')];
+    const keys = [{ keyId: KEY_ID, publicKey: pair().pub }];
+    writeKeyFiles(keys, files);
+    expect(JSON.parse(readFileSync(files[0], 'utf8'))).toEqual({ keys });
+    expect(readFileSync(files[0], 'utf8')).toBe(readFileSync(files[1], 'utf8'));
+    const root = join(import.meta.dir, '..');
+    expect(readFileSync(KEYS_FILE, 'utf8')).toBe(readFileSync(join(root, 'herdr/mods/am-sidebar/am-keys.json'), 'utf8'));
+    const copies = JSON.parse(readFileSync(join(root, 'am/copies.json'), 'utf8'));
+    expect(copies.files.some((file: { to: string }) => file.to === 'am/am-keys.json')).toBe(false);
+  });
+
   test('am\'s own key, never the pack\'s or the plugin lane\'s: am-keys.json shares no key with them', () => {
     const am = JSON.parse(readFileSync(KEYS_FILE, 'utf8')).keys.map((k: { publicKey: string }) => k.publicKey);
     const others = ['herdr/mods/am-sidebar/pack-keys.json', 'plugin-lane/keys.json']
@@ -155,7 +167,7 @@ describe('the am lane', () => {
       expect(ownHalfPost(mine.bytes, posted, null)).toBe(false);
     }
     // The repository defaults to am's own.
-    expect(postedProblem(mine.bytes, null, mine.sig, keys)).toContain('--repo automagik-dev/automagik --yes');
+    expect(postedProblem(mine.bytes, null, mine.sig, keys)).toContain('--repo automagik-si/automagik --yes');
   });
 
   test('posted: am.json alone that names this same am is this release\'s own half-written post, and is finished', () => {

@@ -1,9 +1,10 @@
 import { createElement as h, useRef, useState } from 'react'
-import { PlusIcon, PeopleIcon, ArrowUpIcon, TerminalIcon, SparkIcon } from './icons.js'
+import { PlusIcon, PeopleIcon, ArrowUpIcon, TerminalIcon, SparkIcon, GoalIcon } from './icons.js'
 import { AdminStar, BotMark } from './mark.js'
 import { useEscape, usePaneLeft } from './overlay-hooks.js'
 import { CreateBot } from './create-bot.js'
 import { NewGenie } from './genie-new.js'
+import { NewSolver } from './solver-new.js'
 import { DshBotForm } from './dsh-bot-form.js'
 import { QUICK_EDGES, useFlip, useGlide, useMorph } from './motion.js'
 import { t } from './i18n.js'
@@ -27,6 +28,8 @@ export function NewChat({ mode, sectionId = null, roster, actions }) {
   // A DSH bot: 'dsh-bot' makes one, 'dsh-bot:<id>' edits that one, and the list can open the form.
   const editing = mode.startsWith('dsh-bot:') ? roster.agentsById?.[mode.slice('dsh-bot:'.length)] : undefined
   const [dshDraft, setDshDraft] = useState(mode === 'dsh-bot' || editing !== undefined ? { fromList: false } : null)
+  // A new Solver (RFC 0048): 'solver' opens its dialog straight away, the list opens it too.
+  const [solverDraft, setSolverDraft] = useState(mode === 'solver' ? { fromList: false } : null)
   const inputRef = useRef(null)
   const close = () => actions.closeOverlay()
   useEscape(close)
@@ -108,6 +111,10 @@ export function NewChat({ mode, sectionId = null, roster, actions }) {
     options.push({ key: 'group', icon: h(PeopleIcon), label: t('Create group chat'), run: () => { setGroup(true); setCursor(0); inputRef.current?.focus() } })
     options.push({ key: 'agent', icon: h(TerminalIcon), label: t('New DSH bot'), hint: t('A plain DSH session list, in a folder of its own'), run: () => { setError(''); setDshDraft({ fromList: true }) } })
   }
+  // While typing, "New Solver" comes after the Bots that match, so a name and Enter still opens that Bot.
+  const newSolver = !group && picked.length === 0 && mode !== 'search' && (wanted === '' || 'solver'.startsWith(wanted) || wanted.includes('solver'))
+  const solverOption = { key: 'solver', icon: h(GoalIcon), label: t('New Solver'), hint: t('Plans, does the work and has it reviewed'), run: () => { setError(''); setSolverDraft({ fromList: true }) } }
+  if (newSolver && wanted === '') options.push(solverOption)
   // Genie is one per repository: "New Genie" asks which, beside the Genies there are. A
   // genie-dsh that lists its colors (0.1.3, genie#3176) is one that answers genie-create.
   const newGenie = Array.isArray(roster.genie?.colors) && !group && picked.length === 0 && mode !== 'search' && (wanted === '' || 'genie'.startsWith(wanted) || wanted.includes('genie'))
@@ -118,6 +125,7 @@ export function NewChat({ mode, sectionId = null, roster, actions }) {
   for (const bot of matches) {
     options.push({ key: bot.id, bot, label: bot.name, hint: choosingAdmin ? t('Make admin') : group || picked.length > 0 ? t('Add to group chat') : undefined, run: () => openBot(bot) })
   }
+  if (newSolver && wanted !== '') options.push(solverOption)
   if (wanted !== '' && !exact && mode !== 'search') options.push({ key: 'create', icon: h(PlusIcon), label: t('Create new Bot “{name}”', { name: query.trim() }), run: createBot })
   const active = Math.min(cursor, Math.max(options.length - 1, 0))
   const listed = options.map(option => option.key).join('\n')
@@ -131,6 +139,14 @@ export function NewChat({ mode, sectionId = null, roster, actions }) {
         agent: editing, actions,
         onBack: dshDraft.fromList ? () => { setDshDraft(null); setTimeout(() => inputRef.current?.focus()) } : undefined,
         onDone: () => close(),
+      }))
+  }
+  if (solverDraft) {
+    return h('div', { className: 'bt-pane', style: { left: paneLeft } },
+      h(NewSolver, {
+        roster, actions, brief: message.trim(), sectionId, canGoBack: solverDraft.fromList,
+        onBack: solverDraft.fromList ? () => { setSolverDraft(null); setTimeout(() => inputRef.current?.focus()) } : close,
+        onCreated: created,
       }))
   }
   if (genieDraft) {

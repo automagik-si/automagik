@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -185,6 +185,79 @@ test("a clean pack passes with no warning", { skip }, async (t) => {
   assert.doesNotMatch(`${r.out}${r.err}`, /::warning::/);
 });
 
+const runFolders = (runs) => readdirSync(runs).sort();
+
+test("--keep-app keeps only the verified pinned app and names it in GITHUB_OUTPUT", { skip }, async (t) => {
+  const dir = scratch(t);
+  const runs = join(dir, "runs");
+  mkdirSync(runs);
+  const pack = packTarball(dir);
+  const app = appTarball(dir);
+  const outFile = join(dir, "out");
+  writeFileSync(outFile, "");
+  const r = await invoke(["--pack", pack, "--keep-app"], {
+    fetchImpl: serve(app), sha256: sha256Of(app), buildUrl: BUILD, githubOutput: outFile, tmpRoot: runs,
+  });
+  assert.equal(r.code, 0, r.err);
+  const folders = runFolders(runs);
+  assert.equal(folders.length, 1);
+  const [kept] = folders;
+  assert.match(kept, /^herdr-app-check-/);
+  const bin = join(runs, kept, "app", "herdr-app", "herdr-app");
+  assert.equal(readFileSync(outFile, "utf8"), `outcome=verified\nbin=${bin}\n`);
+  assert.deepEqual(readdirSync(join(runs, kept)), ["app"]);
+  const v = spawnSync(bin, ["--version"], { encoding: "utf8" });
+  assert.equal(v.status, 0, v.stderr);
+  assert.equal(v.stdout.trim(), "herdr-app 0.1.13");
+  assert.match(r.out, /herdr-app kept for the tests: /);
+  assert.ok(existsSync(pack));
+  assert.ok(existsSync(join(dir, "app")));
+});
+
+test("--keep-app keeps nothing when the run could not verify or a mod failed", { skip }, async (t) => {
+  const dir = scratch(t);
+  const pack = packTarball(dir);
+  const cases = [
+    { name: "download failure", code: 0, warning: /::warning::/, output: "outcome=unverified\n" },
+    { name: "cannot start", app: { exitsOnVersion: 7 }, code: 0, warning: /could not start/, output: "outcome=unverified\n" },
+    { name: "mod failure", app: { failMod: "am-footer" }, code: 1, output: "" },
+  ];
+  for (const [i, row] of cases.entries()) {
+    const c = join(dir, `c${i + 1}`);
+    const runs = join(c, "runs");
+    mkdirSync(runs, { recursive: true });
+    const app = appTarball(c, row.app);
+    const outFile = join(c, "out");
+    writeFileSync(outFile, "");
+    const fetchImpl = row.app ? serve(app) : async () => { throw new Error("download failed"); };
+    const r = await invoke(["--pack", pack, "--keep-app"], {
+      fetchImpl, sha256: sha256Of(app), buildUrl: BUILD, githubOutput: outFile, tmpRoot: runs,
+    });
+    assert.equal(r.code, row.code, row.name);
+    if (row.warning) assert.match(r.out, row.warning, row.name);
+    assert.equal(readFileSync(outFile, "utf8"), row.output, row.name);
+    assert.deepEqual(runFolders(runs), [], row.name);
+    assert.ok(existsSync(c));
+    assert.ok(existsSync(pack));
+  }
+});
+
+test("without --keep-app nothing is kept or written, even with GITHUB_OUTPUT set", { skip }, async (t) => {
+  const dir = scratch(t);
+  const runs = join(dir, "runs");
+  mkdirSync(runs);
+  const pack = packTarball(dir);
+  const app = appTarball(dir);
+  const outFile = join(dir, "out");
+  writeFileSync(outFile, "");
+  const r = await invoke(["--pack", pack], {
+    fetchImpl: serve(app), sha256: sha256Of(app), buildUrl: BUILD, githubOutput: outFile, tmpRoot: runs,
+  });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(readFileSync(outFile, "utf8"), "");
+  assert.deepEqual(runFolders(runs), []);
+});
+
 test("a symlinked invocation still runs the entry guard", { skip: symlinkSkip }, (t) => {
   const dir = scratch(t);
   symlinkSync(join(REPO, ".github"), join(dir, ".github"), "dir");
@@ -202,8 +275,36 @@ test("the release cut runs the check with --strict; PR CI keeps the default", ()
     const end = text.indexOf("\n\n", start);
     return text.slice(start, end === -1 ? undefined : end);
   };
+  // The command is the cut's gates script's (#668), so a re-cut on a moved dev runs it again.
   assert.match(step("release.yml", "Every pack mod loads in herdr-app"),
-    /run: node \.github\/scripts\/herdr-app-check\.mjs --strict/);
+    /run: bash scripts\/release-gates\.sh herdr-app/);
+  const gates = readFileSync(join(REPO, "scripts", "release-gates.sh"), "utf8");
+  // The dispatch calls the gate function, and the function holds the command: a case label run as
+  // a command (#1653) fails the dispatch test in scripts/release-cut.test.ts.
+  assert.match(gates, /\n  herdr-app\) gate_herdr_app ;;/);
+  assert.match(gates, /\n    gate_herdr_app\n/);
+  const fn = gates.slice(gates.indexOf("\ngate_herdr_app() {"), gates.indexOf("\ngate_herdr_key() {"));
+  assert.match(fn, /node \.github\/scripts\/herdr-app-check\.mjs --strict/);
   assert.match(step("ci.yml", "Every pack mod loads in herdr-app"),
-    /^        run: node \.github\/scripts\/herdr-app-check\.mjs$/m);
+    /^        run: node \.github\/scripts\/herdr-app-check\.mjs --keep-app$/m);
+  assert.doesNotMatch(step("ci.yml", "Every pack mod loads in herdr-app"), /--strict/);
+});
+
+test("CI hands the standalone check the kept herdr-app on the Node 24 leg only; the release does not opt in", () => {
+  const text = readFileSync(join(REPO, ".github", "workflows", "ci.yml"), "utf8");
+  const job = text.slice(text.indexOf("\n  herdr:\n"), text.indexOf("\n  scheduler:\n"));
+  const step = (name) => {
+    const start = job.indexOf(`- name: ${name}\n`);
+    assert.notEqual(start, -1, name);
+    return job.slice(start, job.indexOf("\n\n", start));
+  };
+  const app = step("Every pack mod loads in herdr-app");
+  assert.match(app, /^        id: app$/m);
+  assert.match(app, /^        if: matrix.node == '24'$/m);
+  const tests = step("Tests");
+  assert.ok(tests.includes("AUTOMAGIK_HERDR_APP_CHECK: ${{ matrix.node == '24' && steps.app.outputs.outcome != 'unverified' && '1' || '' }}"));
+  assert.ok(tests.includes("HERDR_APP_BIN: ${{ steps.app.outputs.bin }}"));
+  for (const file of [".github/workflows/release.yml", "scripts/release-gates.sh"]) {
+    assert.doesNotMatch(readFileSync(join(REPO, file), "utf8"), /AUTOMAGIK_HERDR_APP_CHECK|--keep-app/, file);
+  }
 });

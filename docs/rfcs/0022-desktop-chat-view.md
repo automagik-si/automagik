@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Draft): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l), Proposed (owner not yet read), Q9-Q17 open for the owner; amends RFC 0024 (f)) |
+| Status | In delivery (answers: Q1-Q8, 2026-11-09: Q2 by the owner, the rest by Chat, Q6 re-decided and Decided 9 (H before phase 1) after review; only the RFC: #847; amended by RFC 0028 (Accepted 2026-11-19): Code workers on a host-side grant beside delivery H, the rejection kept; revised 2026-11-10: Team and Code, the left bar, humanized bots, what ships before #631 and the owner's own instance, (h) to (l); the revision approved by the owner's delegate on 2026-11-19, Q9-Q17 answered with this RFC's own recommendations, see Answers; merged: 1L's rendered face (#1393); 2L amended 2026-11-20, approved by the owner's delegate on 2026-11-20: a local seat's rendered face sends only to an idle seat with an empty input row, see (b); (f) amended 2026-11-20, decided by the owner's delegate: client plugins in the window's page are trusted, as in RFC 0013; amends RFC 0024 (f); wording amended 2026-11-21 (RFC 0030 Q9: Code mode means the Code side; one pane's xterm face is the terminal face), no design change; on 2026-11-21 the owner's delegate approved delivery B's drawing: the current bar's design, existing components and tokens only, and RFC 0030's 6b (starting on a linked machine) moved to delivery H (RFC 0030, Decisions (2026-11-21)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); plugin (3.N.P) for bots-dsh; desktop (3.N) for the shell; herdr (3.N.P) for the chat engine |
 | Created | 2026-11-09 |
@@ -16,13 +16,13 @@ one agent as a terminal or as a rendered chat. It adds no new bot and no second 
 does not change the orchestration. It decides: how the desktop renders an hc agent terminal as
 a chat by reusing RFC 0015's engine and Pocket's chat view; how messages from the view reach
 the same terminal, and why approvals are shown there but answered in the terminal until
-herdr-core can type a key on a condition; the Code mode switch in the view, which flips the
+herdr-core can type a key on a condition; the terminal face switch in the view, which flips the
 rendered chat to xterm drawing the same hc pane, in place, from phase 1; which bots can be shown
 and how the desktop lists them; what the Bot team's own DSH Bots keep; whom the view answers,
 how it reaches the Linux box, and the risk that machine link brings; which desktop P0s block
 which phase; and the rollout.
 
-The 2026-11-10 revision (Proposed, for the owner to approve before anything is built) splits the
+The 2026-11-10 revision (approved by the owner's delegate on 2026-11-19) splits the
 product into **Team**, the people-facing chat, and **Code**, the Herdr side ((h)); describes the
 new left bar as a model ((i)); gives each project one humanized bot, starting with the General
 Orchestrator ((j)); states what can ship before #631 and why ((k)); and settles how the owner's
@@ -101,12 +101,12 @@ each as this RFC recommended:
 2. **The terminal face.** Decided by the owner, in the owner's own words (cut off at the
    end, kept as given): "the idea is to have that flip switch in the genie chat itself...
    code mode, we see xterm rendering the very same hc pane as the". So the switch is in the chat
-   view itself, a **Code mode** switch: it swaps the rendered chat for xterm drawing the very
-   same hc pane, in place, both ways, from phase 1. Herdr's own window (RFC 0013's Code) stays
-   reachable, but the view never depends on it ((c)).
+   view itself, a **terminal face** switch: it swaps the rendered chat for xterm drawing the very
+   same hc pane, in place, both ways, from phase 1. Herdr's own window (herdr-app, RFC 0013)
+   stays reachable, but the view never depends on it ((c)).
 3. **Allow-always from the view for a remote seat.** Decided by Chat: no. Once the view may
    answer (phase 4, after Decided 6's upstream call), it offers allow and deny only;
-   allow-always is given in Code mode, where the whole dialog is on the screen ((b)).
+   allow-always is given in the terminal face, where the whole dialog is on the screen ((b)).
 4. **Does Chat become a universal Bot?** Decided by Chat: no. Chat stays a Claude Code seat on
    the Linux box, so the team runs where it runs today and quitting the desktop app never stops
    it. Revisit only after #842.
@@ -116,7 +116,7 @@ each as this RFC recommended:
    3 s, not narrow (the first answer, accepting a narrow window, rested on that wrong
    description). A safe interim: the rendered view **shows** approval dialogs but **never answers
    them by typing keys**, because a late key can approve the next dialog, which the owner never
-   saw. The owner answers in Code mode, the real terminal, where the exact dialog is on the
+   saw. The owner answers in the terminal face, the real terminal, where the exact dialog is on the
    screen. This holds until herdr-core has a conditional key call (herdrdev/herdr-core#122);
    then the view may answer, with an "Answered elsewhere" receipt when it did not (phase 4,
    (b)).
@@ -132,7 +132,7 @@ Decided by Chat after review, 2026-11-09:
 9. **Delivery H comes before phase 1.** The link scoping to the shown seat, a mask on macOS
    (only Linux has one today, bwrap) and ssh coverage land before the view does. The owner is not
    asked to sign off the link's reach as a phase-0 risk ((f), "The link's reach"; Deliveries).
-   Narrowed by (k) if the owner confirms it (2026-11-10, Proposed): H then comes before a view
+   Narrowed by (k), confirmed with the revision on 2026-11-19: H then comes before a view
    of a seat on another computer, and a seat on the desktop's own computer ships first (1L).
 
 Rejected, recorded so it is not proposed again:
@@ -152,7 +152,7 @@ Proposed here: everything else.
 - **A seat**: a bot's long-lived agent in an hc terminal (RFC 0021's word), on this computer or
   on a linked machine (`<machine>/tN`). Workers are not seats.
 - **The view**: the desktop's panel on one seat. It has two faces, **rendered** (chat rows) and
-  **Code mode** (xterm drawing the pane itself), and a switch in the view flips between them
+  **terminal face** (xterm drawing the pane itself), and a switch in the view flips between them
   (Decided, 2).
 - **The engine**: RFC 0015's `createEngine` (`chat/engine.js`): one projection per watched
   terminal, the input, approval and question rules, and herdr-core reached with no caller.
@@ -197,7 +197,7 @@ bots-dsh host runs as it is.
 | Where the engine runs | Pocket Link's bridge, on the paired computer | the bots-dsh host, in the desktop app |
 | Transport to the client | `herdr-pocket/chat/1` over the paired link | the plugin's own window route, same process |
 | Renderer | Kotlin (`ChatScreen.kt`) | the bots-dsh client (JavaScript) |
-| Terminal face | the app's terminal view (`TerminalScreen.kt`) | Code mode: xterm.js in the bots-dsh client ((c)) |
+| Terminal face | the app's terminal view (`TerminalScreen.kt`) | xterm.js in the bots-dsh client ((c)) |
 | Notifications | Android | the desktop app's own |
 
 **One contract for both renderers.** The two renderers share no code (Kotlin and JavaScript), so
@@ -218,25 +218,38 @@ What the person writes in the rendered face is RFC 0015's "Input":
   refuses it, and the message waits.
 - **Interrupt** is one `terminal.interrupt`, which never escalates.
 
+**2L, on this computer (amended 2026-11-20, approved by the owner's delegate on 2026-11-20).**
+For a local seat (delivery 2L) the rendered face writes less than the two bullets above. It
+sends a message only when the seat is idle and its input row reads empty, as one
+`terminal.send` with `if: idle` and no caller, after the cleaner and the hc-tag check ((f)).
+Otherwise (the seat working or blocked, a half-typed draft, an input row that cannot be read, or
+a status that changed before the send) it sends nothing and says so: "Check the terminal." The
+composer keeps the text. There is no hold, no queue, no Send now and no Cancel, so nothing is
+ever typed later on the person's behalf. It also has no interrupt: `terminal.interrupt` has no
+condition, so a Stop pressed as a permission dialog opens would answer it (Decided, 6); it
+comes back once herdr-core gives `terminal.interrupt` a condition (herdrdev/herdr-core#122
+covers `terminal.keys` only). This narrows the Text bullet above and RFC 0015's Send now (Q2)
+for 2L only; the hold with Send now stays the rule for phase 2 and the phone.
+
 **Approvals are shown, never answered, from the rendered face** (Decided, 6). An approval card
 appears under RFC 0015's guards (herdr-core `blocked` with kind `permission`; the dialog read only
 from the bottom of the screen; exactly one open call in the transcript with the dialog's tool, or
 the `PermissionRequest` hook's payload where it runs), with the call's input from the transcript
-or the hook, never the screen's summary. It has no Allow or Deny button. It has **Answer in Code
-mode**, which flips the view to the terminal on that dialog. Questions and pickers follow the
-same rule: their answers are the same unconditioned keys (paced digits and Enter,
+or the hook, never the screen's summary. It has no Allow or Deny button. It has **Answer in the
+terminal face**, which flips the view to the terminal on that dialog. Questions and pickers
+follow the same rule: their answers are the same unconditioned keys (paced digits and Enter,
 `question.js`), so a late one can pick an option of the next question. Their card shows the
-question and its options read-only, with Answer in Code mode.
+question and its options read-only, with Answer in the terminal face.
 
 **Why: the window is about 3 s, and a late key lands on the next dialog.** herdr-core types a
 key only after about 3 s with no other typing, and `terminal.keys` has no condition
 (`approve.js:12-16`, `engine.js:363-367`; hc's schema gives `if` to `terminal.send` only).
 During that gap the engine's last re-read still passes, because the dialog is still there, and
-anyone can answer first: the owner in Herdr, the phone's engine, a second engine, or Code mode in
-the same panel, whose raw keys the engine never sees. When that happens, the view's key arrives
-after the dialog closed. On Claude Code a late `1` then **approves the next approval dialog**,
-which the owner never saw, or picks option 1 of the next question; a late `esc` denies the next
-one or interrupts the turn. Any typing in the gap stretches it further. RFC 0015's engine
+anyone can answer first: the owner in Herdr, the phone's engine, a second engine, or the terminal
+face in the same panel, whose raw keys the engine never sees. When that happens, the view's key
+arrives after the dialog closed. On Claude Code a late `1` then **approves the next approval
+dialog**, which the owner never saw, or picks option 1 of the next question; a late `esc` denies
+the next one or interrupts the turn. Any typing in the gap stretches it further. RFC 0015's engine
 already says "the key lands on the next dialog" and answers `uncertain` when herdr-core reports
 the key went in at another status or turn; that is a report after the fact, not a guard.
 
@@ -256,55 +269,56 @@ The view's receipt then never guesses: "Answered here: Allow, 14:02" when its ke
 tap can answer the next, unseen dialog") tracks it, as a change under RFC 0015 that the owner
 and the Mobile squad decide.
 
-### (c) The Code mode switch: one session, two faces
+### (c) The terminal face switch: one session, two faces
 
-The switch is in the chat view itself (Decided, 2): a **Code mode** switch in the view's header.
+The switch is in the chat view itself (Decided, 2): a **terminal face** switch in the header.
 Off, the view is the rendered chat; on, the same place shows xterm drawing the very same hc pane.
 It flips in place, both ways, from phase 1. It is the same idea as Pocket's Chat tab over the
 terminal's place.
 
-- **Rendered (Code mode off)** shows the chat rows: turns, collapsed tool calls, approval and
+- **Rendered (terminal face off)** shows the chat rows: turns, collapsed tool calls, approval and
   question cards, held messages, status ("working", "needs you", "idle"), receipts, and screen
   rows marked "Live from the screen" when the transcript has nothing yet.
-- **Code mode (on)** shows the pane as the terminal draws it and takes keys, for everything the
+- **Terminal face (on)** shows the pane as the terminal draws it and takes keys, for everything the
   rendered face does not do: approvals and questions until phase 4 (Decided, 6), allow-always
   (Decided, 3), TUI menus, `/` pickers, plan toggles, an image paste, a dialog the screen reader
   does not know.
 
-**How Code mode draws the pane.** The bots-dsh host attaches to the same terminal through
+**How the terminal face draws the pane.** The bots-dsh host attaches to the same terminal through
 herdr-core's `terminal.attach` (on `<machine>/tN` for a remote seat), as Pocket's terminal view
 does through `CoreClient.kt`, and streams its bytes to xterm.js in the window. Keys typed there go
-back over the same attach, as raw keys, the way any attached terminal takes them: Code mode is
-the terminal, so the rendered face's cleaner and draft hold do not apply to it. The attach is
-opened when Code mode is switched on and closed when it is switched off or the view closes.
+back over the same attach, as raw keys, the way any attached terminal takes them: the terminal
+face is the terminal, so the rendered face's cleaner and draft hold do not apply to it. The attach
+is opened when the terminal face is switched on and closed when it is switched off or the view
+closes.
 xterm.js is already a dependency of this repository: the welcome plugin pins `@xterm/xterm`
 6.0.0 (`apps/welcome-dsh/package.json`) and imports its stylesheet into its client
 (`terminal.js`). bots-dsh takes the same pin and bundles both the library and its CSS into its
 committed `client.js`, as welcome-dsh does.
 
-**Size: Code mode never resizes the pane.** `terminal.attach` takes the viewer's `cols` and
-`rows`, and in hc's schema only an `observe` attach ("never type or resize") leaves the size
-alone; Code mode types, so it cannot be `observe`. The view therefore attaches with exactly the
-pane's current `cols` and `rows` (the terminal's own fields, from `hc get`) and sends no RESIZE
-frame afterwards, whatever the window does: xterm keeps that grid and the panel scrolls or
-scales it to fit. So the owner's Herdr and the phone see no reflow, and the rows the
-engine's dialog reader takes from the bottom of the screen do not move under it. A window too
-small for the grid shows it scrolled, never reflowed.
+**Size: the terminal face never resizes the pane.** `terminal.attach` takes the viewer's `cols`
+and `rows`, and in hc's schema only an `observe` attach ("never type or resize") leaves the size
+alone; the terminal face takes keys, so it cannot be `observe`. The view therefore attaches
+with exactly the pane's current `cols` and `rows` (the terminal's own fields, from `hc get`) and
+sends no RESIZE frame afterwards, whatever the window does. The grid stays the same in xterm, and
+the panel scrolls or scales it to fit. So the owner's Herdr and the phone see no reflow, and the
+rows the engine's dialog reader takes from the bottom of the screen do not move under it. A window
+too small for the grid shows it scrolled, never reflowed.
 
 **Scrollback.** The attach asks for history, as Pocket's does (`CoreClient.kt`, 1000 lines), so
-switching Code mode on paints the last screens of the pane, not only the current one. Switching
-it off closes the attach and drops that history; switching on again paints it afresh from
-herdr-core, at the bottom. The rendered face keeps its own scroll place across switches; Code
-mode always reopens at the bottom.
+switching the terminal face on paints the last screens of the pane, not only the current one.
+Switching it off closes the attach and drops that history; switching on again paints it afresh
+from herdr-core, at the bottom. The rendered face keeps its own scroll place across switches;
+the terminal face always reopens at the bottom.
 
 **Switching never forks the session.** Both faces watch the same hc terminal. A switch starts no
-agent, resumes no session, creates no DSH Session and sends nothing; switching Code mode on only
-opens an attach, which reads. The rendered face's unsent composer text stays the view's draft;
-text typed in Code mode and not yet sent is a terminal draft, which the hold rule in (b)
-protects when the person flips back and sends from the rendered face.
+agent, resumes no session, creates no DSH Session and sends nothing; switching the terminal face
+on only opens an attach, which reads. The rendered face's unsent composer text stays the view's
+draft; text typed in the terminal face and not yet sent is a terminal draft, which the hold rule
+in (b) protects when the person flips back and sends from the rendered face.
 
-**Herdr's own window stays one click away.** RFC 0013's Code (herdr-app, focused on the pane)
-still opens the whole workspace around the pane. The view never depends on it, so Code mode works
+**Herdr's own window stays one click away.** herdr-app (RFC 0013), focused on the pane, still
+opens the whole workspace around the pane. The view never depends on it, so the terminal face works
 on a computer where herdr-app is not installed or not supported.
 
 ### (d) Which bots, and how the desktop lists them
@@ -314,10 +328,10 @@ the agent:
 
 | Agent | Rendered face | Approvals and questions |
 |---|---|---|
-| Claude Code | transcript rows (the Claude decoder) | a read-only card under (b)'s guards (the dialog reader; the hook where it runs), with Answer in Code mode |
-| Codex, omp | transcript rows (their decoders) | status only ("needs you"), with Answer in Code mode: they have no dialog reader, since they asked for nothing in the recordings (`dialog.js`) |
-| dsh-tui | screen rows only | status only, with Answer in Code mode |
-| agy, others | screen rows only | status only, with Answer in Code mode |
+| Claude Code | transcript rows (the Claude decoder) | a read-only card under (b)'s guards (the dialog reader; the hook where it runs), with Answer in the terminal face |
+| Codex, omp | transcript rows (their decoders) | status only ("needs you"), with Answer in the terminal face: they have no dialog reader, since they asked for nothing in the recordings (`dialog.js`) |
+| dsh-tui | screen rows only | status only, with Answer in the terminal face |
+| agy, others | screen rows only | status only, with Answer in the terminal face |
 
 Phase 4 lets the view answer only where a card is shown, which today means Claude Code.
 
@@ -365,12 +379,23 @@ The team's DSH Main Bot stays in the list below the main bot when `front` names 
 **Only the person at the desktop.** The engine's send, answer and interrupt are reachable only
 from the chat route bots-dsh serves to its own window, for a terminal that window watches (RFC
 0015, "Who can call the engine"). They are never a DSH tool, never given to an automation, a
-schedule, another plugin or any Bot. Code mode's attach follows the same rule: it is opened
-only for the window that switched Code mode on, its keys come only from that window's xterm, and
-it is never a tool or an automation's. So no DSH Bot reaches Chat's terminal **through the
-view**, whatever a page, a file or a prompt tells it. A test pins this (phase 1). That is a
-claim about the view only: the machine link the view needs gives other paths to the same
-terminal, below ("The link's reach").
+schedule, another plugin or any Bot. The terminal face's attach follows the same rule: it is
+opened only for the window that switched the terminal face on, its keys come only from that
+window's xterm, and it is never a tool or an automation's. So no DSH Bot reaches Chat's terminal
+**through the view**, whatever a page, a file or a prompt tells it. A test pins this (phase 1).
+That is a claim about the view only: the machine link the view needs gives other paths to the
+same terminal, below ("The link's reach").
+
+**Client plugins in the window are trusted (amended 2026-11-20, decided by the owner's delegate
+on 2026-11-20).** "Another plugin" above means a host plugin, an automation or anything outside
+the window's page. The desktop marks a request as the window's by the page, its origin and the
+path (`apps/desktop/src/dsh.js`), so any DSH client plugin running in that page can make a
+request the route takes as the window's, and with it reach the view's reads and writes. As in
+RFC 0013's threat model ("Who reaches the bridge"), client plugins are trusted code; the same
+rule already holds for the vault's unlock, the Code tree and automations. This is a named
+residual, not a guarantee: if client plugins stop being trusted, the fix is an authorization
+outside the renderer for each write (a check in the desktop's main process), proposed in its
+own RFC.
 
 **The desktop has one author today, so it needs no author gate.** When the view is ever shared
 with other people (teams of humans, an instance rail), the gate Buzz uses is the model to follow
@@ -395,7 +420,7 @@ row, only from herdr-core's state and the guards in (b). A message the person wr
 rendered face that holds an hc tag **anywhere** (`<hc` followed by a space or `>`, in any case,
 after the cleaner) is refused with a reason ("This looks like a bot's message"), so a paste
 cannot pass as a bot's words (Decided, 8). A tag in the middle spoofs as well as one at the
-start, so the check is not limited to the start. Code mode is the raw terminal and is not
+start, so the check is not limited to the start. The terminal face is the raw terminal and is not
 checked: there the check could only stop an accident, never a person typing on purpose, and the
 person is the owner.
 
@@ -459,7 +484,7 @@ commands on the box.
 
 **What it reads, and keeps.** Transcripts under the folder rule only. Rows live in the host's
 memory while a window watches and 10 minutes after (`LINGER_MS`); they are never written to disk
-or logged (RFC 0015, Q4). Tool output can hold tokens and keys: the same text Code mode
+or logged (RFC 0015, Q4). Tool output can hold tokens and keys: the same text the terminal face
 shows.
 
 **Undo.** Clear `front`; close the view; revert the plugin release (the view goes, DSH Bots stay);
@@ -470,15 +495,15 @@ or remove the machine link. Nothing is stored that needs cleaning.
 | Issue | What it is | What it blocks |
 |---|---|---|
 | #842 | A Claude-ACP session can be saved in a shape DSH refuses to load | Phase 3, where DSH Bots on `acp-claude` sit beside seats every day. Not phases 1 and 2: a seat has no DSH Session. It also blocks any move of Chat to a universal Bot (Decided, 4). |
-| #843 | Cmd+W quits the app, mid-run and unasked | Phase 1. Code mode puts a terminal that takes keys in the view from phase 1, and a key meant for the pane or a panel must never quit the app. Quitting does not stop Chat (it runs on the box), but it drops held messages, the watch and the attach. |
+| #843 | Cmd+W quits the app, mid-run and unasked | Phase 1. The terminal face puts a terminal that takes keys in the view from phase 1, and a key meant for the pane or a panel must never quit the app. Quitting does not stop Chat (it runs on the box), but it drops held messages, the watch and the attach. |
 | #844 | `bot-session-adopt` refuses with no named reason | None of this RFC's phases: a seat never adopts a DSH Session. Fixed in phase 3's window, since phase 3 lists both kinds side by side. |
-| #845 | On macOS, top-bar controls cannot be clicked under the drag region | Phase 1 on macOS, the owner's daily window. The Code mode switch sits in the view's own header, not the top bar, but phase 1 sets `front` in settings, and the bar's controls must be reachable. |
+| #845 | On macOS, top-bar controls cannot be clicked under the drag region | Phase 1 on macOS, the owner's daily window. The terminal face switch sits in the view's own header, not the top bar, but phase 1 sets `front` in settings, and the bar's controls must be reachable. |
 | #846 | `browser_screenshot` reaches the model as text only through the ACP bridge | No phase of the view: Chat is the Claude Code CLI and handles images itself. It blocks phase 3's claim that DSH Bots keep their full tool set. |
 
 2026-11-10: #842 to #846 are all closed, #843 and #845 included, so phase 1 waits on none of
 them.
 
-### (h) Team and Code (Proposed, 2026-11-10)
+### (h) Team and Code (2026-11-10, approved 2026-11-19)
 
 The owner's words: "first separating the concepts of team and code". One product, two sides, by
 whom each is for:
@@ -488,7 +513,7 @@ whom each is for:
   lists them today (Q11). Every Team row opens a chat: the rendered face for a seat ((c)), the
   DSH chat for a DSH Bot ((e)).
 - **Code** is the Herdr side: every bot and every worker, as Herdr runs them, on this computer
-  and on linked machines. Every Code row opens its pane: the view in Code mode ((c)).
+  and on linked machines. Every Code row opens its pane in the terminal face ((c)).
 
 A seat can be on both sides: on Team as a person, when it is an orchestrator or a humanized bot,
 and on Code as a terminal. It is one session either way (Decided, 2): the two sides are two ways
@@ -510,8 +535,11 @@ What this changes:
   a side of the bar) and Q15 (Code lists workers), those answers amend RFC 0028's Words row for
   "Code" and its line on worker rows, in that RFC, and its code workers are Code rows here ((i),
   delivery B). If he declines either, RFC 0028 stands on that point and this revision changes.
+  Done on 2026-11-21: Q9 and Q15 were answered yes, and both RFCs now use RFC 0030's Q9 words
+  ("Code" and "Code mode" are the app's Code side; one pane's xterm face is the terminal face,
+  (c)); RFC 0028's Words table and its line on worker rows say so.
 
-### (i) The left bar (Proposed)
+### (i) The left bar (approved 2026-11-19)
 
 Described as a model, not a drawing: the owner is still shaping how it looks, and the drawing is
 his to approve. This section fixes only what the bar holds, what each part lists and what a
@@ -525,8 +553,8 @@ click opens.
 | Team: DSH Bots and groups | the team's DSH Bots, the universal ones included, and the group chats, as the bar lists them today | the DSH chat, unchanged ((e)) |
 | Code: machines | this computer first, then each linked machine the owner made | its projects, folded open |
 | Code: projects | the projects with a `shown[]` yes on that machine ((d)) | its bots, folded open |
-| Code: bots | each project's bots from the registry, its main bot first, each with its agent and status | the view in Code mode on the bot's pane; the view's switch flips to the rendered face where (d)'s table has one |
-| Code: workers | each bot's live workers, under the bot that started them, from both sources: the pack's workers ledger, and the code workers a DSH Bot starts if RFC 0028 (#1008) lands (terminals labelled `automagik.bot`) | the view in Code mode on the worker's pane |
+| Code: bots | each project's bots from the registry, its main bot first, each with its agent and status | the terminal face of the bot's pane; the view's switch flips to the rendered face where (d)'s table has one |
+| Code: workers | each bot's live workers, under the bot that started them, from both sources: the pack's workers ledger, and the code workers a DSH Bot starts if RFC 0028 (#1008) lands (terminals labelled `automagik.bot`) | the terminal face of the worker's pane |
 
 Rules for both sides:
 
@@ -540,11 +568,11 @@ Rules for both sides:
   reaches it ((f)).
 - **Kept as today:** search, New, the account menu and the update button.
 
-The bar's side switch and the view's Code mode switch (Decided, 2) do different jobs: the first
-picks a list, the second picks a pane's face. Opening a row from Code opens Code mode; from Team,
-the rendered face (Q10).
+The bar's side switch picks a list. The view's terminal face switch (Decided, 2) picks a pane's
+face. Opening a row from Code opens the terminal face. Opening a row from Team opens the rendered
+face (Q10).
 
-### (j) One humanized bot per project, starting with the General Orchestrator (Proposed)
+### (j) One humanized bot per project, starting with the General Orchestrator (approved 2026-11-19)
 
 The owner's words: "assigning one humanized bot for each project", starting with the General
 Orchestrator.
@@ -570,7 +598,7 @@ Orchestrator.
   Moving one bot to a DSH Bot is a later step for that bot, once those gaps close, each an
   acceptance item then (Q13). Decided 4 (Chat stays a seat) is unchanged.
 
-### (k) What can ship before #631 (Proposed)
+### (k) What can ship before #631 (approved 2026-11-19)
 
 The owner asked whether an owner-only desktop view of Herdr bots can safely ship before #631.
 
@@ -588,8 +616,8 @@ link ((f), "The link's reach"). #631 landing in full would not close that path; 
 
 - The view talks only to this computer's own herdr-core. It opens no machine link and needs
   none.
-- The engine and Code mode's attach are reachable only from the window that shows them, never as
-  a tool, an automation or a Bot's ((f)).
+- The engine and the terminal face's attach are reachable only from the window that shows them,
+  never as a tool, an automation or a Bot's ((f)).
 - Every other path to that terminal exists today without the view: any process of the owner's
   account on that computer can reach the local core, DSH Bots' shells included, and macOS has no
   mask for them yet. The view adds no such path and uses none. So shipping 1L asks the owner to
@@ -615,7 +643,7 @@ the link to the terminals of the projects shown on that machine (read, status, a
 view's send and interrupt on them), still with `exec`, `run`, file writes and every other
 terminal refused (Q16).
 
-### (l) The owner's own instance, linked to his machines (Proposed; amends RFC 0024 (f))
+### (l) The owner's own instance, linked to his machines (approved 2026-11-19; amends RFC 0024 (f))
 
 The owner asked for "a dedicated automagik instance linked to this herdr enviroment, every
 machine connected". RFC 0024 (f) said: "A workspace never holds hc machine links to a member's
@@ -674,13 +702,14 @@ it needs the gate (condition 1) (Q17).
 
 ## Threat model
 
-The view adds one caller of the engine (the bots-dsh window), one attach (Code mode) and one
-reader of a remote seat's transcript on the owner's computer, and it needs a machine link from
+The view adds one caller of the engine (the bots-dsh window), one attach (the terminal face) and
+one reader of a remote seat's transcript on the owner's computer, and it needs a machine link from
 that computer to the box. (f) gives the detail; in short:
 
 - **Who can reach the view.** Only the person in the desktop app's own window. No DSH tool,
-  automation, schedule, plugin or Bot reaches the engine's send or interrupt, or Code mode's
-  attach.
+  automation, schedule, host plugin or Bot reaches the engine's send or interrupt, or the
+  terminal face's attach. DSH client plugins in the window's page are trusted, as in RFC 0013
+  ((f)).
 - **Who can reach Chat's terminal anyway: anything that can use the link.** The machine link
   gives every process of the owner's account on that computer `hc send`, `hc keys` and
   `hc exec --on <box>`, the shells of DSH Bots in the same app included. Today's guards (the
@@ -693,14 +722,15 @@ that computer to the box. (f) gives the detail; in short:
   `terminal.send`, whose condition keeps it off a dialog; one interrupt; no approval or answer
   keys until phase 4 (Decided, 6), and then allow and deny only, through the conditional call,
   never allow-always for a remote seat (Decided, 3); never a message that holds an hc tag. From
-  Code mode, the keys the person types in its xterm, raw, as any attached terminal takes them,
-  and no RESIZE.
+  the terminal face, the keys the person types in its xterm, raw, as any attached terminal takes
+  them, and no RESIZE.
 - **What it can read.** Transcripts under the folder rule, through the machine link the owner
   made.
 - **Provenance.** Tagged rows are a bot's and are data; rows the view sent are the owner's; other
   untagged rows are "typed in the terminal", never claimed as the owner's.
 - **The window's other code.** The desktop host runs plugins, tools and automations. They never
-  get the engine; a test fails if the engine is reachable as a tool.
+  get the engine; a test fails if the engine is reachable as a tool. Client plugins in the
+  window's page are the exception, trusted as in RFC 0013 ((f)).
 - **Undo.** In (f).
 
 ## Deliveries
@@ -734,22 +764,27 @@ H. **The scoped link** (before phase 1, Decided 9; (f) "The link's reach"). The 
    view's link, `hc exec` on the box and a send to another terminal are refused; the view's own
    calls still work. *Rollback:* none that reopens the reach while the view is installed: the
    view refuses an unscoped link, and reverting H reverts the view with it.
-1. **The view of the main bot, with Code mode** (plugin; after H; the desktop lane for #843 and
-   #845, which must merge first; needs RFC 0014 delivery 3 for the listing, or the `front` bot
-   alone ahead of it). The `live-chat/` copy and its gate check (new: no such check exists yet); the
-   host engine, which spawns the computer's own `hc connect` (`hc.js`); the renderer, with the
-   rendered face read-only and approval and question cards that show and never answer (Decided,
-   6); `front` read from the home file and set in settings, with `front` added to
-   `HOME_FIELDS`; the Code mode switch, its attach and its xterm (the welcome plugin's
+   *Tracked here since 2026-11-21:* RFC 0030's 6b, starting on a linked machine (decided by the
+   owner's delegate, recommended option; RFC 0030, Decisions (2026-11-21), 3). H keeps refusing
+   `run`, `exec` and file writes on a link; once herdr-core ships H's scoping, a start scope on a
+   link is designed as an amendment to H.
+1. **The view of the main bot, with the terminal face** (plugin; after H; the desktop lane for
+   #843 and #845, which must merge first; needs RFC 0014 delivery 3 for the listing, or the
+   `front` bot alone ahead of it). The `live-chat/` copy and its gate check (new: no such check
+   exists yet); the host engine, which spawns the computer's own `hc connect` (`hc.js`); the
+   renderer, with the rendered face read-only and approval and question cards that show and
+   never answer (Decided, 6); `front` read from the home file and set in settings, with `front`
+   added to `HOME_FIELDS`; the terminal face switch, its attach and its xterm (the welcome plugin's
    `@xterm/xterm` pin, its CSS bundled into `client.js`), flipping in place both ways (Decided,
    2).
    *Acceptance (from review, required):*
-   - Code mode attaches with the pane's own `cols` and `rows` from `hc get` and never sends a
-     RESIZE frame: resizing the window or switching faces changes the pane's size for no viewer.
-   - Code mode's attach passes `history` (1000 lines, as Pocket), so switching it on paints the
-     last screens, and reopens at the bottom; the rendered face keeps its scroll place.
+   - The terminal face attaches with the pane's own `cols` and `rows` from `hc get` and sends no
+     RESIZE frame. Resizing the window or switching faces keeps the pane's size for every viewer.
+   - The terminal face's attach passes `history` (1000 lines, as Pocket), so switching the face
+     on paints the last screens and reopens at the bottom. The rendered face keeps its scroll
+     place.
    - A repo file that sets `front` has it dropped by the parser; the home file's is kept.
-   - The Codex and omp cards are status only with Answer in Code mode, as (d)'s table says,
+   - The Codex and omp cards are status only with Answer in the terminal face, as (d)'s table says,
      since they have no dialog reader.
    - The host route exposes no answer path before phase 4: the engine's `answer` (and its
      question steps) is not wired to the window's route at all, so no client, request or
@@ -759,15 +794,15 @@ H. **The scoped link** (before phase 1, Decided 9; (f) "The link's reach"). The 
    *Check:* the plugin gate; the copy check fails on a one-byte change; with a fake hc and temp
    homes (never a live Herdr), a remote seat's transcript rows render, an `<img>` and a
    `<script>` render as text, a tagged row renders as the bot's; an approval card has no Allow
-   or Deny and its Answer in Code mode flips the view, and no approval or answer key is ever
-   sent (the fake hc records no `terminal.keys` from the rendered face), and a hand-made answer
-   request to the host route is refused as unknown; switching Code mode on
+   or Deny and its Answer in the terminal face flips the view, and no approval or answer key
+   is ever sent (the fake hc records no `terminal.keys` from the rendered face), and a hand-made
+   answer request to the host route is refused as unknown; switching the terminal face on
    opens one attach with the pane's size and `history`, switching it off closes it, and neither
    sends anything (no `terminal.send`, no `terminal.keys`, no `run`, no RESIZE); keys typed in
-   Code mode reach the attached terminal; the engine and the attach are not callable as a DSH
-   tool or by an automation. On the owner's computer: Code mode shows Chat's pane at its size in
-   Herdr, and a key typed there lands in Chat's terminal. *Rollback:* revert in a later plugin
-   release; `front` stays in the home file and is ignored.
+   the terminal face reach the attached terminal; the engine and the attach are not callable as
+   a DSH tool or by an automation. On the owner's computer, the terminal face shows Chat's pane
+   at its size in Herdr, and a key typed there lands in Chat's terminal. *Rollback:* revert in a
+   later plugin release; `front` stays in the home file and is ignored.
 2. **Writes from the rendered face** (plugin). Send with the hold, interrupt, the hc-tag
    refusal. No approval or answer keys (Decided, 6).
    *Acceptance (from review, required):* the hc-tag check matches a tag anywhere in the message,
@@ -777,8 +812,8 @@ H. **The scoped link** (before phase 1, Decided 9; (f) "The link's reach"). The 
    is never typed into the dialog; a message holding an hc tag at its start, in its middle or
    at its end, in any case, is refused, and one that only mentions "hc" is not. On the owner's
    computer: a message from the rendered face is answered in Chat's terminal, and both faces show
-   the same turn; a draft typed in Code mode holds a message sent from the rendered face.
-   *Rollback:* a plugin release that drops the writes; phase 1 stays, Code mode included.
+   the same turn; a draft typed in the terminal face holds a message sent from the rendered face.
+   *Rollback:* a plugin release that drops the writes; phase 1 stays, including the terminal face.
 3. **Every shown seat, beside DSH Bots** (plugin; after RFC 0014 deliveries 3 and 8; #842 and
    #846 fixed, #844 in the same window). The kind marks, the seat composer, seats on every
    linked machine, offline rows. This is RFC 0014's delivery 9 for every exposed Bot that has a
@@ -786,7 +821,7 @@ H. **The scoped link** (before phase 1, Decided 9; (f) "The link's reach"). The 
    half, starting an agent that has no pane, is not here: it waits for #206 ((d)).
    *Check:* RFC 0014 delivery 9's check, less the start of a Bot with no pane; a seat is never
    written to `state.json` and cannot be mentioned into a group; a DSH Bot's chat is unchanged;
-   Code mode works on every listed seat. *Rollback:* a plugin release that lists only the
+   the terminal face works on every listed seat. *Rollback:* a plugin release that lists only the
    `front` bot again.
 4. **Answers from the view** (herdr, then plugin; after herdr-core ships
    herdrdev/herdr-core#122, Decided 6). The engine answers through `terminal.keys` with
@@ -803,7 +838,7 @@ H. **The scoped link** (before phase 1, Decided 9; (f) "The link's reach"). The 
 The render cases fixture lands with phase 1 (herdr side) and Pocket reads its copy in its next
 pocket patch.
 
-Proposed with the 2026-11-10 revision, for the owner to approve before any is built. The order
+Added with the 2026-11-10 revision, approved by the owner's delegate on 2026-11-19. The order
 becomes 0, 1L, 2L, B, then H, 1, 2, 3, 4 as decided, and I after H and RFC 0024 delivery 2:
 
 1L. **The view of a seat on this computer** (plugin; before H and before #631, (k)). Phase 1's
@@ -814,12 +849,21 @@ becomes 0, 1L, 2L, B, then H, 1, 2, 3, 4 as decided, and I after H and RFC 0024 
    names a machine. On the owner's computer: the General Orchestrator's pane in both faces.
    *Rollback:* a plugin release without the view; `front` is ignored.
 2L. **Writes from the rendered face, on this computer** (plugin; after 1L). Phase 2 for local
-   seats. *Check:* phase 2's checks on a local seat. *Rollback:* as phase 2.
-B. **The Team and Code bar** (plugin; after 1L; the drawing approved by the owner first). (i)'s
+   seats, as amended in (b) on 2026-11-20: a send only to an idle seat with an empty input row,
+   otherwise "Check the terminal" and nothing sent; no hold, queue, Send now, Cancel or
+   interrupt. *Check:* with a fake hc on a local seat: a seat that is working or blocked, or has
+   a half-typed draft or an unreadable input row, gets no `terminal.send` and the message is
+   refused; a status that changes before the send (`if: idle`) is refused and nothing is
+   retried; the draft is never cleared and no key is sent; phase 2's hc-tag checks. On the
+   owner's computer: a message from the rendered face is answered in the seat's terminal and
+   both faces show the same turn; with a draft typed in the terminal face, a rendered-face send is
+   refused and the draft stays. *Rollback:* as phase 2.
+B. **The Team and Code bar** (plugin; after 1L; the drawing: the current bar's design, existing
+   components and tokens only, approved by the owner's delegate on 2026-11-21). (i)'s
    model: the side switch replacing RFC 0013's Work and Code segments, Team's sections, Code's tree
    of this computer from the registry and the two ledgers, humanized bots ((j)) as Team rows.
    *Acceptance:* no row starts, stops or restarts anything; herdr-app still opens from a Code row; a
-   worker row opens Code mode on the worker's pane; Code lists linked machines only after H; Code's
+   worker row opens its pane in the terminal face; Code lists linked machines only after H; Code's
    worker rows read both sources, the pack's workers ledger and, if RFC 0028 (#1008) lands, its code
    workers (terminals labelled `automagik.bot`). *Check:* with temp homes, fake ledgers and a fake
    hc (never a live Herdr), each part lists what (i) says and each click opens what it says; a
@@ -831,13 +875,44 @@ I. **The owner's instance holds his links** (server image and plugin; after H an
    credential, `hc exec` through a link is refused, and a linked machine's shown seats open.
    *Rollback:* remove the links (`hc machine`); the instance shows its own DSH Bots as today.
 
+## Answers (2026-11-19)
+
+The owner's delegate approved the 2026-11-10 revision ((h) to (l)) on 2026-11-19 and answered Q9-Q17
+with this RFC's own recommendation for each; every question had one, so none fell back to the most
+conservative choice. Each answer restates the recommendation; the questions below stay as asked.
+
+9. **Q9:** yes. Team and Code replace RFC 0013's Work and Code segments, and herdr-app stays one
+   click away from a Code row ((h)). Owed: RFC 0028's Words row for "Code" (#1008), together with
+   the wording RFC 0030's Q9 asks of both RFCs ("Code" and "Code mode" are the app's Code side; one
+   pane's xterm face is the terminal face).
+10. **Q10:** yes. The view keeps its own switch (Decided 2) beside the bar's side switch: one picks a
+    list, the other a pane's face ((i)).
+11. **Q11:** both. Team lists the humanized bots first, then the team's DSH Bots and group chats, as
+    (i) lists them.
+12. **Q12:** its registry main bot, so no second agent stands between the owner and the bot that runs
+    the project ((j)). RFC 0030's Q1 answer keeps this for the team's own seats and lets its Decided 3
+    govern the Genie product.
+13. **Q13:** view first. Humanized bots start as views of their seats and move to DSH Bots one by one
+    once the gaps (j) lists close.
+14. **Q14:** the owner sets the main bot in settings; this RFC does not fix it ((j)).
+15. **Q15:** yes. Code lists every worker, as read-only rows that open Code mode ((h), (i)). Owed: RFC
+    0028's line that workers get no rows of their own (#1008) is amended to match.
+16. **Q16:** yes. H widens from the one shown seat to the terminals of shown projects on a linked
+    machine, still with no `exec`, `run` or file writes ((k)).
+17. **Q17:** yes. (l)'s four conditions let the owner's own instance hold links to every one of his
+    machines; RFC 0024 (f) names Cloud workspaces only, as already amended.
+
+(k)'s point for the owner to confirm is confirmed with the revision: an owner-only view of seats on
+the desktop's own computer ships before #631 (1L, 2L); seats on another computer wait for H.
+
 ## Open questions
 
 The eight questions this RFC first asked were decided on 2026-11-09 (Decided, 1 to 8): Q2 by the
 owner, the rest by Chat as recommended, Q6 re-decided after review. Decided 9 (H before phase
 1) came from review the same day.
 
-Open for the owner, from the 2026-11-10 revision ((h) to (l)); each has a recommendation:
+Asked by the 2026-11-10 revision ((h) to (l)), each with a recommendation; answered on 2026-11-19
+(Answers, above), kept as asked:
 
 9. **Team replaces Work.** Does the bar's Team and Code switch replace RFC 0013's Work and Code
    segments, with herdr-app one click away from a Code row? Recommended: yes ((h)). A yes
@@ -880,6 +955,11 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
   left bar as a model, one humanized bot per project starting with the General Orchestrator,
   what ships before #631, and the owner's own instance with his machine links ((h) to (l),
   Proposed, Q9-Q17); RFC 0024 (f) amended to match.
+- 2026-11-19: the 2026-11-10 revision approved by the owner's delegate; Q9-Q17 answered with this
+  RFC's recommendations (Answers); RFC 0030's delivery 0 is met.
+- 2026-11-21: decided by the owner's delegate with the recommended options (RFC 0030, Decisions
+  (2026-11-21)): delivery B's drawing is the current bar's design, existing components and
+  docs/brand tokens, no new visual item; RFC 0030's 6b is tracked under delivery H.
 
 ## Links
 

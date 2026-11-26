@@ -4,9 +4,11 @@ import {
   ASLEEP_MS, liveFrom, poseOf, nextWake, helpersOf, buildTree, placeTrees, placesOf, withSpaceless, visibleRows, botFold, categoryFold, knownBots, projectId,
   secondLine, modelDefaultsFrom, modelTextsUpdate, argvToAsk, argvEntry, argvAfter, argvReader, heldClickOf, heldTerminalOf, liveOf, paneCounts, listedKeyOf, parentMarkOf, parentMarkText,
   programForApp, needsYouText, NEEDS_YOU, NEEDS_YOU_PERMISSION,
+  NEEDS_OWNER_LABEL, OWNER_QUESTION, ownerQuestionOf, RATE_LIMITED, botTerminals, ledgerSessions, liveBots,
 } from "../mods/am-sidebar/rows.js";
 import { waitsOnPermission } from "../mods/am-sidebar/launchArgs.js";
 import { parseBots } from "../mods/am-sidebar/model.js";
+import { NEEDS_OWNER_LABEL as TIDY_NEEDS_OWNER_LABEL, STALE_NEEDS_OWNER_MS } from "../mods/am-sidebar/tidy.js";
 
 const look = { character: "star", colour: "blue" };
 const bot = (id, more = {}) => ({ id, name: id.slice(2), kind: "member", look, role: `${id} role`, instructions: "", agent: "claude", ...more });
@@ -44,6 +46,50 @@ test("a blocked chip names a permission only when herdr-core's report says block
   }
 });
 
+test("a stopped pane's needs-owner label is the owner question, and a working or blocked pane has none", () => {
+  // The marker tidy.js already reports on, held equal: one label, two readers.
+  assert.equal(NEEDS_OWNER_LABEL, "automagik-herdr.needs-owner");
+  assert.equal(NEEDS_OWNER_LABEL, TIDY_NEEDS_OWNER_LABEL);
+  assert.equal(OWNER_QUESTION, "Question");
+  const row = (label, status = "done") => ({ address: "t1", state: "live", status, labels: label === null ? {} : { [NEEDS_OWNER_LABEL]: label } });
+  assert.equal(ownerQuestionOf(row("ship it?")), "ship it?");
+  assert.equal(ownerQuestionOf(row("  which database?  ", "idle"), "idle"), "which database?");
+  // No status reported is not an agent working: the label still speaks.
+  assert.equal(ownerQuestionOf(row("waiting", null), null), "waiting");
+  // Working, blocked and error are not waiting on an answer.
+  for (const status of ["working", "blocked", "error"]) {
+    assert.equal(ownerQuestionOf(row("x", status), status), null, status);
+    assert.equal(ownerQuestionOf(row("x"), status), null, status);
+  }
+  for (const label of [null, undefined, "", "   "]) assert.equal(ownerQuestionOf(row(label), "done"), null, JSON.stringify(label));
+  assert.equal(ownerQuestionOf(null, "done"), null);
+  assert.equal(ownerQuestionOf({ address: "t1", status: "done" }, "done"), null);
+  // One line, and short enough for a chip's tooltip.
+  assert.equal(ownerQuestionOf(row("which\n  database?")), "which database?");
+  const long = ownerQuestionOf(row("x".repeat(500)));
+  assert.equal(long.length, 160);
+  assert.match(long, /\.\.\.$/);
+});
+
+test("a label older than tidy's stale window, or on a terminal that is gone, is no question", () => {
+  const NOW = 1_800_000_000_000;
+  const at = (age, more = {}) => ({ address: "t1", state: "live", status: "done", status_ms: NOW - age,
+    labels: { [NEEDS_OWNER_LABEL]: "ship it?" }, ...more });
+  // The same boundary tidy.js reports (a strict >): a day is still fresh, a day and a millisecond is not.
+  assert.equal(ownerQuestionOf(at(0), "done", NOW), "ship it?");
+  assert.equal(ownerQuestionOf(at(STALE_NEEDS_OWNER_MS), "done", NOW), "ship it?");
+  assert.equal(ownerQuestionOf(at(STALE_NEEDS_OWNER_MS + 1), "done", NOW), null);
+  // Without a status clock, the terminal's creation age: tidy.js's own fallback.
+  assert.equal(ownerQuestionOf(at(STALE_NEEDS_OWNER_MS + 1, { status_ms: null, created_ms: NOW - 1000 }), "done", NOW), "ship it?");
+  assert.equal(ownerQuestionOf(at(0, { status_ms: null, created_ms: NOW - STALE_NEEDS_OWNER_MS - 1 }), "done", NOW), null);
+  // No clock at all is not stale: tidy reports only a finite age.
+  assert.equal(ownerQuestionOf(at(0, { status_ms: null, created_ms: null }), "done", NOW), "ship it?");
+  // A terminal that exited while its label row survives, or one no longer in the snapshot, asks nothing.
+  assert.equal(ownerQuestionOf(at(0, { state: "exited" }), "done", NOW), null);
+  assert.equal(ownerQuestionOf(at(0, { state: undefined }), "done", NOW), null);
+  assert.equal(ownerQuestionOf(undefined, "done", NOW), null);
+});
+
 test("liveFrom: label + live + agent in front; newest holder wins and is flagged; remote counts", () => {
   const terms = [
     T("t1", { labels: { bot: "b-mainmainma" }, status: "working", status_ms: NOW - 5 }),
@@ -58,12 +104,144 @@ test("liveFrom: label + live + agent in front; newest holder wins and is flagged
   ];
   const live = liveFrom(terms, knownBots([{ key: KEY, file }]));
   assert.deepEqual(Object.keys(live).sort(), ["b-captaincap", "b-devdevdevd", "b-mainmainma", "b-pmpmpmpmpm"]);
-  assert.deepEqual({ ...live["b-captaincap"], program: undefined }, { terminal: "t3", duplicate: true, parent: null, status: "idle", status_ms: NOW - 1000, program: undefined, argv: null, panes: ["t3", "t2"] });
+  assert.deepEqual({ ...live["b-captaincap"], program: undefined }, { terminal: "t3", created_ms: 20, duplicate: true, parent: null, status: "idle", status_ms: NOW - 1000, program: undefined, argv: null, panes: ["t3", "t2"] });
   assert.equal(live["b-mainmainma"].duplicate, false);
   assert.ok(!("panes" in live["b-mainmainma"]), "one holder: the entry is as before");
   assert.equal(live["b-devdevdevd"].terminal, "box/t4");
   // No filter: any label counts.
   assert.ok(liveFrom(terms)["b-unknownbot"]);
+});
+
+test("liveFrom: the ledger's binding decides the bot, never the pane's bot= label (#223)", () => {
+  const terms = [
+    T("t1", { labels: { bot: "b-mainmainma" }, created_ms: 10 }),
+    T("t2", { labels: { bot: "b-loneloneln" }, created_ms: 20 }),
+    T("t3", { labels: {}, created_ms: 30 }),
+    T("hx/t4", { labels: { bot: "b-devdevdevd" }, created_ms: 40 }),
+    T("t5", { labels: { bot: "b-captaincap" }, created_ms: 50, state: "exited" }),
+  ];
+  const bindings = [
+    { bot: "b-captaincap", terminal: "t1", address: "t1", project: KEY, machine: null, state: "live", created_ms: 10 },
+    { bot: "b-loneloneln", terminal: "t2", address: "t2", project: KEY, machine: null, state: "unknown", created_ms: 20 },
+    { bot: "b-devdevdevd", terminal: "t3", address: "t3", project: KEY, machine: null, state: "live", created_ms: 30 },
+    { bot: "b-mainmainma", terminal: "t4", address: "hx/t4", project: KEY, machine: "hx", state: "live", created_ms: 40 },
+    { bot: "b-testtestte", terminal: "t5", address: "t5", project: KEY, machine: null, state: "live", created_ms: 50 },
+  ];
+  const known = knownBots([{ key: KEY, file }]);
+  const live = liveFrom(terms, known, undefined, undefined, bindings);
+  // The pane says the main bot, the ledger the captain; an unlabelled pane is the dev's; an
+  // away binding is no row, nor is one whose terminal ended.
+  assert.equal(liveOf(live, { key: KEY }, "b-captaincap").terminal, "t1");
+  assert.equal(liveOf(live, { key: KEY }, "b-devdevdevd").terminal, "t3");
+  assert.equal(liveOf(live, { key: KEY }, "b-loneloneln"), null);
+  assert.equal(liveOf(live, { key: KEY }, "b-testtestte"), null);
+  assert.equal(liveOf(live, { key: KEY, machine: "hx" }, "b-mainmainma").terminal, "hx/t4");
+  assert.equal(liveOf(live, { key: KEY }, "b-mainmainma"), null, "no row at the wrong machine");
+  // Without the ledger the label still decides (the fallback until the CLI answers --all).
+  assert.equal(liveOf(liveFrom(terms, known), { key: KEY }, "b-mainmainma").terminal, "t1");
+});
+
+test("liveFrom and botTerminals: an empty ledger answer leaves a labelled pane to its label (#1875)", () => {
+  const terms = [
+    T("t1", { labels: { bot: "b-mainmainma" }, created_ms: 10 }),
+    T("lab/t4", { labels: { bot: "b-devdevdevd" }, created_ms: 40 }),
+    T("wsl/t2y", { labels: { bot: "b-loneloneln" }, created_ms: 60 }),
+  ];
+  const known = knownBots([{ key: KEY, file }]);
+  const live = liveFrom(terms, known, undefined, undefined, []);
+  assert.equal(liveOf(live, { key: KEY }, "b-mainmainma").terminal, "t1");
+  assert.equal(liveOf(live, { key: KEY, machine: "lab" }, "b-devdevdevd").terminal, "lab/t4");
+  assert.equal(liveOf(live, { key: KEY, machine: "wsl" }, "b-loneloneln").terminal, "wsl/t2y");
+  assert.deepEqual([...botTerminals(terms, known, [])].sort(),
+    [["lab/t4", "b-devdevdevd"], ["t1", "b-mainmainma"], ["wsl/t2y", "b-loneloneln"]]);
+});
+
+test("liveFrom: a ledger row that kept the bare terminal meets the snapshot's machine address by generation (#1875)", () => {
+  const projects = [{ key: KEY, machine: "wsl", file }];
+  const known = knownBots(projects);
+  const terms = [T("wsl/t12", { created_ms: 200 })];
+  const row = { bot: "b-mainmainma", terminal: "t12", address: "t12", project: KEY, machine: null, state: "live", created_ms: 200 };
+  assert.equal(liveOf(liveFrom(terms, known, undefined, () => null, [row], projects), { key: KEY, machine: "wsl" }, "b-mainmainma").terminal, "wsl/t12");
+  assert.deepEqual([...botTerminals(terms, known, [row], projects)], [["wsl/t12", "b-mainmainma"]]);
+  assert.equal(heldTerminalOf("b-mainmainma", terms, [], { key: KEY, machine: "wsl" }, () => null, [row], projects), "wsl/t12");
+  // The ledger's own machine is the same evidence when no project list is given.
+  assert.equal(liveOf(liveFrom(terms, known, undefined, () => null, [{ ...row, machine: "wsl" }]), { key: KEY, machine: "wsl" }, "b-mainmainma").terminal, "wsl/t12");
+  // A generation the two sides know and disagree on is another session, never this pane.
+  assert.equal(liveOf(liveFrom(terms, known, undefined, () => null, [{ ...row, created_ms: 100 }], projects), { key: KEY, machine: "wsl" }, "b-mainmainma"), null);
+  assert.deepEqual([...botTerminals(terms, known, [{ ...row, created_ms: 100 }], projects)], []);
+  // The current pane's own label still draws it: a stale row claims nothing.
+  assert.equal(liveOf(liveFrom([{ ...terms[0], labels: { bot: "b-mainmainma" } }], known, undefined, () => null, [{ ...row, created_ms: 100 }], projects), { key: KEY, machine: "wsl" }, "b-mainmainma").terminal, "wsl/t12");
+  // Two snapshot panes answer to the terminal on two machines the project is listed on: ambiguous.
+  const both = [T("wsl/t12", { created_ms: 200 }), T("lab/t12", { created_ms: 200 })];
+  assert.deepEqual(ledgerSessions([row], both, [...projects, { key: KEY, machine: "lab", file }]), []);
+  assert.equal(ledgerSessions([{ ...row, machine: "lab" }], both, projects)[0].terminal.address, "lab/t12");
+  assert.equal(ledgerSessions([row], both, projects)[0].terminal.address, "wsl/t12", "the only listed machine resolves it");
+});
+
+test("liveFrom: an address reused before the render joins no old binding (#1875)", () => {
+  const known = knownBots([{ key: KEY, file }]);
+  const stale = [{ bot: "b-mainmainma", terminal: "t12", address: "t12", project: KEY, machine: null, state: "live", created_ms: 100 }];
+  const replaced = [T("t12", { labels: {}, created_ms: 200 })];
+  assert.equal(liveOf(liveFrom(replaced, known, undefined, () => null, stale), { key: KEY }, "b-mainmainma"), null);
+  assert.deepEqual([...botTerminals(replaced, known, stale)], []);
+  assert.equal(heldTerminalOf("b-mainmainma", replaced, [], { key: KEY }, () => null, stale), null);
+});
+
+test("liveFrom and heldTerminalOf: labels: false keeps the ledger's attachment authority (#1875)", () => {
+  const known = knownBots([{ key: KEY, file }]);
+  const terms = [
+    T("t12", { labels: { bot: "b-mainmainma" }, created_ms: 200 }),
+    T("t13", { labels: { bot: "b-captaincap" }, created_ms: 210 }),
+  ];
+  const bindings = [{ bot: "b-mainmainma", terminal: "t12", address: "t12", project: KEY, machine: null, state: "live", created_ms: 200 }];
+  const display = liveFrom(terms, known, undefined, () => null, bindings);
+  assert.equal(liveOf(display, { key: KEY }, "b-mainmainma").terminal, "t12");
+  assert.equal(liveOf(display, { key: KEY }, "b-captaincap").terminal, "t13", "the label still draws the card");
+  const bound = liveFrom(terms, known, undefined, () => null, bindings, null, { labels: false });
+  assert.equal(liveOf(bound, { key: KEY }, "b-mainmainma").terminal, "t12");
+  assert.equal(liveOf(bound, { key: KEY }, "b-captaincap"), null, "a label is not an attachment");
+  // A confirmed binding to a pane without an agent in front is still the ledger's answer; the
+  // label-only shell is not one when labels are off.
+  const shells = [
+    T("t12", { labels: {}, created_ms: 200, program: { key: "shell", agent: false } }),
+    T("t13", { labels: { bot: "b-captaincap" }, created_ms: 210, program: { key: "shell", agent: false } }),
+  ];
+  assert.equal(heldTerminalOf("b-captaincap", shells, [], null, () => null, []), "t13");
+  assert.equal(heldTerminalOf("b-captaincap", shells, [], null, () => null, [], null, { labels: false }), null);
+  assert.equal(heldTerminalOf("b-mainmainma", shells, [], { key: KEY }, () => null, bindings, null, { labels: false }), "t12");
+});
+
+test("liveFrom: a confirmed binding outranks a newer pane carrying the same label (#1875)", () => {
+  const known = knownBots([{ key: KEY, file }]);
+  const terms = [
+    T("t12", { labels: {}, created_ms: 100 }),
+    T("t13", { labels: { bot: "b-mainmainma" }, created_ms: 200 }),
+  ];
+  const bindings = [{ bot: "b-mainmainma", terminal: "t12", address: "t12", project: KEY, machine: null, state: "live", created_ms: 100 }];
+  const live = liveFrom(terms, known, undefined, () => null, bindings);
+  assert.equal(liveOf(live, { key: KEY }, "b-mainmainma").terminal, "t12", "the ledger's pane, not the newer label");
+  assert.equal(liveOf(live, { key: KEY }, "b-mainmainma").duplicate, false);
+  assert.deepEqual([...botTerminals(terms, known, bindings)], [["t12", "b-mainmainma"]], "the labelled pane stays an agent row");
+  // Without the binding (a stale generation), the newer label is all there is.
+  const stale = [{ ...bindings[0], created_ms: 50 }];
+  assert.equal(liveOf(liveFrom(terms, known, undefined, () => null, stale), { key: KEY }, "b-mainmainma").terminal, "t13");
+});
+
+test("heldTerminalOf: a bound pane is the bot's, never a newer label on another pane (#1875)", () => {
+  const terms = [
+    T("t12", { labels: {}, created_ms: 100, program: { key: "shell", agent: false } }),
+    T("t13", { labels: { bot: "b-mainmainma" }, created_ms: 200, program: { key: "shell", agent: false } }),
+  ];
+  const bindings = [{ bot: "b-mainmainma", terminal: "t12", address: "t12", project: KEY, machine: null, state: "live", created_ms: 100 }];
+  assert.equal(heldTerminalOf("b-mainmainma", terms, [], { key: KEY }, () => null, bindings), "t12");
+  assert.equal(heldTerminalOf("b-mainmainma", terms, [], { key: KEY }, () => null, bindings, null, { labels: false }), "t12");
+});
+
+test("liveBots: a planned bot is not an id a tree can draw live (#1875)", () => {
+  const projects = [{ key: KEY, file }];
+  assert.ok(knownBots(projects).has("b-plannedpla"), "the file defines it");
+  assert.ok(!liveBots(projects).has("b-plannedpla"), "its node never draws a pane");
+  assert.ok(liveBots(projects).has("b-mainmainma"));
 });
 
 test("an agy pane (#793): agy in front counts even when the table says no agent, and its blocked prompt is needs-you", () => {
@@ -415,6 +593,14 @@ test("heldTerminalOf: a bot's live terminal for its row's click, shown in a pane
   assert.equal(heldTerminalOf("b-c", rows), null, "no live terminal");
   assert.equal(heldTerminalOf("b-a", [T("t3", { labels: { bot: "b-a" }, state: "exited" })]), null);
   assert.equal(heldTerminalOf(null, rows), null);
+  // The ledger's binding, not the label, says which terminal a row's click holds (#223).
+  const terms = [...rows, T("t5", { created_ms: 40 })];
+  const bindings = [{ bot: "b-a", terminal: "t5", address: "t5", project: null, machine: null, state: "live" }];
+  assert.equal(heldTerminalOf("b-a", terms, [], null, () => null, bindings), "t5");
+  assert.equal(heldTerminalOf("b-b", terms, [], null, () => null, bindings), "t4", "a label no binding names still counts (#1875)");
+  const claimed = [...bindings, { bot: "b-a", terminal: "t4", address: "t4", project: null, machine: null, state: "live" }];
+  assert.equal(heldTerminalOf("b-b", terms, [], null, () => null, claimed), null, "a label on a pane the ledger names counts nothing");
+  assert.equal(heldClickOf("b-a", terms, [], null, () => null, bindings).args.terminal, "t5");
 });
 
 test("argvToAsk: panes that never settle can't starve a stale re-read; the cursor goes round", () => {
@@ -568,7 +754,7 @@ test("#227: each checkout keeps its own pane, picked newest within the project; 
   ];
   const trees = buildTree({ projects: twoCheckouts, live: liveFrom(terms, knownBots(twoCheckouts), undefined, keyOf), terminals: terms, now: NOW });
   assert.deepEqual([mainBotIn(trees, MAIN).live, mainBotIn(trees, CLONE).live],
-    [{ terminal: "t1", duplicate: false, parent: null }, { terminal: "t2", duplicate: false, parent: null }]);
+    [{ terminal: "t1", created_ms: 1, duplicate: false, parent: null }, { terminal: "t2", created_ms: 9, duplicate: false, parent: null }]);
   const cap = (key) => trees.find((x) => x.key === key).categories.find((c) => c.id === "eng").bots.find((n) => n.bot.id === "b-captaincap");
   assert.equal(cap(MAIN).live.terminal, "t3", "the worktree's pane counts for its main checkout");
   assert.equal(cap(CLONE).live, null);
@@ -582,8 +768,8 @@ test("#227: a pane with no project (no folder, not in git, not read yet) still c
   ];
   const trees = buildTree({ projects: twoCheckouts, live: liveFrom(terms, knownBots(twoCheckouts), undefined, keyOf), terminals: terms, now: NOW });
   // Main has its own pane and the unknown one: the newest is shown, flagged duplicate.
-  assert.deepEqual(mainBotIn(trees, MAIN).live, { terminal: "t4", duplicate: true, parent: null });
-  assert.deepEqual(mainBotIn(trees, CLONE).live, { terminal: "t4", duplicate: false, parent: null });
+  assert.deepEqual(mainBotIn(trees, MAIN).live, { terminal: "t4", created_ms: 5, duplicate: true, parent: null });
+  assert.deepEqual(mainBotIn(trees, CLONE).live, { terminal: "t4", created_ms: 5, duplicate: false, parent: null });
   for (const key of [MAIN, CLONE]) {
     assert.equal(trees.find((x) => x.key === key).categories.find((c) => c.id === "eng").bots.find((n) => n.bot.id === "b-captaincap").live.terminal, "t5");
   }
@@ -602,6 +788,37 @@ test("#227: a held bot row's click goes to a terminal of its own project only", 
   assert.equal(heldClickOf("b-mainmainma", terms, [], { key: CLONE }, keyOf), null);
   assert.equal(heldTerminalOf("b-mainmainma", [{ ...terms[0], cwd: undefined }], [], { key: CLONE }, keyOf), "t1", "no project: as before");
   assert.equal(heldTerminalOf("b-mainmainma", terms), "t1", "no project given: as before");
+});
+
+test("#1875/#227: a ledger binding in one checkout doesn't silence the other checkout's label", () => {
+  const terms = [
+    T("t1", { labels: {}, cwd: MAIN, created_ms: 100 }),
+    T("t2", { labels: { bot: "b-mainmainma" }, cwd: CLONE, created_ms: 200 }),
+  ];
+  const bindings = [{ bot: "b-mainmainma", terminal: "t1", address: "t1", project: MAIN, machine: null, state: "live", created_ms: 100 }];
+  const known = knownBots(twoCheckouts);
+  const live = liveFrom(terms, known, undefined, keyOf, bindings);
+  assert.equal(liveOf(live, { key: MAIN }, "b-mainmainma").terminal, "t1", "the ledger's pane in MAIN");
+  assert.equal(liveOf(live, { key: CLONE }, "b-mainmainma").terminal, "t2", "the clone's own label");
+  assert.deepEqual([...botTerminals(terms, known, bindings, null, keyOf)].sort(),
+    [["t1", "b-mainmainma"], ["t2", "b-mainmainma"]]);
+});
+
+test("#1875: an unkeyed label is no held fallback for a bot bound in another project", () => {
+  const shell = { key: "shell", agent: false };
+  const bindings = [{ bot: "b-mainmainma", terminal: "t1", address: "t1", project: MAIN, machine: null, state: "live", created_ms: 100 }];
+  const unkeyed = [
+    T("t1", { labels: {}, cwd: MAIN, created_ms: 100, program: shell }),
+    T("t9", { labels: { bot: "b-mainmainma" }, created_ms: 200, program: shell }),
+  ];
+  assert.equal(heldTerminalOf("b-mainmainma", unkeyed, [], { key: CLONE }, keyOf, bindings), null,
+    "the unkeyed label could be any project, and the ledger names the bot in MAIN");
+  const clone = [
+    T("t1", { labels: {}, cwd: MAIN, created_ms: 100, program: shell }),
+    T("t2", { labels: { bot: "b-mainmainma" }, cwd: CLONE, created_ms: 200, program: shell }),
+  ];
+  assert.equal(heldTerminalOf("b-mainmainma", clone, [], { key: CLONE }, keyOf, bindings), "t2",
+    "the clone's own keyed label is its held pane");
 });
 
 test("#227: a pane keyed to a project no listed checkout of its bot is (restart --cwd elsewhere, an unlisted clone) counts as before", () => {
@@ -778,4 +995,54 @@ test("cross-project lead (#850): buildTree nests a cross-project main or member 
   })[0];
   assert.equal(loneSpoke.main.bot.id, "b-spokemainm");
   assert.match(loneSpoke.main.warning, /project \/work\/hub has no roster/);
+});
+
+test("#1557 the sidebar marks a live Claude seat's rate-limit record on its node, and leaves a healthy one alone", () => {
+  assert.equal(RATE_LIMITED, "Rate limited");
+  const trees = buildTree({
+    projects: [{ key: KEY, file }],
+    live: { "b-mainmainma": { terminal: "t1", created_ms: 1, status: "idle", status_ms: NOW } },
+    terminals: [], now: NOW,
+    rateLimited: new Map([["t1", { question: "Rate limit reached", created_ms: 1, resets_at: "2026-11-19T14:10:00.000Z" }]]),
+  });
+  assert.deepEqual(trees[0].main.rateLimited, { question: "Rate limit reached", created_ms: 1, resets_at: "2026-11-19T14:10:00.000Z" });
+  assert.equal(trees[0].main.status, "idle", "the core status is kept beside the added word");
+  assert.equal(trees[0].main.pose, "idle", "the character keeps its core pose; the chip carries the word");
+  const clean = buildTree({
+    projects: [{ key: KEY, file }],
+    live: { "b-mainmainma": { terminal: "t1", created_ms: 1, status: "idle", status_ms: NOW } },
+    terminals: [], now: NOW, rateLimited: new Map(),
+  });
+  assert.equal("rateLimited" in clean[0].main, false);
+  const noLive = buildTree({ projects: [{ key: KEY, file }], live: {}, terminals: [], now: NOW,
+    rateLimited: new Map([["t1", { question: "x" }]]) });
+  assert.equal("rateLimited" in noLive[0].main, false, "a record on a stopped seat's old address is never drawn");
+});
+
+test("#1557 the sidebar never draws a former occupant's rate-limit chip at a reused address", () => {
+  const bot = "b-mainmainma";
+  const terminals = [{ address: "t1", created_ms: 2, state: "live", status: "idle",
+    labels: { bot }, program: { agent: true, key: "claude" } }];
+  const live = liveFrom(terminals);
+  assert.equal(live[bot].created_ms, 2);
+  const treeFor = created_ms => buildTree({ projects: [{ key: KEY, file }], live, terminals,
+    rateLimited: new Map([["t1", { created_ms, question: "Rate limit reached" }]]) })[0].main;
+  assert.equal(treeFor(1).rateLimited, undefined);
+  assert.equal(treeFor(2).rateLimited.question, "Rate limit reached");
+});
+
+
+test("#1557 a late sidebar read is ignored and a live episode keeps its first deadline", async () => {
+  const { rateLimitObservation } = await import("../mods/am-sidebar/rows.js");
+  const pane = { address: "t1", created_ms: 2, labels: { bot: "b-mainmainma" } };
+  const found = { question: "Rate limit reached", resets_at: "2026-11-19T15:00:00.000Z" };
+  const saved = [
+    { terminal: "t1", created_ms: 1, botId: pane.labels.bot, resets_at: "2026-11-19T13:00:00.000Z" },
+    { terminal: "t1", created_ms: 2, botId: pane.labels.bot, resets_at: "2026-11-19T14:00:00.000Z" },
+  ];
+  assert.equal(rateLimitObservation(pane, { ...pane, created_ms: 3 }, found, saved), undefined);
+  assert.deepEqual(rateLimitObservation(pane, pane, found, saved), {
+    question: found.question, created_ms: 2, resets_at: saved[1].resets_at,
+  });
+  assert.equal(rateLimitObservation(pane, pane, null, saved), null);
 });

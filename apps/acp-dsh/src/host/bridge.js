@@ -9,10 +9,12 @@
 // so it must not import the plugin's peers or the ACP SDK. It speaks newline-delimited JSON-RPC
 // (MCP). `server/discover` is answered `-32601`, as the spike shows both adapters then fall back
 // to the 2025-06-18/2025-11-25 handshake.
+import { randomBytes } from 'node:crypto'
 import { request } from 'node:http'
 import { createInterface } from 'node:readline'
 
 const CREDENTIAL = process.env.DSH_BRIDGE_CREDENTIAL
+const ATTACHMENT = randomBytes(16).toString('hex')
 const URL = process.env.DSH_BRIDGE_URL
 const WAIT_MS = 20_000
 // The deadline of a short exchange (`list`, `hello`, `bye`). A `call` has none: DSH runs the
@@ -59,7 +61,12 @@ function rpc(op, payload = {}, { signal } = {}) {
       outgoing = request(URL, {
         method: 'POST',
         agent: false,
-        headers: { authorization: `Bearer ${CREDENTIAL}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+        headers: {
+          authorization: `Bearer ${CREDENTIAL}`,
+          'x-dsh-bridge-attachment': ATTACHMENT,
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+        },
         ...(signal === undefined ? {} : { signal }),
       }, (response) => {
         const chunks = []
@@ -117,7 +124,10 @@ async function call(params, requestId) {
   inflight.set(requestId, controller)
   let answer
   try {
-    answer = await rpc('call', { name, arguments: params.arguments ?? {}, callId: typeof params._meta?.callId === 'string' ? params._meta.callId : undefined }, { signal: controller.signal })
+    const callId = typeof params._meta?.callId === 'string' ? params._meta.callId : undefined
+    answer = await rpc('call', { name, arguments: params.arguments ?? {}, callId,
+      ...(name === 'load_skill' && callId === undefined && { requestId }),
+    }, { signal: controller.signal })
   } catch (error) {
     // A cancelled request gets no response (MCP): the agent already stopped waiting for it.
     if (controller.signal.aborted) return CANCELLED

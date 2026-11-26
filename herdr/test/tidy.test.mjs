@@ -1,3 +1,4 @@
+import { spawnSync as spawnScratch } from "node:child_process";
 // tidy (sidebar-rules Group 2): the planner over the recorded fixtures and plain-data cases,
 // the State read from hc, herdr-app, git and the files, and the CLI: `tidy` changes nothing,
 // and start, attach and create apply only the non-visual fixes. Fakes only: test/fake-hc.mjs
@@ -356,6 +357,7 @@ function scene(t) {
   const list = join(app, "am-sidebar-projects.json");
   writeFileSync(list, `${JSON.stringify([alpha, join(root, "gone"), beta], null, 2)}\n`);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: hcState, HC_FAKE_LOG: hcLog, GIT_CEILING_DIRECTORIES: root };
+  Object.assign(env, { AUTOMAGIK_HERDR_TEST_ROOTS: root, HC_SOCKET: "", HC_SESSION: "" });
   delete env.HC_TERMINAL_ID;
   const cli = (args) => { const r = spawnSync(process.execPath, [CLI, ...args], { cwd: alpha, env, encoding: "utf8" }); return { code: r.status, out: r.stdout, err: r.stderr }; };
   const read = (p) => readFileSync(p, "utf8");
@@ -484,9 +486,114 @@ test("create with no hc on PATH warns once, about its own panes, and nothing fro
   const project = scratchProject(root, "p");
   symlinkSync(process.execPath, join(bin, "node"));
   symlinkSync(execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(), join(bin, "git"));
+  const spawnSync = (command, args, options) => spawnScratch(command, args, {
+    ...options, env: { ...options.env, AUTOMAGIK_HERDR_TEST_ROOTS: root },
+  });
   const r = spawnSync(process.execPath, [CLI, "create", "--name", "Solo", "--agent", "claude"],
     { cwd: project, env: { HOME: root, PATH: bin, HERDR_APP_HOME: app, GIT_CEILING_DIRECTORIES: root }, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   assert.doesNotMatch(r.stderr, /tidy/);
   assert.equal(r.stderr.trim().split("\n").length, 1);
+});
+
+test("tidy ledger: the bound bot supplies role and category, and its stale twin label is ignored", () => {
+  const file = bots([MAIN_A, "main"], [MAIN_B, "member", { rank: "tester", category: "eng" }]);
+  file.categories = [{ id: "eng", title: "Engineering" }];
+  const s = base({ projects: [{ key: A, machine: null, file }], spaces: [],
+    terminals: [T("t1", A, { bot: MAIN_A, role: "main" }), T("t2", A, { bot: MAIN_B }), T("t3", A, { bot: MAIN_A })],
+    ledger: { bound: [{ terminal: "t1", bot: MAIN_B, project: A }], known: [MAIN_B] } });
+  assert.deepEqual(planOf(s).filter((a) => a.kind === "relabel").map(brief), ["relabel t1 role=tester category=eng", "relabel t3 role=main"]);
+});
+
+test("tidy ledger: null gives the same plan as an absent ledger", () => {
+  const s = drift();
+  assert.deepEqual(planOf({ ...s, ledger: null }), planOf(s));
+});
+
+test("tidy ledger: the binding's project wins over a folder that defines the same bot", () => {
+  const s = base({ terminals: [T("t1", B, { bot: MAIN_A })], spaces: [],
+    projects: [base().projects[0], { key: B, machine: null, file: bots([MAIN_B, "main"], [MAIN_A, "member", { rank: "dev" }]) }],
+    ledger: { bound: [{ terminal: "t1", bot: MAIN_A, project: A }], known: [MAIN_A] } });
+  const fixes = () => planOf(s).filter((a) => a.kind === "relabel" || a.kind === "report").map(brief);
+  assert.deepEqual(fixes(), ["relabel t1 role=main"]);
+  s.ledger.bound[0].project = null;
+  assert.deepEqual(fixes(), ["relabel t1 role=dev"]);
+});
+
+test("tidy ledger: an unresolved project leaves the pane alone and reports exactly why", () => {
+  const s = base({ terminals: [T("t1", A, { bot: MAIN_A, "automagik-herdr.needs-owner": "waiting" }, { parent: "gone", created_ms: 1 }),
+    T("t2", B, { bot: MAIN_B, role: "main" })], spaces: [space("sb", B, ["t1", "t2"]), space("lab/s1", "~", ["t1"], "lab")],
+    ledger: { bound: [{ terminal: "t1", bot: MAIN_A }], known: [MAIN_A] } });
+  for (const project of ["/r/missing", B]) {
+    s.ledger.bound[0].project = project;
+    const actions = planOf(s);
+    assert.deepEqual(actions.filter((a) => a.terminal === "t1").map(brief), ["report cross-machine t1", "report foreign t1"]);
+    assert.equal(actions.find((a) => a.terminal === "t1" && a.report === "foreign").note,
+      `t1 plays ${MAIN_A} of ${project} by the attach ledger, a project tidy can't read here; left alone`);
+    assert.ok(!actions.some((a) => a.kind === "create-space" && a.key === A));
+  }
+});
+
+test("tidy ledger: the bound main pane picks the canonical space even with a member's label", () => {
+  const s = base({ projects: [{ key: A, machine: null, file: bots([MAIN_A, "main"], [MAIN_B, "member"]) }],
+    terminals: [T("t1", A, { bot: MAIN_B }), T("t2", A, { bot: MAIN_B })],
+    spaces: [space("member", A, ["t2"]), space("main", A, ["t1"])],
+    ledger: { bound: [{ terminal: "t1", bot: MAIN_A, project: A }], known: [MAIN_A] } });
+  assert.deepEqual(planOf(s).filter((a) => a.kind === "move-pane").map(brief), ["move-pane t2 member -> main duplicate"]);
+});
+
+test("tidy ledger: cross-machine reports follow the resolved local identity and remote labels", () => {
+  const remote = "b-zzzzzzzzzz";
+  const s = base({ projects: [...base().projects, { key: "/r/remote", machine: "lab", file: bots([remote, "main"]) }], spaces: [],
+    terminals: [T("t1", A, { bot: remote }), T("t2", A, { bot: remote }), T("lab/t3", "/r/remote", { bot: MAIN_A })],
+    ledger: { bound: [{ terminal: "t1", bot: MAIN_A, project: A }], known: [MAIN_A] } });
+  assert.deepEqual(planOf(s).filter((a) => a.report === "cross-machine").map(brief), ["report cross-machine t2", "report cross-machine lab/t3"]);
+});
+
+test("readState ledger: only matching live local gets confirm bindings, with no extra get", async () => {
+  const calls = [];
+  const json = (value) => ({ code: 0, stdout: JSON.stringify(value) });
+  const run = async (_, [verb, address]) => {
+    calls.push([verb, address]);
+    if (verb === "ls") return json(["t1", "t2", "t3", "t4", "t5", "lab/t7"].map((address) => ({ address, state: "live" })));
+    if (address === "t4") return { code: 1, stderr: "get refused" };
+    if (address === "t5") return { code: 0, stdout: "bad JSON" };
+    return json({ state: address === "t2" ? "finished" : "live", created_ms: address === "t3" ? 2 : 1 });
+  };
+  const bindings = ["t1", "t2", "t3", "t4", "t5", "t7"].map((terminal, i) => ({ terminal, bot: `bot-${i}`, project: A, created_ms: 1 }));
+  const known = bindings.map((b) => b.bot);
+  const state = await readState({ run, home: "/h", appHome: "/nowhere", ledger: async () => ({ bindings, known }) }, { window: false });
+  assert.deepEqual(state.ledger, { bound: [{ terminal: "t1", bot: "bot-0", project: A }], known });
+  assert.deepEqual(calls, [["ls", "--json"], ...["t1", "t2", "t3", "t4", "t5"].map((address) => ["get", address])]);
+  assert.equal(state.terminals.find((t) => t.address === "t2").state, "live", "the terminal's state still comes from ls");
+});
+
+test("readState ledger: empty and absent ledgers stay distinct, and a refusal rejects", async () => {
+  const run = async (_, [verb]) => ({ code: 0, stdout: JSON.stringify(verb === "ls" ? [{ address: "t1", state: "live" }] : {}) });
+  const io = { run, home: "/h", appHome: "/nowhere" };
+  const read = (extra) => readState({ ...io, ...extra }, { window: false });
+  assert.equal((await read()).ledger, null);
+  assert.equal((await read({ ledger: async () => null })).ledger, null);
+  assert.deepEqual((await read({ ledger: async () => ({ bindings: [], known: [] }) })).ledger, { bound: [], known: [] });
+  const refusal = new Error("ledger refused");
+  const ledger = async () => { throw refusal; };
+  await assert.rejects(read({ ledger }), (error) => error === refusal);
+  const remoteOnly = async () => ({ code: 0, stdout: JSON.stringify([{ address: "lab/t1", state: "live" }]) });
+  assert.equal((await read({ run: remoteOnly, ledger })).ledger, null);
+});
+
+function grantTidy(rank, role) {
+  const file = bots([MAIN_A, "main"], [MAIN_B, "member", { rank, category: "eng" }]);
+  file.categories = [{ id: "eng", title: "Engineering" }];
+  const state = base({ projects: [{ key: A, machine: null, file }], spaces: [],
+    terminals: [T("t1", A, { bot: MAIN_B, ...(role && { role }) })] });
+  return planOf(state).filter((a) => a.kind === "relabel").map(brief);
+}
+
+test("#628 r3 T1 tidy sets the category without adding a grant", () => {
+  assert.deepEqual(grantTidy("reviewer"), ["relabel t1 category=eng"]);
+});
+
+test("#628 r3 T2 tidy keeps an existing grant during rank demotion and removal", () => {
+  for (const rank of ["tester", undefined]) assert.deepEqual(grantTidy(rank, "reviewer"), ["relabel t1 category=eng"]);
 });

@@ -34,6 +34,13 @@ export const SUBSCRIPTION_ROUTES = Object.freeze(['grok', 'antigravity'])
 // claude-code: those are the Claude Code plugin's.
 const ACP_HARNESS = Object.freeze({ claude: 'claude-code', codex: 'codex', gemini: 'gemini' })
 
+// The ACP agents the owner names, by provider id: the model menu's names for them, and the
+// host's when it names one in a sentence. A catalog row's own brand (`providerName`) wins.
+export const ACP_NAME = Object.freeze({
+  'acp-claude': 'Claude Code', 'acp-codex': 'Codex', 'acp-hermes': 'Hermes',
+  'acp-antigravity': 'Antigravity', 'acp-omp': 'omp',
+})
+
 // The providers pi-ai connects, from DSH's configurable-provider directory: what a caller
 // passes as `piAi` to routeOf.
 export const piAiRoutes = directory => new Set([
@@ -54,6 +61,34 @@ export function routeOf(provider, { piAi = new Set(SUBSCRIPTION_ROUTES) } = {}) 
   if (id.startsWith('acp-')) return { harness: ACP_HARNESS[id.slice(4)] ?? id.slice(4), connectedBy: 'acp' }
   if (piAi.has(id)) return { harness: 'dsh', connectedBy: 'pi-ai' }
   return { harness: 'dsh', connectedBy: 'native' }
+}
+
+// Providers whose model runs an agent with tools of its own, which can run commands: an
+// ACP agent, the retired Claude Code plugin, Remote Hermes, and bots-dsh's carried local
+// agents. A Bot without a shell must not be paired with one, because its own tool policy
+// cannot reach the agent's tools. `opencode` is deliberately absent: it is also a DSH
+// provider whose loop uses DSH's tools.
+const LEGACY_LOCAL_CLIS = Object.freeze([
+  'codex-cli', 'devin-cli', 'gemini-cli', 'grok-cli', 'cursor-cli', 'cline', 'qwen-code', 'goose',
+])
+/** The actual CLI reference that needs a shell choice. */
+export function shellHoldModelOf(bot) {
+  if (bot?.shell !== false) return undefined
+  return [bot.model, bot.appliedModel].find(commandCapableAgent)
+}
+
+/** The line a held Bot says: the reason, and the two choices that lift the hold. */
+export function shellHoldText(bot, cli = bot?.shellHeld?.cli) {
+  return `${bot?.name ?? 'This Bot'} has no shell, so it cannot run on ${cli ?? 'a coding CLI'}, `
+    + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.'
+}
+
+export function commandCapableAgent(ref) {
+  const provider = String(ref ?? '').split('/')[0]
+  if (provider === '') return false
+  if (provider === 'hermes-remote' || isClaudeCode(provider)) return true
+  if (provider.startsWith('acp-') || provider.startsWith('local-')) return true
+  return LEGACY_LOCAL_CLIS.includes(provider)
 }
 
 // The selector's first level (RFC 0030, issue #1016): the route the person is crossing to.
@@ -85,6 +120,20 @@ export function crossesHarness(fromRef, toRef) {
   if (from.provider === '' || to.provider === '') return false
   return from.route !== to.route || from.harness !== to.harness
 }
+
+/**
+ * Whether a model ref is a Hermes route: Remote Hermes, or Hermes over ACP. A crossing to or
+ * from one keeps RFC 0030 Q7a's refusal; every other crossing carries the conversation
+ * (RFC 0030, Handoff note, 2026-11-23).
+ */
+export function isHermesRoute(ref) {
+  const { provider, route } = routeOfRef(ref)
+  return route === 'hermes-remote' || provider === 'acp-hermes'
+}
+
+// How long an agent switch in a Bot's own chat may take before nothing changes: the host
+// rolls back past it, and the chat's composer lock ends a little later even with no word.
+export const CROSSING_DEADLINE_MS = 120_000
 
 /**
  * A per-bot-type route policy, from the plugin's `routePolicy` config: `{ automagik:

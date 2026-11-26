@@ -1,6 +1,7 @@
 // The one door, checked statically (refs #431, #448, #450): a folder leaves mods/ and a file leaves
 // layouts/ only through mods/am-sidebar/layoutSafe.mjs change(). Every .js and .mjs under herdr/mods
-// (Pocket Link left out: it owns its folder) and am/ (its tests left out) is scanned for rmSync,
+// (Pocket Link left out: it owns its folder) and am/ (its tests left out, and am/pocket/link/, the
+// byte copies of Pocket Link; am/pocket/pocket.mjs, the part's manager, is scanned) is scanned for rmSync,
 // renameSync, unlinkSync, cpSync, rmdirSync, layoutSafe.mjs removePath (#550: rmSync that never
 // follows a link), fs.promises' rm, rename, unlink and cp, a bare
 // rm/rename/unlink call (an injected one), and a program run through Herdr's io or an exec (`rm`,
@@ -11,8 +12,8 @@
 // code's. am/'s byte-equal copies (am/copies.json) share their source's entries.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
@@ -22,7 +23,7 @@ const CALL = new RegExp([
   String.raw`\b(?:rmSync|renameSync|unlinkSync|cpSync|rmdirSync|removePath)\s*\(`,
   String.raw`\b(?:fs|fsp|promises)\s*\.\s*(?:rm|rename|unlink|cp|rmdir)\s*\(`,
   String.raw`(?<![\w.$])(?:rm|rename|unlink)\s*\(`,
-  String.raw`\b(?:run\s*\(\s*io\s*,|(?:io\.)?exec\s*\()\s*["'\`](?:rm|mv|cp|find|rmdir|unlink)["'\`]`,
+  String.raw`\b(?:run\s*\(\s*io\s*,|(?:io\.)?exec\s*\()\s*["'\`](?:/bin/)?(?:rm|mv|cp|find|rmdir|unlink)["'\`]`,
 ].join("|"), "g");
 
 /** The call starting at `at` in `text`, up to its closing parenthesis, whitespace folded. */
@@ -55,7 +56,7 @@ export function scan(repo = REPO) {
   const rel = (p) => relative(repo, p).split("\\").join("/");
   const inScope = [
     ...files(join(repo, "herdr", "mods"), (p) => /[/\\](pocket-link|node_modules|test)$/.test(p)),
-    ...files(join(repo, "am"), (p) => /[/\\](node_modules|test)$/.test(p)),
+    ...files(join(repo, "am"), (p) => /[/\\](node_modules|test)$/.test(p) || rel(p) === "am/pocket/link"),
   ];
   return inScope.flatMap((path) => {
     const file = rel(path);
@@ -150,22 +151,44 @@ export const ALLOWLIST = [
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(lock, aside)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(aside)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(lock)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(path)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(path)", 5, "the CLI's own files: .herdr/bots.json, its lock and temp files, and the failed refresh's own Antigravity cache temp file under <app home>/automagik-herdr/ (#809); and RFC 0043 delivery 2's own private preview and request files under <app home>/automagik-herdr/accounts-previews and <app home>/data/am-quota/plan-requests, expired, stale or committed"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(owner)", 1, "an owner file in an Accounts lock removed only after the recorded process is proved gone"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rmdirSync(path)", 1, "an empty Accounts lock directory, beside the plan or the Claude login record"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(staged)", 1, "the Accounts lock's staged owner file removed when its creation fails"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rmdirSync(stage)", 1, "the Accounts lock's empty staging directory removed when its owner file cannot be created"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(stage, path)", 1, "publish the Accounts lock directory and owner together, beside the plan or Claude login record"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(join(dir, token))", 1, "release only the Accounts lock owner's own uniquely named marker"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rmdirSync(dir)", 2, "remove the empty Accounts lock or staging directory after releasing its owned marker; and (#1635) the linked machine's emptied per-launch briefing folder <app home>/automagik-herdr/briefings/<core id>.<uuid>, once its pane has ended: never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rmSync(join(dir, basename(file)), { force: true })", 1, "#1635: the one launch briefing file inside a linked machine's ended per-launch folder <app home>/automagik-herdr/briefings/<core id>.<uuid>/: never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(join(attempt.home, name))", 1, "rotate only timestamped auth.json backups within the approved local Codex home"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(unit)", 1, "the revive login service's own systemd user unit under ~/.config/systemd/user (#939), only when its first line is the pack's mark: never mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(tmp)", 2, "the queued-restarts.json temp in <app home>/automagik-herdr and the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, file)", 4, "queued-restarts.json and linked-updates.json (the linked machines' update record, #954) and their sibling temp files under <app home>/automagik-herdr, never mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, path)", 2, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; and a bot's launch briefing file under <app home>/automagik-herdr/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(from, to)", 1, "the Antigravity model cache's temp file under <app home>/automagik-herdr/ (antigravity-models.json.tmp-<time>) renamed onto its cache: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(plist)", 1, "the revive login service's own launchd agent under ~/Library/LaunchAgents (#939), only after launchd let go of its label and only when the plist's second line is the pack's mark: never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rename(tmp, path)", 1, "the Accounts writer renames private temp files onto its own records, including the dispatch receipt beside claude-logins.json under the login lock"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(path, aside)", 1, "a corrupt <app home>/accounts-plan.json kept aside beside itself (accounts-plan.json.corrupt-<time>) before a Manage commit replaces it; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(aside, planPath())", 1, "the corrupt accounts-plan.json put back from its aside name when the replacing write failed; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(path, claimed)", 1, "a panel's private request file under <app home>/data/am-quota/plan-requests claimed by rename so one CLI process reads it; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(claimed)", 1, "the claimed request file under <app home>/data/am-quota/plan-requests removed once read; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", path])", 2, "a file the panel just wrote and could not restrict to 0600, removed: its set-login writer record (<app home>/data/am-quota/writer.json) or a private request file under <app home>/data/am-quota/plan-requests; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", `${appDir()}/${REQUESTS_DIR}/${id}.json`])", 1, "the panel's private request file under <app home>/data/am-quota/plan-requests, removed after the CLI answered; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
+  ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", files.out, files.code, `${files.code}.tmp`])", 1, "a private CLI run's own output and exit-code files under <app home>/data/am-quota/runs (RFC 0043's fleet read), removed after the panel read them: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(tmp)", 9, "the queued-restarts.json, handoff-failures.json, attention.json and linked-updates.json temp files in <app home>/automagik-herdr, the accounts fleet record's temp file in <app home>/data/am-quota (RFC 0043), and the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; and the accounts plan's temp files beside <app home>/accounts-plan.json (RFC 0043 delivery 2)"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, file)", 7, "queued-restarts.json (one writer, saveRestartQueue, #1557), handoff-failures.json (#1556) and linked-updates.json (the linked machines' update and install observations, #954 and #206) and their sibling temp files under <app home>/automagik-herdr, and the accounts fleet record fleet.json under <app home>/data/am-quota (RFC 0043), never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, path)", 3, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; a bot's launch briefing file under <app home>/automagik-herdr/; and the holder pool's holders.json and start reservations there (#1432), never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(fresh, path)", 1, "the Bot login reader's sequence memory under <app home>/automagik-herdr/, a bare-number file, in the source and its am copy: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(fresh)", 1, "the Bot login reader's own sequence-memory temp file under <app home>/automagik-herdr/, removed only when its rename failed, in the source and its am copy: never under mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(from, to)", 1, "the refresh's own Antigravity model cache temp file under <app home>/automagik-herdr/ renamed onto its cache: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, settings.path)", 1, "the Antigravity launch permission file under <app home>/automagik-herdr/agy-settings, written 0600 and renamed onto its deterministic path: never under mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/modelCache.js", "rename(tmp, path)", 2, "the injected rename of the Antigravity model cache's temp file under <app home>/automagik-herdr/ (antigravity-models.json.tmp-<time>) onto its cache: never under mods/ or layouts/; the caller supplies rename"],
+  ["herdr/mods/am-sidebar/modelCache.js", "rename(tmp, path)", 2, "the injected rename of the refresh's own Antigravity model cache temp file under <app home>/automagik-herdr/ onto its cache: never under mods/ or layouts/; the caller supplies rename"],
+  ["herdr/mods/am-sidebar/create.js", "exec(\"/bin/mv\", [from, to])", 1, "the Antigravity model cache's temp file under <app home>/automagik-herdr/ renamed onto its cache (the form's fs API has no rename): never under mods/ or layouts/ (#809)"],
+  ["herdr/mods/am-sidebar/create.js", "fs.unlink(path)", 1, "a failed model-cache write or rename removes only its own temp file beside the cache under <app home>/automagik-herdr/: never under mods/ or layouts/ (#809)"],
   ["herdr/mods/am-sidebar/main.js", "fs.unlink(file)", 1, "a pasted image in <app home>/paste-tmp/"],
   ["herdr/mods/am-sidebar/spaceIcon.js", "fs.unlink(scratch)", 1, "a space icon the sidebar wrote under <app home>/space-icons/ (spaceIconModel.js leftover) or its scratch file"],
   ["herdr/mods/am-sidebar/spaceIcon.js", "fs.unlink(`${appHome()}/${drop}`)", 2, "a space icon the sidebar wrote under <app home>/space-icons/ (spaceIconModel.js leftover) or its scratch file"],
   ["herdr/mods/am-sidebar/hcProxy.mjs", "unlinkSync(path)", 1, "the proxy's own stale per-pane socket under $XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock: never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/hcProxy.mjs", "unlinkSync(socketPath)", 2, "the proxy's own per-pane socket when it closes or a start fails after listen: never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/hcProxy.mjs", "renameSync(tmp, plan.path)", 1, "the proxy's write of an approved worker's Antigravity permission file under the data root's approved/agy-settings (bound read-only to the sandbox): never mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/approved.js", "renameSync(tmp, path)", 1,
-    "the 0600 roster record under <data root>/approved: never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/approved.js", "rename(tmp, path)", 1,
+    "the 0600 roster record under <data root>/approved (renameSync, injectable for the failed-write test): never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/approved.js", "unlinkSync(tmp)", 1,
     "the roster record's temp file under <data root>/approved: never mods/ or layouts/"],
   ["herdr/mods/am-quota/switch.js", "fs.unlink(p)", 1, "am-quota's Codex payload under its data folder (write.js payloadDir)"],
@@ -178,18 +201,56 @@ export const ALLOWLIST = [
   ["am/lib/self.mjs", "removePath(link, { force: true })", 1, "am's parts store ($AM_HOME/parts: am's own record, versions and links), never Herdr's app home (and am's own command link)"],
   ["am/lib/self.mjs", "rmSync(staging, { recursive: true, force: true })", 1, "am's parts store ($AM_HOME/parts: am's own record, versions and links), never Herdr's app home"],
   ["am/lib/self.mjs", "removePath(store, { recursive: true, force: true })", 1, "am's parts store ($AM_HOME/parts: am's own record, versions and links), never Herdr's app home"],
-  ["am/lib/self.mjs", "rmSync(work, { recursive: true, force: true })", 1, "a temp folder am unpacks a release into (mkdtemp in tmpdir)"],
+  ["am/lib/self.mjs", "rmSync(work, { recursive: true, force: true })", 2, "the private folder a release unpacks into, made by mkdtemp in tmpdir for a local update or inside am's parts store for a linked signed install"],
   ["am/lib/self.mjs", "renameSync(tmp, link)", 2, "am's parts store ($AM_HOME/parts: am's own record, versions and links), never Herdr's app home (and am's own command link)"],
   ["am/lib/self.mjs", "renameSync(tmp, path)", 2, "am's parts store ($AM_HOME/parts: am's own record, versions and links), never Herdr's app home (and the briefing entry point am places)"],
   ["am/lib/self.mjs", "removePath(join(store, name), { recursive: true, force: true })", 2, "am's parts store ($AM_HOME/parts: am's own record, versions and links), never Herdr's app home"],
   ["am/lib/self.mjs", "rmSync(path, { force: true })", 1, "am's parts store ($AM_HOME/parts: am's own record, versions and links), never Herdr's app home: the store lock it made"],
-  ["am/lib/self.mjs", "removePath(path, { force: true })", 2, "am's parts store ($AM_HOME/parts: am's own record, versions and links), never Herdr's app home (and the briefing entry point am places)"],
+  ["am/lib/self.mjs", "removePath(path, { force: true })", 1, "unlink the stable briefing entry in the app home's state directory only when it points into am's parts store"],
+  ["am/lib/self.mjs", "rmSync(tmp, { force: true })", 1, "remove am's temporary record in its parts store"],
+  ["am/lib/self.mjs", "removePath(tmp, { force: true })", 2, "remove a temporary store link in am's parts store or a temporary command link in ~/.local/bin without following it (#1645)"],
+  ["am/lib/self.mjs", "rmSync(owner, { force: true })", 2, "remove only the uniquely named owner file in the store's reclaim directory, on confirmed owner death or release"],
+  ["am/lib/self.mjs", "renameSync(staged, reclaim)", 1, "publish the uniquely named staging directory as the stale lock's reclaim directory, both inside am's parts store"],
+  ["am/lib/self.mjs", "rmSync(staged, { recursive: true, force: true })", 1, "remove the private mkdtemp directory for a staged reclaim owner inside am's parts store after publication or failure"],
+  ["am/lib/self.mjs", "rmdirSync(reclaim)", 1, "remove the reclaim directory in am's parts store only if empty after releasing the owned marker"],
+  ["am/lib/self.mjs", "renameSync(path, aside)", 1, "move the stale store lock to a unique sibling inside am's parts store while holding reclaim ownership"],
+  ["am/lib/self.mjs", "removePath(aside, { force: true })", 1, "remove the stale lock moved to its unique sibling inside am's parts store"],
+  ["am/lib/self.mjs", "rmdirSync(dir)", 1, "remove only empty directories on the am store or ~/.local/bin paths that were absent before a failed linked install"],
+  ["am/lib/self.mjs", "renameSync(stagedMarker, marker)", 1, "publish the signed install's flushed recovery marker from its private extraction directory to the root of am's parts store"],
+  ["am/lib/self.mjs", "renameSync(staging, placed)", 1, "publish the verified extract as a version directory within am's parts store"],
+  ["am/lib/self.mjs", "removePath(previous.path, { force: true })", 1, "remove the previous link in am's parts store when the signed install has no rollback slot"],
+  ["am/lib/self.mjs", "rmSync(marker)", 2, "remove the fixed verification marker in am's parts store after its installed launcher passes verification, during a signed install or before a local mutation"],
+  ["am/lib/self.mjs", "removePath(link.path, { force: true })", 1, "undo a signed install's newly created current or previous store link or either command link in ~/.local/bin"],
+  ["am/lib/self.mjs", "rmSync(record.path, { force: true })", 1, "undo a signed install's creation of record.json inside am's parts store when there was no prior record"],
+  ["am/lib/self.mjs", "rmSync(placed, { recursive: true, force: true })", 1, "remove only the new signed version directory in am's parts store after restoring the prior links and record"],
+  ["am/lib/self.mjs", "rmSync(marker, { force: true })", 1, "remove only the marker the failed attempt created in am's parts store after restoring its prior state"],
+  ["am/pocket/pocket.mjs", "renameSync(temp, path)", 1, "save()/remove(): one of Pocket Link's own records: record.json, pending.json and a slot's marker in $AM_HOME/parts/pocket.link, or am-owner.json and purge.pending in Pocket Link's state folder (~/.local/state/automagik-pocket-link*), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(temp, { force: true })", 1, "save()/remove(): one of Pocket Link's own records: record.json, pending.json and a slot's marker in $AM_HOME/parts/pocket.link, or am-owner.json and purge.pending in Pocket Link's state folder (~/.local/state/automagik-pocket-link*), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "unlinkSync(path)", 1, "save()/remove(): one of Pocket Link's own records: record.json, pending.json and a slot's marker in $AM_HOME/parts/pocket.link, or am-owner.json and purge.pending in Pocket Link's state folder (~/.local/state/automagik-pocket-link*), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "cpSync(join(source.folder, path), target)", 1, "copies am's own pocket/ files into a new staging folder inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "cpSync(join(current, MODULES), join(folder, MODULES), { recursive: true, verbatimSymlinks: true })", 1, "reuses the current slot's bridge node_modules in a staging folder; both inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(join(folder, MODULES), { recursive: true, force: true })", 1, "drops node_modules that failed the native probe from a staging folder inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(folder, { recursive: true, force: true })", 1, "removes this run's own failed staging folder inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(path)", 2, "a lock this run holds ($AM_HOME/parts/.pocket.link.lock, the state folder's service.lock, the login service folder's .herdr-pocket-link.lock) or one of Pocket Link's known state files in its recorded state folder (purge, after the owner and folder checks); never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "renameSync(temp, file)", 1, "swaps the current/previous link of Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "unlinkSync(temp)", 1, "removes this run's own temporary link in Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(join(store, name), { recursive: true, force: true })", 2, "prunes dead staging folders and marked slots other than current and previous in Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmdirSync(path)", 1, "removes Pocket Link's part store or its state folder only when empty (uninstall); never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "renameSync(prepared.folder, slot(store, current))", 1, "moves a verified staging folder to its slot, both inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
+  ["am/pocket/pocket.mjs", "rmSync(prepared.folder, { recursive: true, force: true })", 1, "removes this run's staging folder left after a failed commit inside Pocket Link's part store ($AM_HOME/parts/pocket.link: its slots, links, record and journal), never Herdr's app home"],
   ["herdr/mods/am-sidebar/dshTui.mjs", "renameSync(temp, path)", 1, "writeAtomic: dsh-TUI's shim in ~/.local/bin, DSH's dsh-tui profile files under ~/.dsh (or $DSH_HOME) and dsh-TUI's ~/.dsh-tui state: never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/dshTui.mjs", "removePath(cwd, { recursive: true, force: true })", 1, "a temp folder the dsh plugin run works in (mkdtemp in tmpdir)"],
   ["herdr/mods/am-sidebar/dshTui.mjs", "removePath(shim, { force: true })", 1, "the dsh-tui shim in ~/.local/bin: never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/dshTui.mjs", "removePath(join(profile, RECORD_FILE), { force: true })", 1, "the installer's own ownership record in the dsh-tui profile: never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/dsh-sandbox.mjs", "renameSync(tmp, path)", 1, "dsh-sandbox's atomic profile write: the dsh-tui profile's cordis.patch.yml under ~/.dsh (or $DSH_HOME), never mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/dsh-sandbox.mjs", "unlinkSync(tmp)", 1, "the sibling temp file of dsh-sandbox's atomic profile write: never mods/ or layouts/"],
+  ["am/runner/locks.mjs", "unlinkSync(path)", 1, "the member runner's own stale socket, at the socket path its template config names under the runner's own folder: the runner is not a Herdr mod and holds no mods/ or layouts/ path"],
+  ["am/runner/locks.mjs", "rmSync(join(this.dir, entry), { recursive: true, force: true })", 1, "a stray file the socket peer proof left in the member runner's own proof folder (mode 1730), swept by the runner that owns it: never mods/ or layouts/"],
+  ["am/runner/locks.mjs", "unlinkSync(file)", 1, "the one empty proof file the peer just made in the member runner's own proof folder: it is captured by lstat and removed before the captured stat is checked (a refused proof leaves nothing behind), never mods/ or layouts/"],
+  ["am/runner/main.mjs", "unlinkSync(resolved.socket)", 2, "the member runner's own socket, removed when listen fails and when it stops: never mods/ or layouts/"],
+  ["am/runner/spawn.mjs", "renameSync(tmp, config.state)", 1, "the member runner's own member-to-uid state: a temp file beside the state path its template config names is renamed onto it, never mods/ or layouts/"],
+  ["am/runner/spawn.mjs", "unlinkSync(tmp)", 1, "the member runner's own state temp file, removed after a failed write or sync: never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/hc-socket-mask.mjs", "rmSync(egress.dir, { recursive: true, force: true })", 1, "the sandbox wrapper's own 0700 egress temp folder (makeEgressDir under XDG_RUNTIME_DIR or HOME), holding one pane's egress socket and relay; never mods/ or layouts/"],
 ];
 
 test("every rm, rename, unlink and cp outside layoutSafe.mjs is one the allowlist names", () => {
@@ -239,4 +300,49 @@ test("the scan sees the calls it is for", () => {
   // A find that only lists is not a call; one that deletes is.
   assert.ok(!scan().some((f) => f.file === "herdr/mods/am-footer/contributions.js"));
   assert.ok(scan().some((f) => f.file === "herdr/mods/am-mods/main.js" && f.call.startsWith('exec("find"')));
+});
+
+
+// Every module specifier a source names: `from "x"` closes any import/export, single or multiline
+// (`  a, b } from "x"` included); a bare `import "x"`; a dynamic `import("x")`.
+const IMPORTS = /^\s*(?:import|export)\s[^;]*?\bfrom\s*["']([^"']+)["']|^\s*import\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']/gm;
+const specifiers = (source) => [...source.matchAll(IMPORTS)].map(([, from, bare, dynamic]) => from ?? bare ?? dynamic);
+
+test("#1509 the import scanner sees multiline, bare and dynamic forms", () => {
+  const sample = [
+    'import { a, b,',
+    '  c, d } from "./multi.js";',
+    'import {',
+    '  e,',
+    '} from "node:fs";',
+    'import "./bare.js";',
+    'export { f } from "./again.js";',
+    'const g = await import("node:os");',
+    // Not imports: display text and a string that read like `from "x"` (inspect.js's shape).
+    'const shown = `${who} from ${where}`;',
+    'const line = "copied from \' : \'";',
+  ].join("\n");
+  assert.deepEqual(specifiers(sample), ["./multi.js", "node:fs", "./bare.js", "./again.js", "node:os"]);
+});
+
+test("#1509 Herdr mod entry points never reach Node-prefixed imports", () => {
+  const mods = join(REPO, "herdr", "mods");
+  const seen = new Set();
+  const problems = [];
+  const visit = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const specifier of specifiers(source)) {
+      if (specifier.startsWith(".")) {
+        const target = join(dirname(file), specifier);
+        if (existsSync(target)) visit(target); else problems.push(`${relative(REPO, file)} imports a missing ${specifier}`);
+      }
+      else if (specifier.startsWith("node:")) problems.push(`${relative(REPO, file)} imports ${specifier}`);
+    }
+  };
+  const entries = readdirSync(mods).map((name) => join(mods, name, "main.js")).filter(existsSync);
+  for (const entry of entries) visit(entry);
+  assert.ok(seen.has(join(mods, "am-sidebar", "restart.js")), "the sidebar's transitive imports were visited");
+  assert.deepEqual(problems, []);
 });

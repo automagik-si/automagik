@@ -16,6 +16,7 @@ import { createWriteStream, mkdirSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { ANONYMOUS_ID, appHome, automagikHome, dshEnv, installProfile, pinProfileStore, preloadOf, privacyFileOf, privacyPatchOf, resourcesOf, startDsh, stopDsh, storeLayoutOf, writeTools } from '../../src/dsh.js'
+import { ensureOwnerRecord } from '../../src/owner-record.js'
 import { readChoices, writeOverlay } from '../../src/privacy.js'
 import { tarOf } from '../../src/tar.js'
 import { FrameReader, FrameWriter, PROTOCOL } from './frame.mjs'
@@ -46,6 +47,7 @@ export function configOf(env = process.env) {
     image,
     bin: env.DSH_LAUNCH_BIN?.trim() || resources.bin,
     pnpm: resources.pnpm,
+    launcher: resources.launcher,
     profile: resources.profile,
     seeds: join(image, 'seeds'),
     shim: join(image, 'bin', 'xdg-open'),
@@ -58,13 +60,13 @@ export function configOf(env = process.env) {
 }
 
 /** DSH's environment: the desktop's (dsh.js dshEnv), with the image's bin first on PATH. */
-export function launchEnv({ env, config, binDir, privacy, openSocket }) {
+export function launchEnv({ env, config, binDir, privacy, openSocket, instanceId }) {
   const base = { ...env, BROWSER: config.shim, ...(openSocket ? { AUTOMAGIK_OPEN_SOCKET: openSocket } : {}) }
   delete base.DSH_LAUNCH_BIN
   delete base.DSH_LAUNCH_PORT
   const own = join(config.image, 'bin')
   base.PATH = [own, ...String(base.PATH ?? '').split(':').filter(dir => dir !== '' && dir !== own)].join(':')
-  return dshEnv({ base, home: config.home, binDir, userHome: config.userHome, preload: preloadOf({ home: config.root, env }), privacy, platform: 'linux' })
+  return dshEnv({ base, home: config.home, binDir, userHome: config.userHome, preload: preloadOf({ home: config.root, env }), privacy, platform: 'linux', instanceId })
 }
 
 export async function main({ env = process.env, stdin = process.stdin, stdout = process.stdout, stderr = process.stderr, exit = code => process.exit(code) } = {}) {
@@ -217,7 +219,9 @@ export async function main({ env = process.env, stdin = process.stdin, stdout = 
       say('warn', `links out are off: ${error.message}`)
       openSocket = null
     }
-    dshEnvironment = launchEnv({ env, config, binDir, privacy, openSocket })
+    const { instanceId, error } = ensureOwnerRecord(config.home)
+    if (error) say('warn', `owner record ${error}; reservations are off`)
+    dshEnvironment = launchEnv({ env, config, binDir, privacy, openSocket, instanceId })
   } catch (error) {
     say('error', `DSH's tools could not be written: ${error.message}`)
     settingUp = false
@@ -227,9 +231,14 @@ export async function main({ env = process.env, stdin = process.stdin, stdout = 
 
   let running
   try {
+    // The guest takes the desktop's launcher too: plugin installs, updates and removals run the
+    // image's pinned pnpm by absolute path, and a missing one stops this start rather than
+    // falling back to a pnpm PATH finds (the image's shim is for everything else).
     running = await startDsh({
       node: process.execPath,
       bin: config.bin,
+      bundledPnpm: config.pnpm,
+      launcher: config.launcher,
       env: dshEnvironment,
       port: config.port,
       cwd: home,

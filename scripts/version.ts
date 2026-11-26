@@ -45,6 +45,8 @@ export const FIELDS: { file: string; path: string[] }[] = [
   { file: 'apps/welcome-dsh/package.json', path: ['version'] },
   { file: 'apps/locale-pt-br-dsh/package.json', path: ['version'] },
   { file: 'apps/acp-dsh/package.json', path: ['version'] },
+  { file: 'apps/multiuser-dsh/package.json', path: ['version'] },
+  { file: 'apps/vault-dsh/package.json', path: ['version'] },
   { file: 'apps/automagik-pets/package.json', path: ['version'] },
   { file: 'apps/desktop/package.json', path: ['version'] },
   { file: 'apps/desktop/package-lock.json', path: ['version'] },

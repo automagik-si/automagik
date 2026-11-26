@@ -1,4 +1,4 @@
-// A fake herdr-core 0.1.14 for the hc proxy's tests: plain mode only, one JSON-RPC message per
+// A fake herdr-core for the hc proxy's tests: plain mode only, one JSON-RPC message per
 // line, calls on one connection handled one at a time, any number of connections. It answers
 // exactly the methods the proxy may forward, plus `hello` (which the proxy must never forward),
 // and records every request it sees so a row can prove a refusal never reached it. Hermetic: it
@@ -10,17 +10,24 @@ const isRecord = (value) => Boolean(value) && typeof value === "object" && !Arra
 
 /**
  * Start the fake. `terminals` are hc Public-like rows (address, name, labels, cwd, parent,
- * state); a row with `huge: true` answers terminal.read with `hugeBytes` of text. `afterGet`
+ * state); a row with `huge: true` answers terminal.read with `hugeBytes` of text. `machines`
+ * is the `terminal.list` inventory (`{ name, target, state }` per connected machine), and a
+ * machine's terminal rows join `terminals` under a `machine/tN` address. `afterGet`
  * runs after a terminal.get reply, so a row can rename a target between the check and the call.
+ * `state.reply` can supply a fixture or inject a bad reply: undefined uses the default, null
+ * stalls the call, a string is written raw, and an object is written as JSON. A promise can
+ * hold the reply until the test releases it.
  */
-export async function startFakeCore({ socket, version = "0.1.14", terminals = [], hugeBytes = 3 * 1024 * 1024 } = {}) {
+export async function startFakeCore({ socket, version = "0.1.14", terminals = [], machines = [], hugeBytes = 3 * 1024 * 1024 } = {}) {
   if (!socket) throw new Error("startFakeCore needs a socket path");
   try { unlinkSync(socket); } catch { /* first run */ }
   const log = [];
   const sockets = new Set();
   let connections = 0;
-  const state = { version, terminals, hugeBytes, afterGet: null, waitMs: 0, hang: null, templates: [] };
-  const send = (sock, message) => sock.write(`${JSON.stringify(message)}\n`);
+  const state = { version, terminals, machines, hugeBytes, afterGet: null, waitMs: 0, hang: null, templates: [], listError: null, reply: null };
+  const send = (sock, message) => {
+    if (message.id !== undefined) sock.write(`${JSON.stringify(message)}\n`);
+  };
   const ok = (sock, id, result) => send(sock, { jsonrpc: "2.0", id, result });
   const fail = (sock, id, kind, message) => send(sock, {
     jsonrpc: "2.0", id, error: { code: -32000, message, data: { kind } },
@@ -40,7 +47,14 @@ export async function startFakeCore({ socket, version = "0.1.14", terminals = []
       return;
     }
     const { id, method, params = {} } = request;
-    log.push({ conn: sock.connId, method, params: isRecord(params) ? params : {} });
+    log.push({ conn: sock.connId, id, method, params: isRecord(params) ? params : {} });
+    const override = state.reply ? await state.reply(request, sock.connId) : undefined;
+    if (override !== undefined) {
+      if (id !== undefined && override !== null) {
+        sock.write(`${typeof override === "string" ? override : JSON.stringify(override)}\n`);
+      }
+      return;
+    }
     switch (method) {
       case "server.status":
         ok(sock, id, { version: state.version, core: { id: "fake-core", name: "fake" } });
@@ -50,7 +64,14 @@ export async function startFakeCore({ socket, version = "0.1.14", terminals = []
         return;
       case "terminal.list":
         if (state.hang === "terminal.list") return;
-        ok(sock, id, { terminals: state.terminals, hidden_finished: 0 });
+        // `state.listError` is an error reply that (malformed) also carries rows, so a row can
+        // prove an error is never a way to pass the unfiltered list through.
+        if (state.listError) {
+          send(sock, { jsonrpc: "2.0", id, error: state.listError,
+            extra: "private", result: { terminals: state.terminals, machines: state.machines, hidden_finished: 0 } });
+          return;
+        }
+        ok(sock, id, { terminals: state.terminals, machines: state.machines, hidden_finished: 0 });
         return;
       case "terminal.get": {
         const found = record(params.terminal);
@@ -92,9 +113,14 @@ export async function startFakeCore({ socket, version = "0.1.14", terminals = []
       case "templates.list":
         ok(sock, id, { templates: state.templates });
         return;
-      case "terminal.run":
-        ok(sock, id, { terminal: { address: "t200", state: "live" }, argv: params.argv });
+      case "terminal.run": {
+        const pane = { address: "t200", state: "live", argv: params.argv, cwd: params.cwd,
+          name: params.name ?? null, parent: params.parent ?? null, labels: params.labels ?? {},
+          created_ms: 200, screen: "exact", cols: 200, rows: 120 };
+        if (state.trackRuns) state.terminals.push(pane);
+        ok(sock, id, pane);
         return;
+      }
       default:
         fail(sock, id, "refused", `fake core has no ${method}`);
         return;

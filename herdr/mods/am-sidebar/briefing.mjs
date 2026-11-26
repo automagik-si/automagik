@@ -20,6 +20,7 @@
 // Apache-2.0.
 
 import { execFile } from "node:child_process";
+import { coreSocketDiscovery, coreStatus } from "./coreSocket.mjs";
 import { access, readFile } from "node:fs/promises";
 import { closeSync, existsSync, fchmodSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync, writeSync }
   from "node:fs";
@@ -51,6 +52,8 @@ let callMs = CALL_MS;
 
 const MAX_HELPERS = 30;
 let hcMissing = false;
+let lockStatus;
+let lockSocketForHc;
 
 // A program's run: { err, stdout, stderr } (err null when it exited 0), or UNANSWERED when it
 // ran out of time.
@@ -59,7 +62,8 @@ function exec(command, args, cwd) {
   if (timeout <= 0) return Promise.resolve(UNANSWERED);
   return new Promise((resolve) => {
     try {
-      execFile(command, args, { cwd, timeout, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const env = command === "hc" && lockSocketForHc ? { ...process.env, HC_SOCKET: lockSocketForHc } : process.env;
+      execFile(command, args, { cwd, env, timeout, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err && (err.killed || err.signal === "SIGTERM")) return resolve(UNANSWERED);
         if (err?.code === "ENOENT" && command === "hc") hcMissing = true;
         resolve({ err, stdout, stderr });
@@ -82,6 +86,12 @@ function notFound({ err, stdout, stderr }) {
 // not_found (or is missing); any other failure, or no JSON, is UNANSWERED, as a run out of time
 // is: a failed read never reads as "no pane" (#345), the same as the CLI's `brief`.
 async function hcJson(args) {
+  if (args.length === 2 && args[0] === "server" && args[1] === "status") {
+    const timeoutMs = Math.min(callMs, until - Date.now());
+    if (timeoutMs <= 0) return UNANSWERED;
+    const r = await (lockStatus ?? coreStatus(process.env, { timeoutMs }));
+    return Object.hasOwn(r, "status") ? r.status : UNANSWERED;
+  }
   const r = await exec("hc", [...args, "--json"]);
   if (r === UNANSWERED) return r;
   if (r.err) return hcMissing || notFound(r) ? null : UNANSWERED;
@@ -99,7 +109,7 @@ const exists = async (path) => { try { await access(path); return true; } catch 
  * own live terminal, whose unlabelled children are its helpers (null: no helpers counted).
  * Shared with the CLI's `am brief`.
  */
-export async function gatherBriefing({ file, bot, address, ask, locate = (id) => paneOf(id, ask), guard = null, isGit = true, project = null, projects = null }) {
+export async function gatherBriefing({ file, bot, address, ask, locate = (id) => paneOf(id, ask), guard = null, isGit = true, project = null, projects = null, ownPane = false }) {
   const team = directMembers(file, bot.id, { project, projects });
   const eff = bot.kind === "member" || bot.leadProject
     ? effectiveLead(file, bot.id, { project, projects })
@@ -126,7 +136,7 @@ export async function gatherBriefing({ file, bot, address, ask, locate = (id) =>
   const lead = leadBot
     ? { bot: leadBot, terminal: leadPane?.get?.address ?? "", status: leadPane?.get?.status?.state, permission: waitsOnPermission(leadPane?.get?.status), unreachable: Boolean(leadPane?.unreachable) }
     : undefined;
-  return briefingText({ self: bot, file, members, lead, helpers, guard, isGit });
+  return briefingText({ self: bot, file, members, lead, helpers, guard, isGit, ownPane });
 }
 
 /**
@@ -225,8 +235,19 @@ async function main(mePending, inputPending, appHome) {
     if (decision.hash !== null || (seen && transcript && scan.size !== seen.offset)) record();
     return null;
   }
-  const text = await gatherBriefing({ file, bot, address: terminal, ask: hcJson, guard, isGit, project: key, projects, ...(ledger ? { locate: ledger.locate } : {}) });
+  const text = await gatherBriefing({ file, bot, address: terminal, ask: hcJson, guard, isGit, project: key, projects, ownPane: true, ...(ledger ? { locate: ledger.locate } : {}) });
   return { text, record };
+}
+
+function readOwnPane(terminal) {
+  const { sockets, lockSocket } = coreSocketDiscovery();
+  if (!lockSocket) return hcJson(["get", terminal]);
+  // This get and the ledger's later status must refer to the same core.
+  lockStatus = coreStatus(process.env, { sockets, timeoutMs: Math.min(callMs, until - Date.now()) });
+  return lockStatus.then((result) => {
+    if (result.socket === lockSocket) lockSocketForHc = lockSocket;
+    return hcJson(["get", terminal]);
+  });
 }
 
 // The first conversation a pane's hook saw (recorded on its first call, under its own key), or
@@ -423,7 +444,7 @@ if (import.meta.url === invoked) {
   const guard = setTimeout(() => process.exit(0), GUARD_MS * scale);
   guard.unref();
   const self = process.env.HC_TERMINAL_ID;
-  const me = self ? hcJson(["get", self]) : Promise.resolve(null);
+  const me = self ? readOwnPane(self) : Promise.resolve(null);
   const raw = self ? readInput(INPUT_MS, GUARD_MS * scale) : Promise.resolve("");
   const input = raw.then((text) => { try { const x = JSON.parse(text); return x && typeof x === "object" ? x : {}; } catch { return {}; } });
   const joined = self ? Promise.all([me, raw]).then(([get, text]) => joinSession(self, get, text, appHomeOf()), () => false)

@@ -14,6 +14,7 @@ import { rankEntries } from '../src/host/memory-search.js'
 import { estimateTokens } from '../src/host/text.js'
 import { latestMemoryChange, summaryBlocks } from '../src/client/text.js'
 import { fakeContext } from './fake-ctx.js'
+import { asideWorld } from '../../acp-dsh/test/fixtures/aside-world.mjs'
 
 test('entries carry their metadata at the end of the line, as Agent Memory Repo writes it', () => {
   assert.deepEqual(splitMeta('Prefers tea [source: part 2 #14; by: Omni; added: 2026-10-09]'), {
@@ -148,8 +149,12 @@ const ownChat = [
 // it says otherwise. `requireSession` turns down a request without a Session, as
 // some routes do.
 let rt
-function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-')), replies = [], config = {}, history = {}, reasoning = { efforts: [{ id: 'off' }, { id: 'high' }] }, models = ['v4'], defaultModel, modelMaxTokens, requireSession = false, keyless = {}, agents = {} } = {}) {
-  if (!existsSync(join(home, 'state.json'))) writeFileSync(join(home, 'state.json'), JSON.stringify(TEAM))
+function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-')), state = TEAM,
+  replies = [], replyWith, config = {}, history = {},
+  reasoning = { efforts: [{ id: 'off' }, { id: 'high' }] }, models = ['v4'], defaultModel,
+  modelMaxTokens, requireSession = false, keyless = {}, keyed = {}, agents = {},
+} = {}) {
+  if (!existsSync(join(home, 'state.json'))) writeFileSync(join(home, 'state.json'), JSON.stringify(state))
   const services = defaultModel === undefined ? {} : { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek', model: defaultModel }) } }
   // `keyless`: providers DSH serves whose key is not set ({ provider: [model ids] }).
   if (Object.keys(keyless).length > 0) {
@@ -163,14 +168,15 @@ function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-')), replies =
   Object.assign(ctx, {
     llm: {
       // `agents`: agents over ACP the catalog lists ({ provider: [model ids] }).
-      listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }, ...Object.keys({ ...keyless, ...agents }).map(id => ({ id, name: id }))],
-      listModels: async id => (keyless[id] ?? agents[id] ?? models).map(model => ({ id: model })),
+      listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' },
+        ...Object.keys({ ...keyless, ...keyed, ...agents }).map(id => ({ id, name: id }))],
+      listModels: async id => (keyless[id] ?? keyed[id] ?? agents[id] ?? models).map(model => ({ id: model })),
       listConfigurableProviders: () => Object.keys(keyless).map(id => ({ provider: id, displayName: id, settingsNs: 'keys', settingsPath: [id] })),
       resolveModelInfo: async () => ({ reasoning, ...(modelMaxTokens === undefined ? {} : { defaultMaxTokens: modelMaxTokens }) }),
       async* stream(request) {
         requests.push(request)
         if (requireSession && request.sessionId === undefined) throw new Error('400: {"type":"MissingSessionID","message":"Request is missing x-opencode-session"}')
-        const reply = await replies.shift()
+        const reply = await (replyWith ? replyWith(request) : replies.shift())
         if (reply instanceof Error) throw reply
         const out = typeof reply === 'object' && reply !== null ? reply : { text: reply ?? '' }
         yield { type: 'text-delta', index: 0, text: out.text ?? '' }
@@ -1239,7 +1245,7 @@ test('an aborted summary call is not retried', async (t) => {
   assert.match(failed.error, /aborted/)
 })
 
-test('an auth failure is not retried: only the Bot\'s own model is tried after it', async (t) => {
+test('an auth failure on the Bot\'s model falls back without retrying that model', async (t) => {
   const replies = [
     { text: '', finish: 'error', failure: { message: 'invalid key', code: 'AUTH', status: 401 } },
     '## Overview\nYou like tea.',
@@ -1251,7 +1257,7 @@ test('an auth failure is not retried: only the Bot\'s own model is tried after i
   await summarized(call)
   const done = (await call('memory-view', { botId: 'b2' })).value
   assert.deepEqual([done.summary?.text, done.error], ['## Overview\nYou like tea.', null])
-  assert.deepEqual(routes(requests), ['deepseek/flash@16384', 'deepseek/v4@16384'])
+  assert.deepEqual(routes(requests), ['deepseek/v4@16384', 'deepseek/flash@16384'])
 })
 
 test('an adapter output default leaves room for a larger retry', async (t) => {
@@ -1302,9 +1308,8 @@ test('the panel call asks for the model\'s lowest thinking level when it has no 
 
 const routes = requests => requests.map(request => `${request.provider}/${request.model}@${request.maxTokens}`)
 
-// Memory runs on the team's background model (DSH's default here, deepseek/flash), then on the
-// Bot's own (deepseek/v4) when that fails.
-test('a summary the background model refuses is written by the Bot\'s own model', async (t) => {
+// Memory runs on the Bot's own model, then on the team's background model if needed.
+test('a summary the Bot\'s model refuses is written by the background model', async (t) => {
   const replies = [{ text: '', finish: 'error', failure: '403 Forbidden' }, '## Overview\nYou like tea.']
   const { tool, call, requests, stop } = start({ replies, models: ['v4', 'flash'], defaultModel: 'flash' })
   t.after(() => stop())
@@ -1313,11 +1318,11 @@ test('a summary the background model refuses is written by the Bot\'s own model'
   await summarized(call)
   const done = (await call('memory-view', { botId: 'b2' })).value
   assert.deepEqual([done.summary?.text, done.fresh, done.error], ['## Overview\nYou like tea.', true, null])
-  assert.deepEqual(routes(requests), ['deepseek/flash@16384', 'deepseek/v4@16384'])
+  assert.deepEqual(routes(requests), ['deepseek/v4@16384', 'deepseek/flash@16384'])
   assert.ok(requests.every(request => request.messages[0].content[0].text.includes('Likes tea')))
 })
 
-test('a summary cut off at both budgets on the background model is written by the Bot\'s own model', async (t) => {
+test('a summary cut off at both budgets on the Bot\'s model is written by the background model', async (t) => {
   const replies = [{ text: '', finish: 'max-tokens' }, { text: '## half', finish: 'max-tokens' }, '## Overview\nYou like tea.']
   const { tool, call, requests, stop } = start({ replies, models: ['v4', 'flash'], defaultModel: 'flash' })
   t.after(() => stop())
@@ -1326,7 +1331,7 @@ test('a summary cut off at both budgets on the background model is written by th
   await summarized(call)
   const done = (await call('memory-view', { botId: 'b2' })).value
   assert.deepEqual([done.summary?.text, done.error], ['## Overview\nYou like tea.', null])
-  assert.deepEqual(routes(requests), ['deepseek/flash@16384', 'deepseek/flash@32768', 'deepseek/v4@16384'])
+  assert.deepEqual(routes(requests), ['deepseek/v4@16384', 'deepseek/v4@32768', 'deepseek/flash@16384'])
 })
 
 test('a summary that failed on both models is tried again once the Bot has another model', async (t) => {
@@ -1339,7 +1344,7 @@ test('a summary that failed on both models is tried again once the Bot has anoth
   await summarized(call)
   const failed = (await call('memory-view', { botId: 'b2', summarize: true })).value
   // The provider's words are not kept, only that a provider failed and which one.
-  assert.equal(failed.error, 'deepseek/flash: provider error; deepseek/v4: The provider returned an error (SERVER 503)')
+  assert.equal(failed.error, 'deepseek/v4: provider error; deepseek/flash: The provider returned an error (SERVER 503)')
   assert.equal(failed.summarizing, false)
   assert.equal(requests.length, 2)
 
@@ -1366,23 +1371,23 @@ test('a summary that failed on both models is tried again once the background mo
   assert.equal(requests.length, 2)
 
   assert.equal((await call('set-prefs', { backgroundModel: 'deepseek/pro' })).ok, true)
-  replies.push('## Overview\nYou like tea.')
+  replies.push(new Error('401: Unauthorized'), '## Overview\nYou like tea.')
   const retried = (await call('memory-view', { botId: 'b2', summarize: true })).value
   assert.deepEqual([retried.summarizing, retried.error], [true, null])
   await summarized(call)
   const done = (await call('memory-view', { botId: 'b2' })).value
   assert.deepEqual([done.summary?.text, done.error], ['## Overview\nYou like tea.', null])
-  assert.deepEqual(routes(requests).slice(2), ['deepseek/pro@16384'])
+  assert.deepEqual(routes(requests).slice(2), ['deepseek/v4@16384', 'deepseek/pro@16384'])
 })
 
-test('"ask or update" falls back to the Bot\'s own model when the background model fails', async (t) => {
+test('"ask or update" falls back to the background model when the Bot\'s model fails', async (t) => {
   const replies = [new Error('403 Forbidden'), JSON.stringify({ reply: 'You like tea.', changes: [] })]
   const { tool, call, requests, stop } = start({ replies, models: ['v4', 'flash'], defaultModel: 'flash' })
   t.after(() => stop())
   await tool('remember', { text: 'Likes tea' }, 'b2')
   const answer = (await call('memory-ask', { botId: 'b2', text: 'What do I like?' })).value
   assert.equal(answer.reply, 'You like tea.')
-  assert.deepEqual(routes(requests), ['deepseek/flash@16384', 'deepseek/v4@16384'])
+  assert.deepEqual(routes(requests), ['deepseek/v4@16384', 'deepseek/flash@16384'])
 })
 
 test('"ask or update" answers from the entries and changes them through the same rules', async (t) => {
@@ -2826,7 +2831,8 @@ test('a turn whose Session moves to a fresh part before its review is still revi
 test('config.memoryReview false leaves memory to the Bots\' own remember calls', async (t) => {
   const { ctx, call, section, requests, stop } = start({ config: { memoryReview: false, memoryReviewDelayMs: 0 } })
   t.after(() => stop())
-  assert.equal(ctx.calls.filter(entry => entry === 'on agent/status').length, 4)
+  // Hidden answers still preempt for foreground turns. The review listener stays off.
+  assert.equal(ctx.calls.filter(entry => entry === 'on agent/status').length, 6)
   await call('state', {})
   assert.match(section('b2'), /Call it in that same turn, before you reply/)
   ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
@@ -2995,7 +3001,10 @@ test('a memory review on a session-reusing adapter runs on its own, never in the
 // back to DSH's default.
 test('the team\'s background model runs memory, and the pick is checked', async (t) => {
   const replies = ['## Overview\nYou like tea.', '## Overview\nYou like tea and toast.']
-  const { tool, call, requests, stop } = start({ replies, models: ['v4', 'flash'], defaultModel: 'flash', keyless: { openai: ['gpt-6'] } })
+  const { tool, call, requests, stop } = start({ replies, models: ['v4', 'flash'],
+    state: memoryState('acp-codex/default', null), agents: { 'acp-codex': ['default'] },
+    defaultModel: 'flash', keyless: { openai: ['gpt-6'] },
+  })
   t.after(() => stop())
   assert.equal((await call('set-prefs', { backgroundModel: 'acp-codex/default' })).error.code, 'bot/invalid')
   assert.equal((await call('set-prefs', { backgroundModel: 'deepseek/gone' })).error.code, 'bot/invalid')
@@ -3016,21 +3025,19 @@ test('the team\'s background model runs memory, and the pick is checked', async 
   assert.deepEqual(routes(requests), ['deepseek/v4@16384', 'deepseek/flash@16384'])
 })
 
-// The pick decides, not the Bot's own model: a Bot on deepseek/v4 with the background model
-// set to deepseek/lite has its memory written on deepseek/lite.
-test('memory runs on the picked background model, not on the Bot\'s own model', async (t) => {
+// A Bot on deepseek/v4 uses that model with deepseek/lite available as a fallback.
+test('T2 memory runs on the Bot\'s own model before the picked background model', async (t) => {
   const { tool, call, requests, stop } = start({ replies: ['## Overview\nYou like tea.'], models: ['v4', 'flash', 'lite'], defaultModel: 'flash' })
   t.after(() => stop())
   assert.equal((await call('set-prefs', { backgroundModel: 'deepseek/lite' })).ok, true)
   await tool('remember', { text: 'Likes tea' }, 'b2')
   await call('memory-view', { botId: 'b2', summarize: true })
   await summarized(call)
-  assert.deepEqual(routes(requests), ['deepseek/lite@16384'])
+  assert.deepEqual(routes(requests), ['deepseek/v4@16384'])
 })
 
-// A Bot saved on an agent over ACP: its memory goes to the background model, and when that
-// one fails nothing is sent to the agent, which answers only in its own chat.
-test('the memory of a Bot on an agent over ACP runs on the background model, never on the agent', async (t) => {
+// An installation without the ACP memory service keeps using the background model.
+test('the memory of an ACP Bot uses the background when the memory service is absent', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-'))
   const team = structuredClone(TEAM)
   team.bots.b2.model = 'acp-codex/v4'
@@ -3117,4 +3124,774 @@ test('a marker in a topic, an entry or a provider failure reaches no log line or
     'The provider returned an error',
   ])
   assert.deepEqual([...warnings, ...failures.map(item => item.text)].filter(text => text.includes(MARKER)), [])
+})
+
+// ---------------------------------------------------------------------------
+// A deleted Bot's or group's place in the memory review leaves reviewed.json.
+
+// A home whose memory review already keeps these places.
+function reviewedHome(places, team = TEAM) {
+  const home = mkdtempSync(join(tmpdir(), 'ds-bot-memory-'))
+  writeFileSync(join(home, 'state.json'), JSON.stringify(team))
+  mkdirSync(join(home, 'memory'), { recursive: true })
+  writeFileSync(join(home, 'memory', 'reviewed.json'), JSON.stringify(places))
+  return home
+}
+
+// A promise the test releases, and whether the code under test is waiting on it.
+function hold() {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const held = { waiting: false, release, wait: async () => { held.waiting = true; await gate } }
+  return held
+}
+
+test('a deleted Bot\'s review place leaves reviewed.json', async (t) => {
+  const history = { b2: [{ event: { seq: 20, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'I like it plain.' }] } } }] }
+  const { ctx, call, read, stop } = start({ replies: [JSON.stringify({ changes: [] })], history, config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  await call('state', {})
+  ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
+  await reviewed(call)
+  assert.ok(Object.hasOwn(JSON.parse(read('reviewed.json')), 'chat:b2'))
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), {})
+})
+
+test('a deleted Bot forgets every part\'s place and keeps the other keys', async (t) => {
+  const team = { ...TEAM, bots: { ...TEAM.bots, b2: { ...TEAM.bots.b2, sessionId: 'b2-next', segments: [{ sessionId: 'b2', endedAt: Date.now() }] } } }
+  const home = reviewedHome({ 'chat:b2': 19, 'chat:b2-next': 3, 'chat:b3': 4, 'group:r1': 2 }, team)
+  const { call, read, stop } = start({ home })
+  t.after(() => stop())
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4, 'group:r1': 2 })
+})
+
+test('a deleted group\'s review place leaves reviewed.json', async (t) => {
+  const home = reviewedHome({ 'group:r1': 3, 'chat:b3': 4 })
+  const { call, read, stop } = start({ home })
+  t.after(() => stop())
+  assert.equal((await call('delete-room', { id: 'r1' })).ok, true)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a Bot review that read its chat before the delete does not write its place back', async (t) => {
+  const home = reviewedHome({ 'chat:b3': 4 })
+  const { ctx, call, read, stop } = start({ home, config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  // Only the review's read (rt.partLines, which bounds it by `throughSeq`) is held; the
+  // view's preview reads the same Session without it.
+  const reading = hold()
+  const page = ctx.sessionController.page
+  let first = true
+  ctx.sessionController.page = async (options) => {
+    if (first && options.address.sessionId === 'b2' && options.throughSeq !== undefined) {
+      first = false
+      await reading.wait()
+    }
+    return page(options)
+  }
+  await call('state', {})
+  ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
+  await until(() => reading.waiting)
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  reading.release()
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a Bot review of Bot lines only, read before the delete, does not move its place back in', async (t) => {
+  const history = { b2: [
+    { event: { seq: 10, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Please remember this' }] } } },
+    { event: { seq: 11, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Saved.' }] } } } },
+    { event: { seq: 12, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Anything else?' }] } } } },
+  ] }
+  const home = reviewedHome({ 'chat:b2': 10, 'chat:b3': 4 })
+  const { ctx, call, read, requests, stop } = start({ home, history, config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  // Only the review's read (rt.partLines, which bounds it by `throughSeq`) is held; the
+  // view's preview reads the same Session without it.
+  const reading = hold()
+  const page = ctx.sessionController.page
+  let first = true
+  ctx.sessionController.page = async (options) => {
+    if (first && options.address.sessionId === 'b2' && options.throughSeq !== undefined) {
+      first = false
+      await reading.wait()
+    }
+    return page(options)
+  }
+  await call('state', {})
+  ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
+  await until(() => reading.waiting)
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  reading.release()
+  await reviewed(call)
+  assert.equal(requests.length, 0)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a group review that read its log before the delete does not write its place back', async (t) => {
+  const home = reviewedHome({ 'chat:b3': 4 })
+  const { ctx, call, read, stop } = start({ home, config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  await call('state', {})
+  const reading = hold()
+  const linesAfter = rt.groupLinesAfter
+  let first = true
+  rt.groupLinesAfter = async (roomId, since) => {
+    if (first && roomId === 'r1') {
+      first = false
+      await reading.wait()
+    }
+    return linesAfter(roomId, since)
+  }
+  ctx.emit('agent/status', { agent: { id: 'g3' }, status: 'idle' })
+  await until(() => reading.waiting)
+  assert.equal((await call('delete-room', { id: 'r1' })).ok, true)
+  reading.release()
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a Bot never reviewed is deleted with no reviewed.json written', async (t) => {
+  const { home, call, stop } = start()
+  t.after(() => stop())
+  assert.equal((await call('delete-bot', { id: 'b2' })).ok, true)
+  assert.equal(existsSync(join(home, 'memory', 'reviewed.json')), false)
+})
+
+test('a review that starts while its Bot is being deleted writes no place', async (t) => {
+  const home = reviewedHome({ 'chat:b3': 4 })
+  const { ctx, call, read, stop } = start({ home, replies: [JSON.stringify({ changes: [] })], config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  await call('state', {})
+  const step = hold()
+  rt.beforeBotDelete(() => step.wait())
+  const deleting = call('delete-bot', { id: 'b2' })
+  await until(() => step.waiting)
+  ctx.emit('agent/status', { agent: { id: 'b2' }, status: 'idle' })
+  await reviewed(call)
+  step.release()
+  assert.equal((await deleting).ok, true)
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a group review that starts while its group is being deleted writes no place', async (t) => {
+  const home = reviewedHome({ 'chat:b3': 4 })
+  const { ctx, call, read, stop } = start({ home, replies: [JSON.stringify({ changes: [] })], config: { memoryReviewDelayMs: 0 } })
+  t.after(() => stop())
+  await call('state', {})
+  const pausing = hold()
+  const revoke = rt.revokeNewSchedules
+  let first = true
+  rt.revokeNewSchedules = async (...args) => {
+    if (first) {
+      first = false
+      await pausing.wait()
+    }
+    return revoke?.(...args)
+  }
+  const deleting = call('delete-room', { id: 'r1' })
+  await until(() => pausing.waiting)
+  ctx.emit('agent/status', { agent: { id: 'g3' }, status: 'idle' })
+  await reviewed(call)
+  pausing.release()
+  assert.equal((await deleting).ok, true)
+  await reviewed(call)
+  assert.deepEqual(JSON.parse(read('reviewed.json')), { 'chat:b3': 4 })
+})
+
+test('a delete on a reading host lists no composer sweep', async (t) => {
+  const { call, tool, stop } = start()
+  t.after(() => stop())
+  await call('state', {})
+  const readOnly = rt.readOnly
+  rt.readOnly = () => 'read-only'
+  try {
+    await tool('delete_bot', { bot: 'Coder' }, 'm1').catch(() => {})
+  } finally {
+    rt.readOnly = readOnly
+  }
+  assert.equal(rt.botOf('b3'), undefined)
+  assert.equal(rt.state.draftSweep, undefined)
+})
+
+test('a delete whose save is lost to another host takes its ids off the sweep list', async (t) => {
+  const { call, tool, stop } = start()
+  t.after(() => stop())
+  await call('state', {})
+  const save = rt.save
+  rt.save = async (...args) => {
+    if (rt.state.draftSweep !== undefined) throw Object.assign(new Error('lost'), { code: 'ELOCKLOST' })
+    return save(...args)
+  }
+  try {
+    await assert.rejects(tool('delete_bot', { bot: 'Coder' }, 'm1'), error => error.code === 'ELOCKLOST')
+  } finally {
+    rt.save = save
+  }
+  assert.equal(rt.state.draftSweep, undefined)
+})
+
+test('a group delete whose save is lost to another host takes its ids off the sweep list', async (t) => {
+  const { call, tool, stop } = start()
+  t.after(() => stop())
+  await call('state', {})
+  const save = rt.save
+  rt.save = async (...args) => {
+    if (rt.state.draftSweep !== undefined) throw Object.assign(new Error('lost'), { code: 'ELOCKLOST' })
+    return save(...args)
+  }
+  try {
+    await assert.rejects(tool('delete_group', { group: 'Launch' }, 'm1'), error => error.code === 'ELOCKLOST')
+  } finally {
+    rt.save = save
+  }
+  assert.equal(rt.state.draftSweep, undefined)
+})
+
+const reviewReply = text => JSON.stringify({ changes: [{ op: 'add', text }] })
+const quotaFinish = { finish: 'error', failure: { code: 'QUOTA', status: 402 } }
+const reviewIdle = (ctx, id = 'b2') => ctx.emit('agent/status', { agent: { id }, status: 'idle' })
+const memoryState = (model, backgroundModel = 'deepseek/v4') => {
+  const state = structuredClone(TEAM)
+  state.bots.b2.model = model
+  if (backgroundModel !== null) state.prefs = { ...state.prefs, backgroundModel }
+  return state
+}
+
+test('R2-1 queued ACP work refuses a replacement account before sending a prompt', async t => {
+  const world = asideWorld(t)
+  await world.ready()
+  const h = start({ state: memoryState('acp-codex/default'), agents: { 'acp-codex': ['default'] },
+    replyWith: () => 'Fixture background response.', config: { memoryReview: false },
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  const preparing = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const shot = (text, dispatch) => rt.botShot(rt.botOf('b2'), 'Fixture instructions.', text, undefined, dispatch)
+  const first = shot('First fixture prompt.', { prepare: () => {
+    preparing.resolve()
+    return release.promise
+  } })
+  await preparing.promise
+  const queued = shot('Queued private fixture prompt.')
+  await settle()
+  assert.deepEqual(world.events(), [], 'both jobs are still waiting before launch')
+  try {
+    await world.service.accountSignOut(world.provider)
+    await world.signInAs('fixture-replacement-account')
+  } finally {
+    release.resolve()
+  }
+  const replies = await Promise.all([first, queued])
+  assert.deepEqual({ prompts: world.events().filter(row => row.event === 'prompt').length, replies },
+    { prompts: 0, replies: ['Fixture background response.', 'Fixture background response.'] })
+  assert.equal(await shot('New fixture prompt.'), 'Fixture response.')
+  assert.deepEqual(world.events().filter(row => row.event === 'prompt').map(row => row.prompt.at(-1).text),
+    ['New fixture prompt.'])
+})
+
+test('R2-2 removing the keeper during setup withholds the group batch on both routes', async t => {
+  for (const acp of [false, true]) {
+    await t.test(acp ? 'own ACP' : 'native background', async t => {
+      const world = acp ? asideWorld(t) : undefined
+      await world?.ready()
+      const state = structuredClone(TEAM)
+      state.rooms.r1.members.push('b4')
+      state.rooms.r1.sessions.b2 = 'g2'
+      if (acp) state.bots.b3.model = 'acp-codex/default'
+      const fact = 'Keep the fixture notes to one page.'
+      const h = start({ state, agents: acp ? { 'acp-codex': ['default'] } : {},
+        config: { memoryReviewDelayMs: 0 }, replyWith: () => reviewReply(fact),
+      })
+      t.after(h.stop)
+      if (world) h.ctx.provided.set('acpAgents', world.service)
+      await h.call('state')
+      const reached = Promise.withResolvers()
+      const release = Promise.withResolvers()
+      const target = world?.cli ?? h.ctx.llm
+      const method = acp ? 'spawn' : 'resolveModelInfo'
+      const original = target[method]
+      target[method] = async (...args) => {
+        target[method] = original
+        reached.resolve()
+        await release.promise
+        return original(...args)
+      }
+      reviewIdle(h.ctx, 'g3')
+      await reached.promise
+      try {
+        assert.equal((await h.call('update-room', { id: 'r1', remove: ['b3'] })).ok, true)
+      } finally {
+        release.resolve()
+      }
+      await reviewed(h.call)
+      const before = { native: h.requests.length,
+        acp: world?.events().filter(row => row.event === 'prompt').length ?? 0,
+        cursor: JSON.parse(h.read('reviewed.json')) }
+      assert.throws(() => h.read('groups', 'r1', 'MEMORY.md'), { code: 'ENOENT' })
+      reviewIdle(h.ctx, 'g2')
+      await reviewed(h.call)
+      assert.match(h.requests.at(-1).messages[0].content[0].text, /Keep everything you send me under one page/)
+      assert.ok(h.read('groups', 'r1', 'MEMORY.md').includes(fact))
+      assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'group:r1': 3 })
+      assert.deepEqual(before, { native: 0, acp: 0, cursor: { 'group:r1': 0 } })
+    })
+  }
+})
+
+test('R2-4 ACP admission refusal keeps background quota and the batch through provider expiry', async t => {
+  const clock = t.mock.timers
+  clock.enable({ apis: ['Date'], now: Date.now() })
+  const world = asideWorld(t, { permissionMode: 'workspace-write' })
+  await world.ready()
+  let recovered = false
+  const h = start({ state: memoryState('acp-codex/default'),
+    agents: { 'acp-codex': ['default'] }, config: { memoryReviewDelayMs: 0 },
+    replyWith: () => recovered ? reviewReply('Use the green fixture notebook.') : quotaFinish,
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  const minute = 60_000
+  const at = Date.now()
+  const until = at + 60 * minute
+  const snapshot = async () => ({
+    hidden: world.events().filter(row => row.event === 'new').length,
+    prompts: world.events().filter(row => row.event === 'prompt').length, calls: h.requests.length,
+    failure: (await h.call('memory-review-status', { botId: 'b2' })).value.failure,
+    cursor: JSON.parse(h.read('reviewed.json'))['chat:b2'], expiry: rt.quotaUntil('deepseek'),
+  })
+  const tickReview = async (ms = 0) => {
+    clock.tick(ms)
+    reviewIdle(h.ctx)
+    await reviewed(h.call)
+    return snapshot()
+  }
+  const first = await tickReview()
+  const five = await tickReview(5 * minute)
+  const beforeExpiry = await tickReview(55 * minute - 1)
+  const ownFailureCode = 'acp/aside-unavailable'
+  const held = { hidden: 1, prompts: 0, calls: 1, failure: { reason: 'quota', at, retryAt: until, ownFailureCode },
+    cursor: 9, expiry: until }
+  assert.deepEqual({ first, five, beforeExpiry }, { first: held, five: held, beforeExpiry: held })
+
+  // An alternative background route appears at expiry. The second real quota failure
+  // uses the 15-minute holder delay, proving the first failure still counts only once.
+  const listProviders = h.ctx.llm.listProviders
+  h.ctx.llm.listProviders = () => [...listProviders(), { id: 'recovery', name: 'Recovery fixture' }]
+  await rt.catalog({ fresh: true, remember: false })
+  assert.deepEqual(await tickReview(1), {
+    hidden: 2, prompts: 0, calls: 2, cursor: 9, expiry: until + 60 * minute,
+    failure: { reason: 'quota', at: until, retryAt: until + 15 * minute, ownFailureCode },
+  })
+  recovered = true
+  assert.deepEqual(await tickReview(15 * minute), {
+    hidden: 3, prompts: 0, calls: 3, cursor: 11, expiry: until + 60 * minute, failure: null,
+  })
+  assert.equal(h.requests.at(-1).provider, 'recovery')
+  assert.match(h.read('bots', 'b2', 'MEMORY.md'), /Use the green fixture notebook/)
+})
+
+test('R2-6 native attempt expiry falls back while cancellation and disposal stop', async t => {
+  for (const cause of ['timeout', 'cancel', 'dispose']) {
+    await t.test(cause, async t => {
+      const original = AbortSignal.timeout
+      const attempt = new AbortController()
+      let budgets = 0
+      t.mock.method(AbortSignal, 'timeout', ms => ms === 120_000 && budgets++ === 0 ? attempt.signal : original(ms))
+      const caller = new AbortController()
+      const reached = Promise.withResolvers()
+      const release = Promise.withResolvers()
+      const h = start({ state: memoryState('other/m1'), keyed: { other: ['m1'] },
+        config: { memoryReview: false }, replyWith: async request => {
+          if (request.provider === 'deepseek') return 'Fixture background response.'
+          reached.resolve()
+          await release.promise
+          return { finish: 'aborted' }
+        },
+      })
+      t.after(h.stop)
+      await h.call('state')
+      const pending = rt.botShot(rt.botOf('b2'), 'Fixture instructions.', 'Fixture prompt.',
+        undefined, { signal: caller.signal }).catch(error => error)
+      await reached.promise
+      if (cause === 'timeout') {
+        attempt.abort(new DOMException('Fixture attempt expired', 'TimeoutError'))
+      } else if (cause === 'cancel') caller.abort()
+      else await h.ctx.dispose()
+      const aborted = h.requests[0].signal.aborted
+      release.resolve()
+      const result = await pending
+      if (cause === 'timeout') {
+        assert.deepEqual({ reply: result instanceof Error ? result.message : result, routes: routes(h.requests) },
+          { reply: 'Fixture background response.', routes: ['other/m1@16384', 'deepseek/v4@16384'] })
+      } else {
+        assert.ok(result instanceof Error)
+        assert.equal(aborted, true, `${cause} reached the in-flight request`)
+        assert.deepEqual(routes(h.requests), ['other/m1@16384'])
+      }
+    })
+  }
+})
+
+test('E1 idle review saves the own API fact without calling a quota-exhausted background', async t => {
+  const fact = 'Tea should be served in the small blue mug.'
+  const h = start({ state: memoryState('other/m1'), keyed: { other: ['m1'] },
+    config: { memoryReviewDelayMs: 0 },
+    replyWith: request => request.provider === 'deepseek' ? quotaFinish : reviewReply(fact),
+  })
+  t.after(h.stop)
+  await h.call('state')
+  reviewIdle(h.ctx)
+  await reviewed(h.call)
+  assert.ok(h.read('bots', 'b2', 'MEMORY.md').includes(fact))
+  assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'chat:b2': 11 })
+  assert.deepEqual(routes(h.requests), ['other/m1@16384'], 'own API before any background dispatch')
+})
+
+test('E2 idle review through registered ACP service and fake wire saves the ACP fact', async t => {
+  const fact = 'Use the blue notebook for astronomy observations.'
+  const world = asideWorld(t, { reply: { text: reviewReply(fact) } })
+  await world.ready()
+  const h = start({ state: memoryState('acp-codex/default'), agents: { 'acp-codex': ['default'] },
+    config: { memoryReviewDelayMs: 0 }, replies: [quotaFinish],
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  const original = structuredClone(ownChat)
+  const log = []
+  h.ctx.logger.info = (...args) => log.push(format(...args))
+  await h.call('state')
+  reviewIdle(h.ctx)
+  await reviewed(h.call)
+  assert.deepEqual(world.events().filter(row => row.event === 'prompt').map(row => row.model),
+    ['gpt-6.2-sol'], 'one prompt on the resolved own model')
+  assert.deepEqual(h.requests, [], 'zero DSH streams, including fallback')
+  assert.ok(h.read('bots', 'b2', 'MEMORY.md').includes(fact))
+  assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'chat:b2': 11 })
+  assert.deepEqual(ownChat, original)
+  assert.deepEqual(world.lookups, [], 'the hidden run never looked up or sent to a DSH agent')
+  assert.deepEqual(log.filter(line => line.startsWith('omni-ui: memory review completed')),
+    ['omni-ui: memory review completed via own-acp (acp-codex/gpt-6.2-sol)'])
+})
+
+test('E3 native and ACP quota holds preserve the cursor until actual recovery', async t => {
+  const clock = t.mock.timers
+  clock.enable({ apis: ['Date'], now: Date.now() })
+  const hour = 60 * 60_000
+  for (const acp of [false, true]) {
+    await t.test(acp ? 'ACP' : 'DSH native', async t => {
+      const fact = acp ? 'The telescope uses a red filter.' : 'The telescope uses a yellow filter.'
+      const world = acp ? asideWorld(t, { reply: { quota: true } }) : undefined
+      await world?.ready()
+      let recovering = false
+      const model = acp ? 'acp-codex/default' : 'other/m1'
+      const h = start({ state: memoryState(model),
+        ...(acp ? { agents: { 'acp-codex': ['default'] } } : { keyed: { other: ['m1'] } }),
+        config: { memoryReviewDelayMs: 0 },
+        replyWith: request => {
+          if (request.provider === 'deepseek') return quotaFinish
+          if (recovering) return reviewReply(fact)
+          return Object.assign(new Error('Fictitious quota error detail'), {
+            failure: { code: 'ACCOUNT_QUOTA', status: 402 },
+          })
+        },
+      })
+      t.after(h.stop)
+      if (world) h.ctx.provided.set('acpAgents', world.service)
+      await h.call('state')
+      const status = async () => (await h.call('memory-review-status', { botId: 'b2' })).value
+      const counts = () => [h.requests.length,
+        world?.events().filter(row => row.event === 'prompt').length ?? 0]
+      for (let run = 1; run <= 3; run++) {
+        reviewIdle(h.ctx)
+        await reviewed(h.call)
+        const last = await status()
+        assert.equal(last.failure?.reason, 'quota', `quota reason on actual failure ${run}`)
+        assert.equal(last.failure.retryAt, last.failure.at + hour, 'provider marks set the retry')
+        assert.deepEqual(counts(), acp ? [run, run] : [2 * run, 0])
+        assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'chat:b2': 9 })
+        clock.tick(5 * 60_000)
+        reviewIdle(h.ctx)
+        await settle()
+        assert.deepEqual(counts(), acp ? [run, run] : [2 * run, 0])
+        assert.deepEqual(await status(), last)
+        assert.equal(last.pending, false)
+        clock.tick(hour - 5 * 60_000 + 1)
+      }
+      recovering = true
+      world?.setReply({ text: reviewReply(fact) })
+      reviewIdle(h.ctx)
+      await reviewed(h.call)
+      assert.deepEqual(counts(), acp ? [3, 4] : [7, 0])
+      assert.equal((await status()).failure, null)
+      assert.ok(h.read('bots', 'b2', 'MEMORY.md').includes(fact))
+      assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'chat:b2': 11 })
+    })
+  }
+})
+
+test('actual quota failures use 5, 15 and 60 minute holder delays while a route is open', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const h = start({ state: memoryState('other/m1'), config: { memoryReviewDelayMs: 0 },
+    keyed: { other: ['m1'], next: ['m1'], last: ['m1'], recovery: ['m1'] },
+    replyWith: request => request.provider === 'recovery' ? reviewReply('Use the yellow mug.') : quotaFinish,
+  })
+  t.after(h.stop)
+  await h.call('state')
+  for (const [minutes, calls] of [[5, 2], [15, 3], [60, 4]]) {
+    reviewIdle(h.ctx)
+    await reviewed(h.call)
+    const status = (await h.call('memory-review-status', { botId: 'b2' })).value
+    assert.equal(status.failure.reason, 'quota')
+    assert.equal(status.failure.retryAt - status.failure.at, minutes * 60_000)
+    assert.equal(h.requests.length, calls)
+    t.mock.timers.tick(minutes * 60_000)
+  }
+})
+
+test('memory uses background when saved ACP admission is unsupported (including Claude)', async t => {
+  const world = asideWorld(t, { provider: 'acp-claude' })
+  const h = start({ state: memoryState('acp-claude/default'), agents: { 'acp-claude': ['default'] },
+    replyWith: () => 'Fixture background response.', config: { memoryReview: false },
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  assert.equal(await rt.botShot(rt.botOf('b2'), 'Private instructions.', 'Private prompt.'),
+    'Fixture background response.')
+  assert.deepEqual(world.events(), [])
+  assert.deepEqual(routes(h.requests), ['deepseek/v4@16384'])
+})
+
+for (const [provider, agent] of [['acp-omp', 'omp'], ['acp-antigravity', 'checked Antigravity']]) {
+  test(`owner routing: ${agent} memory review uses the configured background model`, async t => {
+    const world = asideWorld(t, { provider, reply: { text: reviewReply('Keep the red fixture folder.') } })
+    const fact = 'Keep the blue fixture folder.'
+    const h = start({ state: memoryState(`${provider}/default`, 'deepseek/lite'),
+      agents: { [provider]: ['default'] }, models: ['v4', 'lite'], defaultModel: 'v4',
+      config: { memoryReviewDelayMs: 0 }, replyWith: () => reviewReply(fact),
+    })
+    t.after(h.stop)
+    h.ctx.provided.set('acpAgents', world.service)
+    await h.call('state')
+    reviewIdle(h.ctx)
+    await reviewed(h.call)
+    assert.deepEqual({ prompts: world.events().filter(row => row.event === 'prompt').length,
+      calls: routes(h.requests) }, { prompts: 0, calls: ['deepseek/lite@16384'] })
+    assert.deepEqual(world.events(), [], 'the memory review never launches the ACP agent')
+    assert.ok(h.read('bots', 'b2', 'MEMORY.md').includes(fact))
+    assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'chat:b2': 11 })
+  })
+}
+
+test('an unavailable saved model uses background over applied and DSH default models', async t => {
+  const state = memoryState('other/gone', 'deepseek/lite')
+  state.bots.b2.appliedModel = 'deepseek/v4'
+  const h = start({ state, models: ['v4', 'lite', 'flash'], defaultModel: 'flash',
+    replyWith: () => 'Fixture background response.',
+  })
+  t.after(h.stop)
+  await h.call('state')
+  assert.equal(await rt.botShot(rt.botOf('b2'), 'Fixture instructions.', 'Fixture prompt.'),
+    'Fixture background response.')
+  assert.deepEqual(routes(h.requests), ['deepseek/lite@16384'])
+})
+
+test('hidden model redacts both fields after async setup and in session creation', async t => {
+  const world = asideWorld(t, { provider: 'acp-omp', system: true })
+  const h = start({ state: memoryState('acp-omp/default'), agents: { 'acp-omp': ['default'] } })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  const textMarker = 'fictional-azure-parakeet-92'
+  const instructionsMarker = 'fictional-gold-sparrow-48'
+  assert.equal((await h.call('secret-set', { name: 'FIXTURE_TEXT', value: textMarker })).ok, true)
+  const spawn = world.cli.spawn
+  world.cli.spawn = async context => {
+    const saved = await h.call('secret-set', { name: 'FIXTURE_SYSTEM', value: instructionsMarker })
+    assert.equal(saved.ok, true)
+    return spawn(context)
+  }
+  await rt.botShot(rt.botOf('b2'), `System marker ${instructionsMarker}`, `Text marker ${textMarker}`)
+  const prompt = world.events().find(event => event.event === 'prompt')
+  const session = world.events().find(event => event.event === 'new' && event.pid === prompt.pid)
+  const opened = session.systemPrompt.content[0].text
+  const sent = prompt.prompt[0].text
+  assert.match(opened, /^System marker /)
+  assert.match(sent, /^Text marker /)
+  const evidence = JSON.stringify([opened, sent,
+    (await h.call('memory-review-status', { botId: 'b2' })).value, h.warnings])
+  assert.equal(evidence.includes(instructionsMarker), false)
+  assert.equal(evidence.includes(textMarker), false)
+})
+
+test('a reserved account releases its work count with zero hidden prompts', async t => {
+  const world = asideWorld(t)
+  await world.ready()
+  const h = start({ state: memoryState('acp-codex/default'), agents: { 'acp-codex': ['default'] },
+    replyWith: () => 'Fixture background response.',
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  const work = []
+  rt.machineReservations = {
+    workStarted: provider => { work.push(provider); return () => work.push('released') },
+    imageGate: async () => 'Reserved for another installation',
+  }
+  assert.equal(await rt.botShot(rt.botOf('b2'), 'Private instructions.', 'Private prompt.'),
+    'Fixture background response.')
+  assert.deepEqual(work, ['acp-codex', 'released'])
+  assert.deepEqual(world.contexts, [])
+  assert.deepEqual(world.events(), [])
+})
+
+test('two queued memory jobs recheck foreground activity and release the hidden slot', async t => {
+  const world = asideWorld(t, { reply: { hang: true } })
+  await world.ready()
+  const h = start({ state: memoryState('acp-codex/default'), agents: { 'acp-codex': ['default'] },
+    config: { memoryReview: false }, replyWith: () => 'Fixture background response.',
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  const shot = text => rt.botShot(rt.botOf('b2'), 'Private instructions.', text)
+  const first = shot('First private prompt.')
+  for (let tries = 0; tries < 100 && !world.events().some(row => row.event === 'prompt'); tries++) {
+    await settle()
+  }
+  assert.equal(world.events().filter(row => row.event === 'prompt').length, 1)
+  const queued = shot('Queued private prompt.')
+  await settle()
+  h.ctx.emit('agent/status', { status: 'running', agent: { id: 'b2' } })
+  assert.deepEqual(await Promise.all([first, queued]),
+    ['Fixture background response.', 'Fixture background response.'])
+  assert.equal(world.events().filter(row => row.event === 'prompt').length, 1)
+  assert.equal(rt.quotaHeld('acp-codex'), false)
+  assert.equal(await shot('While foreground runs.'), 'Fixture background response.')
+  reviewIdle(h.ctx)
+  world.setReply({ text: 'Fixture own response.' })
+  assert.equal(await shot('After foreground ends.'), 'Fixture own response.')
+})
+
+test('freshness and runner refusals during a queued setup withhold text from every route', async t => {
+  const world = asideWorld(t, { reply: { hang: true } })
+  await world.ready()
+  const h = start({ state: memoryState('acp-codex/default'), agents: { 'acp-codex': ['default'] },
+    config: { memoryReview: false },
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  const controller = new AbortController()
+  let fresh = true
+  const shot = dispatch => rt.botShot(rt.botOf('b2'), 'Private instructions.', 'Private text.',
+    undefined, dispatch)
+  const first = assert.rejects(shot({ signal: controller.signal }), { code: 'bot/stale' })
+  for (let tries = 0; tries < 100 && !world.events().some(row => row.event === 'prompt'); tries++) {
+    await settle()
+  }
+  assert.equal(world.events().filter(row => row.event === 'prompt').length, 1)
+  const waiting = assert.rejects(shot({
+    check: () => { if (!fresh) throw Object.assign(new Error('stale'), { code: 'bot/stale' }) },
+  }), { code: 'bot/stale' })
+  await settle()
+  fresh = false
+  controller.abort()
+  await Promise.all([first, waiting])
+  await assert.rejects(shot({
+    prepare: async () => {
+      rt.assertBotRunnerProvider = () => {
+        throw Object.assign(new Error('runner refused'), { code: 'bot/no-runner' })
+      }
+    },
+  }), { code: 'bot/no-runner' })
+  assert.deepEqual(h.requests, [])
+  assert.equal(world.events().filter(row => row.event === 'prompt').length, 1)
+})
+
+test('an oversized hidden answer leaves its review batch eligible', async t => {
+  const world = asideWorld(t, { reply: { chunks: ['🫖'.repeat(12_000), '🫖'.repeat(5_000)] } })
+  await world.ready()
+  const h = start({ state: memoryState('acp-codex/default'), agents: { 'acp-codex': ['default'] },
+    replies: [new Error('fixture background unavailable')], config: { memoryReviewDelayMs: 0 },
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  reviewIdle(h.ctx)
+  await reviewed(h.call)
+  assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'chat:b2': 9 })
+  const fact = 'Serve tea in the amber mug.'
+  world.setReply({ text: reviewReply(fact) })
+  reviewIdle(h.ctx)
+  await reviewed(h.call)
+  assert.ok(h.read('bots', 'b2', 'MEMORY.md').includes(fact))
+  assert.deepEqual(JSON.parse(h.read('reviewed.json')), { 'chat:b2': 11 })
+})
+
+test('hidden review keeps each Bot transcript and fact in its own memory', async t => {
+  const world = asideWorld(t)
+  await world.ready()
+  const state = memoryState('acp-codex/default')
+  state.bots.b3.model = 'acp-codex/default'
+  const bot3 = structuredClone(ownChat)
+  bot3[0].event.data.content[0].text = 'Tend to the garden at dawn.'
+  const h = start({ state, agents: { 'acp-codex': ['default'] }, history: { b3: bot3 },
+    config: { memoryReviewDelayMs: 0 },
+  })
+  t.after(h.stop)
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  for (const [id, fact] of [['b2', 'Use the blue notebook.'], ['b3', 'Water the garden at dawn.']]) {
+    world.setReply({ text: reviewReply(fact) })
+    reviewIdle(h.ctx, id)
+    await reviewed(h.call)
+    assert.ok(h.read('bots', id, 'MEMORY.md').includes(fact))
+  }
+  const prompts = world.events().filter(row => row.event === 'prompt')
+    .map(row => row.prompt.at(-1).text)
+  assert.equal(prompts.length, 2)
+  assert.match(prompts[0], /Please remember this/)
+  assert.doesNotMatch(prompts[0], /Tend to the garden at dawn/)
+  assert.match(prompts[1], /Tend to the garden at dawn/)
+  assert.doesNotMatch(prompts[1], /Please remember this/)
+  assert.doesNotMatch(h.read('bots', 'b2', 'MEMORY.md'), /Water the garden/)
+  assert.doesNotMatch(h.read('bots', 'b3', 'MEMORY.md'), /Use the blue notebook/)
+})
+
+test('the registered ACP login-ready event lifts its provider mark and the memory hold', async t => {
+  let botCtx
+  const world = asideWorld(t, {
+    reply: { quota: true }, onEvent: (...args) => botCtx?.emit(...args),
+  })
+  await world.ready()
+  const h = start({ state: memoryState('acp-codex/default'), agents: { 'acp-codex': ['default'] },
+    replies: [quotaFinish], config: { memoryReviewDelayMs: 0 },
+  })
+  t.after(h.stop)
+  botCtx = h.ctx
+  h.ctx.provided.set('acpAgents', world.service)
+  await h.call('state')
+  reviewIdle(h.ctx)
+  await reviewed(h.call)
+  assert.equal(rt.quotaHeld('acp-codex'), true)
+  assert.equal(rt.quotaHeld('deepseek'), true)
+  await world.ready()
+  assert.equal(rt.quotaHeld('acp-codex'), false)
+  assert.equal(rt.quotaHeld('deepseek'), true)
+  const fact = 'Use the blue chart for the next observation.'
+  world.setReply({ text: reviewReply(fact) })
+  reviewIdle(h.ctx)
+  await reviewed(h.call)
+  assert.ok(h.read('bots', 'b2', 'MEMORY.md').includes(fact))
+  assert.equal((await h.call('memory-review-status', { botId: 'b2' })).value.failure, null)
 })

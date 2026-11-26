@@ -20,7 +20,7 @@ const TOOLS = [
   { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: { file_path: { type: 'string' } } } },
 ]
 
-function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = false, answer = 'allowed-once', tools = TOOLS, preset = 'standard', definitions = tools, turn = 3, fail, content, attachments } = {}) {
+function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = false, answer = 'allowed-once', tools = TOOLS, preset = 'standard', level, definitions = tools, turn = 3, fail, content, attachments } = {}) {
   const session = Session.create('s1')
   session.append('turn/start', { turn })
   session.append('step/start', { turn, step: 1 })
@@ -58,6 +58,7 @@ function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = fals
         }
       }
       if (name === 'sandboxPolicy') return { resolve: () => ({ mode: sandbox }) }
+      if (name === 'permissionPresets') return level === undefined ? undefined : { current: () => level }
       if (name === 'attachments') return attachments
       if (name === 'agentPresets') return { presetForSession: () => preset }
       return undefined
@@ -74,10 +75,14 @@ async function serve() {
   const record = bc.mint({ sessionId: 's1', agent: host_.agent, name: 'Fake agent' })
   // As after `session/new` in a real turn: the bridge may announce from now on.
   bc.announce(record)
-  const post = async (op, body = {}, credential = record.credential, url = bc.urlFor(record)) => {
+  const post = async (op, body = {}, credential = record.credential, url = bc.urlFor(record), attachment) => {
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(credential === null ? {} : { authorization: `Bearer ${credential}` }) },
+      headers: {
+        'content-type': 'application/json',
+        ...(credential === null ? {} : { authorization: `Bearer ${credential}` }),
+        ...(attachment === undefined ? {} : { 'x-dsh-bridge-attachment': attachment }),
+      },
       body: JSON.stringify({ op, ...body }),
     })
     return { status: response.status, body: await response.json() }
@@ -305,6 +310,33 @@ test('a request without a credential, with another Session\'s, or after revocati
   }
 })
 
+// A process ending leaves the Session credential for its replacement. The host revokes it.
+test('#969 8b: a bridge that says bye detaches, and its respawn re-attaches with the same credential', async () => {
+  const h = await serve()
+  try {
+    const bye = await h.post('bye')
+    assert.equal(bye.status, 200)
+    assert.deepEqual(bye.body, { ok: true })
+    assert.equal(h.record.closed, false)
+    assert.equal(h.record.disconnected, true)
+    assert.equal((await h.post('hello')).status, 200)
+    assert.equal((await h.post('list')).status, 200)
+    const a = op => h.post(op, {}, undefined, undefined, 'a'.repeat(32))
+    const b = op => h.post(op, {}, undefined, undefined, 'b'.repeat(32))
+    assert.equal((await a('list')).status, 200)
+    assert.equal(h.record.disconnected, false)
+    assert.equal((await a('bye')).status, 200)
+    assert.equal(h.record.disconnected, true)
+    assert.equal((await b('list')).status, 200)
+    assert.equal(h.record.disconnected, false)
+    assert.equal((await a('list')).status, 401)
+    h.bc.revoke(h.record)
+    assert.equal((await h.post('hello')).status, 401)
+  } finally {
+    h.bc.dispose()
+  }
+})
+
 test('the bridge lists the preset\'s tools, never the mirror, and hides file writers in read-only', async () => {
   const h = await serve()
   try {
@@ -524,6 +556,83 @@ test('a refusal or an unavailable approval never runs the tool, and the agent ge
   }
 })
 
+// The Solver's review guard (bots-dsh, RFC 0048) reads the call's arguments from the tool/call row
+// the bridge wrote before it asked, so the ask itself carries none; a guard that holds the call
+// leaves its text on `bridgeCall.refused`, and the agent reads that instead of "The person rejected".
+const callBash = async (run, args = {}, callId = 'c1') => {
+  await run.backchannel.listen()
+  const record = run.backchannel.mint({ sessionId: 's1', agent: run.agent, name: 'someone' })
+  const response = await fetch(run.backchannel.urlFor(record), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${record.credential}` },
+    body: JSON.stringify({ op: 'call', name: 'bash', arguments: args, callId }),
+  })
+  return response.json()
+}
+
+test('a bridge ask finds its tool/call row already written, and carries no arguments itself', async () => {
+  const seen = []
+  const run = host({
+    answer: request => {
+      seen.push(run.session.snapshotEvents().filter(event => event.type === 'tool/call' && event.data.callId === request.callId))
+      return 'allowed-once'
+    },
+  })
+  try {
+    const body = await callBash(run, { command: 'ls' }, 'bridge-args')
+    assert.equal(body.isError, false)
+    assert.equal(run.asked.length, 1)
+    const [request] = run.asked
+    assert.equal(request.callId, 'bridge-args')
+    assert.equal('arguments' in request.bridgeCall, false, 'the approval request is unchanged')
+    assert.equal(seen[0].length, 1, 'exactly one tool/call row exists when the ask starts')
+    assert.equal(seen[0][0].data.name, request.toolName)
+    assert.equal(seen[0][0].data.arguments, '{"command":"ls"}')
+    assert.equal(seen[0][0].data.arguments, run.executed[0].arguments, 'the row holds what the executor runs')
+  } finally { run.backchannel.dispose() }
+})
+
+test('a rejected bridge ask with a guard text on bridgeCall.refused gives the agent that text', async () => {
+  const refuse = reason => request => { request.bridgeCall.refused = { reason }; return 'rejected' }
+  for (const [answer, text] of [
+    [refuse('Held by the guard.'), 'Held by the guard.'],
+    [refuse('Held\n  by   the\tguard. '), 'Held by the guard. '],
+    [refuse('x'.repeat(3000)), 'x'.repeat(2000)],
+    [request => { request.bridgeCall.judged = { reason: 'risky' }; return refuse('Held by the guard.')(request) }, 'Held by the guard.'],
+  ]) {
+    const run = host({ answer })
+    try {
+      const body = await callBash(run)
+      assert.equal(body.isError, true)
+      assert.deepEqual(body.content, [{ type: 'text', text }])
+      assert.deepEqual(body.error, { name: 'ApprovalDeniedError', code: 'REJECTED' })
+      assert.equal(run.executed.length, 0)
+      const result = run.session.snapshotEvents().find(event => event.type === 'tool/result')
+      assert.deepEqual(result.data.message.content, [{ type: 'text', text }])
+    } finally { run.backchannel.dispose() }
+  }
+})
+
+test('a refused text that is not a usable string, or on an outcome other than rejected, is not read', async () => {
+  const leave = (refused, outcome = 'rejected') => request => { request.bridgeCall.refused = refused; return outcome }
+  for (const [answer, text, code] of [
+    [leave({ reason: 42 }), 'The person rejected bash.', 'REJECTED'],
+    [leave({ reason: '  \n ' }), 'The person rejected bash.', 'REJECTED'],
+    [leave({}), 'The person rejected bash.', 'REJECTED'],
+    [leave('Held'), 'The person rejected bash.', 'REJECTED'],
+    ['rejected', 'The person rejected bash.', 'REJECTED'],
+    [leave({ reason: 'Held by the guard.' }, 'unavailable'), 'DSH could not approve bash: nobody could answer its approval request.', 'UNAVAILABLE'],
+  ]) {
+    const run = host({ answer })
+    try {
+      const body = await callBash(run)
+      assert.deepEqual(body.content, [{ type: 'text', text }])
+      assert.deepEqual(body.error, { name: 'ApprovalDeniedError', code })
+      assert.equal(run.executed.length, 0)
+    } finally { run.backchannel.dispose() }
+  }
+})
+
 test('each level gates a bridge call as DSH gates its own tools: Manual asks, Full does not', async () => {
   const runAt = async ({ sandbox, policy, answer = 'allowed-once' }) => {
     const run = host({ sandbox, policy, answer })
@@ -656,6 +765,90 @@ test('a bridge call with no open step is refused, not written into a closed step
     assert.equal(body.error.code, 'BRIDGE_NO_STEP')
     assert.equal(h.executed.length, 0, 'the body did not run')
     assert.equal(h.session.snapshotEvents().filter(event => event.type === 'tool/call').length, 0, 'no card row')
+  } finally {
+    h.backchannel.dispose()
+  }
+})
+
+// --- a turn the agent opened itself -----------------------------------------------------------
+// A native background task finishes after its DSH turn ended and wakes Claude Code on its own.
+// There is no open DSH step, and none can be opened out of band: the agent loop's own turn
+// numbering is private. Manual and Full still run the extra, without a card; Auto refuses,
+// because Auto review reads a call from its step.
+
+const agentOpened = (h, turn = 3) => {
+  h.session.append('step/end', { turn, step: 1 })
+  h.session.append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
+const outsideStepCall = async (h, callId) => {
+  await h.backchannel.listen()
+  const record = h.backchannel.mint({ sessionId: 's1', agent: h.agent, name: 'Fake agent' })
+  h.backchannel.announce(record)
+  const response = await fetch(h.backchannel.urlFor(record), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${record.credential}` },
+    body: JSON.stringify({ op: 'call', name: 'bash', arguments: {}, callId }),
+  })
+  return { record, body: await response.json() }
+}
+
+test('a bridge call in a turn the agent opened itself runs at Manual without step rows', async () => {
+  const h = host({ turn: 1 })
+  agentOpened(h, 1)
+  try {
+    const { body } = await outsideStepCall(h, 'bridge-own-turn')
+    assert.equal(body.isError, false, 'the extra ran')
+    assert.deepEqual(h.executed.map(entry => entry.name), ['bash'])
+    assert.equal(h.asked.length, 1, 'Manual still asks the person once')
+    const events = h.session.snapshotEvents()
+    assert.equal(events.filter(event => event.type === 'tool/call').length, 0, 'no card row outside a step')
+    assert.equal(events.filter(event => event.type === 'tool/result').length, 0, 'no result row outside a step')
+    const record = events.find(event => event.type === 'plugin:acp-dsh/bridge-outside-step')
+    assert.ok(record, 'the call is recorded against the Session without a step')
+    assert.deepEqual(record.data, { callId: 'bridge-own-turn', name: 'bash', outcome: 'ran' })
+    assert.doesNotThrow(() => assertLoadable(h.session), 'the finished Session still loads')
+  } finally {
+    h.backchannel.dispose()
+  }
+})
+
+test('a held bridge call in a turn the agent opened itself gives the agent the guard text', async () => {
+  for (const [answer, text] of [
+    [request => { request.bridgeCall.refused = { reason: 'Held by the guard.' }; return 'rejected' }, 'Held by the guard.'],
+    ['rejected', 'The person rejected bash.'],
+  ]) {
+    const h = host({ turn: 1, answer })
+    agentOpened(h, 1)
+    try {
+      const { body } = await outsideStepCall(h, 'bridge-own-turn-held')
+      assert.equal(body.isError, true)
+      assert.equal(body.content.map(block => block.text ?? '').join('\n'), text)
+      assert.equal(h.executed.length, 0)
+      assert.equal(h.asked.length, 1)
+      assert.equal('arguments' in h.asked[0].bridgeCall, false)
+    } finally {
+      h.backchannel.dispose()
+    }
+  }
+})
+
+test('a bridge call in a turn the agent opened itself is refused clearly at Auto', async () => {
+  const h = host({ level: 'auto', turn: 1 })
+  agentOpened(h, 1)
+  try {
+    const { body } = await outsideStepCall(h, 'bridge-own-turn-auto')
+    assert.equal(body.isError, true)
+    assert.equal(body.error.code, 'BRIDGE_OUTSIDE_STEP')
+    const text = body.content.map(block => block.text ?? '').join('\n')
+    assert.match(text, /Claude Code opened this turn itself/)
+    assert.match(text, /send a message/)
+    assert.doesNotMatch(text, /no open step/)
+    assert.equal(h.executed.length, 0, 'the extra did not run unreviewed')
+    assert.equal(h.asked.length, 0, 'and the person was not asked in its place')
+    assert.equal(h.session.snapshotEvents().filter(event => event.type === 'tool/call').length, 0)
+    const record = h.session.snapshotEvents().find(event => event.type === 'plugin:acp-dsh/bridge-outside-step')
+    assert.equal(record.data.outcome, 'refused')
   } finally {
     h.backchannel.dispose()
   }

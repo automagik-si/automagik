@@ -55,6 +55,11 @@ fun machineStatus(machine: MachineState): String =
 /** A saved machine's status line: a legacy SSH machine ([LegacySsh]) only ever asks to be paired again. */
 fun machineStatus(host: HostProfile, machine: MachineState): String = if (host.legacySsh) LegacySsh.STATUS else machineStatus(machine)
 
+private val PAIRED_KEY = Regex("^[0-9a-f]{12}$")
+
+/** The stored key fingerprint, when a paired card has a key prefix. */
+fun pairedKey(host: HostProfile): String? = host.host.takeIf { host.paired && PAIRED_KEY.matches(it) }?.let(::keyFingerprint)
+
 /** A machine card's icon, name, address and connection dot. */
 @Composable fun MachineHeader(name: String, address: String, connected: Boolean, greyed: Boolean = false) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -120,6 +125,7 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
             MachineHeader(host.name, host.address, machine.connected)
             Spacer(Modifier.height(18.dp))
             Text(machineStatus(host, machine), fontSize = 12.sp, color = Muted)
+            pairedKey(host)?.let { Text("Computer key fingerprint $it", fontSize = 12.sp, color = Muted) }
             machine.error?.let { Spacer(Modifier.height(10.dp)); SelectionContainer { Text(it, color = Blocked, fontSize = 12.sp, lineHeight = 18.sp) } }
             LinkedMachineRows(linked, host.name)
             Spacer(Modifier.height(10.dp))
@@ -158,6 +164,8 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
 
 /** Settings, a tab: the machines and pairing first, then the display, alerts and About. */
 @Composable fun SettingsScreen(state: PocketState, vm: PocketViewModel, machines: MachineActions) {
+    val lock by AppLock.state.collectAsStateWithLifecycle()
+    val activity = LocalActivity.current as? MainActivity
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)) {
         MachinesSection(state, machines)
         Spacer(Modifier.height(34.dp)); HorizontalDivider(color = Border); Spacer(Modifier.height(26.dp))
@@ -184,14 +192,19 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
         AlertRow("Needs you", "When an agent asks something or waits for approval.", state.alertBlocked) { vm.setAlerts(blocked = it) }
         AlertRow("Done", "When an agent finishes a turn while you aren’t looking at it.", state.alertDone) { vm.setAlerts(done = it) }
         AlertRow("Watch in background", "Keep your machines connected when you leave the app, so alerts still arrive. Android shows a “Watching” notification meanwhile.", state.watch) { vm.setWatch(it) }
-        Spacer(Modifier.height(8.dp)); AssistantRow(); Spacer(Modifier.height(8.dp))
-        AlertRow("Answer from the lock screen", "Notifications show what the agent asks on the lock screen, and Reply and Yes work there without unlocking. Anyone holding your locked phone could answer, so it starts off.", state.lockAnswers) { vm.setLockAnswers(it) }
+        Spacer(Modifier.height(8.dp)); AssistantRow(lock.enabled); Spacer(Modifier.height(8.dp))
+        AlertRow("Lock Automagik", "Ask for your fingerprint, face or screen lock to open Automagik, every time it starts and 60 seconds after you leave it. Notifications then only say an agent needs you; answer in the app.", lock.enabled) {
+            activity?.requestAppLock(if (it) AppLock.Purpose.ENABLE else AppLock.Purpose.DISABLE)
+        }
+        if (!lock.enabled) AlertRow("Answer from the lock screen", "Notifications show what the agent asks on the lock screen, and Reply and Yes work there without unlocking. Anyone holding your locked phone could answer, so it starts off.", state.lockAnswers) { vm.setLockAnswers(it) }
         Spacer(Modifier.height(4.dp))
-        Text("Alerts are Android notifications, in the app too: tap one to open its agent, or answer from it. The agent on screen only sounds when it needs you. They come while Automagik is connected.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
+        val alertHelp = if (lock.enabled) "Alerts are Android notifications, in the app too: tap one to open its agent and answer in the app."
+            else "Alerts are Android notifications, in the app too: tap one to open its agent, or answer from it."
+        Text("$alertHelp The agent on screen only sounds when it needs you. They come while Automagik is connected.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         Spacer(Modifier.height(34.dp)); HorizontalDivider(color = Border); Spacer(Modifier.height(26.dp))
         SmallLabel("About"); Spacer(Modifier.height(15.dp))
         Row(verticalAlignment = Alignment.CenterVertically) { Brand(36); Spacer(Modifier.width(12.dp)); Column { Text("Automagik", fontWeight = FontWeight.SemiBold); Text("${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · Android companion", color = Muted, fontSize = 12.sp) } }
-        Spacer(Modifier.height(16.dp)); UpdateRow()
+        AppUpdates.Settings()
         CrashRow()
         Spacer(Modifier.height(18.dp)); Text("A native companion for your existing herdr-core, in Automagik’s colors, light or dark as your phone is set. Spaces and tabs follow the desktop’s design.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         Spacer(Modifier.height(10.dp)); Text("With Watch in background on, connections stay open while you’re away and come back on their own after a drop. Otherwise Android may close them; pull down on the agent list or tap Reconnect. Your remote programs keep running.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
@@ -200,7 +213,7 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
 }
 
 /** Settings: make Automagik the phone's assistant, so holding the side button opens its panel (lock screen too). */
-@Composable fun AssistantRow() {
+@Composable fun AssistantRow(appLockEnabled: Boolean = false) {
     val context = LocalContext.current
     fun isHeld() = Build.VERSION.SDK_INT >= 29 && context.getSystemService(RoleManager::class.java).isRoleHeld(RoleManager.ROLE_ASSISTANT)
     var held by remember { mutableStateOf(isHeld()) }
@@ -220,7 +233,8 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
         Column(Modifier.weight(1f)) {
             Text("Side button assistant", fontSize = 15.sp, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(2.dp))
-            Text(if (held) "Automagik is your assistant. Hold the side button to see what needs you and answer by typing or speaking, on the lock screen too."
+            Text(if (appLockEnabled) "Hold the side button to open Automagik. Unlock to see what needs you and answer by typing or speaking."
+                else if (held) "Automagik is your assistant. Hold the side button to see what needs you and answer by typing or speaking, on the lock screen too."
                 else "Hold the side button to open Automagik over any screen, the lock screen too: see what needs you and answer by typing or speaking.",
                 color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
         }
@@ -264,47 +278,6 @@ class MachineActions(val pair: () -> Unit, val repair: (HostProfile) -> Unit, va
             Spacer(Modifier.weight(1f))
             TextButton(onClick = { CrashLog.clear(); report = null }) { Text("Clear", fontSize = 13.sp, color = Muted) }
         }
-    }
-}
-
-/** Settings → About: check for a newer build, install it, and whether updates install on their own. */
-@Composable fun UpdateRow() {
-    val update by Updater.state.collectAsStateWithLifecycle()
-    val auto by Updater.auto.collectAsStateWithLifecycle()
-    val updated by Updater.updated.collectAsStateWithLifecycle()
-    val activity = LocalActivity.current
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        updated?.let { Text(it, color = Muted, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
-        when (val u = update) {
-            is UpdateState.Available, is UpdateState.NeedsPermission, is UpdateState.Waiting -> {
-                val release = when (u) { is UpdateState.Available -> u.release; is UpdateState.NeedsPermission -> u.release; else -> (u as UpdateState.Waiting).release }
-                Button(onClick = { activity?.let(Updater::start) }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
-                    Text(if (u is UpdateState.Waiting) "Install ${release.label} now" else "Update to ${release.label}") }
-                if (u is UpdateState.Waiting) Text("Downloaded. It installs on its own when you leave Automagik.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
-                if (release.notes.isNotBlank()) Text(release.notes, color = Muted, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
-                if (u is UpdateState.NeedsPermission) Text("Allow Automagik to install apps, then come back here. Android asks this once.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
-            }
-            is UpdateState.Downloading -> {
-                Text("Downloading ${u.release.label}…", fontSize = 13.sp)
-                LinearProgressIndicator(progress = { u.progress }, Modifier.fillMaxWidth(), color = Accent, trackColor = Border)
-            }
-            is UpdateState.Installing, is UpdateState.Confirm -> Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text("Installing…", fontSize = 13.sp)
-            }
-            else -> Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = { Updater.check() }, enabled = u != UpdateState.Checking) { Text(if (u == UpdateState.Checking) "Checking…" else "Check for updates") }
-                Spacer(Modifier.width(12.dp))
-                when (u) {
-                    UpdateState.Current -> Text("You have the latest build.", color = Muted, fontSize = 12.sp)
-                    is UpdateState.Failed -> Text(u.message, color = Blocked, fontSize = 12.sp, lineHeight = 17.sp)
-                    else -> {}
-                }
-            }
-        }
-        if ((update as? UpdateState.Failed)?.release != null) TextButton(onClick = { activity?.let(Updater::start) }, contentPadding = PaddingValues(0.dp)) { Text("Try again") }
-        AlertRow("Install updates automatically", if (Build.VERSION.SDK_INT >= UpdatePolicy.SILENT_SDK)
-            "New versions download on Wi-Fi and install while you’re away from the app; a notification says so after. Off, a notification asks first."
-            else "Android ${Build.VERSION.RELEASE} asks before each update: a notification says when one is ready.", auto) { Updater.setAuto(it) }
     }
 }
 

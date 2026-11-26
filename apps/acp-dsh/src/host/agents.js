@@ -5,10 +5,23 @@ import { accessSync, constants, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { delimiter, dirname, join } from 'node:path'
+import { AGY_OFF_NAME } from './agy-off.js'
 import { batchSafe } from './batch-spawn.js'
 
 // Efforts as DSH lists them, from least to most.
 const efforts = (...ids) => Object.freeze({ efforts: Object.freeze(ids.map(id => Object.freeze({ id, name: id.charAt(0).toUpperCase() + id.slice(1) }))) })
+
+const MANAGER_ASK = [
+  'bw get*', 'bw list*', 'bw export*', 'bw unlock*', 'bw serve*',
+  'bws secret get*', 'bws secret list*', 'bws run*',
+  'op read*', 'op run*', 'op inject*', 'op item get*',
+  'pass-cli item view*', 'pass-cli item get*', 'pass-cli item run*', 'pass-cli run*',
+  'pass-cli item show*', 'pass-cli item totp*', 'pass-cli inject*', 'pass-cli export*',
+  'pass-cli item attachment*', 'pass-cli pat create*', 'pass-cli pat renew*', 'pass-cli personal-access-token create*',
+  'pass-cli personal-access-token renew*', 'pass-cli agent create*', 'pass-cli agent renew*', 'pass-cli item list *--show-secrets*',
+  'keepassxc-cli show*', 'keepassxc-cli export*', 'secret-tool lookup*',
+  'vault kv get*', 'vault read*',
+]
 
 export const CLAUDE_HARD_ASK = Object.freeze([
   'Bash(rm -r*)',
@@ -54,6 +67,7 @@ export const CLAUDE_HARD_ASK = Object.freeze([
   'Bash(*FLUSHDB*)',
   'Bash(*flushdb*)',
   'Bash(gh auth token*)',
+  ...MANAGER_ASK.map(command => `Bash(${command})`),
   'Bash(* .env)',
   'Bash(*/.env)',
   'Bash(*.git-credentials*)',
@@ -90,6 +104,7 @@ export const CLAUDE_HARD_ASK = Object.freeze([
   ...(process.platform === 'win32' ? [
     'PowerShell(Remove-Item *-Recurse*)', 'PowerShell(git push *--force*)', 'PowerShell(git push * -f*)',
     'PowerShell(git reset *--hard*)', 'PowerShell(git clean *-*f*)',
+    ...MANAGER_ASK.map(command => `PowerShell(${command})`),
   ] : []),
 ])
 
@@ -99,8 +114,9 @@ export const AGENTS = Object.freeze({
     // claude-agent-acp passes this session's settings to the SDK; lists merge with the person's
     // settings, and Bash rules check subcommands too, including in auto mode.
     hardAsk: () => ({ claudeCode: { options: { settings: { permissions: { ask: [...CLAUDE_HARD_ASK] } } } } }),
-    // RFC 0031: asked only through acpAgents.ownMode.
-    ownMode: 'auto',
+    // RFC 0031 question 5: withhold Claude Code's own auto mode until it is captured from a signed-in CLI.
+    // A scratch MCP server passed in session/new ran a call in auto without a permission request.
+    // The same applies to any non-bridge MCP server (docs/research/acp-dsh-tools-spike.md).
     key: 'claude',
     name: 'Claude Code (ACP)',
     // The models and efforts come from the agent itself (catalog.js). Until it has answered once,
@@ -154,19 +170,37 @@ export const AGENTS = Object.freeze({
     // index.js supplies the chat profile modes after writing the isolated home's profiles.
     // DSH's Auto is Codex's auto review. Most wanted first, the strict mode last (see above).
     modeFor: level => (level.full ? ['agent-full-access', 'workspace-write'] : level.auto ? ['agent', 'workspace-write'] : level.sandbox === 'read-only' ? ['read-only'] : ['workspace-write']),
-    // codex-acp has no switch for its built-in tools, so they stay and are named in the turn;
-    // it ignores `tools/list_changed` and a new server list on resume, so a changed tool set
+    // Codex keeps its own tools unless the Bot team's switch keeps them off for a Session; then
+    // a config checked on every spawn removes all but the bridge's transport, and the spawn is
+    // refused otherwise (codex-native.js). A model on `nativeKeptModels` always keeps them. It
+    // ignores `tools/list_changed` and a new server list on resume, so a changed tool set
     // arrives by fork (session/fork with the new servers, then session/close on the source).
     refresh: 'fork',
+    nativeSwitch: 'config',
+    // Models whose tools Codex does not show to `debug prompt-input` (not code mode; measured
+    // on codex-cli 0.171.0). The Bot team's switch does not apply to them: they launch as
+    // today, with Codex's own tools (RFC 0003, Codex amendment).
+    nativeKeptModels: Object.freeze(['gpt-5.5']),
   }),
   // Agents whose CLI is itself an ACP server (#959): `launch` is how it starts (kind `native`,
   // the CLI with these arguments), and there is no adapter package, so nothing is installed for
   // them. With no `cliPackage`, Automagik never installs these CLIs either: one that is not on
-  // this computer is shown with its install page. Their sign-in is the CLI's own, made in a
-  // terminal (`signInHint`, the command a signed-out turn names); whether it holds is what the
+  // this computer is shown with its install page. The one exception is a row that names a
+  // manual `cliInstall` (Antigravity, #2048): its CLI installs only when the person clicks
+  // Install, from its vendor's release manifest (checked against the manifest's sha512; the
+  // manifest has no signature, agy-source.js), and then updates itself. Their sign-in is the
+  // CLI's own, made in a terminal (`signInHint`, the command a signed-out turn names; for a copy
+  // Automagik installed, its absolute path, signInHintOf); whether it holds is what the
   // agent's own ACP session says (catalog.js `signedIn`), since none of the three has a status
   // command that names one sign-in. They are off until the person turns one on, which is their
   // word that Automagik may use the sign-in that CLI has on this computer (index.js).
+  //
+  // The exception is a native agent with `isolatedHome` (Antigravity): it runs in this
+  // installation's own home, as Claude Code and Codex do (cli-homes.js), so the sign-in the
+  // person's terminal has never reaches it. It signs in only in the app: Settings asks it over
+  // ACP (`authenticate` with its `acpSignIn` method). Its terminal command in that same home
+  // (isolatedSignInHintOf) goes only to the log, never to the page or a chat. A Bot never signs
+  // it in.
   //
   // Each is put in its own `default` mode, the one that asks, whatever DSH's level: what it asks
   // is answered by DSH's approval under the Session's level. Its own permission settings still
@@ -193,11 +227,35 @@ export const AGENTS = Object.freeze({
     defaultName: 'Antigravity',
     fallback: Object.freeze([Object.freeze({ id: 'default', name: 'Antigravity', reasoning: efforts('low', 'medium', 'high') })]),
     cli: 'agy',
-    installUrl: 'https://antigravity.google/docs',
+    // Only the fallback when the app's own install fails: Install is the app's (`cliInstall`).
+    installUrl: 'https://antigravity.google/docs/getting-started',
+    // Installed on the person's click only, from Google's release manifest (agy-source.js),
+    // into acp/clis/agy; never on a timer, a plugin change or a switch. No update: it updates
+    // itself.
+    cliInstall: Object.freeze({ kind: 'manifest', id: 'agy', manual: true }),
     // `agy acp` (its help: "Start the Agent Client Protocol (ACP) stdio server").
     launch: Object.freeze({ kind: 'native', args: Object.freeze(['acp']) }),
+    // The Bot team's native-tools switch (#1564), by launch args as omp's: OFF adds our own main
+    // agent with no tools (`--agent`, "Agent for the ACP session") and our own settings folder
+    // denying every tool action (`--cli_dir_name`, "Subdirectory under app_data_dir for CLI
+    // settings and logs": listed by `agy acp --help` 1.5.15 and 1.5.16, the same text, not on
+    // agy's documentation pages).
+    // Both files are written at each OFF start (agy-off.js). agy updates itself, so a later agy
+    // may drop or ignore either: acp-dsh's own guard (`refuseTools`) stays the last line.
+    nativeSwitch: 'args',
+    offArgs: Object.freeze(['--agent', AGY_OFF_NAME, '--cli_dir_name', AGY_OFF_NAME]),
     // `agy acp --login`: "Log in with Google interactively, then exit (ACP terminal auth)".
     signInHint: 'agy acp --login',
+    // Its own home in this installation (#2048), and its sign-in in the app: ACP `authenticate`
+    // with Google's personal sign-in, which opens the browser on this computer.
+    isolatedHome: true,
+    acpSignIn: 'oauth-personal',
+    // Google's own OAuth entry points: a sign-in link agy prints while it signs in is shown as a
+    // link only when it is one of these (isSignInUrl).
+    signInUrls: Object.freeze([
+      'accounts.google.com/o/oauth2/v2/auth',
+      'accounts.google.com/o/oauth2/auth',
+    ]),
     modeFor: () => ['default'],
   }),
   'acp-omp': Object.freeze({
@@ -209,6 +267,8 @@ export const AGENTS = Object.freeze({
     installUrl: 'https://github.com/can1357/oh-my-pi',
     // `omp acp` (its help: "Run omp as an ACP (Agent Client Protocol) server over stdio").
     launch: Object.freeze({ kind: 'native', args: Object.freeze(['acp']) }),
+    nativeSwitch: 'args',
+    offArgs: Object.freeze(['--no-tools', '--no-extensions', '--no-lsp']),
     // `omp login`: "Log in to a model provider (terminal counterpart of /login)".
     signInHint: 'omp login',
     modeFor: () => ['default'],
@@ -217,6 +277,146 @@ export const AGENTS = Object.freeze({
 
 /** Whether `spec`'s CLI is itself the ACP server: no adapter package, nothing to install. */
 export const isNative = spec => spec?.launch?.kind === 'native'
+
+/**
+ * The id of the CLI Automagik installs for `spec`, or undefined when it installs none: the npm
+ * package (`cliPackage`) or a manual install's own id (`cliInstall.id`, `agy`). Both share the
+ * `acp/clis` folder names and the CLI store's failure keys, so an id is never also a package.
+ */
+export const cliIdOf = spec => spec?.cliPackage ?? spec?.cliInstall?.id
+
+const TRAVERSAL = /(^|[\\/])\.\.([\\/]|$)/
+// Inside POSIX single quotes everything is literal but the quote itself; a backtick would also
+// end the chat's code span (adapter.js). PowerShell also takes the typographic double quotes.
+// Line separators and bidi controls are refused too: they make the shown command read
+// differently from what it pastes. welcome-dsh's isSignInHint uses the same class.
+const POSIX_UNSAFE = /['`\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069]/u
+const WIN32_UNSAFE = /["`$\u201C\u201D\u201E\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069]/u
+
+/**
+ * The terminal command that signs in to `spec`'s CLI, as shown (never run): for a copy
+ * Automagik installed itself (a manual `cliInstall`), which is not on PATH, its absolute path,
+ * quoted for the shell the person pastes it into, with the static hint's arguments. Otherwise,
+ * or when the path holds what that quoting cannot carry, the static `signInHint`.
+ * @param {object} spec an entry of AGENTS
+ * @param {{ path?: string, managed?: boolean } | undefined} detail the CLI as discovery found it
+ */
+export function signInHintOf(spec, detail, platform = process.platform) {
+  const hint = spec?.signInHint
+  if (typeof hint !== 'string' || spec.cliInstall?.manual !== true) return hint
+  const path = detail?.managed === true ? detail.path : undefined
+  if (typeof path !== 'string' || path.length > 4000 || TRAVERSAL.test(path)) return hint
+  if (!hint.startsWith(`${spec.cli} `)) return hint
+  const args = hint.slice(spec.cli.length + 1)
+  if (platform === 'win32') {
+    return /^[A-Za-z]:\\/.test(path) && !WIN32_UNSAFE.test(path) ? `& "${path}" ${args}` : hint
+  }
+  return path.startsWith('/') && !POSIX_UNSAFE.test(path) ? `'${path}' ${args}` : hint
+}
+
+/**
+ * Whether `value` is a sign-in link `spec` may hand the page while it signs in: only one of its
+ * own OAuth entry points (`signInUrls`), over https, with no account, port or fragment, asking
+ * for a code for a named client, with a loopback return address on port 1024 or above
+ * (isLoopbackReturn) and one printable state of 8-512 characters, which a pasted-back address
+ * must carry (#2048, sign-in-callback.js). Never an arbitrary URL printed or handed over by a
+ * process.
+ * @param {object} spec an entry of AGENTS
+ * @param {unknown} value
+ */
+export function isSignInUrl(spec, value) {
+  const allowed = spec?.signInUrls
+  if (!Array.isArray(allowed) || typeof value !== 'string' || value.length > 8192) return false
+  if (/[\p{Cc}\s]/u.test(value)) return false
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return false
+    if (!allowed.includes(`${url.hostname}${url.pathname}`)) return false
+    return url.searchParams.get('response_type') === 'code'
+      && /^[\w.-]{1,256}$/.test(url.searchParams.get('client_id') ?? '')
+      && isLoopbackReturn(url.searchParams.get('redirect_uri')) && stateOf(url)
+  } catch { return false }
+}
+
+// Where Google sends the person back: agy's own listener on this computer, `http:` on a
+// loopback host with an explicit port, no account or fragment. The path is not pinned: the
+// loopback is the point, and an agy release may move its path.
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
+function isLoopbackReturn(value) {
+  if (typeof value !== 'string') return false
+  try {
+    const back = new URL(value)
+    return back.protocol === 'http:' && LOOPBACK.has(back.hostname) && /^\d+$/.test(back.port)
+      && Number(back.port) >= 1024 && !back.username && !back.password && !back.hash
+  } catch { return false }
+}
+
+// The state agy waits for back: exactly one, printable, 8-512 characters (#2048, paste-back).
+const stateOf = url => {
+  const states = url.searchParams.getAll('state')
+  return states.length === 1 && /^[^\p{Cc}\s]{8,512}$/u.test(states[0])
+}
+
+/**
+ * A D-Bus session bus address that can never connect: `/dev/null` is a character device on
+ * every Linux and macOS, so no path under it can exist or be made, root included. agy finds the
+ * session bus by the user id when the address is unset, so it gets this one instead (#2048).
+ */
+export const NO_BUS_ADDRESS = 'unix:path=/dev/null/automagik-no-bus'
+
+/** The name agy runs its browser opener by, found on PATH, where Automagik stands in for it. */
+export const SIGN_IN_OPENERS = Object.freeze({ linux: 'xdg-open', darwin: 'open' })
+
+/**
+ * The stand-in for agy's browser opener during an in-app sign-in (#2048): it opens nothing and
+ * only appends the one https link it is given to `<drop>/links`, for the app to read, check and
+ * open itself. Shell built-ins only, so it execs nothing. Undefined when `drop` is not an
+ * absolute path the single quotes can carry.
+ * @param {string} drop the attempt's own folder
+ */
+export function signInOpenerScript(drop) {
+  if (typeof drop !== 'string' || !drop.startsWith('/') || drop.length > 4000 || TRAVERSAL.test(drop)
+    || POSIX_UNSAFE.test(drop)) return undefined
+  return `#!/bin/sh
+# Automagik: hands agy's sign-in link to the app. It opens nothing and reads nothing else.
+[ "$#" -eq 1 ] || exit 0
+case "$1" in https://*) ;; *) exit 0 ;; esac
+umask 077
+printf '%s\\n' "$1" >> '${drop}/links'
+exit 0
+`
+}
+
+/**
+ * The terminal command that signs in to an agent with its own home (`isolatedHome`), for the log
+ * only (never run, never shown on the page or in a chat): its CLI by its absolute path, in that
+ * home and nothing of the person's. On POSIX `env -i` drops every other variable
+ * (XDG_RUNTIME_DIR, API keys) and the D-Bus address is one that can never connect
+ * (NO_BUS_ADDRESS); on Windows the variables last for that PowerShell window
+ * only, so it is run in a new one. Undefined when the home or the path is not absolute or holds
+ * what the quoting cannot carry.
+ * @param {object} spec an entry of AGENTS
+ * @param {{ path?: string } | undefined} detail the CLI as discovery found it
+ * @param {string} home the agent's home (CliHomes.home)
+ */
+export function isolatedSignInHintOf(spec, detail, home, platform = process.platform) {
+  const hint = spec?.signInHint
+  if (typeof hint !== 'string' || !hint.startsWith(`${spec.cli} `)) return undefined
+  const args = hint.slice(spec.cli.length + 1)
+  const path = detail?.path
+  const fits = value => typeof value === 'string' && value.length <= 4000 && !TRAVERSAL.test(value)
+  if (!fits(path) || !fits(home)) return undefined
+  if (platform === 'win32') {
+    const absolute = value => /^[A-Za-z]:\\/.test(value) && !WIN32_UNSAFE.test(value)
+    if (!absolute(home) || !absolute(path) || !path.endsWith(`\\${spec.cli}.exe`)) return undefined
+    return `$env:USERPROFILE="${home}"; $env:HOME="${home}"; $env:HOMEPATH="${home}"; `
+      + `$env:APPDATA="${home}\\roaming"; $env:LOCALAPPDATA="${home}\\local"; & "${path}" ${args}`
+  }
+  const absolute = value => value.startsWith('/') && !POSIX_UNSAFE.test(value)
+  if (!absolute(home) || !absolute(path) || !path.endsWith(`/${spec.cli}`)) return undefined
+  return `env -i DBUS_SESSION_BUS_ADDRESS='${NO_BUS_ADDRESS}' PATH="$PATH" TERM="$TERM" LANG="$LANG" HOME='${home}' XDG_CONFIG_HOME='${home}/config' `
+    + `XDG_DATA_HOME='${home}/data' XDG_CACHE_HOME='${home}/cache' XDG_STATE_HOME='${home}/state' '${path}' ${args}`
+}
 
 /**
  * How an agent is started, of either kind: { command, args, env, ready, version?, key }.
@@ -231,7 +431,9 @@ export const isNative = spec => spec?.launch?.kind === 'native'
  */
 export function launchOf(spec, cli, { store, node = { command: process.execPath, env: {} }, cliEnv = {}, env = process.env, stamp = value => value } = {}) {
   if (isNative(spec)) {
-    return { command: cli, args: [...spec.launch.args], env: { ...cliEnv, PATH: [dirname(cli), env.PATH].filter(Boolean).join(delimiter) }, ready: true, key: `native ${stamp(cli)}` }
+    // An agent with its own home: the home is in the key, so a catalog kept from another home
+    // (or from before a Reset) never answers that it is signed in (catalog.js signedIn).
+    return { command: cli, args: [...spec.launch.args], env: { ...cliEnv, PATH: [dirname(cli), env.PATH].filter(Boolean).join(delimiter) }, ready: true, key: `native ${stamp(cli)}${cliEnv.HOME ? ` ${cliEnv.HOME}` : ''}` }
   }
   const bin = store?.binOf(spec.adapter, spec.bin)
   if (bin === undefined) return { ready: false }

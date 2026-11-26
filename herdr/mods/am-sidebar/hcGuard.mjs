@@ -3,7 +3,7 @@
 // A GUARDRAIL, NOT A BOUNDARY. This wrapper sits first on the pane PATH only because the pack
 // put it there (launchArgs.js startArgs and workers.js workerArgs, dsh-tui only). It refuses the
 // ordinary `hc exec` / bare `run` / file writes / machine and server commands with one line
-// naming #624, #628 and #631, and passes the allowed calls to the real hc unchanged. It is bypassable
+// naming #624, #628 and #631, and passes the allowed calls to the real hc. It is bypassable
 // by design: an absolute path to the real hc, a raw socket client, or `hc connect` skips it.
 // The hard boundary is the sandboxed socket mask plus the per-pane filtering proxy (#624),
 // tracked in #631; #628 is the full send/keys/attach scope. Labels and .herdr/bots.json are
@@ -13,11 +13,19 @@
 // `hc kill` is for the seat of a project's main bot only (#955): a member's seat and every
 // worker are refused, and end their own workers with `automagik-herdr worker kill <pane>`.
 // Every other agent's pane gets the kill shim instead (`hc-kill/hc`, runKillGuard below): that
-// one rule and nothing else, every other hc call passed to the real hc untouched.
+// shim also refuses a prefixed send to an agent or an unknown target (#1421). Both wrappers
+// refuse a send to a pane held by a dialog (#1414): they look at the target's status and, when
+// it is neither working nor blocked, its screen, and never type into or answer the dialog.
+// An Antigravity pane is read even while it reports working (RFC 0042): agy fires no hook while
+// it waits at its folder-trust or file-access question, so its status can say working, idle, done
+// or nothing, and a known prompt shape on its screen is refused the same way. A pane can still
+// start an agent between the check and delivery: a guardrail, not a guarantee. The real fix
+// for every sender is in herdr-core.
 //
-// The caller comes from the attach ledger (attach.js), the authority: a worker pane has no
-// ledger row, so its `worker.of` label names its bot and its cwd's project is the team's
-// project. The target is resolved with the real hc: `hc ls` rows carry no labels, `hc get`
+// The caller comes from the attach ledger (attach.js) in the app home recorded in the
+// caller pane's launch argv (#628). A worker pane has no ledger row, so its `worker.of`
+// label names its bot and its cwd's project is the team's project. The target is resolved
+// with the real hc: `hc ls` rows carry no labels, `hc get`
 // does, as the pack's workersIn does. The team is model.js's graph: the caller's lead chain
 // (effectiveLead), the declared lead chain it names (`bot.lead`, a planned lead included),
 // its members (descendantsOf), the project's main bot (mainBotOf), its own workers
@@ -26,27 +34,61 @@
 // included); that rank is the bots.json entry's, never the pane's role= label or an
 // environment variable, and one of its workers inherits nothing. A captain bot may also send
 // to another listed captain; both ranks come from bots.json, and workers inherit nothing.
+//
+// #628 scopes the rest of the team boundary: `send` and its shared-role widening (above);
+// `read`, `get` and `wait` on the caller's own pane, its own workers or its team graph, and
+// never on the shared-role widening (a send-only rule); `rm` on the caller's own workers only,
+// as the proxy's kill/rm rule; `put` refused, because it writes a file onto the target's
+// machine and the proxy refuses `terminal.put`. A machine target is refused on every verb but
+// `send`. The guard checks and forwards the address `hc get` answered for `send`,
+// `read`/`get`/`wait`, `label`, `kill`, `rm` and both `hc events` target options. A send with
+// `--on` forwards the bare id after checking that address is on the named machine.
+// `keys`, `attach` and `exec` are refused outright. The core types keys after about 3 seconds
+// of quiet with no condition, so a guard check can go stale before delivery. `keys` stays
+// refused until RFC 0044 delivery 6: herdr-core binds, marks and grants the caller (R1-R3)
+// and checks that grant with every write (R4, advertised as `checked_input`); then the
+// guard and the proxy allow it together, to the same set as `send`. `attach` opens a
+// persistent keyboard and stays refused for sandboxed panes for good (RFC 0044 Q5).
+// `ls` and plain `events` stay cross-pane: a wrapper cannot filter a table's text or a
+// stream without changing what the real hc printed. The per-pane proxy filters a sandboxed
+// pane's list and refuses its event subscription.
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, sep } from "node:path";
+import { homedir, userInfo } from "node:os";
+import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readApprovedRecord } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
-import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
-import { ENV, KILL_GUARD_NAME, WORKER_OF_LABEL, isKillGuardWord } from "./workers.js";
+import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, isSendGrantRole, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
+export { isSendGrantRole, SEND_GRANT_ROLES } from "./model.js";
+import { agentKeyOfArgv, resolveAgent } from "./models.js";
+import { pendingDialog, rateLimitDialog } from "./dialog.js";
+import { agyCandidate, agyPromptOf } from "./agyPrompt.js";
+import { ENV, KILL_GUARD_NAME, SESSION_LABEL, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL,
+  WORKER_OF_LABEL, isKillGuardWord, stableRootOf } from "./workers.js";
 
-/** The commands a sandboxed bot may call unchanged. */
+/** The commands a sandboxed bot may call unchanged (its reads and waits are team-scoped below). */
 export const ALLOWED_VERBS = new Set([
-  "send", "read", "ls", "get", "wait", "put", "label", "kill", "rm", "events", "schema", "templates",
+  "send", "read", "ls", "get", "wait", "label", "kill", "rm", "events", "schema", "templates",
 ]);
-/** Doc-only forms that touch no core (and `hc send --help` and friends for an allowed command). */
+export const OWNER_QUESTION_LABEL = "automagik-herdr.needs-owner";
+/**
+ * Commands the guard refuses by name, with their own line (#628). `put` writes a file beside a
+ * terminal on its machine, and the proxy refuses `terminal.put`, so a guarded pane refuses it
+ * too; its `--help` still passes, like every other named command's.
+ */
+const REFUSED_VERBS = new Map([
+  ["put", "a file beside another pane on its machine (hc's terminal.put) is refused, as the proxy refuses terminal.put"],
+]);
+/** Doc-only forms that touch no core (and `hc send --help` and friends for a named command). */
 const DOC_ONLY = new Set(["--help", "-h", "--version", "--skill"]);
-/** The `operation` of `hc run`: the one worker start the pack emits. */
+/** The `operation` of `hc run`: the one worker start the pack emits, for any agent it launches. */
 const WORKER_LABELS = new Set([
   WORKER_OF_LABEL, "task", "task.project", "task.lead", "branch", "worker.role", "herdr.space",
+  SESSION_LABEL, WORKER_MODEL_LABEL, WORKER_EFFORT_LABEL, WORKER_AGY_MODE_LABEL,
 ]);
 /** The shared verdict ranks: targets with one of these bots.json ranks are reachable. */
 export const SHARED_ROLES = ["tester", "reviewer", "fixer"].filter((role) => RANKS.includes(role));
@@ -90,6 +132,8 @@ export async function runGuard(argv, env = process.env) {
       return real ? passthrough(real, args, env) : failedClosed("the real hc is not on PATH");
     }
     if (!verb || verb.startsWith("-")) return refused("hc without a command");
+    const named = REFUSED_VERBS.get(verb);
+    if (named) return refused(`${verb}: ${named}`);
     if (!ALLOWED_VERBS.has(verb) && verb !== "run") return refused(verb === "file" ? `file ${args[1] ?? ""}` : verb);
     const on = onWord(args);
     if (on.present && verb !== "send") return refused(`${verb} with --on`);
@@ -102,23 +146,57 @@ export async function runGuard(argv, env = process.env) {
     const real = findRealHc(env);
     if (!real) return failedClosed("the real hc is not on PATH");
     if (verb === "run") {
-      const why = runProblem(args, env, terminal);
+      const why = runProblem(real, args, env, terminal);
       if (why) return refused(`run: ${why}`);
       return passthrough(real, args, env);
     }
     if (verb === "send") {
-      const why = sendProblem(real, args, env, terminal, on);
-      if (why) return refused(`send: ${why}`);
+      const send = sendArgs(args);
+      const hit = sendProblem(real, send, env, terminal);
+      if (typeof hit === "string") return refused(`send: ${hit}`);
+      const why = sendTextProblem(send.texts, hit.get);
+      if (why) return refused(`send: ${why}; start it with other text (your name, say)`);
+      if (send.texts.length) {
+        const held = heldTarget(real, hit, env);
+        if (held) return heldRefusal(held);
+      }
+      args[send.targetIndex] = send.on === null ? hit.address : hit.address.slice(send.on.length + 1);
       return passthrough(real, args, env);
     }
     if (verb === "label") {
-      const why = labelProblem(real, args, env, terminal, on);
-      if (why) return refused(`label: ${why}`);
+      const hit = labelProblem(real, args, env, terminal, on);
+      if (typeof hit === "string") return refused(`label: ${hit}`);
+      if (hit) args[hit.index] = hit.address;
       return passthrough(real, args, env);
     }
     if (verb === "kill") {
-      const why = killProblem(real, env, terminal);
-      if (why) return refused(`kill: ${why}`);
+      const hit = killProblem(real, args, env, terminal);
+      if (typeof hit === "string") return refused(`kill: ${hit}`);
+      if (hit) args[hit.index] = hit.address;
+      return passthrough(real, args, env);
+    }
+    if (verb === "events") {
+      // #628: both target options are resolved and re-checked as addresses; the checked target
+      // is the one forwarded, so a name that resolves to a machine never reaches hc.
+      const why = eventsProblem(real, args, env);
+      if (why) return refused(`events: ${why}`);
+      return passthrough(real, args, env);
+    }
+    if (verb === "rm") {
+      // #628: a pane ends its own workers, as the proxy's kill/rm rule; never a member's seat,
+      // another bot's worker or a stranger's pane, and a worker pane ends nothing.
+      const hit = rmProblem(real, args, env, terminal);
+      if (typeof hit === "string") return refused(`rm: ${hit}`);
+      if (hit) args[hit.index] = hit.address;
+      return passthrough(real, args, env);
+    }
+    if (READ_VERBS.has(verb)) {
+      // #628: reads and waits see the caller's own pane, its own workers and its team graph; the
+      // shared send roles stay send only. The checked address is the one forwarded, so a rename
+      // between the check and the call cannot redirect it (the proxy's rule).
+      const hit = readProblem(real, args, env, terminal, verb);
+      if (typeof hit === "string") return refused(`${verb}: ${hit}`);
+      if (hit) args[hit.index] = hit.address;
       return passthrough(real, args, env);
     }
     return passthrough(real, args, env);
@@ -129,14 +207,17 @@ export async function runGuard(argv, env = process.env) {
 
 function docOnly(args) {
   if (args.length === 1 && DOC_ONLY.has(args[0])) return true;
-  return args.length === 2 && ALLOWED_VERBS.has(args[0]) && (args[1] === "--help" || args[1] === "-h");
+  return args.length === 2 && (ALLOWED_VERBS.has(args[0]) || REFUSED_VERBS.has(args[0]))
+    && (args[1] === "--help" || args[1] === "-h");
 }
 
 function terminalOf(env) {
-  return typeof env.HC_TERMINAL_ID === "string" ? env.HC_TERMINAL_ID.trim() : "";
+  const terminal = typeof env.HC_TERMINAL_ID === "string" ? env.HC_TERMINAL_ID.trim() : "";
+  if (isMachineAddress(terminal)) throw new Error("the caller's pane is machine-qualified");
+  return terminal;
 }
 
-// ---- the kill shim: the one rule every other agent's pane gets (#955) ----
+// ---- the kill shim: kill and prefixed-send rules for every other agent's pane (#955, #1421) ----
 
 /** The kill shim's own folder, beside this module (workers.js KILL_GUARD_DIR). */
 export const KILL_GUARD_DIR = join(dirname(SELF_MODULE), KILL_GUARD_NAME);
@@ -153,14 +234,22 @@ const killFailed = (reason) => {
   return 1;
 };
 
+const sendRefused = (prefix, target, reason = "it would run as a command in that agent, not reach it as text") => {
+  say(`hc send: refused a message starting with "${prefix}" to ${oneLine(target)}: ${reason} (#1421). Start it with other text (your name, say); a real command goes with hc keys.`);
+  return 2;
+};
+
 /**
  * The `hc kill` shim for a pane of any agent other than dsh-tui (Claude Code, Codex,
  * Antigravity and the rest): `argv` as the pane's shell gave it. A call whose command is
  * `kill`, in any flag order (`hc kill --json t1`, `hc --json kill t1`), is checked by the
  * guard's own rule (killProblem: the seat of a `kind: "main"` bot only) and refused to every
- * worker and every other seat, with the verb that ends a bot's own worker. Every other call,
- * `hc kill --help` included, goes to the real hc with the same words, stdio and exit code; the
- * shim reads nothing for it. A kill it cannot check (no HC_TERMINAL_ID, an unreadable ledger)
+ * worker and every other seat, with the verb that ends a bot's own worker. It also refuses a
+ * prefixed send to an agent or an unknown target (#1421); allowed prefixed sends use the checked
+ * address. A pane can still start an agent between the check and delivery: a guardrail, not a
+ * guarantee; the real fix for every sender is in herdr-core. Every other call, help included,
+ * goes to the real hc with the same words, stdio and exit code; the shim reads nothing for it.
+ * A kill it cannot check (no HC_TERMINAL_ID, an unreadable ledger)
  * is refused; a call it cannot pass on says so and exits 127. It stops the honest path only:
  * the real hc by its full path, a raw socket or `hc connect` skips it.
  */
@@ -173,12 +262,40 @@ export async function runKillGuard(argv, env = process.env) {
     return 127;
   }
   const asksHelp = args.includes("--help") || args.includes("-h");
-  if (hcVerbOf(args) !== "kill" || asksHelp) return passthrough(real, args, env, { plain: true });
+  const verb = hcVerbOf(args);
+  if (verb === "send" && !asksHelp) {
+    const send = sendArgs(args);
+    const prefix = send.texts.map(commandPrefixOf).find(Boolean);
+    if (send.target && send.texts.length) {
+      let hit;
+      try {
+        hit = checkedTargetOf(real, send.target, send.on, env);
+      } catch {
+        if (prefix) return sendRefused(prefix, send.target, "the target could not be checked");
+        return passthrough(real, args, env, { plain: true });
+      }
+      if (hit.why) {
+        say(`hc send: refused ${oneLine(hit.why)}.`);
+        return 2;
+      }
+      if (send.on && hit.address && !hit.address.startsWith(`${send.on}/`)) {
+        say("hc send: refused because hc resolved the target off the --on machine (#628).");
+        return 2;
+      }
+      if (prefix && sendTextProblem(send.texts, hit.get)) return sendRefused(prefix, send.target);
+      const held = heldTarget(real, hit, env);
+      if (held) return heldRefusal(held);
+      if (hit.address) args[send.targetIndex] = send.on ? hit.address.split("/").at(-1) : hit.address;
+    }
+    return passthrough(real, args, env, { plain: true });
+  }
+  if (verb !== "kill" || asksHelp) return passthrough(real, args, env, { plain: true });
   try {
     const terminal = terminalOf(env);
     if (!terminal) return killRefused("kill: a call without HC_TERMINAL_ID cannot be checked");
-    const why = killProblem(real, env, terminal);
-    if (why) return killRefused(`kill: ${why}`);
+    const hit = killProblem(real, args, env, terminal);
+    if (typeof hit === "string") return killRefused(`kill: ${hit}`);
+    if (hit) args[hit.index] = hit.address;
   } catch (e) {
     return killRefused(`kill: the caller could not be checked (${oneLine(e?.message ?? e)})`);
   }
@@ -188,7 +305,7 @@ export async function runKillGuard(argv, env = process.env) {
 /**
  * The real hc for the kill shim: the first executable `hc` on PATH outside every folder that
  * looks like a guard (an hcGuard.mjs beside it), of this version or another. The shim guards
- * one command, so it never hands a call to another guard and never sets the re-entry marker.
+ * its own rules, so it never hands a call to another guard and never sets the re-entry marker.
  */
 function hcPastGuards(env) {
   const self = new Set([realOrNull(join(KILL_GUARD_DIR, "hc")), realOrNull(SELF_ENTRY), realOrNull(process.argv[1])].filter(Boolean));
@@ -236,9 +353,48 @@ export function isGuardFolder(dir) {
   try { bytes = readFileSync(join(dir, "..", "hcGuard.mjs")); } catch { return false; }
   return SELF_BYTES !== null && bytes.equals(SELF_BYTES);
 }
-/** A folder the loose rule would call a guard, which isGuardFolder cannot vouch for (#643). */
-const looksLikeGuardFolder = (dir) => typeof dir === "string" && dir !== ""
+/**
+ * A folder the loose rule would call a guard, which isGuardFolder cannot vouch for (#643); the
+ * revive unit drops it from the PATH it keeps too (#1418: another or older copy's guard).
+ */
+export const looksLikeGuardFolder = (dir) => typeof dir === "string" && dir !== ""
   && existsSync(join(dir, "..", "hcGuard.mjs"));
+
+const guardEntryHash = (file) => {
+  try { return createHash("sha256").update(readFileSync(file)).digest("hex"); } catch { return null; }
+};
+const GUARD_ENTRY_HASHES = new Set([
+  guardEntryHash(SELF_ENTRY),
+  guardEntryHash(join(KILL_GUARD_DIR, "hc")),
+  // Older guard/hc variant found in the shipped git tags checked for #1728.
+  "a65edeb17a1df82a586da83f60f07e90cd44727038126e573445010b28bea594",
+].filter(Boolean));
+
+/**
+ * A shipped guard or kill shim in the pack, stable sandbox or am install (#1728 version skew).
+ * Its canonical folder and entry hash let the CLI skip it on PATH. The guard's own byte-equal
+ * rule (#643, #721) stays in isGuardFolder.
+ */
+export function isInstalledGuardFolder(dir, env = process.env) {
+  if (typeof dir !== "string" || dir === "") return false;
+  const real = realOrNull(dir);
+  if (!real) return false;
+  const name = basename(real);
+  if (name !== "guard" && name !== KILL_GUARD_NAME) return false;
+  const parent = dirname(real);
+  if (!existsSync(join(parent, "hcGuard.mjs")) || !GUARD_ENTRY_HASHES.has(guardEntryHash(join(real, "hc")))) return false;
+
+  if (parent === realOrNull(`${appHome(env)}/mods/am-sidebar`)) return true;
+  try { if (parent === realOrNull(stableRootOf(env))) return true; } catch { /* no data home */ }
+
+  const amHome = (env.AM_HOME || join(env.HOME || homedir(), ".automagik")).replace(/\/+$/, "");
+  const store = `${amHome}/parts/automagik.am`;
+  const version = basename(parent);
+  if (version.startsWith(".") || dirname(parent) !== realOrNull(store)) return false;
+  return /^\d+\.\d+\.\d+(-[0-9a-f]+)?$/.test(version)
+    || parent === realOrNull(join(store, "current")) || parent === realOrNull(join(store, "previous"));
+}
+
 /**
  * The env for `real`: the re-entry marker only when that hc looks like a guard this guard
  * cannot vouch for. A stray hcGuard.mjs beside an ordinary real hc also sets it, and the
@@ -297,12 +453,103 @@ function hcJson(real, args, env) {
 
 const rowsOf = (ls) => (Array.isArray(ls?.terminals) ? ls.terminals : Array.isArray(ls) ? ls : []);
 
+/** The statuses an Antigravity pane is read in: agyScan.js readable, the sidebar's twin. */
+const agyReadable = (state) => state == null || state === "working" || state === "idle" || state === "done";
+
+/**
+ * The target a send must not be typed into (#1414), or null: a pane herdr-core reports blocked
+ * is waiting for a person, and a pane whose status says idle, done or nothing at all can still
+ * show a visible dialog (a linked machine, a revived pane). A working pane is mid-turn, not
+ * asking, so it is left alone. The screen look is the pack's own pendingDialog; a screen that
+ * cannot be read is left to hc's own send, never guessed at. An Antigravity pane that reports
+ * working, idle, done or nothing gets one read matched against its captured prompt shapes too
+ * (RFC 0042). The screen's text never leaves the guard. Returns the resolved address.
+ */
+export function heldTarget(real, hit, env) {
+  if (!hit?.get) return null;
+  // A finished pane has no live dialog: its last screen may still show one, and hc's own
+  // `finished` refusal is the answer the sender needs (#1414).
+  if (hit.get.state && hit.get.state !== "live") return null;
+  const state = hit.get.status?.state;
+  if (state === "blocked") return hit.address;
+  // RFC 0042: a pane its live hc get record calls Antigravity (agyCandidate) is read in these
+  // states too, once, at the address hc get answered, and refused under that address when one
+  // of its prompt shapes is on screen. agy fires no hook while it waits there.
+  const agy = agyReadable(state) && agyCandidate(hit.get) === true;
+  if (state === "working" && !agy) return null;
+  const at = agy ? hit.get.address : hit.address;
+  const read = hcJson(real, ["read", at, "--lines", "40"], env);
+  if (typeof read?.text !== "string") return null;
+  if (agy && agyPromptOf(read.text)) return at;
+  if (state === "working") return null;
+  return pendingDialog(read.text) || rateLimitDialog(read.text) ? hit.address : null;
+}
+
+/**
+ * One hc-style error line and exit 9 (hc's own `blocked` code), so a relay can tell a held pane
+ * from a transport error and route elsewhere. Names the pane, never the dialog's text, a folder
+ * or a host: the sender needs the pane and the reason, not the person's screen.
+ */
+function heldRefusal(address) {
+  const message = `${address} is held by a dialog: a person must answer a question, permission or sign-in in it, so nothing was sent.`;
+  const hint = "Answer the dialog in that pane, or route this message to another pane; it was not typed and was not dropped.";
+  say(JSON.stringify({ error: { kind: "blocked", message, hint } }));
+  return 9;
+}
+
 // ---- caller: the attach ledger is the authority; a worker pane's worker.of is the fallback ----
 
 const appHome = (env) => (env.HERDR_APP_HOME || join(env.HOME || homedir(), ".config/herdr-app")).replace(/\/+$/, "");
 
-function foldOf(env) {
-  const path = attachPath(appHome(env));
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Read the recorded launch prefix. Returns { home } or { error }; defaultHome is lazy. */
+export function launchHomeOf(argv, defaultHome) {
+  if (!Array.isArray(argv) || argv.length === 0) return { error: "the caller has no valid launch argv" };
+  for (const word of argv) {
+    if (typeof word !== "string") return { error: "the caller has no valid launch argv" };
+  }
+  if (argv[0] === ENV) {
+    let index = 1;
+    // Leading unsets have already removed the variable unless a later assignment sets it.
+    while (argv[index] === "-u") {
+      if (index + 1 === argv.length) return { error: "the caller's launch has an -u without a name" };
+      index += 2;
+    }
+    let home;
+    while (index < argv.length && ENV_ASSIGNMENT.test(argv[index])) {
+      const word = argv[index++];
+      if (word.startsWith("HERDR_APP_HOME=")) home = word.slice("HERDR_APP_HOME=".length);
+    }
+    if (index === argv.length) return { error: "the caller's launch has no program" };
+    if (home !== undefined) {
+      if (!isAbsolute(home) || /[\x00-\x1f\x7f]/.test(home)) {
+        return { error: "the caller's launch has an invalid HERDR_APP_HOME" };
+      }
+      return { home: home.replace(/\/+$/, "") || "/" };
+    }
+  }
+  try {
+    return { home: defaultHome() };
+  } catch {
+    return { error: "the default app home could not be read. Start or restart the bot from the sidebar or with HERDR_APP_HOME set, so its launch records the app home" };
+  }
+}
+
+function callerLaunch(real, env, terminal) {
+  const get = hcJson(real, ["get", terminal], env);
+  if (!get || typeof get !== "object" || get.error || get.address !== terminal) {
+    throw new Error("the caller's pane is not resolvable with hc");
+  }
+  if (get.state !== "live") throw new Error("the caller's pane is not live");
+  if (!Number.isSafeInteger(get.created_ms)) throw new Error("the caller's pane has no valid created_ms");
+  const { home, error } = launchHomeOf(get.argv, () => join(userInfo().homedir, ".config/herdr-app"));
+  if (error) throw new Error(error);
+  return { home, get };
+}
+
+function foldOf(home) {
+  const path = attachPath(home);
   let st;
   try {
     st = statSync(path);
@@ -315,14 +562,14 @@ function foldOf(env) {
   return foldAttach(readAttach(readFileSync(path, "utf8")).rows);
 }
 
-/** The newest this-computer binding of `terminal`, or null. */
-function boundCaller(env, terminal) {
-  let best = null;
-  for (const binding of foldOf(env).byKey.values()) {
-    if (binding.terminal !== terminal || binding.machine) continue;
-    if (!best || (binding.created_ms ?? 0) > (best.created_ms ?? 0)) best = binding;
+/** The local binding for this lifetime of `terminal`, or null. */
+function boundCaller(terminal, launch) {
+  for (const binding of foldOf(launch.home).byKey.values()) {
+    if (binding.terminal !== terminal || binding.machine || typeof binding.bot !== "string") continue;
+    if (!Number.isSafeInteger(binding.created_ms) || binding.created_ms !== launch.get.created_ms) continue;
+    return { bot: binding.bot, project: typeof binding.project === "string" ? binding.project : null, worker: false };
   }
-  return best && typeof best.bot === "string" ? { bot: best.bot, project: typeof best.project === "string" ? best.project : null, worker: false } : null;
+  return null;
 }
 
 /** The project a folder belongs to: a worktree's main checkout, else the nearest .herdr/bots.json. */
@@ -350,10 +597,11 @@ function projectOfFolder(folder) {
  * project is the main checkout above its worktree, else the nearest .herdr/bots.json above its cwd.
  */
 function callerOf(real, env, terminal) {
-  const bound = boundCaller(env, terminal);
-  if (bound) return { ...bound, project: bound.project ?? null };
-  const get = hcJson(real, ["get", terminal], env);
-  const of = get && typeof get === "object" && get.labels && typeof get.labels === "object" ? get.labels[WORKER_OF_LABEL] : null;
+  const launch = callerLaunch(real, env, terminal);
+  const bound = boundCaller(terminal, launch);
+  if (bound) return bound;
+  const { get } = launch;
+  const of = labelsOf(get)[WORKER_OF_LABEL];
   if (typeof of !== "string" || !of) return "the caller is neither bound in the attach ledger nor a worker pane";
   return { bot: of, project: projectOfFolder(get.cwd), worker: true };
 }
@@ -492,7 +740,7 @@ export function sharedSendAllowed(file, caller, labels) {
     if (self.rank === "captain" && target.rank === "captain") return true;
   }
   // Keep the existing reviewer/fixer label path; tester access requires a roster rank.
-  if (labels.role === "reviewer" || labels.role === "fixer") return true;
+  if (isSendGrantRole(labels.role)) return true;
   return Boolean(target && SHARED_ROLES.includes(target.rank));
 }
 
@@ -510,6 +758,8 @@ const TARGET_VALUE_OPTIONS = {
   rm: new Set(),
 };
 const TARGETED_VERBS = new Set(Object.keys(TARGET_VALUE_OPTIONS));
+/** The verbs whose target is read-scoped (#628): the caller, its own workers, its team graph. */
+const READ_VERBS = new Set(["read", "get", "wait"]);
 /** `hc events` names its terminal through option values, not a positional. */
 const EVENTS_TARGET_OPTIONS = ["--terminal", "--children-of"];
 
@@ -533,48 +783,137 @@ function optionValues(args, names) {
   return out;
 }
 
-/** The first positional word after the options, or null (`--` starts the positionals). */
-function firstPositional(args, valueOptions = new Set()) {
-  for (let i = 1; i < args.length; i += 1) {
-    const word = args[i];
-    if (word === "--") return args[i + 1] ?? null;
-    if (valueOptions.has(word)) { i += 1; continue; }
-    if (word.startsWith("-") && word !== "-") continue;
-    return word;
-  }
-  return null;
-}
-
-/** The positional words of `hc send`, with its options and their values skipped. */
-function sendPositionals(args) {
+/** The named options' values with their argv position, for resolving and rewriting each target. */
+function optionTargetsAt(args, names) {
   const out = [];
   for (let i = 1; i < args.length; i += 1) {
     const word = args[i];
-    if (word === "--") { out.push(...args.slice(i + 1)); break; }
-    if (SEND_VALUE_OPTIONS.has(word)) { i += 1; continue; }
-    if (word.startsWith("-") && word !== "-") continue;
-    out.push(word);
+    for (const name of names) {
+      if (word === name) {
+        if (typeof args[i + 1] === "string") out.push({ name, word: args[i + 1], index: i + 1, inline: false });
+        i += 1;
+        break;
+      }
+      if (word.startsWith(`${name}=`)) {
+        out.push({ name, word: word.slice(name.length + 1), index: i, inline: true });
+        break;
+      }
+    }
   }
   return out;
 }
 
-/** The target's hc get answer: an address or name through ls, then get for the labels. */
-function targetOf(real, word, on, env) {
-  let address = word;
-  if (on && !address.includes("/")) address = `${on}/${address}`;
-  if (!address.includes("/")) {
-    const rows = rowsOf(hcJson(real, ["ls"], env));
-    const hit = rows.find((r) => r?.address === address) ?? rows.find((r) => r?.name === address);
-    if (hit?.address) address = hit.address;
-  }
-  const get = hcJson(real, ["get", address], env);
-  if (!get || typeof get !== "object" || get.error || !get.labels || typeof get.labels !== "object") return null;
-  return { address, get, labels: get.labels };
+/** The first positional word after the options, or null (`--` starts the positionals). */
+function firstPositional(args, valueOptions = new Set()) {
+  return firstPositionalAt(args, valueOptions)?.word ?? null;
 }
 
-function sendProblem(real, args, env, terminal, on) {
-  const words = sendPositionals(args);
-  const target = words[0];
+/** A kill call's target and argv index, wherever the kill word sits (the shim takes flags before it). */
+function killTargetAt(args) {
+  const verb = args.indexOf("kill");
+  if (verb < 0) return null;
+  const at = firstPositionalAt(args.slice(verb), TARGET_VALUE_OPTIONS.kill);
+  return at ? { word: at.word, index: at.index + verb } : null;
+}
+
+/** The first positional word and its argv index, or null (`--` starts the positionals). */
+function firstPositionalAt(args, valueOptions = new Set()) {
+  for (let i = 1; i < args.length; i += 1) {
+    const word = args[i];
+    if (word === "--") return i + 1 < args.length ? { word: args[i + 1], index: i + 1 } : null;
+    if (valueOptions.has(word)) { i += 1; continue; }
+    if (word.startsWith("-") && word !== "-") continue;
+    return { word, index: i };
+  }
+  return null;
+}
+
+/** The leading command character, ignoring whitespace, or null (#1421). */
+export function commandPrefixOf(text) {
+  return typeof text === "string" ? text.match(/^\s*([!/])/)?.[1] ?? null : null;
+}
+
+/** A resolved target's agent kind, including argv beneath a stale shell report. */
+export function prefixTarget(get) {
+  if (!get || typeof get !== "object") return "unknown";
+  if (resolveAgent(get.status?.app) !== null || agentKeyOfArgv(get.foreground?.argv) !== null) return "agent";
+  return "other";
+}
+
+/** A prefixed send that would be interpreted as a command; callers add their way out. */
+export function sendTextProblem(texts, get) {
+  const prefix = texts.map(commandPrefixOf).find(Boolean);
+  if (!prefix || prefixTarget(get) === "other") return null;
+  return `a message starting with "${prefix}" would run as a command in that agent, not reach it as text (#1421)`;
+}
+
+/** The send target's word and index, texts and machine, with options skipped. */
+function sendArgs(args) {
+  const positions = [];
+  let on = null;
+  for (let i = args.indexOf("send") + 1; i < args.length; i += 1) {
+    const word = args[i];
+    if (word === "--") {
+      for (let j = i + 1; j < args.length; j += 1) positions.push(j);
+      break;
+    }
+    if (SEND_VALUE_OPTIONS.has(word)) {
+      if (word === "--on" && on === null) on = args[i + 1] ?? null;
+      i += 1;
+      continue;
+    }
+    if (word.startsWith("--on=") && on === null) on = word.slice(5);
+    if (word.startsWith("-") && word !== "-") continue;
+    positions.push(i);
+  }
+  const [targetIndex, ...texts] = positions;
+  return { target: args[targetIndex], targetIndex, texts: texts.map((i) => args[i]), on };
+}
+
+const TERMINAL_ADDRESS = /^(?:[^\s/]+\/)?t[0-9a-z]+$/;
+
+/** The canonical address from hc get, with agreement required when hc ls supplied an address. */
+function checkedTargetOf(real, word, on, env) {
+  let address = word;
+  let provenance = "typed";
+  if (on && !word.includes("/")) {
+    address = `${on}/${word}`;
+  } else if (!on && !word.includes("/")) {
+    const rows = rowsOf(hcJson(real, ["ls"], env));
+    const listed = rows.find((r) => r?.address === word) ?? rows.find((r) => r?.name === word);
+    if (listed) {
+      address = listed.address;
+      provenance = "ls";
+    }
+  }
+  const get = hcJson(real, ["get", address], env);
+  if (!get || typeof get !== "object" || get.error) return { get: null };
+  if (typeof get.address !== "string" || !TERMINAL_ADDRESS.test(get.address)) {
+    return { why: "the target's address from hc is not a terminal id" };
+  }
+  if (provenance === "ls" && address !== get.address) {
+    return { why: `because hc resolved the target to two different panes (${address} and ${get.address})` };
+  }
+  return { address: get.address, get };
+}
+
+/** The resolved target with labels for the team and own-worker checks. */
+function targetOf(real, word, on, env) {
+  const hit = checkedTargetOf(real, word, on, env);
+  if (hit.why) return hit;
+  if (!hit.get?.labels || typeof hit.get.labels !== "object") return null;
+  return { ...hit, labels: hit.get.labels };
+}
+
+/**
+ * A resolved address names a linked machine's pane when it carries `/<terminal>` (`machine/tN`).
+ * The guard uses the address hc get answered, including when hc ls has no matching name.
+ */
+const isMachineAddress = (address) => typeof address === "string" && address.includes("/");
+
+/** The team-checked target, or its refusal reason. */
+function sendProblem(real, send, env, terminal) {
+  const target = send.target;
   if (!target) return "no target";
   const caller = callerOf(real, env, terminal);
   if (typeof caller === "string") return caller;
@@ -582,8 +921,12 @@ function sendProblem(real, args, env, terminal, on) {
   if (!file) return "the caller's project has no readable .herdr/bots.json";
   const self = file.bots.find((b) => b.id === caller.bot);
   if (!self) return "the caller is not a bot in the project's .herdr/bots.json";
-  const hit = targetOf(real, target, on.value, env);
+  const hit = targetOf(real, target, send.on, env);
   if (!hit) return "the target is not resolvable with hc";
+  if (hit.why) return hit.why;
+  if (send.on !== null && !hit.address.startsWith(`${send.on}/`)) {
+    return "hc resolved the target off the --on machine";
+  }
   const { labels } = hit;
   const targetProject = projectOfFolder(hit.get?.cwd);
   const crossTarget = Boolean(
@@ -596,7 +939,7 @@ function sendProblem(real, args, env, terminal, on) {
     extraKeys: targetProject ? [targetProject] : [],
   });
   if (typeof labels.bot === "string" && allowed.has(labels.bot)) {
-    if (!crossTarget) return null;
+    if (!crossTarget) return hit;
     const ownClean = cleanProjectPath(caller.project);
     const targetClean = cleanProjectPath(targetProject);
     const verified = loadApprovedProjectsFor(caller.project, file, env, [targetProject]);
@@ -610,24 +953,116 @@ function sendProblem(real, args, env, terminal, on) {
     const isDirectMember = Boolean(
       targetEff && targetEff.lead === caller.bot && targetEff.leadProject === ownClean,
     );
-    return isDirectLead || isDirectMember ? null : "the target is not in the caller's team";
+    return isDirectLead || isDirectMember ? hit : "the target is not in the caller's team";
   }
   if (crossTarget) return "the target is not in the caller's team";
-  if (labels[WORKER_OF_LABEL] === caller.bot) return null;
-  if (sharedSendAllowed(file, caller, labels)) return null;
+  if (labels[WORKER_OF_LABEL] === caller.bot) return hit;
+  if (sharedSendAllowed(file, caller, labels)) return hit;
   return "the target is not in the caller's team";
 }
 
-/** label is own-workers only: the target's parent must be the caller's own pane. */
+/** Label an own worker, or set or clear the owner question on the caller's own pane. */
 function labelProblem(real, args, env, terminal, on) {
-  const target = firstPositional(args, TARGET_VALUE_OPTIONS.label);
-  if (!target) return "no target";
+  const at = firstPositionalAt(args, TARGET_VALUE_OPTIONS.label);
+  if (!at) return "no target";
+  // One resolution, the checked canonical address hc get answered (#628).
+  const hit = checkedTargetOf(real, at.word, on.value, env);
+  if (hit.address === terminal) {
+    if (args.length === 3 && at.index === 1 && args[2].startsWith(`${OWNER_QUESTION_LABEL}=`)) {
+      return { index: 1, address: hit.address };
+    }
+    return `the caller's own pane takes only the ${OWNER_QUESTION_LABEL} label`;
+  }
   const caller = callerOf(real, env, terminal);
   if (typeof caller === "string") return caller;
-  const hit = targetOf(real, target, on.value, env);
-  if (!hit) return "the target is not resolvable with hc";
+  if (hit.why) return hit.why;
+  if (!hit.get?.labels || typeof hit.get.labels !== "object") return "the target is not resolvable with hc";
+  // The own-worker check alone lets a machine row through when its parent is this pane
+  // (`hc label worker-m` above `machine/t105`); the address hc resolved decides, as for a read,
+  // and the checked address is the one forwarded.
+  if (isMachineAddress(hit.address)) return "a machine target is not allowed";
   if (hit.get.parent !== terminal) return "the target is not the caller's own worker";
+  return { index: at.index, address: hit.address };
+}
+
+/**
+ * `hc events` names its terminal through option values, not a positional. Each one is resolved
+ * and re-checked as an address, as a read target is: a name that resolves to a linked machine's
+ * pane is refused, and the checked address is what reaches the real hc.
+ */
+function eventsProblem(real, args, env) {
+  for (const at of optionTargetsAt(args, EVENTS_TARGET_OPTIONS)) {
+    const hit = checkedTargetOf(real, at.word, null, env);
+    if (hit.why) return hit.why;
+    if (!hit.get) return `the target ${at.word} is not resolvable with hc`;
+    if (isMachineAddress(hit.address)) return "a machine target is not allowed";
+    if (hit.address !== at.word) args[at.index] = at.inline ? `${at.name}=${hit.address}` : hit.address;
+  }
   return null;
+}
+
+// ---- reads and waits, and rm: the team graph, and the caller's own workers (#628) ----
+
+/** A resolved target's labels as a plain object; {} when the core answered none. */
+const labelsOf = (get) => (get?.labels && typeof get.labels === "object" && !Array.isArray(get.labels)
+  ? get.labels : {});
+
+/**
+ * `read`, `get` and `wait` see only the caller's own pane, its own workers and its team graph
+ * (the proxy's `terminal.get`/`read`/`wait` rule). The shared send roles do not widen reads, and
+ * another project's link counts only when its approved 0600 snapshot verifies it, through the
+ * same `teamOf` call the proxy uses. Returns the checked target and its argv index, null when
+ * the call names no target (the core answers for the caller), or a refusal reason.
+ */
+function readProblem(real, args, env, terminal, verb) {
+  const at = firstPositionalAt(args, TARGET_VALUE_OPTIONS[verb]);
+  if (!at) return null;
+  const hit = checkedTargetOf(real, at.word, null, env);
+  if (hit.why) return hit.why;
+  if (!hit.get) return `the target ${at.word} is not resolvable with hc`;
+  // A name may resolve to a linked machine's pane after the lexical check above has passed
+  // (`hc get` carries `machine/tN`). With the proxy off this guard is the only check.
+  if (isMachineAddress(hit.address)) return "a machine target is not allowed";
+  // The caller's own pane needs no team check (its identity is the pane's, fixed at start):
+  // an unbound guarded pane still reads itself, as the pack's CLI does to identify the caller.
+  if (hit.address === terminal) return { index: at.index, address: hit.address };
+  const caller = callerOf(real, env, terminal);
+  if (typeof caller === "string") return caller;
+  const labels = labelsOf(hit.get);
+  if (labels[WORKER_OF_LABEL] === caller.bot) return { index: at.index, address: hit.address };
+  const file = readBots(caller.project);
+  if (!file) return "the caller's project has no readable .herdr/bots.json";
+  const targetProject = projectOfFolder(hit.get.cwd);
+  const allowed = teamOf(file, caller, { project: caller.project, env,
+    extraKeys: targetProject ? [targetProject] : [] });
+  if (typeof labels.bot === "string" && allowed.has(labels.bot)) {
+    return { index: at.index, address: hit.address };
+  }
+  return "the target is not in the caller's team";
+}
+
+/**
+ * `rm` ends the caller's own workers only: the target's parent is the caller's pane, or its
+ * `worker.of` is the caller's bot, and a worker pane ends nothing (the proxy's kill/rm rule).
+ * A team member's seat, another bot's worker and every stranger are refused. Returns the
+ * checked target and its argv index, null with no target, or a refusal reason.
+ */
+function rmProblem(real, args, env, terminal) {
+  const at = firstPositionalAt(args, TARGET_VALUE_OPTIONS.rm);
+  if (!at) return null;
+  const caller = callerOf(real, env, terminal);
+  if (typeof caller === "string") return caller;
+  if (caller.worker) return "a worker pane ends no panes; its bot ends it";
+  const hit = checkedTargetOf(real, at.word, null, env);
+  if (hit.why) return hit.why;
+  if (!hit.get) return `the target ${at.word} is not resolvable with hc`;
+  // The same resolved-address rule as readProblem: a name that resolves to a linked machine
+  // is refused even though it passed the lexical check, and is never forwarded.
+  if (isMachineAddress(hit.address)) return "a machine target is not allowed";
+  if (hit.address === terminal) return "the target is the caller's own pane";
+  if (hit.get.parent === terminal) return { index: at.index, address: hit.address };
+  if (labelsOf(hit.get)[WORKER_OF_LABEL] === caller.bot) return { index: at.index, address: hit.address };
+  return "the target is not the caller's own worker";
 }
 
 // ---- kill: a project's main bot only (#955, the owner's rule) ----
@@ -637,10 +1072,13 @@ function labelProblem(real, args, env, terminal, on) {
  * else: a member's seat, a lead that isn't the main bot, and every worker are refused, whatever
  * the target. The kind is the bots.json entry's, read through the attach ledger's binding of the
  * caller's pane, never a label. A bot ends a worker it started with `automagik-herdr worker
- * kill <pane>`, which checks the worker is its own. `hc --json kill` and any other flag before
- * the command never get here: the guard refuses a call whose first word is an option.
+ * kill <pane>`, which checks the worker is its own. The target is resolved and re-checked as an
+ * address like a read: a name that resolves to a linked machine's pane is refused and the
+ * checked address is the one forwarded. `hc --json kill` and any other flag before the command
+ * never get here: the guard refuses a call whose first word is an option (the kill shim uses
+ * this same rule through killTargetAt, which finds the kill word wherever it sits).
  */
-function killProblem(real, env, terminal) {
+function killProblem(real, args, env, terminal) {
   const caller = callerOf(real, env, terminal);
   if (typeof caller === "string") return caller;
   const own = "end a worker you started with am worker kill <pane>";
@@ -649,10 +1087,16 @@ function killProblem(real, env, terminal) {
   const bot = file?.bots?.find((row) => row.id === caller.bot) ?? null;
   if (!bot) return "the caller's bot is not in its project's bots.json";
   if (bot.kind !== "main") return `hc kill is for a project's main bot only; ${own}`;
-  return null;
+  const at = killTargetAt(args);
+  if (!at) return null;
+  const hit = checkedTargetOf(real, at.word, null, env);
+  if (hit.why) return hit.why;
+  if (!hit.get) return `the target ${at.word} is not resolvable with hc`;
+  if (isMachineAddress(hit.address)) return "a machine target is not allowed";
+  return { index: at.index, address: hit.address };
 }
 
-// ---- run: exactly the worker start workers.js emits for dsh-tui ----
+// ---- run: exactly the worker start workers.js emits ----
 
 /** Canonical `cwd` under the project's .claude/worktrees/; false for a link or a path outside it. */
 function underWorktrees(cwd, project) {
@@ -665,8 +1109,8 @@ function underWorktrees(cwd, project) {
   return realCwd !== root && realCwd.startsWith(`${root}${sep}`);
 }
 
-/** Why `args` is not the worker shape, or null. */
-function runProblem(args, env, terminal) {
+/** The worker shape, or a refusal reason. This does not ask hc about the caller. */
+function workerRunShape(args, terminal) {
   let bg = false, seenJson = false, cwd = null, parent = null, seenName = false, dashes = false;
   const labels = new Map();
   let i = 1;
@@ -723,16 +1167,44 @@ function runProblem(args, env, terminal) {
   if (parent !== terminal) return "--parent is not the caller's pane";
   if (labels.get(WORKER_OF_LABEL) === undefined) return `no --label ${WORKER_OF_LABEL}=<caller's bot>`;
   for (const key of labels.keys()) if (!WORKER_LABELS.has(key)) return `--label ${key} is not the worker shape`;
-  const caller = boundCaller(env, terminal);
-  if (!caller) return "only a bot pane the attach ledger binds starts a worker";
-  if (labels.get(WORKER_OF_LABEL) !== caller.bot) return `${WORKER_OF_LABEL} is not the caller's bot`;
-  if (!underWorktrees(cwd, caller.project)) return "--cwd is not under the caller's project .claude/worktrees/";
   const rest = args.slice(i);
   if (rest[0] !== ENV) return `the program is not ${ENV}`;
-  if (!rest[1] || !rest[1].startsWith("PATH=")) return "no PATH word after the program";
-  const first = rest[1].slice("PATH=".length).split(delimiter)[0];
+  // `/usr/bin/env` words: a login option first (Claude's default login unsets its config
+  // variable), the PATH word the pack set, then any other assignment (the chosen login's).
+  let at = 1;
+  while (rest[at] === "-u" || rest[at] === "--unset") {
+    if (typeof rest[at + 1] !== "string") return "a login word without a name";
+    at += 2;
+  }
+  if (!rest[at] || !rest[at].startsWith("PATH=")) return "no PATH word after the program";
+  const first = rest[at].slice("PATH=".length).split(delimiter)[0];
   if (!isGuardFolder(first) || isKillGuardWord(first)) return "the PATH word does not start with a guard";
-  if (rest[2] !== "dsh-tui") return "the program is not dsh-tui";
-  if (rest.length !== 5 || rest[3] !== "--" || typeof rest[4] !== "string") return "the task is not the one -- <task> word";
+  at += 1;
+  let hasAppHome = false;
+  while (at < rest.length && ENV_ASSIGNMENT.test(rest[at])) {
+    if (rest[at].startsWith("HERDR_APP_HOME=")) hasAppHome = true;
+    at += 1;
+  }
+  const launch = rest.slice(at);
+  // dsh-tui runs from `-- <task>` exactly; every other agent the pack launches starts from its
+  // own program, with whatever flags the pack gave it (#1011).
+  if (launch[0] !== "dsh-tui") {
+    const agent = agentKeyOfArgv(launch);
+    if (!agent || agent === "dsh-tui") return "the program is not a coding agent";
+  } else if (launch.length !== 3 || launch[1] !== "--" || typeof launch[2] !== "string") {
+    return "the task is not the one -- <task> word";
+  }
+  return { cwd, workerOf: labels.get(WORKER_OF_LABEL), hasAppHome };
+}
+
+/** Why this worker start is refused, or null. */
+function runProblem(real, args, env, terminal) {
+  const shape = workerRunShape(args, terminal);
+  if (typeof shape === "string") return shape;
+  if (shape.hasAppHome) return "a worker launch cannot set HERDR_APP_HOME";
+  const caller = boundCaller(terminal, callerLaunch(real, env, terminal));
+  if (!caller) return "only a bot pane the attach ledger binds starts a worker";
+  if (shape.workerOf !== caller.bot) return `${WORKER_OF_LABEL} is not the caller's bot`;
+  if (!underWorktrees(shape.cwd, caller.project)) return "--cwd is not under the caller's project .claude/worktrees/";
   return null;
 }

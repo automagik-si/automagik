@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
 import { build } from 'esbuild'
+import { bench } from './grants-fixture.js'
 
 // The existing BotPanel rendered with the React DSH ships (its module-loader seeds, as in
 // brain-navigation.test.js) in jsdom: focus in and back out, the narrow modal and its Tab
@@ -34,6 +35,11 @@ const { outputFiles } = await build({
     "export { HeaderPill } from './src/client/header.js'; export { teamActions } from './src/client/team-actions.js'",
     "export { createSource, indexRoster } from './src/client/sources.js'",
     "export { frameLayout } from './src/client/frame-layout.js'",
+    "export { DetailsDrawer } from './src/client/details-drawer.js'",
+    "export { LiveRail } from './src/client/live-rail.js'",
+    "export { MemberApprovals } from './src/client/member-status.js'",
+    "export { ToolCell } from './src/client/cells.js'",
+    "export { TeamApproval, isTeamApproval } from './src/client/team-approval.js'",
   ].join('\n'), resolveDir: plugin },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
@@ -440,4 +446,244 @@ test('only the Details button exposes aria-expanded; the memory pill carries dat
   }
   await act(() => document.querySelector('[data-memory="updated"]').click())
   assert.deepEqual(opened, ['bot'], 'the memory pill still opens the memory')
+})
+
+const grantBot = { id: 'a', name: 'Ada', color: 'gray', sessionId: 'a' }
+const grantRoster = { ...roster, byId: { a: grantBot }, bots: [grantBot],
+  tasks: { task: { from: 'a', title: 'Check fixtures', status: 'working', at: Date.now() } },
+  exchangeTurns: {}, closedCards: {} }
+const grantAsk = (extra = {}) => ({
+  id: 'ask-a', offer: 'offer-a', callId: 'call-a', sessionId: 'a', botId: 'a',
+  tool: 'bash', reason: 'Needs  escalation', shownTarget: 'echo  safe', folder: '/work/a  b',
+  sandboxMode: 'danger-full-access', grantable: true, answerable: true, capabilityKey: 'same',
+  ...extra,
+})
+const withLabel = (node, label) =>
+  [...node.querySelectorAll('button')].find(button => button.textContent.trim() === label)
+
+test('rfc0039 D4 C4 the start task cell can grant its correlated ask [P]', async t => {
+  const { document, root, ToolCell } = mount(t)
+  const approval = grantAsk({ taskId: 'task', sessionId: 'task' })
+  const taskId = 'session-task'
+  const roster = { ...grantRoster, tasks: { [taskId]: grantRoster.tasks.task } }
+  const pending = { kind: 'approval', answerable: true, answer() {},
+    toolName: approval.tool, reason: approval.reason, callId: approval.callId }
+  const actions = { openSession() {}, grantApproval() {} }
+  const row = { ...approval, sessionId: taskId, taskId }
+  const status = new Map([[taskId, { pendingInteraction: pending }]])
+  const node = { key: 'tool-a', data: { root: { kind: 'tool-result', name: 'start_task',
+    content: [{ type: 'text',
+      text: 'Started task "Check fixtures" (session-task) under your row.' }],
+    arguments: '{"title":"Check fixtures"}', callId: 'task-start', turn: 1 } } }
+  await act(() => root.render(React.createElement(ToolCell, {
+    node, sessionId: 'a', useRoster: hook(roster), actions,
+    useWork: hook({ approvals: [row] }), useSessionStatus: hook(status),
+  })))
+  const button = withLabel(document, 'Allow this step for this task')
+  assert.ok(button, document.body.textContent)
+  await act(() => button.click())
+  assert.match(document.querySelector('[role="dialog"]').textContent, /Check fixtures/)
+})
+
+test('rfc0039 D4 C5 member cards grant only asks in the displayed room [P]', async t => {
+  const { document, root, MemberApprovals } = mount(t)
+  const rooms = [{ id: 'ops', name: 'Ops' }, { id: 'lab', name: 'Lab' }]
+  const entry = { state: 'ask', approvals: rooms.map(room =>
+    grantAsk({ id: room.id, roomId: room.id, offer: room.id + '-offer' })) }
+  const actions = { grantApproval() {} }
+  for (const room of rooms) {
+    await act(() => root.render(React.createElement(MemberApprovals,
+      { room, entry, bot: grantBot, actions })))
+    const candidates = [...document.querySelectorAll('button')]
+      .filter(button => button.textContent === 'Allow this step in this group')
+    assert.equal(candidates.length, 1)
+    assert.equal(candidates[0].title, 'Where: ' + room.name)
+  }
+})
+
+test('rfc0039 D4 C6 merged Live asks grant one id at a time [P]', async t => {
+  const { document, root, LiveRail } = mount(t)
+  const taken = []
+  const actions = { grantApproval: (...args) => { taken.push(args) } }
+  const host = await bench(t)
+  const first = await host.held(host.ask('t1'))
+  const second = await host.held(host.ask('t2'))
+  const ordinary = await host.held(host.ask('t1', { bridgeCall: { id: 'fixture' } }))
+  const { work } = await host.state()
+  assert.equal(work.approvals.length, 3)
+  assert.ok(first.capabilityKey)
+  assert.deepEqual(work.approvals.map(row => row.capabilityKey), Array(3).fill(first.capabilityKey))
+  assert.equal(first.grantable, true)
+  assert.equal(second.grantable, true)
+  assert.equal(ordinary.grantable, undefined)
+  const roster = { ...grantRoster, tasks: host.rt.state.tasks }
+  await act(() => root.render(React.createElement(LiveRail,
+    { actions, roster, useWork: hook(work) })))
+  const row = document.querySelector('.bt-live-need')
+  assert.match(row.textContent, /3 requests to use bash/)
+  const buttons = [...row.querySelectorAll('button')]
+    .filter(button => button.textContent === 'Allow this step for this task')
+  assert.equal(buttons.length, 2)
+  await act(() => buttons[1].click())
+  await act(() => withLabel(document.querySelector('[role="dialog"]'), 'Go').click())
+  assert.deepEqual(taken, [[second.id, second.offer]])
+})
+
+test('rfc0039 D4 C6b a single grantable Live ask can be confirmed [P]', async t => {
+  const { document, root, LiveRail } = mount(t)
+  await act(() => root.render(React.createElement(LiveRail, {
+    actions: { grantApproval() {} }, roster: grantRoster,
+    useWork: hook({ approvals: [grantAsk()] }),
+  })))
+  assert.ok(withLabel(document, 'Allow this step for this chat'))
+})
+
+test('rfc0039 D4 C7 Live counts grants alongside active work [P]', async t => {
+  const { document, root, LiveRail } = mount(t)
+  await act(() => root.render(React.createElement(LiveRail, {
+    actions: {}, roster: grantRoster, useWork: hook({ grants: [{}, {}] }),
+  })))
+  assert.match(document.querySelector('.bt-live-sum').textContent, /2 grants/)
+})
+
+test('rfc0039 D4 C8 Details lists and revokes only the selected Bot grants [P]', async t => {
+  const { document, root, DetailsDrawer } = mount(t)
+  const stopped = []
+  const grant = { id: 'grant-1', botId: 'a', owner: { kind: 'task', id: 'task' },
+    target: 'echo  safe', tool: 'bash', uses: 4 }
+  await act(() => root.render(React.createElement(DetailsDrawer, {
+    ...panelProps, sessionId: 'a', roster: grantRoster,
+    actions: { revokeGrant: id => { stopped.push(id) } },
+    useWork: hook({ grants: [grant, { ...grant, botId: 'b', target: 'other Bot' }] }),
+  })))
+  assert.match(document.body.textContent, /Allowed for now/)
+  assert.match(document.body.textContent, /Check fixtures/)
+  assert.match(document.body.textContent, /4 uses/)
+  assert.doesNotMatch(document.body.textContent, /other Bot/)
+  await act(() => withLabel(document, 'Stop allowing').click())
+  assert.deepEqual(stopped, ['grant-1'])
+})
+
+for (const [provider, offHint] of [
+  ['acp-claude', /Claude Code uses Automagik's tools/],
+  ['acp-omp', /omp has no tools at all in any of this Bot's chats, so this Bot can only chat/],
+]) {
+  test(`Details places ${provider}'s native tools title and switch together directly below Working folder`, async t => {
+    const { document, root, DetailsDrawer } = mount(t)
+    const bot = { ...grantBot, model: `${provider}/default` }
+    await act(() => root.render(React.createElement(DetailsDrawer, {
+      ...panelProps, sessionId: bot.id, roster: { ...grantRoster, byId: { [bot.id]: bot }, bots: [bot] }, actions: {},
+    })))
+
+    const body = document.querySelector('.bt-drawer-body')
+    const folder = [...body.children].find(row => row.firstElementChild?.textContent === 'Working folder')
+    assert.ok(folder)
+    const row = folder.nextElementSibling
+    const [header, hint] = row.children
+    const [title, toggle] = header.children
+    assert.equal(row.children.length, 2)
+    assert.equal(header.children.length, 2)
+    assert.ok(header.classList.contains('bt-drawer-switch-head'))
+    assert.equal(title.textContent, 'Native tools')
+    assert.equal(toggle.getAttribute('role'), 'switch')
+    assert.equal(toggle.getAttribute('aria-label'), title.textContent)
+    assert.equal(toggle.getAttribute('aria-checked'), 'false')
+    assert.ok(hint.classList.contains('bt-note'))
+    assert.match(hint.textContent, offHint)
+    assert.equal([...body.textContent.matchAll(/Native tools/g)].length, 1)
+    assert.doesNotMatch(body.textContent, /Claude Code native tools/)
+  })
+}
+
+test('rfc0039 D4 C9 an older host still opens ordinary Live rows [C]', async t => {
+  const { document, root, LiveRail } = mount(t)
+  const opened = []
+  const ordinary = { id: 'older', botId: 'a', tool: 'bash', reason: 'existing' }
+  await act(() => root.render(React.createElement(LiveRail, {
+    actions: { openSession: id => { opened.push(id) } }, roster: grantRoster,
+    useWork: hook({ approvals: [ordinary] }),
+  })))
+  assert.equal(withLabel(document, 'Allow this step for this chat'), undefined)
+  await act(() => document.querySelector('button.bt-live-need').click())
+  assert.deepEqual(opened, ['a'])
+})
+
+test('rfc0039 D4 C10 Escape closes confirmation without deciding [P]', async t => {
+  const { document, root, LiveRail, key } = mount(t)
+  const taken = []
+  await act(() => root.render(React.createElement(LiveRail, {
+    actions: { grantApproval: (...args) => { taken.push(args) } }, roster: grantRoster,
+    useWork: hook({ approvals: [grantAsk()] }),
+  })))
+  const button = withLabel(document, 'Allow this step for this chat')
+  assert.ok(button)
+  await act(() => button.click())
+  assert.equal(document.activeElement.textContent, 'Cancel')
+  await act(() => key('Escape'))
+  assert.equal(document.querySelector('[role="dialog"]'), null)
+  assert.equal(document.activeElement.textContent, 'Allow this step for this chat')
+  assert.deepEqual(taken, [])
+})
+
+test('rfc0039 D4 C11 confirmation freezes the token, folder, full command and place [P]',
+  async t => {
+    const { document, root, LiveRail } = mount(t)
+    const taken = []
+    const actions = { grantApproval: (...args) => { taken.push(args) } }
+    const full = 'echo  ' + 'a'.repeat(394)
+    const room = { id: 'ops', name: 'Production fixtures' }
+    const roster = { ...grantRoster, roomsById: { ops: room } }
+    let row = grantAsk({ shownTarget: full, roomId: room.id })
+    const render = () => root.render(React.createElement(LiveRail,
+      { actions, roster, useWork: hook({ approvals: [row] }) }))
+    await act(render)
+    const button = withLabel(document, 'Allow this step in this group')
+    assert.ok(button)
+    await act(() => button.click())
+    row = { ...row, shownTarget: full.replace('  ', ' '), offer: 'new-token',
+      reason: 'new reason', folder: '/new/folder' }
+    room.name = 'Different room'
+    await act(render)
+    const dialog = document.querySelector('[role="dialog"]')
+    assert.deepEqual([...dialog.querySelectorAll('.bt-apr-quote')].map(node => node.textContent),
+      [full, 'Folder: /work/a  b', 'Needs  escalation'])
+    assert.match(dialog.textContent, /Where: Production fixtures/)
+    assert.match(dialog.textContent, /Sandbox: danger-full-access/)
+    assert.match(dialog.textContent, /Files this step changes can make the same command/)
+    await act(() => withLabel(dialog, 'Go').click())
+    assert.deepEqual(taken, [['ask-a', 'offer-a']])
+  })
+
+test('rfc0039 D4 C12 an allowed-once receipt shows the ordinary notice [P]', async t => {
+  const { document, root, LiveRail } = mount(t)
+  const notices = []
+  await act(() => root.render(React.createElement(LiveRail, {
+    actions: { grantApproval: async () => ({ allowedOnce: true }),
+      showNotice: line => { notices.push(line) } },
+    roster: grantRoster, useWork: hook({ approvals: [grantAsk()] }),
+  })))
+  const button = withLabel(document, 'Allow this step for this chat')
+  assert.ok(button)
+  await act(() => button.click())
+  await act(() => withLabel(document.querySelector('[role="dialog"]'), 'Go').click())
+  assert.deepEqual(notices, ['Allowed once'])
+})
+
+test('rfc0039 D4 C3 ordinary shell asks stay with the native composer [C]', t => {
+  const { isTeamApproval } = mount(t)
+  assert.equal(isTeamApproval({ kind: 'approval', toolName: 'bash', grantable: true }), false)
+})
+
+test('rfc0039 D4 C10c Enter and Escape keep deciding ordinary composer cards [C]', async t => {
+  const { document, root, TeamApproval, key } = mount(t)
+  const decisions = []
+  for (const name of ['Enter', 'Escape']) {
+    const matched = { key: name, kind: 'approval', toolName: 'start_task', sessionId: 'a',
+      reason: '{}', answerable: true, answer: outcome => decisions.push(outcome) }
+    await act(() => root.render(React.createElement(TeamApproval,
+      { key: name, matched, useRoster: hook(grantRoster) })))
+    assert.equal(document.activeElement.className, 'bt-apr')
+    await act(() => key(name))
+  }
+  assert.deepEqual(decisions, ['allowed-once', 'rejected'])
 })

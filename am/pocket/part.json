@@ -1,0 +1,27 @@
+{
+  "id": "pocket.link",
+  "title": "Pocket Link",
+  "kind": "binary",
+  "paths": ["am/pocket/**", "herdr/mods/pocket-link/**"],
+  "provides": [],
+  "requires": [],
+  "os": ["macos", "linux"],
+  "targets": "local",
+  "artifact": "automagik-am-{version}.tgz",
+  "select": "pocket/",
+  "entry": {
+    "install": ["node", "pocket.mjs", "link", "install"],
+    "uninstall": ["node", "pocket.mjs", "link", "uninstall"],
+    "doctor": ["node", "pocket.mjs", "link", "doctor"]
+  },
+  "writes": [
+    "~/.automagik/parts/pocket.link/**",
+    "~/.automagik/parts/.pocket.link.lock*",
+    "~/Library/LaunchAgents/dev.herdr.pocket-link.plist",
+    "~/Library/LaunchAgents/.herdr-pocket-link.lock*",
+    "~/.config/systemd/user/herdr-pocket-link.service",
+    "~/.config/systemd/user/.herdr-pocket-link.lock*",
+    "~/.local/state/automagik-pocket-link*/**"
+  ],
+  "set": []
+}

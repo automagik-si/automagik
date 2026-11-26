@@ -8,10 +8,20 @@
 //                           whether it is signed in (the page does this when it opens)
 //   acp-switch { id, on }   turns an agent on or off in acp-dsh's settings
 //   acp-retry { id }        starts a failed connector install again
+//   acp-install { id }      installs a CLI the app installs only on the person's click
+//                           (Antigravity, acp-dsh `installCli`), while its switch is on
+//   acp-sign-in { id }      signs in to an agent with its own home in the app (Antigravity,
+//                           acp-dsh `signInNative`): its link opens in the person's browser
+//   acp-sign-in-callback { id, attempt, url }
+//                           the address the browser ended on after signing in on any
+//                           computer, for that attempt (acp-dsh `signInCallback`, #2048)
+//   acp-sign-out { id }     signs out of it by retiring its home (acp-dsh
+//                           `accountSignOutNative`); never where its account is shared (Windows)
 import { homedir } from 'node:os'
 import { sep } from 'node:path'
 import { z } from 'zod'
 import { parse } from './payloads.js'
+import { isSignInUrl } from './sign-in-url.js'
 
 export const ACP_SERVICE = 'acpAgents'
 export const ACP_ENTRY = 'acp-dsh'
@@ -22,6 +32,13 @@ const AgentId = z.enum(ACP_IDS)
 const RefreshPayload = z.object({ refresh: z.boolean().optional() })
 const SwitchPayload = z.object({ id: AgentId, on: z.boolean() })
 const RetryPayload = z.object({ id: AgentId })
+const CallbackPayload = z.object({ id: AgentId, url: z.string().max(8192) })
+const UUID_RE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
+// The two refusals of a pasted address (#2048): not this attempt's, or no attempt waiting. The
+// second is the Claude/Codex chat's own sentence (parity).
+const NOT_THIS_SIGN_IN = 'This link is not from this sign-in.'
+const EXPIRED_SIGN_IN = 'This sign-in expired. Start again.'
+const SIGN_IN_CHECKS = new Set(['timeout', 'unreadable'])
 
 const failure = (code, message) => Object.assign(new Error(message), { code })
 const invalid = message => failure('omni-ai/invalid', message)
@@ -41,6 +58,44 @@ const shownText = (text) => {
   }
   return out
 }
+// The terminal command that signs in to a CLI with no sign-in in the app: a plain command line,
+// or exactly the command for a copy of Antigravity acp-dsh installed itself, which is not on
+// PATH and so is named by its path, quoted (acp-dsh agents.js signInHintOf). Shown, never run.
+const BARE_HINT = /^[a-z][a-z0-9]{0,23}( [a-z0-9-]{1,24}){0,4}$/
+const V = String.raw`(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)`
+const UUID = String.raw`[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}`
+// The path's class is acp-dsh's (agents.js POSIX_UNSAFE, WIN32_UNSAFE): controls, line separators
+// and bidi controls refused; \x60 is the backtick.
+const UNSHOWN = String.raw`\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069`
+const POSIX_AGY = new RegExp(String.raw`^'(/[^'\x60${UNSHOWN}]*/acp/clis/agy/${V}-${UUID}/bin/agy)' acp --login$`, 'u')
+const WIN32_AGY = new RegExp(String.raw`^& "([A-Za-z]:\\[^"\x60$\u201C\u201D\u201E${UNSHOWN}]*\\acp\\clis\\agy\\${V}-${UUID}\\bin\\agy\.exe)" acp --login$`, 'u')
+// Antigravity with its own home (acp-dsh agents.js isolatedSignInHintOf): its CLI by its path,
+// in its home under the installation's cli-homes, and nothing else of the person's.
+const POSIX_HOME = String.raw`/[^'\x60${UNSHOWN}]*/acp/(?:installations/[a-f0-9]{32}/)?cli-homes/(?:antigravity|homes/antigravity/${UUID})`
+const POSIX_ISOLATED = new RegExp(String.raw`^env -i PATH="\$PATH" TERM="\$TERM" LANG="\$LANG" HOME='(${POSIX_HOME})' XDG_CONFIG_HOME='\1/config' XDG_DATA_HOME='\1/data' XDG_CACHE_HOME='\1/cache' XDG_STATE_HOME='\1/state' '(/[^'\x60${UNSHOWN}]*/agy)' acp --login$`, 'u')
+const WIN32_CLASS = String.raw`[^"\x60$\u201C\u201D\u201E${UNSHOWN}]*`
+const WIN32_HOME = String.raw`[A-Za-z]:\\${WIN32_CLASS}\\acp\\(?:installations\\[a-f0-9]{32}\\)?cli-homes\\(?:antigravity|homes\\antigravity\\${UUID})`
+const WIN32_ISOLATED = new RegExp(String.raw`^\$env:USERPROFILE="(${WIN32_HOME})"; \$env:HOME="\1"; \$env:HOMEPATH="\1"; \$env:APPDATA="\1\\roaming"; \$env:LOCALAPPDATA="\1\\local"; & "([A-Za-z]:\\${WIN32_CLASS}\\agy\.exe)" acp --login$`, 'u')
+const TRAVERSAL = /(^|[\\/])\.\.([\\/]|$)/
+export function isSignInHint(hint) {
+  if (typeof hint !== 'string' || hint.length > 4096) return false
+  if (BARE_HINT.test(hint)) return true
+  const path = (POSIX_AGY.exec(hint) ?? WIN32_AGY.exec(hint))?.[1]
+  if (path !== undefined) return !TRAVERSAL.test(path)
+  const isolated = POSIX_ISOLATED.exec(hint) ?? WIN32_ISOLATED.exec(hint)
+  return isolated !== null && !TRAVERSAL.test(isolated[1]) && !TRAVERSAL.test(isolated[2])
+}
+// The one word that says why an in-app sign-in failed (acp-dsh `signInError`); `no-browser`:
+// agy handed no sign-in link the app could show.
+const SIGN_IN_ERRORS = new Set(['unsupported', 'timeout', 'failed', 'no-browser', 'expired'])
+// How the last in-app attempt ended (acp-dsh `signInEnd`), for acceptance only: the page draws none.
+const SIGN_IN_ENDS = new Set(['agent-error', 'agent-exit', 'deadline', 'window', 'checking', 'unreachable'])
+// acp-dsh's two log words, as status fields for acceptance; the page draws neither.
+const SIGN_OUT_OVER_ACP = new Set(['yes', 'no'])
+const LAST_SIGN_OUT = new Set(['done', 'none', 'failed'])
+// A sign-in link agy handed over while it signs in (sign-in-url.js).
+export { isSignInUrl }
+
 const shownPath = (path) => {
   if (typeof path !== 'string') return undefined
   const home = homedir()
@@ -48,19 +103,24 @@ const shownPath = (path) => {
 }
 
 export function agentView(agent) {
+  const check = agent.signInCheck
   return {
     id: agent.id,
     key: agent.key,
     name: agent.name,
     on: agent.on === true,
+    ...(agent.authScope === 'isolated' ? { authScope: 'isolated' } : {}),
     // The CLI as acp-dsh's own store has it (#749): installing, failed or ready, its version and
     // an update under way, redacted like the connector's.
     cli: {
       found: agent.cli?.found === true,
       ...(typeof agent.cli?.installUrl === 'string' && agent.cli.installUrl.startsWith('https://') ? { installUrl: agent.cli.installUrl } : {}),
-      // The terminal command that signs in to a CLI with no sign-in in the app: a plain command
-      // line, nothing else.
-      ...(typeof agent.cli?.signInHint === 'string' && /^[a-z][a-z0-9]{0,23}( [a-z0-9-]{1,24}){0,4}$/.test(agent.cli.signInHint) ? { signInHint: agent.cli.signInHint } : {}),
+      // The terminal command that signs in to a CLI with no sign-in in the app (isSignInHint).
+      // Never for one that signs in here (Antigravity): no command reaches its row (#2048).
+      ...(agent.appSignIn !== true && isSignInHint(agent.cli?.signInHint) ? { signInHint: agent.cli.signInHint } : {}),
+      // A CLI the app installs only when the person clicks Install (Antigravity), and whether
+      // the copy found is the one it installed (its row says it updates itself).
+      ...(agent.cli?.install === 'manual' ? { install: 'manual', ...(agent.cli.managed === true ? { managed: true } : {}) } : {}),
       ...(['missing', 'installing', 'failed', 'ready'].includes(agent.cli?.state) ? { state: agent.cli.state } : {}),
       ...(typeof agent.cli?.version === 'string' ? { version: shownText(redactText(agent.cli.version)).slice(0, 80) } : {}),
       ...(agent.cli?.updating === true ? { updating: true } : {}),
@@ -72,6 +132,7 @@ export function agentView(agent) {
       state: ['off', 'no-cli', 'installing', 'failed', 'ready'].includes(agent.connector?.state) ? agent.connector.state : 'installing',
       // A native agent: its CLI is the ACP server, so there is no connector to install or show.
       ...(agent.connector?.native === true ? { native: true } : {}),
+      ...(agent.connector?.state === 'failed' && agent.connectorUnreachable === true ? { unreachable: true } : {}),
       ...(typeof agent.connector?.version === 'string' ? { version: agent.connector.version } : {}),
       ...(typeof agent.connector?.error === 'string' ? { error: shownText(redactText(agent.connector.error)).slice(0, 300) } : {}),
       // Installed, but its last start failed: the settings page offers Retry, which reinstalls it.
@@ -81,9 +142,29 @@ export function agentView(agent) {
       ...(typeof agent.connector?.logPath === 'string' ? { logPath: shownPath(agent.connector.logPath) } : {}),
     },
     ...(typeof agent.signedIn === 'boolean' ? { signedIn: agent.signedIn } : {}),
+    // Why the last check could not tell: only these two words reach the page.
+    ...(agent.signedIn === undefined && SIGN_IN_CHECKS.has(check) ? { signInCheck: check } : {}),
     // Signed in on this computer, to an account the person has not confirmed for the app
     // (#869, acp-dsh's consent): only that it waits, never who it is.
     ...(agent.signedIn === true && agent.consent === 'needed' ? { consent: 'needed' } : {}),
+    // An agent with its own home that signs in here (Antigravity, #2048): exact values only.
+    ...(agent.appSignIn === true ? { appSignIn: true } : {}),
+    ...(agent.signingIn === true ? { signingIn: true } : {}),
+    ...(agent.appSignIn === true && agent.signingIn === true && isSignInUrl(agent.signInUrl) ? { signInUrl: agent.signInUrl } : {}),
+    // The paste-back of that attempt (#2048): its id, whether the field is offered, whether a
+    // pasted address was delivered, and when the link stops being good. Never the address.
+    ...(agent.appSignIn === true && agent.signingIn === true && typeof agent.signInAttempt === 'string'
+      && UUID_RE.test(agent.signInAttempt) ? { signInAttempt: agent.signInAttempt } : {}),
+    ...(agent.appSignIn === true && agent.signingIn === true && agent.signInPaste === true ? { signInPaste: true } : {}),
+    ...(agent.appSignIn === true && agent.signingIn === true && agent.signInChecking === true ? { signInChecking: true } : {}),
+    ...(agent.appSignIn === true && agent.signingIn === true && Number.isFinite(agent.signInExpiresAt)
+      ? { signInExpiresAt: agent.signInExpiresAt } : {}),
+    ...(SIGN_IN_ERRORS.has(agent.signInError) ? { signInError: agent.signInError } : {}),
+    ...(agent.appSignIn === true && SIGN_IN_ENDS.has(agent.signInEnd) ? { signInEnd: agent.signInEnd } : {}),
+    ...(agent.appSignIn === true && SIGN_OUT_OVER_ACP.has(agent.signOutOverAcp) ? { signOutOverAcp: agent.signOutOverAcp } : {}),
+    ...(agent.appSignIn === true && LAST_SIGN_OUT.has(agent.lastSignOut) ? { lastSignOut: agent.lastSignOut } : {}),
+    // Its account is the person's own too (Windows Credential Manager): the row says so.
+    ...(agent.sharedAccount === true ? { sharedAccount: true } : {}),
     listed: agent.model?.listed === true,
     restartNeeded: agent.restartNeeded === true,
   }
@@ -156,6 +237,73 @@ export function createAcpActions(ctx) {
       const acp = service()
       if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
       return view(next => next.retry(asked.id))
+    },
+    // The person's click on Install. acp-dsh refuses while the agent is off; its words go back.
+    'acp-install': async (payload) => {
+      const asked = parse(RetryPayload, payload)
+      if (asked === undefined) throw invalid('Say which agent.')
+      const acp = service()
+      if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
+      if (typeof acp.installCli !== 'function') throw refused('This ACP agents plugin cannot install that CLI.')
+      try {
+        return await view(next => next.installCli(asked.id))
+      } catch (error) {
+        if (typeof error?.code === 'string' && error.code.startsWith('acp-install/')) throw refused(String(error.message).slice(0, 300))
+        throw error
+      }
+    },
+    // The person's click on Sign in, for an agent that signs in here: answers at once, the
+    // sign-in under way (`signingIn`). acp-dsh's refusals go back in its words.
+    'acp-sign-in': async (payload) => {
+      const asked = parse(RetryPayload, payload)
+      if (asked === undefined) throw invalid('Say which agent.')
+      const acp = service()
+      if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
+      if (typeof acp.signInNative !== 'function') throw refused('This ACP agents plugin cannot sign in to that agent here.')
+      try {
+        return await view(next => next.signInNative(asked.id))
+      } catch (error) {
+        if (typeof error?.code === 'string' && /^acp-(?:sign-in|account)\//.test(error.code)) throw refused(String(error.message).slice(0, 300))
+        throw error
+      }
+    },
+    // The address the browser ended on after the person signed in, on this computer or another,
+    // for the attempt the page shows (#2048, paste-back). acp-dsh checks it and hands it once
+    // to agy's own listener; it is never logged or answered. A stale page's attempt id answers
+    // that the sign-in expired.
+    'acp-sign-in-callback': async (payload) => {
+      const asked = parse(CallbackPayload, payload)
+      if (asked === undefined) throw refused(NOT_THIS_SIGN_IN)
+      if (typeof payload?.attempt !== 'string' || !UUID_RE.test(payload.attempt)) throw refused(EXPIRED_SIGN_IN)
+      const acp = service()
+      if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
+      if (typeof acp.signInCallback !== 'function') throw refused('This ACP agents plugin cannot sign in to that agent here.')
+      try {
+        await acp.signInCallback(asked.id, payload.attempt, asked.url)
+      } catch (error) {
+        if (typeof error?.code === 'string' && /^acp-(?:sign-in|account)\//.test(error.code)) throw refused(String(error.message).slice(0, 300))
+        throw refused(EXPIRED_SIGN_IN)
+      }
+      return view(next => next.status())
+    },
+    // Sign out of such an agent: only a row that signs in here, and never one whose account is
+    // shared (Windows), where retiring its home would not sign out. acp-dsh refuses that too.
+    'acp-sign-out': async (payload) => {
+      const asked = parse(RetryPayload, payload)
+      if (asked === undefined) throw invalid('Say which agent.')
+      const acp = service()
+      if (acp === undefined) throw refused('The ACP agents plugin is not running in this DSH.')
+      if (typeof acp.accountSignOutNative !== 'function') throw refused('This ACP agents plugin cannot sign out of that agent here.')
+      const row = (await acp.status())?.agents?.find(agent => agent?.id === asked.id)
+      if (row?.appSignIn !== true) throw refused('Sign out of this agent where you signed in to it.')
+      if (row.sharedAccount === true) throw refused(`Sign out is not available on Windows. Sign out in ${row.name ?? 'the agent'} itself.`)
+      try {
+        await acp.accountSignOutNative(asked.id)
+      } catch (error) {
+        if (typeof error?.code === 'string' && error.code.startsWith('acp-account/')) throw refused(String(error.message).slice(0, 300))
+        throw error
+      }
+      return view(next => next.status())
     },
   }
 }

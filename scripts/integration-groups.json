@@ -1,0 +1,143 @@
+{
+  "groups": [
+    {
+      "id": "acp-image-read",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/image-read.test.js"],
+      "env": ["AUTOMAGIK_TEST_CODEX", "AUTOMAGIK_TEST_CODEX_RUNTIME_IMAGE"],
+      "jobs": {
+        "acp-dsh (real Codex image reads) · required integration": "required",
+        "acp-dsh (plugin tests)": "optional"
+      },
+      "expect": {"tests": 7, "pass": 7, "top": 1},
+      "note": "Real native Codex filesystem-helper reads, without credentials or a model request."
+    },
+    {
+      "id": "acp-image-codex",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/image-codex.test.js"],
+      "env": ["AUTOMAGIK_TEST_CODEX_ACP", "AUTOMAGIK_TEST_CODEX"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Native Codex and codex-acp integration.",
+      "details": [
+        "PR CI installs no codex-acp / Claude Code.",
+        "Scheduled acp-drift.yml installs the newest adapters daily and greps for some of these.",
+        "acp-compat.json are compatibility records, not install pins."
+      ]
+    },
+    {
+      "id": "acp-image-lock-native",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/image-codex-lock-native.test.js"],
+      "env": ["AUTOMAGIK_TEST_CODEX_ACP", "AUTOMAGIK_TEST_CODEX"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Linux or macOS; the two read tests also need Linux with bwrap.",
+      "details": [
+        "PR CI installs no codex-acp / Claude Code.",
+        "Scheduled acp-drift.yml installs the newest adapters daily and greps for some of these.",
+        "acp-compat.json are compatibility records, not install pins."
+      ]
+    },
+    {
+      "id": "acp-session-files-native",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/session-files-native.test.js"],
+      "env": ["AUTOMAGIK_TEST_CODEX", "AUTOMAGIK_TEST_CODEX_ACP"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Native Codex and codex-acp integration.",
+      "details": [
+        "PR CI installs no codex-acp / Claude Code.",
+        "Scheduled acp-drift.yml installs the newest adapters daily and greps for some of these.",
+        "acp-compat.json are compatibility records, not install pins."
+      ]
+    },
+    {
+      "id": "acp-real-adapters-codex",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/real-adapters.test.js"],
+      "select": "real Codex:",
+      "env": ["AUTOMAGIK_TEST_CODEX_ACP", "AUTOMAGIK_TEST_CODEX"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "A pass count alone does not prove bridge coverage (real-adapters.test.js:119).",
+      "details": [
+        "The test can pass while reporting its bridge checks did not run.",
+        "PR CI installs no codex-acp / Claude Code.",
+        "Scheduled acp-drift.yml installs the newest adapters daily and greps for some of these.",
+        "acp-compat.json are compatibility records, not install pins."
+      ]
+    },
+    {
+      "id": "acp-real-adapters-claude",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/real-adapters.test.js"],
+      "select": "real Claude Code:",
+      "env": ["AUTOMAGIK_TEST_CLAUDE_ACP", "AUTOMAGIK_TEST_CLAUDE"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "A pass count alone does not prove bridge coverage (real-adapters.test.js:119).",
+      "details": [
+        "The test can pass while reporting its bridge checks did not run.",
+        "PR CI installs no codex-acp / Claude Code.",
+        "Scheduled acp-drift.yml installs the newest adapters daily and greps for some of these.",
+        "acp-compat.json are compatibility records, not install pins."
+      ]
+    },
+    {
+      "id": "acp-real-login-claude",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/real-login.test.js"],
+      "select": "real Claude Code:",
+      "env": ["AUTOMAGIK_TEST_LIVE_LOGIN", "AUTOMAGIK_TEST_CLAUDE"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Claude Code sign-in link-start check in an isolated home.",
+      "details": [
+        "PR CI installs no Claude Code and does not opt in.",
+        "Scheduled acp-drift.yml enables the check and requires it to run."
+      ]
+    },
+    {
+      "id": "acp-real-login-codex",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/real-login.test.js"],
+      "select": "real Codex:",
+      "env": ["AUTOMAGIK_TEST_LIVE_LOGIN", "AUTOMAGIK_TEST_CODEX"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Codex sign-in link-start check in an isolated home.",
+      "details": [
+        "PR CI installs no Codex and does not opt in.",
+        "Scheduled acp-drift.yml enables the check and requires it to run."
+      ]
+    },
+    {
+      "id": "id-pages-browser",
+      "cwd": "apps/id",
+      "files": ["test/pages.test.ts"],
+      "env": ["ID_PAGES_BROWSER"],
+      "jobs": {"Automagik ID (local Workers runtime)": "prerequisite-enforced"},
+      "note": "Only when ID_PAGES_BROWSER=required."
+    },
+    {
+      "id": "bots-chrome-layout",
+      "cwd": "apps/bots-dsh",
+      "files": ["test/composer-layout.test.js"],
+      "env": ["CHROME_BIN"],
+      "jobs": {"bots-dsh (plugin tests)": "prerequisite-enforced"},
+      "note": "Only when CI is set."
+    },
+    {
+      "id": "bots-electron-wall",
+      "cwd": "apps/bots-dsh",
+      "files": ["test/browser-script-wall.test.js"],
+      "env": ["ELECTRON_BIN"],
+      "jobs": {"bots-dsh (plugin tests)": "prerequisite-enforced"},
+      "note": "Only when CI is set."
+    },
+    {
+      "id": "pets-chromium-parity",
+      "cwd": "apps/automagik-pets",
+      "files": ["test/browser-parity.test.js"],
+      "env": ["CHROME_BIN"],
+      "jobs": {"automagik-pets (tests)": "optional"},
+      "note": "Needs bots-dsh's playwright-core and esbuild plus an available Chromium."
+    }
+  ]
+}

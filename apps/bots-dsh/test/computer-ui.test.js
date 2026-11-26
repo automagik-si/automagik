@@ -73,6 +73,14 @@ test('the app-access card orders its buttons Deny, This time, Always', () => {
   assert.deepEqual(buttons(tree), ['Deny', 'This time', 'Always'])
 })
 
+test('the app-access card shows the path of the installation being approved', () => {
+  const ask = { id: 'a1', sessionId: 'w1', botName: 'Writer', appName: 'Notes' }
+  const title = appPath => texts(render('PendingAppAccess', { ask: { ...ask, appPath }, actions: {}, inline: true }))[0]
+  assert.equal(title(undefined), 'Allow Writer to use Notes?')
+  assert.equal(title('/Applications/Notes.app'), 'Allow Writer to use Notes (/Applications/Notes.app)?')
+  assert.equal(title('/Other/Notes.app'), 'Allow Writer to use Notes (/Other/Notes.app)?')
+})
+
 test('the settings page draws the switch, the provider line and one level picker per Bot', () => {
   const roster = { bots: [{ id: 'w1', name: 'Writer' }], computer: { enabled: false } }
   const hooks = { useComputer: pick => pick({ provider: { state: 'missing' } }) }

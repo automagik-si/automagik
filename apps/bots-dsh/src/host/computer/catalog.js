@@ -66,6 +66,12 @@ export function classify(name, args = {}) {
 // Whether a tool name belongs to a computer-use provider at all.
 export const isComputerTool = name => classify(name, {}) !== undefined
 
+// getApp selects an app and can launch it. The remaining methods need a handle.
+export const CUA_WITHOUT_HANDLE = new Set([
+  'getApp', 'getCapabilities', 'listApps', 'findApps', 'permissionStatus', 'applicationIcons',
+  'requestPermission', 'openPermissionSettings',
+])
+
 // Driver calls these without an app target: lists and the agent's own
 // session/config. Everything else must resolve the app it acts on; a call that
 // cannot is refused before it can reach the desktop.

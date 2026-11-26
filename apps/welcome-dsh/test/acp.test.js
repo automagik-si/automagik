@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { STAGE_CSS } from '../src/client/octopus.js'
 import { install } from '../src/host/endpoint.js'
 import { ACP_ENTRY, agentView } from '../src/host/acp.js'
 import { fakeContext } from './fake-ctx.js'
@@ -729,4 +730,248 @@ test('a ready native agent shows no connector line: its CLI is the ACP server', 
   assert.match(textOf(tree), /Ready: pick Hermes in the model picker\./)
   assert.doesNotMatch(textOf(tree), /Connector/)
   assert.match(textOf(tree), /Your own hermes CLI, as a model in DSH/)
+})
+
+const accountEntry = (account = { kind: 'account', email: 'a@example.test' }) => ({
+  authScope: 'isolated', signedIn: true, account,
+})
+
+function accountSettings({
+  entries = { 'acp-codex': accountEntry() },
+  agents = [agent('acp-codex', { authScope: 'isolated' })],
+  foundFace = true,
+  missingAction,
+  snapshot = { mainBotIds: ['missing', 'main'], mainBotId: 'fallback', byId: { main: {}, fallback: {} } },
+  opens = true,
+  refusal,
+  hostText,
+} = {}) {
+  const calls = []
+  const face = {
+    hooks: { roster: { getSnapshot: () => snapshot } },
+    actions: {
+      cliLoginAccounts: async () => { calls.push(['accounts']); return { accounts: entries } },
+      cliLoginSwitch: async (...args) => { calls.push(['switch', ...args]); if (refusal) throw new Error(refusal) },
+      refreshModels: async () => { calls.push(['refresh']) },
+    },
+    hostText,
+  }
+  if (missingAction) delete face.actions[missingAction]
+  const load = () => ({ omni: { face: () => foundFace ? face : null } })
+  const close = () => calls.push(['close'])
+  sandbox.fetch = async () => ({ ok: true, json: async () => ({ ok: true, value: view(agents) }) })
+  sandbox[ui.CHAT_LOGIN] = { open: id => { calls.push(['open', id]); return opens } }
+  const run = runHook(() => ui.AcpSettingsSection({ close, load }))
+  return {
+    calls,
+    tree: () => render(run.current),
+    settle: run.settle,
+    done() {
+      run.done()
+      delete sandbox.fetch
+      delete sandbox[ui.CHAT_LOGIN]
+    },
+  }
+}
+
+test('Coding agents is the menu label, heading and accessible list name in English and pt-BR', async () => {
+  for (const [pt, name] of [[false, 'Coding agents'], [true, 'Agentes de código']]) {
+    const off = pt ? ui.installLocale({ register() {}, bind: () => key => ui.PT_BR[key] ?? key }) : () => {}
+    const section = accountSettings()
+    const entries = []
+    const dispose = ui.installAcpSection({ slots: {
+      inject: (slot, register) => { register(); return () => {} },
+      register: options => entries.push(options),
+    } })
+    try {
+      await section.settle()
+      const tree = section.tree()
+      const [heading] = findAll(tree, node => node.type === 'h1')
+      const [list] = findAll(tree, node => node.type === 'section')
+      assert.equal(entries[0].id, 'acp-agents')
+      assert.equal(entries[0].label(), name)
+      assert.equal(textOf(heading), name)
+      assert.equal(list.props['aria-label'], name)
+      if (pt) assert.equal(buttons(tree, 'Trocar de conta').length, 1)
+    } finally {
+      dispose()
+      section.done()
+      off()
+    }
+  }
+})
+
+test('Settings without the Bot face keeps the existing signed-in line', async () => {
+  const section = accountSettings({ foundFace: false })
+  try {
+    await section.settle()
+    assert.match(textOf(section.tree()), /Signed in to Codex\./)
+    assert.doesNotMatch(textOf(section.tree()), /a@example\.test|share this account/)
+    assert.equal(buttons(section.tree(), 'Switch account').length, 0)
+    assert.deepEqual(section.calls, [])
+  } finally { section.done() }
+})
+
+test('Settings without either account action keeps the existing signed-in line', async () => {
+  for (const missingAction of ['cliLoginAccounts', 'cliLoginSwitch']) {
+    const section = accountSettings({ missingAction })
+    try {
+      await section.settle()
+      assert.match(textOf(section.tree()), /Signed in to Codex\./)
+      assert.doesNotMatch(textOf(section.tree()), /a@example\.test|share this account/)
+      assert.equal(buttons(section.tree(), 'Switch account').length, 0)
+      assert.deepEqual(section.calls, [])
+    } finally { section.done() }
+  }
+})
+
+test('two Settings rows share one account read and only account sign-ins show a label', async () => {
+  const entries = {
+    'acp-codex': accountEntry(),
+    'acp-claude': accountEntry({ kind: 'key', email: 'b@example.test' }),
+  }
+  const agents = ['acp-codex', 'acp-claude'].map(id => agent(id, { authScope: 'isolated' }))
+  const section = accountSettings({ entries, agents })
+  try {
+    await section.settle()
+    const tree = section.tree()
+    const text = textOf(tree)
+    assert.match(text, /Signed in to Codex as a@example\.test\./)
+    assert.match(text, /Signed in to Claude Code\./)
+    assert.doesNotMatch(text, /b@example\.test/)
+    assert.match(text, /Bots in this installation share this account\. Your terminal sign-in stays as it is\./)
+    assert.equal(buttons(tree, 'Switch account').length, 2)
+    assert.deepEqual(section.calls, [['accounts']])
+  } finally { section.done() }
+
+  const reopened = accountSettings({ entries: { 'acp-codex': accountEntry({ kind: 'account', org: 'Example Org' }) } })
+  try {
+    await reopened.settle()
+    assert.match(textOf(reopened.tree()), /Signed in to Codex as Example Org\./)
+    assert.deepEqual(reopened.calls, [['accounts']])
+  } finally { reopened.done() }
+})
+
+test('account details and switch require an isolated, consented, signed-in non-native row and entry', () => {
+  const entry = accountEntry()
+  const row = agent('acp-codex', { authScope: 'isolated' })
+  for (const [candidate, account] of [
+    [row, { ...entry, authScope: 'shared' }],
+    [row, { ...entry, signedIn: false }],
+    [{ ...row, authScope: 'shared' }, entry],
+    [{ ...row, signedIn: false }, entry],
+    [{ ...row, consent: 'needed' }, entry],
+    [nativeAgent('acp-hermes', { authScope: 'isolated' }), entry],
+  ]) {
+    const lines = ui.agentLines(candidate, account)
+    assert.equal(lines.some(line => line.action === 'switch'), false)
+    assert.equal(lines.some(line => line.text.includes('a@example.test')), false)
+    assert.equal(lines.some(line => line.text.includes('share this account')), false)
+  }
+})
+
+test('the octopus ghost opacity rule applies to paths without hiding Coding agents buttons', () => {
+  assert.doesNotMatch(STAGE_CSS, /(?:^|[},])\s*\.oai-ghost\s*\{\s*opacity\s*:\s*0\s*;?\s*\}/)
+  assert.ok(STAGE_CSS.includes('path.oai-ghost{opacity:0}'))
+})
+
+test('Switch account confirms once on the Main Bot, refreshes, opens the chat and closes Settings', async () => {
+  const section = accountSettings()
+  try {
+    await section.settle()
+    const [switchAccount] = buttons(section.tree(), 'Switch account')
+    assert.equal(switchAccount.props.className, 'oai-ghost oai-acp-act')
+    switchAccount.props.onClick()
+    await section.settle()
+    assert.match(textOf(section.tree()), /This stops running Bot work for this account\. Continue\?/)
+    assert.doesNotMatch(textOf(section.tree()), /Signed in to Codex as/)
+    buttons(section.tree(), 'Cancel')[0].props.onClick()
+    await section.settle()
+    assert.deepEqual(section.calls, [['accounts']])
+    buttons(section.tree(), 'Switch account')[0].props.onClick()
+    await section.settle()
+    const confirm = buttons(section.tree(), 'Continue')[0].props.onClick
+    confirm()
+    confirm()
+    await section.settle()
+    assert.deepEqual(section.calls, [['accounts'], ['switch', 'main', 'acp-codex'], ['refresh'], ['open', 'acp-codex'], ['close']])
+  } finally { section.done() }
+})
+
+test('a failed switch or a missing chat says why and keeps Settings open', async () => {
+  const noChat = 'Sign-in needs a Bot chat. If you have no Bot yet, set one up first.'
+  const refusal = 'The Bot account cannot be changed from this session. Use the app on this computer.'
+  for (const [options, expected, calls] of [
+    [{ opens: false, snapshot: { mainBotIds: ['missing'], mainBotId: 'main', byId: { main: {} } } }, noChat, [['switch', 'main', 'acp-codex'], ['refresh'], ['open', 'acp-codex']]],
+    [{ snapshot: { mainBotIds: ['missing'], byId: {} } }, noChat, []],
+    [{ refusal }, refusal, [['switch', 'main', 'acp-codex']]],
+    [{ refusal, hostText: () => 'Conta indisponível.' }, 'Conta indisponível.', [['switch', 'main', 'acp-codex']]],
+  ]) {
+    const section = accountSettings(options)
+    try {
+      await section.settle()
+      buttons(section.tree(), 'Switch account')[0].props.onClick()
+      await section.settle()
+      buttons(section.tree(), 'Continue')[0].props.onClick()
+      await section.settle()
+      const [problem] = findAll(section.tree(), node => node.props?.role === 'alert')
+      assert.equal(textOf(problem), expected)
+      assert.deepEqual(section.calls, [['accounts'], ...calls])
+    } finally { section.done() }
+  }
+})
+
+// #2064: a Switch account hands its own attempt to the chat's row; a plain Sign in hands none.
+test('the default bridge gets the switch\'s attempt, and a plain Sign in passes nothing (B14)', async () => {
+  const calls = []
+  const row = agentView(agent('acp-codex', { signedIn: false, authScope: 'isolated' }))
+  const attemptId = 'attempt_000000000000000000000002'
+  // The options object comes from the page's realm: copied here, so it compares by value.
+  sandbox[ui.CHAT_LOGIN] = { open: (provider, options) => { calls.push([provider, options === undefined ? undefined : { ...options }]); return true } }
+  const request = async () => ({ available: true, agents: [row] })
+  const run = runHook(() => ui.useAcp(request))
+  try {
+    await run.settle()
+    assert.equal(run.current.login(row, { attemptId }), true)
+    assert.deepEqual(calls, [['acp-codex', { attemptId }]])
+    calls.length = 0
+    assert.equal(run.current.login(row), true)
+    assert.deepEqual(calls, [['acp-codex', undefined]])
+    await run.settle()
+    assert.equal(run.current.problems['acp-codex'] ?? null, null, 'no "Sign-in needs a Bot chat." message')
+  } finally {
+    run.done()
+    delete sandbox[ui.CHAT_LOGIN]
+  }
+})
+
+test('Settings\' Switch account opens the chat\'s row on the switch\'s own attempt (B14)', async () => {
+  const attemptId = 'attempt_000000000000000000000002'
+  for (const [answer, options] of [[{ id: 'acp-codex', attemptId, status: 'failed', signedIn: false }, { attemptId }],
+    [{ id: 'acp-codex', signedIn: false }, undefined], [undefined, undefined]]) {
+    const calls = []
+    const face = {
+      hooks: { roster: { getSnapshot: () => ({ mainBotIds: ['main'], byId: { main: {} } }) } },
+      actions: {
+        cliLoginAccounts: async () => ({ accounts: { 'acp-codex': accountEntry() } }),
+        cliLoginSwitch: async (...args) => { calls.push(['switch', ...args]); return answer },
+        refreshModels: async () => {},
+      },
+    }
+    sandbox.fetch = async () => ({ ok: true, json: async () => ({ ok: true, value: view([agent('acp-codex', { authScope: 'isolated' })]) }) })
+    sandbox[ui.CHAT_LOGIN] = { open: (provider, opened) => { calls.push(['open', provider, opened === undefined ? undefined : { ...opened }]); return true } }
+    const run = runHook(() => ui.AcpSettingsSection({ close: () => calls.push(['close']), load: () => ({ omni: { face: () => face } }) }))
+    try {
+      await run.settle()
+      buttons(render(run.current), 'Switch account')[0].props.onClick()
+      await run.settle()
+      buttons(render(run.current), 'Continue')[0].props.onClick()
+      await run.settle()
+      assert.deepEqual(calls, [['switch', 'main', 'acp-codex'], ['open', 'acp-codex', options], ['close']])
+    } finally {
+      run.done()
+      delete sandbox.fetch
+      delete sandbox[ui.CHAT_LOGIN]
+    }
+  }
 })

@@ -1,9 +1,15 @@
+import { SKILLS_PANEL, SkillsScreen } from './skills-screen.js'
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
+import { bootView, checkViewer, isRetired, onRetire, requestViewer, revalidateViewerOnRefusal, startViewer } from './viewer.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
-import { badges, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons, mountShellInstallers, nav, onShell, registerComposerPack, sidebarTools, toolCards } from './extend.js'
+import {
+  badges, botChannels, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons,
+  mountShellInstallers, nav, officialInstall, onShell, registerComposerPack, sidebarTools,
+  toolCards,
+} from './extend.js'
 import { BUILTIN_PACKS, packCellSync, stepsAside } from './composer-packs.js'
 import { COMPOSER_PACK_CSS, packModelCell } from './composer-pack-cells.js'
 import { agentRowSessions, TASK_CSS } from './task-card.js'
@@ -14,25 +20,27 @@ import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
 import { teamActions } from './team-actions.js'
+import { createDraftSweep, liveSessionIds, unarchivedSessionIds } from './draft-sweep.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
 import { MENTION_ORIGIN, currentPart, relativeShort } from './text.js'
 import { SHELL_CSS, CONVERSATION_CSS, installStyles, installCompiledStyles } from './styles.js'
 import { BotMark, lookOf } from './mark.js'
-import { TeamSidebar, ChannelsMoved, YouAvatar, AccountLauncher, FooterAccount, BrandMark, BrandName, BotReturn, SIDEBAR_CSS, RETURN_CSS, holdShellShortcuts, openHarnessOnboarding, openHarnessSettings } from './sidebar.js'
+import { TeamSidebar, ChannelsMoved, YouAvatar, AccountLauncher, FooterAccount, RailToggle, BrandMark, BrandName, BotReturn, SIDEBAR_CSS, RETURN_CSS, holdShellShortcuts, openHarnessOnboarding, openHarnessSettings } from './sidebar.js'
 import { frameLayout } from './frame-layout.js'
 import { HeaderPill, NativeBotHeader, NativeControlsNote } from './header.js'
 import { ComposerPermission, ComposerPlus, ComposerVoice, menuIcons } from './composer.js'
 import { CHATS_SOURCE, atSources } from './at-menu.js'
 import { BtwDock, BtwTurnTail } from './btw.js'
 import { SIDE_CSS, sideSource } from './side-chat.js'
-import { SEAT_CHAT_CSS, SEAT_CHAT_PANEL, SeatChatPanel, seatChatView } from './seat-chat.js'
+import { SEAT_CHAT_CSS, SEAT_CHAT_PANEL, SeatChatPanel, seatChatView, seatNavigation, useSeatRoster } from './seat-chat.js'
 import { VOICE_BUNDLE, closingReplyText, requestPreparation } from './speech.js'
 import { sameVersion } from './dsh-offer.js'
 import { QuestionCard, QuestionDock } from './questions.js'
 import { DesktopUpdate, DESKTOP_UPDATE_CSS } from './desktop-update.js'
 import { WORK_CODE_SWITCH_CSS } from './work-code-switch.js'
-import { installCodeSide } from './code-side.js'
+import { CODE_PANEL, CodeMainPanel, clearSeatOrigin, codePanelNavigation, installCodeSide } from './code-side.js'
+import { CodeStartMenu, CodeStartStatus } from './code-start-menu.js'
 import { LEFT_BAR_CSS } from './left-bar-css.js'
 import { installBarWidth } from './left-bar-width.js'
 import { PRIVACY_CSS } from './privacy.js'
@@ -46,9 +54,13 @@ import { AnsweredReply, WidgetDock, WIDGET_CSS } from './widget-cell.js'
 import { HandoffDock, HANDOFF_CSS } from './handoff-card.js'
 import { AppAccessDock, ComputerHandoffDock, ComputerIndicator, COMPUTER_CSS } from './computer.js'
 import { headerNavigation, installHeaderNavigation } from './header-navigation.js'
-import { AssistantCell, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
+import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, registerSkillActivity, SkillActivityCell, SkillNoticeCell, TurnTailCell, ToolCell } from './cells.js'
+import { SKILL_ACTIVITY } from '../shared/skill-activity.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
+import { SETTINGS_CARD_CSS, setSettingsPages } from './settings-card.js'
+import { PAGE_ICONS, PageBoundary, SettingsPage } from './settings.js'
+import { BotBrowserBody, installBotBrowserTab } from './bot-browser-tab.js'
 import { createBotBrowsers, serveBrowserReads } from './bot-browsers.js'
 import { BROWSER_CSS } from './browser-pane.js'
 import { SECRET_CSS, SecretDock } from './secret-card.js'
@@ -56,11 +68,22 @@ import { PermissionChoiceDock } from './permission-card.js'
 import { MODEL_CSS, ModelChoiceDock, ModelChoiceTail, ModelLineTail, DeepSeekSignIn } from './model-menu.js'
 import { MODEL_SWITCH_CSS, ModelSwitchNotice } from './model-switch.js'
 import { announceCarried, CLI_LOGIN_CSS, CliLoginConversation, installCliLoginBridge, installKnownStateGuard } from './cli-login.js'
+import { showSignInCodeNotice } from './cli-login-guard.js'
 import { createCliLogin } from './cli-login-state.js'
 import { cliLoginBotOf } from './cli-login-model.js'
+import { installLoginCommand } from './login-command.js'
 import { ConnectorDock, MailDock, CONNECTOR_CSS } from './connectors.js'
 import { CONNECTORS_PAGE_CSS } from './connectors-page.js'
 import { LearningDock, LearningTurnTail, LEARNING_CSS } from './learning-card.js'
+import {
+  BackfillCard, CANCEL_BACKFILL, CoverageRow, GENUI_CSS, PersonCard, ProgressRow, ProgressRows,
+  READING_NOTE, START_BACKFILL, cancelBackfill, loadReadingNote, genuiRows, revisionOf, startBackfill,
+} from './genui.js'
+import {
+  backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, coverageLine,
+  coverageOf, countText, parseReadingNote, percentOf, personView, proposalView, rowView, runView,
+  shortDate, spanOf, stateId, stateWord,
+} from './genui-model.js'
 import { BOT_SETTINGS_CSS } from './bot-settings.js'
 import { AVATAR_LIBRARY_CSS } from './avatar-library.js'
 import { GROUP_SETTINGS_CSS } from './group-settings.js'
@@ -68,7 +91,7 @@ import { FOLDER_CSS } from './folder-menu.js'
 import { USAGE_CSS } from './usage-page.js'
 import { SCHEDULE_CSS } from './schedules.js'
 import { STORAGE, migrateStorage } from './storage.js'
-import { rememberOpen, takeReopen } from './reopen.js'
+import { armUpdateReopen, endUpdateReopen, ensureBotHome as goToBotHome, watchChatReopen } from './reopen.js'
 import { noteLeft, setUnread, sharedMap, toggleReaction } from './shared-map.js'
 import { freePriority, groupsFor, readMode, surfaceGroups, writeMode } from './surface.js'
 import { addStrings, dateLocale, hostText, installLocale, language, t } from './i18n.js'
@@ -86,6 +109,10 @@ import { QueueDock, QUEUE_CSS } from './queue-dock.js'
 import { noticeApprovals } from './approval-notices.js'
 import { listedOpener } from './open-listed.js'
 import { agentSessionToReuse, singleFlight } from './agent-new.js'
+import { ReadScopeControl } from './read-scope.js'
+import { installSelfUpdate } from './self-update.js'
+import { installPeopleCard } from './bot-settings.js'
+import * as gatedShared from './gated-shared.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
@@ -101,9 +128,24 @@ export const omni = Object.freeze({
   // Copy in this plugin's namespace; addStrings brings a plugin's Chinese copy.
   t, addStrings, hostText, language, dateLocale,
   // The Bot surface: what runs while it is up, and what draws in its places.
-  onShell, toolCards, nav, badges, botChildren, headerButtons, sidebarTools, botSettings, chatSuggestions, registerComposerPack, setCanvasRenderer,
+  onShell, toolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools,
+  botSettings, officialInstall, chatSuggestions, registerComposerPack, setCanvasRenderer,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
+  // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's
+  // own tool card. `rows(roster, batchId)` reads the host's slice; the model is the same
+  // words and number formats the kit's cards use, for a card of a plugin's own shape.
+  genui: Object.freeze({
+    PersonCard, ProgressRow, ProgressRows, CoverageRow, BackfillCard,
+    rows: genuiRows, revisionOf, loadReadingNote, READING_NOTE,
+    // The backfill card's actions (#1326 K2): one approval, and one job's stop.
+    startBackfill, cancelBackfill, START_BACKFILL, CANCEL_BACKFILL, backfillView,
+    model: Object.freeze({
+      backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, coverageLine,
+      coverageOf, countText, parseReadingNote, percentOf, personView, proposalView, rowView,
+      runView, shortDate, spanOf, stateId, stateWord,
+    }),
+  }),
   // The roster and actions of the running surface, or null before it runs.
   face: () => currentFace?.() ?? null,
 })
@@ -112,7 +154,36 @@ export const omni = Object.freeze({
 const DSH_SETTINGS = new Set(['general', 'account', 'models', 'agent-presets', 'plugins'])
 
 export function apply(ctx) {
-  ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
+  const boot = bootView()
+  if (boot === undefined) return applyOwner(ctx)
+  const lifetime = new AbortController()
+  ctx.effect(() => () => lifetime.abort(), 'ds-bot: gated viewer')
+  ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy (gated)')
+  let gated
+  const prepare = async () => {
+    const chunk = await globalThis.__dshChunk('./client.gated.js')
+    gated = chunk.initialize(gatedShared)
+  }
+  const clearNativeDrafts = () => {
+    for (const id of Object.keys(ctx.sessions.list.getSnapshot?.()?.byId ?? {})) {
+      try { ctx.sessions.binding?.(id)?.props?.inputActions?.setDraft?.('') } catch { /* Storage may be unavailable. */ }
+    }
+  }
+  startViewer(boot, lifetime.signal, prepare, clearNativeDrafts).then(viewer => {
+    if (lifetime.signal.aborted || (ctx.fiber && ctx.fiber.state !== 2) || isRetired()) return
+    const surface = ctx.inject([], scope => {
+      if (viewer.role === 'member' || viewer.role === 'guest') gated.applyMember(scope)
+      else {
+        scope.effect(() => installPeopleCard(gated.PeopleCard), 'ds-bot: gated People card')
+        applyOwner(scope, { gated: true })
+      }
+    })
+    ctx.effect(() => onRetire(() => { void Promise.resolve().then(() => surface.dispose()) }), 'ds-bot: retire gated surface')
+  }, () => {})
+}
+
+function applyOwner(ctx, { gated = false } = {}) {
+  if (!gated) ctx.effect(() => installLocale(ctx.get('locale')), 'ds-bot: interface copy')
   // A Bot's own browser hold, from the team view, where no browser bridge reports holds.
   const hostHolds = createSource({})
   migrateStorage()
@@ -129,7 +200,8 @@ export function apply(ctx) {
   let seenAt = seenStore.read()
   // `details` is the panel's subject (a Session id); `view` picks details or the
   // subject Bot's browser inside it.
-  const ui = createSource({ details: null, view: 'details', renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: unreadStore.read(), reactions: reactionStore.read(), visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null })
+  const emptyUi = { details: null, view: 'details', renaming: false, tab: null, side: null, newChat: null, exchange: null, menu: null, voice: null, palette: null, quote: null, settings: null, memory: null, toast: null, signIn: null, renameAgent: null, unread: {}, reactions: {}, visits: {}, panelYield: false, bootFailed: false, goalCompose: null, goalOpen: null }
+  const ui = createSource({ ...emptyUi, unread: unreadStore.read(), reactions: reactionStore.read() })
   // The window's width, which the Bot panel's fit rule reads (frame-layout.js). The team's bar
   // sits in the shell's own sidebar, which keeps its own track: no column of ours takes room.
   const frame = createSource({ viewport: typeof window === 'undefined' ? 0 : window.innerWidth })
@@ -231,12 +303,15 @@ export function apply(ctx) {
   // Pulls can overlap (the poll and a navigation); an older answer never wins.
   let pulls = 0
   let applied = 0
+  // Deleted Sessions' composer state, removed as the host lists them (draft-sweep.js).
+  const drafts = createDraftSweep({ call, openSession: () => mainView(), unarchived: () => unarchivedSessionIds(ctx.sessions.list.getSnapshot(), workspaces?.list?.getSnapshot()) })
   const pull = async () => {
     const order = ++pulls
     const known = roster.getSnapshot()
     const value = await call('state', { since: known.revision, models: known.modelsKey ?? '', live: liveKey, locale: language(), allowPlace: allowPlace() })
-    if (order < applied) return
+    if (order < applied || (gated && isRetired())) return
     applied = order
+    if (!value.unchanged) drafts.note(value.draftSweep, liveSessionIds(value))
     if (value.liveKey !== undefined) liveKey = value.liveKey
     if (value.activity !== undefined) {
       const nextActivity = JSON.stringify(value.activity)
@@ -257,6 +332,10 @@ export function apply(ctx) {
     // Omni listens to: an unchanged answer carries only those.
     const live = {}
     if (value.connectors !== undefined && JSON.stringify(value.connectors) !== JSON.stringify(current.connectors ?? [])) live.connectors = value.connectors
+    if (value.secretSources !== undefined && JSON.stringify(value.secretSources) !== JSON.stringify(current.secretSources)) live.secretSources = value.secretSources
+    if (value.secretSourcesPresent !== undefined && value.secretSourcesPresent !== current.secretSourcesPresent) live.secretSourcesPresent = value.secretSourcesPresent
+    // The web self-update holds new work while it runs (the host's self-update-hold.js); the composer says so.
+    if (value.updateHold !== undefined && value.updateHold !== (current.updateHold === true)) live.updateHold = value.updateHold
     if (value.capabilityStatuses !== undefined && JSON.stringify(value.capabilityStatuses) !== JSON.stringify(current.capabilityStatuses ?? {})) live.capabilityStatuses = value.capabilityStatuses
     if (value.learning !== undefined && JSON.stringify(value.learning) !== JSON.stringify(current.learning ?? {})) live.learning = value.learning
     if (value.learningSettled !== undefined && JSON.stringify(value.learningSettled) !== JSON.stringify(current.learningSettled ?? {})) live.learningSettled = value.learningSettled
@@ -270,10 +349,14 @@ export function apply(ctx) {
     if (value.sideChats !== undefined && JSON.stringify(value.sideChats) !== JSON.stringify(current.sideChats ?? {})) live.sideChats = value.sideChats
     if (value.browserHolds !== undefined && JSON.stringify(value.browserHolds) !== JSON.stringify(hostHolds.getSnapshot())) hostHolds.set(value.browserHolds)
     if (Object.keys(live).length > 0 && current.ready) roster.set({ ...current, ...live })
-    if (value.unchanged || (value.revision === current.revision && value.modelsKey === current.modelsKey)) return
+    if (value.unchanged || (value.revision === current.revision && value.modelsKey === current.modelsKey)) {
+      void drafts.run()
+      return
+    }
     // On a browser with no visit record yet, everything already there counts as seen.
     if (Object.keys(seenAt).length === 0) leaveVisits([...value.bots, ...value.rooms].map(entry => entry.id))
     roster.set(indexRoster(value))
+    void drafts.run()
     try {
       const ids = (value.agents ?? []).flatMap(agent => agent.sessions ?? [])
       localStorage.setItem(STORAGE.agentSessions, JSON.stringify(ids))
@@ -294,6 +377,19 @@ export function apply(ctx) {
     }
   }
 
+  let selfUpdate
+  const selfUpdateStatusSource = createSource(null)
+  if (gated) ctx.effect(() => onRetire(() => {
+    currentFace = null
+    for (const [source, empty] of [[roster, EMPTY_ROSTER], [ui, emptyUi], [work, { bots: {}, approvals: [] }],
+      ...[hostHolds, activity, live, computer, cards, heldCards, turnClock, memoryNews].map(source => [source, {}])]) {
+      try { source.set(empty) } catch { /* Continue even if a subscriber is being removed. */ }
+    }
+    seenAt = savedPrefs = {}
+    agentSessionCache.clear()
+    for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear()
+  }), 'ds-bot: clear owner state on retirement')
+
   ctx.effect(() => {
     let stopped = false
     let running = false
@@ -303,6 +399,7 @@ export function apply(ctx) {
       clearTimeout(timer)
       if (running || stopped) return
       running = true
+      void selfUpdate?.refresh()
       try {
         await pull()
         misses = 0
@@ -328,20 +425,26 @@ export function apply(ctx) {
     return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', wake) }
   }, 'ds-bot: roster poll')
 
-  // Plugin updates: every window that opens asks the host once (the host keeps its
-  // answer for a while), again each hour, and every two seconds while installing.
+  // Plugin updates: each window asks the host on open, retries early misses, then
+  // checks hourly and every two seconds while installing.
   const update = createSource({ available: false, phase: 'idle' })
+  const takeUpdateReply = value => update.set(previous => ({ ...value, app: previous.app, hostAnswered: true }))
   let wakeUpdate = () => {}
   ctx.effect(() => {
     let stopped = false
     let timer
+    const firstReplyBackoff = [5000, 15_000, 30_000]
+    let request = 0
     const loop = async () => {
       clearTimeout(timer)
       if (stopped) return
+      const current = ++request
       const value = await call('update-check', { fresh: false }).catch(() => null)
-      if (stopped) return
-      if (value) update.set(previous => ({ ...value, app: previous.app }))
-      timer = setTimeout(loop, value?.phase === 'installing' || value?.dsh?.phase === 'installing' ? 2000 : 60 * 60_000)
+      if (stopped || current !== request) return
+      if (value) takeUpdateReply(value)
+      const retry = update.getSnapshot().hostAnswered ? undefined : firstReplyBackoff.shift()
+      const installing = value?.phase === 'installing' || value?.dsh?.phase === 'installing'
+      timer = setTimeout(loop, installing ? 2000 : retry ?? 60 * 60_000)
     }
     wakeUpdate = loop
     void loop()
@@ -366,6 +469,8 @@ export function apply(ctx) {
   // panel on there (`browser` in the state).
   const bridge = (window.dshDesktop?.protocolVersion === 1 ? window.dshDesktop.browser : globalThis.dsBotApp?.browser) ?? null
   const browsers = bridge ? createBotBrowsers({ bridge, createSource, savedTabs: () => roster.getSnapshot().browserTabs }) : null
+  const holdView = bridge?.views ? (botId, held) => bridge.views.hold(botId, held) : undefined
+  const viewClientId = holdView ? globalThis.crypto.randomUUID() : undefined
   if (browsers) {
     ctx.effect(() => {
       let stopReads = null
@@ -373,7 +478,7 @@ export function apply(ctx) {
         const snapshot = roster.getSnapshot()
         if (!snapshot.ready) return
         const on = snapshot.browser === true
-        if (on && !stopReads) stopReads = serveBrowserReads({ browsers, post: call })
+        if (on && !stopReads) stopReads = serveBrowserReads({ browsers, post: call, clientId: viewClientId, holdView })
         if (!on && stopReads) { stopReads(); stopReads = null }
         // A Bot deleted here or in another window takes its guests and saved tabs along.
         void browsers.retain(snapshot.bots.map(bot => bot.id))
@@ -508,31 +613,12 @@ export function apply(ctx) {
     if (state.details === null) return false
     return frameLayout({ viewport: frame.getSnapshot().viewport, sidebarWidth: 0, pref: 'hidden', panel: { view: view ?? state.view, yielded: state.panelYield === true } }).panel === 'folded'
   }
-  const yieldBrowser = state => state.panelYield === true || panelFolded('browser')
-  // Bot mode's view must hold a team conversation; an outside Session wears the
-  // Bot skin without one. Runs whenever the surface is (or stays) Bot mode —
-  // including a cold start, where no setSurface call ever fires.
-  const homeToMainBot = () => {
-    const snapshot = roster.getSnapshot()
-    if (!snapshot.ready || !snapshot.mainBotId) return
-    const main = mainView()
-    if (main !== undefined && snapshot.byId[main] === undefined && snapshot.roomsById[main] === undefined) {
-      actions.openSession(snapshot.mainBotId)
-    }
-  }
-  const ensureBotHome = () => {
-    if (roster.getSnapshot().ready) homeToMainBot()
-    else {
-      const off = roster.subscribe(() => {
-        if (!roster.getSnapshot().ready) return
-        off()
-        homeToMainBot()
-      })
-    }
-  }
+  const ensureBotHome = () => goToBotHome({ roster, mainView, openSession: actions.openSession })
   let cliLogin
+  const codePanel = codePanelNavigation(ctx.layout, seatNavigation)
   const actions = {
-    ...teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession: id => actions.openSession(id), loginState: () => cliLogin, panelFolded }),
+    ...teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession: id => actions.openSession(id), loginState: () => cliLogin, panelFolded, work }),
+    selfUpdateStatusSource,
     learningAnswer: (id, approve) => after(call('learning-answer', { id, approve })),
     // The full-pane overlays sit above the conversation, so opening one must dismiss them
     // or the click appears to do nothing.
@@ -636,10 +722,16 @@ export function apply(ctx) {
     },
     // A seat is not a Session: the bar sets the seat and picks the keyed main panel
     // (RFC 0022 1L). Opening any Session returns the main panel to the conversation.
-    openSeat: (seat) => {
+    openSeat: (seat, { fromCode = false } = {}) => {
+      if (!fromCode) clearSeatOrigin()
       seatChatView.set({ seat })
       try { ctx.layout.selectPanel(SEAT_CHAT_PANEL) } catch (error) { noteClientError('seat-chat', error) }
     },
+    openCodePane: (selected, options) => {
+      try { codePanel.open(selected, options) } catch (error) { noteClientError('code-side', error) }
+    },
+    closeCodePane: codePanel.close,
+    reshowCodePane: codePanel.reshow,
     seatList: () => call('seat-chat-list'),
     selectPanel: (id) => { ctx.layout.selectPanel(id) },
     toggleSidebar: () => { ctx.layout.toggleSidebar() },
@@ -694,7 +786,7 @@ export function apply(ctx) {
         if (!bot) return
         browsers.ensureTabs(bot.id)
         if (browsers.tabs.getSnapshot()[bot.id]?.active == null) browsers.openTab(bot.id)
-        ui.set(state => ({ ...state, details: id, view: 'browser', renaming: false, tab: null, panelYield: yieldBrowser(state) }))
+        actions.showBrowserPanel(id, { resetDetails: true })
       },
       // '+' on the strip or the drawer's new-tab card: a blank tab in the browser view.
       browserNewTab: (id) => {
@@ -702,7 +794,7 @@ export function apply(ctx) {
         if (!bot) return null
         browsers.ensureTabs(bot.id)
         const tabId = browsers.openTab(bot.id)
-        ui.set(state => ({ ...state, details: id, view: 'browser', renaming: false, tab: null, panelYield: yieldBrowser(state) }))
+        actions.showBrowserPanel(id, { resetDetails: true })
         return tabId
       },
       // A drawer card: its tab active, the panel on the browser view.
@@ -710,7 +802,7 @@ export function apply(ctx) {
         const bot = roster.getSnapshot().byId[id]
         if (!bot) return
         browsers.activate(bot.id, tabId)
-        ui.set(state => ({ ...state, details: id, view: 'browser', panelYield: yieldBrowser(state) }))
+        actions.showBrowserPanel(id)
       },
       browserEnsure: botId => browsers.ensureTabs(botId),
       browserCloseTab: (botId, tabId) => browsers.closeTab(botId, tabId),
@@ -719,22 +811,10 @@ export function apply(ctx) {
       browserNavigate: (tabId, input) => browsers.navigate(tabId, input),
       browserCommand: (tabId, name) => browsers.command(tabId, name),
       browserFocus: (tabId) => browsers.focus(tabId),
-      browserTakeover: bridge.views ? async botId => {
-        const result = await call('browser-takeover', { botId })
-        await bridge.views.hold(botId, true)
-        return result
-      } : undefined,
-      browserStop: bridge.views ? async botId => {
-        const result = await call('browser-stop', { botId })
-        await bridge.views.hold(botId, true)
-        return result
-      } : undefined,
+      browserTakeover: holdView ? (botId, callId) => call('browser-takeover', { botId, callId, viewClientId }) : undefined,
+      browserStop: holdView ? botId => call('browser-stop', { botId, viewClientId }) : undefined,
       // `answer` is a handoff card's { callId, outcome }; the panel's Give back sends none.
-      browserGiveBack: bridge.views ? async (botId, answer = {}) => {
-        const result = await call('browser-give-back', { botId, ...answer })
-        await bridge.views.hold(botId, false)
-        return result
-      } : undefined,
+      browserGiveBack: holdView ? (botId, answer = {}) => call('browser-give-back', { ...answer, botId, viewClientId }) : undefined,
       // Cookie imports, only where the bridge offers them (the desktop app): a file or an
       // installed browser's profile is previewed, then applied into the Bot's storage key.
       browserImport: typeof bridge.importSources === 'function' ? {
@@ -749,7 +829,7 @@ export function apply(ctx) {
     // Without the bridge a Bot's own browser is a window of the Chrome on this computer: it
     // still hands over to the user, through the host alone, and the team view carries the hold.
     Object.assign(actions, {
-      browserTakeover: botId => call('browser-takeover', { botId }),
+      browserTakeover: (botId, callId) => call('browser-takeover', { botId, callId }),
       browserStop: botId => call('browser-stop', { botId }),
       browserGiveBack: (botId, answer = {}) => call('browser-give-back', { botId, ...answer }),
     })
@@ -778,14 +858,14 @@ export function apply(ctx) {
   }, 'ds-bot: carried CLI sign-in notice')
   actions.inputActionsOf = sessionId => ctx.sessions.binding?.(sessionId)?.props?.inputActions
   ctx.effect(() => () => cliLogin.dispose(), 'ds-bot: CLI sign-in rows')
-  ctx.effect(() => installKnownStateGuard({ onRefused: () => actions.showNotice(t('This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step.')) }), 'ds-bot: sign-in code guard')
+  ctx.effect(() => installKnownStateGuard({ onRefused: () => showSignInCodeNotice(actions) }), 'ds-bot: sign-in code guard')
   ctx.effect(() => installCliLoginBridge({
     selectedBot: () => cliLoginBotOf(roster.getSnapshot(), mainView()),
     mainBot: () => {
       const snapshot = roster.getSnapshot()
       return [...(snapshot.mainBotIds ?? []), snapshot.mainBotId].map(id => cliLoginBotOf(snapshot, id)).find(Boolean)
     },
-    openLogin: (botId, provider) => actions.openCliLogin(botId, provider),
+    openLogin: (botId, provider, attemptId) => actions.openCliLogin(botId, provider, undefined, attemptId),
   }), 'ds-bot: CLI sign-in bridge')
   // Whether AccountLauncher holds the shell's settings seat; FooterAccount steps aside if so.
   actions.signInEntry = () => ctx.slots.entries?.('settings.models.sign-in')?.[0] ?? null
@@ -853,13 +933,16 @@ export function apply(ctx) {
   }
   actions.checkUpdate = async () => {
     const value = await call('update-check', { fresh: true })
-    update.set(previous => ({ ...value, app: previous.app }))
+    takeUpdateReply(value)
     wakeUpdate()
   }
   actions.freshConversation = botId => after(call('bot-fresh', { id: botId }))
   // Each Bot's model state (the host's model-state.js), as the last state answer carried it.
   actions.subscribeWork = listener => work.subscribe(listener)
   actions.modelStateOf = botId => work.getSnapshot().models?.[botId]
+  // Whether a Session runs a turn now (the host's live `turns`), read at the moment of a model
+  // pick: a crossing that would stop a running reply asks first (RFC 0030, Handoff note).
+  actions.turnRunning = sessionId => work.getSnapshot().turns?.[sessionId] !== undefined
   const browserPages = browsers?.pages ?? createSource({})
   const browserTabs = browsers?.tabs ?? createSource({})
   const browserHolds = browsers?.holds ?? hostHolds
@@ -940,11 +1023,25 @@ export function apply(ctx) {
     })
   }
   const face = () => ({ actions, hooks: { roster, ui, activity, work, memoryNews, registry, turnClock, live, computer, cards, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } })
+  const ownerViewer = gated ? requestViewer('whoami') : undefined
+  const updateQueue = async (sessionId, itemId, action) => {
+    if (ownerViewer) {
+      checkViewer(ownerViewer)
+      try { await call('whoami') }
+      catch (error) {
+        revalidateViewerOnRefusal(ownerViewer, error)
+        throw error
+      }
+    }
+    const session = ctx.sessions.binding(sessionId)?.session
+    checkViewer(ownerViewer)
+    return (await session?.updateQueue(itemId, action)) ?? { ok: false }
+  }
   // The queue dock's per-session verbs, supplied the way the shell's own dock
   // injects them (the session facade and the conversation service).
   const queueFace = (sessionId) => ({
     ...face(),
-    updateQueue: async (itemId, action) => (await ctx.sessions.binding(sessionId)?.session?.updateQueue(itemId, action)) ?? { ok: false },
+    updateQueue: (itemId, action) => updateQueue(sessionId, itemId, action),
     loadImage: (attachment) => ctx.uiConversation.imageUrl(sessionId, attachment),
   })
   ctx.effect(() => noticeApprovals({
@@ -1001,7 +1098,7 @@ export function apply(ctx) {
   actions.steerQueued = async (sessionId) => {
     const session = ctx.sessions.binding(sessionId)?.session
     if (session === undefined) return
-    if (await steerQueued(session) === 'failed') {
+    if (await steerQueued(session, gated ? (id, action) => updateQueue(sessionId, id, action) : undefined) === 'failed') {
       actions.reportError(new Error(t('Couldn’t steer the queued messages. Try again.')), 'steer-queue')
     }
   }
@@ -1165,7 +1262,7 @@ export function apply(ctx) {
   // so a surface change withdraws the whole group and the outlets re-render.
   const installShell = () => [
     () => installCompiledStyles(SHELL_CSS, 'shell'),
-    () => installCodeSide(ctx),
+    () => installCodeSide(ctx, { start: { Menu: CodeStartMenu, Status: CodeStartStatus } }),
     () => installCompiledStyles(SIDEBAR_CSS, 'sidebar'),
     () => installCompiledStyles(LEFT_BAR_CSS, 'left-bar'),
     () => installBarWidth(),
@@ -1180,6 +1277,8 @@ export function apply(ctx) {
     () => installCompiledStyles(GOAL_CSS, 'goal'),
     () => installCompiledStyles(USER_MESSAGE_CSS, 'user-messages'),
     () => installCompiledStyles(TASK_CSS, 'tasks'),
+    () => installCompiledStyles(SETTINGS_CARD_CSS, 'settings-card'),
+    () => setSettingsPages({ PAGE_ICONS, PageBoundary, SettingsPage }),
     () => installCompiledStyles(DESKTOP_UPDATE_CSS, 'desktop-update'),
     () => installCompiledStyles(WORK_CODE_SWITCH_CSS, 'work-code-switch'),
     () => installCompiledStyles(PRIVACY_CSS, 'privacy'),
@@ -1189,10 +1288,19 @@ export function apply(ctx) {
     () => installCompiledStyles(VOICE_SETTINGS_CSS, 'voice-settings'),
     () => installCompiledStyles(IMAGE_CELL_CSS, 'image-cell'),
     () => installCompiledStyles(SUGGEST_CSS, 'suggestions'),
+    () => installCompiledStyles(GENUI_CSS, 'genui'),
     () => installCompiledStyles(LIVE_CSS, 'live'),
     () => {
       const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
         scope.effect(() => installLiveTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: LiveTab }), 'ds-bot: native Live tab')
+      })
+      return () => fiber.dispose()
+    },
+    // The Bot browser in the same right column: the person drives the Bot's own page, then
+    // hands it back, so the Web app needs no Electron webview to show it.
+    () => {
+      const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
+        scope.effect(() => installBotBrowserTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: BotBrowserBody }), 'ds-bot: native Bot browser tab')
       })
       return () => fiber.dispose()
     },
@@ -1214,8 +1322,16 @@ export function apply(ctx) {
     // picks it, and opening any Session (or Back) puts the conversation back.
     () => ctx.slots.inject('main', () => ctx.slots.register({
       name: 'main', key: SEAT_CHAT_PANEL,
-      inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
+      inject: () => ({ onBack: () => ctx.layout.selectPanel(null), onReshowCode: actions.reshowCodePane }),
     }, SeatChatPanel)),
+    () => ctx.slots.inject('main', () => ctx.slots.register({
+      name: 'main', key: SKILLS_PANEL,
+      inject: () => ({ actions, rosterSource: roster, onBack: () => ctx.layout.selectPanel(null) }),
+    }, SkillsScreen)),
+    () => ctx.slots.inject('main', () => ctx.slots.register({
+      name: 'main', key: CODE_PANEL,
+      inject: () => ({ onBack: codePanel.close, openSeat: actions.openSeat, useSeatRoster }),
+    }, CodeMainPanel)),
     () => shadow('sidebar.brand.mark', { priority: BOT_PRIORITY }, BrandMark),
     () => shadow('sidebar.brand.name', { priority: BOT_PRIORITY }, BrandName),
     // The desktop app's own update, above the account and Channels (desktop-update.js).
@@ -1223,6 +1339,8 @@ export function apply(ctx) {
     () => shadow('sidebar.footer.action', { id: 'bot-account', order: -200, inject: face }, FooterAccount),
     // Shown only when the team is linked to an Omni without the channels plugin.
     () => shadow('sidebar.footer.action', { id: 'bot-channels-moved', order: -100, inject: face }, ChannelsMoved),
+    // The footer keeps the wide toggle below every entry, independent of the Bot list's height.
+    () => shadow('sidebar.footer.action', { id: 'bot-rail-toggle', order: 0, inject: face }, RailToggle),
     () => shadow('settings.trigger', { priority: BOT_PRIORITY }, YouAvatar),
     // The whale wins the seat over a shell account plugin's own launcher (the
     // Desktop's "··· More"), which comes back in Agent mode.
@@ -1296,11 +1414,15 @@ export function apply(ctx) {
     () => installCompiledStyles(QUEUE_CSS, 'queue'),
     () => installMentions(),
     () => installAtMenu(),
+    () => installLoginCommand(ctx, { roster, actions, t }),
     () => installAdvancedStyle(),
     installHeader,
     installNativeBotHeader,
     () => shadow('conversation.composer.dock', { id: 'bot-native-note', order: 20, inject: face }, NativeControlsNote),
+    () => shadow('conversation.composer.dock', { id: 'bot-review-guard-off', order: 21, inject: face }, GuardOffLine),
     () => shadow('conversation.chat.node', { key: 'assistant-step', priority: BOT_PRIORITY, locale: 'chat', inject: assistantFace }, AssistantCell),
+    () => registerSkillActivity(ctx),
+    () => shadow('conversation.chat.node', { key: SKILL_ACTIVITY, priority: BOT_PRIORITY, locale: 'chat', inject: face }, SkillActivityCell),
     () => shadow('conversation.chat.node', { key: 'turn-trigger', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TriggerCell),
     () => shadow('conversation.chat.node', { key: 'tool-call', priority: BOT_PRIORITY, locale: 'chat', inject: face }, ToolCell),
     () => simpleOnly(() => shadow('conversation.chat.node', { key: 'turn-process', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TurnProcessCell)),
@@ -1324,7 +1446,7 @@ export function apply(ctx) {
     () => simpleOnly(() => shadow('conversation.chat.node', { key: 'compaction', priority: BOT_PRIORITY, locale: 'chat' }, CellEmpty)),
     // A Bot chat leaves DSH's context lines (tool updates, injected context) out; a Bot
     // message spliced in mid-turn gets an event line from the step that reads it instead.
-    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'context', priority: BOT_PRIORITY, locale: 'chat' }, CellEmpty)),
+    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'context', priority: BOT_PRIORITY, locale: 'chat' }, SkillNoticeCell)),
     ...(canDrawUserMessages() ? ['user', 'steering'].map(key => () => shadow('conversation.chat.node', { key, priority: BOT_PRIORITY, locale: 'chat', inject: face }, UserMessageCell)) : []),
     () => installPackCell('conversation.input.permission', 'permission'),
     () => simpleOnly(() => shadow('conversation.input.plan', { priority: BOT_PRIORITY }, Nothing)),
@@ -1336,6 +1458,7 @@ export function apply(ctx) {
     () => shadow('conversation.composer.dock', { id: 'btw', order: 2, priority: BOT_PRIORITY, inject: face }, BtwDock),
     () => shadow('conversation.input.left', { id: 'bot-plus', order: -100, inject: face }, ComposerPlus),
     () => shadow('conversation.input.left', { id: 'bot-permission-chip', order: -99, inject: face }, ComposerPermission),
+    () => shadow('conversation.input.left', { id: 'session-read-scope', order: -98 }, ReadScopeControl),
     () => shadow('conversation.input.right', { id: 'bot-voice', order: 100, inject: face }, ComposerVoice),
     () => shadow('conversation.composer', {
       priority: BOT_PRIORITY,
@@ -1499,24 +1622,13 @@ export function apply(ctx) {
     return () => { offList(); offRoster() }
   }, 'ds-bot: agent surface')
 
-  // The chat on screen, kept for a restart of DSH alone (reopen.js): taken before it is noted
-  // again, opened once the team is known, and noted from then on.
+  // A reload consumes the marker once. A web reconnect can use the same validated open path.
+  let chatReopen
   ctx.effect(() => {
-    let reopening = takeReopen()
-    const note = () => { if (reopening === null) rememberOpen(mainView()) }
-    const reopen = () => {
-      const snapshot = roster.getSnapshot()
-      if (!snapshot.ready) return
-      const id = reopening
-      reopening = null
-      if (isAgentSessionId(id) || snapshot.byId?.[id] !== undefined || snapshot.roomsById?.[id] !== undefined) actions.openSession(id)
-      note()
-    }
-    const offList = ctx.sessions.list.subscribe(note)
-    const offRoster = reopening === null ? () => {} : roster.subscribe(() => { if (reopening !== null) reopen() })
-    if (reopening !== null) reopen()
-    note()
-    return () => { offList(); offRoster() }
+    chatReopen = watchChatReopen({
+      roster, sessions: ctx.sessions.list, mainView, isAgentSession: isAgentSessionId, openSession: actions.openSession,
+    })
+    return () => { chatReopen.dispose(); chatReopen = undefined }
   }, 'ds-bot: keep the open chat across a DSH restart')
 
   ctx.effect(() => {
@@ -1570,4 +1682,26 @@ export function apply(ctx) {
       groups.dispose()
     }
   }, 'ds-bot: surface')
+  ctx.effect(() => {
+    const connection = ctx.get('connection')?.state
+    const update = installSelfUpdate({
+      readStatus: actions.selfUpdateStatus,
+      startUpdate: actions.startSelfUpdate,
+      connection,
+      onStatus: selfUpdateStatusSource.set,
+      desktop: window.dshDesktop?.protocolVersion === 1,
+      keepChat(active, restore) {
+        if (active) armUpdateReopen(chatReopen?.getPending() ?? mainView())
+        else {
+          const id = endUpdateReopen(restore)
+          if (id !== null) chatReopen?.setPending(id)
+        }
+      },
+    })
+    selfUpdate = update
+    return () => {
+      update?.dispose()
+      if (selfUpdate === update) selfUpdate = null
+    }
+  }, 'ds-bot: web self-update')
 }

@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // agentPath.mjs: the PATH an agent worker starts with when its `#!/usr/bin/env node` (or bun)
 // interpreter isn't on the pane's PATH. Fake agents and fake runtimes in temp folders; no real
 // codex, node install or Herdr is touched. The last test runs the CLI with the fake hc.
@@ -88,6 +89,21 @@ test("node already on the worker's PATH: PATH unchanged, nothing said", (t) => {
   const got = interpreterPath("codex", path, s.env);
   assert.deepEqual(got, { path, note: null });
   assert.equal(pathOf(got.path), path);
+});
+
+test("a FIFO named like the agent is never opened for its first line", (t) => {
+  const s = scratch(t);
+  const fifo = join(s.empty, "claude");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  chmodSync(fifo, 0o755);
+  const module = new URL("../mods/am-sidebar/agentPath.mjs", import.meta.url).href;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import { interpreterPath } from ${JSON.stringify(module)};
+    console.log(JSON.stringify(interpreterPath("claude", process.argv[1])));
+  `, s.empty], { timeout: 5000, encoding: "utf8", env: { ...process.env, ...s.env } });
+  assert.ifError(r.error);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { path: s.empty, note: null });
 });
 
 test("node missing, codex reached through a link to nvm's bin: nvm's bin goes first, nothing removed", (t) => {
@@ -251,6 +267,10 @@ function codexProject(t, extra = [], { terminals = [], env: more = {} } = {}) {
   mkdirSync(bin);
   symlinkSync(join(prefix, "bin/codex"), join(bin, "codex"));
   exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+  // The test's own herdr-app has no window, so a Start places the bot as on a machine without one.
+  const appLog = join(s.root, "herdr-app.log");
+  writeFileSync(appLog, "");
+  exe(join(bin, "herdr-app"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${appLog}"\necho "herdr-app: no window is open" >&2\nexit 1\n`);
   symlinkSync(execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(), join(bin, "git"));
   const project = join(s.root, "proj");
   mkdirSync(join(project, ".herdr"), { recursive: true });
@@ -273,9 +293,12 @@ function codexProject(t, extra = [], { terminals = [], env: more = {} } = {}) {
   writeFileSync(log, "");
   const path = `${bin}:${s.empty}`;
   const env = { ...s.env, PATH: path, HERDR_APP_HOME: app, HC_FAKE_STATE: state, HC_FAKE_LOG: log, HC_TERMINAL_ID: "t1", ...more };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: s.root });
+  Object.assign(env, { ...core.env });
   const cli = (...args) => spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
   const run = () => readJsonLines(log).find((c) => c[0] === "run");
-  return { s, prefix, path, app, cli, run };
+  const appCalls = () => readFileSync(appLog, "utf8").split("\n").filter(Boolean);
+  return { s, prefix, path, app, cli, run, appCalls };
 }
 
 test("worker CLI: a codex the pane reaches without node starts under env PATH=<nvm bin>:<pane PATH>, and says so", (t) => {
@@ -288,21 +311,23 @@ test("worker CLI: a codex the pane reaches without node starts under env PATH=<n
 });
 
 test("start CLI (#56): a codex bot whose node is only in nvm starts under env PATH=<nvm bin>:<PATH>, and the command runs", (t) => {
-  const { prefix, path, app, cli, run: runCall } = codexProject(t, [{ id: "b-dddddddddd", name: "Maint", kind: "member", agent: "codex" }]);
+  const { prefix, path, app, cli, run: runCall, appCalls } = codexProject(t, [{ id: "b-dddddddddd", name: "Maint", kind: "member", agent: "codex" }]);
   const r = cli("start", "Maint", "--json");
   assert.equal(r.status, 0, r.stderr);
   const run = runCall();
   const argv = run.slice(run.indexOf("--") + 1);
-  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"]);
+  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "-c", "allow_login_shell=false"]);
   assert.match(argv[4], /^-c$/);
   assert.match(argv[5], /^developer_instructions="<herdr-bot>\\nAutomagik Herdr briefing/, "codex takes it as a TOML string");
-  assert.deepEqual(noGrants(plain(JSON.parse(r.stdout).argv)), ["codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"]);
+  assert.deepEqual(noGrants(plain(JSON.parse(r.stdout).argv)), ["codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "-c", "allow_login_shell=false"]);
   assert.match(r.stderr, new RegExp(`am: codex runs under node, which isn't on its PATH: ${join(prefix, "bin")} put first on it\\.`));
   // The seat's command as hc would run it: with the caller's PATH alone, env finds no node (127); as started, it runs.
   const bare = spawnSync("codex", [], { env: { PATH: path }, encoding: "utf8" });
   assert.equal(bare.status, 127, bare.stderr);
   const seat = spawnSync(argv[0], argv.slice(1), { env: {}, encoding: "utf8" });
   assert.equal(seat.status, 0, seat.stderr);
+  assert.ok(appCalls().includes("ls"), "the start asked the test's own herdr-app for the window");
+  assert.ok(appCalls().every((c) => c === "ls"), `only ls: ${appCalls()}`);
 });
 
 test("restart CLI (#56): restarting a codex bot whose node is only in nvm runs under env PATH=<nvm bin>:<PATH>, not into 127", (t) => {
@@ -315,7 +340,7 @@ test("restart CLI (#56): restarting a codex bot whose node is only in nvm runs u
   assert.equal(JSON.parse(r.stdout).replaced, "t7");
   const run = runCall();
   const argv = run.slice(run.indexOf("--") + 1);
-  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "resume", "--last"]);
+  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "-c", "allow_login_shell=false", "resume", "--last"]);
   assert.ok(argv.findIndex((w) => w.startsWith("developer_instructions=")) < argv.indexOf("resume"), "its -c before the subcommand");
   assert.equal(argv.filter((w) => w.startsWith("developer_instructions=")).length, 1, "never twice after a restart");
   const seat = spawnSync(argv[0], argv.slice(1), { env: {}, encoding: "utf8" });
@@ -418,6 +443,119 @@ test("agentOnMachine: npm's layout reached through a link puts <prefix>/bin on t
   assert.deepEqual([got.state, got.login], ["found", false]);
   assert.ok(got.path.split(":").includes(join(prefix, "bin")), got.path);
   assert.equal(spawnSync("/usr/bin/env", ["PATH=" + got.path, "sh", "-c", 'command -v node'], { encoding: "utf8" }).stdout.trim(), join(prefix, "bin/node"));
+});
+
+// A system node (/usr/bin/node) beside an npm-installed agent: CI has none, so a fake one in s.sys
+// (on hc's PATH before /usr/bin) stands in for it, and these run the same on every host.
+/** npm's layout reached through ~/.local/bin/codex, with an older "system" node in s.sys. */
+function linkedNpm(s, opts) {
+  const prefix = npmPrefix(s.root, opts);
+  const links = join(s.env.HOME, ".local/bin");
+  mkdirSync(links, { recursive: true });
+  symlinkSync(join(prefix, "bin/codex"), join(links, "codex"));
+  runtime(join(s.sys, "node"), "v18.0.0");
+  return { prefix, bin: join(prefix, "bin"), links, pkg: join(prefix, "lib/node_modules/@openai/codex/bin") };
+}
+const nodeOn = (path) => spawnSync("/usr/bin/env", ["PATH=" + path, "sh", "-c", "command -v node"], { encoding: "utf8" }).stdout.trim();
+
+test("agentOnMachine: an npm agent reached through a link gets <prefix>/bin before a system node, nothing else moved or lost", async (t) => {
+  const s = scratch(t);
+  const n = linkedNpm(s);
+  const got = await agentOnMachine(service(s, { exit: "1" }), "codex");
+  assert.deepEqual(got, { state: "found", path: [n.bin, s.sys, "/usr/bin", "/bin", n.links, n.pkg].join(":"), file: join(n.links, "codex"), login: false });
+  assert.equal(nodeOn(got.path), join(n.bin, "node"));
+});
+
+test("agentOnMachine: a login PATH with a node folder before the agent's link: <prefix>/bin goes right before that folder", async (t) => {
+  const s = scratch(t);
+  const n = linkedNpm(s);
+  const sysl = join(s.root, "login-sys");
+  runtime(join(sysl, "node"), "v20.0.0");
+  const got = await agentOnMachine(service(s, { path: [sysl, n.links, "/usr/bin", "/bin"].join(":") }), "codex");
+  assert.equal(got.path, [n.bin, sysl, n.links, "/usr/bin", "/bin", s.sys, n.pkg].join(":"));
+  assert.equal(nodeOn(got.path), join(n.bin, "node"));
+});
+
+test("agentOnMachine: hc's PATH finds the npm link and has its own node: unchanged, hc's node runs (#436)", async (t) => {
+  const s = scratch(t);
+  const prefix = npmPrefix(s.root);
+  const hc = join(s.root, "hc-bin");
+  mkdirSync(hc, { recursive: true });
+  symlinkSync(join(prefix, "bin/codex"), join(hc, "codex"));
+  runtime(join(hc, "node"), "v20.0.0");
+  const got = await agentOnMachine(service(s, { hc, exit: "1" }), "codex");
+  assert.equal(got.path, [hc, s.sys, "/usr/bin", "/bin", join(prefix, "lib/node_modules/@openai/codex/bin"), join(prefix, "bin")].join(":"));
+  assert.equal(nodeOn(got.path), join(hc, "node"));
+});
+
+test("agentOnMachine: PATH_PREPEND with a node stays first and its node wins; <prefix>/bin goes after it", async (t) => {
+  const s = scratch(t);
+  const n = linkedNpm(s);
+  const pre = join(s.root, "pre-bin");
+  runtime(join(pre, "node"), "v24.0.0");
+  const got = await agentOnMachine(service(s, { exit: "1" }), "codex", { prepend: pre });
+  assert.equal(got.path, [pre, n.bin, s.sys, "/usr/bin", "/bin", n.links, n.pkg].join(":"));
+  assert.equal(nodeOn(got.path), join(pre, "node"));
+});
+
+test("agentOnMachine: <prefix>/bin already before every node stays put; later than one, it moves up once", async (t) => {
+  const s = scratch(t);
+  const n = linkedNpm(s);
+  const sysl = join(s.root, "login-sys");
+  runtime(join(sysl, "node"), "v20.0.0");
+  const early = await agentOnMachine(service(s, { path: [n.bin, sysl, "/usr/bin", "/bin"].join(":") }), "codex");
+  assert.deepEqual([early.path, early.file], [[n.bin, sysl, "/usr/bin", "/bin", s.sys, n.links, n.pkg].join(":"), join(n.bin, "codex")]);
+  const late = await agentOnMachine(service(s, { path: [sysl, n.bin, "/usr/bin", "/bin"].join(":") }), "codex");
+  assert.deepEqual([late.path, late.file], [[n.bin, sysl, "/usr/bin", "/bin", s.sys, n.links, n.pkg].join(":"), join(n.bin, "codex")]);
+});
+
+test("agentOnMachine: no promotion when <prefix>/bin/codex is another program, so the agent that runs is the one checked", async (t) => {
+  const s = scratch(t);
+  const n = linkedNpm(s);
+  rmSync(join(n.links, "codex"));
+  symlinkSync(join(n.pkg, "codex.js"), join(n.links, "codex"));
+  rmSync(join(n.bin, "codex"));
+  exe(join(n.bin, "codex"), "#!/bin/sh\necho another codex\n");
+  const got = await agentOnMachine(service(s, { exit: "1" }), "codex");
+  assert.equal(got.path, [s.sys, "/usr/bin", "/bin", n.links, n.pkg, n.bin].join(":"));
+  assert.equal(spawnSync("/usr/bin/env", ["PATH=" + got.path, "sh", "-c", "command -v codex"], { encoding: "utf8" }).stdout.trim(), join(n.links, "codex"));
+});
+
+test("agentOnMachine: no promotion for an open <prefix>/bin, a node linked into an open folder, a node that can't run or a non-node agent", async (t) => {
+  const today = (s, n) => [s.sys, "/usr/bin", "/bin", n.links, n.pkg, n.bin].join(":");
+  let s = scratch(t), n = linkedNpm(s);
+  chmodSync(n.bin, 0o777);
+  assert.equal((await agentOnMachine(service(s, { exit: "1" }), "codex")).path, today(s, n), "a world-writable <prefix>/bin");
+  s = scratch(t); n = linkedNpm(s);
+  const open = join(s.root, "open");
+  runtime(join(open, "node"), "v22.22.0");
+  chmodSync(open, 0o777);
+  rmSync(join(n.bin, "node"));
+  symlinkSync(join(open, "node"), join(n.bin, "node"));
+  assert.equal((await agentOnMachine(service(s, { exit: "1" }), "codex")).path, today(s, n), "node's real file in a world-writable folder");
+  s = scratch(t); n = linkedNpm(s);
+  chmodSync(join(n.bin, "node"), 0o644);
+  assert.equal((await agentOnMachine(service(s, { exit: "1" }), "codex")).path, today(s, n), "a node that isn't executable");
+  s = scratch(t); n = linkedNpm(s);
+  exe(join(n.pkg, "codex.js"), "#!/bin/sh\necho hi\n");
+  assert.equal((await agentOnMachine(service(s, { exit: "1" }), "codex")).path, today(s, n), "an agent that doesn't run under node");
+});
+
+test("agentOnMachine: a prefix with spaces, $, backticks, quotes and * is promoted as one word, never evaluated", async (t) => {
+  const s = scratch(t);
+  const canary = join(s.root, "ran");
+  const prefix = join(s.root, `p a $HOME \`touch ${canary}\` $(touch ${canary}) 'q' "d" *`);
+  exe(join(prefix, "lib/node_modules/@openai/codex/bin/codex.js"), NODE_SCRIPT);
+  runtime(join(prefix, "bin/node"), "v22.22.0");
+  symlinkSync("../lib/node_modules/@openai/codex/bin/codex.js", join(prefix, "bin/codex"));
+  const links = join(s.env.HOME, ".local/bin");
+  mkdirSync(links, { recursive: true });
+  symlinkSync(join(prefix, "bin/codex"), join(links, "codex"));
+  runtime(join(s.sys, "node"), "v18.0.0");
+  const got = await agentOnMachine(service(s, { exit: "1" }), "codex");
+  assert.equal(got.path.split(":")[0], join(prefix, "bin"));
+  assert.equal(nodeOn(got.path), join(prefix, "bin/node"));
+  assert.equal(existsSync(canary), false, "nothing in it ran");
 });
 
 test("agentOnMachine: a name and a PATH are data: nothing in them is ever evaluated", async (t) => {

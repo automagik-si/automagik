@@ -2,7 +2,7 @@ import { createElement as h, Fragment, useEffect, useMemo, useRef, useState } fr
 import { createPortal } from 'react-dom'
 import { ChatsIcon, ClockIcon, GoalIcon, MicIcon, PaperclipIcon, PeopleIcon, PlusIcon, ShieldIcon, WaveIcon } from './icons.js'
 import { canSetGoal } from './goal.js'
-import { BotMark } from './mark.js'
+import { BotMark, catalogueLookOf } from './mark.js'
 import { stepMenuFocus, useLinger, useViewport, viewBottom } from './motion.js'
 import { t } from './i18n.js'
 import { useAnchoredMenu } from './model-menu.js'
@@ -114,8 +114,20 @@ export function menuIcons(roster) {
   return (row) => {
     if (!row.bot) return PeopleIcon
     const id = row.bot.id
-    if (!marks.has(id)) marks.set(id, ({ size = 14 }) => h(BotMark, { bot: roster.getSnapshot().byId[id] ?? row.bot, size }))
-    return marks.get(id)
+    let mark = marks.get(id)
+    if (!mark) {
+      mark = {
+        Icon: ({ size = 14 }) => {
+          const bot = roster.getSnapshot().byId[id]
+          return bot
+            ? h(BotMark, { bot, size })
+            : h(BotMark, { bot: mark.bot, look: catalogueLookOf(mark.bot), size })
+        },
+      }
+      marks.set(id, mark)
+    }
+    mark.bot = row.bot
+    return mark.Icon
   }
 }
 

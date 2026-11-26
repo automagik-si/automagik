@@ -1,0 +1,260 @@
+{
+  "status": {
+    "source": "herdr-core v0.1.14, crates/herdr-core/src/api/types.rs: Empty, StatusResult",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "server.status",
+      "params": {}
+    },
+    "reply": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "core": {
+          "id": "fake-core",
+          "name": "fake"
+        },
+        "version": "0.1.14",
+        "pid": 42,
+        "uptime_ms": 120,
+        "holder": null,
+        "holders": [],
+        "live": 2,
+        "finished": 7,
+        "installed_by": null
+      }
+    }
+  },
+  "get": {
+    "source": "herdr-core v0.1.14, crates/herdr-core/src/api/types.rs: TerminalParams, terminals::Public",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "terminal.get",
+      "params": {
+        "terminal": "t100",
+        "caller": "t999"
+      }
+    },
+    "reply": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "address": "t100",
+        "name": "dev",
+        "labels": {
+          "bot": "b-cccccccccc"
+        },
+        "argv": [
+          "dsh-tui"
+        ],
+        "cwd": "$PROJECT",
+        "state": "live",
+        "created_ms": 100,
+        "screen": "exact",
+        "cols": 200,
+        "rows": 120,
+        "status": null
+      }
+    }
+  },
+  "list": {
+    "source": "herdr-core v0.1.14, crates/herdr-core/src/api/types.rs: ListParams, ListResult (empty machines omitted)",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "terminal.list",
+      "params": {
+        "all": false,
+        "labels": {}
+      }
+    },
+    "reply": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "terminals": [
+          {
+            "address": "t100",
+            "name": "dev",
+            "labels": {
+              "bot": "b-cccccccccc"
+            },
+            "argv": [
+              "dsh-tui"
+            ],
+            "cwd": "$PROJECT",
+            "state": "live",
+            "created_ms": 100,
+            "screen": "exact",
+            "cols": 200,
+            "rows": 120,
+            "status": null
+          },
+          {
+            "address": "t110",
+            "name": "other",
+            "labels": {
+              "bot": "b-gggggggggg"
+            },
+            "argv": [
+              "dsh-tui"
+            ],
+            "cwd": "$PROJECT",
+            "state": "live",
+            "created_ms": 100,
+            "screen": "exact",
+            "cols": 200,
+            "rows": 120,
+            "status": null
+          }
+        ],
+        "hidden_finished": 7
+      }
+    }
+  },
+  "send": {
+    "source": "herdr-core v0.1.14, crates/herdr-core/src/api/types.rs: SendParams, SendResult",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "terminal.send",
+      "params": {
+        "terminal": "t101",
+        "text": "fixture hello",
+        "force": false,
+        "if": null,
+        "wait": false,
+        "timeout": null,
+        "caller": "t999"
+      }
+    },
+    "reply": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "result": {
+        "status": "idle",
+        "turn": 1,
+        "started": true
+      }
+    }
+  },
+  "waitTarget": {
+    "source": "herdr-core v0.1.14, crates/herdr-core/src/api/types.rs: WaitParams, wait::WaitResult",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "terminal.wait",
+      "params": {
+        "terminal": "t101",
+        "children": null,
+        "output": null,
+        "timeout": 1,
+        "caller": "t999"
+      }
+    },
+    "reply": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "result": {
+        "terminal": "t101",
+        "ended": false,
+        "reason": "timeout",
+        "turn": 1,
+        "status": "working",
+        "exit_code": null,
+        "signal": null,
+        "children": []
+      }
+    }
+  },
+  "waitChildren": {
+    "source": "herdr-core v0.1.14, crates/herdr-core/src/api/types.rs: WaitParams, Children, wait::WaitResult",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 6,
+      "method": "terminal.wait",
+      "params": {
+        "terminal": null,
+        "children": "all",
+        "output": null,
+        "timeout": 1,
+        "caller": "t999"
+      }
+    },
+    "reply": {
+      "jsonrpc": "2.0",
+      "id": 6,
+      "result": {
+        "terminal": "t100",
+        "ended": true,
+        "reason": "children",
+        "turn": 1,
+        "status": null,
+        "exit_code": null,
+        "signal": null,
+        "children": []
+      }
+    }
+  },
+  "run": {
+    "source": "herdr-core v0.1.14, crates/herdr-core/src/api/types.rs: RunParams, RunResult (flattens terminals::Public)",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "method": "terminal.run",
+      "params": {
+        "argv": "$WORKER_ARGV",
+        "name": "worker-one",
+        "cwd": "$WORKTREE",
+        "env": {},
+        "labels": {
+          "worker.of": "b-cccccccccc",
+          "task": "gn-1",
+          "task.project": "$PROJECT",
+          "task.lead": "b-cccccccccc",
+          "branch": "feat/worker",
+          "worker.role": "dev"
+        },
+        "parent": "t100",
+        "no_parent": false,
+        "no_notify": false,
+        "outlive_parent": false,
+        "die_with_parent": true,
+        "rm": false,
+        "keep": false,
+        "wait": false,
+        "timeout": null,
+        "caller": "t999"
+      }
+    },
+    "reply": {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "result": {
+        "address": "t200",
+        "name": "worker-one",
+        "labels": {
+          "worker.of": "b-cccccccccc",
+          "task": "gn-1",
+          "task.project": "$PROJECT",
+          "task.lead": "b-cccccccccc",
+          "branch": "feat/worker",
+          "worker.role": "dev"
+        },
+        "argv": "$WORKER_ARGV",
+        "cwd": "$WORKTREE",
+        "state": "live",
+        "created_ms": 200,
+        "screen": "exact",
+        "cols": 200,
+        "rows": 120,
+        "status": null,
+        "parent": "t100",
+        "die_with_parent": true,
+        "notify": true
+      }
+    }
+  }
+}

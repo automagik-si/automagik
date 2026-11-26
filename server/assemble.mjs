@@ -4,11 +4,11 @@
 //   out/runtime/   the pinned DeepSeek Harness and the pnpm it installs plugins with
 //                  (apps/desktop/runtime/package.json + lock, the desktop's own pins)
 //   out/profile/   the automagik-web profile: dsh's base and web app, the Bot team, the
-//                  welcome and ACP, installed by dsh's own plugin command from the release
+//                  welcome, ACP and the multiuser adapter, installed by dsh's own plugin command from the release
 //                  tarballs, with pnpm's store repointed at /data and build-only files gone
 //   out/versions.json
 //
-// The release is pinned by --version (default 3.90.1); every tarball is checked against the
+// The release is pinned by --version (default 3.160.6); every tarball is checked against the
 // release's plugins.json and PLUGINS.SHA256SUMS before it is installed. Run it in the image
 // builder, where npm and the network exist; the runtime stage carries no package manager but
 // the profile's own pnpm.
@@ -17,11 +17,15 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rm
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchPlugins, DEFAULT_PACKAGES } from './fetch-plugins.mjs'
+import { fetchAm } from './fetch-am.mjs'
 import { readCheckoutPlugins, validateInput, verifyCheckoutDirectory } from './checkout-input.mjs'
 import { profileDirOf, PROFILE, pinStore } from './lib.mjs'
 import { pruneNodeModules } from '../apps/desktop/scripts/prune-runtime.mjs'
 import { patchRuntime } from '../apps/desktop/scripts/runtime-patches.mjs'
+import { writeShippedProfilePatch } from '../apps/desktop/src/profile-patch.mjs'
+import { ADAPTER, ADAPTER_SINCE, compareRelease } from './profile-state.mjs'
 import { buildOfflineStore } from './offline-store.mjs'
+import { HERDR_CORE_SHA256, HERDR_CORE_TARBALL, HERDR_CORE_VERSION } from './toolchain.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
@@ -119,6 +123,47 @@ export function pruneExtras(nodeModules) {
   return removed
 }
 
+// What the web profile never composes (proved by its --dump-config graph): the office
+// conversion wasm, the voice engine, the inspector, the alternate app bundles' optional
+// extras and the other platforms' native prebuilds. npm installs dsh's whole dependency
+// list; the automagik-web tree names none of these entries.
+const RUNTIME_PRUNE = [
+  // office-kit is a composed entry (libreoffice-kit-wasm included), so its stack stays
+  '@deepseek-ai/dsh-experimental-inspector', '@deepseek-ai/dsh-experimental-inspector-profile',
+  '@deepseek-ai/dsh-experimental-session-inspector',
+  '@deepseek-ai/dsh-experimental-client-ui-forge', '@deepseek-ai/dsh-experimental-forge',
+  '@deepseek-ai/dsh-experimental-forge-bundle', '@deepseek-ai/dsh-experimental-forge-github',
+  '@deepseek-ai/dsh-experimental-forge-session',
+  '@deepseek-ai/dsh-experimental-liveshare', '@deepseek-ai/dsh-experimental-liveshare-protocol',
+  '@deepseek-ai/dsh-experimental-auto-review', '@deepseek-ai/dsh-experimental-badge-skill-bundle',
+  '@deepseek-ai/dsh-experimental-cot-translation-bundle', '@deepseek-ai/dsh-experimental-client-ui-cot-translation',
+  '@deepseek-ai/dsh-experimental-translator',
+  '@deepseek-ai/dsh-experimental-voice-input-bundle', '@deepseek-ai/dsh-experimental-client-ui-voice-input',
+  '@deepseek-ai/dsh-experimental-speech-to-text', '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice',
+  '@deepseek-ai/dsh-experimental-api-speech-to-text', 'sherpa-onnx-linux-x64', 'sherpa-onnx-node',
+  '@deepseek-ai/dsh-experimental-plugin-market-bundle', '@deepseek-ai/dsh-experimental-ralph-bundle',
+  '@deepseek-ai/dsh-experimental-session-search', '@deepseek-ai/dsh-experimental-session-titles-bundle',
+  '@deepseek-ai/dsh-experimental-terminal-bundle', '@deepseek-ai/dsh-experimental-tool-worktree',
+  '@deepseek-ai/dsh-experimental-worktree',
+  '@img/sharp-libvips-linuxmusl-x64', '@img/sharp-linuxmusl-x64',
+  'node-pty/prebuilds/win32-arm64', 'node-pty/prebuilds/win32-x64',
+  'node-pty/prebuilds/darwin-arm64', 'node-pty/prebuilds/darwin-x64', 'node-pty/prebuilds/linux-arm64',
+  // The server image is glibc Linux: the musl native addon and pnpm's non-Linux reflink
+  // binaries are never loaded there.
+  'node-addon-require-builtin-linux-x64-musl',
+  'pnpm/dist/reflink.darwin-arm64-2HJ4WGO6.node',
+  'pnpm/dist/reflink.darwin-x64-3G3H6IW4.node',
+  'pnpm/dist/reflink.win32-arm64-msvc-Q6BARPPB.node',
+  'pnpm/dist/reflink.win32-x64-msvc-J2TZHRQI.node',
+]
+
+export function pruneRuntime(nodeModules) {
+  for (const name of RUNTIME_PRUNE) rmSync(join(nodeModules, name), { recursive: true, force: true })
+  const pruned = pruneNodeModules(nodeModules, { keepDocsOf: (name) => name.startsWith('@deepseek-ai/') })
+  const extras = pruneExtras(nodeModules)
+  return { pruned, extras }
+}
+
 /**
  * Apply the desktop's carried runtime patches to an installed runtime, logging each file's
  * result. `patchRuntime` checks the dsh version, every package version and every file hash
@@ -134,19 +179,25 @@ export function applyRuntimePatches(runtimeDir, patchesDir = PATCHES_SOURCE) {
   return results
 }
 
-export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-dev/automagik', kind = 'release', event = '', manifest = '' }) {
+export async function assemble({ out, version = ADAPTER_SINCE, dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-si/automagik', kind = 'release', event = '', manifest = '' }) {
   const input = { kind, event, revision, manifest, repository, version }
   const source = validateInput(input)
-  if (kind === 'checkout') verifyCheckoutDirectory(join(HERE, 'checkout-input'), input)
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`not a release version: ${version}`)
+  if (compareRelease(version, ADAPTER_SINCE) < 0) {
+    throw new Error(`the image needs ${ADAPTER} ${ADAPTER_SINCE} or later (RFC 0038 delivery 1); release ${version} is older`)
+  }
+  if (kind === 'checkout') verifyCheckoutDirectory(join(HERE, 'checkout-input'), input)
   const runtimeDir = join(out, 'runtime')
   const dshHome = join(out, 'dsh-home')
   const installDir = profileDirOf(dshHome)
   rmSync(out, { recursive: true, force: true })
   mkdirSync(runtimeDir, { recursive: true })
 
-  const pinned = readJson(join(RUNTIME_SOURCE, 'package.json')).dependencies?.['@deepseek-ai/dsh']
+  const runtimePackage = readJson(join(RUNTIME_SOURCE, 'package.json'))
+  const pinned = runtimePackage.dependencies?.['@deepseek-ai/dsh']
   if (pinned !== dsh) throw new Error(`apps/desktop/runtime pins dsh ${pinned}, not the image's ${dsh}`)
+  const pnpmPin = runtimePackage.dependencies?.pnpm
+  if (!/^10\.\d+\.\d+$/.test(String(pnpmPin ?? ''))) throw new Error(`apps/desktop/runtime pins pnpm ${pnpmPin}, not a pnpm 10`)
   for (const file of ['package.json', 'package-lock.json']) cpSync(join(RUNTIME_SOURCE, file), join(runtimeDir, file))
   say(`installing dsh ${dsh} and pnpm`)
   // npm 11.19 gates dependency install scripts behind allowScripts and skips them by default.
@@ -156,6 +207,8 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
   run('npm', ['ci', '--omit=dev', '--no-audit', '--no-fund', '--dangerously-allow-all-scripts'], { cwd: runtimeDir, env: ENV })
   const installedDsh = readJson(join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')).version
   if (installedDsh !== dsh) throw new Error(`runtime installed dsh ${installedDsh}, not ${dsh}`)
+  const installedPnpm = readJson(join(runtimeDir, 'node_modules', 'pnpm', 'package.json')).version
+  if (installedPnpm !== pnpmPin) throw new Error(`runtime installed pnpm ${installedPnpm}, not ${pnpmPin}`)
 
   // The same carried patches the desktop runtime applies, to the same pinned packages: this
   // image serves the web app, so the index cache policy is the one the desktop's patch sets.
@@ -163,13 +216,16 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
 
   say(`fetching ${DEFAULT_PACKAGES.join(', ')} at ${version}`)
   mkdirSync(installDir, { recursive: true })
+  say(`fetching am ${version} from its pinned release tarball`)
+  const am = await fetchAm({ version, out: join(out, 'am'), repository })
+
   const fetched = kind === 'checkout'
     ? readCheckoutPlugins({ ...input, out: join(installDir, 'vendor') })
     : await fetchPlugins({ version, out: join(installDir, 'vendor'), repository })
   const profile = readJson(join(PROFILE_SOURCE, 'package.json'))
   for (const name of DEFAULT_PACKAGES) profile.dependencies[name] = `file:vendor/${fetched.plugins[name].file}`
   writeFileSync(join(installDir, 'package.json'), `${JSON.stringify(profile, null, 2)}\n`)
-  for (const file of ['cordis.patch.yml', 'pnpm-workspace.yaml']) cpSync(join(PROFILE_SOURCE, file), join(installDir, file))
+  cpSync(join(PROFILE_SOURCE, 'pnpm-workspace.yaml'), join(installDir, 'pnpm-workspace.yaml'))
   pinStore(installDir, dshHome)
 
   say('installing the profile with dsh plugin')
@@ -183,56 +239,21 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
     const installed = readJson(join(installDir, 'node_modules', ...name.split('/'), 'package.json')).version
     if (installed !== version) throw new Error(`${name} installed at ${installed}, not the release's ${version}`)
   }
+  writeShippedProfilePatch(PROFILE_SOURCE, installDir, runtimeDir)
 
   // DSH's record of this build's install is not part of what ships; the profile is seeded at
   // the first start, not installed there.
   rmSync(join(installDir, '.plugin-manager'), { recursive: true, force: true })
   pinStore(installDir, '/data/dsh')
 
-  // What the web profile never composes (proved by its --dump-config graph): the office
-  // conversion wasm, the voice engine, the inspector, the alternate app bundles' optional
-  // extras and the other platforms' native prebuilds. npm installs dsh's whole dependency
-  // list; the automagik-web tree names none of these entries.
-  const PRUNE = [
-    // office-kit is a composed entry (libreoffice-kit-wasm included), so its stack stays
-    '@deepseek-ai/dsh-experimental-inspector', '@deepseek-ai/dsh-experimental-inspector-profile',
-    '@deepseek-ai/dsh-experimental-session-inspector',
-    '@deepseek-ai/dsh-experimental-client-ui-forge', '@deepseek-ai/dsh-experimental-forge',
-    '@deepseek-ai/dsh-experimental-forge-bundle', '@deepseek-ai/dsh-experimental-forge-github',
-    '@deepseek-ai/dsh-experimental-forge-session',
-    '@deepseek-ai/dsh-experimental-liveshare', '@deepseek-ai/dsh-experimental-liveshare-protocol',
-    '@deepseek-ai/dsh-experimental-auto-review', '@deepseek-ai/dsh-experimental-badge-skill-bundle',
-    '@deepseek-ai/dsh-experimental-cot-translation-bundle', '@deepseek-ai/dsh-experimental-client-ui-cot-translation',
-    '@deepseek-ai/dsh-experimental-translator',
-    '@deepseek-ai/dsh-experimental-voice-input-bundle', '@deepseek-ai/dsh-experimental-client-ui-voice-input',
-    '@deepseek-ai/dsh-experimental-speech-to-text', '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice',
-    '@deepseek-ai/dsh-experimental-api-speech-to-text', 'sherpa-onnx-linux-x64', 'sherpa-onnx-node',
-    '@deepseek-ai/dsh-experimental-plugin-market-bundle', '@deepseek-ai/dsh-experimental-ralph-bundle',
-    '@deepseek-ai/dsh-experimental-session-search', '@deepseek-ai/dsh-experimental-session-titles-bundle',
-    '@deepseek-ai/dsh-experimental-terminal-bundle', '@deepseek-ai/dsh-experimental-tool-worktree',
-    '@deepseek-ai/dsh-experimental-worktree',
-    '@img/sharp-libvips-linuxmusl-x64', '@img/sharp-linuxmusl-x64',
-    'node-pty/prebuilds/win32-arm64', 'node-pty/prebuilds/win32-x64',
-    'node-pty/prebuilds/darwin-arm64', 'node-pty/prebuilds/darwin-x64', 'node-pty/prebuilds/linux-arm64',
-    // The server image is glibc Linux: the musl native addon and pnpm's non-Linux reflink
-    // binaries are never loaded there.
-    'node-addon-require-builtin-linux-x64-musl',
-    'pnpm/dist/reflink.darwin-arm64-2HJ4WGO6.node',
-    'pnpm/dist/reflink.darwin-x64-3G3H6IW4.node',
-    'pnpm/dist/reflink.win32-arm64-msvc-Q6BARPPB.node',
-    'pnpm/dist/reflink.win32-x64-msvc-J2TZHRQI.node',
-  ]
-  for (const name of PRUNE) rmSync(join(runtimeDir, 'node_modules', name), { recursive: true, force: true })
-
   say('pruning what the runtime and the profile nothing read')
-  const runtimePruned = pruneNodeModules(join(runtimeDir, 'node_modules'), { keepDocsOf: (name) => name.startsWith('@deepseek-ai/') })
+  const { pruned: runtimePruned, extras: runtimeExtras } = pruneRuntime(join(runtimeDir, 'node_modules'))
   const profilePruned = pruneNodeModules(join(installDir, 'node_modules'), {
     keepDocsOf: (name) => name.startsWith('@deepseek-ai/') || DEFAULT_PACKAGES.includes(name),
     docs: false,
   })
   say(`runtime: left out ${runtimePruned.files} files, ${mib(runtimePruned.bytes)}`)
   say(`profile: left out ${profilePruned.files} files, ${mib(profilePruned.bytes)}`)
-  const runtimeExtras = pruneExtras(join(runtimeDir, 'node_modules'))
   const profileExtras = pruneExtras(join(installDir, 'node_modules'))
   say(`runtime: left out ${runtimeExtras.files} test/example files, ${mib(runtimeExtras.bytes)}`)
   say(`profile: left out ${profileExtras.files} test/example files, ${mib(profileExtras.bytes)}`)
@@ -250,6 +271,9 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
     revision,
     source,
     dsh: installedDsh,
+    pnpm: installedPnpm,
+    am,
+    herdrCore: { version: HERDR_CORE_VERSION, sha256: HERDR_CORE_SHA256, tarball: HERDR_CORE_TARBALL },
     profile: PROFILE,
     plugins: Object.fromEntries(DEFAULT_PACKAGES.map((name) => [name, version])),
   }, null, 2)}\n`)
@@ -259,7 +283,7 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = argsOf(process.argv.slice(2))
-    if (!args.out) throw new Error('usage: node assemble.mjs --out <dir> [--version 3.90.1] [--dsh 0.2.2-rc.2] [--repository <url>]')
+    if (!args.out) throw new Error('usage: node assemble.mjs --out <dir> [--version 3.160.6] [--dsh 0.2.2-rc.2] [--repository <url>]')
     const result = await assemble({ out: resolve(args.out), version: args.version, dsh: args.dsh, revision: args.revision, repository: args.repository, kind: args['input-kind'], event: args.event, manifest: args['input-manifest'] })
     console.log(`[assemble] ready: dsh ${result.dsh}, automagik ${result.version}`)
   } catch (error) {

@@ -299,3 +299,54 @@ test("no contributed buttons: no empty group in the rail", async () => {
   await footer({ sidebar: false });
   assert.ok(!nodes.has("footer-contributed"));
 });
+
+test("the footer reads the adopted state and refreshes when am's record changes", async t => {
+  const root = mkdtempSync(join(tmpdir(), "hb-footer-pocket-"));
+  const savedAmHome = process.env.AM_HOME;
+  const savedState = process.env.POCKET_LINK_STATE_DIR;
+  process.env.AM_HOME = join(root, "am");
+  process.env.POCKET_LINK_STATE_DIR = join(root, "standalone");
+  t.after(() => {
+    if (savedAmHome === undefined) delete process.env.AM_HOME; else process.env.AM_HOME = savedAmHome;
+    if (savedState === undefined) delete process.env.POCKET_LINK_STATE_DIR; else process.env.POCKET_LINK_STATE_DIR = savedState;
+    rmSync(root, { recursive: true, force: true });
+  });
+  const record = join(process.env.AM_HOME, "parts/pocket.link/record.json");
+  const status = (name, connected) => {
+    const dir = join(root, name);
+    mkdirSync(dir);
+    writeFileSync(join(dir, "public-status.json"), JSON.stringify({ schema: 1, updated: Date.now(), running: true, phones_connected: Number(connected) }));
+    return dir;
+  };
+  status("standalone", false);
+  const adopted = status("adopted elsewhere", true);
+  const moved = status("sibling adoption", false);
+  mkdirSync(join(record, ".."), { recursive: true });
+  const dialog = join(root, "mods/pocket-link/mod.json");
+  mkdirSync(join(dialog, ".."), { recursive: true });
+  writeFileSync(dialog, "{}");
+  state.appHome = root;
+  ui.props = { footer: true };
+  const cx = makeCx();
+  let look;
+  cx.timer.every = (_, fn) => { look = () => fn(cx); };
+  const view = new Footer();
+  view.init({}, cx);
+  await cx.settle();
+  assert.equal(view.pocket, true);
+  assert.equal(view.phone, false);
+  writeFileSync(record, JSON.stringify({ state: adopted }));
+  look();
+  await cx.settle();
+  assert.equal(view.phone, true);
+  assert.equal(view.statusPath, join(adopted, "public-status.json"));
+  writeFileSync(record, JSON.stringify({ state: moved }));
+  look();
+  await cx.settle();
+  assert.equal(view.phone, false);
+  assert.equal(view.statusPath, join(moved, "public-status.json"));
+  rmSync(record);
+  look();
+  await cx.settle();
+  assert.equal(view.statusPath, join(root, "standalone/public-status.json"));
+});

@@ -1,12 +1,13 @@
+import { canManageSkills, SKILLS_PANEL } from './skills-screen.js'
+import { CodeBarList, CodeSideSwitch, setCodeSide, useCodeSide } from './code-side.js'
 import { openStops } from './stops.js'
 import { Component, createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { Lockup, OmniMark, Wordmark } from './logo.js'
 import { isMainOf } from './sources.js'
 import { currentPart, previewOf, relativeShort } from './text.js'
-import { PlusIcon, SearchIcon, SidebarIcon, GaugeIcon, PlugIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, TasksIcon, SignOutIcon } from './icons.js'
+import { PlusIcon, SearchIcon, SidebarIcon, GaugeIcon, PlugIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, TasksIcon, SignOutIcon, SparkIcon } from './icons.js'
 import { botState, BotAvatar, BotMark, RoomAvatar } from './mark.js'
-import { AgentBadge } from './agent-badge.js'
 import { DSH_LOOK } from './characters.js'
 import { reducedMotion } from './activity-row.js'
 import { Shimmer, workPhrase } from './cells.js'
@@ -17,10 +18,11 @@ import { showsDshRow } from './dsh-offer.js'
 import { badges, botChildren, nav, sidebarTools, useEntries } from './extend.js'
 import { agentRowSessions, approvalFor, endLabel, runningTasksOf, taskState, waitsForUser } from './task-card.js'
 import { approvalCount, approvalDetail, useApproval } from './approvals.js'
-import { WorkCodeSwitch } from './work-code-switch.js'
 import { BotPills, pillLabels } from './capability-pills.js'
 import { LeftBar } from './left-bar.js'
-import { useSeats } from './seat-chat.js'
+import { localSeatByKey, seatBotId, seatChatView, seatWithFreshPane, useSeatRoster, useSeats } from './seat-chat.js'
+import { NATIVE_WORKERS_CSS, NativeWorkers, runningWorkers } from './native-workers.js'
+import { roleOutletVisible, roleTagOf } from '../shared/roles.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
@@ -88,14 +90,20 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const away = !running && groups.length > 0
   const failed = useWork ? useWork(work => work.failed?.[id] !== undefined) : false
   const replied = useSessionStatus(map => map.get(part)?.completionUnread === true) && !active
-  const state = botState(running || away, doing, alert, { failed, unread: replied })
+  // A crew Bot whose plugin is missing, switched off or did not load cannot run at all
+  // (installed.js in the host): it is not an idle Bot, and its row says why.
+  const notInstalled = bot.installed === false
+  const notInstalledText = notInstalled ? [t('Not installed'), bot.reason ? hostText(bot.reason) : ''].filter(Boolean).join(' · ') : ''
+  const state = botState(running || away, doing, alert, { failed, unread: replied, notInstalled })
   // A Bot running in its own chat previews what it is doing, like a group's row.
   const runningLine = running && doing ? doingLine(doing) : null
   const awayLine = away ? workLine(roster.roomsById[groups[0].id]?.name ?? t('a group chat'), groups[0], groups.length - 1) : null
   const waits = workKeys(useWork ? useWork(work => JSON.stringify(work.waiting?.[id] ?? null)) : 'null')
   const waitsFor = state === 'waiting' ? waitingFor(roster, waits) : ''
-  // Tasks it started that still run hang under the row (BotThreads); the row says how many.
-  const threads = runningTasksOf(roster, id).length
+  // Tasks it started that still run hang under the row (BotThreads), and so do the native
+  // Claude Code subagents of its turn (NativeWorkers); the row says how many still run.
+  const nativeRunning = useWork ? useWork(work => runningWorkers(work, id)) : 0
+  const threads = runningTasksOf(roster, id).length + nativeRunning
   const threadsLine = threads === 0 ? '' : threads === 1 ? t('Working on 1 thing') : t('Working on {n} things', { n: threads })
   if (bot.hidden && !active && !main) return null
   const onContextMenu = (event) => {
@@ -104,7 +112,8 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   }
   const pinned = bot.pinned === true && !crowned
   const role = crowned ? bot.role : ''
-  const label = [bot.name, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
+  const tag = roleTagOf(bot, roster.prefs, roster, t)
+  const label = [bot.name, tag, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', notInstalled ? notInstalledText : running || away ? t('Working') : '', notInstalled ? '' : waitsFor, notInstalled ? '' : stoppedLine, notInstalled ? '' : approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: crowned ? 'bt-row bt-row-crowned' : 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
     'data-bot-id': id, title: wide ? undefined : bot.name,
@@ -113,7 +122,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
-    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
+    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), tag ? h('span', { className: 'bt-tag' }, tag) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
     // What to ask this Bot for, on a line of its own: the name line has no room for it.
     h(BotPills, { roster, bot, className: 'bt-row-caps' }),
     blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)
@@ -139,7 +148,8 @@ function RowBadges(props) {
 function BotChildren({ wide, ...props }) {
   const entries = useEntries(botChildren)
   if (!wide || entries.length === 0) return null
-  return entries.map(entry => h(entry.Component, { key: entry.id, ...props, wide }))
+  return entries.filter(entry => roleOutletVisible('botChildren', entry.id, props.bot, props.roster))
+    .map(entry => h(entry.Component, { key: entry.id, ...props, wide }))
 }
 
 // A short age for a thread: now, 4m, 2h, 3d.
@@ -201,6 +211,14 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
       h('span', { className: 'bt-thread-age', 'aria-hidden': true }, threadAge(task.at ?? now, now)))
     }),
     more > 0 ? h('button', { type: 'button', className: 'bt-thread bt-thread-more', onClick: () => setOpen(true) }, t('+{n} more', { n: more })) : null)
+}
+
+// Claude Code's native subagents under the row (native-workers.js), their ages ticking like
+// the threads' while there are any.
+function BotWorkers(props) {
+  const any = props.useWork ? props.useWork(work => (work?.native?.[props.bot.id]?.length ?? 0) > 0) : false
+  const now = useMinute(props.wide && any)
+  return h(NativeWorkers, { ...props, age: ms => threadAge(ms, now) })
 }
 
 function RoomRow({ room, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useWork, wide, marked }) {
@@ -385,14 +403,29 @@ const bootHint = () => {
     : t('The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.', { error: last })
 }
 
+export function useFreshSeat(openSeat, seats) {
+  useEffect(() => {
+    if (openSeat === null) return
+    const fresh = localSeatByKey(seats, openSeat.key ?? seatBotId(openSeat))
+    const next = seatWithFreshPane(openSeat, fresh)
+    if (next !== openSeat) seatChatView.set({ seat: next })
+  }, [seats, openSeat])
+}
+
 export function TeamSidebar(props) {
   const { wide, expandSidebar, useRoster, useUi, useSessions, actions } = props
   const listRef = useRef(null)
   const closing = useRef(false)
   useLayoutEffect(() => { closing.current = false })
   const roster = useRoster(value => value)
+  const code = useCodeSide()
   // The seats on this computer (RFC 0022 1L): the registry's orchestrators as the bar's rows.
-  const seats = useSeats(actions.seatList, wide)
+  // An open seat keeps polling even where the bar is a narrow rail, so its switch learns a
+  // pane that starts or stops while the panel stays open.
+  const openSeat = useSyncExternalStore(seatChatView.subscribe, seatChatView.getSnapshot).seat
+  const { front } = useSeatRoster()
+  const seats = useSeats(actions.seatList, wide || openSeat !== null || code.barSelected !== null)
+  useFreshSeat(openSeat, seats)
   const markedUnread = useUi(value => value.unread)
   const bootFailed = useUi(value => value.bootFailed === true)
   props.useRegistry(value => value)
@@ -420,8 +453,8 @@ export function TeamSidebar(props) {
   // The shell keeps wide content during its collapse fade. Normalize through its
   // public expansion action before toggling; coalesce synchronous activations
   // until React commits the result.
-  const navigate = (open, id) => {
-    const result = open(id)
+  const navigate = (open, ...args) => {
+    const result = open(...args)
     if (wide && window.innerWidth < 1024 && !closing.current) {
       closing.current = true
       expandSidebar?.()
@@ -429,12 +462,16 @@ export function TeamSidebar(props) {
     }
     return result
   }
+  const team = () => {
+    actions.closeCodePane?.()
+    if (code.side !== 'team') setCodeSide('team')
+  }
   const rowActions = {
     ...actions,
-    openSession: id => navigate(actions.openSession, id),
-    openAgent: id => navigate(actions.openAgent, id),
-    openAgentSession: id => navigate(actions.openAgentSession, id),
-    newAgentSession: id => navigate(actions.newAgentSession, id),
+    openSession: (id) => { team(); return navigate(actions.openSession, id) },
+    openAgent: (id) => { team(); return navigate(actions.openAgent, id) },
+    openAgentSession: (id) => { team(); return navigate(actions.openAgentSession, id) },
+    newAgentSession: (id) => { team(); return navigate(actions.newAgentSession, id) },
   }
   const rowProps = { roster, actions: rowActions, useSessions, useUi, useSessionStatus: props.useSessionStatus, useSessionRetainInfo: props.useSessionRetainInfo, useActivity: props.useActivity, useWork: props.useWork, wide }
   // Typing while the sidebar has focus starts a search.
@@ -449,9 +486,15 @@ export function TeamSidebar(props) {
   if (wide) {
     // The new left bar (left-bar.js): the rail, the Team rows, the same openings as below.
     const byId = id => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find(agent => agent.id === id)
-    const open = row => (row.bot?.seat ? rowActions.openSeat(row.bot)
-      : row.kind === 'group' ? rowActions.openSession(row.id)
-      : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
+    const open = (row) => {
+      if (row.bot?.remote) return
+      team()
+      if (row.bot?.seat) return navigate(actions.openSeat, row.bot)
+      if (row.kind === 'chat') return row.source?.open?.(row.id)
+      if (row.kind === 'group') return rowActions.openSession(row.id)
+      if (row.bot?.dsh) return rowActions.openAgent(row.id)
+      if (row.kind === 'bot') return rowActions.openSession(row.id)
+    }
     const menu = (row, event) => {
       // A seat is read here and run in Herdr: it has no Bot settings or context menu.
       if (row.bot?.seat) return
@@ -465,18 +508,22 @@ export function TeamSidebar(props) {
         return agent ? h(AgentRow, { ...rowProps, agent, bare: true, marked: markedUnread[agent.id] === true }) : null
       }
       const bot = roster.byId[row.id]
-      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotChildren, { ...rowProps, bot })) : null
+      // A channel source draws the Bot's channels as the bar's own rows; the team's old rows
+      // under it come off for that Bot, so the two never draw the same channels twice.
+      const children = row.channelSource ?? row.bot?.channelSource ? null : h(BotChildren, { ...rowProps, bot })
+      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotWorkers, { ...rowProps, bot }), children) : null
     }
     return h(LeftBar, {
-      roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
+      roster, order, marked: markedUnread, seats, front, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
       open, menu, renderAfter, notice, onKeyDown: typeToSearch,
+      sideSwitch: h(CodeSideSwitch, { current: code, onSelect: setCodeSide }),
+      codeList: code.side === 'code' ? h(CodeBarList, { current: code, onSelect: (selected, options) => navigate(actions.openCodePane, selected, options) }) : null,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row) => {
         const bot = row.bot.dsh ? undefined : roster.byId[row.id]
         return bot ? h(RowBadges, { bot, roster, useWork: props.useWork }) : null
       },
       tools: h(Fragment, null, h(UpdateButton, { useUpdate: props.useUpdate, actions }), h(SidebarTools, toolProps)),
-      foot: h(WorkCodeSwitch, { roster, useSessions }),
       collapse: h('button', { type: 'button', className: 'bt-round bt-side-collapse', 'aria-label': t('Collapse sidebar'), title: t('Collapse sidebar'), onClick: () => actions.toggleSidebar() }, h(SidebarIcon)),
       empty: roster.ready ? null : h('div', { className: 'bt-hint' }, bootFailed ? bootHint() : t('Setting up your Main Bot…')),
     })
@@ -484,7 +531,6 @@ export function TeamSidebar(props) {
   return h('div', { className: wide ? 'bt-side' : 'bt-side bt-rail', onKeyDown: typeToSearch },
     wide ? h('div', { className: 'bt-side-top' },
       h('span', { className: 'bt-brand' }, h(Lockup, { height: 21 })),
-      h(WorkCodeSwitch, { roster, useSessions }),
       h(UpdateButton, { useUpdate: props.useUpdate, actions }),
       h(SidebarTools, toolProps),
       h('button', { type: 'button', className: 'bt-round', 'aria-label': t('Search'), title: t('Search'), onClick: () => actions.openPalette() }, h(SearchIcon)),
@@ -501,18 +547,20 @@ export function TeamSidebar(props) {
       main ? h(Fragment, { key: main.id },
         h(BotRow, { ...rowProps, bot: main, marked: markedUnread[main.id] === true }),
         h(BotThreads, { ...rowProps, bot: main }),
+        h(BotWorkers, { ...rowProps, bot: main }),
         h(BotChildren, { ...rowProps, bot: main })) : roster.ready ? null : h('div', { className: 'bt-hint' }, bootFailed ? bootHint() : t('Setting up your Main Bot…')),
       order.map(entry => (entry.kind === 'bot'
         ? h(Fragment, { key: entry.item.id },
             h(BotRow, { ...rowProps, bot: entry.item, marked: markedUnread[entry.item.id] === true }),
             h(BotThreads, { ...rowProps, bot: entry.item }),
+            h(BotWorkers, { ...rowProps, bot: entry.item }),
             h(BotChildren, { ...rowProps, bot: entry.item }))
         : entry.kind === 'room'
           ? h(RoomRow, { key: entry.item.id, ...rowProps, room: entry.item, marked: markedUnread[entry.item.id] === true })
           : h(AgentRow, { key: entry.item.id, ...rowProps, agent: entry.item, marked: markedUnread[entry.item.id] === true })))))
 }
 
-// Other plugins' buttons in the top row and the rail (extend.js sidebarTools). Each is drawn on
+// Other plugins' buttons in the wide footer and the rail (extend.js sidebarTools). Each is drawn on
 // its own: one that throws draws nothing, and the row around it stays.
 let ToolBoundary = null
 const toolBoundary = () => (ToolBoundary ??= class SidebarTool extends Component {
@@ -533,10 +581,21 @@ function SidebarTools(props) {
   return entries.map(entry => h(toolBoundary(), { key: entry.id, entry, tool: props }))
 }
 
-// The update button at the sidebar's top right: a cloud while a newer Omni —
+// The sidebar's update button: a cloud while a newer Omni —
 // or a newer verified DSH — is available, then the install's progress and
 // result. Its card has one row each for the bot and DSH, with their versions,
 // the release notes link, and each row's own button.
+export function updatePopoverPlacement(rect, { width, height, top, bottom, left = 0 }) {
+  const inset = 8
+  const gap = 6
+  const below = Math.max(0, bottom - Math.max(top + inset, rect.bottom + gap) - inset)
+  const above = Math.max(0, Math.min(bottom - inset, rect.top - gap) - top - inset)
+  const x = Math.max(left + inset, Math.min(rect.left, left + width - 280 - inset))
+  return above > below
+    ? { left: x, bottom: height - top - inset - above, maxHeight: above, maxWidth: width - 2 * inset }
+    : { left: x, top: bottom - inset - below, maxHeight: below, maxWidth: width - 2 * inset }
+}
+
 function UpdateButton({ useUpdate, actions }) {
   const update = useUpdate(value => value)
   const [open, setOpen] = useState(false)
@@ -564,8 +623,17 @@ function UpdateButton({ useUpdate, actions }) {
   const tick = useViewport()
   useLayoutEffect(() => {
     if (!open) return
-    const rect = button.current?.getBoundingClientRect()
-    if (rect) setBox({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)), top: rect.bottom + 6 })
+    const place = () => {
+      const rect = button.current?.getBoundingClientRect()
+      const viewport = window.visualViewport
+      if (rect) setBox(updatePopoverPlacement(rect, {
+        width: viewport?.width ?? window.innerWidth, height: window.innerHeight,
+        top: viewport?.offsetTop ?? 0, bottom: viewBottom(), left: viewport?.offsetLeft,
+      }))
+    }
+    place()
+    window.addEventListener('resize', place)
+    return () => window.removeEventListener('resize', place)
   }, [open, tick])
   if (!update?.available && !dshRow && phase === 'idle' && dshPhase === 'idle') return null
   const cloudPhase = phase === 'installing' || dshPhase === 'installing' ? 'installing' : phase !== 'idle' ? phase : dshPhase
@@ -796,7 +864,8 @@ export function AccountLauncher({ seat = true, settingsOpen, openSettings, openO
     [
       [t('Usage'), GaugeIcon, () => actions.openSettings('usage')],
       [t('Plugins'), PlugIcon, () => actions.selectPanel('plugins')],
-      [t('Connectors'), ConnectorIcon, () => actions.openConnectors()],
+      [t('Apps'), ConnectorIcon, () => actions.openConnectors()],
+      ...(canManageSkills() ? [[t('Skills'), SparkIcon, () => actions.selectPanel(SKILLS_PANEL)]] : []),
       // Rows other Omni plugins add (extend.js), such as Automations.
       ...navRows.map(row => [row.label(), row.icon, () => row.run(actions)]),
       [t('Bot settings'), GearIcon, () => actions.openSettings('general')],
@@ -882,6 +951,30 @@ export function FooterAccount(props) {
   return h('span', { className: 'bt-foot-account' }, h(AccountLauncher, { ...props, seat: false }))
 }
 
+// The footer and DSH's rail share one toggle seat; carry keyboard focus between their nodes.
+export function RailToggle({ wide, actions }) {
+  const button = useRef(null)
+  const hadFocus = useRef(false)
+  useLayoutEffect(() => {
+    const native = document.querySelector('[data-sidebar-toggle]')
+    if (!wide && hadFocus.current) {
+      hadFocus.current = false
+      native?.focus({ preventScroll: true })
+    } else if (wide && native === document.activeElement
+      && !document.documentElement.matches('[data-windows-titlebar],[data-platform=darwin]')
+      && !button.current?.closest('[data-sidebar-drawer]')) {
+      button.current?.focus({ preventScroll: true })
+    }
+  }, [wide])
+  if (!wide) return null
+  return h('button', {
+    ref: button, type: 'button', className: 'bt-round bt-side-collapse bt-foot-toggle',
+    'aria-label': t('Collapse sidebar'), title: t('Collapse sidebar'),
+    onFocus: () => { hadFocus.current = true }, onBlur: () => { hadFocus.current = false },
+    onClick: () => actions.toggleSidebar(),
+  }, h(SidebarIcon))
+}
+
 // The only entry registered in every mode: in Agent mode the whole Bot surface is
 // withdrawn, and this button in the shell's own footer is the way back. It carries the
 // app's mark, so the name beside it is the app's, Automagik (#1160): Omni is one of its Bots.
@@ -937,17 +1030,38 @@ html[data-automagik-desktop=darwin] .bt-side-top{-webkit-app-region:drag}
 /* The row is the window's title bar: empty space moves the window, while every control in it
    takes clicks. The list is the shell bar's, so a control a builder adds here is covered
    without another rule; the brand is hidden in the app but kept sane. */
-html[data-automagik-desktop=darwin] .bt-side-top :is(.bt-brand,.bt-code-switch,a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
+html[data-automagik-desktop=darwin] .bt-side-top :is(.bt-brand,a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
 html[data-automagik-desktop=darwin] header[class*="_header"]{-webkit-app-region:drag}
 html[data-automagik-desktop=darwin] header[class*="_header"] :is(a,button,input,label,select,summary,textarea,[contenteditable],[role=button],[role=checkbox],[role=link],[role=menu],[role=menubar],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=radio],[role=slider],[role=switch],[role=tab],[aria-haspopup],[tabindex],[data-menu]){-webkit-app-region:no-drag}
 /* The fixed details panel overlaps that header but is not its descendant. Native drag
    regions ignore DOM z-index/pointer-events: subtract the panel so its top actions click. */
 html[data-automagik-desktop=darwin] .bt-panel{-webkit-app-region:no-drag}
 /* The collapsed sidebar is a 56px rail, and DSH's card around it left its content 12px: the
-   marks were cut. It keeps a 6px margin and no side padding, everything centred in it. */
-[class*="_root"][class*="_collapsed"]{margin:6px!important;padding-left:0!important;padding-right:0!important}
+   marks were cut. It keeps a 4px margin and no side padding, everything centred in it. The
+   toggle's seat and the card's height below subtract twice this margin (8px). */
+[class*="_root"][class*="_collapsed"]{margin:4px!important;padding-left:0!important;padding-right:0!important}
 [class*="_collapsed"]>[class*="_logoRow"],[class*="_collapsed"] [class*="_regionArea"]{width:100%;display:flex;justify-content:center}
-[class*="_collapsed"]>[class*="_footArea"]{width:100%;justify-items:center;padding-left:0!important;padding-right:0!important}
+/* One column as wide as the card, so the Account is centred in it and not in the open footer's first column. */
+[class*="_collapsed"]>[class*="_footArea"]{width:100%;grid-template-columns:minmax(0,1fr);column-gap:0;justify-items:center;padding-left:0!important;padding-right:0!important}
+/* The rail's card keeps its 4px inset on every side (8px is twice the margin above), so its
+   native toggle sits at the footer seat's height. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"][class*="_collapsed"]{position:relative;height:calc(100% - 8px)}
+/* The toggle leaves the logo row without reserving an empty seat above the Bot list. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_logoRow"]{height:0!important;margin:0!important}
+/* DSH keeps the badge and keyboard hints while the control moves below every footer entry. It is
+   centred in the card by a fixed offset, so the folding track cannot slide it: the rail (56px) less
+   8px, twice the card's margin above, less the 36px control. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"] [data-sidebar-toggle]{position:absolute;left:calc((var(--lb-rail-w) - 8px - 36px)/2);bottom:14px;margin:0}
+/* Footer entries need a whole control's height above the bottom seat, even on short windows. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_footArea"]{padding-bottom:calc(14px + 36px + var(--lb-rail-gap))!important}
+/* A horizontal rail entrance would move the toggle away from the seat it just replaced. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:bt-rail-toggle-in 150ms var(--ds-ease-in-out) backwards}
+/* Only opacity changes so a mid-animation press still lands on the same control. */
+@keyframes bt-rail-toggle-in{from{opacity:0}}
+/* Quiet motion leaves the native toggle immediately ready in its bottom seat. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) body[data-bt-motion=quiet] [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:none}
+/* Respect the system's motion choice without changing the drawer or caption controls. */
+@media (prefers-reduced-motion:reduce){html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:none}}
 /* rc.2 nests the Bot list in a scrolling grid. Bound its row so only bt-list
    scrolls; the search and sidebar buttons stay above it. Native sessions keep their grid. */
 [class*="_scrollArea"]:has(.bt-side){grid-template-rows:8px max-content 2px minmax(0,1fr);overflow-y:hidden}
@@ -956,6 +1070,9 @@ html[data-automagik-desktop=darwin] .bt-panel{-webkit-app-region:no-drag}
    pseudo-element would appear beside the native icon when DSH reveals it on hover. */
 [class*="_collapsed"] [data-sidebar-toggle] [class*="_railMark"]{display:none}
 [class*="_collapsed"] [data-sidebar-toggle] [class*="_panelIcon"]{display:inline!important}
+/* The glyph is 20px where the footer seat's is (left-bar-css.js); a Windows title bar, macOS and
+   the drawer keep DSH's own size in both states. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"] [data-sidebar-toggle] [class*="_panelIcon"]{width:20px;height:20px}
 /* macOS, collapsed: the rail starts below the traffic lights, and the chat's header leaves
    them room where they reach past the rail. */
 html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) [class*="_root"][class*="_collapsed"]{padding-top:52px!important}
@@ -976,6 +1093,7 @@ html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) [class*="_f
 @keyframes bt-thread-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.bt-thread-spin{animation-duration:3s}}
 body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
+${NATIVE_WORKERS_CSS}
 /* The first Main Bot's crown (mark.js) and its role chip, in clay gold. */
 .bt-crown{position:absolute;left:50%;top:calc(var(--bt-size,36px) * -.27);width:calc(var(--bt-size,36px) * .52);height:calc(var(--bt-size,36px) * .36);transform:translateX(-50%) rotate(-8deg);filter:drop-shadow(0 1.5px 0 var(--bt-gold-edge)) drop-shadow(0 3px 3px color-mix(in srgb,var(--bt-gold-edge) 30%,transparent));pointer-events:none;z-index:1;line-height:0}
 .bt-crown-body{fill:var(--bt-gold);stroke:var(--bt-gold-edge);stroke-width:2;stroke-linejoin:round}
@@ -993,6 +1111,11 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
 .bt-channels-moved{gap:8px;justify-content:flex-start;padding:0 12px}
 [class*="_footArea"]:has(.bt-foot-account)>[class*="_settingsArea"]{grid-column:3}
 [class*="_footArea"]:has(.bt-foot-account)>[class*="_settingsArea"] button[class*="_trigger"] [class*="_label"]{display:none!important}
+/* On the rail the footer seat is one column too: the Account and the shell's settings trigger
+   stack, each centred in the card. An empty settings seat takes no row. */
+[class*="_collapsed"]>[class*="_footArea"]:has(.bt-foot-account){grid-template-columns:minmax(0,1fr);column-gap:0}
+[class*="_collapsed"]>[class*="_footArea"]:has(.bt-foot-account)>[class*="_footerActions"]>div>.bt-connect-wrap,[class*="_collapsed"]>[class*="_footArea"]:has(.bt-foot-account)>[class*="_settingsArea"]{grid-column:1}
+[class*="_collapsed"]>[class*="_footArea"]:has(.bt-foot-account)>[class*="_settingsArea"]:empty{display:none}
 
 
 /* The update cloud springs in when a newer Omni shows up; its arrow drops in a
@@ -1004,7 +1127,7 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
 .bt-update[data-phase=installing] .bt-cloud-arrow{animation:bt-cloud-drop 1.1s cubic-bezier(.45,0,.55,1) infinite}
 @keyframes bt-cloud-drop{0%{transform:translateY(-3px);opacity:0}35%{opacity:1}70%{transform:translateY(1px);opacity:1}100%{transform:translateY(2px);opacity:0}}
 .bt-update-dot{position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#E5484D;box-shadow:0 0 0 1.5px var(--bt-sidebar)}
-.bt-update-pop{position:fixed;z-index:60;width:280px;padding:14px 14px 12px;border-radius:14px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);box-sizing:border-box;transform-origin:top left;font-family:var(--bt-font);animation:bt-update-pop ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing}}
+.bt-update-pop{position:fixed;overflow:auto;z-index:60;width:280px;padding:14px 14px 12px;border-radius:14px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);box-sizing:border-box;transform-origin:top left;font-family:var(--bt-font);animation:bt-update-pop ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing}}
 @keyframes bt-update-pop{from{opacity:0;transform:scale(.96);filter:blur(4px)}}
 .bt-update-title{font-size:14px;line-height:20px;font-weight:600}
 .bt-update-text{margin-top:2px;font-size:12.5px;line-height:18px;color:var(--bt-ink-2)}
@@ -1022,10 +1145,6 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
    .bt-update-dot, a card of .bt-update-* rows, and .bt-update-notes as a button. */
 .bt-side-tool{position:relative}
 .bt-update-pop button.bt-update-notes{padding:0;border:0;background:none;font-family:inherit;cursor:pointer}
-/* A card row may lead with its product's mark (BotMark), beside its name and status. */
-.bt-power-who{display:flex;align-items:center;gap:10px}
-.bt-power-who>.bt-mark{flex:none}
-.bt-power-what{min-width:0}
 
 /* A DSH bot's row and its expanding Session list. It wears DSH's own whale, the mark a
    Bot with no look of its own wears too. */

@@ -1,18 +1,28 @@
-// Settings → Connectors. The catalog is a two-column grid of apps grouped by
-// category, with search and category chips on top and the connected count at the
-// right. A tile connects in place when nothing more is needed, and shows the
-// sign-in it started; anything that needs a form or a choice opens the app's own
-// view, which reuses the rows in connectors.js. Connected apps and the mailbox
-// accounts have their own view.
-import { createElement as h, useEffect, useRef, useState } from 'react'
+// Settings → Apps. Automagik's official apps come first, from the overlay that catalog.js never
+// carries, then the upstream catalog as a two-column grid grouped by category, with search and
+// category chips on top and the connected count at the right. An official row expands to what
+// the app is, its real state and the one action the page can take; an upstream tile connects in
+// place when nothing more is needed, and shows the sign-in it started. Anything that needs a form
+// or a choice opens the app's own view, which reuses the rows in connectors.js. Connected apps
+// and the mailbox accounts have their own view.
+import { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { OFFICIAL_APPS } from '../host/connectors/official.js'
 import { ConnectorMark, ConnectorRow, MailAccount, MailCatalogRow, MailPending, MailRules, AddMenu, openSignIn, SignInPanel } from './connectors.js'
+import { PRODUCT_MARK_ART } from './clay-art.js'
+import { AgentMark } from './marks.js'
 import { useMorph } from './motion.js'
 import { reserveWindow } from './open-window.js'
 import { ChevronLeftIcon, ChevronRightIcon, CheckIcon, PlusIcon, SearchIcon } from './icons.js'
 import { hostText, t } from './i18n.js'
+import { rolesOn } from '../shared/roles.js'
+import { rolePackageResult, useRolePackageAction } from './bot-settings.js'
+import { RoleShopCard, RoleShopSection, shopRoles } from './role-shop.js'
+import { officialInstall, useEntries } from './extend.js'
+
+const NO_SUBSCRIBE = () => () => {}
+const NO_VERSION = () => 0
 
 const CATEGORIES = [['dev', 'Developer'], ['docs', 'Docs & files'], ['work', 'Work'], ['design', 'Design'], ['data', 'Data'], ['commerce', 'Commerce'], ['search', 'Search']]
-const FEATURED = ['github', 'mail', 'notion', 'linear', 'figma', 'slack']
 const PREVIEW = 6
 
 const matches = (query, ...texts) => query === '' || texts.join(' ').toLowerCase().includes(query.toLowerCase())
@@ -46,7 +56,7 @@ function tileStatus(app) {
   return null
 }
 
-function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
+function AppTile({ app, actions, onOpen }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const fresh = useJustConnected(app.state)
@@ -60,7 +70,6 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
     const auth = app.auth ?? {}
     if (app.id === 'mail' || auth.kind === 'key' || (auth.kind === 'oauth' && auth.token && !auth.client?.id)) return onOpen()
     if (auth.kind === 'oauth') {
-      onSignIn()
       const win = reserveWindow()
       return void run(actions.connectorConnect(app.id, {}), view => openSignIn(win, app.id, view), () => win.close())
     }
@@ -75,7 +84,7 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
     if (app.state === 'error') return void run(actions.connectorRetry(app.id))
     return onOpen()
   }
-  const signIn = showsSignIn ? app.pending?.kind : undefined
+  const signIn = app.pending?.kind
   const tile = useRef(null)
   useMorph(tile, signIn ?? '')
   return h('div', { ref: tile, className: 'bt-app', 'data-state': app.state, 'data-fresh': fresh ? '' : undefined, 'data-error': error ? '' : undefined, 'data-signing': signIn ? '' : undefined },
@@ -89,25 +98,21 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
     signIn ? h(SignInPanel, { connector: app, actions, run }) : null)
 }
 
-// An app can be listed in two sections. Only one tile draws the sign-in: the one
-// that was clicked, or after a reload the first one on the page.
-function Grid({ apps, actions, open, place = null, signInPlaces }) {
-  const homePlace = app => (FEATURED.includes(app.id) ? 'featured' : app.category)
+// A tile connects in place; one with a sign-in pending draws the sign-in instead of the action.
+function Grid({ apps, actions, open }) {
   return h('div', { className: 'bt-app-grid' }, apps.map(app => h(AppTile, {
     key: app.id, app, actions,
     onOpen: () => open(app.id),
-    showsSignIn: place === null || place === (signInPlaces.current[app.id] ?? homePlace(app)),
-    onSignIn: () => { signInPlaces.current[app.id] = place },
   })))
 }
 
-function Section({ title, apps, actions, open, onAll, place, signInPlaces }) {
+function Section({ title, apps, actions, open, onAll }) {
   if (apps.length === 0) return null
   return h('section', { className: 'bt-app-section' },
     h('div', { className: 'bt-app-section-head' },
       h('h3', null, title),
       onAll && apps.length > PREVIEW ? h('button', { type: 'button', className: 'bt-app-all', onClick: onAll }, t('See all')) : null),
-    h(Grid, { apps: onAll ? apps.slice(0, PREVIEW) : apps, actions, open, place, signInPlaces }))
+    h(Grid, { apps: onAll ? apps.slice(0, PREVIEW) : apps, actions, open }))
 }
 
 function Subview({ title, onBack, children }) {
@@ -125,13 +130,214 @@ function ConnectedSummary({ apps, count, onClick }) {
     t('{count} connected', { count }), h(ChevronRightIcon))
 }
 
-export function ConnectorsPage({ roster, actions }) {
+// --- Automagik's official apps --------------------------------------------
+//
+// The rows come from the overlay (src/host/connectors/official.js), never from catalog.js, so
+// upstream's file keeps merging cleanly. Their state is what the page already knows: a Bot of
+// the app's kind on the roster is Installed; Claude and Codex are Installed when the ACP routes
+// the Bot settings model menu reads are there (roster.models), and a signed-out agent is known
+// from its `needsSignIn`. A state the page cannot know yet reads Unknown, never a guess.
+
+const ACP_ROUTE = Object.freeze({ claude: 'acp-claude', codex: 'acp-codex' })
+
+function officialBot(app, roster, installer) {
+  const bots = roster?.bots
+  if (!Array.isArray(bots)) return undefined
+  const own = bots.find(bot => bot.kind === app.id)
+  if (own !== undefined) return own
+  // The Main Bot stands in for Omni unless the installer has a pending Omni row.
+  if (app.id === 'omni' && !installer?.pending?.('omni')) return roster?.byId?.[roster.mainBotId]
+}
+
+function officialAcp(app, roster) {
+  const provider = ACP_ROUTE[app.id]
+  const models = roster?.models
+  if (provider === undefined || !Array.isArray(models)) return undefined
+  return models.filter(model => (model.provider ?? String(model.ref ?? '').split('/')[0]) === provider)
+}
+
+function officialState(app, roster, installer) {
+  if (roster?.ready === false) return { state: 'unknown' }
+  if (app.kind === 'agent') {
+    if (!Array.isArray(roster?.bots)) return { state: 'unknown' }
+    const bot = officialBot(app, roster, installer)
+    return bot === undefined ? { state: 'missing' } : { state: 'installed', bot }
+  }
+  if (app.kind === 'acp') {
+    const models = officialAcp(app, roster)
+    if (models === undefined) return { state: 'unknown' }
+    if (models.length === 0) return { state: 'missing' }
+    return { state: models.some(model => model.needsSignIn === true) ? 'sign-in' : 'installed' }
+  }
+  return { state: 'unknown' }
+}
+
+function officialStateText(state) {
+  if (state === 'installed') return t('Installed')
+  if (state === 'sign-in') return t('Sign-in needed')
+  if (state === 'missing') return t('Not installed')
+  return t('Unknown')
+}
+
+// Omni and Genie install in place through the welcome's officialInstall entry, using the
+// team step's own power-on. Without the entry, the team step opens.
+function officialAction(app, resolved, roster, actions, installer, info) {
+  if (resolved.state === 'unknown') return null
+  if (app.kind === 'agent') {
+    if (resolved.state === 'installed') {
+      const bot = resolved.bot
+      if (bot === undefined) return null
+      return {
+        label: t('Installed'), done: true,
+        run: () => {
+          actions.closeSettings?.()
+          if (typeof actions.openSession === 'function') actions.openSession(bot.id)
+          else actions.openSettings?.('bots', bot.id)
+        },
+      }
+    }
+    if (info !== null) {
+      const label = info.action === 'install' ? t('Install') : info.label
+      if (label === null) return null
+      return { label, done: false, run: () => installer.act(app.id, { roster, actions }) }
+    }
+    if (typeof actions.openHarnessOnboarding !== 'function') return null
+    return {
+      label: t('Install'), done: false,
+      run: () => { actions.closeSettings?.(); actions.openHarnessOnboarding('omni-team') },
+    }
+  }
+  if (app.kind !== 'acp' || resolved.state === 'missing') return null
+  const provider = ACP_ROUTE[app.id]
+  // The ACP agents section signs in through the Bot team's bridge, which opens this row in a
+  // Bot's chat; the Main Bot is the Bot that bridge falls back to.
+  const botId = (roster?.mainBotIds ?? [])[0] ?? roster?.mainBotId ?? roster?.bots?.[0]?.id
+  if (provider === undefined || botId === undefined || typeof actions.openCliLogin !== 'function') return null
+  return {
+    label: resolved.state === 'sign-in' ? t('Sign in') : t('Installed'), done: resolved.state === 'installed',
+    run: () => { actions.closeSettings?.(); actions.openCliLogin(botId, provider) },
+  }
+}
+
+// The mark on an official row is the product's own drawing from the brand's logo set, never
+// Automagik's triskle (brand rule 1) and never the clay pet (rule 3): Omni's vortex and Genie's
+// lamp, one colour, ink on a light ground and cream on a dark one. The mark is drawn at the
+// 32px size (rule 6: Omni's small drawing has no smaller version; the lamp has one drawing), so
+// it is never scaled down. The ground is DSH's Appearance setting, read from
+// body[data-ds-dark-theme] the way logo.js reads it.
+const DARK = 'data-ds-dark-theme'
+const isDark = () => document.body.hasAttribute(DARK)
+const watchDark = (changed) => {
+  const watch = new MutationObserver(changed)
+  watch.observe(document.body, { attributes: true, attributeFilter: [DARK] })
+  return () => watch.disconnect()
+}
+const useDarkGround = () => useSyncExternalStore(watchDark, isDark, () => false)
+
+function BrandMark({ mark }) {
+  const dark = useDarkGround()
+  return h('img', {
+    className: 'bt-official-brand-mark', src: PRODUCT_MARK_ART[mark][dark ? 'cream' : 'ink'],
+    width: 32, height: 32, alt: '', 'aria-hidden': true, draggable: false,
+  })
+}
+
+function OfficialMark({ app, size = 22 }) {
+  if (app.mark === 'omni' || app.mark === 'genie') return h(BrandMark, { mark: app.mark })
+  return h(AgentMark, { id: app.mark, name: app.name, size })
+}
+
+function OfficialButton({ action }) {
+  if (action === null) return null
+  return h('button', {
+    type: 'button', className: action.done ? 'bt-app-btn bt-app-btn-done' : 'bt-app-btn', onClick: action.run,
+  }, action.done ? h(CheckIcon) : null, action.label)
+}
+
+function OfficialTile({ app, resolved, info, action, expanded, onToggle }) {
+  const text = info?.text ?? officialStateText(resolved.state)
+  return h('div', {
+    className: 'bt-app', 'data-state': resolved.state === 'installed' ? 'ready' : 'off',
+    'data-error': info?.alert ? '' : undefined,
+  },
+    h('button', { type: 'button', className: 'bt-app-main', 'aria-expanded': expanded, onClick: onToggle },
+      h('span', { className: 'bt-app-icon' }, h(OfficialMark, { app })),
+      h('span', { className: 'bt-app-text' },
+        h('span', { className: 'bt-app-name' }, app.name, h('span', { className: 'bt-tag' }, t('Official'))),
+        h('span', { className: 'bt-app-status' }, text))),
+    h(OfficialButton, { action }))
+}
+
+function OfficialDetail({ app, resolved, info, action }) {
+  const text = info?.text ?? officialStateText(resolved.state)
+  return h('div', { className: 'bt-set-card bt-connectors-card bt-app-detail bt-app-expanded' },
+    h('div', { className: 'bt-connector', 'data-state': resolved.state === 'installed' ? 'ready' : 'off' },
+      h('div', { className: 'bt-connector-head' },
+        h('span', { className: 'bt-connector-mark' }, h(OfficialMark, { app, size: 20 })),
+        h('span', { className: 'bt-connector-text' },
+          h('span', { className: 'bt-connector-name' }, app.name, h('span', { className: 'bt-tag' }, t('Official'))),
+          h('span', { className: 'bt-connector-status' }, t(app.about))),
+        action === null ? null : h('span', { className: 'bt-connector-actions' }, h(OfficialButton, { action }))),
+      h('div', { className: 'bt-set-row' },
+        h('span', { className: 'bt-set-copy' },
+          h('span', { className: 'bt-bs-label' }, t('State')),
+          h('span', { className: 'bt-set-hint' }, text))),
+      info?.alert
+        ? h('div', { className: 'bt-connector-error', role: 'alert' }, info.alert) : null))
+}
+
+function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
+  const installer = useEntries(officialInstall).findLast(e => typeof e.row === 'function') ?? null
+  const version = installer?.version ?? NO_VERSION
+  useSyncExternalStore(installer?.subscribe ?? NO_SUBSCRIBE, version, version)
+  useEffect(() => {
+    if (installer) void installer.refresh?.()?.catch?.(() => {})
+  }, [installer])
+  if (apps.length === 0) return null
+  const rows = apps.map((app) => {
+    const resolved = officialState(app, roster, installer)
+    const info = app.kind === 'agent' && resolved.state === 'missing'
+      && installer?.kinds?.includes(app.id) ? installer.row(app.id, { roster, actions }) : null
+    const action = officialAction(app, resolved, roster, actions, installer, info)
+    return { app, resolved, info, action }
+  })
+  const open = rows.find(row => row.app.id === expanded)
+  return h('section', { className: 'bt-app-section' },
+    h('div', { className: 'bt-app-section-head' },
+      h('h3', null, t('Automagik official')),
+      h('span', { className: 'bt-app-status' }, t('Included with Automagik'))),
+    h('div', { className: 'bt-app-grid' }, rows.map(row => h(OfficialTile, {
+      key: row.app.id, app: row.app, resolved: row.resolved, info: row.info, action: row.action,
+      expanded: row.app.id === expanded, onToggle: () => onToggle(row.app.id),
+    }))),
+    open === undefined ? null : h(OfficialDetail, open))
+}
+
+function AppsPage({ roster, actions }) {
   const [query, setQuery] = useState('')
-  const [category, setCategory] = useState('')
+  const [selectedCategory, setCategory] = useState('')
   const [view, setView] = useState(null)
+  const [expanded, setExpanded] = useState(null)
   const [error, setError] = useState(null)
-  const signInPlaces = useRef({})
   const run = (task, onDone) => Promise.resolve(task).then((value) => { setError(null); onDone?.(value) }, failure => setError(failure?.message ?? String(failure)))
+  const roleOperation = useRolePackageAction(run)
+  const rolesEnabled = rolesOn(roster?.prefs)
+  const requested = useRef(false)
+  useEffect(() => {
+    if (!rolesEnabled || requested.current || !actions.roleCatalog) return
+    requested.current = true
+    void run(actions.roleCatalog())
+  }, [rolesEnabled, actions.roleCatalog])
+  const roleRows = shopRoles(roster)
+  const roleView = typeof view === 'string' && view.startsWith('role:')
+  const shownRole = roleView ? roleRows.find(row => row.key === view) : undefined
+  const resetRoles = (roleView && !shownRole) || (selectedCategory === 'roles' && roleRows.length === 0)
+  const category = resetRoles ? '' : selectedCategory
+  useEffect(() => {
+    if (!resetRoles) return
+    setCategory('')
+    if (roleView) setView(null)
+  }, [resetRoles, roleView])
   const data = roster?.connectors ?? { connectors: [], mail: { accounts: [], google: false } }
   const mail = data.mail ?? { accounts: [] }
   const accounts = mail.accounts ?? []
@@ -148,6 +354,11 @@ export function ConnectorsPage({ roster, actions }) {
   const back = () => setView(null)
   const banner = error ? h('div', { className: 'bt-connector-error bt-connector-banner', role: 'alert' }, hostText(error)) : null
 
+  if (shownRole) {
+    return h(Subview, { key: shownRole.key, title: shownRole.name, onBack: back }, banner,
+      h(RoleShopCard, { row: shownRole, roster, actions, operation: roleOperation }),
+      rolePackageResult(roleOperation.result))
+  }
   if (view?.app === 'mail') {
     return h(Subview, { title: t('Mailbox'), onBack: back }, banner,
       h('div', { className: 'bt-set-card bt-connectors-card' },
@@ -166,7 +377,7 @@ export function ConnectorsPage({ roster, actions }) {
     const rows = connected.filter(app => app.id !== 'mail')
     return h(Subview, { title: t('Connected'), onBack: back }, banner,
       h('div', { className: 'bt-set-card bt-connectors-card' },
-        count === 0 ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No connectors connected'))) : null,
+        count === 0 ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No apps connected'))) : null,
         rows.map(app => h(ConnectorRow, { key: app.id, connector: app, actions })),
         accounts.map(account => h(MailAccount, { key: account.id, account, actions, run })),
         (mail.pending ?? []).map(p => h(MailPending, { key: p.address ?? 'google', pending: p })),
@@ -178,35 +389,176 @@ export function ConnectorsPage({ roster, actions }) {
   }
 
   const inCategory = id => apps.filter(app => app.category === id)
-  const searching = query.trim() !== ''
-  const found = apps.filter(app => (category === '' || app.category === category) && matches(query.trim(), app.name, app.about ?? ''))
+  const queryText = query.trim()
+  const searching = queryText !== ''
+  // The official apps have no upstream category: they stay in the All view only.
+  const official = category === '' ? OFFICIAL_APPS.filter(app => matches(queryText, app.name, app.about, t(app.about))) : []
+  const foundRoles = category === '' || category === 'roles' ? roleRows.filter(row =>
+    matches(queryText, row.name, row.id, row.listed?.name, row.listed?.publisher, row.record?.publisher,
+      row.record?.version, row.listed?.version, row.declarations?.description,
+      row.builtIn ? t('Built in') : row.listed ? t(row.listed.installable ? 'Official' : 'Community') : t('Installed'))) : []
+  const rolesSection = foundRoles.length ? h(RoleShopSection, {
+    key: 'roles', rows: foundRoles, roster, actions, operation: roleOperation, open: setView,
+  }) : null
+  const found = apps.filter(app => (category === '' || app.category === category) && matches(queryText, app.name, app.about ?? ''))
+  const toggle = id => setExpanded(current => (current === id ? null : id))
   let body
   if (searching || category !== '') {
-    body = found.length === 0
+    body = found.length === 0 && official.length === 0 && foundRoles.length === 0
       ? h('p', { className: 'bt-app-empty' }, t('Nothing matches'))
-      : h(Grid, { apps: found, actions, open, signInPlaces })
+      : [
+        official.length === 0 ? null : h(OfficialSection, { key: 'official', apps: official, roster, actions, expanded, onToggle: toggle }),
+        rolesSection,
+        found.length === 0 ? null : h(Grid, { key: 'found', apps: found, actions, open }),
+      ]
   } else {
-    const featured = FEATURED.map(id => apps.find(app => app.id === id)).filter(Boolean)
     body = [
-      h(Section, { key: 'featured', place: 'featured', signInPlaces, title: t('Recommended'), apps: featured, actions, open }),
-      ...CATEGORIES.map(([id, label]) => h(Section, { key: id, place: id, signInPlaces, title: t(label), apps: inCategory(id), actions, open, onAll: () => setCategory(id) })),
+      h(OfficialSection, { key: 'official', apps: official, roster, actions, expanded, onToggle: toggle }),
+      rolesSection,
+      ...CATEGORIES.map(([id, label]) => h(Section, { key: id, title: t(label), apps: inCategory(id), actions, open, onAll: () => setCategory(id) })),
     ]
   }
   return h('div', { className: 'bt-apps' },
     banner,
+    rolePackageResult(roleOperation.result),
     h('div', { className: 'bt-app-bar' },
       h('label', { className: 'bt-app-search' },
         h(SearchIcon),
-        h('input', { type: 'search', 'aria-label': t('Search connectors'), placeholder: t('Search connectors'), value: query, onChange: e => setQuery(e.target.value) })),
+        h('input', { type: 'search', 'aria-label': t('Search apps'), placeholder: t('Search apps'), value: query, onChange: e => setQuery(e.target.value) })),
       h('button', { type: 'button', className: 'bt-app-pill', onClick: () => setView('custom') }, h(PlusIcon), t('Custom')),
       h(ConnectedSummary, { apps: marks, count, onClick: () => setView('connected') })),
     h('div', { className: 'bt-app-chips', role: 'group', 'aria-label': t('Category') },
-      [['', 'All'], ...CATEGORIES].map(([id, label]) => h('button', { key: id || 'all', type: 'button', 'aria-pressed': category === id, onClick: () => setCategory(id) }, t(label)))),
+      [['', 'All'], ...(roleRows.length ? [['roles', 'Roles']] : []), ...CATEGORIES].map(([id, label]) => h('button', { key: id || 'all', type: 'button', 'aria-pressed': category === id, onClick: () => setCategory(id) }, t(label)))),
     body)
+}
+
+// --- the mock behind ?mock-apps ------------------------------------------
+//
+// The preview of this page's decided shape: the official rows first, then a sample of the
+// upstream categories, all of it sample data. It reads no roster and calls no action, so it
+// reaches no network and no catalog; every row expands in place and nothing installs. The flag
+// alone selects it, and it is read at render time, so without it the page is the real page.
+
+const MOCK_STATE = Object.freeze({ omni: 'installed', genie: 'missing', claude: 'sign-in', codex: 'installed' })
+const MOCK_SAMPLE_ROWS = Object.freeze([
+  Object.freeze({ id: 'github', name: 'GitHub', category: 'dev', about: 'Repositories and requests', state: 'ready' }),
+  Object.freeze({ id: 'notion', name: 'Notion', category: 'docs', about: 'Pages and databases', state: 'off' }),
+  Object.freeze({ id: 'linear', name: 'Linear', category: 'work', about: 'Issues, projects, and cycles', state: 'off' }),
+  Object.freeze({ id: 'figma', name: 'Figma', category: 'design', about: 'Design files, components, and comments', state: 'off' }),
+  Object.freeze({ id: 'paypal', name: 'PayPal', category: 'commerce', about: 'Payments, invoices, and customers', state: 'off' }),
+  Object.freeze({ id: 'supabase', name: 'Supabase', category: 'data', about: 'Databases, tables, and project settings', state: 'off' }),
+  Object.freeze({ id: 'exa', name: 'Exa', category: 'search', about: 'Web search for agents', state: 'off' }),
+])
+
+const mockFlag = () => {
+  try {
+    const search = String(window.location?.search ?? '').replace(/^\?/, '')
+    return search.split('&').some(part => part === 'mock-apps' || part.startsWith('mock-apps='))
+  } catch {
+    return false
+  }
+}
+
+const mockOfficialRows = () => OFFICIAL_APPS.map((app) => {
+  const state = MOCK_STATE[app.id] ?? 'missing'
+  return {
+    ...app, official: true, state, about: t(app.about), subtitle: officialStateText(state), done: state === 'installed',
+    label: state === 'installed' ? t('Installed') : state === 'sign-in' ? t('Sign in') : t('Install'),
+  }
+})
+
+const mockSampleRows = () => MOCK_SAMPLE_ROWS.map(row => ({
+  ...row, official: false, about: t(row.about), subtitle: t(row.about), done: row.state === 'ready',
+  label: row.state === 'ready' ? t('Connected') : t('Connect'),
+}))
+
+function MockTile({ app, expanded, onToggle }) {
+  return h('div', { className: 'bt-app', 'data-state': app.done ? 'ready' : 'off' },
+    h('button', { type: 'button', className: 'bt-app-main', 'aria-expanded': expanded, onClick: onToggle },
+      h('span', { className: 'bt-app-icon' }, app.official ? h(OfficialMark, { app }) : h(AppIcon, { app })),
+      h('span', { className: 'bt-app-text' },
+        h('span', { className: 'bt-app-name' }, app.name, app.official ? h('span', { className: 'bt-tag' }, t('Official')) : null),
+        h('span', { className: 'bt-app-status' }, app.subtitle))),
+    // A sample control never touches the host: it opens the sample row like the row itself.
+    h('button', { type: 'button', className: app.done ? 'bt-app-btn bt-app-btn-done' : 'bt-app-btn', onClick: onToggle },
+      app.done ? h(CheckIcon) : null, app.label))
+}
+
+function MockDetail({ app }) {
+  return h('div', { className: 'bt-set-card bt-connectors-card bt-app-detail bt-app-expanded' },
+    h('div', { className: 'bt-connector', 'data-state': app.done ? 'ready' : 'off' },
+      h('div', { className: 'bt-connector-head' },
+        h('span', { className: 'bt-connector-mark' }, app.official ? h(OfficialMark, { app, size: 20 }) : h(ConnectorMark, { connector: app })),
+        h('span', { className: 'bt-connector-text' },
+          h('span', { className: 'bt-connector-name' }, app.name, app.official ? h('span', { className: 'bt-tag' }, t('Official')) : null),
+          h('span', { className: 'bt-connector-status' }, app.subtitle))),
+      h('div', { className: 'bt-set-row' },
+        h('span', { className: 'bt-set-copy' },
+          h('span', { className: 'bt-bs-label' }, t('SAMPLE DATA')),
+          h('span', { className: 'bt-set-hint' }, t('Sample row: nothing is installed from this preview.'))))))
+}
+
+function MockSection({ title, hint, rows, expanded, onToggle }) {
+  if (rows.length === 0) return null
+  const open = rows.find(row => row.id === expanded)
+  return h('section', { className: 'bt-app-section' },
+    title === undefined && hint === undefined ? null : h('div', { className: 'bt-app-section-head' },
+      title === undefined ? null : h('h3', null, title),
+      hint === undefined ? null : h('span', { className: 'bt-app-status' }, hint)),
+    h('div', { className: 'bt-app-grid' }, rows.map(row => h(MockTile, {
+      key: row.id, app: row, expanded: row.id === expanded, onToggle: () => onToggle(row.id),
+    }))),
+    open === undefined ? null : h(MockDetail, { app: open }))
+}
+
+function MockAppsPage() {
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('')
+  const [expanded, setExpanded] = useState('genie')
+  const rows = [...mockOfficialRows(), ...mockSampleRows()]
+  const official = rows.filter(row => row.official)
+  const sample = rows.filter(row => !row.official)
+  const queryText = query.trim()
+  const searching = queryText !== '' || category !== ''
+  const officialFound = category === '' ? official.filter(row => matches(queryText, row.name, row.about)) : []
+  const sampleFound = sample.filter(row => (category === '' || row.category === category) && matches(queryText, row.name, row.about))
+  const toggle = id => setExpanded(current => (current === id ? null : id))
+  const inCategory = id => sample.filter(row => row.category === id)
+  const sections = searching
+    ? [
+      officialFound.length === 0 ? null : h(MockSection, { key: 'official', title: t('Automagik official'), hint: t('Included with Automagik'), rows: officialFound, expanded, onToggle: toggle }),
+      sampleFound.length === 0 ? null : h(MockSection, { key: 'found', rows: sampleFound, expanded, onToggle: toggle }),
+    ]
+    : [
+      h(MockSection, { key: 'official', title: t('Automagik official'), hint: t('Included with Automagik'), rows: official, expanded, onToggle: toggle }),
+      ...CATEGORIES.map(([id, label]) => h(MockSection, { key: id, title: t(label), rows: inCategory(id), expanded, onToggle: toggle })),
+    ]
+  return h('div', { className: 'bt-apps', 'data-mock': 'apps' },
+    h('div', { className: 'bt-app-note', role: 'note' },
+      h('span', { className: 'bt-tag' }, t('SAMPLE DATA')),
+      h('span', null, t('A mock of the Apps page. Nothing here installs; click a row to expand it.'))),
+    h('div', { className: 'bt-app-bar' },
+      h('label', { className: 'bt-app-search' },
+        h(SearchIcon),
+        h('input', { type: 'search', 'aria-label': t('Search apps'), placeholder: t('Search apps'), value: query, onChange: e => setQuery(e.target.value) })),
+      h('button', { type: 'button', className: 'bt-app-pill', onClick: () => {} }, h(PlusIcon), t('Custom'))),
+    h('div', { className: 'bt-app-chips', role: 'group', 'aria-label': t('Category') },
+      [['', 'All'], ...CATEGORIES].map(([id, label]) => h('button', { key: id || 'all', type: 'button', 'aria-pressed': category === id, onClick: () => setCategory(id) }, t(label)))),
+    searching && officialFound.length === 0 && sampleFound.length === 0
+      ? h('p', { className: 'bt-app-empty' }, t('Nothing matches'))
+      : sections)
+}
+
+// The flag is read at render time, so without it the page is the real page, unchanged.
+export function ConnectorsPage(props) {
+  return mockFlag() ? h(MockAppsPage) : h(AppsPage, props)
 }
 
 export const CONNECTORS_PAGE_CSS = `
 .bt-apps{display:flex;flex-direction:column;gap:14px;container-type:inline-size}
+.bt-app-note{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-app-note .bt-tag{max-width:none}
+.bt-app-expanded{grid-column:1/-1;margin-top:4px}
 .bt-app-bar{display:flex;align-items:center;gap:8px}
 .bt-app-search{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-card);color:var(--bt-ink-3);cursor:text}
 .bt-app-search:focus-within{border-color:var(--bt-line-2)}
@@ -263,6 +615,7 @@ export const CONNECTORS_PAGE_CSS = `
 .bt-app-sub-head h3{margin:0;font-size:14px;line-height:20px;font-weight:600}
 .bt-app-about{margin:0 4px;font-size:13px;line-height:20px;color:var(--bt-ink-2)}
 .bt-connector-mark{--bt-mark-ink:var(--bt-ink)}
+.bt-official-brand-mark{object-fit:contain}
 [data-bt-motion=off] .bt-app,[data-bt-motion=off] .bt-app *,[data-bt-motion=off] .bt-app::after{animation:none!important;transition:none!important}
 @media (prefers-reduced-motion:reduce){.bt-app[data-fresh]::after,.bt-app[data-fresh] .bt-app-icon,.bt-app[data-fresh] .bt-app-btn-done{animation:none}}
 `

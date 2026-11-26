@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { homedir, hostname, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session } from '@deepseek-ai/dsh-session'
 import { apply } from '../index.js'
@@ -10,6 +11,7 @@ import { SOURCE_KIND } from '../src/host/constants.js'
 import { dshHomeOf } from '../src/host/folders.js'
 import { escapeRegExp } from '../src/host/text.js'
 import { fakeApproval, fakeContext } from './fake-ctx.js'
+import { captureWaterfall } from './support/capture-waterfall.js'
 import { until } from './until.js'
 import { createUnfold } from './fake-unfold-bot.js'
 
@@ -52,6 +54,7 @@ async function start({ services = {}, workspaces = [], llm, team: saved = TEAM, 
   process.env.DSH_HOME = dsh
 
   const ctx = fakeContext({ services: { unfoldSession: { sessionId: 'configured-unfold', ready: Promise.resolve() }, ...services } })
+  const preStepContext = captureWaterfall(ctx, 'agent/pre-step')
   const created = []
   const archived = []
   const cwds = new Map()
@@ -116,9 +119,17 @@ async function start({ services = {}, workspaces = [], llm, team: saved = TEAM, 
     method: 'POST', body: JSON.stringify({ endpoint, payload }),
   }))).json()
   const tool = (name, args, sessionId) => rt.teamTools.find(d => d.name === name).execute(args, { agent: agentOf(sessionId), name, callId: 'c1' })
-  // Runs the parts check, registered last; 'next' means the step goes on.
-  const preStep = (sessionId, messages = [], step = 1) => ctx.listeners.get('agent/pre-step').at(-1)(
-    { agent: agentOf(sessionId), messages, step, signal: AbortSignal.timeout(60_000) }, async () => 'next')
+  const preStep = async (sessionId, messages = [], step = 1) => {
+    let reachedTerminal = false
+    const decision = await agentEvents(preStepContext, agentOf(sessionId)).waterfall('agent/pre-step',
+      { messages, turn: 1, step, signal: AbortSignal.timeout(60_000), modelSelection: { provider: 'test', model: 'test' } },
+      async () => {
+        reachedTerminal = true
+        return { kind: 'enter', messages }
+      })
+    // Distinguish DSH's normal entry from a takeover returning its own decision.
+    return reachedTerminal && decision.kind === 'enter' ? 'next' : decision
+  }
   const state = () => JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
   // Waits until the Bot's own chat runs in `dir` and its move has finished.
   const workingIn = async (botId, dir) => {
@@ -1479,16 +1490,26 @@ test('Unfold Main Bot adopts the configured adapter root in either startup order
         await env.call('state', {}) // the browser may arrive before either plugin
         assert.deepEqual(env.state().bots, {})
         const rt = env.ctx.provided.get('omniTeam')
+        let expired = false
+        const warn = rt.warn
+        rt.warn = (...args) => {
+          if (typeof args[0] === 'string' && args[0].includes('the Main Bot maker gave no answer')) expired = true
+          return warn?.(...args)
+        }
         rt.mainBotMakerMs = 10
         const unfold = createUnfold(env.ctx, rt)
         const reading = env.call('state', {})
         if (delayed) {
-          await settle() // beyond the team's maker deadline; it must still create no default
+          // The state read must finish through the deadline while the adapter is still blocked.
+          await until(() => expired, { label: 'the Main Bot maker deadline expired' })
+          await reading
           assert.equal(env.created.length, 0)
           assert.deepEqual(env.state().bots, {}, 'no default Bot while the adapter prepares its root')
           release()
         }
         await Promise.all([reading, unfold.unfoldReady])
+        // The fake plugin's readiness can precede the adopted Bot's save.
+        await until(() => env.state().bots[session.sessionId] !== undefined, { label: 'the adopted Bot is saved' })
         const bots = Object.values(env.state().bots)
         assert.deepEqual(bots.map(bot => [bot.id, bot.kind]), [[session.sessionId, 'unfold']])
         assert.deepEqual(env.state().mainBotIds, [session.sessionId])

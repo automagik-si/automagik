@@ -50,9 +50,14 @@ for (const type of ['keydown', 'keyup', 'input', 'beforeinput', 'paste', 'copy',
 // The host, faked: one attempt per agent, any view of the owner reads it.
 export const STATE = 'Sentinel_State_ABCdef0123456789'
 window.STATE = STATE
-window.host = { attempts: {}, signedIn: { 'acp-codex': false, 'acp-claude': false }, choices: {}, restarted: false, hold: {}, release: {}, sequence: 0 }
+// Antigravity's link and the address the browser ends on (#2048): Google's link, its state.
+export const AGY_STATE = 'Agy-_.~state_0123456789'
+window.AGY_STATE = AGY_STATE
+window.AGY_LINK = `https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${AGY_STATE}`
+window.AGY_CALLBACK = `http://localhost:41234/auth/callback?code=4%2F0Abc&state=${AGY_STATE}`
+window.host = { attempts: {}, signedIn: { 'acp-codex': false, 'acp-claude': false, 'acp-antigravity': false }, choices: {}, restarted: false, hold: {}, release: {}, sequence: 0 }
 const refused = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
-const linkOf = provider => (provider === 'acp-codex' ? 'https://auth.openai.com/codex/device'
+const linkOf = provider => (provider === 'acp-codex' ? 'https://auth.openai.com/codex/device' : provider === 'acp-antigravity' ? window.AGY_LINK
   : `https://claude.ai/oauth/authorize?code=true&client_id=${'c'.repeat(240)}&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&state=${STATE}`)
 const view = provider => {
   const attempt = window.host.attempts[provider]
@@ -79,6 +84,7 @@ window.finishSignIn = (provider) => {
 const call = async (endpoint, payload) => {
   window.calls.push({ endpoint, payload: structuredClone(payload) })
   await pause(endpoint)
+  if (window.reservationActions?.[endpoint]) return window.reservationActions[endpoint](payload)
   const { provider, botId } = payload ?? {}
   switch (endpoint) {
     case 'cli-login-connections': return { available: true, connections: Object.fromEntries(Object.entries(window.host.signedIn).map(([id, signedIn]) => [id, { id, signedIn }])) }
@@ -88,7 +94,9 @@ const call = async (endpoint, payload) => {
       if (!live(provider)) {
         window.host.attempts[provider] = { id: provider, attemptId: `attempt_${provider.replace('-', '_')}_${String(++window.host.sequence).padStart(20, '0')}`, status: 'waiting',
           expiresAt: Date.now() + 600_000, expiresBy: 'app', openedBy: botId, url: linkOf(provider),
-          ...(provider === 'acp-codex' ? { userCode: 'ABCD-1234' } : { prompt: { id: 'claude-code', label: 'Authorization code', secret: true } }) }
+          ...(provider === 'acp-codex' ? { userCode: 'ABCD-1234' }
+            : provider === 'acp-antigravity' ? { prompt: { id: 'agy-callback', label: 'Sign-in address', secret: true } }
+              : { prompt: { id: 'claude-code', label: 'Authorization code', secret: true } }) }
       }
       return view(provider)
     }
@@ -100,6 +108,12 @@ const call = async (endpoint, payload) => {
       if (window.host.restarted || window.host.attempts[provider]?.attemptId !== payload.attemptId) throw refused('This sign-in has ended. Start again.', 'bot/login-ended')
       return view(provider)
     case 'cli-login-answer':
+      // Antigravity: the right address is delivered; agy finishes when the test says so.
+      if (provider === 'acp-antigravity') {
+        if (payload.value !== window.AGY_CALLBACK) throw refused('This link is not from this sign-in.', 'bot/invalid')
+        Object.assign(window.host.attempts[provider], { checking: true, prompt: undefined })
+        return view(provider)
+      }
       if (payload.value !== `authcode-XYZ#${STATE}`) throw refused('Paste the complete code shown by Claude, including the part after #.', 'bot/invalid')
       window.finishSignIn(provider)
       return view(provider)
@@ -211,14 +225,14 @@ slots.register({ name: 'root', children: {
 slots.register({ name: 'conversation.composer.bar', inject: id => runtimes.get(id)?.inputProps ?? {} }, native.InputBar)
 slots.register({ name: 'conversation.input.dock', id: 'bot-cli-login', inject: face }, CliLoginConversation)
 const root = createRoot(document.getElementById('root'))
-window.showAccounts = (failure) => {
+window.showAccounts = (failure, failureMessage = 'private-process-diagnostic') => {
   window.accountCalls = []
   const entry = { authScope: 'isolated', signedIn: true,
     account: { email: 'bot@example.test' }, terminal: { email: 'terminal@example.test' } }
   const actions = {
-    cliLoginAccounts: async () => ({ accounts: { 'acp-codex': { ...entry } } }),
+    cliLoginAccounts: async () => ({ accounts: { 'acp-codex': { ...entry } }, installation: 'desktop' }),
     cliLoginSignOut: async () => {
-      if (failure) throw Object.assign(new Error('private-process-diagnostic'), { code: failure })
+      if (failure) throw Object.assign(new Error(failureMessage), { code: failure })
       window.accountCalls.push('signout'); entry.signedIn = false
     },
     cliLoginSwitch: async () => { window.accountCalls.push('switch') },
@@ -268,11 +282,111 @@ window.showRecoveryAccounts = evidence => {
   }
   root.render(h(CliAccounts, { bot, actions }))
 }
+
+// The card uses the real team actions and host handlers. The browser keeps the fixture's
+// reservation file in memory and reads a fake account instead of running a CLI.
+function reservationFs() {
+  const files = new Map()
+  const open = new Map()
+  let sequence = 0
+  const fileOf = path => {
+    if (!files.has(path)) throw Object.assign(new Error('Missing fixture file'), { code: 'ENOENT' })
+    return files.get(path)
+  }
+  const stat = file => ({ isFile: () => true, mode: file.mode, dev: 1, ino: file.ino })
+  return {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 1, O_NONBLOCK: 2 },
+    lstatSync: path => stat(fileOf(path)),
+    openSync: (path, flags, mode) => {
+      if (flags === 'wx') {
+        if (files.has(path)) throw Object.assign(new Error('Fixture file exists'), { code: 'EEXIST' })
+        files.set(path, { mode, ino: ++sequence })
+      }
+      const fd = ++sequence
+      open.set(fd, fileOf(path))
+      return fd
+    },
+    fstatSync: fd => stat(open.get(fd)),
+    fchmodSync: (fd, mode) => { open.get(fd).mode = mode },
+    readFileSync: fd => open.get(fd).bytes,
+    writeFileSync: (fd, value) => { open.get(fd).bytes = new TextEncoder().encode(value) },
+    fsyncSync() {},
+    closeSync: fd => open.delete(fd),
+    unlinkSync: path => files.delete(path),
+    renameSync: (from, to) => { files.set(to, fileOf(from)); files.delete(from) },
+  }
+}
+
+window.showReservationAccounts = ({
+  isolated = false, instance = 'test-instance', machine,
+} = {}) => {
+  const id = 'acp-codex'
+  const seen = { id, signedIn: true, consent: 'given', ref: 'fixture-ref',
+    account: { kind: 'account', email: 'owner@example.test', plan: 'team' } }
+  const fixture = { instance, state: 'complete', exact: 'a'.repeat(43), machine }
+  const acp = {
+    authScope: isolated ? 'isolated' : 'consent',
+    status: async () => ({ agents: [seen] }),
+    account: async provider => provider === id && !fixture.machine?.signedOut
+      ? seen : { id: provider, signedIn: false },
+    accountEvidence: async provider => {
+      if (provider !== id || fixture.state === 'signed-out') return { id: provider, signedIn: false }
+      if (fixture.state === 'unknown') return { id }
+      if (fixture.state === 'unsupported') return { id, supported: false }
+      if (fixture.state === 'ambiguous') return { id, signedIn: true, outcome: 'ambiguous', why: 'unknown-plan' }
+      if (fixture.state === 'recovery') return { id, recoveryRequired: true }
+      return { id, signedIn: true, vendor: 'codex', ref: seen.ref, outcome: fixture.state,
+        reservable: true, class: 'workspace', exact: fixture.exact, loose: 'b'.repeat(43) }
+    },
+  }
+  const rt = { ctx: { get: () => acp, on: () => {} }, holdsLock: () => true, readOnly: () => undefined }
+  installAccountActions(rt, {
+    path: 'reservation.json', fs: reservationFs(), pid: 1, instanceId: () => fixture.instance,
+    random: (size, encoding) => {
+      const bytes = crypto.getRandomValues(new Uint8Array(size))
+      if (encoding === 'hex') return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+      return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
+    },
+    decodeKey: key => Uint8Array.from(atob(key.replaceAll('-', '+').replaceAll('_', '/')), char => char.charCodeAt(0)),
+  })
+  const host = rt.cliLoginActions
+  window.reservationActions = machine ? {
+    ...host,
+    async 'cli-login-accounts'(payload) {
+      const value = await host['cli-login-accounts'](payload)
+      value.accounts[id].machine = fixture.machine
+      return value
+    },
+    async 'cli-login-reserve'(payload) {
+      if (!payload.machineId) return host['cli-login-reserve'](payload)
+      fixture.machine.claims.find(claim => claim.machineId === payload.machineId).label =
+        payload.label
+      return { state: 'complete', claims: [] }
+    },
+    async 'cli-login-release'(payload) {
+      if (!payload.machineId) return host['cli-login-release'](payload)
+      fixture.machine = { state: 'shared', claims: [] }
+      return { state: 'unknown', claims: [] }
+    },
+  } : host
+  let refresh
+  window.refreshReservations = change => {
+    Object.assign(fixture, change)
+    refresh()
+  }
+  root.render(h(CliAccounts, { bot: { id: 'alpha' }, actions: {
+    ...actions,
+    cliLogin: {
+      subscribe: fn => { refresh = fn; return () => { refresh = undefined } },
+      getSnapshot: () => ({ rows: { alpha: { stage: 'done' } } }),
+    },
+  } }))
+}
 root.render(slots.renderSlot('root', {}))
 
 window.setBots = (bots, { blank = false, shown } = {}) => {
   for (const bot of bots) if (!runtimes.has(bot.id)) runtimes.set(bot.id, makeSession(bot.id, blank))
-  roster.set(indexRoster({ bots, rooms: [], agents: [], models: [{ ref: 'deepseek-official/deepseek-flash', name: 'DeepSeek Flash' }, { ref: 'acp-claude/default', name: 'Claude Code' }, { ref: 'acp-codex/default', name: 'Codex' }], prefs: {} }))
+  roster.set(indexRoster({ bots, rooms: [], agents: [], models: [{ ref: 'deepseek-official/deepseek-flash', name: 'DeepSeek Flash' }, { ref: 'acp-claude/default', name: 'Claude Code' }, { ref: 'acp-codex/default', name: 'Codex' }, { ref: 'acp-antigravity/default', name: 'Antigravity' }], prefs: {} }))
   for (const bot of [...bots].reverse()) if (shown === undefined || bot.id !== shown) selectSession(bot.id)
   if (shown !== undefined) selectSession(shown)
   else selectSession(bots[0].id)

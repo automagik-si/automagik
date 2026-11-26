@@ -8967,7 +8967,13 @@ var NAMESPACE = "welcome.team";
 var PT_BR = {
   // Installs and their errors
   "The install was cancelled.": "A instalação foi cancelada.",
+  "Viewer unavailable": "Visualização indisponível",
   "Omni's installer stopped (exit code {code}). What it printed is above.": "O instalador do Omni parou (código de saída {code}). A saída está acima.",
+  "Omni {version} is not on npm, where Omni's installer gets it. The newest there is {npm}.": "O Omni {version} não está no npm, de onde o instalador do Omni o baixa. A versão mais recente lá é {npm}.",
+  "Omni {github} is out on GitHub and not on npm yet.": "O Omni {github} já saiu no GitHub e ainda não chegou ao npm.",
+  "Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.": "Desligue e ligue o Omni novamente para usar os plugins compatíveis com essa versão ou use um Omni em outro computador.",
+  "Omni's installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.": "O instalador do Omni precisa do systemd, que não está disponível neste computador (como acontece em um contêiner, por exemplo). Use um Omni em outro computador.",
+  "unknown": "desconhecida",
   // A found Omni, and where Omni comes from
   "Your Omni on this Mac": "Seu Omni neste Mac",
   "Your Omni on this computer": "Seu Omni neste computador",
@@ -9105,6 +9111,37 @@ var PT_BR = {
   "Approve this device on your phone": "Aprove este dispositivo no seu celular",
   "Downloading Bun for Omni…": "Baixando o Bun para o Omni…",
   "Setting up your Omni…": "Configurando seu Omni…",
+  "Checking Omni {version}…": "Verificando o Omni {version}…",
+  "Downloading Omni {version} from GitHub…": "Baixando o Omni {version} do GitHub…",
+  "Building Omni {version}…": "Compilando o Omni {version}…",
+  "Installing Omni {version} from npm…": "Instalando o Omni {version} pelo npm…",
+  "Installing Omni {version}…": "Instalando o Omni {version}…",
+  "Connecting to your Omni…": "Conectando ao seu Omni…",
+  "Stopping after this step…": "Parando após esta etapa…",
+  "npm's newest Omni is {npm}, older than Omni {version}, which this Automagik installs.": "A versão mais recente do Omni no npm é {npm}, anterior à versão {version} que este Automagik instala.",
+  "Omni {version} is not on npm (the newest there is {npm}).": "O Omni {version} não está no npm (a versão mais recente lá é {npm}).",
+  "Installing Omni from npm failed (exit code {code}).": "A instalação do Omni pelo npm falhou (código de saída {code}).",
+  "Installing Omni from npm failed.": "A instalação do Omni pelo npm falhou.",
+  "Omni's npm installer needs systemd, and this computer has none.": "O instalador do Omni pelo npm precisa do systemd, que não está disponível neste computador.",
+  "Installing Omni {version} from GitHub instead.": "Instalando o Omni {version} pelo GitHub.",
+  "Installing Omni from GitHub instead.": "Instalando o Omni pelo GitHub.",
+  "Installing Omni {version} from npm.": "Instalando o Omni {version} pelo npm.",
+  "npm could not install it either. Installing Omni {version} from GitHub instead.": "A instalação pelo npm também falhou. Instalando o Omni {version} pelo GitHub.",
+  "The install steps": "As etapas da instalação",
+  "Check": "Verificar",
+  "Download": "Baixar",
+  "Build": "Compilar",
+  "Install": "Instalar",
+  "What the GitHub install printed": "A saída da instalação pelo GitHub",
+  "It stopped at the {step} step.": "Parou na etapa {step}.",
+  "Power Omni on to try again.": "Ligue o Omni para tentar novamente.",
+  "Update Automagik, then power Omni on again.": "Atualize o Automagik e ligue o Omni novamente.",
+  "Use an Omni on another computer.": "Use um Omni em outro computador.",
+  "The install's progress was lost (Automagik may have restarted). Power Omni on to try again.": "O progresso da instalação foi perdido (o Automagik pode ter reiniciado). Ligue o Omni para tentar novamente.",
+  "Omni could not be installed from GitHub.": "Não foi possível instalar o Omni pelo GitHub.",
+  "Omni is installed, but its address is unknown. Power Omni on to try again.": "O Omni está instalado, mas não foi possível identificar o endereço. Ligue o Omni para tentar novamente.",
+  "Omni is installed but did not answer at {url}. Power Omni on to try again.": "O Omni está instalado, mas não respondeu em {url}. Ligue o Omni para tentar novamente.",
+  "Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.": "Há outro login do Omni aguardando ({origin}). Conclua ou cancele esse login e depois conecte-se ao novo Omni em {url} pela lista de Omnis.",
   "Installed · restart DSH to start it": "Instalação concluída · reinicie o DSH para começar",
   "Could not install Omni": "Não foi possível instalar o Omni",
   "Installing Genie…": "Instalando o Genie…",
@@ -9120,21 +9157,14 @@ var PT_BR = {
   "link": "conexão",
   "team": "equipe",
   "The Omni plugins": "Os plugins do Omni",
+  "Power": "Energia",
   "Power {name} off": "Desligar {name}",
   "Power {name} on": "Ligar {name}",
-  // The power shortcut in the Bot team's sidebar (power-shortcut.js)
-  "Omni and Genie": "Omni e Genie",
-  "Omni, Genie and Unfold": "Omni, Genie e Unfold",
+  // The power card in each built-in Bot's settings (power-shortcut.js)
   "Try again": "Tentar de novo",
   "Choose where Omni lives": "Escolher onde o Omni fica",
   "Add Omni": "Adicionar o Omni",
   "Open Plugins": "Abrir Plugins",
-  "Open team setup": "Abrir configuração da equipe",
-  "{name} on": "{name}: energia ligada",
-  "{name} off": "{name}: energia desligada",
-  "{name} working": "{name}: trabalhando",
-  "{name} needs you": "{name}: precisa de você",
-  "{a}, {b}": "{a}, {b}",
   "On · {status}": "Ligado · {status}",
   "{name} stays on once it joins your team.": "O {name} fica ligado depois que entra na sua equipe.",
   "Adds the Omni plugins to this DSH, then looks for your Omni.": "Adiciona os plugins do Omni a este DSH e depois procura o seu Omni.",
@@ -9199,8 +9229,8 @@ var PT_BR = {
   "Continue with just {name}": "Continuar só com {name}",
   "Continue with {who}": "Continuar com {who}",
   " and ": " e ",
-  // Claude Code and Codex (acp-agents.js), in Connect AI and in Settings
-  "Claude Code and Codex": "Claude Code e Codex",
+  // Coding agents (acp-agents.js), in Connect AI and in Settings
+  "Coding agents": "Agentes de código",
   "Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.": "Use os agentes de código que você já tem como modelos no DSH. Cada um roda a sua própria CLI, com o seu login e as suas configurações.",
   "Looking at what this computer has…": "Vendo o que este computador tem…",
   "The ACP agents plugin is not running in this DSH.": "O plugin de agentes ACP não está rodando neste DSH.",
@@ -9222,23 +9252,46 @@ var PT_BR = {
   "Found the {cli} CLI on this computer.": "A CLI {cli} está neste computador.",
   "Found the {cli} CLI on this computer (version {version}).": "A CLI {cli} está neste computador (versão {version}).",
   "Installing {name} automatically…": "Instalando o {name} automaticamente…",
+  "Installing {name}…": "Instalando o {name}…",
+  "Install it yourself instead": "Ou instale por conta própria",
+  "The {cli} CLI is not on this computer. Automagik can install it for you.": "A CLI {cli} não está neste computador. O Automagik pode instalar para você.",
+  "The {cli} CLI is not on this computer. Turn {name} on to install it.": "A CLI {cli} não está neste computador. Ligue o {name} para instalar.",
+  "Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).": "A CLI {cli} está neste computador (o Automagik instalou a versão {version}; a CLI se atualiza por conta própria).",
   "Updating {name} automatically…": "Atualizando o {name} automaticamente…",
   "The {name} installation or update failed: {error}": "A instalação ou atualização do {name} falhou: {error}",
   "The {name} installation or update failed.": "A instalação ou atualização do {name} falhou.",
   "Signed in to {name}.": "Login feito no {name}.",
+  "Signed in to {name} as {account}.": "Login feito no {name} como {account}.",
+  "Switch account": "Trocar de conta",
+  "Bots in this installation share this account. Your terminal sign-in stays as it is.": "Os Bots desta instalação compartilham esta conta. O login no terminal continua como está.",
+  "This stops running Bot work for this account. Continue?": "Isso interrompe o trabalho dos Bots nesta conta. Continuar?",
   "Not signed in to {name}. Sign in from a Bot's chat.": "Sem login no {name}. Entre pelo chat de um Bot.",
   "Or run {command} in a terminal, then check again.": "Ou rode {command} em um terminal e verifique de novo.",
   "Not signed in to {name}. Run {command} in a terminal, then check again.": "Sem login no {name}. Rode {command} em um terminal e verifique de novo.",
   "Turning it on lets Automagik use the sign-in {name} already has on this computer.": "Ao ligar, o Automagik passa a usar o login que o {name} já tem neste computador.",
   "The sign-in to {name} has not been checked yet.": "O login no {name} ainda não foi verificado.",
+  "Could not check the sign-in to {name}: {cli} took too long to answer.": "Não foi possível verificar o login no {name}: o {cli} demorou demais para responder.",
+  "Could not tell whether you are signed in to {name}.": "Não foi possível saber se há login no {name}.",
   "Sign in": "Entrar",
+  // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
+  "Not signed in to {name}.": "Sem login no {name}.",
+  "The CLI did not offer a sign-in link in time. Try again.": "O CLI não ofereceu um link de login a tempo. Tente de novo.",
+  "Finish the sign-in to {name} in your browser…": "Conclua o login no {name} pelo navegador…",
+  "{name} did not offer a Google sign-in. Try again.": "O {name} não ofereceu login com Google. Tente de novo.",
+  "The sign-in to {name} took too long. Try again.": "O login no {name} demorou demais. Tente de novo.",
+  "The sign-in to {name} did not finish. Try again.": "O login no {name} não terminou. Tente de novo.",
+  "Automagik keeps its own {name} sign-in, apart from the one in your terminal.": "O Automagik mantém um login próprio do {name}, separado do login do seu terminal.",
+  "Sign out": "Sair",
+  "On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.": "No Windows, a conta do {name} é compartilhada: o Automagik e o seu próprio {name} neste computador usam o mesmo login, guardado no Gerenciador de Credenciais do Windows. Sair não está disponível aqui: saia pelo próprio {name}.",
   "No Bot chat to sign in from here. Run {command} in a terminal instead.": "Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.",
+  "Sign-in needs a Bot chat. If you have no Bot yet, set one up first.": "Para entrar, você precisa de um chat de Bot. Se ainda não tiver um Bot, configure um primeiro.",
   "Sign in from the Bot's chat, then come back to finish setting up.": "Entre pelo chat do Bot e volte para terminar a configuração.",
   "Back to setup": "Voltar à configuração",
   "Off. Turn it on to use {name} as a model in DSH.": "Desligado. Ligue para usar o {name} como modelo no DSH.",
   "Installing its connector in the background. This takes a minute or two.": "Instalando o conector em segundo plano. Leva um ou dois minutos.",
   "The connector did not install: {error}": "O conector não foi instalado: {error}",
   "The connector did not install.": "O conector não foi instalado.",
+  "Could not reach the connector registry. Automagik tries again by itself, or press Retry.": "Não foi possível acessar o registro de conectores. O Automagik tenta de novo automaticamente. Para tentar agora, clique em Tentar de novo.",
   "The connector did not start: {error}": "O conector não iniciou: {error}",
   "Install details": "Detalhes da instalação",
   "Log: {path}": "Registro: {path}",
@@ -9289,7 +9342,6 @@ var PT_BR = {
   "Telegram bot": "Bot do Telegram",
   "Telegram": "Telegram",
   "Move its Telegram bot to Omni, with the bot you already know.": "Mova o bot do Telegram do Hermes para o Omni, com o bot que você já conhece.",
-  "We are still mapping how it keeps its bot.": "Ainda estamos mapeando como essa ferramenta guarda o bot.",
   "Coming soon": "Em breve",
   "{name}: coming soon": "{name}: em breve",
   "Move {name} to Omni": "Mover {name} para o Omni",
@@ -9357,6 +9409,11 @@ var PT_BR = {
   "Omni has the channel. Its next update adds your Bot as the one who answers.": "O Omni está com o canal. A próxima atualização do Omni adiciona o seu Bot como quem responde.",
   "Hermes: Telegram off": "Hermes: Telegram desligado",
   "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key.": "O Telegram do Hermes está desligado. O Omni não confirmou qual canal é o da mudança, então verifique os Canais do Omni antes de tentar de novo. O Hermes ainda tem a chave.",
+  "Turn Hermes's Telegram back on": "Religar o Telegram do Hermes",
+  "Hermes's Telegram is back on": "O Telegram do Hermes está de volta",
+  "That is your way back. Hermes has its Telegram again.": "Esse é o caminho de volta. O Hermes está com o Telegram de novo.",
+  "Nothing else changed. If Omni kept a channel from this move, check it in Omni's Channels before moving again.": "Nada mais mudou. Se o Omni ficou com um canal desta mudança, verifique nos Canais do Omni antes de mover de novo.",
+  "No Bot answers in these chats yet. Pick one in Omni's Channels.": "Nenhum Bot responde nesses chats ainda. Escolha um nos Canais do Omni.",
   "Hermes was not running. Its Telegram stays off until you start Hermes again.": "O Hermes não estava rodando. O Telegram fica desligado até você iniciar o Hermes de novo.",
   "Hermes: Telegram was already off": "Hermes: o Telegram já estava desligado",
   "Omni: listening": "Omni: escutando",
@@ -9471,15 +9528,45 @@ var PT_BR = {
   "Sign in on their page, then paste the address it ends on here.": "Faça login na página do provedor e cole aqui o endereço da página final.",
   "Copy your {what} from ": "Copie o valor “{what}” em ",
   " and paste it here. It stays in DSH's credential store on this computer.": " e cole aqui. Fica no cofre de credenciais do DSH, neste computador.",
-  "The address you landed on": "O endereço da página final"
+  "The address you landed on": "O endereço da página final",
+  // Antigravity's sign-in from any computer (#2048, paste-back). The expired sentence and the
+  // expiry are the Bot chat's own (bots-dsh omni-ui), byte for byte.
+  "Your Google account, through Antigravity": "Sua conta Google, pelo Antigravity",
+  "This link is not from this sign-in.": "Este link não é deste login.",
+  "Signed in on another computer? Paste the address the browser ends on:": "Entrou em outro computador? Cole o endereço em que o navegador parou:",
+  "Finishing the sign-in to {name}…": "Concluindo o login em {name}…",
+  "This sign-in expired. Start again.": "Este login expirou. Comece de novo.",
+  "Send": "Enviar",
+  "Expires at {time}": "Expira às {time}"
 };
 var EN = Object.fromEntries(Object.keys(PT_BR).map((key) => [key, key]));
+var ZH = {
+  "Not signed in to {name}.": "未登录 {name}。",
+  "The CLI did not offer a sign-in link in time. Try again.": "CLI 没有及时给出登录链接，请重试。",
+  "Finish the sign-in to {name} in your browser…": "请在浏览器中完成 {name} 的登录…",
+  "{name} did not offer a Google sign-in. Try again.": "{name} 没有提供 Google 登录。请重试。",
+  "The sign-in to {name} took too long. Try again.": "{name} 的登录用时过长。请重试。",
+  "The sign-in to {name} did not finish. Try again.": "{name} 的登录没有完成。请重试。",
+  "On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.": "在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。",
+  // Its row in Connect AI and its sign-in from any computer (#2048, paste-back). The expired
+  // sentence and the expiry are the Bot chat's own (bots-dsh i18n.js), byte for byte.
+  "Your Google account, through Antigravity": "你的 Google 账号，通过 Antigravity",
+  "Installing {name}…": "正在安装 {name}…",
+  "The {cli} CLI is not on this computer. Automagik can install it for you.": "这台电脑上没有 {cli} CLI。Automagik 可以为你安装。",
+  "The {cli} CLI is not on this computer. Turn {name} on to install it.": "这台电脑上没有 {cli} CLI。开启 {name} 即可安装。",
+  "Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).": "已找到 {cli} CLI（由 Automagik 安装，版本 {version}；它会自行更新）。",
+  "This link is not from this sign-in.": "此链接不属于本次登录。",
+  "Signed in on another computer? Paste the address the browser ends on:": "在另一台电脑上登录了？请粘贴浏览器最后停留的地址：",
+  "Finishing the sign-in to {name}…": "正在完成 {name} 的登录…",
+  "This sign-in expired. Start again.": "本次登录已过期，请重新开始。",
+  "Expires at {time}": "{time} 过期"
+};
 var fill = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
 var bound = null;
 function installLocale(locale) {
   if (!locale || typeof locale.register !== "function" || typeof locale.bind !== "function") return () => {
   };
-  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, "pt-BR": PT_BR });
+  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, "pt-BR": PT_BR, zh: ZH });
   const mine = locale.bind(NAMESPACE);
   bound = mine;
   return () => {
@@ -9491,26 +9578,62 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 
+// src/host/viewer-policy.js
+var READS = /* @__PURE__ */ new Set([
+  "state",
+  "ais",
+  "providers",
+  "companion",
+  "companion-image",
+  "omni-plugins",
+  "genie-plugin",
+  "unfold-plugin",
+  "bot-type",
+  "migrate-status"
+]);
+var needsViewer = (endpoint) => !READS.has(endpoint);
+
 // src/client/api.js
 var ROUTE = "api/omni-ai";
 var OMNI_UI = "api/omni-ui";
-var call = (endpoint, payload) => callRoute(ROUTE, endpoint, payload);
-var callOmniUi = (endpoint, payload) => callRoute(OMNI_UI, endpoint, payload);
-async function callRoute(route, endpoint, payload) {
+var call = (endpoint, payload) => needsViewer(endpoint) ? callWithViewer(ROUTE, endpoint, payload) : callRoute(ROUTE, endpoint, payload);
+var callOmniUi = (endpoint, payload) => callWithViewer(OMNI_UI, endpoint, payload);
+async function callWithViewer(route, endpoint, payload) {
+  if (globalThis.__AUTOMAGIK_VIEW__ === void 0) return callRoute(route, endpoint, payload);
+  const viewer = globalThis.__AUTOMAGIK_MOUNTED_VIEWER__;
+  if (!viewer) throw Object.assign(new Error("Viewer unavailable"), { code: "bot/retired" });
+  return callRoute(route, endpoint, payload, viewer);
+}
+async function callRoute(route, endpoint, payload, viewer) {
+  const body = { endpoint, payload: payload ?? null };
+  if (viewer) body.viewer = viewer.id;
   let response;
   try {
     response = await fetch(route, {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ endpoint, payload: payload ?? null })
+      body: JSON.stringify(body)
     });
   } catch {
+    viewer?.check();
     throw Object.assign(new Error(t("Could not reach DSH. Check that it is still running.")), { code: "NETWORK" });
   }
-  if (!response.ok) throw Object.assign(new Error(t("DSH answered HTTP {status}", { status: response.status })), { code: `HTTP_${response.status}` });
+  viewer?.check();
+  if (!response.ok) {
+    const refusal = viewer && await viewer.response(response);
+    throw Object.assign(new Error(t("DSH answered HTTP {status}", { status: response.status })), {
+      code: refusal?.changed ? "bot/viewer-changed" : `HTTP_${response.status}`
+    });
+  }
   const result = await response.json();
-  if (!result.ok) throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code: result.error?.code ?? "omni-ai/error" });
+  viewer?.check();
+  const changed = viewer && (result.code === "bot/viewer-changed" || result.error?.code === "bot/viewer-changed");
+  if (!result.ok || changed) {
+    const code = changed ? "bot/viewer-changed" : result.error?.code ?? (route === OMNI_UI && viewer ? "bot/error" : "omni-ai/error");
+    viewer?.refused(code);
+    throw Object.assign(new Error(result.error?.message ?? t("Request failed")), { code });
+  }
   return result.value;
 }
 
@@ -9568,9 +9691,22 @@ var CHARACTERS = {
   pebbles: { body: "M47.3 4.5l2.7-.4 2.7 .1 13.7 3 4.3 2.1 3.3 3.4 1.3 2.2 1 2.8 2 12-.5 4.3-3.1 7.7 .2 .5 8.4 1.9 2.7 1 3.3 2.1 2.7 2.8 2.4 4.3 1.4 6.5 .1 4.4-.8 3.8-1.3 2.7-2 2.8-2.4 2.2-2.7 1.6-45.5 17-3.3 .6-3.2-.2-19.2-4.2-4.9-2.8-3.4-3.8-1.9-4.4-1.3-7.7 .2-3.2 .8-2.8 1.3-2.7 2-2.7 3.2-2.8 7.9-3.8 2.5-2.2-.4-1.6-5.4-6.1-1.8-3.8-2.3-12.5 .2-3.3 .7-2.7 2.6-4.4 2.2-2 2.2-1.4z", shade: "M73.2 12.2l.4 0 1.5 2.2 1.2 3.3 1.8 11.4-.2 4.4-3.3 7.6 0 1.1 .6 1.1-1.2 1.3-26.8 10.1-3.2 .5-5.8-.4-15.2-3.3-1.4-.5-3.5-3.8 .2-.3 1.6 .2 10.9 2.2 2.8-.5 4.4-2.2 5-3.8 .1-.6-1.5-8.7 4-4.5 24.2-9.2 2.4-3.8zM90.9 48.8l2.8 3.8 1 2.8 1.2 6 0 4.3-1.1 3.9-1.7 3.2-3.8 3.9-2.7 1.7-42.1 15.8-5.5 1.6-3.8 0-18-3.8-4.9-2.1-3.4-2.9 17.6 3.8 2.7-.2 3.3-1.2 4.3-2.6 4.4-3.6-.4-3.8 4.4-4.9 42.5-16 2.1-3.1 1.1-2.8 .5-3.3z", light: "M45.6 5.1l1.5 0-.4 .2-22.9 8.5 11.4 2.5 .6 .8 0 1.6-1.5 2.8-1.9 2.2-2.8 2.1-3.1 1.2-13.2-2.8-.1-2.2 1.2-2.2 1.7-2.2 2.7-2.2 2.2-1.1 2.2-.5 .5-.5 2.8-.6 1.6-1.1 2.7-.5 1.7-1.1 2.7-.6 1.6-1 2.8-.6 1.6-1.1 2.8-.5zM21.6 53.2l15.8 3.6 1.2 .7-.1 .9-.8 .8-3.1 1.6-1.3 3.8-3 3.8-3.3 2.5-3.3 1.4-18-3.6-.6-1.3 .6-2.2 1.6-2.7 1.7-1.8 3.8-2.8 5.5-2.2z", eyes: [[51.2, 34.1, 6.9, 18.1, -10], [66.4, 28.4, 6.9, 18.1, -10]] },
   cushion: { body: "M64.2 4.4l3.3-.4 2.8 .2 3.9 .8 2.8 1.1 2.7 1.7 2.4 2.1 1.9 2.4 1.5 2.8 1.2 3.9 7.1 40.6-.1 5-1.4 4.5-1.6 2.9-1.9 2.2-2.2 1.9-2.8 1.7-45.6 17.1-3.4 .9-3.4 .2-4.5-.7-3.4-1.2-3.3-2-2.9-2.7-2.3-3.4-1.5-3.9-7.3-41.7 .1-5 1.4-4.5 1.6-2.9 1.9-2.2 2.2-1.9 2.8-1.7z", shade: "M82.1 10l2.9 4 1.6 4.5 7.3 42.2-.5 5.1-1.1 3.3-1.7 2.9-4.6 4.5-3.3 1.7-46.8 17.4-5.6 .2-4-.7-3.3-1.2-3.4-2.2-1.7-1.8 .6 .4 3.3 .2 4.5-1.2 5.1-2.8 5.3-4.4-6.9-39.4 5-5.7 43.9-16.4 2.3-3.6 1.1-2.8 .5-3.6z", light: "M62.3 4.9l1.8 .1-43.4 16.1 1.1 .4 .8 .9 .1 1.7-1.6 3.4-2.6 3-3.4 2.7-3.4 1.5-3.4-.2-.8-.8-.2-1.2 .4-1.6 1.7-2.9 3.4-3.5 2.3-1.6 3.4-1.6 5.6-1.8 .6-.5 1.1 0 .5-.6 2.3-.5 .6-.6 1.1 0 .6-.6 2.2-.5 .6-.6 1.1 0 .6-.6 2.2-.5 .6-.6 1.1 0 .6-.5 2.2-.6 .6-.6 1.1 0 .6-.5 2.2-.6 .6-.5 1.1-.1 .6-.5 2.2-.6 .6-.5 1.1-.1 .6-.5 2.2-.6 .6-.5 1.1 0 .6-.6 2.2-.6 .6-.5 1.1 0z", eyes: [[51.1, 57.2, 8.4, 22.1, -10], [69.9, 50.1, 8.4, 22.1, -10]] },
   ring: { body: "M48.1 4.3l8-.1 7.8 1.8 7.3 3.5 6.7 5.4 5.2 6.7 4.1 8.3 2.3 8.9 .7 9-1 9.5-2.5 8.9-4.1 8.3-5.3 7.3-6.6 6.1-7.3 4.5-7.8 2.7-8.4 .9-7.2-.8-7.3-2.5-6.7-4.1-5.6-5.3-4.5-6.5-3.5-7.8-2-8.4-.6-8.4 .9-8.9 2.2-8.4 3.5-7.8 4.9-7.2 5.8-6.1 6.3-4.5 7.1-3.3zM50.5 33.8l2.3-.3 1.7 .4 1.6 1.1 2 2.2 1.3 2.8 .8 2.7 .4 3.4-.1 3.3-1.4 6.2-3 5.6-2.2 2.4-2.2 1.6-2.3 1-2.2 .3-1.7-.4-1.6-1.1-2.8-3.7-1.5-5.2-.1-5.5 1.2-5.6 2.4-5 3.6-4z", shade: "M76.2 14.9l1.1-.5 3.4 3.8 2.8 3.9 2.3 4.5 1.6 3.9 1.6 5.6 1.1 8.3-.4 10.1-1.3 6.1-2.6 7.8-4.6 8.3-4.4 5.6-6.2 5.7-6.1 3.8-7.2 2.9-6.2 1.1-7.8-.1-7.2-1.7-3.9-1.6-4-2.2-5.5-4.5-2.8-3.4 1.7-.6 2.4-2.1 2-2.8 1.2-2.8 1.2-5 1.1-13.4 1.4-7.8 2.5-7.8 3.8-7.3 3.3-4.5 3.4-3.4 3.9-3.1 4.4-2.6 3.9-1.5 4.5-1.1 12.3-.9zM50.5 33.8l.6-.3 2.8 0 1.6 .9 2.7 2.8 3 1.4 3.3 .5 6.1 .2 3.9 .9 1.7 1 1.7 1.6 2.1 4.4 .7 4.5-.3 5-1.2 5-1.9 4.5-2.8 4.2-3.3 3.6-3.9 2.8-3.9 1.7-3.4 .6-3.3-.1-3.4-1.1-2.5-1.7-2.5-3-3.6-7-2.9-3.4-2.1-5-.6-5.6 .6-4.4 1-3.4 2.3-4.4 1.4-2.1 2.3-2.2 2.7-1.7z", light: "M41.1 5.9l.5 .1 .2 .5-.3 .6-12.4 13.3-13.1 18.1-2.3 2.1-1.1 0-.2-1.2 .2-2.8 1.6-5 4.6-8.3 3.9-5.1 4.4-4.4 4.5-3.4 5-2.8zM60.5 53.3l1.2-.3 1.1 .6 1.1 1.3 .8 1.8-.2 3.3-1.5 2.8-2 1.7-2.6 1-7.3 .2 2.2-1.4 2.6-2.6z", eyes: [[56.2, 84.6, 5.3, 13.3, -6.8], [71.7, 78.8, 5.1, 13.4, -6.5]] },
-  gem: { body: "M57 9.3l2.9-.4 14.9 3.5 19.6 14.1 1 1.4 .6 1.6-.5 2.6-27.1 56.5-1.6 1.8-2.1 .7-15.9-3.4-42.9-30.7-1.3-1.6-.6-1.6 .5-2.6 12-25.2 1.1-1.5 1.5-1z", shade: "M75.7 14.6l.1-.4 .6 .2 16.9 12.3 1.1 .7 .5-.2 .5 .7 .6 2.6-.5 1.6-26.4 55.1-1.2 2.1-1.1 1.1-1.6 .6-2.1 0-14.3-3.3-42.8-30.7 1.5-.2 11.6 2.5 2.2-.7 2.8-2.6 11.9-24.9 .6-.8 38.2-14.2z", light: "M19.1 23.6l1.1-.4 .5 .5 11.7 2.2 1 .9-.2 .5-1.8 2.7-11.7 24.4-1.6 .6-13.3-2.8-.5-.5 12.1-25.4 1.2-1.7z", eyes: [[51.4, 42.9, 6.7, 17.7, -10], [66.1, 37.4, 6.7, 17.7, -10]] }
+  gem: { body: "M57 9.3l2.9-.4 14.9 3.5 19.6 14.1 1 1.4 .6 1.6-.5 2.6-27.1 56.5-1.6 1.8-2.1 .7-15.9-3.4-42.9-30.7-1.3-1.6-.6-1.6 .5-2.6 12-25.2 1.1-1.5 1.5-1z", shade: "M75.7 14.6l.1-.4 .6 .2 16.9 12.3 1.1 .7 .5-.2 .5 .7 .6 2.6-.5 1.6-26.4 55.1-1.2 2.1-1.1 1.1-1.6 .6-2.1 0-14.3-3.3-42.8-30.7 1.5-.2 11.6 2.5 2.2-.7 2.8-2.6 11.9-24.9 .6-.8 38.2-14.2z", light: "M19.1 23.6l1.1-.4 .5 .5 11.7 2.2 1 .9-.2 .5-1.8 2.7-11.7 24.4-1.6 .6-13.3-2.8-.5-.5 12.1-25.4 1.2-1.7z", eyes: [[51.4, 42.9, 6.7, 17.7, -10], [66.1, 37.4, 6.7, 17.7, -10]] },
+  puff: { label: "Puff", body: "M64.4 4.4l1.3 0 1 1.1 .4 0 .5-.8 1.4-.1 1.4 1 .9 1.9 1.4-.8 .9 .5 .8 1.4-.3 1.9 .4 .5 1.9 .7 1 1.5-.1 1-1.2 .9 1.6 1.8-.2 1-1.2 .4 .5 1.9 3.3 3 2.8 4.5 1.5 1.7 3.6 2.8 2.7 .5 1.4 1.2-.3 1.1 1.2 1.5 .4 1.3 .1 .4-.6 .5 .1 1.7-2.7 .1-.3 .5 2.6 1.9 1.5 2.7-.1 .8-2.1 .6 .9 1.4 2.1 1.9 1 2.3-.1 1.8-.3 .5-.8 0-.1 .5 .5 3.7-.7 1.8-.9-.3-.9 1.8-3.7-1.3-.9 .3 .2 2.3 1.4 2.8 0 2.8-.7 1.2-.5 .2-1.8-1.7-1.5 4.9-1.8 1.5-.9-.9-1.4 1.2 .5 .6 1.8 .8 .6 .9 .4 1.9-.5 1.3-1.9-.1-.4 .5-1.5 2-.4 2.3-.9 1.2-1.4 .4-1.4-1.8-2.3 .5-1.5 1.6-1.3 .6-1.4 .2-1.4-.4-.3-.4 .2-1.9-.3-.4-1.4-.7-2.3 .3-1.6-.6-.2-1.8 1-1.9-.2-1.8-2.3 1.7-1.4-2-1.3 2.6-1 .3-1-.3-.2 1.4 .4 1.4-1.8 .9-.1 .4-.9 3.3 .4 2.3-.6 1.4-1.7 .6-1.9-1.1-2.8 .8-1.3 2.3-1.9 .7-1.8-.9-1-2.1-1.4-.6-2.3 1.7-1.4-1.7 .4-2.5-.4-.7-2.5 .3 .2-2.8 1.8-1.4-1.8-2.5-1.8-.2-.5 .4-.7 3.7-.7 1.7-1.5-.8-1.3-1.6-1.9-1.2-1.3-1.4-.6-1.8-.8-.9-.9 0-1.9 4-1.6-1.3-.7-3-3.2 2.5-.5-.2-.7-1.6 .1-2.3-.7-2.3 0-1.9 .8-1.8 0-.9-.4-.5-.5 .1-3.7 4.7-1.4-2 0-3.7-.4-.4-1.4 .6-.5-.3-.3-1.8 .7-2.3 1.7-1.8 .8-1.9-.6-.6-2 .1-.8-1.3 .1-3.7 1.4-2.8-.1-4.7 .7-2.3 2.5-4.6 1.2-6 1.5-2.3-.9-.5-.5-.9 .1-1.4 .6-.9-.1-1-1.4-.3-.5-1.1 .5-1.8 1.6-1.9 .1-.4-1-1.4 .1-.9 .8-1 2.1-.4 .9-.9-.2-1.4 .3-1 1.8-.7 1.9 .5 .2-1.6 .7-.3 .9 .2 1.4 1.1 .5-1.2 1.4-.2 1.8 1.8 .9-1.2 1 0 1.3 1.2 .4 1.8 1.5 1.5 .5 0 3.2-2.7 9.3-4.4 5.1-.9 5.7 .5-.1-1.4 .4-.6 1.4-.6 1.4 .1 .8-.7 .3-.5-.4-1.4 .7-.8 1.3-.2 1.4 .5 3.3-.9z", paints: [["M69.9 14.6l1.4-.2 .9 .4 .7 1.2 0 .9-.6 4.7-2.9 5.6-.4 .2-2.2-.7 1.3-1.4 2.1-4.7 .5-3.7-.3-.4-3.7 1.4-8 4.6 2.3-3.2 .1-.8-.3 1.7 .3 .1zM32.7 23.4l2.1 1.9 4.1 2.3-.5 .3-6.5-.3-2.9 .4 1.9 2.8 3.9 2.8 .2 .5-2.1 1.1-3.8-3-1.9-2.8-.4-1.4 .5-1.3 .9-.6 6.2 .1zM55.6 25.3l.4-.4 .2 .4-.3 1.4 .5 2.3 2 2.3-1 1.6-1.5-1.1-.8-1.9 .2-2.8 .6-1.4zM44.1 28.5l.6 0-.8 .9 1.8 2.8-.2 1.9-.6 .7-1.7-1.2 .5-2.3-1.1-2.3zM79.5 34.1l.6-.3 2.7 2.6 2.4 4.2-.5-.2-.8-1.7-4.3-4.1zM54.4 35l.7-.3 2.1 3.5 .8 2.3-1.1 .1-1.4-.6-1.8 2.6-.9 .3-1.4-.1-2.3-2.5-.9-2.1 1.1-2.3 .7-.4 2.3 5.2 1.3-2zM11.6 43.3l1.8-.3 .6 .3-1.7 3.3 0 2.3 .2 .2 4.6-2.6 .5 .5-.9 2.8 .3 1.9 2.9-2.1-.5 2.9-.9 1.1-1.4 .5-1.4-.4-.9-1.1-.5-2-2.3 .7-1.7-1-.4-1.4 .2-2.8 1-2.3zM86.3 45.2l1.7-.3 1.8 .4 2.2 3.6-.6 1.8-1.9 1.4 1.5 3.7-.1 1.4-.6 1-1.4 .7-4.2-.8-2.6-2.7 6.3 1.2 .4-.3-1.1-2.8-2.1-2.5-1.6-1.2 1.2-.7 4.3 .2 .1-.4-1.2-1.8zM25.2 50.7l.7 .5-4.2 4.2-.9 1.7-.2-.3 .6-1.4 1.5-2.3zM11.4 56.3l1.3 0-.8 .9-1.6 3.7-.1 2.8 .4 .3 6.5-3.6-.2 .5 .5 .5-1.1 3.7 .2 2.3 .6 .1 1.9-1.5 .3-2.8 1-2.3 2.8-1.5 .3 .1-1.9 4.7-.1 2.3 .3 .3 1.9-1 4.6-3 .5 .4-1.1 3.7 .1 2.4 .5 .1 3.3-2.7 .1 .7-.8 2.8-1.6 1.4-1 .3-1.4-.3-.9-.7-2.4 2.5-1.5 2.3 .9-2.3 2.5-3.2-.4-2.5-3.3 1.4-2.3-.8-1.5 1.4-1.7 .3-1.2-.7-.6-1-.5-3.4-3.3 1.5-1.4-.3-1-1-.3-1.4 .3-3.7 1.4-2.8z", "#000", 0.15]], shade: "M73.9 8.1l.3 .5-.1 1.9 2.3 1.2 .9 1.5 0 1-1.3 .9 1.4 1.4 .4 .8-.5 .7-1.2 .3 .3 1.4 1 1.4-.3 .9-1.2 1.3-.9 .4-1.9-.9-.9 .6-.8-.4 1.3-.5 .1-.5-1.5-.7-.9-1.1-.3-2.8 .3-.3 1.3 .9-.4-2.5 1.7-3.2 .3-3.2zM29.8 20.6l.5 0 .2 .5-.9 1.1zM80 23.4l3.3 5.2-1.5-.6-1-.9zM81.7 32.2l3.5 2.4 .9 0 .9-.5 1-1.9 2.7 .5 1 .5 .5 .9-.5 .9 1.5 1.8 .3 1.4-.8 .5 .3 1.7-1.3 .2-1-.3-.8 .7 3.1 2.4 1.1 2.7-.6 .4-1.4 .2-.3 .8 3.1 2.8 1 2.7-.1 1.4-.4 .5-.5-.3-.4 .3 .6 3.7-.7 2.3-.9-.4-.7 .9-.2 .9-3.3-1.2-.9-.1-.4 .4-.3 .9 .4 1.9 1.3 1.8 0 3.7-1 1-1.8-1.9-.4 .5 0 1.8-1 2.7-1.9 1.6-.9-1-1.4 1.3-.3-2.7-2.1-.5-.4-.5-.9 .6-3.2 .1-4.7 1.9-5.5 3-2.8 2.9-1-.1-.1-1-.8-.8-1.3 2.7-1.9 0-.4 .5 .4 .4-.4 .9 .5 1-1.9 .9-.9 3.7 .4 2.3-.8 1.4-1.5 .6-1.9-1.1-2.8 .7-.7 .7-.5 1.4-1.5 1-1.9-.5-1-1.4-.1-.9-1.2-.8-.9-.1-1.9 1.8-1.4-1.9 0-.9 1.4-.5 2.8 .5 4.6-.6 .5 0 .5 .9 .4-1.2 .9 1 .2-1.5 .3-.3 .5 .5 .3-.2 .2-.9 3.2-2.3 1.5-2.3 .2-1.9-2.2-1.6-3.7-.7-5.5 .1-2.4 .4-2.7 1.1-.5 1.3-1.4 1.8-1.4-2.3-1.8 0-.8 .8-.2 2.4-.9 2.4-1.4-.5-1.5-1.9-1.7-.9-1.4-1.5-.6-2.3-1.3-.7-.8 .7-1.5 3.4-.4 0-1.1-1.1-.8-3.2-2.8 2.3-.9 0-.6-1.4 .1-1.8 1 .4 1.4-.3 2-1.1 2-.4 1.5-1.3 2.9 .8 .4-4.1 .4-.5 1.4-.2 2.8 4.4 .8-1.9 .6-3.4 .4-.1 2.8 3.2 .4-1.5 .1-2.6 3.2-1.3 1.9 3.2 .7-1.7 .7-2.8 .4 .1 2.8 3.6 .8-1.8 .1-3.9 .5-.1 2.8 2.5 0-4 4.1-2.4 .5 .1 2.3 3.2 .8-1.9 .1-3.7 2.8 2.5 .4-1.5-.3-2.8 1.3-.9 1.9 2.3 .5-1.4 .4-2.9 2.8 2.9 .4-1.9-.4-3.2 .4-.4 2.8 2.1 .1-1.7-.5-2.3 3.2-2.7 1.4 2 .4 .1 .5-1.3 0-3.4 3.2 2.8 .5-.3 .3-1.9-.9-4.1 .6 0 2.3 1.6 .3-.2 0-1.4-1.2-2.8 1.8-3.3zM9.7 69.3l.9-.4 1.9 .4 .6 .9 .3 1.5-1.4-.6-2.3 3.3-.5-1-.9-.3-.4-.1-1 .9 0-3.2 1-.1zM7.8 75.3l.1-.3 .4 .5 .5-.2-.5 .5zM81.2 76.7l1.2-.1 .9 .5 1 2.8-.5 1.3-1.9-.2-.4 .4-1.7 2.2-.2 2.3-1.4 1.5-.9 0-1.4-1.8-2.3 .5-2.3 2.1-2.8 .1-.6-.5 .1-1.9-.4-.4-1.4-.8-2.3 .4-.9-.6 1.3-.9 1.9 .8 1.4 0 2.3-.1 4.2-1.2 .9 .9 .4-1.1 .7 .7 .2-1.4 .5-.1 .6 .6 .1-1.4 2.6-2.3z", light: "M58.2 6.3l1-.1 1.4 .5 2-.4 .9 .5 .1 .9-.7 1.8-1.3 1.8-1.9 1.7-2.7 1.6-.2 1.4 1.2 2.8-.2 .5-1.3 .1-2.4-.6-1.5-.9-.3-1 .1-3.2 1.2-1.4 0-1.8 1-.6 1.9 0 .4-.4 .8-.9-.4-.9 .1-.9zM42.5 12.8l1.9-.3 1.1 .3-.5 .9-2 1.6-.7 1.2-.1 .9 3.2 .1 .8 .8-3.2 1 1.2 2.3-.6 2.7-1.9 3.3-3.8 4.6-8.4 7.4-8.4 5.6-5.8 2.3-1.9 .2-2.3-.4-1.9 1.5-2.3 .3-.9-.2-.1-.9 .6-1.4 2.2-4.2 2.3-2.3-1.2-2.8 .3-1.4 1.4-1.8 .6 0 .2 2.3 .5 1.4 1.5 .9 4.2-.8 6-3.1 6.3-5.4 2.2-2.7 1.4-2.8 0-1.9-1.1-.8-3.2-1 0-.4 2.8-2.4 4.6-2zM14.4 16.5l1.8-.2 .9 .5 .9-.3 1.4 .3 .6 .6 0 .9-1.2 2.3-2.1 2.3-2.4 1.5-2.3 .5-.7-.6-.2-1.3-.9-.8-.1-.6 1-1.1 1.4 0 1.3-1.2-.1-1.9zM38.8 18.8l.1-.3 1.2 .3zM71.7 74.8l.7 0 .2 .5 .2 1.4-.6 1.6-1.1 1.1-1.7 .9-1.8 .3-3.3-.7-.3-.5 .4-.9 1.8-1.4zM41.8 80.8l2.6 0 .3 2.8-.5 1.4-.9 .9-2.1 1.1-2.3 .2-2.1-.4-1.2-.8-.4-1 1.8-2.8 2.2-.9z", eyes: [[40.6, 53.1, 14.8, 34.3, -8], [69.5, 46.2, 12.9, 34.3, -18.1]] },
+  sprout: { label: "Sprout", body: "M66.4 4.2l3.3 0 1.1 .4 1.2 1.2 .8 2.8-.5 3.9-1.9 4.7-3.1 5.1-3.9 4.6-4.3 3.7 1.1 1.2 2.7 1.2 1.2 1.2 1.2 3 1.6 1 .8-.2 1.3-3.5 1-1.6 1.7 1.6 1.1 2.8 .8-.6 1.3 1.4 .5 2.3-.6 2.8 .4 1.4 1.1 .5 2.8-.6 2.4 .4 2.1 1.4-3.3 2.4 2.7 1.8 1 1.7-4.1 .8-.3 .4 4.1 3.1 1.4 2.4 .1 2-.2 .4-1.6 0 .6 1.5-.2 1.7-3.9-1.3-.8 .3-.2 1.7 1.4 2.4 .4 2.3-1.3 2.4 .1 2.7-.8 1.8-2.4-1.7-.1 .3 .4 2.8 3.5 3.9 .4 2-.2 1.1-.8 .1-.8 1.1-1.6-.9-.4 .3-2.1 1.4-1 2.2-1.2 .7-1.8-.1-.2-1.6-.4-.3-.7 .2-1.6 1.2-2.4 .1-1.8-1.2 .7-2-1.6-2.2-1.8 .3-1-1-.4-1.5-3.1 .7-.4 .2 1.5 .8-.3 1.2-.9 .8 1.7 1.9-.1 2.8-1.1 1-2-.6-3.2 1.9-1.1 2.3-1.6 1-1.6-.5-1-2-.5-.2-2.8-.9-2 .9-1.7-.6-.4-2.7 2.2-4.7-.8-2 .2-1.2-.2-.2-2.4-.9-.8 .1-1.9 3.8-1.2 1.3-1.4-1.7-.4-1.6-1-.2-1.1-1.4-.5-2.3 .6-2-.2-.9-.8 0-3.9 3.7-1-2 .2-2.8-1.2 .1-.5-1.6 .3-2.4 1.6-2.4-.2-1.7-.8-.5-4.3 1.1-.2-1.6 1.2-2-.2-.3-2.8 .3 .1-2.3 1.9-2.8 .4-2.8 1.6-1.9 2.7-1.2 1.5-1.2-.3-.6-3.9-1.9-1.9-1.4 1.9-1.6 3.5-.8-.9-1.5 1.3-1 3.2-.4 3.1 .9 2.9-2.3-3-4.7 .1-.5 1.3-.3-4.8-1.9-3.8-2-3.4-2.4-2.9-2.7-2.6-4-.5-1.9 .1-1.6 1.3-2.2 2.7-1.5 3.6-.5 4.7 .4 4.7 1.3 4.7 2.1 4.3 2.7 4 3.4 .8 .1 .7-.8 3.8-7 4.9-5.8 5.9-4.8z", paints: [["M71.6 36.5l.4-.2 .8 1 .8-.5 1.2 1.3 .1 1.1-.6 3.2-1.8 3.5-1.7 1.9-2.1-1.1 1.8-2 1.8-3.5 .3-3.5-2.9 1-6.7 3.7 1.9-3.1 .4 .8zM59.4 40.4l2.1 3.2-.7 2.3 .3 1.6 1 1.6-1.1 1.4-.4 .1-1-1.1-.6-1.7-1.1 .1-1.6-.5-2.5 3.6-1.5 .5-1.5-.6-.3 1.7-.5 .5-2-.9 .6-1.2-.2-.9-2 1.3-1.9-.6-.8-1.3-.1-2-.3-.3-5.9 0-.6 .3 1.4 2.1 2.3 1.9 1.8 .7-2.1 1.7-3.6-2.6-2-3-.1-1.6 .9-.9 5.1-.3-.7-2 1.5 1.6 2.4 1.4 .4-.2 .4-1.1 .4 0 1.2 3.8 1.5-1.5 1.3-3.5 .7-.6 2.7 5.7 1.8-2.4 .7-3.1-.1-1.8 .4 .4 .4-.4 2.7 3.8 .8-2-1.7-2.4 .7-.4 1 1.3zM29.8 49.5l-1.5 4.7 .5 2.8 5.1-3.9 .4 .4 .4-.1-.6 3.5 .5 2.1 .4 .1 2.9-2.9-.6 3.9-1.3 1.2-1.4 .3-1.1-.4-1.6-2.4-1.4 1.3-2.3 3.5 .2 .8 .8 0-1 1.6-.9 3.5 .3 2.4 .4 .2 5.1-3.8 .4 .4-.7 4 .7 2.2 3.1-3.1-.5 3.2 .9 .5-.5 2.7 .1 1.9 .4 .1 2.8-2.3 .1 .3-.5 3.1-2.4-.3-.8 1.6-1.4-.9-.6-1.9-2.7 .7-1.6-.6-.4-.9 .7-1.6 0-1.2-1-.8 .4-1.5-2 .6-1.6-.7-.7-1.1-.7-5.5-.6-.8-1.5 .4-.5-.4 .1-2.8 .5-1.2 2.9-1.1-1.1 2.7 0 2 .4-.1 2.8-1.6 2.6-5-2.6 0-1.1-1.6-.6-3.1 .8-3.6zM82.7 60.9l1.2 0-.5 .4 .5 1.1-.1 2-.8-1.4-1.7-1.7zM77.5 69.1l2.8 .9-.3 1.5-.9 .5zM31.5 76.6l1.6 .8-1.6 .6z", "#000", 0.15]], shade: "M71.6 5.4l.8 1.2 .4 1.6-.4 3.9-2 5.1-3.5 5.5-3.9 4.5-3.9 3.4 .2 .8-.3 .5-1.9-.1-4 1.9-1.4 1.2 .3 .8-.4 .4-1.6 .1-1.8-.5-.6-2.4 8.5-8.6 7.3-8 5.6-7zM44 24.3l1.2 3.9-1.1 4 .5 1.5 0 2-.9 1.2-.8-.3-5.9-.1-.4-.4-3.1-.4-4.7-1.6-6.3-3.5-4.4-3.9 5.5 .6 9.9-.4 8.2-1.3 1.6-.5zM75 41.6l-.2 2.4 .8 1 4.3-.3 1.9 .3 1.7 1.3-1.3 1.3-1.9 1.1 0 .4 2.7 1.5 .9 1.6-1.3 .5-2.3 .1-.8 .6 4.1 3.1 1.5 2.8-.1 2-1.2-.3-.4 .3 .5 1.1-.1 2.1-3.9-1.5-.7 .2-.4 .8 .1 1.6 1.4 2 .4 2.3-.4 1.2-1.1 1.2 .4 2.3-.9 2.1-.8-.5 .8-.8-.4-.2-3.5-.1-2.4 .8-.8-.5-.4 .8-2.7 1-5.1 3-1.9 1.9-.9 2.1-.8-.9-.4-1.4-3.5 1 1.5 1.2-1.2 1.6 1.7 1.9 0 2.4-.4 .8-.8 .5-2.4-.4-1.2 1-1.9 .9-.7 1.9-1.7 1.3-1.6-.5-1.1-2.2-3.2-.9-2 .8-1.5-.4 0-.3 1.9-1.3 1.2 .6 2 0 4.3-.8 .8 .6 .4-1.1 1.2 1.1 .1-1.2 .3-.4 .7 .4-.1-1.2 2.7-2.8 .4-1.5-.6-1.4-2.4-1.3-2.7-.4-3.9 0-5.2 1.2-.3-1.2-2.8-.9-.7 .4-1.6 3.6-1.2 1.2-1.2-1.3-.5-1.9-1.1-.3-1.2-1.7-.4-1.9 .7-1.6-.3-1.5-.8 0-3.9 3.9-.8-1.6 0-1.2 4.4-2.4 2.3 .8 2.8 .3 1.2 2.9 1.1 1.4 .9-1.8 .7-3 .4-.1 2.3 3.1 .6-1.2 .2-2.8 2.4-.8 2.7 3.7 .9-2.1 .3-3.3 2.8 2.7 .5-1.7-.2-2.4 3.6-2 2 2.7 .6-1.5 .2-3.1 .4-.3 3.1 3.5 .6-2-.3-4 .5 0 2.7 2.2 .3-1.8-.6-2.7 2.3-1.9 2.1 2.7 .8-1.6-.1-4.1 3.2 2.9 .3 .3 .2-.3 .4-2.4-.4-2.3-.8-1.6 .2-.6 3.6 1.4-.2-2-1.6-2.7 .8-3.2-.6-2.7zM77.8 79.8l2.5 2.7 0 2.7-.8 .1-.8 .9-1.6-.8-2.6 1.8-.5 1.6-1.2 1.2-2 .1-.8-2-.7 0-1.2 1.2-2.4 .3-.8 0-1.3-1.2-.2-.4 1.1-1.7 2.8 .2 3.1-.6 .8 1.1 .8-1.5 .8 1.1 .8-1.7 .9 .8-.1-1.6 2.3-2z", light: "M65 4.6l.8 0-5.6 3.5-5.6 5.2-5 6.3-3 5.5-.6 0 3.2-6.3 3.8-5.1 5.3-5.1 3.5-2.4zM17.7 16l.7 0-3 2.5 .3-.9zM32.8 35.7l2.2 .8 1.6 0 .4 .4 6.3 .2 .4 .7 2.4 .3 2.2 .8 .4 .3-.2 1.6-1 2.4-2.3 3.1-6.3 5.9-6.8 4-3.3 .9-2-.1-1.2-.6-.5-1-.1-2.4 .6-1.6-4.4-2.3-1.3-1.2 1.4-1.6 1.9-.1 1.6-.7-.8-1.5 1.6-1.2 2.8-.2 1.9 .8 1.6 0 2.3-1.8 .3-.8-3-4.3 0-.5zM69.6 77.8l.4 0 .4 .6 .3 1.7-.7 1.5-1 .9-3.3 .8-1.9-.4-.8-.7 .5-1.3 1.4-1.1 3.1-1.6zM45 82.5l3.3 0-.6 .8 .5 2-.6 1.5-1.2 1-1.5 .7-2.4 .1-1.6-.6-.5-1.2 .8-1.5-.1-1.2 1.2-.8z", eyes: [[46.9, 67.5, 11.9, 26.7, -10], [68.7, 62.3, 10.2, 26.7, -10]] },
+  cap: { label: "Cap", body: "M55.9 4.1l2.3 .5 1.3 1.2 3.1 .7 1.7 1.5 1.3 2.8 1.8 1 .8 .1 .4-.4 .9-3.7 2.2 1.3 .9-1.7 1.3 .7 1.7 1.9 2.5 1.5 1.1 1.7 .6 3.1 1 1.2 .9-.2 3.1-4 1.2 1.7 .5 3.1 3.5-2.2 .8 2.6-1.1 3.9 .6 .4 2.3 0 1.5 .9-1.1 1.5-2.9 2.4 .6 2.6 2.5 3.5 .3 2.6-.9 1.7-1.8-1-.5 4.1-1.6 2.1-1.8-2.3-.4 .2-.7 1.7-1 1.1-1.2-1.5-1-2.7-.5-.1-2.8 1.5-.7 3-4.3 4.3-1.7 .9-.5-.7-.4 0-.9 .8 2.3 5.6 1 6.5-.5 6.6-1.9 5.6 2.2 1.2 1.3 2 2.2 1.3 2.5-.1 .2 .8 1.2 1.4 0 1.9-1.8 .7-.5 1.7 .5 2.2-.4 1-1.3 .8-1.7-1.1-1.3 2.3-1.8 1.1-1.3-.1-.4-1.4-.9-.3-2.2 1.5-2.2 .2-1.4-1 .3-1.7-2.3-2.2-.4 .4 .6 1.3-.2 2.1-.9 .8-1.7-.5-1.2 1.1-.4 2.2-1.1 1.4-1.7 .3-1.7-1.7-.9 .1-.6 .3-1.1 1.8-1.3 .5-1.8-1-.6-2.1-.6-.5-1-.4-2.1 .8-1.2-.8-.3-2.2 .9-1.7 .1-1.3-1.5-1.3 0-1.8 2.4-1.4 1.7 .1 .7-.4-5.5-5.4-3.4-5.9-2-7-.2-7.4-1.7-.6-.9 1.4-1.8-.3-1.3-1-2.1-.6-1.8-1-1.7-2.7-2.6-.3-.1 4.3-.4 1.6-2-.8-1.4-1.7-.9 .4-1.7-.9-1.5-2.1-.4-3.1-.8-.6-4 2.4-.4-1.3 .4-1.8-.3-.4-2.2 .2 0-2 1.3-2.1 .8-2.6 3.6-3.1-.5-.5-3.5-.8-1.8-.9 1.4-1.8 2.2-1.2-.4-.9 1.3-1.4 2.6-.9 2.1 .3 1.6-1 0-.9-3.4-3.5 1.2-.8 1.9-.5-1.2-1.7 0-.5 1.7-.8 2.6 0 .4-.8 1.3-.7 2.6 0 2.2 1 .9-.1 .9-.7-2.3-5.3 2.7-.2-.3-1.9 2-.5 2.6 .5 2.7-.8 2.1 .5 2.6 1.9 2.6-.3 .4-.9-.9-4.3 2.6 0 .1-1.9 2.2 0 2.6 1.4 2.6 .1 2.2 1.2 1.7 1.9z", paints: [["M55.9 22.8l2.8-.4 2.6 .4 2.6 1.3 1.8 1.8 .9 2.1 .1 2.2-.8 2.2-1.6 1.7-3 1.2-3.1 0-3-1.3-2.2-2-1.2-2.7 0-2.6 1.3-2.1zM76.2 25.4l1.2-.4 2.1 .4 1.8 1.2 1.2 1.4 .8 1.8 .2 2.2-.4 1.3-1 1-1.3 .4-1.7-.4-1.7-1.1-1.3-1.7-.9-1.7-.3-1.8 .5-1.7zM35.3 32.4l2.5-.3 2.2 .7 1.8 1.8 .8 2.1-.1 2.7-1.3 2.5-2 1.8-2.3 .8-2.2-.1-2.2-1-1.3-1.4-.8-2.2 0-2.2 .9-2.2 1.7-1.8zM73 37.2l1.3 0 .9 .4 1 1.3 .5 1.8-.6 1.2-3.5 .9-.9-.9-.5-2.1 .5-1.6zM53.1 40.2l1.6 .1 1.3 .7 1.1 1.4 .3 1.3-.1 1.3-.6 1.3-1.1 .9-1.7 .6-1.3-.1-1.3-.7-1-1.1-.4-1.3 .1-1.8 .7-1.3zM23 43.3l1.3-.1 1.3 .7 .8 1.1 .4 1.3-.3 2.6-2.7 1.8-1.9-.9-1.1-2.2 .4-2.7z", "#fff", 0.5], ["M68.2 16.3l.7 0 1.9 2.1 1.5 3.1-.2 .6-.8-1.9-3.1-3.4zM29.9 22.8l.5-.4 .4 .2-.1 .7-2.1 1.8-2.1 3 1.7-3.5zM73.7 24.6l1.9 .9 .8 .8 .1 2.6-.8 1.8-2.2 .8-.8 4.4-1 .8-1.3 .2-2.2-1.4-1.7 3.2-1.3 .4-1.3-.4-1.2-1.5-.1-3.3 2.6 3 .8-1.9-.4-3.9 .4-.5 4.8 4.1 .6-2.7-.6-3.1-.7-1.3 .5-.4-.2-.5 3.9 2.3 .1-1.8zM42.5 26.3l.9 3.9 1.3 2.3 1.5-2.3 1.6-3.5 .8 .6 .9 2.5 1.3 1.6 1.8-3.9 .9 2.7-.7 2.2-1.1 1-1.3 .2-1.3-.7-.9-1.2-2.2 2.5-1.3 .4-1.3-.3-1.7-2.8-.6-2.2 .1-1.3zM59.2 27.6l.3-.2 .6 .2 .9 2.2 .6 3-.3 .6-.4-1.9-.5-.4 .1-.4zM20.6 33.3l1.2 0-1.2 2.1-.2 1.8 .4 .2 3.5-1.6 .4 .5-.9 1.1-.8 2.4 .1 2.6 4.7-2.6 .4 .4-.4 2.6 .2 1.3 .2 .3 1.7-1.6 .3 .5-.7 2.9-1.3 .4-1.3-.4-.7-.8-.6-1.8-2.2 1.1-1.3-.2-.9-.8-.3-.9-.2-3-1.6-.6-.9-1.6 .7-3.5zM35.1 36.7l-.6 4.8 1 2.6 4.4-4.9 .6 .6 .2 3.5 1 1.8 .4-.1 1.8-2.9 .4-.1 .1 3.4-1 1.4-1.3 .6-1.3-.2-.9-.8-1.3-2.3-1.5 1.8-1.1 .5-1.3-.2-1-.8-1.3-3.4 .1-2.6 .2-.9zM69.9 43.3l1.8 .2 .5 1.1-.6 3.5-.4 .8-1.2 .7-.7-.7 .7-4.3-3.1 1-.8-.2zM42.8 50.2l1.3 0z", "#000", 0.15]], shade: "M90 15.9l.6 2.6-.5 3-.5 .9 .4 .4 2.6 0 1.4 .9-1 1.4-2.9 2.5 .5 2.6 2.4 3.1 .5 2.6-.5 1.7-.8 0-.9-.7-.5 .1-.7 4.5-1.4 1.5-1.8-2.3-.7 .8-.1 .9-1.3 1.4-1-1-1.2-3.1-.5-.2-2.6 1.3-.6 1.2-.1 1.7-1.4 1.9-4 3.3-.8 .4-.5-.8-.4 0-1.1 .9 2 4.3 1.3 5.7 0 6.9-.9 3.9-1.3 3.5 1.7 .9-6 2.8-5.1 3.7-1.4 2.2 1.7 3.9 .1 2.2-1 1-1.7-.5-1.3 1.2-.3 .5-.1 1.7-1 1.3-2.1 .1-1.3-1.4-1.3 .1-1.3 2.1-1.3 .5-.9-.8-.9-.2-.5-2.1-.8-.7-.9-.2-1.3 .6-1.6-.2-.2-.4 1.8-1 3.1 .7 3-.3 2.2-.7 .4 .9 .5-.8 .8 .8 .4-1.8 .9 .9 .1-1.3 3.6-3.5 .5-2.2-2.4-2.4-3.1-.9-3.9-.2-3.5 .2-1.3 .8-3.9-3.6 1.8 .3 2.1-.4 4.5-2.5 5.1-4.8 5.4-6.9 4.1-7.4 2.1-6.5 .2-3.6-1.8-.2-.4 .4-1-.1 0-1.8 9.6-3.9 2.7-2 1.7 2.5 .8-1.8 .1-3.1 3 2.6 .4-2.1-.8-3.5 .4-.1 2.4 1.4 .1-1.3-1-2.1 2.2-5.3 .2-1.7-.5-2.6 3.2-4.4zM61.3 45l.6 0 1 1.3-.8 .5-1-.1zM57.8 45.9l.5 0 .6 1.3-.2 .5-1.8 0-2.2 .8-1.4 0-.1-1.3zM10.6 47.2l.6-.1 .9 1.1-1.7 1.6-1.8 .9-.4-.9zM41.6 49.4l.2 .8-.6 .5-3.4 0-.5 .4-1.3 .1-.4 .3 0 4.8-1.7-.7-.9 1.3-1.8-.1-1.3-1.2-2.6-.6-1.3-.8-.9-1.4 1.4-.2 1.3-1.1 3-.9zM16.8 50.2l7 .8 0 .2-2.1 0-.3 .3 .3 3.5-.5 2.1-1.7-.7-1.7-1.8-.9 .4-1.7-.9-1-1.3-.1-.4 1-.5zM79.3 78.1l.6 0 .1 .8 1.3 1.4 .1 1.7-2.1 .9-.5 2.1 .5 2.2-.6 .9-1.3 .4-.9-1.2-.4 .1-1.2 2-1.9 1.4-1.3 0-.2-1-.7-.8-.8 .1-2.2 1.6-2.2 .1-.9-1 .3-1.7-1.6-1.3 .5 .4 3 .1 3.9-.8 .9 1 .4-1.3 .5 .4 .8-1.2 .9-.1 .5 .8 .4-1.6 1 1 .2-1.8 1.1 .5-.4-1.3 1.3-2.2 .1-1.3z", light: "M29.5 10.6l.9 0 2.1 .8 1-.8 2.3 0 1.4 .9 1.6 1.7 4.6-.4 2.6 .6 1.2 1.2 .3 1.3-.2 1.7-.9 2.2-1.7 2.6-3.8 4.3-5.4 4.8-5.4 3.9-5.8 3.4-4.4 1.7-3.5 .7-2.6-.3-1.4-1.5-.1-4-2.4-1.7-.5-2.6 1.8-1.4 1.8-.5 2.6 .4 1.2-1.1 0-.9-2.5-2.2-1-1.3 .2-.4 1.2-.5 1.3 0 .4-.4-1.2-1.7 0-.5 2.1-.8 1.8 .2 .9-1.1 1.2-.6 2.6 0 2.2 1 1.6-.4 .1-1.3-1.7-2.6-.5-1.8 2.7 0 .3-.4-.6-1.7zM41.7 50.7l1.5 0-3.7 2-1.3 .1-.9-.7-.1-.6 .6-.4 3.4 0zM69.3 77.6l.6 0 .4 .5 .4 1.7-.3 1.3-1 1.3-1.5 .9-1.9 .4-2.1-.1-1.3-.7 .4-1.2 1.4-1.4 2.7-1.8zM50 81.1l1.7 0 .8 .5-.9 .4 .8 2.2-.8 2.1-2 1.3-2.7 .5-2.2-.5-.8-.7-.5-1.6-1.3-1.1 0-.6 1.8-1.2 2.6 0 .9-.8z", eyes: [[51.5, 67.5, 8.8, 19.8, -10.3], [66.8, 63.9, 7.4, 19.8, -9.1]] },
+  bell: { label: "Bell", body: "M38.3 4.2l3.5 0 3 1.7 2 3 .4 3.9 .5-.6 .2-3.3 2.1 .4 .5-1.1 .5 0 4.7 2.2 1.4 1.8 .9 2.8 .5-.2 1.9-2.6 .5-.1 .8 1.1 .6 2 2.8-1.8 .8 2.1-.8 3.4 2.8 .4 .9 .5 .1 .5-3.2 2.8 .1 .9 .8 1.4 3.1 1.9 2.7 3.3 .6 1.4-.4 1 .2 1.4-3 .8-.2 .6 1.1 2.8 2.2 4.3 1.8 2.3 3.1 3.1 2.4 1.4 7.4 3.1 2.7 1.9 2.4 2.8 .8 2.3 0 2.4-.6 1.9-1.1 1.9-3.6 3.5-6.7 4 0 .5 2 .8 .4 .6-1.1 2.4 .5 2.8 1 1.9-.4 2.3-1.8 1.3-1.9-1.1-3.8 1.8-1.4 1.8-2.3 1.1-1.7-.6-.3-1.9-.4-.2-2.4-.8-2.3 .7-2.4-.9-.3-1.2 1-2.3-.2-2.6-7.4 1.6-1.2 .5 3.1 2.4 .4 .9-.1 1.4-2.3 .5-1.9 3.3-.1 2.3-.9 1.4-1.9 .3-1.8-1.4-2.4 .4-.8 .3-1.1 1.8-1.9 .4-1.4-.8-.9-2.4-2.4-1.6-1.9 .7-1.4-.9-.1-2.4 1.5-2.1 .5-2.3-11.3 0-8-1-6.6-2.1-2.7-1.9-1.2-1.4-1-2.4-.1-2.4 1.2-3.6 2.8-3.8 4.9-4.3 1.7-2 2.1-4.2 1-3.3-.2-.8-1.5-.2-.5-1.3 1.2-2.9 1.4-1.4 .1-2.3-.7-.4-3.3 .4-.1-1.4-.7-1 0-.9 1.2-5.2 .8-1.4 2.2-1.9 .5-1.4-.6-.7-3.4-.7-.1-.5 .6-1.1 1.7-1.3-1.9-1.4 1.2-1.5 1.9-.8 0-1 1.4-1.1 1.9-.4 1.8 .5 1-.2 3.3-2.4 4.7-2-1-3.3 .5-3.3 1.9-2.8z", paints: [["M38.5 21.7l.5 0 .6 4.7 1.5 2.6 1.6-2.1 2.1-4.2 .5 .6 .5-.9 1.1 4 1.7 2 1.9-5.2 .9 4.1-.8 2.4-1.5 1-1.4-.1-1-.5-1.9-2.3-2.3 3.3-1.4 .4-1.4-.5-2.3-3.7-.5-2.3 .2-1.4zM25.5 22.6l-1.6 4.3 .2 2.5 .5 .1 4.7-3.3 .5 .7-.6 2.8 .6 2.4 2.8-2.7 0 2.2 .5 .4 4.6 .5-.9-2.5 1.9 1.9 3.5 2-8.8 0 1.5 2.8 2.9 2.3 1.4 .6-2.8 1.2-3.3-2.7-2.3-3.7-1.5 0-1.4-.8-1-2.9-2.3 1.3-1.4-.3-.9-.6-.5-.9-.2-2.9 .6-2.9 1-1.1zM61.1 23.6l1.2-.1 .8 .5 .8 1.9-.3 4.3-2.3 5.1-2.3-.1-.3-.3 1-1.4 1.6-3.8 0-4-3.3 1.5-6.6 4.1 1.5-2.7 .4 .8 4.3-3.6zM47 34.9l-.4 .9 1.2 1.9 .3 1.9-.2 .9-.7 .7-1.9-1.1 .7-1 .4-1.4-.9-2.4 1.2-.1zM48.5 34.9l.5 1.9 .8 1.4 2.6 1.4-1 2.1-1.8-.8-1.2-1.8zM22.1 38.2l.9 0-1.2 2.8-.1 2 .5 0 3.8-2.1 .5 .4 .5-.3-1.3 1.9-.7 2.8 .3 2.8 .5 0 4.4-3.5 .7 .7-.4 3.8 .7 1.7 .9-1 .3 .2 .2 2.4-.3 .4-1.1 .4-1.4-.4-.9-.9-1-2.4-2.4 1.2-1.4-.4-.8-.8-.7-4.2-1.8-.4-.1-2.4-.4-.5-.9 0 .5-2.9zM79.1 49.9l1.6 0 2.3 .8 1.4 1.8 .1 2.2-1.6 1.8 3.4 7.3-1.9-2.3-2.3 1.2-3.3-.3-1-.5-1.7-2.1 .3-.3 5.2 .8 .3-.5-1.2-2.3-1.9-2.1-1.3-.7 .8-.8 4-.2-1.2-1.8zM28.6 55.1l.7-.4 .4 .4-.2 .5-3.2 3.3-.8 1.9-.2-.5 .7-1.7zM26.3 62.2l-1.8 3.8-.1 2.8 5.4-2.8 .7 .4-.7 2.9 0 1.9 .4 .3 2.9-2.2 .5 0-.7 2.8-1.5 1.4 .6 1-2.6 2.8-2.5 4.1 1.9-4.6 2.5-2.8-2-.2-1-.5-.7-1.2-.2-1.9-2.4 1-1.4-.1-1.3-.9-.4-1.4 .2-2.8 .9-2.4 1.1-.8zM12.8 65.5l1.4-.3-1.1 2.7-.2 1.4 .4 .3 3.8-1.7-.3 .4 .5 .5-.7 .9-1.2 3.3 .2 2.7 5.2-3.2 .5 .5-.6 3.3 .3 1.9 .3 .2 2.9-2.5-.8 3.3-.7 1.1-1.4 .5-1.4-.4-1.1-1.2-.4-1.9-.4-.2-2.4 1.1-1.3-.4-.9-1-.2-4.7-1.8-.8-.8-1.6 .5-3.3z", "#000", 0.15]], shade: "M45.3 6.6l1.1 1.4 .5 1.9 0 2.8-.6 1 0 1.4-.4 .4-2.5 1-3.7 .4-4.3-.9 3.3-1 3.1-2.3 2.7-3.3 1-2.3zM64.6 13.7l.6 0 .5 1.4-.6 3.8 2.8 .4 .9 .5 .1 .5-3.3 2.8 .2 1.4 1.3 1.4 1.3 .4 1.1 1 3.3 4.3-.1 2.8-2.9 .6-.3 .8 2.4 5.7 1.9 2.8 3.2 3.8-.1 1.7-.6-.8 .4-.5-1.2-.7-3.3 .1-1.4 .5-3.4-1.8-1.8-3.9-1.4 1.8-2.4 .3-1.4 .6-1.9-2-.5-.1 2 0 .2-.4-.7-1.2-2.2-1.6-1.5-.5 2.2-1-1.8-1.4 .4-4.7 3.8 1.1 .6-.1-.6-2.1-1.2-1.7-1.2-1 1.9-.9 4.6 1.9-.1-1.9-.7-1.4 .2-1.9-.9-2.4 .2-1.8-1.4-1.5-.5-1.4 2.4-3.3zM91.5 56.1l1 1 1 2.7-.1 2.9-.5 1.4-2.8 3.8-2.4 1.9-1.8 .9-.2-3.8 4.9-3.6 1.9-3-.7-.9 .2-2.9zM81.8 69.3l.8-.3 2.3 2.6-3.1 1.4zM77.2 71.2l.6 0 2.5 3.7-5.8 1-.5-3.3zM81.3 74.5l1.3-.1 .9 .4 .2 .6-.1 .9-.9 1.5 .5 2.8 .9 1.9 0 1.9-.6 .9-1.9 .6-1.4-1-.5 .1-3.2 1.7-1.5 1.9-2.3 1-1.6-.5-.4-1.9-.4-.3-2.4-.9-2.3 .8-1.9-.6-.3-.4 1.7-1.1 3.8 .5 4.2-.5 1 1.3 .9-1.7 .5 .6 .5-.1 .1-1.4 .8-.2 .5 .9 .4-1.3 1 .8-.1-1.6 .6-.1 .5 .6 0-1.4 1.3-1.5 .9-1.8-.2-1.9-.8-.5zM71.1 74.9l.1-.2 .5 .3 1.5 1.8-2 1-.3 0zM66.2 76.3l.8 0 1.2 2.4-.6 .5-3 0-.4 .5-7.6 1.6-1.5 .7 3.1 2.4 .3 1.8-.5 .7-1.8 .3-2.2 3.8 .3 1.4-1 1.8-1.9 .2-1.8-1.4-.5 0-2.4 .5-1.4 2.1-1.4 .2-1.9-.6-.5-.9-.1-1.5-2.3-1.4 3.9 .3 3.7-.9 .6 .2 .4 .6 .4-1 .5 .8 .5 0 0-1.4 .5-.1 .4 .6 .5-1.4 .9-.6 1 1 .5-.9 .8-.5-.1-1.4 1.4-2.3 .1-.5-.8-.7-2.9-.6-6.1-.1-3.8 .6-1.2 .8-2.1 .5-.9-.4-14.1 0-8.1-1.5-4.3-1.9 1.5 .9 1.1 0 .3 .5 1.4-.1 .5 .4 1.9 .1 .9 .4 5.7 .5 8.5-.1 2.3-.4 4.8-.2 .9-.5 1.9-.1-.1-.5 1 0 .5-.4 10.4-1.6zM37.4 91l.4-.3 .6 .3-1.6 .9-.1-.5z", light: "M37.2 4.7l1-.4 .9 .4-.1 .9-.8 1.5-2.3 1.9-1.4 .6-.8-.2-.2-.9 1.4-2.3zM34 15.1l.4 .4-1.9 1.5 0 .9 .5 .5 1 0 .5 .5 4.9-.1-3.5-.1-1.4-.4-.9-.9 .9-1.3 .9 1.1 1.4 .5 5.3 .2-2.4 .5 3.1 .4 .2 .5-.3 .5-1.1 .5 .2 1.4-3.2 .9-.1 1.9-4.9 .9-.4 2.4-4.8 .5-.5 1.9-2.4 .1-2.8-.9-1.9-2.5-1-.5 .1-.4 .9 0 .5-.7-2.4-2.6 0-.6 1-.4 .4-1.4 1-.6 1.9-.4 2.8 .3 2.8-2.2zM18.9 56.5l0-.4 .2 .9 1.7 1.5 2.4 1.1 3.4 .7-.6 2.4 .7 .4 4.9 .5-.5 2.4 4.9 .4-.4 2.4 1.2-.3 3.3 .3-.2 1.9 2.6 .3 .5-.4 1.1 .1 0 1.9-3.6 .9-.2 1.9-6.6 .9-.2 1.5-15.1 .3-.2 1.1-.4 0-4.8-1-3.6-1.4-1.8-1.4-.9-1.5 .1-2.3 .7-1.9 2.3-3.3 6.6-6.1 1.1-1.8 .5-.1zM71.9 78.7l1.2-.1-.1 .6-1.3 1.2-1.5 .7-3.2 .2-1.3-.2-.2-.5 1.5-.2zM44.4 83.9l1.2 0 1 .5-1.2 1.8-2 1.2-3.7 .3-1.6-.5-.9-1 .1-.5 .7-.4z", eyes: [[42.2, 57.1, 13.1, 30.3, -4.5], [63.7, 52, 11, 30.6, -25.2]] },
+  cloud: { label: "Cloud", body: "M48.5 16.9l.7-.3 .9 .3 1.6 1.3 1.9 .8 2.3 3.8 .7-.4 1.5-3.2 .4-.4 .3 .2 1 1.1 .8 2 .9-.2 .8 1.1 .3 2-.5 2.1 .4 .8 .7 .3 2.5-.5 0-1.1 1.3-.2 1.7 .3 .4-.5 1.3-.2 1.7 .6 1.2 1.2 0-4.6 2 .5 1.4 1.2 .9-.4 1.7 .6 1.4 1.6 .6 2.1 1 1.1 .6-.3 1.3-2.5 1-1.1 1.3 1.5 .4 3.1 1.7-.7 .6 .1 .2 1.7-1.4 3 .2 .8 1.3 1 2.1 .7 1.3 1.3 .5 2.6 1.3 2.1 .2 1.3-.3 .4-1.4 0 .5 2.1-.4 .9-3.4-.9-.4 .1-.2 .8 1 .5 2.6 .3 2.5 1.7 .6 1.3-.2 .4-2.3 .4-.1 .5 1.4 2.1 .1 1.3-.3 .3-3.4-.8-.2 .9 .7 2.1-.1 1.7-1.3 1.9-1.3-1.3-2.1 1.9-1.2-3.1-.9 .1-1.1 2.6-1.9 2.1 .5 2.2-1.4 .4 .8 3.4-.5 1.7-.6 0-2.6-1.7-.5 2.5-1.2 1.5-2.5-3.7-1.3 1-.7 1.7-1.4 1.3-1.7 .5-.4-.6-.5 0-1.7 1.1-1.7 .2-.3-.4 .3-2.3-2.7 .2 1.3-3.9-1.5-2.1-1.3 1-.9 2-1.2 1.3-1.3-1.6-.4 0-.9 .8-.4-.3-1-1.1-1.1-2.1-.4-.1 1.7 5.2-.9 .6-3-.5-.4 .3 1.4 3.9-.5 1.2-1.4-.4 .1 3.4-.4 .2-2.6-1.2-.8 1.3-.9-.2-3-2.8-.5 .2-.7 3.3-.9 1.2-1.2-1.2-.5-.9-.4-.2-.8 .7-1.1-.8-.6-1.7 0-1.7-.5-.9-.4 .1-.4 1.2-2.1 0-1.7 .5-.8-2.2-2.4-2.1-1.1-.3-.6 .7 .6 3.4 0 1.3-.4 .1-1.7-.4-1.7-1.5-1.3 .8-1.2-.7-1.1-1.7-.6-3.4-.9-.9-2.5 2.7-.5 0-.8-1.5-1.3 .7-.4-.1-.8-1.3-.3-2.6-1-.4-.5-1.3 .3-1.7 1.2-1.7 .6-1.7-.8-.7-4.2 1.9-.5-1.2 .5-2.1-.4-.8 .1-1.7 .9-1.7 1.6-1.3 .6-1.3-.5-.4-4.2-.4 .6-1.7 2.1-1.7-.7-.9 .8-1.3 2-.9 1.7 .2 1.2-.5-.1-.9-1.9-1.9-.9-1.5 3-.7 .4-.6 1.3-.4 2.1 .4 1.3 1 1.3 0 .2-.5-.6-3 .4-.4 1.9 .4 .2-1.7 .4-.2 1.5 .2 1.1 .8 2.1 .3 .8-2.9 1.3-1.2 2.3-.8 1.1-1.3-.3-.8-2.7-2.1 2-1.3-.9-1.3 .1-.4 1.4-.8 1.3-.1 1.9-1.2 1.5 0 1.7 .6 1.2-.4 .3-.7-1.4-2.5 0-1.3 2.4 .2 2.1-.5 1.7 .7 1.3 1.3 1.3 .3 .5-.7-.1-3 2.1 .2z", paints: [["M43.3 26.7l.8-.1 0 .5-1 2.9-.3 3-.2-3.8zM71.2 29.2l.9 0 .9 1.3 .6 1.7-.5 1.7 .7 .1 2.1 2 1.7 3 0 .6-1.1-1.9-3.2-3-.4-.8-1.3 2.5-3.3 3.4-.5 .2-1.1-1.5 3.1-3.4 1.6-2.9 .4-2.6zM67.7 30.5l1 0-1.7 .5-2.6 1.8-.2-.2 1.5-2.1 .4 .6zM58.9 32.2l1.3 2 1.9 .5 0 2.6-1.9 .7-.4-1.6-1.3-.8-.2-1.3zM55.5 34.7l1.6 3-1.6 3.1-1.7 .5-2.1-1.1-1.7 2.4-.8 .6-1.3 .1-1.3-.7-1.7-4.1 1.3-3 2.1 5.7 1.6-2.2 1.4-4 .4-.1 2.1 4.1 .5 0zM34.7 36.4l3.9 2.6-6.7 0 1.4 2.1 1.9 1.4 2.6 1.1-1.8 1.6-2.1-.9-2.1-1.7-2-2.8 .1-.8 1-1 4.1-.3 .1-.9zM81.9 37.7l2.1 .6 1.2 1 .8 3.9-.3 1-.9 .8-2.3 .3 .1 4.3-.5 1.2-.7 .6-1.3 .4-2.9-1.6-.4 .2-.7 3-1.1 .9-1.2 .2-1.3-.5-.9 1.5-1.2 .6-3.4-1-.8-1.7 .4-.8 3.5 1.2-.5-2.1-1.9-2.6 .6-.4 3.1 .4-1.9-3 2.1-.2 1 .7 1 2.5-.8 2.2 1 .9 .5-.1 .3-1.7-.9-3.8 .9 .3-.4-1.2 6 3.9 .4-3-1.2-3.4-.9-1.3 .4-.4 0-.4 4.6 2.1 .3-.4-.3-2.1zM43.2 38.1l.4 .1 .2 1.2-.3 3-2 0-.2-1.7-.5-.9 1.6-.8zM14.4 42.8l1.1 0-1.2 2.1-.3 1.7 .4 .3 3.4-1.6 .4 .5-.9 1.1-.7 2.2-.1 2.2 .4 .4 3.9-2.6 .6 .5-.6 2.5 .4 1.8 2.1-1.7 .4 .8-.8 2.5-2.2 .9-1 2.5-.1 2.6 .3 .2 5.9-3.2-.2 .4 .5 .4-1.1 3.4 .3 2.1 .5 0 3-2.3 .2 .2-1.1 3-1.5 1.3-1.4 .1-1.3-.7-.5-1.1-.4-2.6-2.9 1.2-1.3-.3-.9-.9-.2-3.8 1.1-3 .7-.8-.5-1.7-.2-.3-1.7 .8-1.7-.5-.7-1.3-.2-2.5-2-1.3-.5-1.3 .7-3.4zM78.2 52.5l.7-.3 2.1 2 1.7 3 0 .6-1.2-1.9zM32.3 54.7l.4 0-1.1 2.9-.1 1.7 .3 .3 3.8-2.6 .4 0-.2 4 .4 0 1.9-1.8 .3 .6 0 2.1-1.1 1-1.3 .4-.9-.2-1.1-.8-.5-1.2-1.7 .7-1.7-.4-.7-1.6 .4-3.9 .7-.8zM73.2 60.2l.1-.4 2.6 1.5 .2 2.7-.6 1.4-2.1 1.1-.9 4.3-.9 .6-1.2 .2-2.1-1.2-.8 2.1-.7 .8-1.5 .5-1.3-.5-.9-1.2-.4-3.5 2.6 3 .9-2.1-.1-3.9 4.7 3.8 .5-2.4-.6-3-.7-1.3 .6-.4-.2-.5 3.4 2.2 .1-1.7z", "#000", 0.15]], shade: "M62.1 25.4l.2-.3 .1 .7-.4 .4 0 1.3 .7 .7 3-.4 1.3 .6 0 1.6-.7 2.2-.2 4.2-1.5 1.7-.6 1.7 2.1-.6 .4 .2-.9 .8-.8 2.2 1.3-.5 0 1.3-2.1 1.7-.5 .9 1.2 .4-2.3 2.1 .3 .4 1.7 0-1.7 .1-1.7 1.2 1.3 .7-.8 .6-3-1.4-1.7 .1 1.7 3-3.4-1.5-.4 .2 1.1 2.1-.5 .4-2.6 .5-.6-2.8-1 1.1-1.1 2.1-.5 0 .1-3.5-1.7 .9-1.7 2.5-.3-.3 .1-2.2-.2-.2-1.3 .9-.2-.2 .2-3 .4-.1 1.7 1.9 .4-1-.3-2.1 1.6-1.2 1.3 1.9 .8-3 1.7 1.8 .6-1.2-.2-2.9 2.2 1.5 .1-1.1-.5-2.2 1.6-1.7 1.7 1.9 .6-1.4-.1-2.6 1.2 1.1 .4-.2-.1-1.3-.7-1.7 2.5-5.1 .3-2.5-.4-2.1zM88.2 30l.9 0 .1 1.3-.1 1.3-1.2 1.7 0 .8 1.6 1.6 2.1 .5 1.3 1.3 .6 3 1.1 1.3 .1 .8-.1 1.3-1.3-.2-.4 .2 .8 2.1-.4 .9-3.4-.9-.4 .1-.3 .8 1.1 .7 2.6 .1 2.5 1.7 .4 1.7-1.7 .2-.8 .7 1.3 1.7 .1 1.7-1.4 .1-2.1-.6-.3 1.3 .7 1.3 0 2.1-1.3 1.8-1.3-1.3-2.1 2-1-2.9-.2-.4-.9 .1-1.2 2.8-1.7 1.7 .4 2.6-1.4 .4 .7 3-.5 2.1-3.1-1.7-.7 3-1 .9-1.2-1.4-1-2.1-.3-.3-.9 .7-.2-.4 .6-3.2 .5 0 1.8 1.5-.2-3 1.6-1.7 1.2-2.1-3-2.1 .6-3 .5-.1 1.7 2.3 .5-3 1.2-.3 2.1 3.3 1.3-4 2.1 2.5 .3-3.2 2.3-2.6 1.3-2.5 .2-1.7-3.1-2.1 .3-2.2-1.3 .6-1.2 1.6-.7 0-.5-.9-.1-2.9 2.1 1.7 .4-.3 .1-1.4-.8-2.6 .3-.2 1.7 1.1 .3-.5-1.2-2.5 .8-2.6-.2-2.1zM34.6 50.4l.5 3.4-1 .9 1.7 1.2-.1 .5-1 .4-1.2-.8-1.3-.1 1 1.7-.6 0-1.4-.8-1-2.1 2.4-4.1 .9 1.8zM41.9 51.3l-.2 .4-.9 0zM39.6 52.1l.9 0-1.1 .9-.2-.5zM42.3 52.1l1.3 1.7-.1 .9-2 0zM36.8 52.5l1 1.7-1.6-.4zM28.7 56.4l.6 0 1.3 2.5-.5 .2-.8-.6zM26.5 58.5l.6-.1 .8 1.1-1.1 .3zM71.3 58.5l1.6-.4 1.2 2.1-5.3 .4-.1-1.3 .4-.3zM66 59.8l1.3 1.7-1.2 .5-.3-.1zM62.6 60.6l1.8 2.5-2.8 3-2.3 4.7-1.2 1.3-1.3-1.7-.4 0-.9 .9-1.3-1.4-1.2-2.1-.4-.3-.4 .3 2.1 5.1-.9 .5-3-.4-.4 .3 .1 1.3 .8 .9 .4 1.7-.4 1.2-1.3-.4-.4 .4 .4 3-1.3 0-1.7-1.2-.5 1.2-1.2 .1-1.7-1.4-.8-1.2-.9-.3-.8 3.6-.4 .9-.5 .1-1.2-1-.5-1.1-.4-.1-.8 .8-1.3-1.3-.5-1.6 .3-1.3-.6-.9 2.9 .2 4.2-.9 2.6 3.2 .6-1.6 .1-3 .6 .1 2.1 1.8 .2-1.5-.5-2.1 1.6-3-.9-1.4-2.3-1.1 .4-3 .6 .1 1.7 2 .4-.4 .1-2.3 2.5-.7 1.6 3 .5 .1 .9-3.6 .4-.2 2.1 2.5 .3-3 2.3-.7 1.7 2.8zM43.1 65.3l1.3 1.7-1.6 0zM39.1 66.1l1.6-.3 .7 1.2-4.2 2.1 .1-2.5zM34.8 67.4l1.8 1.7 0 .4-3.8 3.8-1.8 4.7-.5 .4-.5 0-.5-2.1-2.8-2.4-.9 0-.7 .7 .7 4.7-2.1-.4-1.7-1.6-.8 .8-.9 0-.8-.5-.9-1.3-.4-3.1 2.5-.7 2.1-1.1 .5 .1 1.7 2 .4-1.4 0-2.6 1.7 1.8 .4 0 .1-2.2 .3-.3 2.2-.5 .8 1.8 .4-.1 .9-2.2 1.7 2.6 .4 0zM12.4 68.7l.7-.4 .4 .2 3 2.7-.8 1.7-1.3 1.4-.5-.1-.8-1.4-1.7 .6-.8-1.3-.1-2.4zM69.4 69.5l1.4-.2 1.7 2.8-.7 1.7-1.4 1.3-1.7 .4-.4-.5-.5 0-1.7 1-1.7 .3 0-2.7-2.6 .2 .1-1.3 1.3-2.4 3.4 0zM33.8 77.6l.1 .4-.4 0z", light: "M37 19l3.2 .3 .9 .6 1 1.7 2.4 .4 .8 1.3-.4 2.1-2.5 4.1-3.8 3.5-4.3 2.4-3 .2-.8-.7-.2-1.5 .9-2.5-3.3-2.5 2.1-1.3-.9-1.3 .1-.4 .9-.6 1.7-.3 2.1-1.3 1.3 .1 1.7 .7 .8-.1 .8-.6-.1-.9-1.5-2.5zM69.1 26.2l1.5 .5 1.4 2.1 1.7 .8 .2 .9-.4 1.7-1.3 2.1-3.9 3.6-.5 0-.8-2.2 .2-2.7-.3-.4 .1-1 1.1-1.1 .4-1.7-.2-.6-1.3-.2-.4-.5 .4-1 1.7 .2zM25.7 37.3l1.8 1.7 .9 2.1 1.7 1 .9 1.5-.1 .5-5.3-6-.3-.4zM13.2 40.2l2.4 .4 1.3 1.2 2.1-.4 1.3 .3 .7 .7 0 1.2-1.2 2.6-3.3 3.5-3.4 2.1-2.6 .3-.5-.4-.9-2.1-2.2-1.7 .7-.9 1.2-.5 1.7 .3 1.3-.6-.1-.9-2.1-2.1-.8-1.3 1.3-.5 1.7 0 .4-.8zM65.6 48.7l3.5 .3 1.8 .6-1.4 .3-3.8 0-.5-.8zM38.1 55.5l5 .4-.3 .5-2.1 .1-2.2-.2zM68 62.7l2.2 0-.3 1.3-.9 1.3-2.4 1.1-3 0 .1-.7 1.1-1.3zM19.3 63.1l1.4-.1 .8 .6-2.9 2.2-1.7 .1 .9-1.9zM39.4 69.5l2.2 0-.3 1.3-.9 1.3-2.3 1.1-2.9 .1-.1-.8 1.2-1.3z", eyes: [[43.3, 52.8, 9, 17.3, -23.1], [61.8, 48.4, 6.9, 19, 12.5]] },
+  spike: { label: "Spike", body: "M57.6 4.2l1.6-.2 1.8 .4 1.4 .9 .9 1.2 .5 1.8 .5 8.7 2.7 2.8 .4 3.6 2.7 2.2 14.2-4.9 2.8 .5 1.8 1.5 .9 2.1-.2 2.3-.8 1.4-5.4 6.4-.1 .9 .7 1.8-.4 2.3-2 1.8-.9-.6-.4 .2 1.3 4.6-1.1 .4 .1 .5 12.8 5.9 1.5 1.9 .3 2.7-1 2.3-1.8 1.4-9 1.2-2.2 2.9-1.9 .6-1.5-.1-.3-2.6-.2 1.6-1.4 2.8-.7 .2-1.4-1.3-.3 .2 1.7 3.2 .1 1.4 1.5 1.8 .4 1.8 .3 .3 1.8-1.1 .7 1.3 1.7 .9-.6 1.4 .8 1.3-.3 .5-1.7 .5-1 2.7-1.7 1.8-.8 1.9-1.2 1.4-1.9 .9-1.8 0-3.6-1.8-1.9 1.2-2.7 .1-1.2-1.4 .6-2.3-1.3-1.9-2.2 .3-1 .7 .2 2.3 1 1.8 0 1.4-1.2 1-1.8-.9-.4 .2-.6 .6-.1 1.9-1.2 1.5-1.8 0-1.4-1.5-4.6 0-1.4 2.2-1.3 1.3-1.8 .7-1.9 0-2.3-1.2-1.3-2.1-.6-9.6-3.1 .3-.5-.3 1.3-4.6-1.4 0-1.5-4.1-1.1 0-13.7 5-2.8-.5-2-1.8-.7-1.8 .2-2.3 .8-1.4 5.8-6.9 0-.9-1.6-1.8 .7-1.8 2.6-1.4 .6-5.3-12.7-6.1-1.5-1.9-.3-2.7 1-2.3 2.1-1.5 10-1.3 .1-3.5 1.3-.5 3.2 .5 .9-1.4 3.3-2.8 .2-.5-4-12.8 .4-2.3 1.5-1.9 2.3-.9 2.8 .4 7.3 6 2.7-3.2 2.3 3.7 3.7 .6 1.8 .7 7.3-13.6 1-1z", paints: [["M70 28l1.1-.3 1.3 .2 .6 .6 .2 1.4-.8 4.1-1.8 3.6-1.8 1.7-2.3-.7 2.1-2.3 1.6-3.2 .4-3.8-2.7 1.1-6.5 3.6 1.9-3.1 .4 .9zM39.3 35.4l5 3.2-7.6 0-.2 .4 1.2 1.8 2.7 2.1 1.8 .7-2.7 1.5-3.7-2.8-1.9-3.3 .3-1.4 1.2-.6 4.4 .2zM57.6 35.8l1.6 0 .2 2.8 1.4 1.8-1.6 1.7-1.4-1.7-.1-1.4 .6-2.3zM48.4 39l.4 0-.3 .9 1.3 2.8 0 .9-.7 .8-1.9-.8 .6-2.3-1-1.8zM79.1 52.3l2.9-.4 1 .8 1.2 2.3-.2 1.9-1.6 1.3 .8 2.3 0 1.4-.9 1.4-1.2 .5-4.1-1.1-1.5-2.6 5.2 1.3-.5-2.2-1.6-2.3-1.2-.9 .5-.6 3.2 .4 .7-.3-.8-1.4zM32.5 62.8l-1.4 3.7-.1 1.8 .2 .5 4.8-2.8 .4 .5-.5 2.3 .1 1.8 .3 .2 2.7-2.3 .2 .3-.3 2.7-1.7 1.6-1.4 .2-1-.4-.9-.9-.4-1.5-2.7 .6-1.2-.5-.8-.9-.1-3.2 .7-2.4 .9-.8z", "#000", 0.15]], shade: "M62.8 6.1l1 1.8 .2 7.8 .3 1.8 2.7 2.3 .4 1.8-.3 1.4-1.8 2.3 .7 1.4-.4 .5-3.7-1.9 .7-.5-.8-.9 .3-.5-.7-1.2-1.1-1 1.4 0-.2-1-1.2-1.3 .9-9.6zM88.8 23l.5 .4 .5 1.9-.4 2.3-6.3 7.8 .9 2.2-.1 1.9-1.9 1.8-.9 .1-.4-.4-.5 .3 1.4 4.6-1.4 .5-.7 .9 .7 2.7-1.4 2.7 .5 .2 1.4-.6-.4 1.8 .8 2.6 1.9-2.7 1.3 2.5 .9-2 7.8 1.6 1.4-2.1 .9 2.4-.3 1.8-1.5 2-1.4 .9-8.7 1-.8 .7-.5 1.4-1.9 1.4-2.3 0-.4-2.7-.4 2.2-1.5 2.4-1.3-.6-.5-.8-.4 .4 1.8 3.2 .1 .9-1 0-1.8 1.8-.1 .5-2.5 0-.2-2-.5 0-1.3 2-2.9-1.8 .3 2.7-3 0 1 1.4-.8 .4-.6 1.9-.9 .9 0 3.8-1.8 .4-1 .8 .2 2.8 .9 1.3-.1 1.9-1 .5-1.3-.8-.9 0-.8 .7-.1 2.3-1 1-1.8 0-1.4-1.4-4.6 0-1.7 2.7-2.4 1.4-2.7 0-1.5-.9 2.8-1.6 1-3 .4-.3 .5 .4 .4-.4 6-.8 .9 1.2 .9-1.8 .9 1.3 .5-2 .9 1 .5-2 .4-.1 .5 .7 .4 .1 .3-1 .6-.4-.2-1 1.3-1.8 .1-2.3 1.4-1.8-.3-1.3-.4 1-1-.6 1-.1 .4-.4-.4-.3-1.4-.1-.4 .5-1 0-.4 .9-1.4 0-.5-.5-.9 0-2.1-.9 .3-.9-.5-.3-1.4 1.2-.4-1.2-.7 1.2-.7 .2-.4 0-.5-1.1-.9 1.4-.5-1-1.3-.5-2.8 .2-.2-.1 1.2-1.4-1-.1-2.3 .6-1.3-.2-2.8 2.4-1.4 .6-1.1-3.8-.7-.7-14.6 5.3-2.8-.5-1.1-.9 2.5-.8 8.7-5 1.4 1.8 .4-2.8 .5-.2 1.8 2.3 .5-1.2 0-2.4 .4 0 1.9 2 .1-2.4 .3-.4 2.8 .4 .9 2.6 1.4-2.4 2.2 2.8 1-3.7 1.8 1.9 .2-2.5 1.2-.6 1.3 1.7 .9-2.5 1.9 2 .3-3.4 1.5 1.2 .4-.3 0-2.3 1.4-.9 .5 0 .9 1.4 .5-2.5 1.8 1.7 0-3.4 1.8 1.2 .3-.7-.4-1.8 2-1.9 .4-.1 .9 1.4 .6-.8 .1-1.8 .3-.2 1.3 1.5 .5-.4-.4-3.2 2 .9-.4-2.7 1.1-1.2 1 1.2 .4-.9-.1-2.1 1.9 1.4 .4-.2 .1-1.4-.7-1.9 .2-.2 1.7 .7-.8-2.3 1.4-2.5 1.4 1.1 0-1.8-.5-1.4 1.8 1.1 .4-.2-.1-1.3-1.1-1.9 .4-.2 1.3 .4 .9-2.4 .5 0 1.5 2.2 .3-.2 .5-2.7 1.4 1.3 .1-2.5 9.5-7.8zM71.2 34.9l.4 0-.1 1-.5-.5zM9.2 45.9l7.8 2.3 1.4 2.9 .9-2.1 1.4 2.3 .5-1.6 1.3 .1 .6 2.5-.5 2.7-3.3 .9 .1-2.2-.5-.8-12.3-5.6 .2-.5zM79.8 74.7l.4 .8 1.5 .6-.6 1.4 .7 1.3-.2 .5-1.8 .5-.9 2.7-1.9 1.9-.9 2.2-.9 1-1.9 .9-1.3 .1-1.9-.5-1.8-1.4-.9 .1-.9 .9-1.4 .3-1.8 0-.5-.8-.4-.1-.1-1.4 .5-1.2 3.7 .4 4.6-.9 .4 1.1 .9-1.2 .9 1 .5-1.9 .9 .5 .1-1.5 2.2-1.6 1.2-1.6 .6-2.6zM42.9 77.9l.7-.2 0 .7-1.3 0z", light: "M57.7 4.2l.5 .2 .1 .7-2.5 2.8-5.1 12.3 .2 3.7-.9 1-2.3 .6-2.9-3.4-.4-3.2 1 0 1.9 .8 .9-.3 6.8-13.3 1-1zM25.6 12l1.1-.3 .4 .3-.5 1.4-1.8 1.5-1.4 .3 0-.9 .5-.9zM82.9 21.2l1.4 0-.4 .8-11.9 5.4-1.4-.3-1-.9 .1-.5 3.2-.6zM45.4 28.5l.2 .4-1.8 3.2-3.9 4.6-4.5 3.9-5.1 2.7-1.4-.5-1.3-1.2-5.7-7.2 .6-.1 .8-1.2 1.1-.6 5 3 2.7-.4 6.9-2.7zM7.8 39l1.1 0-.8 1.8-1.6 1.3-1.4 .2 .4-1.5zM18.8 58.7l3.3-.3 .5 .3 1 2.3-.6 1.8-10.1 9.7-1.4 .9-.8-.1-.1-.9 .9-1.3 5.9-6.9-1.9-2.3 .6-1.8 1.9-.6zM65.5 74.3l2.8-.4 1.4 .7 .9 2-.3 1.8-1.1 1.4-1.8 .9-2.3 .4-2.5-.4-1.2-1.1 .1-1.2 1.7-2.8zM46 78.4l1.6 0-1.5 .4 1.5 .5 1.2 1.4 .2 1.8-.8 1.8-1.9 1.3-1.8 .5-2.3 0-1.8-.7-.5-.6 0-1.4 .9-1.4 3.2-2.7 1.9-.6z", eyes: [[46.2, 58.5, 11.4, 25.6, -10], [67, 53.5, 9.7, 25.6, -10]] },
+  floppy: { label: "Floppy", body: "M38.7 4l3.8 .7 3.2 1.1 .7-1.3 .5 0 1.6 .9 1.3 2.2 1.4 .7 1.4 1.3 .8 1.8-.1 2.8 .7 1.5 .9 .2 2.5-1.7 1.6-.4 0 3.4 2.8-.3 1.9 .4-1.3 2.8 1.7 .5 .2 .5-.6 1.7-2.2 2.4 .3 .6 1.4 .6 .6-1.6 1.2-.7 2.3 .5 1.9 1.5 4.1-.2 1.4-1.7 1.4 .2 .9 1.4 1.2 .8-.4 2.3 .6 2.3 2.1 1.8 .6 1.4-.4 1.2-1.6 .2 2.1 1.5 .7 1.3-.1 .9-1.3 .5-.2 .4 .4 .7 2.1 1.2 .8 1.3-.1 1-1.6 .4 .1 .9 2.3 1.9 1.4 2.3 0 .9-.4 .4-1.4 .5 .7 2.8 .6 .9 1.9 1.3 1.3 2.4 .1 1-1.7 .8 .1 1 2.3 1.8 1.3 2.8-.1 1.5-2.3 .5-.8 2.1 .1 1.9-1.6 2.1-1.9 .2-.9-1.6-2.3 0-2.3 1-2.4-.8-.5-1.4 1-2.3-7.3-28.6-1.1-2.7-.8-.6-.9 0-.4 1 1 6 .5 5.5-.4 8.8-1.9 8.3-3.3 6.9 1.3 1.9 1.4-.1 .9-1.9 .9-.3 1.4 .4 .9 .5 1.1 1.8 .8 .3 1.1-1.7 .7 0 1.9 1.9 .1 .9-.4 1.8 .7 1.9 1.4 1.8 0 2.3-1.4 1.7-2.3-.7-1.8 1.3-1 2.3-1.8 1.3-1.8-.1-1-2-1.3-.1-2.8 1.5-1.4 .1-.9-.7-.5 1.1-1.4 1-2.3-.9-1.7 1.1-.2 1.9-.8 .9-1.4-.1-1.4-1.8-.4 0-1.4 .2-1 1.4-1.8 .5-1.5-1.1-.4-1.9-2.2-1.7-1.9 .9-.6-.1-.5-2.3 1.2-1.9 .4-1.8-1.6-1.8 1.6-1.7 2.3 .1 .9-.4 .5-.8-.5-1.8 2.4-.5-3-1.8-3.1-2.8-2.8-3.2-2.8-4.2-4.2-9.2-2.6-10.3-.9 .4-.6 .7-.4 3.2 3 29.5 1.7 2.8-.1 1.8-.9 .7-1.8-.6-.9 .3-.6 .5 .1 1.9-1.4 1.1-2.3-.4-1.4-1.6-1.8-.9-.5-.2-1.8 1-1.2-.9-.5-1.8 .3-1.4 .8-1.4-.1-2.3-1.6-.2-.8-1.2 .5-2.7 1.6-2.3-.3-3.3-1.9 .1-.3-.5 .6-2.3 1.4-1.4 0-1.8-.4-.5-1.5 0-.6-1.4 .4-2.3 1.6-1.8 .1-1.9-.4-.8-1.6-.1-.5-.9 .5-2.8 1.4-1.8-.8-3.7-2.1-.5-.3-1.8 1.5-2.7 2.1-.5 2.4-1.9-.2-1.8 .8-.8 2.8 0 1.8 .9 2.3-1 1.5-1.4 .2-.5-.3 0-3.7 .4-1.4 0-.2-.4 .4-1.8 1.2-1.4 1.2-3.2 1.6-1.7 2.3-.9 1-1.1-4.6-1.8 .9-1.4 1.9-1.4-2.3-1.4 .1-.5 1.3-1.3 2.6-1 .2-.4-.8-.9 1.5-1.4 2.8-.5 2.8 .7 2.3-1.3 .4-.8-1.6-4.6 .2-.4 1.4 0 2.3 1zM56 79.6l.7-.1 .1 .5-1 1.9-.4 .2-2.7-1.2 .3-.4z", paints: [["M29.2 19.7l1.3-.4 .1 .4-1.1 3.7 .5 2.5 4.6-3.6 .5 .6-.3 2.8 .5 1.8 .3 .3 2.4-2.6 0 2.8-1.1 1.5-1.3 .5-1.4-.4-.9-.7-.5-2-2.8 1.2-1.8-.9-.5-1.1-.3-3.2 .6-2.3zM57.2 19.7l1.5 3.2-1 2.4-1.9 .8-1.8-1.5-1.9 3.1-1.8 .9-1.6-.6-2.1-3-1.4 1.2-1.9-.1-.5 3.7-.1-4.1-.9-2.3 1.1-2.7 .9 .6 .7-.2 .2 .4-.7 1.9 .3 .6 1.1-1.1 1.2-2.1 .9-.4 1.5 3.9 1.3 2.1 1.3-2.1 1.5-4 .4 .3 .5-.2 1.8 3 .5 .1zM67 26.1l1.3 0 1.1 1-.2 4.1-2 4.6-2.6 3-1.8-1.2 2.7-3.2 1.5-3.7 .3-3.2-.4-.2-2.7 1.1-6.1 3.8-.5-.1 1.4-2.5 .5 .8zM36 33.5l4.6 3.2-.4 .3-7.4-.3-.4 .5 1.6 1.8 0 .5 2.5 2.1 1.6 .7 0 .4-1.6 1.2-.5-.1-3.7-2.8-1.4 1.7-.9 2 .4-2 1.4-2.3-1.6-2.8 0-1.3 1.7-1.1 4.6 .3 .2-.2zM52.1 34.4l3 .5-.1 1.4 1.1 2.7-2.6 4.1-1.8-.3-1.4-1.7-1.8 2.9-.5 0-1.1-.8-.3-1.1-.5 .6-2.7-1-.6-2.7 1.5-3.3 .5 2.2 1.3-.6 .3 .3-.6 1.4 1.3 3.2 2.1-4.1 .6-2.4 3.3 5.3 .5-1-.4-1.9 .4-1.8zM72.8 51.5l2.8 0 .9 .3 1.8 2.9-.3 1.8-1.8 1.4 1.1 2.8 0 1.4-.5 .9-1.2 .7-.4 .1-.5-.8-.1-1.4 .5-.5-1.8-3.6-.5-1.9 .5-.4 2.3 .3 .5-.4-1.1-1.8-1.7-1.8zM33.2 64.8l.6 .5-.5 1.8-.5 .1-.6-1.5zM36.2 68l.4 0-.4 2.3-.6 1-1.1-1.4 .1-.5z", "#000", 0.15]], shade: "M57.6 14.2l1.4-.4 .2 1.7-.5 1.4 .3 .4 2.8-.4 1.9 .5-1.4 2.7 1.8 .5 .1 .9-1 1.9-1.8 1.8 0 .5 2.8 4.6-.3 1.4 .2 .2 .5-.6 .2 .4 .2 1.7 1-1 .4 1.3 .9-.6 1.4 .9 .4 1.3 .6-.9 .9 1.7 .9-1.5 .9 1.2 .1-1.4 .4-.2 1 1.1 .3-2 1 .7-.2-1.9 1.7-2.7 .3-1.7 1-1.1 .1 1.4-.5 .9 .5 1.8 .4 1 1.7 1.2 .6 1.1-.1 1.5-1.8 .3 1.8 1.2 1.1 1.6-.2 1-1.3 .4 .1 .9 2.1 1.2 1.1 1.5-.1 1-1.8 .4 .1 .9 2.3 1.9 1.6 2.3 0 .9-.4 .4-1.4 .5 .2 1.4 .9 2.3 2.2 1.4 1.3 2.8-.4 1-1.4 .3 .1 1 2.7 2.3 .9 1.8 0 1.8-1.9 .2-.4 .4-.8 1.7-.1 2.8-1.9 1.8-1.4 .1-.9-1.7-2.3 0-1.4 .8-1.4 .1-1.8-.6-.5-.9 1.9-1 2.7-.6 1.9-1.1 .9 1 .5-1.8 1.3 .8-.6-2 .7-.4-1.6-1.4 .6-.5-.4-.4 .7-.5-1.6-1.4 1-.4-1.5-.9-.3-1.4 .7 0 .1-.5-.5-1.3-.5 .4 .4-.5-1.1-.9-.1-.4 .7-.5-.7-.9 .8-.5-.9-.9 0-.9-1.2-1-.3-.9 .9-.4-1.3-1.4 1.1 0 .1-.5-.9-.9 .5-.5-1.8-1.3-.1-.5 .7-.5-.7-.9 1 0-.6-.9-1.3-.9 1.2-.5-1.6-.9-.3-.9 1.5-.5-1.1-1-1.1-.4 .7-.4-.5-.5-1.8 .2-1.9-.7-3.2 1.1-1.4-.9-.9 0-.3 .3 .1 2.8 1.2 7.3-.1 9.7-1.8 8.8-1.8 4.6-1.8 2.7 0 1 .4 .4-4.2 2.4-2.3 1.8-3.7 .9-1.3-.9-2.3-.4-1 .1-.9 .7-2.8-1.2-4.1-2.9-2.3-2.3 0-.3 1.8 0 1.9-.8 2.3 2.7 .3-.2 .4-1.9-.4-3.2 2.4 1.7 .3-.3 0-1.4-.9-2.3 1.1-2.1 .5-.2 2 1.8 .5 0 .2-1.8-.4-1.9-.8-1.3 .3-.3 2.4 1.2-.1-1.4-1.4-2.8 .6-1.3 .4-.3 2.8 1.6 0-1.8-1.4-3.2 .4-.2 1.8 .9 .4-.3-.4-1.6-1.5-2.1 .3-1.8 .8 .1 2.3 1.4 .6-.1-.1-2.3-.9-2.3-1.4-1.9 3.4 1-.3-1.9-1.2-1.8-1.1-.9 .5-3.4 1.9 .6-.6-2.3-.9-1.4 2.8 .9 .3-.4-1.2-2.8-1.5-1.4 .6-.3 1.8 .4 .2-.5-1.4-1.9-1.3-.9-.6-6.5-1.5-4.1 1-.2zM24.6 43.6l.8-.2 .9 .6 .7 1.5-.2 2.3-1.4-.4-.9 .9-.7 2.7 2.8 28.1 .4 2.8 1.7 2.3 0 .9-.5 1.4-3.2-.3-.8 .7 .3 1.9-.9 1-1.9 0-.9-.4-1.8-1.9-1.9-.9-1.3 1.2-1-.4 1.4-1.2 2.3-.4 2.3-1.2 .9 1.1 .2-1.5 .3-.4 .5 .3 .4-.4-.5-.9 .1-.5 .4 .3 .3-.3-.4-.9 .9-.5-1.4-1.8 1.2 0-1.5-1.4 0-1 1 .1-1.1-1.4 .8-.4-1-1 .3-.2 1 .2-1-1.8 .5 .2 .1-.7-1.2-1.4 .1-.5 1 .4 .2-.3-.8-1.4 .6-.5-1.5-1.3 0-1.4 .9 0-.4-1.1 .8-.3-1.6-1.8 1.1-.5-1.2-.9-.1-.5 1.3 0-1.3-1.8 1-.5-1.3-1.4 0-.4 1.1 0-.7-1.7-.5-.2 .9-.4-1.1-1-.1-2.3-1.1-1.3 .5-.5-.6-.9 .6-1.2 1 1.1 .2-1.8 .8 .5 0-1.4 .7-.4 1 1.1 .5-1.9 .9 .9zM74.2 77.3l-.2 3.2 .8 1.8 1.3 1.4 0 2.3-1.4 1.5-.9-.1-.9-.8-1.4 .9-1.3 1.3-.6 1.8-1.3 1-2.3 .1-1-1.9-1.8-.1-1.9 1.4-1.8 .1-.9-.6-.4 .9-1.5 1.1-2.3-.9-1.8 1.2 0 1.4-.9 1.4-.9 0-1.9-1.9-.9-.2-.9 .3-1.4 1.8-.9 .1-2-1-.4-1.9-1-.9 6.1-.6 1 1.3 .9-1.6 .4 .7 .4-.3 .4-1.3 .6-.1 .5 .8 .9-1 .5 .3-.1-1.4 1.9-1.6 1.8-2.4 1.6 2.1 1.2 .9 4.2-.2 1.8-.6 .9 1.2 .5-1.5 .4 .7 .5-1.4 .9-.5 .5 .9 .4-1.2 .5 .7 .5-.4-.1-.9 .5 .3 .3-.3 0-.9 2.1-2.8 .2-1.3-.4-.5zM57.3 88.3l.8-.4 .8 .9-.8 1.3zM39.4 91.1l.5 0-.7 .5-1.1 .4z", light: "M34.5 6.3l.1-.4 1 0 1.1 .4 1.2 1.4 1 2.3 1.7 1.2 .5 1.6-.4 2.3-1.9 4.2-2.8 3.4-3.7 2.5-2.7 .4-1.4-1.1-.5-3-1-1.4-2.6-1.8-.5-.9 .9-1 2.3-.9 .4-.4-.9-.9 1.9-1.5 2.3-.4 1.8 .8 1.4 0 2.3-1.7zM25.8 33l.6 0 .6 1.9 0 1.4-.7 1-3.6 1.2-3.7 .6-3.7 3.4-1.9 1-.9-.1-1.4-1.1-.2-.5 .7-.6 1.4 0 2.7-2.2 .1-2.2 3.6-.1 1.9 .7 2.6-1.6zM60.3 77.3l2.4-.5 1.3 .5 1.2 1.8-.2 2-1.2 1.7-1.5 .9-4.6 .7-1.9-2.5 1.7-2.8zM42 79.6l3.1 0 .6 .4-1.2 .5 2.6 .9 .9 1.4 .1 1.8-.5 1.4-1 1-1.8 .8-2.3 .3-2.3-.4-1-.8-.4-1.8-1.3-.9 .8-1.4 3.2-.2 .9-.7zM47.1 80l1.5 0z", eyes: [[43.7, 57.7, 12, 27.2, -12.1], [61.6, 53.5, 9.4, 27.5, -5.7]] },
+  antenna: { label: "Antenna", body: "M46.8 4.2l3.3-.1 3.1 1.3 2.6 2.6 1.1 3 0 2.7-.9 2.6-1 1.6-3 2.8-.8 1.3-.7 6.8 .7 6.8 .7-.3 .1-4.8 1.5 .3 1.5 1.2 .5-2 .3-.1 1.9 .7 1.9 2.1 2.4 1.1 1.4 1.5 1.1 3.3 1.5 1 .8-.3 1.5-2.7 1.1-1.2 1.1 1.4 .4 2.3 .4 .1 2.3-2 1.1 2.2-.2 3.1-.9 2.1 3-.5 1.6 .6-.8 1.5-2.6 2.3 .2 1.2 .9 .9 4.5 2.2 2.1 2.5 .4 2.3-.2 .4-1.6 0 .8 1.9 0 1.8-4.5-.9-.7 .6 .4 1.5 2.5 3 .8 3.1-.5 1.9-.3 .3-1.9-1-.2 .3 .3 1.9-.4 1.6-4.6-2.7-.4 .7 .4 2.6-1.1 1.3-1.2-.1 .2 1.1 .6 .6 2.3 .6 1.1-1.5 1.3 1.1 .4 1.1-.2 1.9 2.6 2.3 0 1.1-.7 1.3-.4 .3-1.8-.6-.9 1.3-.4 2.2-.6 .7-1.6 .3-.7-1.4-.8 0-.8 .4-1.4 1.9-1.2 .4-1.5-.4 .1-1.9-.5-.4-1.5-.6-2.3 .5-2-.6 .1-2.3 1.2-1.9 .2-1.8-.2-.2-1.4 2-.9 .7-1.1-.1-1.2-1.4-1.2 2 1.6 1.5-1.9 1.1-.5 2.7 .7 2.3-.2 1-.7 0-.8 .8-1.9-1.2-2.2 .7-1.2 2.6-1.7-.5-1.3-1.9-1.9-.5-1.4 1.2-.5 .1-1.3-.5-.9-1.5-.1-1.1 .6-1.5-.2-1.9-1.9-1-.2-.5 1.7-2.1 2.7-.1-.5-.9 .6-1.1-2.8-.6-1.3 3.3-.9 1.2-1.9-2.2-1.2 1.4-1.5-1.4-1.1-2.8-.8-.1-1.1-1.4-.5-1.9 .4-2.3-.7-1.6-.7-.2-3.4 2.1-.4-.1-.3-1 .3-2-2.7 .9-.4-1.9 .7-2.6-.5-2.3 .6-1.9 1.5-1.5 .4-1.3-4.5 .6-2-.1 .5-2.2 2.2-2.7-.6-.8 .6-2 1.9-1.8 3.8-1.5 .7-1.1-.3-.6-3.8-2-1.4-1.2 0-.4 1.8-1.2 3.3-.6-.8-1.6 1.3-.8 3-.3 1.9 .9 1.1 0 4.9-3.2 4.9-2.2-.2-7.2-.9-5.3 1.6-5.3-2-5-.2-3.4 .7-2.2 1.4-2.1 1.9-1.5z", paints: [["M72.4 38.3l1 .4 .5 .7-.5 4.2-2 4.2-2 2.1-2.1-1 2.1-2.3 1.7-3.4 .4-3-.2-.6-8.9 4.4 1.7-2.9 .4 1.1 6.1-3.5 .7 .7zM46.3 38.7l1 0-.8 2.2-.6 5.1-.2-3.5zM59.1 44.4l1.6 1.4 .6 1.2-.8 2.7 .7 .7-1.2 1.7-1.2-.7-1.1 .3-1.5-.4-2.3 3.2-1.5 .7-1.5-.3-1.2-1.5-.7 1.4-2.2-1 .5-1.9-.8-1.9 2.1-.8-.5 1.6 .5 .7 1.1-4.3 2.3 5.5 .4 0 1.6-2.3 .8-3-.1-2 .3 .6 .4-.5 2.3 3.8 1.2-1.9-.7-1.2 .9-.3zM39 46.2l4.9 3.1-5.5-.3-2.4 .3 1.3 2.2 2.4 1.9 2 .8-2.6 1.6-3.6-2.7-1.7-2.7-.3-1.2-1.9 2.6-.2-.3 1.6-3 2-1.9 .6 0 .1 .9 3.4 .4 .3-.1zM25.4 54.6l.8 0-1.4 2.6-.1 2.1 4.2-1.8 .5 .5-1 1.5-1 3 .3 2.7 5.4-3.5-.2 .4 .3 .4-.7 3.4 .2 1 1.1-.9 .4 0 .4 .7 1.5-1.2-.8 3.5-1.1 1.2-1.5 .2-1.5-.7-1.5 2 1-2.4-.5-2.6-2.8 .9-1.1-.4-.8-.9-.4-4.5-2.1-.8-.8-1.9 .7-3.4zM77.1 65.6l2.5 .3 .8 3.1-.4 1.5-1.9-3.4-1.4-1.2zM74.9 70.1l2.5 .6 .4 1.3-.4 1.2-1.2-.6zM32.2 72.7l.5 0-1.5 3.5 0 2.3 4.9-2.9 .4 .6-.6 2.6 .2 1.7 3-2.3 .2 .2-.4 3.1-1.7 1.3-1.1 .2-1.2-.4-.8-.8-.6-1.7-1.6 .7-1.1 .1-1.5-1.3-.5-1.9 .7-3.8 .9-.7z", "#000", 0.15]], shade: "M54.9 7.3l.9 .7 .7 1.6 .5 1.8-.1 2.3-1.1 3-4.4 4.6-.9 7.5 .2 5 .6 2.6-1.6 .4-1.1-.2-.9-.6-.4-5.3-1.2-2.2 1.8-3.8 .5-1.9-3.5-4.6 3.9-2.2 3.2-2.9 2.2-3.2zM74.2 39.4l.1-.2 .4 .6-.2 2.7-1.2 1.9 .3 .3 3-.5 1.6 .5-.9 1.5-2.5 2.3 .1 1.2 1 1 4.1 1.9 2.7 3.5 0 1.9-1.2-.2-.6 .6 1 1.5 0 1.6-1.9-.1-2.6-.7-.7 .3 .1 1.5 2.8 3.5 .8 3-.8 2.2-1.5-1-.7 .3 .4 1.9-.4 1.5-4.6-2.6-.4 .7 .4 2.6-1.1 1.2-1.1-.2-.3 .6-2.8 .8-4.9 2.6-2.2 2.2-1.2 2-1.5 0-1.2-1.3-.7 1.6-.7 .4 1.8 1.5-1.9 1.1-.6 3.1 .7 1.5-.1 1.4-.7-.2-.8 .8-.7-.1-1.2-1-1.5 .4-1.3 .9-.2 1.6-.4 .4-1.5-.3-1.1-1.9-2.3-.7-1.5 1.4-1.5-.4-.8-1.6 1.2-.7 2.6 .5 4.2-.7 1.1 1.3 .8-1.8 .7 .8 .1-1.6 2.2-1.6 1.3-1.5 .3-2.2 .6-.8-1.1-1-1.5-.4-.4 .3-1.5-.7-3.4-.3-4.9 .7 .3-.5-.3-.2-2.3-.5-.6 .3-.9 2.7-.8-.1-1.1 .7-1.1-1.3-1.2 1.5-1.6-1.6-1-2.6-.8-.3-1.1-1.2-.5-1.9 .4-1.9-.3-1.5 2.3 1 2.6 .3 1.2 2.5 1.1 1.6 1.5-4.7 2.3 2.8 .4-.1 .3-3.4 1.9-.8 1.9 2.9 .7-1.4 .5-2.9 3 3.5 .6-2.1-.1-3 .3-.3 3 2.4 .1-1.4-.5-2.6 1.9-1.3 .4-.1 2.8 3.3 .7-1.9-.1-4 .4-.3 2.8 2.4 .3-1.5-.6-3.1 1.2-1.1 .4 .1 1.5 2.1 .8-1.4 0-3.4 3 2.8 .3-.2 .4-1.9-.3-2.3-.8-1.5 .4-.3 2.7 1.7 .2-.2 0-1.5-1.2-2.7 2.1-4.9-.2-3.8zM76.1 78.8l-.1 1.9 2.2 1.5 .7 1.5-1.2 2-1.5-.7-.6 .2-.8 1.2 0 1.9-.5 .7-1.9 .5-.7-1.5-.8 .1-1 .5-1.2 1.9-1.2 .2-1.6-.5 .2-1.6-.5-.6-1.5-.4-1.5 .4-1.9-.1 0-.4 1.5-1.1 1.5 .5 1.9 .1 4.2-1 .8 1.2 .3-1.6 1.2 1.2 .2-1.9 1.4 .7-.3-1.5 2.2-2.6 0-1.9z", light: "M45.6 4.6l1.5-.1 .5 .5-.2 1.1-1 1.5-3.3 2.7-1.3 .3-.8-.3 0-1.2 .8-1.5 1.9-1.9zM42.4 20.9l.4 0 .5 .7-.6 1.2-.9 .7-.4-.3zM41.4 37.5l.8-.1 5.2 2.4-1 3-2.3 3.4-5 5-5.3 3.5-4.9 1.7-1.9-.1-1.1-.6-.6-1.1 0-1.9 .9-2.7-4.1-2.2-1.4-1.2 .2-.4 1.6-1.2 3.4-.6-.8-1.6 1.2-.8 3-.3 1.9 1 1.1 0 4.2-2.9zM65.8 78.4l1.7-.2 1 .6 .5 1.9-.7 1.6-1.4 1-1.6 .5-1.9 0-1.6-.6-.5-1 .5-1.2 1.2-1.1zM45 82.6l2.5 0-1.3 .7 .8 .8 .3 1.1-.7 2.3-1.4 1-1.5 .4-1.9 0-1.5-.5-.8-1.6-1.1-.8 .3-1.1 1.2-.8 1.9 .3 .5-.3 .2-.8z", eyes: [[45.9, 68.5, 11.4, 25.2, -10.7], [66.9, 63.5, 9.7, 25.3, -7.8]] },
+  cactus: { label: "Cactus", body: "M46.4 4.4l.5-.4 .9 .1 3.1 1.2 2.2 2.7 1.4-2.9 2.8 2 1.2 2.7 1.8-2.6 .9 .4 .9 2 .8 .1 .9 1.4-.4 3.5 3 5.4 2 8.9 .8 .5 2.3-.5 1.2-1.8-1.8-11.6 .4-2.2 .8-1.8 2-1.9 2.7-1.1 2.6 0 2.7 1.2 1.5 1.4 1.2 2.2 2.3 12.9 2.1 7.6-.3 2.2-.7 1.8-2.5 2.8-3 1.2-9.1 1.3-1.5 .9-.7 1.4 1 6.2 .8 1 1.7 .8 1 1.3 .3 2.7-1.5 .4 2.1 2 .3 1.6-.3 2.1-2.2 .1 1.4 2.3 .3 4.1-.9 .8-.4 1.3-2-.4 0 2.2 2 1.7 .9 2 2.2 2.1 2.3 1.3 .8 2.2-.7 1.8-.6 .3-1.4-.4-.4 .2-.9 1.7-.2 2.2-.7 .9-1.8 .5-.9-1.6-.4 0-1.5 2-1.2 .6-1-.1-.8-1.9-.9 .3-1.3 1.4-1.5 .2-1.3-.9 .4-1.8-1.2-1.1-.8 1.4-1.4-.2-.4 .4-.4 .8 .1 2.2-1.1 1.7-1.7 .3-1.4-1.1-2.7 .5-.7 .4-.6 1.5-.9 .6-1.3-.5-.9-2-1.3-.5-2.7 1.8-1.5-1.8 .4-2.2-.3-.7-.4-.2-1.8 .5-.4-.5 .3-2.7 1.9-1.5 .9-1.6-.9-1.6-1.3-.2-.5-1.6-.9-.2-.4-1.3 .4-2.5-3.1 1.6-.4-.4-.8-3.1 1-2.7-1.4-4-1.1-5.1-.4-.6-1.4-.2-3.1 .7-6.2 2.3-2.7 .4-3.5-.9-2.7-2.2-1.5-3.3-.4-6.7-1.7-10.3 .7-3.1 2-2.5 3.1-1.4 3.1 .1 2.7 1.4 1.8 2.1 2.2 9.3 .9 .6 .9 0 2.5-1.1 .6-2.2-2.3-13-.4-.4-2.2 .4-.5-.4 .1-1.3-1.1-.5 1.2-4.4 2.7-2.7-.2-.5-2.7-.8 .8-1.4-.6-1.3 2.5-3.2 1.4-.6 2.2-.1 .8-.6 .1-.9-1.4-1.7 .8-.9-.2-.9 .3-.5 3.6-1.3 2.7 .9-.9-3.7 4-.2 2.7 1.3 0-1.4 .4-.5 1.1 0zM58.5 81.9l1.3-.3 .6 .3-.1 2.1z", paints: [["M58.9 13.3l1.8 3.6-1.8 3.5-.9 .6-1.3 .1-.9-.4-.9-1-.8 1.6-2.3 2.7-1.8 .3-1.2-.8-1.8-4 .8-3.2 .4-.3 2.3 6 2-2.5 1.3-4.4 .7-1.1 2.7 4.9 1.2-2zM34.9 14.2l-.5 1.3-.2 3.1 .9 2.3 .3 0 3.9-4.6 .6 .6 .1 3.1 1.1 2 2.2-3.5 .3 3.7-1.2 1.7-1.3 .4-1.3-.4-1.8-2.6-2.2 2.2-1.8-.5-.9-.8-1.1-3.1 .1-2.7 .9-1.3zM65.5 25.8l.1-.3 1.2 .7 1.1 1.3 .1 1.4-.8 2.7-1.1 .9-1.8 .1-2 3.9-1.6 .6-1.3-.3-2.3-3 .1-3.7 3.1 4.5 .4 .1 1.1-2.3 .2-3.1-.4-1.7 .9 .1 2.7 2.7 .6-2zM32.1 27.1l-1 4 .5 2.7 .4 0 4.2-3.9 .5 .3-.1 3.6 .9 1.7 2.3-2.9 .2 .3-.1 3.1-1.1 1.3-1.3 .5-1.3-.3-.9-.9-.9-2-2.2 1.6-1.3-.2-1.2-.9-.9-3.5 .4-2.7 .8-.9zM45.8 28.4l.2-.3 .7 .3-1.1 6.8-.3-4.1zM68.7 34.7l.9-.4 .7 1.3 0 3.1 .5 .4 .1 1.8-1.5 3.1-1.6 1.7-2.3-.8 2-2.2 1.5-3.1 .6-3.6-.4-.2-2.2 1-5.8 3.3-.6-.1 1.5-2.3 .4 .6zM53.8 38.7l.5 0 .3 .4 .6 2.7-.3 5.1-.3-3.8-1-4zM43.3 40.5l1.4 1.3 2.9 1.8 .2 .4 .6 0-5.5-.3-2.6 .3 1.7 2.5 2.2 1.7 1.8 .7-2.7 1.4-2.9-2.3-1.1-1.2-.4 0-1 2.1-.4 1.7-.1-1.7 1.2-3.1-.6-1.3 .2-1.4 1.6-.8 4 .1 0-1.5zM56.2 42.2l2.1 .5-.1 2.2 1.2 1.8-.9 1.6-.5 .2-1.1-1.4-.2-1.3 .5-2.2zM52.2 44.5l.6 0-.5 .9 1.3 2.6-.5 1.7-1.7-.8-.1-.4 .4-1.8-.9-1.8zM76.3 61.8l.5 0 0 1-.8-.5zM74.1 66.3l1.8 .6 .4 2.3-.9-.7zM35.9 68.1l.7 0-.8 .9zM40.2 70.8l-.3 4.9 .3 .2 2.7-2.2 .2 .2-.3 2.7-2.1 1.6-.6-.3 .4-.9-.3-.4-1.8 .9-.6-.9-.3-1.5-1.3 .8-.2-.7 .1-1.3 .6-.8z", "#000", 0.15]], shade: "M83.4 11.1l1.4 2.2 2 12 2 6.3 .1 4.4-1 2.2-2.8 2.7-2.6 .9-8.4 1.1-1.4 .4-1.1 1.2 0 4 .8 3.5 .8 .8 1.3 .4 1.4 1.5 .1 2.7-1.3 .4 1.6 1.4 .6 1.3 0 2.7-.6 .4-1.3-.3-.4 .3 1.3 2.3 .5 3.1-.1 .9-.9 .9-.4 1.3-2-.4-.1 2.2 .3 .4-8 3.6-4.9 3.6-1.8 .4-2.7-1.2-3.1-.5-4 0-1.8 .4-1.8-.5-1.3 .9-2.2 .1-.5-.5-.8 0-.2-2.3 .4-1.3-.3-.4-3.1 1.7-.4-.6 0-.8 2.2-1.2 3.1 .5 3.1-.3 2.3 3.7 .4-.1 .6-1.6 .3-3.3 .4 0 2.5 2.4 .3-1.3-.2-2.7 2.3-1.6 .5 0 2.2 2.9 .5 0 .5-1.8-.1-3.9 .4 0 2.7 2 .3-.3 0-1.3-.5-1.8-1.3-1.8-.3-1.3 1.8 .5 .2-.5-1.2-2.3-1.1-.8 3.1 0-1-2-1.3-1.4-1.2-.7 .3-.3 2.3-.1-1-1.5-2.8-1.6-.8-4.5 1.8 .4 .4-.4-1.2-2.6-1.7-1.4 3.4 .4 .4-.4-1.2-2.2-1.4-1.5-1.6-.7 2.8-.5-1.2-1.6-2.6-1.5-.4-2.2 .8 .2 .4-.7-.1-1.3-.8-1.8 .5-.7 2.7 2.6 .5-.1 .3-1.8-.8-3.6 2.6 1.6 .4-.2 0-1.4-1.1-2.6 2.1-3.4 1.1-2.9 .5-2.6-.4-2.7 1.4-1.8-.7 2.7 3.4 6.2 1.5 7.6 1.2 2.7 .7 3.5 1 2.3 1 1 1.3 .6 2.7-.7 3.1 .1 4.1-1.5 1.4-3.1-.4-2.2-2.2-2.3-2-11.1 2.6-3.6zM23.2 37.8l.6 .4 .9 1.8 1 6.7 1 2.2-.3 1.9-.9 1.6-.9 .8-.9 .2-1.7-.6-.8-.8-1.4-8 2.6-3.5zM32.8 56.9l1.6 .5 1.4 1.6 .2 2.4-.7 1.4-.9-.1-.9-.7-.9 0-4.9 1.3-4 1.7-2.6 .5-3.5-.5-2.4-1.8 1.9-.2 2.6-1.2 5.4-4.1 1.3-.2 3.1 .2zM77.9 80.1l.2-.4 2.3 1.3 .8 2.7-.9 1.4-1.8-.4-1.1 1.2-.2 2.7-1 1.3-1.7 .5-.6-1.4-.7-.3-1.8 2.3-1.8 .3-.9-2.1-.9 .4-1.7 1.7-.9 0-1.5-.9 .5-1.8-1.3-1.3-.8 1.4-1.4 0-.7 .8-.1 3.1-1 1.1-1.7 .3-1.4-1.2-2.2 .4-1.3 .7-.4 1.4-1 .6-1.3-.5-.5-1.5-.9-.7-1.3-.1-2.2 1.7-1.4-1.4 0-1.7 .9-.3 3.6 .5 4.5-.8 .4 .7 .4 0 .5-1.1 .9 1.2 .2-2 1.6 .5-.2-1.4 3-2.6 1-2.3-.3-.5 1.4 1.4 1.3 2.2 .9 .4 4-.2 3.6-.9 .9 1.3 .4-1.5 .6 .5 .1-1.3 1.1-.5 .9 1.1 .4-1.9 .5 .5 .4-.1-.2-1.4 1.1-1.3z", light: "M37.9 5.7l2.2 0 2.3 2.6 2.5 .5 .6 1.4-.4 2.2-2.7 4.1-4 3.8-4.2 2.3-2 .5-1.3-.2-.9-.7-.4-2.7-1.7-1.3 .3-1.8 1.3-.9 2.7-.1 1.2-1.2-1.7-2.2 .9-.9-.3-.9 .3-.5 3.6-1.1 2.7 .7 .3-.5zM75.5 8.8l1.3 0 .3 .5-.7 1.8-2.3 2.2-2.2 .6-.5-.6 .5-1.3 2.2-2.4zM72.4 28l.3-.2 1 1.1 .3 .9-.4 .6-1.7 0-.9-.6-.2-.5 1.1-.5zM15.3 35.6l1.5 0 .1 .9-.6 1.3-2.4 2.2-2.2 .6-.4-.6 .4-1.3 2.2-2.4zM31.2 47.1l.1-.4 .5 .3 .7 1 .5 1.4-.4 .6-1.3-.1-1.8-1-.2-.4zM67 77.9l1.7-.4 .9 1 .2 2.1-1 1.7-2.4 1.4-2.1 .2-2.2-.4-.5 1.1-.9-.5 .7-2.6 2.9-2.3zM48.3 81l3.7 0-.9 .9 .8 1.8-.5 2.2-1.4 1.3-1.8 .8-2.6 .1-1.8-.5-1-1.2 1-2.3-.9-1.8 1.9-.8z", eyes: [[50.1, 63.7, 11.4, 25.7, -10], [65.8, 59.9, 9.5, 25.7, -10]] },
+  bulb: { label: "Bulb", body: "M49.4 4.3l.1-.3 1.7 .2 2.1 1.6 2.5 .7 1.5 1.6 1.2 2.5 1.4 .7 .5-.4 1.5-4.9 .5 0 1.5 1.2 1.1 2.2 .8-.1 1.4 1.3 .8 2.1 0 3.3 1.5 1.7 3.8-1.8 1.7-.3 0 2-1.2 2.2 .3 .3 1.7-.1 2.9 .7 1.8 1.6-1.4 1.2-1.8 .8 0 .5 2.7 1.5 .8 1.5-4.6 1.2-.2 .8 1.1 1.2 2.4 1.7 1 1.7 .4 2.9 1.1 2.1 0 1.6-2.2 0 .5 1.7-.2 1.3-3.9-1-.5 .5-.1 1.7 1.6 2.5 .4 2.5-1.2 2.5 .2 2.1-.8 1.9-2.5-1.4-.1 2.4-.7 1.5-4.2-3.5-4.8 3.3 2.6 .8 .9 1.3 .2 2.5-1.6 2.1 2.3 1.2 .5 2.5-.4 1.3-1.4 1.2 2.3 1.3 .8 2.9 1.1 0 .4 .4 1.3 2.4 1.2 .5 1.3-1.2 .8 .6 1.3 .2 0 2 1.1 1.3-1.6 1-.3 2.4 .6 2.1-.2 1.2-1.7 1.1-1.7-1.2-1.4 1-1.1 2.1-1.3 .5-1.6-.1-.2-1.7-.7-.2-.8 .1-1.7 1.4-1.2 0-.9-.5 .1-1.6-.5-.2-.5 1 .3 2.1-.6 .8-1.3 .3-1-1.1-.6-.1-1.6 .9-.5 1.7-.8 .7-1.3-.3-.7-1.7-.5-.2-1.7-.1-1.7 1.3-1.7 .1-1.1-1.1 .1-2.5-1-1.6-2.1 .3-.3-.3 .2-2.1 .4-.9 1.8-.9 2.9-3.2-2.5-1.5-.7-1-.3-3 1.6-1.6-2.3-1.7-.5-2.5 .5-1.3 1.5-1.2-1.9-.7-.8-1.1-.9 1.1-.2-.1-1.3-1.3-.6-1.5-.8 .1-1.6-1.1-1-2.1 .1-2.1-.4-1-.4 .2-1.5 2.9-1.1 1.3-1.2-1.3-.8-2.5-.9 .1-1-1.3-.3-2.1 .6-2.5-.6-1.3-.8-.1-3.7 2.4-.5-1.4 .1-1.5-2.5 1-.6-2.5 .5-2.1-.8-2.9 .5-2.1 1.8-2 .4-1.7-.6-.5-3.3 .9-1.9 0 .3-2.1 1.1-1.7 .4-2.9 1.3-1.7 2.8-1.6 .7-1.3-.3-.8-3.6-1.2 .9-1.3 1.5-.8-2.6-1.7 1.5-1.7 3-1.2-.5-.9 1.2-1.1 2.1-.5 2.5 .3 2.4-2-.1-.8-1.9-3 .9-.5 1.6 0-.8-2.5 1.7-.5 2.1 .2 .4-.5 1.6-.5 2.4 .6 2.2 1.6 .5-.4-1.1-3.3-.2-1.9 2.1 .1 1.7 1 .8-.6 2.5 .3z", paints: [["M62.7 59.4l1.8-.1 1.3 .4 .8 .6 .4 1.2-1.6 1.8-3.8 1.7-5.4 1.5-5.4 .6-4.6-.1-2.8-.9-.2-3 .9-.5 11.7-1.1zM67 64l-1.4 1.7 2.3 1.2 0 1.6-1.7 1.4-3.8 1.7-5.8 1.4-5.8 .6-4.6-.3-1.3-.5-.8-.9 .4-1.7 1.6-1.2-2-.8-.4-.5 1.2 .7 2.9 .3 7.1-.4 7.5-1.9zM67.7 70.7l-1.1 1.2 2.2 1.3 .4 .4-.1 1.2-1.6 1.5-3.4 1.5-5.8 1.6-5.9 .7-5-.4-2.1-1.1 0-1.3 1.6-1.6-1.1-1 .8 .4 4.2 .1 7.1-.8 6.2-1.8z", "#000", 0.22], ["M65.4 11.8l1.6-.3 .9 .7-.3 3 .4 1.2-1.5 3.8-1.1 1.5-2.4-.7 1.4-1.7 1.4-2.9 .3-2.9-.3-.2-2.1 .9-5.5 3.1 1.3-2.4 .4 .8zM40.3 18.5l4 2.5-6.1 .1-.6 .3 1.5 2 2.1 1.6 1.5 .6-2.4 1.3-.4-.1-3.3-2.7-2.5 3.2 .1-.9 1.9-2.9-.7-2.1 .3-1.2 1.3-.7 3.3 .3zM52.4 18.9l2.5 4.4 .9-3.5-.7-.5 1.1-.1 .4-.6 1.4 2.4 .1 .8-.5 1.3 .7 .4-1.3 1.9-2.5 .1-1.6-1.1-2.2 2.9-.8 .4-1.6-1.3-2-.8-.8-2.1 0-.8 1.1-2.8 .8 2 1.3-.5-.5 1.3 1.3 2.5 1.1-1.7 1.2-3.7zM25.5 26.4l1.5-.2 .7 .2-1.8 3.4-.1 2.1 .3 .3 4.6-2.6 .5 .4 .4-.2-1.2 2.9 .1 2.1 .5 0 2.7-2.1-.6 2.9-1.1 1.2-1.7 .3-1.2-.6-.6-.9-.3-1.7-2.5 .5-1.6-1-.5-1.1 .1-1.7 1-1.7-.3-1.2zM78.2 33.1l1.4 .1 .8 1.2 .5 3.3-1 1.2 .7 1.7-1 .4 .5 1.7-.5 .7-.9 .3-2.1-.8-1.2 .3-1.6-2.6 4.7 .9-.8-2.1-2.6-2.5 .3-.5 3.7 0-.8-1.3-1.9-1.6zM33.3 38.1l.8 0 0 .4-2.5 2.3-2.1 3-.2-.3 .7-1.6 1.2-1.7zM32.8 43.5l.6 0-1.3 3-.1 2.1 4.6-2.5-.4 4.1 .4 .3 2.6-2-.4 3-1.4 1.1-2.1-.1-1.6-2.2-2.1 .5-1.7-1.3-.1-3 .7-2.1 .7-.5z", "#000", 0.15]], shade: "M73.2 16l1.8-.4 .1 .4-.2 1.7-1.1 2.1 .3 .4 1.7-.2 2.5 .6 2.2 1.7-1.4 1.2-2 .8 1.2 1.2 1.3 .5 1.2 1.7-1.7 .8-2.9 .5-.3 .8 1.6 1.6 2 1.3 1 1.7 .5 3.3 .7 .8 .1 .9-.2 1.7-1.6-.3-.4 .2 .8 2.5-.4 .5-3.8-1.2-.7 .7 0 1.7 1.6 2.2 .4 2.4-.4 1.7-.8 .8 .3 2.1-.7 2.1-.5 .1-2.1-1.4-.3 .4 .3 1.7-.8 1.8-1.7-1-2.1-2.4-.8 .1-3.8 2.8-2.5 1.2-.8 0-.8 .8 0 1.7-2.6 1.3-1.2 0-.3-1.7-.5-.2-5.9 .2-.4 .4-3.8-.4-.8 .8-.4 1.7-2.5 1.7-1 0-.3-.8-1.2 0-1.4-1.3-.8-1.7 0-2.5-.3-.7-2.9 4.5-1.3-1.3-.5-2.1-.3-.4-.9 .1-.8-1-.5-2.4 .9-2.5-.9-1.3 1.8 1.2 4.1 .8 2.9 4.4 .9-1.8 .4-2.8 2.2 2.4 .5-1.7-.2-2.9 1.7-.6 1.6 2.4 .7-1.4 .2-2.3 3.7 3.7 .6-1.8-.2-2.8 2.1 1.8 .5-.3-.2-3.3-.7-1.7 2.5-.8 1.7 2.3 .7-1.5 .3-2.9 1.9 1.1 0-3.4 .4-.4 1.3 1.6 .8-3.4 1.7 1.6 .4-.4 0-3.7 2.4 1.2-.5-2.5-1.1-1.3 .5-.6 .8-.4 1.2 1.6 .5-.1 .4-1.3 0-2.7 2.1 1.9 .4 .2 .2-.2 .3-2.1-1-3.4 2.1 .8 .4-.4-.3-1.6-.9-1.5-1.6-1.4 .8-1.7-.9-1.4-.1-1.1 .1-.4 .9-.1zM67 61.5l.2 2.1-1 1.3-3.8 2-.8 0-.8 2.1-3.4 1.2-.5-2 1.4-.5-.2-1.6 6-2.2zM67.8 68.2l.5 .4 .1 .8-.4 1.3-2.2 1.6-1.7 .9-.8 0-1.7 2.5-2.1 .8-1 0-.2-1.2-1.4-.5 1.8-.2 .8-.6-.1-1.7 5.1-1.7 1.7-.9zM54.8 68.6l1.6 0zM51.2 69l2.5 0zM69.1 74.4l.5 1.7 .4 .3 .8-.3 .4 .4-1.5 1.3-1.8 .1-3.4 1.4-1.5 1 .8 .4-.6 .4-.8-.4-.4 .4-1.5 0-.1-2.1 5.8-2.2zM54.3 75.3l2 0zM49.1 75.7l3 0zM77 79l.1 1.3-.3 .4 1.2 1.6-1.6 1.3 .3 5.4-1.7 1-1.3-1.3-1.2 .5-.8 .7-.5 1.6-.8 .8-2.5 .1-.4-2-1.3 0-1.7 1.6-1.2 0-.9-.5 .1-1.6-.5-.4-.6 1.2 .4 1.7-.6 1.2-1.3 .2-1.2-1.3-1.3 .4-.7 .7-.5 1.7-.8 .6-1.3-.2-.8-1.9-2.5-.1-.9 1.2-2.1 .1-1.2-1.4 .4-1.8 3.3 .3 4.6-.9 .9 1.1 .3-1.6 .9 .8 0-1.2 2.5-1.9 1.7-2 2.9 2.4 4.2-.8 .8 1.1 .4-1.2 1.3 .7 .2-1.2 .6 .3 .4-.3 .2-1.3 2.8-2.6 .6-1.2 0-1.6zM59 81.5l1 0zM57.8 81.9l.8 0-.7 .5z", light: "M37.8 8.1l2.2 .4 2 2.1 3.7 .4 1 1.7 .1 .8-.4 2.5-.6 .4 0 .9-.8 .4 0 .8-.9 .8-.1 .9-1.1 .4-.1 1.2-1.4 .5-.2 1.2-1.5 .4-.2 1.3-2 .8-.2 1.3-2.3 .4-.2 1.2-2.7 0-.5 1.3-2.1 .2-2.5-.6-1.8-2.1 .5-2.6-3.7-1.9-.9-.9 .9-.9 2.9-.9 .3-.3-.4-.4 .1-.8 1.2-.9 1.7-.4 2.9 .2 2-1.9 0-.8-2-3 .5-.4 2 0 .4-.4-1.3-2.1 1.8-.6 1.6 .4 .9-.7zM44.1 64.8l.4 0-.4 .4 .3 .5 1.2 .4 5.6 0 .8 .4-6.6 0-2.6-.8zM44.9 69.8l-.4 .6zM44 71.1l2.1 1.2 1.3 .1 .4 .3-1.6 .1-1.3-.4-.9-.9zM52.9 72.7l.8-.3 .8 .3zM48.9 73.2l.6-.3 .6 .3zM45.3 77.3l1.3 1.3 .8 0 .4 .4-1.2 .1-.8-.5-.6-.4zM47.9 79.4l.4-.4 1.2 0 4.2 .1 .3 .3zM66.2 80.3l1.3-.4 .5 .8 .1 1.2-.7 1.7-2 1.4-3 .3-2.4-3 .7-.8 1.7-.3 1.3 .2zM50.2 82.3l2.7-.1 1.4 .6-.7 .4 .5 1.6-.5 1.7-1.2 1.3-1.6 .7-2.1 .2-2.1-.5-1.4-1.7 2.3-2.5z", eyes: [[45.6, 39.4, 10.1, 23.5, -7.7], [65.2, 34.7, 8.5, 23.4, -16.9]] },
+  chick: { label: "Chick", body: "M40.1 4l1.9 .3 1.5 1.3 2.2 8.1 .7 1 9-7.8 2.4-.5 2 1.1 1 1.8-.2 1.8-3.6 4.7 1.4 1.6 .6 2 .4-.1 1.6-2.4 .4 0 1.4 1.7 .7 3.6 .4 .3 1.6-1 .9 2-.1 2.4-1.1 2.4 .4 1.6 .7 .8 2.8 .2 1.6 1.5-.3 .8 .5 1.2-.9 .8 2.4 1.2 .6 1.6-.3 .8 2.1 1.2 1.6 2.1 .4-.2 .8-2.2 .8 .3 2.1 1.7 .6 2.8 2.2 2.4 2.4 .5 2 2.4-.3 2-1.3 .3-.3 .5 0 2.9 1.3 2.4-.2 1.3-1.6 1.3-1.6-1-2.4 1.3-2.1 2.1-3.2 .5-1.2-.9-.7 2.7 .8 1.6-.2 2.4-1.1 1.3-1.4-.5 .1 2.1-1.1 2.4-.5 .2-1.3-.6-.2 .4 1.5 1.1 1.3 2 2 1.2 2.4-.3 .3 1.2 1 1.3-.3 2-1.7 .4-1.6 2.8-.6 2.9-2 .8-1.2-1.6-2 2-2 .7-1.2-.7-.3-1.6-3-1.2-3.2 .7-.6-1.6 1.1-2-.1-1.9-2.5 1.9 .5 1.7-1.7 .7-.9 3.3 .5 2-.9 1.6-1.9 .6-2-1.4-2.4 .5-1.3 1.9-1.6 .5-1.6-1.2-.5-1.7-1.5-.9-.4-.2-2.1 1.1-.6-.8-.9-.4-.2-2.8 3.6-4.9-.9-1.6 1-1.2-2-.8-.8 .1-2 4.1-1.2 1.7-1.7-1.9-.5-2.4-.2-.2-.8 .5-1.4-1.5-.6-2.5 .7-2.8-.4-1-2 1.2-.8-1.4-1.6-1.2-.6 .8 .6 2-1.2 .3-.4 1.1-3.3-.4-1.2-.9-.8-1.6-2-1.7-1.2-1.9-2.1 .1-.9-1.1 .3-2.8 1.7-2 .3-1.6-1.8-.9-.1-2 1.7-2.1 2.5-.6 2.1-2.1-1.2-2.9 1.1-.3 3.2 .4 .3-.5-.3-2.5-3.6 .4-1.2 0-.2-.3 .3-1.6 1.3-1.7 .6-2.4 1.2-1.6 2.7-1.6-5.4-.4 .4-1.6 2-2.1 .1-1.2 .9-1.6 1.8-1.4 3.3-1 2.8-4.5 2.8-3.2-8.2-4.1-1.3-2 .1-2.1 1.7-1.8 2-.5 9.7 3 1.2 .1 .4-.4 .2-1.1-.7-8.5 1.2-2.1z", paints: [["M54.1 54.6l2.5 0 1.2 .4 1.7 1.7 .9 2 .4 2.8-.8 4.5 .3 4.8-.9 .9-1.6-.4-2.5-3.1-2.9-1.8-2-3.3-.4-2.4 .6-3.2 1.5-1.9z", "#000", 0.2], ["M40.7 22.2l.7 .4-2.1 3.7-1.1 2.4-.3 2-.2-1.2 .4-2 .7-2zM50.4 22.6l.5-.1 .3 .6 .1 5.6-.4 1.5-.3-.3zM65.1 25.1l1.2 0-.4 1.7-3.3 1.1-6.2 3.7 1.6-2.5 .2-1.3 0 1.3 .4 .4zM65.4 30.3l.1-.3 1.2 1 .9-.3-1.7 4.3-1.2 1.5-2.6-.5 1.8-2.2zM34.2 31.2l.5 .4-1.9 2 .3 .2 4 .4 .3-.2-.7-2.1 1.6 1.7 1.7 .7 1.2-2.1 1.2 3.8 .4 0 2.4-4.1 .4 1.2 .4-.8 1.3 4.5 1.6 2.6 1.5-2.6 1.3-4.4 .4 .8 .4-.2 .4 1 1.3 0-.1 2.4 1.2 1.4 1.7-4.8 1.4 3.8-1.9 1.6-1.6 2.4-1.5-1.1-.9-1.6-2.2 3.2-1.4 .4-1.7-.2-.4 .6-1.9-1.2 .7-2.1-.8-1.6-1.2 1.1-1.2 .2-1.6-.8-1.2-2.1-5.7 0-.1 .4 1.3 2.1 2.4 2 1.9 .8-2.7 1.4-3.3-2.6-2.3-4-1.5 2.3 .6-2 1.2-2zM26.1 37.2l1.1 0-1 1.2-1.1 2.9 .1 2.8 5.9-3.3-.2 .5 .4 .4-.9 3.2 .4 2 .3 .2 3.3-2.6-.9 3.4-1.6 1.5-1.3 .1-1.3-.5-.6-.8-.9-2.7-1.6 .9-1.2 .2-1.2-.5-.8-1.1-.3-2.9 .6-.8-.5-.4 .8-2.1 1-1.1zM76.9 50.2l3.2-.2 2.1 3-.3 2-1.5 1.3 1.1 2.8 0 1.2-1 1.3-.9 .4-4-.6-1.9-2.7 5.1 1 .4-.2-1.1-2.4-1.6-2.1-1.2-.8 .7-.5 3.8 .1-.8-1.6zM26.5 51.4l-.9 1.2-1.3 2.9 0 2.4 5.1-2.6 .7 .6-1 2.8 .3 2.2 2.5-2 .8-.2-1.2 3.6-1.7 .9-1.6-.2-.8 2.2-.1 2 2.1-.8 3.3-2.1 .4 .5-.8 2.8 .3 2 2.9-2.2 .2 .2-.4 2.8-1.8 1.5-1.2 .1-1.2-.5-.9-1.1-.4-1.6-1.6 .8-1.2 .1-1.2-.6-.7-1.1 .1-3.6 .8-2.1 1.1-.8-.2-1.6-.3-.3-2 .8-1.7-.5-.9-1.6 0-2.8 1.3-3.3z", "#000", 0.15]], shade: "M43.2 5.2l.8 1.7 2.1 7.6 0 2.1-.5 1.2-1.2 .9-.6-.1-2-10.5 1.2-1.6zM60.1 8.1l.5 .8 .1 2-3.7 4.9 1.2 1.2 .5 2-.9 .5-2.6-.1 .8-1.6-.2-.7-1.6 1.9-.3 .8 .2 .6-1.6-.1-1-.5-.4-.8 .2-.8 7.9-8.5zM61 17l.4 0 .8 .8 .5 1.2-3 0zM25.8 19l.8-.4 8.7 3.6 .1 .4-2.1 1.7-1.4 0-8.1-4.1zM65.9 22.2l.5 1.3-.1 2.4-1.1 2 0 1.6 1.5 1.5 2-.3 2 1.7-.3 .8 .4 1.2-.8 .8 2.4 1.2 .5 1.6-.2 .8 .6 .5-1.2 2.4 1.5 3.2-1.4 1.6-.9 2.5 0 2.4 .2 .2 3.3-2-.9 3.4 .5 2.2 2.4-2 .8 1.1 1.6-1.2 1.3 1.2-.1-2.9 1.4 .8-.5-2 .9-2.4 .2-1.7 1.3 1.2 2 .1 1.8 2.4-.1 2-1.6 .4 0 3.7 1.2 1.6 0 1.6-1.3 1.3-.7-.1-.9-.7-.8 0-2 1.1-2.1 2.1-3.2 .5-1.2-.9-.7 2.8 .8 1.6-.1 2-1.2 1.7-1.4-.5 .1 1.6-.7 2.5-.9 .5-1.3-.5-.2 .4 1.2 .8-5.7 2.1-5.6 3.6-1.6 2.8-1.2 .8 .7 1.6-1.7 .8-.3 2.1-.7 1.2 .4 2.4-1 1.4-1.6 .3-1.6-1.2-2 .1-1.5 .6-.6 1.6-1.6 .5-1.6-1.3-.8-1.9-1.6-.8-2.1 .9-.3-.2 0-.8 1.2-.7 1.2 .6 2 .2 4-.7 .6 .2 .8 1.2 .7-2 .8 1 .5-1.8 3.4-2.9 .7-1.2 .5-2.4-1.5-1.1-.8 .3-3.2-1.2-5.3 0-3.8 .8 .5-.8-2.4-.8-.6 .4-.6 1.6-.8 .9-1.2 .1-2 1-.5-2.4-.3-.4-1.2 .4-1.2-2-.2-2.5 .5-2-.4-1.1-1.2 1.1-.8 .1-.8-1.3-1.6-1.2-.7 .8 .7 2-1.2 .1-.3 1.1-.9 .1-2.9-.5-3.2-4 2.4-1.2 1.2 .9 .4-2.2 1.3 1.2-.1-2.7 1.3 .7-.2-2 1-1.4 .8 .9 .4-.8 1.2 1.6 .4 .1 .4-.7 .8 1.7 .7 3.1-.3 .6-.4-.4-.4 .2 .4 1.2 .4-.3 2.9 1.1 2.4 .1 1.4 3.1 1.4 1.7 .9-2.1 .7-3.7 .4-.1 2.9 3.2 .4-.1 .2-1.3-.1-3.2 1.5-.8 2.8 3.7 .9-2.1-.1-3.7 .9-.1 2.4 2.4 .5-1.9-.5-2.4 .8-1 .2 3.4 1 2.2 2.9-3.4-.2 4.1 1 1.7 1.7-2.6 1.1-.5 1.1-1.5-1.6-9.7 .2-2.8 .3-.3 2.4 2.4 .4-.1 .4-2-.3-2.1-.9-2 2.9 1.2 .1-.4-.3-1.6-1.7-2.4 .6-2.9 3 1.3-.2-2.1-1-2-1.3-1.2 3 .4-.7-1.6-2.1-2 .1-9-.9-4.4 .1-.7 2.1-1.7zM52.8 66l1 .8zM75.6 78.5l.8 0 .1 1.2 1.2 1.3-.4 .8 .3 .8-.4 .5-1.2 0-.4 .3-1.9 3.2 0 2.1-.9 .9-1.3 .3-.8-1.3-.8-.2-1.6 1.9-2 .5-1.2-.5-.1-1.6-.3-.3-3.3-.9-2 .8-1.2-.5 0-.4 .4 .3 1.6-1.1 3.2 .6 3.7-.7 1.2 1.4 .3-1.7 .5-.1 .8 .8 0-1.5 2.5-1.5 1.7-1.7zM54.6 82.2l.7-.1 .7 .9-.7 .3z", light: "M38.8 4.4l1.2 0-.2 .8-1.1 1.1-1.2 .5-.3-.3 .3-.9zM55.6 6.9l1.2 0-1 1.6-7.3 7-.4 .2-.9-.4-.4-.8zM24.5 14.1l.9 0-.4 1.2-1.2 1.1-1 .2-.2-.4 .4-.8zM37.5 16.6l.4-.1 .4 .9-.4 .1-.8-.5zM41.2 22.6l1.9 0-.4 1.3-2.3 3.7-3.7 4.2-3.2 2.9-3.3 2.1-2.4 1-1.6-.5-.5-1.7 .5-3.2 2.4-4.1 2.9-3.6 .4 0 .4 .8 1.6-.1zM18 53l3.3-.1 1.2 .5 .9-.6 .8 1 .4 1.8-2.5 .5-4.4 5-2 1.5-1.9-1.9-.2-.8 1.3-1.6 2-.2 2.3-2.2-1.2-2.1zM64.7 78.1l2-.1 .6 .9 .2 1.7-.8 1.7-1.6 1.1-1.7 .4-2-.1-1.6-.7-.4-.8 .7-1.2 2.1-1.7zM43.4 82.2l3.8 0-1.1 .4 .9 1.6-.2 2-.9 1.2-1.5 .9-2.4 .4-2-.5-1.1-1.2 .6-1.6 1.2-1.2 0-1.2z", eyes: [[43.1, 56.7, 11.8, 27.7, -7.7], [64.2, 51.7, 9.8, 27.6, -16]] },
+  frog: { label: "Frog", body: "M66.6 8.1l1.3-.1 2.9 1.2 1.4 1.8 1.2-2 .7 .2 2.6 2.2 .6 2.8 .5 .6 2.4-1.9 .9 2.2 2.5-.4 .2 1.4-.5 1.9 2.2 .9-.4 .9-1.7 1.5 0 .4 3 1.9 1.8 3.8-.5 2.4-2.5 .4 1.4 2.3 .8 3.3 .3 .2 2.8-2.7 .4 .2 .9 1.9-.7 3.7 3.2 .9 1.2 1-1.2 1.2-2.4 1.3-.5 .8 .5 1.4 2.7 2.4 1 1.8-.3 2.9 .7 2.3-.3 2-.5 .3-1.9-.7 .1 2.2-.5 1.6-4.7-2.7-.4 .6 .1 1.9-.9 1.9-1.2 .4-.9-.7-.3 .3-.1 1.4-1.1 1.9 .9 2.3 .6 .6 2-.6 .4 1 1.7 1.4 .2 1.9-1.8 .9-.6 2.4 .4 2.3-1.4 2-1.4 .4-1.4-1.2-1.9 .9-1.4 1.8-1.9 .7-1.4-.2-.5-1.7-1.4-.4-2.3 1.2-1.4 0-1.1-1.1 .5-1.9-.8-.2-1.9 .5-.8-.3 0-1.9 1.3-2.4-.2-1.4-.8-.3-.7 .8-.2 2.4-1.1 1.8-2.2 1.3-2.4 2.8-1.4-1.6-.5 .1-.9 1.2-.5-.2-1.2-1.2-1.5-3.3-.6-.3-2 .3-1.3 2.8-1.4-.2-.8-.7-.1-.6-.2 1.5 1.3 1.4 .6 1.9-.3 1.1-.5 .3-1.4-.1-.6 1.1 .8 2.3-.2 .9-1.4 .6-1.9-.8-1.6 .7-.3 .5 0 2.3-.4 .4-1.9-.3-1.9-1.7-.8 .2-.6 2.2-1.9-.4-1-.8-.8-1.9-1.5-.8-.4 0-1.5 1.1-1.5-.8-.8-2.3 .8-1.9 0-1.4-3.2-1.1-1.4-1.4-2.8-1.3-1.4-1.7-.7-2.5-.7-1-1.4-.5-2.4 4-1.4-1.6-.5-1.9-2.3 2.3-1.4-1.8-.5-3.5-1.4 .3-.5-1-.1-2.8 1.5-2.9 .1-2.3-.5-.4-2.4 .1 0-1.6-.9-.9 1.9-4.3 3.8-1.9-2.6-2.3 1.6-1.3-.3-2.9 1.5-2.9-.3-.4-2.3 .4-1.1-1.8 .9-4.3 2.7-2.8-.2-.5-2.6-.9 .9-1.9-.9-.9 3.1-3.3 3.3-.3 .7-.7-1.6-2.3-.1-.7 2.9-1.2 2.8 .8 .5-.2-1-2.5 0-.5 .5-.2 2.8-.2 2.4 1.4-.2-2.8 .6-.3 3.3 .6 1.9 2 .9-2.1 1.9-.1 3.3 2 1 2.2 .4 0 1.4-1.8 1.4 1.3 1-.5 .5 .2 .9 2.3 .9 .4 .4 .8-.1 1.4-.6 1.4 .2 1 .6 .2 1.4-.8 1.4 1.3 .5-.1 2-2-.1-.4-1.9-.3 0-1.2 1.6-2.8 2.2-1.2-2.6-2.1 3-2.8 3.3-.1-1.4-2.8 .9-.4 .1-1 4.2-1.3 1.4 .3 1.9 1 3.8-.8 .3-.6 0-2.3z", paints: [["M73.2 10l1.3-.5 2.4 2.3-.9 3.3-2.9 4.1-2.4-.8 1.6-1.4 1.7-2.8 .8-2.8-.3-.4-2.3 .6-5.2 2.3-.5-.2 1.4-2 .5 .8 3.3-1.8 .5 .3zM63.3 16.1l.6 0-.3 1.4 .3 1.4 1.3 1.4-1.5 1.6-.9-.9-.3-1.2 .3-1.8 .7-1.5zM25.1 21.3l0-.3 4.9 2.6-7 .5-.2 .4 1.4 1.7 2.3 1.5 1.8 .6-2.7 1.4-2.8-1.9-1.9-2.1-.4-1.2 .1-.9 .8-.9 3.7-.2 .3-.3zM33.5 23.6l-.1 .9 1.6 2.9-.5 1.5-1.9-.6 .6-2.3-1-1.9zM84 32.5l2.3-.2 1 3.5 .4 .4 .7-.4-.4 1.4-1.3 1 .6 2.3-.4 1.5-1.6 1-1.9-.1 2.4 2.8 .7 1.4-.2 .5-1-1.7-2.8-2.6 .1-.9-1-.4-1.5-2.9 4.3 1.6 .7-.2-.6-1.8-2.1-2.9 .1-.4 .5-.1 3.2 .5-.5-1.4zM18.4 47.6l.9 0-1.1 3.3 0 1.4 .4 .4 3.7-2.7 .6 .4-.3 2.4 .2 1.4 .5 0 1.8-1.9 .4 .5-.1 2.3-1.2 1.2-.9 .3-1.5-.3-.8-.7-.6-1.5-1.4 .8-.9 .1-1-.3-.9-1-.2-3.3 .5-1.9zM80.5 49.5l2 .4 1 .7 .4 1.2 .2 2.4-.6 1.4-2.1 .9-.6 4.3-1.1 .9-1.4 .1-2.8-2-1.1-3.3 4.4 3.1 .2-.2 .3-2.4-.8-2.8-.9-1.4 .7-.5 3.3 1.9 .2-1.9zM18.8 58.4l.6 .5-4.3 4.2-.8 1.7 0-.7 1.9-3.3zM20.3 63.1l1.3 0-.9 1-1.2 2.8 0 2.6 5.2-2.8 .4 .5 .5-.3-.7 .9-.6 2.4 .1 1.9 .3 .4 2.8-2.2 .2 .3-.8 2.9-1.3 1-1.4 .2-1.3-.8-1.1-3.1-1.4 .8-1.4 .1-1.1-.6-.6-.9-.1-3.3 .4-1.3 1-1.8z", "#000", 0.15]], shade: "M82.6 14.7l1 0 0 1.8-.5 1.5 2.3 .9-.4 .9-1.9 1.5 0 .4 3.3 1.9 1.8 3.8-.5 2.4-2.4 0-.3 .4 1.4 1.9 .9 3.7-.5 1-1.9 .2 0 1.6-1 1.2-2.3-2.4-1.4-.8-.3 .2 .3 4.3-.4-.1-.6-3.4-1.2 1.1-1.6 2.5-2.8-.5 .5-1.2-1.9 .2 .6-1-.2-.2-1.4-.1-2.3 .8 1.1-1-1.3-.5 0-1.4 .2-.2 .9 1.2 .5 0 0-2.9 1.6 1-.2-2.2 .5-.5 .9 1.3 .3 0 .7-2.3 1.4 1.3 .2-1.4-.4-2.4 1.7 1 .1-1-.7-1.4 1-1 1.4 1.5 .3-.5-.4-2.8 1.5 .7 .2-.2-1-2.8 .8-2.9-.2-3.3 1.1-1.4zM41.9 24.1l.8 .4 .1 1-.6 3.3 .8 .3 1.4-.9 1.9 2.5 .2 2.8-.2 .5-.9 0-.5 .4 .5 1.4-1.4 1.7-.3 .7 .5 .5-.7 1.4-1.9 .9 .5 .6-2.3 1.3 1.1 .5-2.1 .9 .9 .5-.5 .7-.4 .2-2.4-.7-.3 .2 .7 1-1.8-.3-1.3 .3 1.5 1.9-3-.7-.2 .2 1.1 1.4-1.4 .6-.4-.1-1.9-2.1-.3 .2-.3 2.8-2-2.3-.1-1 1.9 1-.4-1.9 .7-.9 .5 .1 1 1.3 .9-2.4 .4 .5 .5 0-.3-1.9 .3-.5 .5-.4 .4 .1 1 1 .1-2.6 .3-.1 1.9 1.6 .2-1.5-.5-1.8 .3-.5 1.6 .9-.5-2.8 1.3-1.8 1.4 1.3 .4-.4-.5-3.3 1.5 .7 .2-.3-1.3-2.3 .2-1.9-.4-1.9zM90.4 33.5l.6 0 0 .9-1.4 .1 0-.5zM91.3 35.8l.3 1.9-.6 1.4 .5 .4 2.8 .5 1.1 1-1.6 1.5-1.8 .9-.8 .9 .7 1.4 3 2.8 .5 1.4-.1 2.9 .6 2.3-.2 1.9-.9 .1-1.5-.5-.3 .4 .4 1.4-.4 1.9-1.5-.4-3.3-2.3-.4 .3 0 2.4-.5 1.4-.5 .6-1 .1-.9-.6-.4 .4 0 1.4-1.1 1.9-5.1 1-5.2 2.4-4.2 2.7-1.9 .5-.8 .9 0 1.9-1 1.9-1.5 1.3-.9 .2-1.4 2.2-1 .6-.5-.1-.9-1.4-.5 0-.9 1.4-.5-.3-1.4-1.6-1.4-3.1-2.7 .3-.6 2.3-.5 .5-1.4-.3-.8-.6-.1-.6-.3 1.5 1.7 2.4 .1 1.8-.6 .5-1.4-.3-.7 1.3 .8 1.8-.1 1.4-1.4 .6-2.3-.8-1.5 .8-.3 .4 .3 2.3-2.3 .1-1.4-1.8-1 0-.4 .3-.4 1.9-.6 .2-1.9-.6-1.3-2.4-1.5-.8-.4-.1-1.5 1.1-1.4-.6-.2-.5 1.6-1.1 3.8 .8 5.2-1.1 .9 1.2 .5-1.5 .5 .5 .3-.3 0-.9 .6-.2 .9 .9 .3-1.2 .2-.2 .5 .6 0-1.3 2-1.9 1-1.9 .1-1.4-2.6-2.2-1.9-.5-3.8-.1-6.6 .5-5.6 2.4-1.9 1.7-.5-.7-2.8-1.1-1.5-1.9-.1-1.4-.9-1.9-1.3-.7-1.2 1.2-.6 1.8-1 1.1-1.4-1.5-.5-1.9-2.3 2.1-1.4-1.6-.2-3.3-.3-.5 2.8-1.5 3.8 1.1 3.8 .4 1.8 4.3 1-1.4 .9-2.6 .8-.3 1.6 3.2 1.4 1.7 .8-2 .6-3.4 3.3 3.6 .4-1.6 .1-2.5 3.2-.7 1.4 2.7 1 1 1-4.3 .4-.2 2.4 2.9 .5-3.6 2.8-.6 1.4 2.7 1.4-3.7 2.3 3.1 .5 .1 .6-4 .3-.3 2.4 2.3 0-3 3.8-1.6 2.8 4 .9-1.9 .5-3.7 2.8 3 .4-1.6-.1-2.4 1.1-.8 .5 .1 1.9 3 .4 .1 1-4.9 2.3 2.4 .6-1.3-.1-2.5 1.9-1 1.9 2.2 .9-3.8 2.8 3.1 .6-1.7-.2-3.3 .6-.5 2.3 2.1 .4-.2-.5-3.3 3.4-3.1 2.1-2.6 .8-1.8 0-2.4zM66.7 37.2l.8-.3 .4 .8-.4 .5zM24.3 48.5l.4-.3 .4 .4 1.8 1.8-.2 .5-2 .1 .1-1.5zM22.9 50.4l.4-.3 .1 .3-.6 .6zM86.7 68.8l.5-.5 .1 .5 1.4 .9 .5 2.4-1.9 .9-.5 2.4 .4 1.8-1.4 2.5-1.4 .4-1.4-1.3-.5 0-1.3 .8-2 2.3-2.3 .2-.6-.2-.4-1.7-2.3 0-1.4 .9-1.8-.1-.7-.9 .6-1.9-.5-.4-1.9 .4 1-.7 1.4 .7 3.3 .2 4.7-1 .9 1.4 .5-2 .7 0 .7 .9 .4-1.9 .6-.2 .9 .9 .3-1.1 .2-.3 .4 .5 0-1.2 2.1-2.8 .2-1.9z", light: "M56.6 11.4l1.9-.2 1.9 1 3.2 .1 .9 1.4-.3 1.9-2.3 3.8-3.4 3.2-3.7 2.3-1.9 .6-1.4 0-1.1-1-.2-3.2-2.6-1.9 2.5-2.5 .9-.4 2.4 .4 .4-.4-1.4-2.8 .9-.4 .4-1 .6-.5 1.9 0zM17.6 19.8l2.4-.3 .9 .5 .9 1.3 2.4 .5 .8 1.3-.3 1.9-2.4 3.8-3.7 3.5-3.8 2.2-1.9 .4-1.4-.2-.7-.7-.2-2.3-2.3-1.5-.1-1 .5 0 1.4-1.8 3.3-.2 .8-.8-1.9-2.8 .6-.5 2.4-.9 2.3 .8 1-.2zM46.8 30.7l0-.4 3.3 3.9 4.8 4 .4 .9-2.4 .1-3.8-1.4-2.8-3.4 1.3-1.4-.4-1.9zM12.4 49.5l.7 2.8 2.2 2.1 3.3 1.3 5.6 1 .3 .3-5 1.9-4.2 .9-3.3 .2-2.4-.8-.9-1.2-.5-2.4-1-.9 .1-.5 1.4-.2 1.2-.8-2.7-2.3 1.5-1.1 0 1.1 .9 .4zM75.4 68.8l2-.1 .4 1-.3 1.9-1.6 1.8-1.8 .8-1.9 .3-1.9-.2-1.4-.7 .1-1.1 1-.9zM33.6 77.2l4.6 0-.3 .5 .3 2.4-.5 1.4-1.5 1.4-2.1 .8-2.4 .1-1.9-.5-.9-.8-.5-1.3-.9-.7 0-.4 .5-.5 2-.5 1.7-1.4z", eyes: [[31.7, 41.9, 10.3, 23.4, -10.6], [71.2, 32.6, 10.3, 23.4, -10.6]] }
 };
-var PICKER_SHAPES = Object.keys(CHARACTERS);
+var SOLVER_SHAPES = ["puff", "sprout", "cap", "bell", "cloud", "spike", "floppy", "antenna", "cactus", "bulb", "chick", "frog"];
+var PICKER_SHAPES = Object.keys(CHARACTERS).filter((id) => !SOLVER_SHAPES.includes(id));
 var PICKER_COLUMNS = 6;
 var DEFAULT_SHAPES = ["star", "moon", "gumdrop", "peanut", "bunny", "kitty", "acorn"];
 var FALLBACK_SHAPE = "gumdrop";
@@ -9770,7 +9906,7 @@ body[data-ds-dark-theme] .oai-overlay::before{background:radial-gradient(1100px 
 .oai-clay-omni{--oai-clay-atlas:var(--oai-omni)}
 .oai-clay-genie{--oai-clay-atlas:var(--oai-genie)}
 .oai-clay-unfold{--oai-clay-atlas:var(--oai-unfold)}
-.oai-ghost{opacity:0}.oai-cyan{fill:#00f0ff}.oai-magenta{fill:#ff2bd6}
+path.oai-ghost{opacity:0}.oai-cyan{fill:#00f0ff}.oai-magenta{fill:#ff2bd6}
 .oai-octo:hover .oai-cyan,.oai-glitch .oai-cyan{opacity:.55;transform:translate(-2.5px,0);animation:oai-glitch 2.4s steps(1) infinite}
 .oai-octo:hover .oai-magenta,.oai-glitch .oai-magenta{opacity:.55;transform:translate(2.5px,0);animation:oai-glitch 2.4s steps(1) infinite reverse}
 .oai-eyes{transform-origin:50px 36px;animation:oai-blink 5s infinite}
@@ -10080,7 +10216,7 @@ function Stage({ title, speech, at: at2, glitching, hero, mark = "AUTOMAGIK", wi
 // src/client/companion.js
 var import_react3 = require("react");
 var IDEAS = ["a sleepy cyan fox with a lantern tail", "a tiny robot made of moonlight", "a round jellyfish that wears headphones"];
-var NAMES = ["Pip", "Nova", "Mochi", "Echo", "Biscuit"];
+var NAMES = ["Pirlim", "Mestrik", "Maguito", "Guizo", "Trunfo"];
 var NAME_RULE = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u;
 var AVATAR_SIZE = 256;
 var MAX_AVATAR = 16e4;
@@ -10674,32 +10810,10 @@ var startPower = (kind, run) => WORKING.has(powerOf(kind).phase) ? null : runPow
 function stopPower(kind) {
   runs.get(kind)?.abort();
 }
-var INTENT_KEY = "automagik.welcome.team-intent";
-var INTENT_MS = 6e4;
-var intent = null;
-function setTeamIntent(power = null, now = Date.now()) {
-  intent = { power, at: now };
-  try {
-    globalThis.sessionStorage?.setItem(INTENT_KEY, JSON.stringify(intent));
-  } catch {
-  }
-}
-function takeTeamIntent(now = Date.now()) {
-  let value = intent;
-  intent = null;
-  try {
-    const stored = globalThis.sessionStorage?.getItem(INTENT_KEY);
-    globalThis.sessionStorage?.removeItem(INTENT_KEY);
-    if (value === null && stored) value = JSON.parse(stored);
-  } catch {
-  }
-  return value !== null && typeof value?.at === "number" && now - value.at >= 0 && now - value.at < INTENT_MS ? value : null;
-}
 function resetPower() {
   for (const controller of runs.values()) controller.abort();
   runs.clear();
   states.clear();
-  intent = null;
   for (const listener of Array.from(listeners)) listener();
 }
 
@@ -10756,18 +10870,34 @@ var import_react7 = require("react");
 var WAKE_MS = 1100;
 var LOOK_MS = 1800;
 var POLL_MS = 900;
+var GITHUB_POLL_MS = 1e3;
+var CONNECT_POLL_MS = 2e3;
+var CONNECT_MS = 18e4;
+var STATUS_RETRIES = 5;
 var READY_POLLS = 20;
 var abortError = () => Object.assign(new Error("Omni was switched off"), { name: "AbortError" });
 var sleep = (ms2, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) return reject(abortError());
   if (ms2 <= 0) return resolve();
-  const timer = setTimeout(resolve, ms2);
-  signal?.addEventListener("abort", () => {
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", abort);
+    resolve();
+  }, ms2);
+  const abort = () => {
     clearTimeout(timer);
     reject(abortError());
-  }, { once: true });
+  };
+  signal?.addEventListener("abort", abort, { once: true });
 });
-async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, quick = reducedMotion(), resume = null }) {
+var serverDone = (job) => job?.phase === "done" && job.acknowledged !== true;
+function resumeServer(status, start = startPower, { passive = false } = {}) {
+  const job = status?.server;
+  if (!job?.id || job.phase !== "running" && (passive || !serverDone(job)) || status.install?.phase === "installing") return null;
+  const { phase, detail } = powerOf("omni");
+  if (detail?.removed === true || WORKING.has(phase) || phase === "pairing" || phase === "linked") return null;
+  return start("omni", (options) => githubInstall({ ...options, resume: job, passive }));
+}
+async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, quick = reducedMotion(), resume = null, passive = false }) {
   const check = () => {
     if (signal?.aborted) throw abortError();
   };
@@ -10805,7 +10935,11 @@ async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait 
     if (plugins.install?.phase === "failed") return end("failed", { message: plugins.install.error });
     if (!plugins.ready) return end("restart", { plugins });
   }
-  show("looking");
+  const server = plugins.server;
+  if (server?.phase === "running") return githubInstall({ show, signal, omniAi, omniUi, wait, resume: server, passive });
+  if (passive && serverDone(server)) return end("asleep", null);
+  if (serverDone(server)) show("looking", detailOf(server));
+  else show("looking");
   const started = Date.now();
   let link = null;
   try {
@@ -10816,8 +10950,12 @@ async function powerOn({ show, signal, omniAi = call, omniUi = callOmniUi, wait 
   check();
   if (link?.linked === true || link?.configured === true) {
     await pause(LOOK_MS / 2);
+    check();
+    if (serverDone(server)) void claimJob(omniAi, server.id, signal).catch(() => {
+    });
     return end("linked", { origin: link.origin ?? null });
   }
+  if (link && serverDone(server)) return githubInstall({ show, signal, omniAi, omniUi, wait, resume: server, linkChecked: true });
   const found = await omniUi("omni-discover").catch(() => null);
   check();
   await pause(Math.max(0, LOOK_MS - (Date.now() - started)));
@@ -10866,31 +11004,88 @@ async function botPowerOn(kind, { show, signal, ai: ai2, wait = sleep, quick = r
 }
 var SANDBOX_LOG_MAX = 48e3;
 var TERMINAL_ENDED = /* @__PURE__ */ new Set(["done", "exited", "failed", "cancelled", "closed"]);
-async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep, poll = 400 }) {
+var OMNI_COMMAND_VERSION = /(?:^|\s)@automagik\/omni@(\d+\.\d{6}\.\d+(?:-[0-9A-Za-z.]+)?)(?=\s|$)/;
+var OMNI_RELEASE_TAG = /^v?(\d+)\.(\d{6})\.(\d+)$/;
+function newerOmniTag(github, npm) {
+  const left = OMNI_RELEASE_TAG.exec(github)?.slice(1).map(BigInt);
+  const right = OMNI_RELEASE_TAG.exec(npm)?.slice(1).map(BigInt);
+  if (!left || !right) return false;
+  const at2 = left.findIndex((part, i) => part !== right[i]);
+  return at2 !== -1 && left[at2] > right[at2];
+}
+function serverRefusal({ reason, version, npm, github }) {
+  if (reason === "no-systemd") return t("Omni's installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.");
+  const message = t("Omni {version} is not on npm, where Omni's installer gets it. The newest there is {npm}.", { version, npm: npm ?? t("unknown") });
+  const newer = newerOmniTag(github, npm) ? ` ${t("Omni {github} is out on GitHub and not on npm yet.", { github })}` : "";
+  return `${message}${newer} ${t("Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.")}`;
+}
+async function sandboxInstall({ show, signal, omniAi = call, omniUi = callOmniUi, wait = sleep, poll = 400, check: checkVersion }) {
   const check = () => {
     if (signal?.aborted) throw abortError();
   };
-  const opened = await omniUi("omni-terminal-open", { kind: "install", cols: 72, rows: 8 });
-  check();
+  show("sandbox", { terminal: null, log: "", step: null });
+  const payload = { kind: "install", cols: 72, rows: 8 };
+  let opened;
+  try {
+    opened = await omniUi("omni-terminal-open", { ...payload, via: "welcome" });
+  } catch (error) {
+    if (error?.code !== "bot/invalid") throw error;
+    check();
+    opened = await omniUi("omni-terminal-open", payload);
+  }
   const { terminal } = opened;
+  const close = () => omniUi("omni-terminal-close", { terminal }).catch(() => {
+  });
+  if (signal?.aborted) {
+    await close();
+    throw abortError();
+  }
   let log = "";
   let from = 0;
   show("sandbox", { terminal, log, step: null });
-  let started = false;
-  const start = async (state) => {
-    if (started || state !== "ready") return;
-    check();
-    const written = await omniUi("omni-terminal-write", { terminal, data: "\r" });
-    started = written?.ok === true;
-  };
-  await start(opened.state);
   const end = (phase, detail) => {
-    void omniUi("omni-terminal-close", { terminal }).catch(() => {
-    });
+    void close();
     check();
     show(phase, detail);
     return phase;
   };
+  const switchToGithub = async ({ npm, ...start2 }) => {
+    show("sandbox", { terminal: null, log: "", step: null });
+    await close();
+    check();
+    return githubInstall({ show, signal, omniAi, omniUi, wait, start: start2, npm });
+  };
+  let started = false;
+  let checked = false;
+  let checkedRun = null;
+  const start = async ({ state, command }) => {
+    if (started || state !== "ready") return;
+    check();
+    const version = checkVersion && OMNI_COMMAND_VERSION.exec(command)?.[1];
+    if (version && !checked) {
+      checked = true;
+      let answer;
+      try {
+        answer = await checkVersion(version);
+      } catch {
+      }
+      check();
+      checkedRun = { version, answer };
+      if (answer?.ok === false) {
+        if (answer.fallback || answer.reason === "no-systemd" && Object.hasOwn(answer, "fallback") && answer.npmHas === true) {
+          return { github: { version, reason: answer.reason, npm: { version, latest: answer.npm ?? null, exitCode: null } } };
+        }
+        return { refusal: serverRefusal({ ...answer, version }) };
+      }
+    }
+    const written = await omniUi("omni-terminal-write", { terminal, data: "\r" });
+    check();
+    started = written?.ok === true;
+  };
+  const opening = await start(opened);
+  check();
+  if (opening?.github) return switchToGithub(opening.github);
+  if (opening?.refusal) return end("failed", { message: opening.refusal });
   for (; ; ) {
     check();
     const read = await omniUi("omni-terminal-read", { terminal, from });
@@ -10899,13 +11094,228 @@ async function sandboxInstall({ show, signal, omniUi = callOmniUi, wait = sleep,
     from = read.next ?? from;
     if (read.result?.status === "paired") return end("linked", { origin: read.result.origin ?? null });
     if (read.result?.status === "pairing") return end("pairing", { pairing: read.result.pairing });
-    const exited = typeof read.exitCode === "number" || TERMINAL_ENDED.has(read.state);
-    if (exited && read.exitCode === 0) return end("linked", { origin: null });
+    const linking = read.exitCode === 0 && read.state === "linking" && !read.error;
+    const exited = !linking && (typeof read.exitCode === "number" || TERMINAL_ENDED.has(read.state));
+    if (exited && read.exitCode === 0 && !read.error) return end("linked", { origin: null });
+    if (exited && typeof read.exitCode === "number" && read.exitCode !== 0 && read.exitCode !== 130 && checkedRun?.answer?.ok === true && checkedRun.answer.fallback) {
+      const { version } = checkedRun;
+      const { exitCode } = read;
+      return switchToGithub({ version, reason: "npm-failed", exitCode, npm: { version, latest: null, exitCode } });
+    }
     if (exited) return end("failed", { message: read.error ?? (read.exitCode === 130 ? t("The install was cancelled.") : t("Omni's installer stopped (exit code {code}). What it printed is above.", { code: read.exitCode ?? "?" })), log });
     show("sandbox", { terminal, log, step: read.step ?? null });
-    await start(read.state);
+    const next = await start(read);
+    check();
+    if (next?.github) return switchToGithub(next.github);
+    if (next?.refusal) return end("failed", { message: next.refusal });
     await wait(poll, signal);
   }
+}
+var claimAttempts = /* @__PURE__ */ new WeakSet();
+async function claimJob(omniAi, id, signal) {
+  if (signal && claimAttempts.has(signal)) return;
+  if (signal) claimAttempts.add(signal);
+  return omniAi("omni-github-ack", { id });
+}
+async function cancelJob(omniAi, id, signal) {
+  const reply = await omniAi("omni-github-cancel", { id });
+  if (reply?.job?.id === id && reply.job.phase !== "running") await claimJob(omniAi, id, signal);
+}
+function showStoppedJobError(error, signal) {
+  if (powerSignal("omni") === signal && powerOf("omni").detail?.removed === true) {
+    showPower("omni", "failed", { message: error.message, removed: true });
+  }
+}
+var detailOf = ({ id, source, reason, npm, release, step, steps, log, error, fellBack, phase, cancelRequested }) => ({ job: id, source, reason, npm, release, step, steps, log, error: error ?? null, fellBack, phase, cancelRequested });
+function cleanUrl(text) {
+  const value = String(text ?? "").trim();
+  if (value === "") return null;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) && !/^https?:\/\//i.test(value)) return null;
+  let url;
+  try {
+    url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.username || url.password || url.search || url.hash) return null;
+  return `${url.origin}${url.pathname.replace(/\/api\/v2\/?$/, "").replace(/\/+$/, "")}`;
+}
+var loopback = (host) => ["localhost", "127.0.0.1", "[::1]"].includes(host) ? "localhost" : host;
+var effectivePort = (url) => url.port || (url.protocol === "https:" ? "443" : "80");
+function sameUrl(a, b2) {
+  const left = cleanUrl(a);
+  const right = cleanUrl(b2);
+  if (!left || !right) return false;
+  const leftUrl = new URL(left);
+  const rightUrl = new URL(right);
+  return leftUrl.protocol === rightUrl.protocol && loopback(leftUrl.hostname) === loopback(rightUrl.hostname) && effectivePort(leftUrl) === effectivePort(rightUrl) && leftUrl.pathname === rightUrl.pathname;
+}
+function sameOrigin(origin, target) {
+  if (typeof origin !== "string" || /[/\\?#@\s]/.test(origin)) return false;
+  const url = new URL(target);
+  try {
+    const candidate = new URL(`${url.protocol}//${origin}`);
+    return loopback(candidate.hostname) === loopback(url.hostname) && candidate.port === url.port;
+  } catch {
+    return false;
+  }
+}
+var CONNECT_DEADLINE = /* @__PURE__ */ Symbol();
+async function readBefore(omniUi, endpoint, remaining, signal) {
+  let timer;
+  let abort;
+  const deadline = new Promise((resolve, reject) => {
+    timer = setTimeout(resolve, remaining, CONNECT_DEADLINE);
+    abort = () => reject(abortError());
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    const request2 = Promise.resolve().then(() => omniUi(endpoint)).catch(() => null);
+    return await Promise.race([deadline, request2]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+async function githubInstall({
+  show,
+  signal,
+  omniAi = call,
+  omniUi = callOmniUi,
+  wait = sleep,
+  now = Date.now,
+  poll = GITHUB_POLL_MS,
+  connectPoll = CONNECT_POLL_MS,
+  connectMs = CONNECT_MS,
+  start = null,
+  npm = null,
+  resume = null,
+  linkChecked = false,
+  passive = false
+}) {
+  const check = () => {
+    if (signal?.aborted) throw abortError();
+  };
+  const end = (phase, detail) => {
+    check();
+    show(phase, detail);
+    return phase;
+  };
+  const connectSandbox = async (job2) => {
+    const github = detailOf(job2);
+    const fail = (message) => end("failed", { message, github });
+    const target = cleanUrl(job2.report?.apiUrl);
+    if (!target) return fail(t("Omni is installed, but its address is unknown. Power Omni on to try again."));
+    show("sandbox", { ...github, step: "connect" });
+    const deadline = now() + connectMs;
+    const read = (endpoint) => readBefore(omniUi, endpoint, deadline - now(), signal);
+    let claimLost = false;
+    while (now() < deadline) {
+      check();
+      const found = claimLost ? null : await read("omni-discover");
+      check();
+      if (found === CONNECT_DEADLINE || now() >= deadline) break;
+      const omnis = Array.isArray(found?.omnis) ? found.omnis : [];
+      const entry = omnis.find((entry2) => entry2.source === "sandbox" && entry2.reachable === true && entry2.version === job2.report.version && sameUrl(entry2.url, job2.report.apiUrl));
+      const link = entry || claimLost ? await read("omni-link") : null;
+      check();
+      if (link === CONNECT_DEADLINE || now() >= deadline) break;
+      if (link?.linked === true || link?.configured === true) return end("linked", { origin: link.origin ?? null });
+      if (link?.pairing && !sameOrigin(link.pairing.origin, target)) {
+        return fail(t("Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.", {
+          origin: link.pairing.origin ?? t("unknown"),
+          url: target
+        }));
+      }
+      if (link && entry) {
+        let claim;
+        try {
+          claim = await claimJob(omniAi, job2.id, signal);
+        } catch (error) {
+          return end("failed", { message: error.message });
+        }
+        check();
+        if (claim?.claimed === true) {
+          let reply;
+          try {
+            reply = await omniUi("omni-discover-use", { id: entry.id });
+          } catch (error) {
+            return fail(error.message);
+          }
+          check();
+          if (reply.status === "paired") return end("linked", { origin: reply.origin ?? null });
+          if (reply.pairing) return end("pairing", { pairing: reply.pairing });
+          return fail(reply.message);
+        }
+        claimLost = true;
+      }
+      await wait(Math.min(connectPoll, deadline - now()), signal);
+      check();
+    }
+    return fail(t("Omni is installed but did not answer at {url}. Power Omni on to try again.", { url: target }));
+  };
+  check();
+  let job = resume;
+  if (resume === null) {
+    show("sandbox", { job: null, source: "github", reason: start.reason, npm, release: null, step: "check", steps: [], log: "", fellBack: false });
+    const { version, reason, exitCode } = start;
+    const payload = { version, reason };
+    if (reason === "npm-failed" && Number.isInteger(exitCode)) payload.exitCode = exitCode;
+    try {
+      const reply = await omniAi("omni-github-install", payload);
+      job = reply.job;
+    } catch (error) {
+      return end("failed", { message: error.message });
+    }
+    if (signal?.aborted) void cancelJob(omniAi, job.id, signal).catch((error) => showStoppedJobError(error, signal));
+    check();
+  } else if (job.phase === "done" && !linkChecked && !passive) {
+    show("sandbox", detailOf(job));
+    let link;
+    try {
+      link = await omniUi("omni-link");
+    } catch {
+      return end("asleep", null);
+    }
+    check();
+    if (link?.linked === true || link?.configured === true) {
+      void claimJob(omniAi, job.id, signal).catch(() => {
+      });
+      return end("linked", { origin: link.origin ?? null });
+    }
+  }
+  let retries = 0;
+  let last;
+  while (job.phase === "running") {
+    last = detailOf(job);
+    show("sandbox", last);
+    await wait(poll, signal);
+    check();
+    let reply;
+    try {
+      reply = await omniAi("omni-github-status", { id: job.id });
+    } catch (error) {
+      check();
+      retries += 1;
+      if (retries === STATUS_RETRIES) return end("failed", { message: error.message, github: last, log: last.log });
+      continue;
+    }
+    check();
+    retries = 0;
+    if (reply.job === null) {
+      return end("failed", { message: t("The install's progress was lost (Automagik may have restarted). Power Omni on to try again."), github: last, log: last.log });
+    }
+    job = reply.job;
+  }
+  if (job.phase === "done") return passive ? end("asleep", null) : connectSandbox(job);
+  if (job.phase === "cancelled") return end("failed", { message: t("The install was cancelled.") });
+  return end("failed", {
+    message: job.error ?? t("Omni could not be installed from GitHub."),
+    next: job.next ?? null,
+    log: job.log,
+    github: detailOf(job)
+  });
 }
 var around = (text, name, node) => {
   const [before, after = ""] = text.split(`{${name}}`);
@@ -11114,6 +11524,15 @@ function statusOf(phase, detail) {
     return count === 1 ? t("Found an Omni") : count > 1 ? t("Found {count} Omnis", { count }) : t("Found Omnis, none ready to connect");
   }
   if (phase === "linked") return detail?.origin ? t("Connected to {origin}", { origin: detail.origin }) : t("Connected");
+  if (phase === "sandbox" && detail && "job" in detail) {
+    const version = detail.release?.version ?? detail.npm?.version;
+    if (detail.step === "check") return t("Checking Omni {version}…", { version });
+    if (detail.step === "download") return t("Downloading Omni {version} from GitHub…", { version });
+    if (detail.step === "build") return t("Building Omni {version}…", { version });
+    if (detail.step === "install") return detail.source === "npm" ? t("Installing Omni {version} from npm…", { version }) : t("Installing Omni {version}…", { version });
+    if (detail.step === "connect") return t("Connecting to your Omni…");
+    return t("Setting up your Omni…");
+  }
   return {
     waking: t("Waking up…"),
     starting: t("Starting Omni in this DSH…"),
@@ -11234,7 +11653,7 @@ function destinyOf(omnis = [], { where = WORKSPACE, newOmni = true } = {}) {
     title: choice.action === "use" ? t("Use {omni}", { omni: titleIn(omni, choice) }) : t("Connect {omni}", { omni: titleIn(omni, choice) }),
     sub: choice.sub || (omni.local ? place.already : t("Saved in your Omni CLI"))
   }));
-  if (newOmni && !rows.some((row) => row.omni.source === "sandbox")) {
+  if (newOmni && !rows.some((row) => row.omni.source === "sandbox" && row.omni.reachable !== false)) {
     tiles.push({ id: "local", icon: "sandbox", title: place.run, sub: place.on });
   }
   tiles.push({ id: "remote", icon: "remote", title: t("An Omni somewhere else"), sub: t("On a server, or the link Omni sent you") });
@@ -11285,11 +11704,78 @@ function Remote({ busy, onRemote, onBack, label = t("Where is your Omni?") }) {
     (0, import_react7.createElement)("button", { type: "button", className: "oai-textlink", onClick: onBack }, t("Back to the choices"))
   );
 }
+var installStepLabel = (step) => ({
+  check: t("Check"),
+  download: t("Download"),
+  build: t("Build"),
+  install: t("Install"),
+  connect: t("Connect")
+})[step];
+function installReason({ reason, release, npm }) {
+  if (reason === "behind" && release?.version) return t("npm's newest Omni is {npm}, older than Omni {version}, which this Automagik installs.", { npm: npm.latest ?? npm.version, version: release.version });
+  if (reason === "unpublished") return t("Omni {version} is not on npm (the newest there is {npm}).", { version: npm.version, npm: npm.latest ?? t("unknown") });
+  if (reason === "no-systemd") return t("Omni's npm installer needs systemd, and this computer has none.");
+  if (reason === "npm-failed") return Number.isInteger(npm.exitCode) ? t("Installing Omni from npm failed (exit code {code}).", { code: npm.exitCode }) : t("Installing Omni from npm failed.");
+  return null;
+}
+function installSource({ source, fellBack, release }) {
+  if (!release) return t("Installing Omni from GitHub instead.");
+  const { version } = release;
+  if (fellBack) return t("npm could not install it either. Installing Omni {version} from GitHub instead.", { version });
+  return source === "npm" ? t("Installing Omni {version} from npm.", { version }) : t("Installing Omni {version} from GitHub instead.", { version });
+}
+var installLogLabel = (source) => source === "npm" ? t("What Omni's installer printed") : t("What the GitHub install printed");
 function Inside({ phase, detail, power, live }) {
   const channels = live?.configured ? live.channels ?? [] : [];
   if (phase === "installing") return (0, import_react7.createElement)(InstallProgress, { plugins: detail?.plugins });
   if (phase === "pairing") return (0, import_react7.createElement)(Pairing, { pairing: detail.pairing, onCancel: power.cancelPairing });
+  if (phase === "sandbox" && detail && "job" in detail) {
+    const reason = installReason(detail);
+    const steps = [...detail.steps, { id: "connect", state: detail.step === "connect" ? "now" : "next" }];
+    return (0, import_react7.createElement)(
+      "div",
+      null,
+      reason ? (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad" }, reason) : null,
+      (0, import_react7.createElement)("p", { className: "oai-inside-note" }, detail.phase === "running" && detail.cancelRequested ? t("Stopping after this step…") : installSource(detail)),
+      (0, import_react7.createElement)("ol", { className: "oai-install", "aria-label": t("The install steps") }, steps.filter(({ state }) => state !== "skipped").map(({ id, state }) => {
+        const style = state === "done" || state === "now" ? state : "next";
+        return (0, import_react7.createElement)(
+          "li",
+          { key: id, className: `oai-install-${style}` },
+          (0, import_react7.createElement)("span", { className: "oai-install-dot", "aria-hidden": true }, style === "done" ? (0, import_react7.createElement)(Check) : null),
+          installStepLabel(id)
+        );
+      }))
+    );
+  }
   if (phase === "sandbox") return (0, import_react7.createElement)(InstallLog, { text: detail?.log ?? "", label: t("What Omni's installer printed") });
+  if (phase === "failed" && detail?.github) {
+    const { github, message, next, log } = detail;
+    const reason = installReason(github);
+    const stopped = github.steps.find(({ state }) => state === "failed");
+    const advice = {
+      retry: t("Power Omni on to try again."),
+      update: t("Update Automagik, then power Omni on again."),
+      "other-omni": t("Use an Omni on another computer.")
+    }[next];
+    const stoppedAt = stopped ? t("It stopped at the {step} step.", { step: installStepLabel(stopped.id) }) : null;
+    if (!github.error && log) {
+      const words = [stoppedAt, message, advice].filter(Boolean).join(" ");
+      return (0, import_react7.createElement)(
+        "div",
+        null,
+        (0, import_react7.createElement)(InstallLog, { text: log, label: installLogLabel(github.source) }),
+        (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad", title: [reason, words].filter(Boolean).join(" ") }, words)
+      );
+    }
+    return (0, import_react7.createElement)(
+      "div",
+      null,
+      reason ? (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad" }, reason) : null,
+      (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad", title: message }, [stoppedAt, message].filter(Boolean).join(" ")),
+      advice ? (0, import_react7.createElement)("p", { className: "oai-inside-note" }, advice) : null
+    );
+  }
   if (phase === "failed" && detail?.log) return (0, import_react7.createElement)("div", null, (0, import_react7.createElement)(InstallLog, { text: detail.log, label: t("What Omni's installer printed") }), (0, import_react7.createElement)("p", { className: "oai-inside-note oai-bad", title: detail.message }, t("What went wrong is above. Power Omni on to try again.")));
   if ((phase === "none" || phase === "found") && power.unowned) return (0, import_react7.createElement)(Unowned, { ...power.unowned, busy: power.busy, onRemote: power.remote, onBack: power.forgetUnowned });
   if (phase === "none" || phase === "found") return (0, import_react7.createElement)(Destiny, { omnis: detail?.omnis ?? [], machine: power.machine, busy: power.busy, onUse: power.use, onLocal: power.local, onRemote: power.remote });
@@ -11306,12 +11792,21 @@ function Inside({ phase, detail, power, live }) {
   return null;
 }
 var powerLocked = (kind, phase) => phase === "installing" || phase === "starting" || kind !== "omni" && phase === "ready";
-function powerOff(kind, { phase, detail } = powerOf(kind), omniUi = callOmniUi) {
+function powerOff(kind, { phase, detail } = powerOf(kind), omniUi = callOmniUi, omniAi = call) {
+  const signal = powerSignal(kind);
   stopPower(kind);
   if (kind === "omni" && phase === "pairing") void omniUi("omni-pair-cancel").catch(() => {
   });
   if (kind === "omni" && phase === "sandbox" && detail?.terminal) void omniUi("omni-terminal-write", { terminal: detail.terminal, data: "" }).catch(() => {
   });
+  if (kind === "omni") {
+    const job = phase === "failed" ? detail?.github : detail;
+    if (job?.job && (job.step === "connect" || job.phase === "done" || job.phase === "failed")) {
+      void claimJob(omniAi, job.job, signal).catch((error) => showStoppedJobError(error, signal));
+    } else if (phase === "sandbox" && job?.job) {
+      void cancelJob(omniAi, job.job, signal).catch((error) => showStoppedJobError(error, signal));
+    }
+  }
   showPower(kind, "asleep", { removed: true });
 }
 function Machine({ kind = "omni", phase, detail, power, live, onPower, children }) {
@@ -11480,7 +11975,7 @@ function usePower() {
   const off = () => {
     setProblem(null);
     setBusy(null);
-    powerOff("omni", { phase, detail });
+    powerOff("omni");
   };
   const connect = async (row, endpoint, payload) => {
     setBusy(row);
@@ -11537,7 +12032,17 @@ function usePower() {
     sandbox: () => {
       setProblem(null);
       back.current = { phase, detail };
-      runPower("omni", sandboxInstall);
+      runPower("omni", (args) => sandboxInstall({
+        ...args,
+        check: async (version) => {
+          try {
+            return await call("omni-server-check", { version, fallback: true });
+          } catch (error) {
+            if (error.code !== "omni-ai/invalid" || args.signal.aborted) throw error;
+            return call("omni-server-check", { version });
+          }
+        }
+      }));
     },
     remote: (wanted) => wanted.kind === "bad-link" ? setProblem(t("That is not a link your Omni sends. It looks like https://your-omni/api/login/app?grant=…")) : wanted.kind === "claim" ? (setProblem(null), setUnowned({ url: wanted.url, claimUrl: wanted.claimUrl }), window.open(wanted.claimUrl, "_blank", "noreferrer")) : wanted.kind === "grant" ? connect("remote", "omni-connect-grant", { url: wanted.url, grant: wanted.grant }) : connect("remote", "omni-pair-start", { url: wanted.url }),
     cancelPairing: () => {
@@ -11595,10 +12100,9 @@ var TeamLede = ({ name }) => (0, import_react7.createElement)(
   (0, import_react7.createElement)("br"),
   (0, import_react7.createElement)("span", { className: "oai-lede-rule" }, t("Code work goes to a Bot with Computer."))
 );
-var explicitOf = (props, intent2) => props?.explicit === true || intent2 !== null;
+var explicitOf = (props) => props?.explicit === true;
 function TeamStep(props) {
-  const [intent2] = (0, import_react7.useState)(() => takeTeamIntent());
-  const explicit = explicitOf(props, intent2);
+  const explicit = explicitOf(props);
   const state = useGate(explicit ? { ...props, explicit: true } : props);
   const finish2 = useFinish(props);
   const [glitching, glitch] = useGlitch();
@@ -11632,23 +12136,41 @@ function TeamStep(props) {
     if (state) glitch();
   }, [state, glitch]);
   (0, import_react7.useEffect)(() => {
-    const asked = intent2?.power === "omni" && !autoPowered.current && power.phase === "asleep";
-    if (!state || !(asked || powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current))) return;
-    autoPowered.current = true;
-    power.toggle();
-  }, [state]);
+    if (!state) return;
+    if (!explicit && powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) {
+      autoPowered.current = true;
+      power.toggle();
+    } else if (!autoPowered.current) {
+      void call("omni-plugins").then((status) => resumeServer(status)).catch(() => {
+      });
+    }
+  }, [state, explicit]);
   (0, import_react7.useEffect)(() => {
-    if (!state || !powersOnByItself(state.preload, geniePower.phase, geniePower.detail, genieAutoPowered.current, "genie")) return;
+    if (explicit || !state) return;
+    if (!powersOnByItself(
+      state.preload,
+      geniePower.phase,
+      geniePower.detail,
+      genieAutoPowered.current,
+      "genie"
+    )) return;
     genieAutoPowered.current = true;
     setLastPressed("genie");
     geniePower.toggle();
-  }, [state]);
+  }, [state, explicit]);
   (0, import_react7.useEffect)(() => {
-    if (!state || !powersOnByItself(state.preload, unfoldPower.phase, unfoldPower.detail, unfoldAutoPowered.current, "unfold")) return;
+    if (explicit || !state) return;
+    if (!powersOnByItself(
+      state.preload,
+      unfoldPower.phase,
+      unfoldPower.detail,
+      unfoldAutoPowered.current,
+      "unfold"
+    )) return;
     unfoldAutoPowered.current = true;
     setLastPressed("unfold");
     unfoldPower.toggle();
-  }, [state]);
+  }, [state, explicit]);
   if (!state) return null;
   const name = state.companionName ?? t("Your companion");
   const omni = phase !== "asleep" && phase !== "failed";
@@ -12053,6 +12575,14 @@ function SubscriptionSignIn({ tile, onBack, onSaved, glitch }) {
 
 // src/client/redact.js
 var CREDENTIAL_MARK = "[hidden]";
+function basicCredential(match, scheme, token) {
+  try {
+    const decoded = atob(token);
+    if (decoded.includes(":") && !/[^\x20-\x7e\x80-\xff]/.test(decoded)) return `${scheme} ${CREDENTIAL_MARK}`;
+  } catch {
+  }
+  return match;
+}
 var CREDENTIALS = Object.freeze([
   [/\bsk-[A-Za-z0-9_*.-]{6,}/g, "sk-[hidden]"],
   [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
@@ -12061,8 +12591,26 @@ var CREDENTIALS = Object.freeze([
   [/\bxox[baprs]-[A-Za-z0-9-]{8,}/g, CREDENTIAL_MARK],
   [/\bAIza[A-Za-z0-9_-]{20,}/g, CREDENTIAL_MARK],
   [/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, CREDENTIAL_MARK],
-  [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
-  [/([?&#](?:token|access_token|api_key|apikey|key|secret|password)=)[^&\s"']+/gi, `$1${CREDENTIAL_MARK}`],
+  [/\b(Bearer)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
+  [/(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?Basic\s+)[A-Za-z0-9._~+/=*-]+/gi, `$1${CREDENTIAL_MARK}`],
+  [/\b(Basic)\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9_+/=-])/gi, basicCredential],
+  // Provider and code-host keys whose own prefix the rules above do not cover. Each needs a
+  // long enough body that ordinary words cannot match it.
+  [/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}/g, CREDENTIAL_MARK],
+  [/\bwhsec_[A-Za-z0-9+/=]{12,}/g, CREDENTIAL_MARK],
+  [/\bhf_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bgl(?:pat|oas|rt)-[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bgsk_[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\br8_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bdop_v1_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bshp(?:at|ca|pa|ss)_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bSG\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bya29\.[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\bnfp_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bvercel_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bsbp_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bATBB[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/([?&#](?:token|access[_-]?token|api[_-]?key|apikey|key|secret|password|passwd|auth|authorization|client[_-]?secret|x-api-key|signature|sig|code|ticket)=)[^&#\s"']+/gi, `$1${CREDENTIAL_MARK}`],
   // npm registry credentials: an access token (8+ chars; shorter is indistinguishable from a
   // package name), the .npmrc keys as JSON (quoted key or value), their npm_config_* env
   // spelling, NPM_TOKEN, and any userinfo in an http(s) URL. The userinfo rule is greedy to
@@ -12075,7 +12623,7 @@ var CREDENTIALS = Object.freeze([
   // as a key with = or :, JSON-quoted keys included.
   [/(\b[A-Z0-9_]*(?:NPM_TOKEN|AUTH_TOKEN)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',}]+)/gi, `$1${CREDENTIAL_MARK}`],
   [/(\bhttps?:\/\/)[^/\s]+@/gi, `$1${CREDENTIAL_MARK}@`],
-  [/(["']?(?:api[_-]?key|authorization|x-api-key|password|secret)["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
+  [/(["']?(?:(?:[a-z0-9]+[-_.])*(?:api[_-]?key|authorization|x-api-key|x-auth-token|x-amz-security-token|proxy-authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|secret))["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
 ]);
 function redactText(text) {
   let out = String(text ?? "");
@@ -12111,18 +12659,23 @@ var import_react9 = require("react");
 var CLI_OF = { "acp-claude": "claude", "acp-codex": "codex", "acp-hermes": "hermes", "acp-antigravity": "agy", "acp-omp": "omp" };
 var LOGO_OF = { "acp-claude": "CC", "acp-codex": "CX", "acp-hermes": "HM", "acp-antigravity": "AG", "acp-omp": "OM" };
 var isNative = (agent) => agent?.connector?.native === true;
+var NOT_THIS_SIGN_IN = "This link is not from this sign-in.";
+var EXPIRED_SIGN_IN = "This sign-in expired. Start again.";
+var signInWords = (message) => message === NOT_THIS_SIGN_IN ? t("This link is not from this sign-in.") : message === EXPIRED_SIGN_IN ? t("This sign-in expired. Start again.") : message;
+var isolatedSignIn = (agent) => agent.authScope === "isolated" && !isNative(agent);
 var signInCommand = (agent) => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key;
 var SIGN_IN_OF = { "acp-claude": "claude auth login", "acp-codex": "codex login" };
 var CHAT_LOGIN = /* @__PURE__ */ Symbol.for("automagik.cli-login");
-function openChatLogin(provider, scope = globalThis) {
+function openChatLogin(provider, scope = globalThis, { attemptId } = {}) {
   if (!Object.hasOwn(SIGN_IN_OF, provider)) return false;
   try {
-    return scope[CHAT_LOGIN]?.open?.(provider) === true;
+    return scope[CHAT_LOGIN]?.open?.(provider, attemptId === void 0 ? void 0 : { attemptId }) === true;
   } catch {
     return false;
   }
 }
 var POLL_MS2 = 2e3;
+var UNREACHABLE_POLL_MS = 15e3;
 var SETTINGS_SECTION = "acp-agents";
 var cliBusy = (agent) => agent.cli.state === "installing" || agent.cli.updating === true;
 function stateOf(agent) {
@@ -12152,10 +12705,30 @@ function badgeOf(agent) {
   if (state === "ready") return t("Ready");
   return null;
 }
-function agentLines(agent) {
+function agentLines(agent, entry, { settings = false } = {}) {
   const name = agent.name;
   const cli = CLI_OF[agent.id] ?? agent.key;
   const lines = [];
+  const manual = agent.cli.install === "manual";
+  if (manual && !agent.cli.found) {
+    if (cliBusy(agent)) lines.push({ tone: "wait", text: t("Installing {name}…", { name }) });
+    else if (agent.cli.state === "failed" || agent.cli.error) {
+      lines.push({
+        tone: "bad",
+        text: agent.cli.error ? t("The {name} installation or update failed: {error}", { name, error: redactText(agent.cli.error) }) : t("The {name} installation or update failed.", { name }),
+        // Retry installs, so it shows only while the agent is on; off keeps the text and the link.
+        ...agent.on ? { action: "install", label: t("Retry") } : {},
+        ...agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t("Install it yourself instead") } } : {},
+        ...agent.cli.diagnostic ? { details: { diagnostic: redactText(agent.cli.diagnostic), ...agent.cli.logPath ? { logPath: agent.cli.logPath } : {} } } : {}
+      });
+    } else if (agent.on) {
+      lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Automagik can install it for you.", { cli }), action: "install" });
+    } else {
+      lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Turn {name} on to install it.", { cli, name }) });
+    }
+    if (agent.sharedAccount === true) lines.push(sharedLine(name));
+    return lines;
+  }
   if (cliBusy(agent)) {
     lines.push({ tone: "wait", text: agent.cli.updating ? t("Updating {name} automatically…", { name }) : t("Installing {name} automatically…", { name }) });
   } else if (agent.cli.state === "failed" || agent.cli.error) {
@@ -12168,28 +12741,50 @@ function agentLines(agent) {
   }
   if (!agent.cli.found) {
     if (lines.length === 0) lines.push({ tone: "muted", text: t("The {cli} CLI is not on this computer. Install it, sign in, then check again.", { cli }), ...agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t("Install {name}", { name }) } } : {}, action: "check" });
+    if (agent.sharedAccount === true) lines.push(sharedLine(name));
     return lines;
   }
-  lines.push({ tone: "ok", text: agent.cli.version ? t("Found the {cli} CLI on this computer (version {version}).", { cli, version: agent.cli.version }) : t("Found the {cli} CLI on this computer.", { cli }) });
-  if (agent.signedIn === true && agent.consent !== "needed") lines.push({ tone: "ok", text: t("Signed in to {name}.", { name }) });
+  lines.push({
+    tone: "ok",
+    text: manual && agent.cli.managed === true && agent.cli.version ? t("Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).", { cli, version: agent.cli.version }) : agent.cli.version ? t("Found the {cli} CLI on this computer (version {version}).", { cli, version: agent.cli.version }) : t("Found the {cli} CLI on this computer.", { cli })
+  });
+  if (agent.sharedAccount === true) lines.push(sharedLine(name));
+  const app = agent.appSignIn === true;
+  if (agent.signedIn === true && agent.consent !== "needed" && app) {
+    lines.push({ tone: "ok", text: t("Signed in to {name}.", { name }), ...agent.sharedAccount === true ? {} : { action: settings ? "native-switch" : "native-sign-out" } });
+  } else if (agent.signedIn === true && agent.consent !== "needed") {
+    const canSwitch = isolatedSignIn(agent) && entry?.authScope === "isolated" && entry.signedIn === true;
+    const account = canSwitch && entry.account?.kind === "account" ? entry.account.email ?? entry.account.org : void 0;
+    lines.push({
+      tone: "ok",
+      text: account ? t("Signed in to {name} as {account}.", { name, account }) : t("Signed in to {name}.", { name }),
+      ...canSwitch ? { action: "switch" } : {}
+    });
+    if (canSwitch) lines.push({ tone: "muted", text: t("Bots in this installation share this account. Your terminal sign-in stays as it is.") });
+  }
   if (agent.signedIn === true && agent.consent === "needed" && !cliBusy(agent)) lines.push({ tone: "bad", text: t("{name} is signed in on this computer. Confirm its account in a Bot's chat before Bots use it.", { name }), action: "login", label: t("Confirm account") });
-  if (agent.signedIn === false && isNative(agent)) lines.push({ tone: "bad", text: t("Not signed in to {name}. Run {command} in a terminal, then check again.", { name, command: signInCommand(agent) }), action: "check" });
+  if (app && agent.on && !cliBusy(agent)) lines.push(...appSignInLines(agent, name));
+  if (agent.signedIn === false && isNative(agent) && !app) lines.push({ tone: "bad", text: t("Not signed in to {name}. Run {command} in a terminal, then check again.", { name, command: signInCommand(agent) }), action: "check" });
   if (agent.signedIn === false && !isNative(agent) && !cliBusy(agent)) {
     lines.push({ tone: "bad", text: t("Not signed in to {name}. Sign in from a Bot's chat.", { name }), action: "login" });
-    lines.push({ tone: "muted", text: t("Or run {command} in a terminal, then check again.", { command: SIGN_IN_OF[agent.id] ?? cli }), action: "check" });
+    if (!isolatedSignIn(agent)) lines.push({ tone: "muted", text: t("Or run {command} in a terminal, then check again.", { command: SIGN_IN_OF[agent.id] ?? cli }), action: "check" });
   }
-  if (agent.signedIn === void 0 && !cliBusy(agent) && (agent.on || !isNative(agent))) lines.push({ tone: "muted", text: t("The sign-in to {name} has not been checked yet.", { name }), action: "check" });
+  if (agent.signedIn === void 0 && !cliBusy(agent) && (agent.on || !isNative(agent))) {
+    const text = agent.signInCheck === "timeout" ? t("Could not check the sign-in to {name}: {cli} took too long to answer.", { name, cli }) : agent.signInCheck === "unreadable" ? t("Could not tell whether you are signed in to {name}.", { name }) : t("The sign-in to {name} has not been checked yet.", { name });
+    lines.push({ tone: "muted", text, action: "check" });
+  }
   if (!agent.on) {
     lines.push({ tone: "muted", text: t("Off. Turn it on to use {name} as a model in DSH.", { name }) });
-    if (isNative(agent)) lines.push({ tone: "muted", text: t("Turning it on lets Automagik use the sign-in {name} already has on this computer.", { name }) });
+    if (app && agent.sharedAccount !== true) lines.push({ tone: "muted", text: t("Automagik keeps its own {name} sign-in, apart from the one in your terminal.", { name }) });
+    else if (isNative(agent)) lines.push({ tone: "muted", text: t("Turning it on lets Automagik use the sign-in {name} already has on this computer.", { name }) });
     return lines;
   }
-  const { state, version, error, diagnostic, logPath } = agent.connector;
+  const { state, version, error, diagnostic, logPath, unreachable } = agent.connector;
   if (state === "installing") lines.push({ tone: "wait", text: t("Installing its connector in the background. This takes a minute or two.") });
   if (state === "failed") {
     lines.push({
       tone: "bad",
-      text: error ? t("The connector did not install: {error}", { error: redactText(error) }) : t("The connector did not install."),
+      text: unreachable === true ? t("Could not reach the connector registry. Automagik tries again by itself, or press Retry.") : error ? t("The connector did not install: {error}", { error: redactText(error) }) : t("The connector did not install."),
       action: "retry",
       // What DSH 0.2.2 shows for a failed plugin install: the full diagnostic and its log file.
       // The panel and its expander read this one value, so the shared table runs here too: a
@@ -12206,6 +12801,32 @@ function agentLines(agent) {
     if (agent.restartNeeded) lines.push({ tone: "bad", text: t("Restart DSH to see {name} in the model picker.", { name }) });
     else if (stateOf(agent) === "ready") lines.push({ tone: "ok", text: t("Ready: pick {name} in the model picker.", { name }), ready: true });
   }
+  return lines;
+}
+var sharedLine = (name) => ({ tone: "muted", text: t("On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.", { name }) });
+var timeOf = (at2) => new Date(at2).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+function appSignInLines(agent, name) {
+  const lines = [];
+  if (agent.signingIn === true) {
+    if (agent.signInChecking === true) return [{ tone: "wait", text: t("Finishing the sign-in to {name}…", { name }) }];
+    lines.push({
+      tone: "wait",
+      text: t("Finish the sign-in to {name} in your browser…", { name }),
+      ...agent.signInUrl ? { link: { href: agent.signInUrl, text: t("Sign in with {name}", { name }) }, copy: agent.signInUrl } : {}
+    });
+    if (agent.signInPaste === true && agent.signInUrl && typeof agent.signInAttempt === "string") {
+      lines.push({ tone: "muted", text: t("Signed in on another computer? Paste the address the browser ends on:"), action: "callback" });
+    }
+    if (Number.isFinite(agent.signInExpiresAt)) lines.push({ tone: "muted", text: t("Expires at {time}", { time: timeOf(agent.signInExpiresAt) }) });
+    return lines;
+  }
+  if (agent.signInError === "expired") lines.push({ tone: "bad", text: t("This sign-in expired. Start again.") });
+  if (agent.signInError === "unsupported") lines.push({ tone: "bad", text: t("{name} did not offer a Google sign-in. Try again.", { name }) });
+  if (agent.signInError === "timeout") lines.push({ tone: "bad", text: t("The sign-in to {name} took too long. Try again.", { name }) });
+  if (agent.signInError === "failed") lines.push({ tone: "bad", text: t("The sign-in to {name} did not finish. Try again.", { name }) });
+  if (agent.signInError === "no-browser") lines.push({ tone: "bad", text: t("The CLI did not offer a sign-in link in time. Try again.") });
+  if (agent.signedIn !== false) return lines;
+  lines.push({ tone: "bad", text: t("Not signed in to {name}.", { name }), action: "native-login" });
   return lines;
 }
 function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
@@ -12232,16 +12853,19 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
   (0, import_react9.useEffect)(() => {
     void load(true);
   }, [load]);
-  const settling = view?.agents?.some((agent) => cliBusy(agent) || agent.on && agent.cli.found && agent.connector.state === "installing" || wanted[agent.id] !== void 0 && wanted[agent.id] !== agent.on) === true;
+  const settling = view?.agents?.some((agent) => cliBusy(agent) || agent.signingIn === true || agent.on && agent.cli.found && agent.connector.state === "installing" || wanted[agent.id] !== void 0 && wanted[agent.id] !== agent.on) === true;
+  const unreachable = view?.agents?.some((agent) => agent.on && agent.cli.found && agent.connector.state === "failed" && agent.connector.unreachable === true) === true;
+  const pollMs = settling ? POLL_MS2 : unreachable ? UNREACHABLE_POLL_MS : void 0;
   (0, import_react9.useEffect)(() => {
-    if (!settling) return void 0;
+    if (pollMs === void 0) return void 0;
     const timer = setInterval(() => {
       void load(false);
-    }, POLL_MS2);
+    }, pollMs);
     return () => clearInterval(timer);
-  }, [settling, load]);
+  }, [pollMs, load]);
+  const [signingOut, setSigningOut] = (0, import_react9.useState)(null);
   const say = (id, message) => setProblems((previous) => ({ ...previous, [id]: message }));
-  const act = async (id, endpoint, payload) => {
+  const act = async (id, endpoint, payload, words = (message) => message) => {
     say(id, null);
     setBusy(id);
     let ok = true;
@@ -12249,7 +12873,7 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
       show(await request2(endpoint, payload));
     } catch (error) {
       ok = false;
-      say(id, error.message);
+      say(id, words(error.message));
     }
     if (live.current) setBusy(null);
     return ok;
@@ -12258,25 +12882,53 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     view,
     busy,
     problems,
+    setProblem: say,
     isOn: (agent) => wanted[agent.id] ?? agent.on,
     flip: async (agent) => {
       const on2 = !(wanted[agent.id] ?? agent.on);
       setWanted((previous) => ({ ...previous, [agent.id]: on2 }));
-      if (!await act(agent.id, "acp-switch", { id: agent.id, on: on2 }) && live.current) {
+      const ok = await act(agent.id, "acp-switch", { id: agent.id, on: on2 });
+      if (!ok && live.current) {
         setWanted((previous) => previous[agent.id] === on2 ? Object.fromEntries(Object.entries(previous).filter(([id]) => id !== agent.id)) : previous);
       }
+      return ok;
     },
     retry: (agent) => act(agent.id, "acp-retry", { id: agent.id }),
+    // The person's click on Install (a CLI the app installs only then).
+    install: (agent) => act(agent.id, "acp-install", { id: agent.id }),
     check: (agent) => act(agent.id, "acp", { refresh: true }),
+    // An agent that signs in here: Sign in starts it (its link shows; a person's click opens it),
+    // and Sign out and Switch account ask first, with the account switch's words.
+    // acp-dsh's fixed refusals read in the page's language.
+    nativeLogin: (agent) => act(agent.id, "acp-sign-in", { id: agent.id }, signInWords),
+    // The address the browser ended on, for the attempt the row shows (#2048, paste-back).
+    callback: (agent, url) => act(agent.id, "acp-sign-in-callback", { id: agent.id, attempt: agent.signInAttempt, url }, signInWords),
+    signOutPending: signingOut,
+    askSignOut: (agent) => {
+      say(agent.id, null);
+      setSigningOut(agent.id);
+    },
+    cancelSignOut: () => setSigningOut(null),
+    nativeSignOut: (agent) => {
+      setSigningOut(null);
+      return act(agent.id, "acp-sign-out", { id: agent.id });
+    },
+    // Switch account (Settings), one action as Claude Code's and Codex's: sign out, then a new
+    // sign-in at once. A refused sign-out starts none.
+    switchAccount: async (agent) => {
+      setSigningOut(null);
+      if (!await act(agent.id, "acp-sign-out", { id: agent.id })) return false;
+      return act(agent.id, "acp-sign-in", { id: agent.id }, signInWords);
+    },
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
-    // Opens the sign-in row in a Bot's chat; nothing is asked of the host here. Without the Bot
-    // team (or a Bot), the row says to use the terminal.
-    login: (agent) => {
+    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat. A switch
+    // passes its own attempt (#2064); a plain Sign in passes none.
+    login: (agent, { attemptId } = {}) => {
       say(agent.id, null);
-      if (!open(agent.id)) {
-        say(agent.id, t("No Bot chat to sign in from here. Run {command} in a terminal instead.", { command: signInCommand(agent) }));
+      if (!open(agent.id, void 0, { attemptId })) {
+        say(agent.id, isolatedSignIn(agent) ? t("Sign-in needs a Bot chat. If you have no Bot yet, set one up first.") : t("No Bot chat to sign in from here. Run {command} in a terminal instead.", { command: signInCommand(agent) }));
         return false;
       }
       onLoginOpen?.(agent);
@@ -12284,19 +12936,79 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     }
   };
 }
-function AcpLine({ line, agent, acp, busy }) {
+function rememberSignInLink(url, scope = globalThis) {
+  try {
+    scope[CHAT_LOGIN]?.remember?.(url);
+  } catch {
+  }
+}
+function CopyLink({ url }) {
+  const [copied, setCopied] = (0, import_react9.useState)(false);
+  return (0, import_react9.createElement)("button", {
+    type: "button",
+    className: "oai-copy oai-acp-act",
+    onClick: () => globalThis.navigator?.clipboard?.writeText(url).then(() => setCopied(true), () => {
+    })
+  }, copied ? t("Copied") : t("Copy"));
+}
+function CallbackField({ agent, acp, busy }) {
+  const send = (event) => {
+    event.preventDefault();
+    const input = event.currentTarget?.elements?.namedItem?.("sign-in-address");
+    if (!input) return;
+    const value = input.value;
+    input.value = "";
+    if (typeof value === "string" && value.trim() !== "") void acp.callback(agent, value);
+  };
+  return (0, import_react9.createElement)(
+    "form",
+    { className: "oai-setup-form", onSubmit: send },
+    (0, import_react9.createElement)(
+      "div",
+      { className: "oai-field" },
+      (0, import_react9.createElement)("input", {
+        type: "password",
+        name: "sign-in-address",
+        autoComplete: "off",
+        spellCheck: false,
+        "aria-label": t("Signed in on another computer? Paste the address the browser ends on:"),
+        "data-1p-ignore": "true",
+        "data-lpignore": "true",
+        "data-bwignore": "true"
+      }),
+      (0, import_react9.createElement)("button", { type: "submit", className: "oai-ghost oai-acp-act", disabled: busy }, t("Send"))
+    )
+  );
+}
+function AcpLine({ line, agent, acp, busy, accountControls }) {
+  if (line.copy) rememberSignInLink(line.copy);
+  const canSwitch = line.action === "switch" && accountControls !== void 0;
+  const signOut = line.action === "native-sign-out";
+  const nativeSwitch = line.action === "native-switch";
+  const confirmingOut = (signOut || nativeSwitch) && acp.signOutPending === agent.id;
+  const confirming = canSwitch && accountControls.pending === agent.id || confirmingOut;
+  const accountButton = (label, onClick) => (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick }, label);
   return (0, import_react9.createElement)(
     "div",
     { className: "oai-acp-line-block" },
     (0, import_react9.createElement)(
       "p",
       { className: `oai-acp-line oai-acp-${line.tone}${line.tone === "wait" ? " oai-waiting" : ""}`, ...line.tone === "bad" ? { role: "status" } : {} },
-      line.text,
+      confirming ? t("This stops running Bot work for this account. Continue?") : line.text,
       line.link ? [" ", (0, import_react9.createElement)("a", { key: "link", className: "oai-link", href: line.link.href, target: "_blank", rel: "noreferrer" }, line.link.text)] : null,
+      line.copy ? (0, import_react9.createElement)(CopyLink, { url: line.copy }) : null,
       line.action === "retry" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.retry(agent) }, t("Retry")) : null,
+      line.action === "install" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.install(agent) }, line.label ?? t("Install")) : null,
       line.action === "login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t("Sign in")) : null,
-      line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null
+      line.action === "check" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.check(agent) }, t("Check again")) : null,
+      line.action === "native-login" ? (0, import_react9.createElement)("button", { type: "button", className: "oai-ghost oai-acp-act", disabled: busy, onClick: () => acp.nativeLogin(agent) }, t("Sign in")) : null,
+      canSwitch && !confirming ? accountButton(t("Switch account"), () => accountControls.ask(agent)) : null,
+      nativeSwitch && !confirming ? accountButton(t("Switch account"), () => acp.askSignOut(agent)) : null,
+      signOut && !confirming ? accountButton(t("Sign out"), () => acp.askSignOut(agent)) : null,
+      confirming ? accountButton(t("Continue"), () => !confirmingOut ? accountControls.confirm(agent) : nativeSwitch ? acp.switchAccount(agent) : acp.nativeSignOut(agent)) : null,
+      confirming ? accountButton(t("Cancel"), confirmingOut ? acp.cancelSignOut : accountControls.cancel) : null
     ),
+    line.action === "callback" ? (0, import_react9.createElement)(CallbackField, { agent, acp, busy }) : null,
     line.details ? (0, import_react9.createElement)(
       "details",
       { className: "oai-acp-details" },
@@ -12306,11 +13018,11 @@ function AcpLine({ line, agent, acp, busy }) {
     ) : null
   );
 }
-function AcpAgentRow({ agent, acp }) {
+function AcpAgentRow({ agent, acp, accountControls }) {
   const on2 = acp.isOn(agent);
-  const busy = acp.busy !== null;
+  const busy = acp.busy !== null || accountControls?.busy === true;
   const badge = badgeOf({ ...agent, on: on2 });
-  const lines = agentLines(agent);
+  const lines = agentLines({ ...agent, on: on2 }, accountControls?.accounts[agent.id], { settings: true });
   return (0, import_react9.createElement)(
     "div",
     { className: `oai-ai oai-acp${on2 ? " oai-ai-on" : ""}`, "data-acp": agent.id, "data-state": stateOf({ ...agent, on: on2 }) },
@@ -12327,29 +13039,91 @@ function AcpAgentRow({ agent, acp }) {
       badge ? (0, import_react9.createElement)("em", { className: "oai-found" }, badge) : null,
       (0, import_react9.createElement)("button", { type: "button", role: "switch", className: "oai-switch", "aria-checked": on2 ? "true" : "false", "aria-label": agent.name, disabled: busy, onClick: () => acp.flip(agent) })
     ),
-    (0, import_react9.createElement)("div", { className: "oai-acp-lines" }, lines.map((line, i) => (0, import_react9.createElement)(AcpLine, { key: i, line, agent, acp, busy }))),
+    (0, import_react9.createElement)("div", { className: "oai-acp-lines" }, lines.map((line, i) => (0, import_react9.createElement)(AcpLine, { key: i, line, agent, acp, busy, accountControls }))),
     acp.problems[agent.id] ? (0, import_react9.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, acp.problems[agent.id]) : null
   );
 }
-function AcpAgents({ acp }) {
+function AcpAgents({ acp, accountControls }) {
   if (acp.view?.available !== true || acp.view.agents.length === 0) return null;
   return (0, import_react9.createElement)(
     "section",
-    { className: "oai-group oai-acp-group", "aria-label": t("Claude Code and Codex") },
-    (0, import_react9.createElement)("div", { className: "oai-list" }, acp.view.agents.map((agent) => (0, import_react9.createElement)(AcpAgentRow, { key: agent.id, agent, acp })))
+    { className: "oai-group oai-acp-group", "aria-label": t("Coding agents") },
+    (0, import_react9.createElement)("div", { className: "oai-list" }, acp.view.agents.map((agent) => (0, import_react9.createElement)(AcpAgentRow, { key: agent.id, agent, acp, accountControls })))
   );
 }
-function AcpSettingsSection({ close } = {}) {
+var BOTS_CLIENT = "@automagik/bots-dsh/client";
+var loadBots = () => require(BOTS_CLIENT);
+async function readAccounts(load) {
+  try {
+    const omni = load()?.omni;
+    const face = omni?.face?.();
+    if (typeof face?.actions?.cliLoginAccounts !== "function" || typeof face.actions.cliLoginSwitch !== "function") return null;
+    const result = await face.actions.cliLoginAccounts();
+    return { face, hostText: face.hostText ?? omni.hostText, accounts: result?.accounts ?? {} };
+  } catch {
+    return null;
+  }
+}
+function AcpSettingsSection({ close, load = loadBots } = {}) {
   const acp = useAcp(void 0, { onLoginOpen: () => close?.() });
+  const [accountView, setAccountView] = (0, import_react9.useState)(null);
+  const [pending, setPending] = (0, import_react9.useState)(null);
+  const [busy, setBusy] = (0, import_react9.useState)(false);
+  const switchBusy = (0, import_react9.useRef)(false);
+  (0, import_react9.useEffect)(() => {
+    let live = true;
+    void readAccounts(load).then((view) => {
+      if (live) setAccountView(view);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const confirm2 = async (agent) => {
+    if (switchBusy.current) return;
+    switchBusy.current = true;
+    setBusy(true);
+    acp.setProblem(agent.id, null);
+    try {
+      const { face } = accountView;
+      const snapshot = face.hooks?.roster?.getSnapshot?.();
+      const main = [...snapshot?.mainBotIds ?? [], snapshot?.mainBotId].find((id) => id && snapshot.byId?.[id]);
+      if (!main) {
+        acp.setProblem(agent.id, t("Sign-in needs a Bot chat. If you have no Bot yet, set one up first."));
+        return;
+      }
+      const switched = await face.actions.cliLoginSwitch(main, agent.id);
+      await face.actions.refreshModels?.();
+      acp.login(agent, { attemptId: typeof switched?.attemptId === "string" ? switched.attemptId : void 0 });
+    } catch (error) {
+      const message = error?.message ?? String(error);
+      acp.setProblem(agent.id, accountView.hostText?.(message) ?? message);
+    } finally {
+      setPending(null);
+      setBusy(false);
+      switchBusy.current = false;
+    }
+  };
+  const accountControls = accountView === null ? void 0 : {
+    accounts: accountView.accounts,
+    pending,
+    busy,
+    confirm: confirm2,
+    ask: (agent) => {
+      acp.setProblem(agent.id, null);
+      setPending(agent.id);
+    },
+    cancel: () => setPending(null)
+  };
   return (0, import_react9.createElement)(
     "div",
     { className: "oai-acp-page" },
     (0, import_react9.createElement)(
       "div",
       { className: "oai-card" },
-      (0, import_react9.createElement)("h1", null, t("Claude Code and Codex")),
+      (0, import_react9.createElement)("h1", null, t("Coding agents")),
       (0, import_react9.createElement)("p", null, t("Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.")),
-      acp.view === null ? (0, import_react9.createElement)("p", { className: "oai-muted oai-waiting" }, t("Looking at what this computer has…")) : acp.view.available ? (0, import_react9.createElement)(AcpAgents, { acp }) : (0, import_react9.createElement)("p", { className: "oai-muted" }, t("The ACP agents plugin is not running in this DSH."))
+      acp.view === null ? (0, import_react9.createElement)("p", { className: "oai-muted oai-waiting" }, t("Looking at what this computer has…")) : acp.view.available ? (0, import_react9.createElement)(AcpAgents, { acp, accountControls }) : (0, import_react9.createElement)("p", { className: "oai-muted" }, t("The ACP agents plugin is not running in this DSH."))
     )
   );
 }
@@ -12372,7 +13146,7 @@ function AcpSectionIcon({ size = 16 }) {
   );
 }
 function installAcpSection(ctx) {
-  const section = ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: SETTINGS_SECTION, order: 30, label: () => t("Claude Code and Codex") }, AcpSettingsSection)) ?? (() => {
+  const section = ctx.slots.inject("settings.section", () => ctx.slots.register({ name: "settings.section", id: SETTINGS_SECTION, order: 30, label: () => t("Coding agents") }, AcpSettingsSection)) ?? (() => {
   });
   const icon = ctx.slots.inject("settings.section.icon", () => ctx.slots.register({ name: "settings.section.icon", id: SETTINGS_SECTION, order: 30 }, AcpSectionIcon)) ?? (() => {
   });
@@ -12407,7 +13181,7 @@ var ACP_CSS = `
 var import_react10 = require("react");
 var VENDOR_TERMS = "Personal use under the vendor's terms";
 var FIRST_OTHERS = 4;
-var LOGOS = { claude: "C", chatgpt: "G", deepseek: "D", kimi: "K", copilot: "P", grok: "X", openai: "O", openrouter: "R", zai: "Z", moonshot: "M", opencode: "OC", cliproxy: "⇄", ollama: "L" };
+var LOGOS = { claude: "C", chatgpt: "G", antigravity: LOGO_OF["acp-antigravity"], deepseek: "D", kimi: "K", copilot: "P", grok: "X", openai: "O", openrouter: "R", zai: "Z", moonshot: "M", opencode: "OC", cliproxy: "⇄", ollama: "L" };
 function subscriptionRows(subscriptions) {
   if (!subscriptions) return [];
   return SUBSCRIPTION_TILES.map((tile) => {
@@ -12595,7 +13369,7 @@ function SignInOrKey({ row, provider, onSaved, onClose }) {
     (0, import_react10.createElement)("button", { type: "button", onClick: () => setWay("key") }, (0, import_react10.createElement)("strong", null, t("Use an API key")), (0, import_react10.createElement)("span", null, t("Billed per use")))
   );
 }
-var CLI_ROWS = { claude: "acp-claude", chatgpt: "acp-codex" };
+var CLI_ROWS = { claude: "acp-claude", chatgpt: "acp-codex", antigravity: "acp-antigravity" };
 function cliAgentOf(row, acp) {
   const id = CLI_ROWS[row.id];
   if (id === void 0) return void 0;
@@ -12603,8 +13377,25 @@ function cliAgentOf(row, acp) {
 }
 var acpBusy = (acp) => acp ? acp.busy !== null : false;
 var canSignIn = (agent) => agent.cli.found === true && agent.cli.state !== "installing" && agent.cli.state !== "failed" && agent.cli.updating !== true;
+var appRow = (agent) => agent?.appSignIn === true;
+function AppAgentSetup({ agent, acp, onClose }) {
+  const busy = acpBusy(acp);
+  const problem = acp?.problems?.[agent.id];
+  const cancel = async () => {
+    if (agent.signedIn !== true && acp.isOn(agent)) await acp.flip(agent);
+    onClose();
+  };
+  return (0, import_react10.createElement)(
+    "div",
+    { className: "oai-signin" },
+    (0, import_react10.createElement)("div", { className: "oai-acp-lines" }, agentLines(agent).map((line, i) => (0, import_react10.createElement)(AcpLine, { key: i, line, agent, acp, busy }))),
+    problem ? (0, import_react10.createElement)("p", { className: "oai-error", role: "alert" }, problem) : null,
+    (0, import_react10.createElement)("button", { type: "button", className: "oai-quiet", onClick: cancel }, t("Cancel"))
+  );
+}
 function CliSetup({ row, agent, acp, onSaved, onClose }) {
   const [way, setWay] = (0, import_react10.useState)(null);
+  if (appRow(agent) && acp) return (0, import_react10.createElement)(AppAgentSetup, { agent, acp, onClose });
   if (way === "key" || agent === void 0 && row.keyUrl) return (0, import_react10.createElement)(KeyForm, { row, provider: providerOf(row), onSaved });
   if (agent === void 0) return (0, import_react10.createElement)("p", null, t("This DSH offers no {name} sign-in.", { name: row.name }));
   const busy = acpBusy(acp);
@@ -12659,7 +13450,8 @@ function Duplicates({ row, onDedupe }) {
 function Row({ row, acp, open, busy, problem, onFlip, onSaved, onClose, onDedupe }) {
   const logo = LOGOS[row.id] ?? row.name.slice(0, 1);
   const agent = cliAgentOf(row, acp);
-  const settling = !row.on && !open && agent?.on === true && agent.signedIn === true && agent.cli.found === true;
+  const settling = !row.on && !open && agent?.on === true && (agent.signedIn === true && agent.cli.found === true || appRow(agent));
+  const agentProblem = appRow(agent) && !open ? acp?.problems?.[agent.id] : null;
   return (0, import_react10.createElement)(
     "div",
     { className: `oai-ai${row.on ? " oai-ai-on" : ""}` },
@@ -12679,6 +13471,7 @@ function Row({ row, acp, open, busy, problem, onFlip, onSaved, onClose, onDedupe
     open && !row.on ? (0, import_react10.createElement)("div", { className: "oai-ai-setup" }, (0, import_react10.createElement)(Setup, { row, acp, onSaved, onClose })) : null,
     settling ? (0, import_react10.createElement)("div", { className: "oai-acp-lines" }, agentLines(agent).map((line, i) => (0, import_react10.createElement)(AcpLine, { key: i, line, agent, acp, busy: busy || acpBusy(acp) }))) : null,
     problem ? (0, import_react10.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, problem) : null,
+    agentProblem ? (0, import_react10.createElement)("p", { className: "oai-error oai-ai-problem", role: "alert" }, agentProblem) : null,
     (0, import_react10.createElement)(Duplicates, { row, onDedupe })
   );
 }
@@ -12700,9 +13493,10 @@ function ConnectAiStep(props) {
     setRows(reply.rows ?? []);
     setSubs(reply.subscriptions ?? null);
   }, []);
+  const agentsDigest = agentsDigestOf(acp.view);
   (0, import_react10.useEffect)(() => {
     void refresh();
-  }, [refresh, acp.view]);
+  }, [refresh, agentsDigest]);
   (0, import_react10.useEffect)(() => {
     if (state) glitch();
   }, [state, glitch]);
@@ -12721,6 +13515,16 @@ function ConnectAiStep(props) {
   const flip = async (row) => {
     const action = flipAction(row);
     say(row.id, null);
+    const agent = cliAgentOf(row, acp);
+    if (action === "setup" && appRow(agent)) {
+      if (!acp.isOn(agent)) {
+        if (await acp.flip(agent)) setOpen(row.id);
+      } else if (open === row.id) {
+        await acp.flip(agent);
+        setOpen(null);
+      } else setOpen(row.id);
+      return;
+    }
     if (action === "setup") {
       setOpen((current) => current === row.id ? null : row.id);
       return;
@@ -12766,6 +13570,17 @@ function ConnectAiStep(props) {
     onModels: () => finish2("models"),
     onContinue: () => proceed()
   });
+}
+function agentsDigestOf(view) {
+  return JSON.stringify((view?.agents ?? []).map((agent) => [
+    agent.id,
+    agent.on,
+    agent.signedIn,
+    agent.cli?.found,
+    agent.cli?.state,
+    agent.connector?.state,
+    agent.restartNeeded
+  ]));
 }
 function ConnectAiView({ state, rows, subscriptions, open, showAll, glitching, rowProps, onShowAll, onSkip, onModels, onContinue }) {
   const all = rows === null ? null : [...rows, ...subscriptionRows(subscriptions)];
@@ -12817,9 +13632,9 @@ function ConnectAiView({ state, rows, subscriptions, open, showAll, glitching, r
 var import_react11 = require("react");
 var TOOLS = [
   { id: "hermes", name: "Hermes", vendor: null, tag: "H", what: "Telegram bot", blurb: "Move its Telegram bot to Omni, with the bot you already know.", ready: true },
-  { id: "openclaw", name: "OpenClaw", vendor: null, tag: "OC", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false },
-  { id: "grok", name: "Grok bot", vendor: "xAI", tag: "X", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false },
-  { id: "muse", name: "Muse", vendor: "Meta", tag: "M", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false }
+  { id: "openclaw", name: "OpenClaw", vendor: null, tag: "OC", ready: false },
+  { id: "grok", name: "Grok bot", vendor: "xAI", tag: "X", ready: false },
+  { id: "muse", name: "Muse", vendor: "Meta", tag: "M", ready: false }
 ];
 var MOVE = [
   { id: "key", label: "Read Hermes's bot key", doing: "It goes straight to Omni, which keeps it private. You never see it here." },
@@ -12926,12 +13741,10 @@ function ToolCard({ tool, onPick }) {
         (0, import_react11.createElement)(
           "div",
           { className: "oai-mig-who" },
-          (0, import_react11.createElement)("strong", null, tool.name, tool.vendor ? (0, import_react11.createElement)("small", null, tool.vendor) : null),
-          (0, import_react11.createElement)("span", null, t(tool.what))
+          (0, import_react11.createElement)("strong", null, tool.name, tool.vendor ? (0, import_react11.createElement)("small", null, tool.vendor) : null)
         )
       ),
-      (0, import_react11.createElement)("span", { className: "oai-soon" }, t("Coming soon")),
-      (0, import_react11.createElement)("p", { className: "oai-mig-blurb" }, t(tool.blurb))
+      (0, import_react11.createElement)("span", { className: "oai-soon" }, t("Coming soon"))
     );
   }
   return (0, import_react11.createElement)(
@@ -13105,6 +13918,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     "div",
     { className: "oai-mig-doneview" },
     (0, import_react11.createElement)(BotPanel, { result }),
+    result.recovered === true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("No Bot answers in these chats yet. Pick one in Omni's Channels.")) : null,
     result.connected !== true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Omni has the channel. It is bringing the bot up now.")) : null,
     result.chatUrl ? (0, import_react11.createElement)("a", { className: "oai-pill oai-mig-sayhi", href: result.chatUrl, target: "_blank", rel: "noreferrer" }, t("Say hi to your bot"), Arrow()) : null,
     result.answering === true && result.answerBot ? (0, import_react11.createElement)("p", { className: "oai-mig-answer" }, Check2(), t("Replies through {name}.", { name: result.answerBot.name })) : null,
@@ -13132,19 +13946,34 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     )
   );
 }
-function ProblemCard({ error, onRetry, onHandoff }) {
+function ProblemCard({ error, note, restoring, onRetry, onHandoff, onRestoreHermes }) {
   const changed = error?.changed ?? {};
   const lines = error?.code === "hermes-still-on" ? "Hermes still has the channel. Nothing was handed to Omni, and its settings were put back." : error?.code === "refused" ? "Hermes would not restart. It may still have a chat open; finish it and try again." : changed.omniUnknown === true ? "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key." : changed.hermesOff === true && changed.omniCreated !== true ? "Hermes's Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key." : "Nothing was changed. Hermes is exactly as it was.";
+  const canRestore = changed.omniUnknown === true && error?.canRestoreHermes === true;
   return (0, import_react11.createElement)(
     "div",
     { className: "oai-mig-problem" },
     (0, import_react11.createElement)("p", { className: "oai-mig-error", role: "alert" }, t(lines)),
     error?.message && !["hermes-still-on", "refused", "omni", "failed"].includes(error.code) ? (0, import_react11.createElement)("p", { className: "oai-mig-fine" }, hidden(error.message)) : null,
+    note ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t(note)) : null,
     (0, import_react11.createElement)(
       "div",
       { className: "oai-actions" },
-      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", onClick: onHandoff }, t("Set up Omni's Telegram instead")),
-      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onRetry }, t("Try again"))
+      canRestore ? (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", disabled: restoring === true, onClick: onRestoreHermes }, t("Turn Hermes's Telegram back on")) : null,
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", disabled: restoring === true, onClick: onHandoff }, t("Set up Omni's Telegram instead")),
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", disabled: restoring === true, onClick: onRetry }, t("Try again"))
+    )
+  );
+}
+function RestoredCard({ onDone }) {
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-handoff" },
+    (0, import_react11.createElement)("p", { className: "oai-mig-lede" }, t("Nothing else changed. If Omni kept a channel from this move, check it in Omni's Channels before moving again.")),
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-actions" },
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onDone }, t("Done"))
     )
   );
 }
@@ -13155,6 +13984,7 @@ var TITLES = {
   moving: "Moving your bot…",
   done: "Omni has your bot",
   problem: "That did not finish",
+  restored: "Hermes's Telegram is back on",
   handoff: "Set up Omni's Telegram"
 };
 var SPEECH = {
@@ -13164,6 +13994,7 @@ var SPEECH = {
   moving: "Moving your bot. The key stays with me the whole time.",
   done: "There it is. Your bot answers on Omni now.",
   problem: "That did not finish. I'll tell you exactly where it stopped.",
+  restored: "That is your way back. Hermes has its Telegram again.",
   handoff: "We will do this Omni's own way."
 };
 function MigrateView({
@@ -13204,7 +14035,10 @@ function MigrateView({
   },
   onCheckStatus = null,
   gatewayStopped = false,
-  aside = null
+  aside = null,
+  onRestoreHermes = () => {
+  },
+  restoring = false
 }) {
   if (aside !== null) {
     return (0, import_react11.createElement)(StepAside, {
@@ -13234,7 +14068,8 @@ function MigrateView({
     phase === "confirm" && probe !== null ? (0, import_react11.createElement)(ConfirmCard, { probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) : null,
     phase === "moving" ? (0, import_react11.createElement)(MovingCard, { steps }) : null,
     phase === "done" && result !== null ? (0, import_react11.createElement)(DoneCard, { result, onDone, onCheckStatus, canOpenSettings, onOpenSettings, gatewayStopped }) : null,
-    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, onRetry, onHandoff }) : null,
+    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, note, restoring, onRetry, onHandoff, onRestoreHermes }) : null,
+    phase === "restored" ? (0, import_react11.createElement)(RestoredCard, { onDone }) : null,
     phase === "handoff" ? (0, import_react11.createElement)(HandoffCard, { handoff, note, onOpenChannels, onCheckAgain, onSkip }) : null
   );
 }
@@ -13283,6 +14118,7 @@ function MigrateStep(props) {
   const [note, setNote] = (0, import_react11.useState)(null);
   const [aside, setAside] = (0, import_react11.useState)(null);
   const [busy, setBusy] = (0, import_react11.useState)(false);
+  const [restoring, setRestoring] = (0, import_react11.useState)(false);
   const alive = (0, import_react11.useRef)(true);
   (0, import_react11.useEffect)(() => () => {
     alive.current = false;
@@ -13417,6 +14253,19 @@ function MigrateStep(props) {
       if (alive.current) setNote(problem.message);
     }
   };
+  const restoreHermes = async () => {
+    if (restoring) return;
+    setRestoring(true);
+    setNote(null);
+    try {
+      await call("migrate-restore-hermes");
+      if (alive.current) setPhase("restored");
+    } catch (problem) {
+      if (alive.current) setNote(problem.message);
+    } finally {
+      if (alive.current) setRestoring(false);
+    }
+  };
   return (0, import_react11.createElement)(MigrateView, {
     phase,
     probe,
@@ -13462,6 +14311,10 @@ function MigrateStep(props) {
     },
     onOpenSettings: openSettingsHere,
     onCheckStatus: checkStatus,
+    onRestoreHermes: () => {
+      void restoreHermes();
+    },
+    restoring,
     gatewayStopped: result?.gatewayStopped === true
   });
 }
@@ -13472,7 +14325,7 @@ var MIGRATE_CSS = `
 .oai-card .oai-mig-tool:hover:not(:disabled){transform:translateY(-2px)}
 .oai-card .oai-mig-tool:active:not(:disabled){${pressed("var(--oai-card)", 4)}}
 .oai-card .oai-mig-tool:focus-visible{outline:3px solid var(--oai-ring);outline-offset:3px}
-.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;${recessed("color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))")};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
+.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;align-content:start;${recessed("color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))")};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
 .oai-mig-top{display:flex;align-items:center;gap:11px;min-width:0}
 .oai-mig-mark{flex:none;width:38px;height:38px;display:grid;place-items:center;border-radius:12px 14px 11px 13px;font:var(--bt-weight-title,800) 13px/1 var(--oai-head);letter-spacing:.02em;${raised("var(--oai-clay)", 2)};color:var(--oai-ink)}
 .oai-mig-tool.oai-mig-is-ready .oai-mig-mark{${raised("var(--oai-cyan)", 2)};color:var(--oai-cyan-ink)}
@@ -13551,6 +14404,7 @@ var MIGRATE_CSS = `
 .oai-card button.oai-mig-soft{justify-self:start;width:auto;min-height:34px;margin:2px 0 0;padding:7px 14px;font-size:12.5px;${raised("var(--oai-card)", 2)};color:var(--oai-ink)}
 .oai-mig-summary{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--oai-ink2);margin:0 0 14px}
 .oai-mig-problem{display:grid;gap:10px}
+.oai-mig-problem .oai-actions{flex-wrap:wrap}
 .oai-mig-error{margin:0;color:var(--oai-bad);font-size:13.5px;line-height:1.5}
 .oai-mig-handoff{display:grid;gap:12px}
 .oai-card .oai-mig-handoff h2{margin:0;font:var(--bt-weight-title,800) 19px/1.25 var(--oai-head);letter-spacing:-.016em}
@@ -13600,16 +14454,8 @@ function installVeil({ doc = globalThis.document, scope = globalThis, request: r
 
 // src/client/power-shortcut.js
 var import_react12 = require("react");
-var import_react_dom2 = require("react-dom");
 var NAMES2 = { omni: "Omni", genie: "Genie", unfold: "Unfold" };
 var CHOOSE = /* @__PURE__ */ new Set(["found", "none"]);
-var FOCUSABLE = 'button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-var LOOKS = {
-  omni: { id: "omni", kind: "omni", color: "deepseek", avatar: { shape: "octopus" } },
-  genie: { id: "genie", kind: "genie" },
-  unfold: { id: "unfold", kind: "unfold" }
-};
-var MARK_SIZE = 28;
 var statusText = (kind, phase, detail) => kind === "omni" ? statusOf(phase, detail) : kind === "unfold" ? unfoldStatusOf(phase, detail) : genieStatusOf(phase, detail);
 var GENIE_STEPS = { git: () => t("Checking git"), team: () => t("Bot team"), genie: () => t("Genie plugin") };
 function installStepOf(kind, detail) {
@@ -13680,9 +14526,6 @@ function powerRow(kind, power, { roster = {}, status = null } = {}) {
   if (notInstalled(kind, status)) return row("off", t("Not installed"), "install", { note: INSTALL_NOTE[kind]() });
   return row("off", asleep, "power");
 }
-function cardRows(kinds, powers, { roster = {}, read = {}, problems = {}, teamSetup = true } = {}) {
-  return kinds.map((kind) => powerRow(kind, powers[kind], { roster, status: read[kind] ?? null })).map((row) => (row.action === "power" || row.action === "install") && read.checked !== true ? { ...row, action: null, note: null } : row).map((row) => row.action === "choose" && !teamSetup ? { ...row, action: null } : row).map((row) => problems[row.kind] ? { ...row, alert: problems[row.kind] } : row);
-}
 var ACTION_LABEL = {
   power: (name) => t("Power {name} on", { name }),
   off: (name) => t("Power {name} off", { name }),
@@ -13694,239 +14537,155 @@ var ACTION_LABEL = {
 };
 var actionLabel = (row) => row.action ? ACTION_LABEL[row.action](row.name) : null;
 var secondaryLabel = (row) => row.secondary ? ACTION_LABEL[row.secondary](row.name) : null;
-var STATE_LABEL = {
-  on: (name) => t("{name} on", { name }),
-  off: (name) => t("{name} off", { name }),
-  working: (name) => t("{name} working", { name }),
-  attention: (name) => t("{name} needs you", { name })
-};
-var buttonLabel = (rows) => rows.map((row) => STATE_LABEL[row.state](row.name)).reduce((a, b2) => t("{a}, {b}", { a, b: b2 }));
-function badgeOf2(phases) {
-  if (phases.some((phase) => WORKING.has(phase))) return "working";
-  if (phases.some((phase) => phase === "failed" || phase === "restart")) return "error";
-  return null;
-}
-var kindsOf = ({ host = null, preload = null } = {}) => teamOrder(host === "unfold" ? "unfold" : preload).filter((kind) => kind !== "unfold" || host === "unfold");
-function focusAfter(trigger) {
-  const all = [...document.querySelectorAll(FOCUSABLE)].filter((node) => node === trigger || node.getClientRects().length > 0);
-  const next = all[all.indexOf(trigger) + 1];
-  if (next) next.focus();
-  else trigger?.focus();
-}
-var canOpenTeamSetup = (actions) => typeof actions?.openHarnessOnboarding === "function";
-function openTeamSetup({ actions, close }, power = null) {
-  close();
-  if (!canOpenTeamSetup(actions)) return;
-  setTeamIntent(power);
-  actions.openHarnessOnboarding("omni-team");
-}
-function actOn(row, { actions, close, onProblem, start = startPower, stop = powerOff }, action = row.action) {
-  onProblem(row.kind, null);
-  if (action === "power" || action === "install" || action === "retry") {
-    start(row.kind, row.kind === "omni" ? powerOn : geniePowerOn);
-  } else if (action === "off") {
-    if (!row.locked) stop(row.kind);
-  } else if (action === "choose") {
-    openTeamSetup({ actions, close }, "omni");
-  } else if (action === "add") {
-    return Promise.resolve(actions.addOmni?.()).then((bot) => {
-      if (!bot?.id) return;
-      close();
-      actions.openSession(bot.id);
-    }, (error) => onProblem(row.kind, error?.message ?? String(error)));
-  } else if (action === "plugins") {
-    close();
-    actions.selectPanel?.("plugins");
-  }
-  return void 0;
-}
+var POWER_KINDS = /* @__PURE__ */ new Set(["omni", "genie", "unfold"]);
+var POWER_ON = { omni: powerOn, genie: geniePowerOn, unfold: unfoldPowerOn };
 var installRunning = (status) => status?.install?.phase === "installing";
 function resumeInstall(kind, status, start = startPower) {
   if (!installRunning(status) || kind !== "omni" && kind !== "genie") return null;
   const on2 = kind === "omni" ? powerOn : geniePowerOn;
-  return start(kind, (options) => on2({ ...options, resume: status }));
+  return start(kind, (options) => on2({ ...options, resume: status, passive: true }));
 }
-var readPlugins = (ask = call) => Promise.all([ask("omni-plugins"), ask("genie-plugin")].map((request2) => Promise.resolve(request2).catch(() => null)));
-function RowMark({ Mark, row }) {
-  if (typeof Mark !== "function") return null;
-  return (0, import_react12.createElement)(Mark, { bot: row.bot ?? LOOKS[row.kind], size: MARK_SIZE, live: false });
+var readPlugins = (ask = call) => Promise.all(
+  [ask("omni-plugins"), ask("genie-plugin")].map((request2) => Promise.resolve(request2).catch(() => null))
+);
+function officialRow(kind, power, { roster, read, actions }) {
+  const asleep = (power?.phase ?? "asleep") === "asleep";
+  if (!read.checked && asleep) {
+    return { text: null, label: null, alert: null, action: null };
+  }
+  const status = asleep ? read.status : null;
+  const row = powerRow(kind, power, { roster, status });
+  if (row.state === "on" && row.action === "off" && notInstalled(kind, status)) {
+    const action2 = "install";
+    const label = actionLabel({ ...row, action: action2 });
+    return { text: null, label, alert: null, action: action2 };
+  }
+  let action = null;
+  if (row.action === "install" || row.action === "power" || row.action === "retry") {
+    action = row.action;
+  } else if (row.action === "off" && kind === "omni" && power?.phase === "sandbox" && power.detail?.job) {
+    action = "off";
+  } else if (row.action === "choose" && typeof actions?.openHarnessOnboarding === "function") {
+    action = row.action;
+  } else if (row.action === "plugins" && actions?.hasPlugins?.() === true) {
+    action = row.action;
+  }
+  const text = row.state === "off" && action === "install" ? null : row.text;
+  return { text, label: actionLabel({ ...row, action }), alert: row.alert, action };
 }
-function PowerShortcut({ roster, actions, Mark = null }) {
-  const omni = usePowerState("omni");
-  const genie = usePowerState("genie");
-  const unfold = usePowerState("unfold");
-  const [open, setOpen] = (0, import_react12.useState)(false);
-  const [box, setBox] = (0, import_react12.useState)(null);
-  const [read, setRead] = (0, import_react12.useState)({ host: null, preload: null, omni: null, genie: null, checked: false });
-  const [problems, setProblems] = (0, import_react12.useState)({});
-  const button = (0, import_react12.useRef)(null);
-  const card = (0, import_react12.useRef)(null);
-  const title = (0, import_react12.useRef)(null);
-  const id = (0, import_react12.useId)();
-  const powers = { omni, genie, unfold };
-  (0, import_react12.useEffect)(() => {
-    let alive = true;
-    void call("state").catch(() => null).then((state) => {
-      if (alive) setRead((current) => ({ ...current, host: state?.host ?? null, preload: state?.preload ?? null }));
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
-  const mounted = (0, import_react12.useRef)(false);
-  (0, import_react12.useEffect)(() => {
-    if (!open && mounted.current) return void 0;
-    mounted.current = true;
-    let alive = true;
-    void readPlugins().then(([omniStatus, genieStatus]) => {
-      if (!alive) return;
-      setRead((current) => ({ ...current, omni: omniStatus, genie: genieStatus, checked: true }));
-      resumeInstall("omni", omniStatus);
-      resumeInstall("genie", genieStatus);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [open]);
-  (0, import_react12.useEffect)(() => {
-    if (!open) return void 0;
-    const onDown = (event) => {
-      if (event.target instanceof Node && (card.current?.contains(event.target) || button.current?.contains(event.target))) return;
-      setOpen(false);
-    };
-    const onKey = (event) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setOpen(false);
-      button.current?.focus();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [open]);
-  (0, import_react12.useLayoutEffect)(() => {
-    if (!open) return void 0;
-    const place = () => {
-      const rect = button.current?.getBoundingClientRect();
-      if (rect) setBox({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)), top: rect.bottom + 6 });
-    };
-    place();
-    window.addEventListener("resize", place);
-    return () => window.removeEventListener("resize", place);
-  }, [open]);
-  const placed = open && box !== null;
-  (0, import_react12.useEffect)(() => {
-    if (!placed) return;
-    const at2 = document.activeElement;
-    if (card.current?.contains(at2) && at2 !== title.current) return;
-    const first = card.current?.querySelector(".bt-update-dsh button:not(:disabled)");
-    (first ?? title.current)?.focus();
-  }, [placed, read.checked]);
-  (0, import_react12.useEffect)(() => {
-    if (placed && card.current && !card.current.contains(document.activeElement) && document.activeElement === document.body) title.current?.focus();
-  });
-  const kinds = kindsOf(read);
-  const teamSetup = canOpenTeamSetup(actions);
-  const rows = cardRows(kinds, powers, { roster, read, problems, teamSetup });
-  const badge = badgeOf2(kinds.map((kind) => powers[kind].phase));
-  const label = buttonLabel(rows);
+function actOfficial(kind, row, { actions, start = startPower, stop = powerOff }) {
+  if (row.action === "install" || row.action === "power" || row.action === "retry") {
+    return start(kind, POWER_ON[kind]);
+  }
+  if (row.action === "off") {
+    stop(kind);
+  } else if (row.action === "choose") {
+    actions.closeSettings?.();
+    actions.openHarnessOnboarding("omni-team");
+  } else if (row.action === "plugins") {
+    actions.closeSettings?.();
+    actions.openPlugins?.();
+  }
+}
+function togglePowerSettings(kind, next, { start = startPower, stop = powerOff } = {}) {
+  if (next) start(kind, POWER_ON[kind]);
+  else stop(kind);
+}
+function PowerSettingsCard({ bot, roster, Card, Row: Row2, SwitchRow, start = startPower, stop = powerOff }) {
+  const kind = POWER_KINDS.has(bot?.kind) ? bot.kind : null;
+  const power = usePowerState(kind ?? "omni");
+  if (kind === null || typeof Card !== "function" || typeof Row2 !== "function" || typeof SwitchRow !== "function") return null;
+  const row = powerRow(kind, power, { roster });
   const readOnly = Boolean(roster?.readOnly);
-  const close = () => setOpen(false);
-  const onProblem = (kind, message) => setProblems((current) => ({ ...current, [kind]: message }));
-  const run = (row, action) => actOn(row, { actions, close, onProblem }, action);
-  const onKeyDown = (event) => {
-    if (event.key.length === 1 && event.key !== " " && !event.metaKey && !event.ctrlKey && !event.altKey) event.preventDefault();
-    if (event.key !== "Tab") return;
-    const items = [...card.current.querySelectorAll(FOCUSABLE)];
-    const at2 = document.activeElement;
-    if (!event.shiftKey && (items.length === 0 || at2 === items[items.length - 1])) {
-      event.preventDefault();
-      close();
-      focusAfter(button.current);
-    } else if (event.shiftKey && (at2 === items[0] || at2 === title.current)) {
-      event.preventDefault();
-      close();
-      button.current?.focus();
-    }
-  };
-  const heading = kinds.includes("unfold") ? t("Omni, Genie and Unfold") : t("Omni and Genie");
+  const stays = kind !== "omni" && row.bot !== null && row.state === "on";
+  const on2 = row.state === "on" || row.pressed === true;
+  const note = row.note ?? (stays && kind === "genie" ? t("{name} stays on once it joins your team.", { name: row.name }) : null);
   return (0, import_react12.createElement)(
-    import_react12.Fragment,
-    null,
-    (0, import_react12.createElement)(
-      "button",
-      {
-        ref: button,
-        type: "button",
-        className: "bt-round bt-side-tool bt-power",
-        "aria-label": label,
-        title: label,
-        "aria-haspopup": "dialog",
-        "aria-expanded": open,
-        "aria-controls": open ? id : void 0,
-        onClick: () => setOpen((value) => !value)
-      },
-      badge === "working" ? (0, import_react12.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : (0, import_react12.createElement)(PowerIcon, { size: 16, stroke: 2 }),
-      badge === "error" ? (0, import_react12.createElement)("span", { className: "bt-update-dot", "aria-hidden": true }) : null
-    ),
-    placed ? (0, import_react_dom2.createPortal)((0, import_react12.createElement)(
-      "div",
-      { ref: card, id, className: "bt-update-pop bt-power-pop", role: "dialog", "aria-label": heading, style: box, onKeyDown },
-      (0, import_react12.createElement)("div", { ref: title, className: "bt-update-title", tabIndex: -1 }, heading),
-      rows.map((row) => (0, import_react12.createElement)(
-        "div",
-        { key: row.kind, className: "bt-update-dsh", "data-power": row.kind, "data-state": row.state },
-        (0, import_react12.createElement)(
-          "div",
-          { className: "bt-power-who" },
-          (0, import_react12.createElement)(RowMark, { Mark, row }),
-          (0, import_react12.createElement)(
-            "div",
-            { className: "bt-power-what" },
-            (0, import_react12.createElement)("div", { className: "bt-update-title" }, row.name),
-            (0, import_react12.createElement)("div", { className: "bt-update-text", role: "status", "aria-live": "polite" }, row.text)
-          )
-        ),
-        row.note ? (0, import_react12.createElement)("div", { className: "bt-update-text" }, row.note) : null,
-        row.alert ? (0, import_react12.createElement)("div", { className: "bt-update-error", role: "alert" }, row.alert) : null,
-        row.working || row.action || row.secondary ? (0, import_react12.createElement)(
-          "div",
-          { className: "bt-update-actions" },
-          row.secondary ? (0, import_react12.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => run(row, row.secondary) }, secondaryLabel(row)) : null,
-          row.working ? (0, import_react12.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : null,
-          row.action ? (0, import_react12.createElement)("button", {
-            type: "button",
-            className: "bt-update-go",
-            disabled: row.locked,
-            onClick: () => run(row, row.action),
-            ...row.action === "off" || row.action === "power" ? { "aria-pressed": row.action === "off" } : {}
-          }, actionLabel(row)) : null
-        ) : null
-      )),
-      readOnly || !teamSetup ? null : (0, import_react12.createElement)(
-        "div",
-        { className: "bt-update-actions" },
-        (0, import_react12.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => openTeamSetup({ actions, close }) }, t("Open team setup"))
-      )
-    ), document.body) : null
+    Card,
+    { title: t("Power") },
+    readOnly ? (0, import_react12.createElement)(Row2, { label: t("Power"), hint: row.text }, null) : (0, import_react12.createElement)(SwitchRow, {
+      label: t("Power"),
+      hint: row.text,
+      on: on2,
+      disabled: row.working === true || row.locked === true || stays,
+      onChange: (value) => togglePowerSettings(kind, value, { start, stop })
+    }),
+    note ? (0, import_react12.createElement)("div", { className: "bt-bs-shell-note" }, note) : null,
+    row.alert ? (0, import_react12.createElement)("div", { className: "bt-bs-shell-note", role: "alert", style: { color: "var(--st-bad-strong,var(--bt-danger))" } }, row.alert) : null
   );
 }
-function installPowerShortcut(load = () => require("@automagik/bots-dsh/client")) {
-  let tools = null;
+function installPowerSettings(load = () => require("@automagik/bots-dsh/client")) {
   let bots = null;
   try {
     bots = load();
-    tools = bots?.omni?.sidebarTools ?? null;
   } catch {
-    tools = null;
+    bots = null;
   }
-  if (typeof tools?.register !== "function") return () => {
+  const settings = bots?.omni?.botSettings ?? null;
+  if (typeof settings?.register !== "function") return () => {
   };
-  const Mark = typeof bots?.omni?.ui?.BotMark === "function" ? bots.omni.ui.BotMark : null;
-  return tools.register({ id: "welcome-power", order: 0, Component: (props) => (0, import_react12.createElement)(PowerShortcut, { ...props, Mark }) });
+  return settings.register({ id: "welcome-power", order: 0, Component: PowerSettingsCard });
+}
+function installOfficialInstall(load = () => require("@automagik/bots-dsh/client"), { ask = call, start = startPower, stop = powerOff } = {}) {
+  let bots = null;
+  try {
+    bots = load();
+  } catch {
+    bots = null;
+  }
+  const registry = bots?.omni?.officialInstall;
+  if (typeof registry?.register !== "function") return () => {
+  };
+  const empty = { checked: false, status: null };
+  const reads = { omni: empty, genie: empty };
+  const listeners2 = /* @__PURE__ */ new Set();
+  let version = 0;
+  let inFlight = null;
+  let disposed = false;
+  const changed = () => {
+    version += 1;
+    for (const listener of Array.from(listeners2)) listener();
+  };
+  const unsubscribePower = subscribePower(changed);
+  const row = (kind, { roster, actions }) => officialRow(kind, powerOf(kind), { roster, read: reads[kind], actions });
+  const unregister = registry.register({
+    id: "welcome-install",
+    order: 0,
+    kinds: ["omni", "genie"],
+    subscribe(listener) {
+      listeners2.add(listener);
+      return () => listeners2.delete(listener);
+    },
+    version: () => version,
+    pending(kind) {
+      const { phase } = powerOf(kind);
+      const missing = phase === "asleep" && notInstalled(kind, reads[kind].status);
+      const needsAttention = phase === "failed" || phase === "restart" || phase === "pairing";
+      return missing || WORKING.has(phase) || needsAttention || CHOOSE.has(phase);
+    },
+    row,
+    act: (kind, ctx) => actOfficial(kind, row(kind, ctx), { actions: ctx.actions, start, stop }),
+    refresh() {
+      if (inFlight !== null) return inFlight;
+      inFlight = readPlugins(ask).then(([omni, genie]) => {
+        if (disposed) return;
+        reads.omni = { checked: true, status: omni };
+        reads.genie = { checked: true, status: genie };
+        changed();
+        resumeInstall("omni", omni, start);
+        resumeServer(omni, start, { passive: true });
+        resumeInstall("genie", genie, start);
+      }).finally(() => {
+        inFlight = null;
+      });
+      return inFlight;
+    }
+  });
+  return () => {
+    disposed = true;
+    unsubscribePower();
+    unregister();
+  };
 }
 
 // src/client/index.js
@@ -13953,7 +14712,8 @@ function apply(ctx) {
     ctx.slots.inject("settings.onboarding", () => ctx.slots.register({ name: "settings.onboarding", id: step.id, order: step.order }, step.component));
   }
   ctx.effect(() => installAcpSection(ctx), "omni-ai: Claude Code and Codex in Settings");
-  ctx.effect(() => installPowerShortcut(), "omni-ai: power shortcut in the Bot team sidebar");
+  ctx.effect(() => installPowerSettings(), "omni-ai: power in each Bot's settings");
+  ctx.effect(() => installOfficialInstall(), "omni-ai: Omni and Genie install on the Apps page");
 }
 /*! Bundled license information:
 

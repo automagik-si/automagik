@@ -1,0 +1,38 @@
+{
+  "pulls": [
+    {
+      "number": 201,
+      "draft": false,
+      "baseRef": "dev",
+      "headSha": "00000000000000000000000000000000000000c9",
+      "checkRuns": [],
+      "complete": false
+    }
+  ],
+  "runs": [],
+  "pushes": [
+    {
+      "actor": "automagik-genie[bot]",
+      "ref": "refs/heads/dev",
+      "before": "0000000000000000000000000000000000000001",
+      "after": "0000000000000000000000000000000000000002",
+      "activityType": "push",
+      "timestamp": "2026-11-20T08:20:00Z",
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000002",
+          "parents": [
+            "0000000000000000000000000000000000000001"
+          ],
+          "subject": "chore(release): v3.162.4"
+        }
+      ],
+      "commitsComplete": true
+    }
+  ],
+  "complete": {
+    "pulls": true,
+    "runs": false,
+    "pushes": false
+  }
+}

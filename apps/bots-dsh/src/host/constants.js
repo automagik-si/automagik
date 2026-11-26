@@ -25,6 +25,8 @@ export const PET_ROUTE = `${ROUTE}/pet`
 export const PET_CODEX_ROUTE = `${ROUTE}/pet-codex`
 // Generated images (imagegen.js), by id.
 export const IMAGE_ROUTE = `${ROUTE}/image`
+// The gen-UI kit's media bytes (genui.js), by source and id: a card's photo or voice note.
+export const GENUI_MEDIA_ROUTE = `${ROUTE}/genui-media`
 // The Automagik desktop app (OMNI_CLIENT_ID) updates as a whole and carries the Bot browser;
 // upstream's own app says so with DS_BOT_APP.
 export const inDesktopApp = () => process.env.OMNI_CLIENT_ID === 'omni-desktop' || process.env.DS_BOT_APP === '1'
@@ -56,6 +58,10 @@ export const ROOM_REPLY_TIMEOUT_MS = 240_000
 // Lines a member writes less than this apart while it works reach its group together.
 export const ROOM_STEP_GAP_MS = 30_000
 export const SOURCE_KIND = 'bot'
+// The failure code acp-dsh gives a turn the host stopped from outside the app (its SIGTERM at
+// a restart): the work was cut while running, so it is resumed, not marked failed. A Stop the
+// person asked for stays `ABORTED`.
+export const AGENT_INTERRUPTED = 'AGENT_INTERRUPTED'
 // The fixed reply that opens a fresh conversation part; it is never shown or sent on.
 export const HANDOFF_ACK = 'Noted. I have my handoff note and carry on from here.'
 // A result that arrives after the user gave up waiting for it: it settled once
@@ -77,6 +83,11 @@ export const ROOM_MAX_MEMBERS = 12
 export const SECTION_NAME_MAX = 32
 export const SECTION_COLORS = ['blue', 'orange', 'green', 'violet', 'rose']
 
+// The Session ids of deleted Bots and groups whose composer state the owner's page still
+// has to remove (`draftSweep` in the team file). Oldest dropped first: a dropped id only
+// leaves a composer key behind, as before the list existed.
+export const DRAFT_SWEEP_MAX = 200
+
 // DSH bots: plain dsh entries in the sidebar, not Bots, and the one record that keeps the
 // Sessions of the tasks Bots start (agents.js). Their Sessions are ordinary root Sessions,
 // so the team tools must not be offered to them.
@@ -88,10 +99,11 @@ export const DSH_BOT_NAME_MAX = 40
 // profile, so the list served to one session can be shorter.
 export const TEAM_TOOLS = [
   'list_bots', 'message_bot', 'stop_bot', 'create_bot', 'update_bot', 'delete_bot', 'list_bot_models',
-  'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'show_view',
-  'request_secret', 'list_secrets', 'group_relay', 'read_own_chat',
+  'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'show_view', 'show_settings', 'propose_bot_change',
+  'request_secret', 'list_secrets', 'group_relay', 'read_own_chat', 'solver_progress',
   'read_group_chat', 'remember', 'forget', 'recall', 'read_browser',
   'list_capabilities', 'save_capability', 'delete_capability',
+  'load_skill',
   'attach_capability', 'detach_capability', 'group_goal', 'list_connectors', 'request_connector',
   'find_chats', 'list_automations', 'save_automation', 'pause_automation', 'delete_automation',
   'generate_image',
@@ -124,3 +136,13 @@ export const HISTORY_TIMEOUT_MS = 20_000
 export const ASIDE_LIMIT = 'Answer cut off at the output limit.'
 
 export const STEER_CUT = 'ds-bot/steer'
+// The hook reason a person's agent switch stops the running reply with (RFC 0030, Handoff
+// note, 2026-11-23): nothing is answered for the cut turn; the new agent goes on with it.
+export const SWITCH_CUT = 'ds-bot/switch'
+export const switchCutBy = reason => reason?.kind === 'aborted' && reason.reason?.kind === 'hook'
+  && reason.reason.reason === SWITCH_CUT
+// The hook reason the web self-update stops running turns with at the click (RFC 0041): resume.js reads it as a
+// restart cut, so the stopped work comes back after the supervisor's verdict.
+export const UPDATE_CUT = 'ds-bot/update'
+export const cutByUpdate = reason => reason?.kind === 'aborted' && reason.reason?.kind === 'hook'
+  && reason.reason.reason === UPDATE_CUT

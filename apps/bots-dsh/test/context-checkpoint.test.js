@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { registerHooks } from 'node:module'
+import { install as installChatIndex } from '../src/host/chat-index.js'
 import { install } from '../src/host/parts.js'
 import { install as installModelState } from '../src/host/model-state.js'
 import { install as installFallback } from '../src/host/fallback.js'
+import { cutByRestart } from '../src/host/resume.js'
+import { redactor } from '../src/host/secrets.js'
 import { fakeContext } from './fake-ctx.js'
+import { textOf } from '../src/host/text.js'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { Session } from '@deepseek-ai/dsh-session'
 import LlmRuntime, { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -710,6 +717,29 @@ test('case 3b: the surface fits the window but is over thresholdTokens, no expli
   assert.equal(b.recorded(), b.recordedBefore, 'no message deleted from the record')
 })
 
+test('the automatic threshold move still tracks its target until the fresh part answers', async t => {
+  const b = await switchBench({ perNode: 20_000 })
+  t.after(b.stop)
+  const idle = deferred()
+  t.after(() => idle.resolve())
+  b.agent.whenIdle = () => idle.promise
+  const outcome = await b.step('api', 'small')
+  assert.equal(outcome.stopped, true)
+  const [job] = [...b.rt.switchJobs()]
+  assert.equal(job.target, 'api/small')
+  assert.equal(job.noNote, 'switch')
+  assert.equal(b.rt.switchingChat('b1'), true, 'the threshold move owns the held switch window')
+  assert.equal(Object.hasOwn(job, 'routeChange'), false, 'the removed explicit crossing is no longer job state')
+  idle.resolve()
+  assert.ok(await until(() => b.rt.awaitingFirstAnswer('fresh1') && [...b.rt.switchJobs()].length === 0))
+  assert.deepEqual(b.calls.selected, [['fresh1', 'api/small']])
+  assert.deepEqual(b.calls.archived, [])
+  b.firstTurn('fresh1', { answer: true })
+  assert.ok(await until(() => b.calls.archived.length > 0))
+  assert.deepEqual(b.calls.archived, ['s1'])
+  assert.equal(b.rt.switchingChat('b1'), false, 'the settled threshold move no longer owns a switch window')
+})
+
 test('case 4: a failed switch does not leave the new model pending in a loop', async (t) => {
   // The Bot was on its agent (confirmed) and the person picked an API model that declares no
   // window: DSH's guard still refuses that one.
@@ -870,7 +900,8 @@ const requestError = (agent, failure) => agent.dispatch.waterfall('agent/request
 const notices = calls => calls.followups.filter(entry => entry.message?.source?.kind === 'model-selection')
 
 test('case 4d: a pending switch that is not configured goes back without waking a fallback turn', async (t) => {
-  const b = await switchBench({ perNode: 20_000, model: 'openai-codex/gpt-5.6-sol', fallback: true })
+  // Both sides on the same native header, so only the pending switch tells them apart.
+  const b = await switchBench({ perNode: 20_000, routed: ['openai-codex', 'gpt-5.6-sol'], model: 'openai-codex/gpt-5.6-sol', fallback: true })
   t.after(b.stop)
   b.bot.previousModel = 'deepseek/flash'
   assert.equal(await requestError(b.agent, notConfigured('openai-codex')), undefined)
@@ -881,14 +912,26 @@ test('case 4d: a pending switch that is not configured goes back without waking 
   assert.deepEqual(b.calls.agentSelected, [], 'no fallback route recorded')
   assert.deepEqual(notices(b.calls), [], 'no fallback notice, so no turn runs on its own')
   assert.equal(b.rt.fallbackArmed('s1'), false)
+  assert.deepEqual(b.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source?.kind === 'model-selection'), [], 'no notice appended either')
   // Control: the same failure on a confirmed model falls back as before, with its notice.
-  const kept = await switchBench({ perNode: 20_000, model: 'openai-codex/gpt-5.6-sol', fallback: true })
+  const kept = await switchBench({ perNode: 20_000, routed: ['openai-codex', 'gpt-5.6-sol'], model: 'openai-codex/gpt-5.6-sol', fallback: true })
   t.after(kept.stop)
   kept.bot.previousModel = 'openai-codex/gpt-5.6-sol'
   await requestError(kept.agent, notConfigured('openai-codex'))
   await until(() => notices(kept.calls).length > 0, 500)
   assert.deepEqual(kept.calls.agentSelected, [['s1', 'deepseek/flash']])
   assert.equal(notices(kept.calls).length, 1)
+})
+
+test('case 4d: a confirmed model cannot wake a fallback on another harness', async t => {
+  const b = await switchBench({ perNode: 20_000, model: 'openai-codex/gpt-5.6-sol', fallback: true })
+  t.after(b.stop)
+  b.bot.previousModel = 'openai-codex/gpt-5.6-sol'
+  await requestError(b.agent, notConfigured('openai-codex'))
+  await new Promise(resolve => setImmediate(resolve))
+  const appended = b.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source?.kind === 'model-selection')
+  assert.deepEqual([b.calls.agentSelected, notices(b.calls), b.rt.fallbackArmed('s1'), appended.map(event => event.data.source.summary)],
+    [[], [], false, ['acp-codex/default failed; the fallback runs on another harness']])
 })
 
 test('case 8e: a fresh part whose provider is not configured goes back without waking a fallback turn', async (t) => {
@@ -1052,6 +1095,144 @@ test('case 8b, a first call that fails at once, during the handoff itself, still
   const waiting = [...b.agent.inbox.nextStep, ...b.agent.inbox.nextTurn]
   assert.deepEqual(waiting.map(message => message.source?.exchangeId), ['x-fast'], 'the carried message, forwarded after the failure, is taken back too')
   assert.deepEqual(b.streams(), [])
+})
+
+test('a same-harness no-note rollover settles after interruption, host disposal, or user Stop', async t => {
+  const cuts = [
+    ['ACP interruption', { kind: 'error', error: { code: 'AGENT_INTERRUPTED', message: 'The agent was interrupted before it finished.' } }],
+    ['repaired interruption', { kind: 'interrupted' }],
+    ['host disposal', { kind: 'aborted', reason: { kind: 'disposed' } }],
+  ]
+  const scenarios = cuts.flatMap(([label, reason]) => [true, false].map(answer => ({
+    label: `${label}, then ${answer ? 'answer' : 'failure'}`, reason, answer, cut: true,
+  })))
+  scenarios.push({ label: 'user Stop rolls back', reason: { kind: 'error', error: { code: 'ABORTED', message: 'Stopped' } }, answer: false, cut: false })
+  for (const { label, reason, answer, cut } of scenarios) await t.test(label, async t => {
+    const model = 'acp-codex/default'
+    const b = await switchBench({ perNode: 170_000, model })
+    t.after(b.stop)
+    b.rt.cutByRestart = cutByRestart
+    b.bot.effort = 'low'
+    b.rt.desiredEffort = async bot => bot.effort
+    const select = b.rt.selectSessionModel
+    b.rt.selectSessionModel = async (id, selection) => {
+      await select(id, selection)
+      if (id !== 'fresh1') return
+      const session = b.sessions.get(id)
+      const event = session.append('request/header', { reason: 'model-change', header: { config: selection } })
+      await b.ctx.parallel('session/event', session, event)
+    }
+    const snapshots = []
+    b.rt.save = async () => { snapshots.push(structuredClone(b.state)) }
+    const moving = deferred(), release = deferred()
+    t.after(() => release.resolve())
+    b.rt.moveSchedules = async () => { moving.resolve(); await release.promise }
+    const history = b.session.snapshotEvents()
+    assert.equal((await b.step('acp-codex', 'default')).stopped, true)
+    await moving.promise
+    const [job] = [...b.rt.switchJobs()]
+    assert.equal(job.noNote, 'aside')
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
+    const fresh = b.sessions.get('fresh1')
+    assert.deepEqual(fresh.requestHeader().config, { provider: 'acp-codex', model: 'default', reasoningEffort: 'low' })
+    const emit = async (type, data, options) => {
+      const event = fresh.append(type, data, options)
+      await b.ctx.parallel('session/event', fresh, event)
+      return event
+    }
+    await emit('turn/start', { turn: 1 })
+    const owner = b.agents.get('fresh1')
+    for (const message of owner.inbox.nextTurn.splice(0)) await emit('user/message', message, { surfaceOp: 'append' })
+    const kept = structuredClone(b.bot)
+    const warnings = [...b.calls.warnings]
+    const ended = await emit('turn/end', { turn: 1, reason })
+    assert.deepEqual(fresh.snapshotEvents().at(-1), ended)
+    assert.equal([...b.rt.switchJobs()][0], job, 'event delivery finishes before the held move')
+    release.resolve()
+    await job.done
+    assert.ok(await until(() => [...b.rt.switchJobs()].length === 0 && Object.keys(b.state.switching).length === 0))
+    assert.deepEqual(b.streams(), [], 'no background call or fallback')
+    if (cut) {
+      assert.deepEqual(b.bot, kept, 'restart cannot undo the fresh Session, route or segment')
+      assert.equal(b.bot.sessionId, 'fresh1')
+      assert.equal(b.bot.segments.at(-1).archivePending, true)
+      assert.deepEqual(snapshots.at(-1).bots.b1, kept, 'durable state retains archivePending and the new choice')
+      assert.deepEqual(b.calls.warnings, warnings)
+      assert.deepEqual(b.calls.archived, [], 'neither Session is archived by a cut')
+      assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
+      assert.deepEqual(b.session.snapshotEvents(), history)
+
+      await emit('turn/start', { turn: 2 })
+      if (answer) await emit('assistant/message', {
+        turn: 2, message: { role: 'assistant', source: { provider: 'acp-codex', model: 'default' }, content: [{ type: 'text', text: 'Continued after the cut.' }] },
+      }, { surfaceOp: 'append' })
+      await emit('turn/end', { turn: 2, reason: answer ? { kind: 'stop' } : { kind: 'error', error: { code: 'ACP_AGENT', message: 'The agent failed' } } })
+    }
+    assert.ok(await until(() => b.calls.archived.length > 0), 'the real outcome settles without a stranded promise')
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
+    assert.deepEqual(b.calls.archived, [answer ? 's1' : 'fresh1'])
+    assert.equal(b.bot.sessionId, answer ? 'fresh1' : 's1')
+    assert.equal(b.bot.model, model)
+    assert.equal(b.bot.appliedModel, model)
+    assert.equal(b.bot.segments.at(-1)?.archivePending, undefined)
+    assert.deepEqual(b.session.snapshotEvents(), history)
+    assert.deepEqual(snapshots.at(-1).bots.b1, b.bot)
+    if (answer) {
+      assert.deepEqual(b.calls.warnings, warnings)
+    } else {
+      assert.equal(b.calls.warnings.length, warnings.length + 1)
+      assert.deepEqual(b.calls.warnings.slice(0, -1), warnings)
+      assert.match(b.calls.warnings.at(-1), /first call in the fresh part .* failed before any answer/)
+    }
+  })
+})
+
+test('same-harness first-answer rollback restores cards before saving and archives only after a successful save', async t => {
+  for (const failSave of [false, true]) await t.test(failSave ? 'EIO is surfaced' : 'successful snapshots are coherent', async t => {
+    const model = 'acp-codex/default'
+    const b = await switchBench({ perNode: 170_000, model })
+    t.after(b.stop)
+    Object.assign(b.bot, { appliedModel: model, effort: 'high', appliedEffort: 'high', previousModel: model })
+    b.rt.desiredEffort = async bot => bot.effort
+    const history = b.session.snapshotEvents()
+    assert.equal((await b.step('acp-codex', 'default')).stopped, true)
+    assert.ok(await until(() => b.rt.awaitingFirstAnswer('fresh1') && [...b.rt.switchJobs()].length === 0))
+    b.state.questions.fresh1 = { question: 'pending question' }
+    b.state.views.fresh1 = { view: 'pending view' }
+    const snapshots = []
+    b.rt.save = async () => {
+      snapshots.push(structuredClone(b.state))
+      if (failSave) throw Object.assign(new Error('injected rollback EIO'), { code: 'EIO' })
+    }
+    b.firstTurn('fresh1', { answer: false })
+    assert.ok(await until(() => failSave
+      ? b.calls.warnings.some(line => line.includes('injected rollback EIO'))
+      : b.calls.archived.length > 0))
+    assert.ok(snapshots.length > 0)
+    for (const snapshot of [...snapshots, b.state]) {
+      const bot = snapshot.bots.b1
+      assert.equal(bot.sessionId, 's1', 'no save may strand the old choice on the fresh chat')
+      assert.equal(bot.model, model)
+      assert.equal(bot.appliedModel, model)
+      assert.equal(bot.effort, 'high')
+      assert.equal(bot.appliedEffort, 'high')
+      assert.equal(bot.previousModel, model)
+      assert.deepEqual(bot.segments, [])
+      assert.deepEqual(snapshot.questions, { s1: { question: 'pending question' } })
+      assert.deepEqual(snapshot.views, { s1: { view: 'pending view' } })
+      assert.deepEqual(snapshot.switching, {})
+    }
+    assert.deepEqual(b.session.snapshotEvents(), history)
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
+    if (failSave) {
+      assert.equal(snapshots.length, 1, 'the failed write is not swallowed or retried')
+      assert.deepEqual(b.calls.archived, [], 'a failed write cannot authorize archival')
+      assert.ok(b.calls.warnings.some(line => line.includes('going back from the fresh part') && line.includes('injected rollback EIO')))
+    } else {
+      assert.deepEqual(b.calls.archived, ['fresh1'])
+      assert.deepEqual(b.calls.selected.at(-1), ['s1', model])
+    }
+  })
 })
 
 test('case 8b\', a first answer that comes at once, during the handoff itself, archives the old part', async (t) => {
@@ -1257,3 +1438,168 @@ for (const trigger of ['idle', 'pre-step']) {
     assert.deepEqual([...b.rt.switchJobs()], [])
   })
 }
+
+
+// A crossing refusal leaves the actual Session log and the owner's pending cards intact.
+test('explicit crossings with history move to a new part with a handoff, their cards with them', async t => {
+  for (const target of ['api/small', 'acp-claude/default']) await t.test(target, async t => {
+    const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
+    t.after(b.stop)
+    Object.assign(b.bot, { appliedModel: 'acp-codex/default', effort: 'high', appliedEffort: 'high', previousModel: 'acp-codex/default' })
+    b.state.questions.s1 = { question: 'pending question' }
+    b.state.views.s1 = { view: 'pending view' }
+    const history = b.session.snapshotEvents()
+    const notes = []
+    b.rt.resolveModel = async ref => ref
+    b.rt.resolveEffort = async (_ref, effort) => effort
+    b.rt.cachedCatalog = () => ['acp-codex/default', target].map(ref => ({ ref }))
+    b.rt.noteFailure = entry => notes.push(entry.text)
+    // Codex is the outgoing agent: it writes no summary in this bench, so the switch goes on
+    // with the latest messages once its short wait ends.
+    b.rt.config.crossingNoteTimeoutMs = 20
+    assert.ok(b.session.deriveMessages().length > 0)
+    assert.deepEqual(await b.rt.switchRoute('b1', target, 'low'), { id: 'b1', model: target, effort: 'low', status: 'switching' })
+    assert.equal(b.rt.switchingChat('b1', { crossing: true }).to, target)
+    for (const at = Date.now(); b.bot.sessionId !== 'fresh1' || [...b.rt.switchJobs()].length > 0;) {
+      if (Date.now() - at > 3000) assert.fail('the switch did not finish')
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    // The old part keeps its record and stays until the new agent's first answer.
+    assert.deepEqual(b.session.snapshotEvents().slice(0, history.length), history)
+    assert.deepEqual(b.calls.archived, [])
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
+    assert.deepEqual({ model: b.bot.model, appliedModel: b.bot.appliedModel, effort: b.bot.effort, appliedEffort: b.bot.appliedEffort },
+      { model: target, appliedModel: target, effort: 'low', appliedEffort: 'low' })
+    assert.deepEqual(b.calls.selected, [['fresh1', target]])
+    assert.deepEqual(b.bot.segments.map(segment => [segment.sessionId, segment.switchedTo, segment.archivePending]), [['s1', target, true]])
+    assert.deepEqual(b.state.questions.fresh1, { question: 'pending question' })
+    assert.deepEqual(b.state.views.fresh1, { view: 'pending view' })
+    const handoff = b.agents.get('fresh1').inbox.nextTurn.find(message => message.source?.handoff === true)
+    assert.match(textOf(handoff.content), /the user switched this chat from Codex to .+; you are .+ now/)
+    assert.equal(b.rt.switchingChat('b1', { crossing: true }), false)
+    assert.deepEqual(notes, [
+      `Route change acp-codex/default → ${target} accepted`,
+      `Route change acp-codex/default → ${target} completed (handoff without a summary)`,
+    ])
+  })
+})
+
+async function redactedHandoff(t, { changeDuringSetup = false } = {}) {
+  const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
+  t.after(b.stop)
+
+  const oldPiece = 'OldHandoffFixture'
+  const newPiece = 'NewHandoffFixture'
+  const shapePiece = 'ShapeEx1'
+  const oldValue = `VALUE${oldPiece.repeat(40)}END`
+  const newValue = `VALUE${newPiece.repeat(300)}END`
+  const mask = redactor([{ name: 'OLD', value: oldValue }, { name: 'NEW', value: newValue }])
+  let savedMask = changeDuringSetup ? undefined : mask
+  let loadedMask = savedMask
+  b.rt.connectorDiagnosticRedactor = () => loadedMask
+  b.rt.loadSecrets = () => { loadedMask = savedMask }
+  b.ctx.provide('omniTeam', { redactSecrets: text => savedMask?.(text) ?? text })
+  if (changeDuringSetup) {
+    b.rt.applyToolDeny = async () => { savedMask = mask }
+  }
+  b.bot.contextRecentTokens = 1000
+  b.rt.config.crossingNoteTimeoutMs = 20
+  b.rt.resolveModel = async ref => ref
+  b.rt.cachedCatalog = () => [{ ref: 'api/small' }]
+  for (const text of [
+    `earlier-marker ${oldValue} earlier-tail`,
+    `shape-marker ${'x'.repeat(363)} ghp_${shapePiece.repeat(20)} ok`,
+    'ordinary filler '.repeat(260),
+    `latest-marker ${newValue} latest-tail`,
+  ]) {
+    b.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text }], source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+  }
+
+  assert.equal((await b.rt.switchRoute('b1', 'api/small')).status, 'switching')
+  assert.ok(await until(() => b.bot.sessionId === 'fresh1' && [...b.rt.switchJobs()].length === 0))
+  assert.equal(b.bot.segments[0].fallback, 'recent')
+  assert.deepEqual(b.streams(), [], 'the fake outgoing agent produced no summary')
+  b.firstTurn('fresh1', { answer: true })
+  const fresh = b.sessions.get('fresh1')
+  const handoff = fresh.snapshotEvents().find(event =>
+    event.type === 'user/message' && event.data.source?.handoff)
+  assert.ok(handoff, 'the fresh Session received the handoff')
+  return { b, fresh, text: textOf(handoff.data.content), oldPiece, newPiece, shapePiece }
+}
+
+test('AD-1 masks both handoff excerpts and subsequent history when the agent writes no summary', async t => {
+  const { b, fresh, text, oldPiece, newPiece, shapePiece } = await redactedHandoff(t)
+  const [earlier, latest] = text.split('## Latest messages (oldest first)')
+  assert.match(earlier, /## Messages to you in part 1/)
+  assert.match(earlier, /earlier-marker/)
+  assert.match(earlier, /shape-marker/)
+  assert.match(latest, /latest-marker/)
+
+  const home = mkdtempSync(join(tmpdir(), 'handoff-redaction-'))
+  const historyContext = fakeContext()
+  t.after(async () => {
+    await historyContext.dispose()
+    rmSync(home, { recursive: true, force: true })
+  })
+  historyContext.sessionController = {
+    async page({ address, throughSeq }) {
+      const events = b.sessions.get(address.sessionId).snapshotEvents()
+        .filter(event => event.seq <= throughSeq)
+      return { records: events.map(event => ({ event })), hasMore: false }
+    },
+  }
+  const history = { ...b.rt, ctx: historyContext, home }
+  installChatIndex(history)
+  const results = []
+  for (const [marker, piece] of [
+    ['earlier-marker', oldPiece], ['latest-marker', newPiece], ['shape-marker', shapePiece],
+  ]) {
+    const { lines } = await history.searchOwnChat('b1', marker, { askingId: fresh.id })
+    assert.equal(lines.length, 1, marker)
+    assert.ok(lines[0].includes(marker), marker)
+    results.push(lines[0].includes(piece))
+  }
+  assert.deepEqual({
+    earlierExcerptLeaks: earlier.includes(oldPiece),
+    latestExcerptLeaks: latest.includes(newPiece),
+    clippedShapeLeaks: earlier.includes(shapePiece),
+    historyLeaks: results,
+  }, {
+    earlierExcerptLeaks: false,
+    latestExcerptLeaks: false,
+    clippedShapeLeaks: false,
+    historyLeaks: [false, false, false],
+  })
+  assert.match(earlier, /earlier-marker \[secret:OLD\] earlier-tail/)
+  assert.match(earlier, /\[hidden\] ok/)
+  assert.match(latest, /latest-marker \[secret:NEW\] latest-tail/)
+})
+
+test('AD-1 drops both stale handoff excerpts when the redactor changes during fresh Session setup', async t => {
+  const { text, oldPiece, newPiece } = await redactedHandoff(t, { changeDuringSetup: true })
+  assert.deepEqual({
+    earlierExcerptLeaks: text.includes(oldPiece),
+    latestExcerptLeaks: text.includes(newPiece),
+  }, {
+    earlierExcerptLeaks: false,
+    latestExcerptLeaks: false,
+  })
+  assert.doesNotMatch(text, /earlier-marker|latest-marker|shape-marker/)
+  assert.match(text, /## Latest messages \(oldest first\)\n\(none\)/)
+  assert.match(text, /## Handoff note\n\(No note, on purpose: the agent of the previous part wrote no summary in time for the switch\./)
+  assert.match(text, /Everything earlier stays saved: read_own_chat searches every part/)
+  assert.match(text, /Nothing needs an answer now; wait for the next message\.$/)
+})
+
+// The restart classifier is also used by same-harness moves and their first turns.
+test('first-turn interruptions distinguish host cuts from failures and the user stopping', () => {
+  for (const [reason, cut] of [
+    [{ kind: 'error', error: { code: 'AGENT_INTERRUPTED', message: 'Claude Code was interrupted before it finished.' } }, true],
+    [{ kind: 'interrupted' }, true],
+    [{ kind: 'aborted', reason: { kind: 'disposed' } }, true],
+    [{ kind: 'error', error: { code: 'ABORTED', message: 'Stopped' } }, false],
+    [{ kind: 'error', error: { code: 'ACP_AGENT', message: 'The agent failed' } }, false],
+  ]) assert.equal(cutByRestart(reason), cut)
+})

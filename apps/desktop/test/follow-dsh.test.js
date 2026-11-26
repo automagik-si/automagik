@@ -47,7 +47,7 @@ test('follow-omni follows only an Omni release tested on the dsh the desktop run
   assert.ok(text.indexOf('not following it until the Bot team moves') < text.indexOf('git commit -qa'), 'a mismatch stops before the commit')
   // The welcome installs the same Omni release in a plain DSH: both pins move in one commit.
   assert.ok(text.indexOf('apps/welcome-dsh/package.json') < text.indexOf('git commit -qa'))
-  assert.match(text, /pkg\.automagik\.omni = \{ \.\.\.pkg\.automagik\.omni, version, commit \}/)
+  assert.match(text, /pkg\.automagik\.omni = \{ \.\.\.pkg\.automagik\.omni, version, commit, tree \}/)
 })
 
 test('follow-omni carries an Omni only after it booted, on the dev commit that booted', () => {
@@ -63,9 +63,9 @@ test('follow-omni carries an Omni only after it booted, on the dev commit that b
   assert.match(text, /\n {2}release:\n {4}name: Release\n {4}needs: carry\n/)
 })
 
-test('follow-omni runs on Omni\'s dispatch, takes its payload only as a logged hint', () => {
+test('follow-omni runs on Omni\'s dispatch and the outside daily clock, taking the payload only as a logged hint', () => {
   const text = readFileSync(new URL('../../../.github/workflows/follow-omni.yml', import.meta.url), 'utf8')
-  assert.match(text, /\n {2}repository_dispatch:\n(?: {4}#[^\n]*\n)* {4}types: \[omni-release\]\n/)
+  assert.match(text, /\n {2}repository_dispatch:\n(?: {4}#[^\n]*\n)* {4}types: \[omni-release, daily-carry\]\n/)
   // The schedule stays as the fallback, and every run queues behind a running follow.
   assert.match(text, /\n {2}schedule:\n[\s\S]*?- cron: '/)
   assert.match(text, /\nconcurrency:\n {2}group: follow-omni\n {2}cancel-in-progress: false\n/)
@@ -87,12 +87,15 @@ test('follow-omni runs on Omni\'s dispatch, takes its payload only as a logged h
   // what is followed is still only what the lookup lists (or a dry run's omni_version).
   assert.match(text, /for try in 1 2 3 4 5 6; do\n\s+unlisted \|\| break\n[\s\S]*?sleep 20\n\s+lookup\n\s+done\n/)
   assert.match(text, /if unlisted; then\n\s+echo "::warning ::Omni dispatched \$\{wanted\}/)
-  assert.deepEqual([...text.matchAll(/\bnewest=(.*)/g)].map(match => match[1]), ['"${WANT_VERSION}"', '$(sort -V releases.txt | tail -1)'])
+  assert.deepEqual([...text.matchAll(/\bnewest=(.*)/g)].map(match => match[1]), ['"${WANT_VERSION}"', "$(sed -E '/^2\\.20[0-9]{6}\\.[0-9]+$/d' releases.txt | sort -V | tail -1)"])
+  // The newest listed release is followed as it is (#1915): npm's server no longer picks it.
+  assert.doesNotMatch(text, /registry\.npmjs\.org|\$\{candidate\}|read -r candidate/)
+  assert.match(text, /# follow: start\n[\s\S]*?! above "\$\{newest\}" "\$\{current\}"[\s\S]*?# follow: end\n/)
 })
 
 test('the boot gate boots the candidate exactly as carry writes it, both pins', () => {
   const read = name => readFileSync(new URL(`../../../.github/workflows/${name}`, import.meta.url), 'utf8')
-  const bump = text => text.match(/\n {10}node -e '\n([\s\S]*?)\n {10}' "\$\{(?:OMNI_)?VERSION\}" "\$\{(?:OMNI_)?COMMIT\}"/)?.[1]
+  const bump = text => text.match(/\n {10}node -e '\n([\s\S]*?)\n {10}' "\$\{(?:OMNI_)?VERSION\}" "\$\{(?:OMNI_)?COMMIT\}" "\$\{(?:TREE|tree)\}"/)?.[1]
   const carried = bump(read('follow-omni.yml'))
   assert.ok(carried?.includes('apps/welcome-dsh/package.json'), 'carry moves the welcome too')
   assert.equal(bump(read('boot-check.yml')), carried)
@@ -135,7 +138,7 @@ test('all runtime patch version guards track the desktop DSH pin', () => {
 })
 
 test('all shipped plugin harnesses track the exact desktop DSH pin', () => {
-  assert.deepEqual([...PLUGINS].sort(), ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'welcome-dsh'])
+  assert.deepEqual([...PLUGINS].sort(), ['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'vault-dsh', 'welcome-dsh'])
   const pinned = JSON.parse(readFileSync(new URL('../runtime/package.json', import.meta.url), 'utf8')).dependencies['@deepseek-ai/dsh']
   for (const name of PLUGINS) {
     const tested = JSON.parse(readFileSync(new URL(`../../${name}/dev/harness/package.json`, import.meta.url), 'utf8')).dependencies['@deepseek-ai/dsh']

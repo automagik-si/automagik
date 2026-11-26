@@ -14,11 +14,22 @@ import { BotComputerCard } from './computer.js'
 import { avatarImage } from './avatar-library.js'
 import { botSettings, useEntries } from './extend.js'
 import { useMemoryCount } from './memory-panel.js'
-import { SPRING_SHAPE, SPRING_TAP, spring } from './motion.js'
-import { t } from './i18n.js'
-import { cliProviderOf } from './cli-login-model.js'
+import { SPRING_SHAPE, SPRING_TAP, Segmented, spring } from './motion.js'
+import { hostText, t } from './i18n.js'
+import { useVoices } from './voice-settings.js'
+import { cliProviderOf, signInProviderOf } from './cli-login-model.js'
+import { OWN_TOOLS_DENY_TEXT, addsAcpToolDeny } from '../shared/own-tools.js'
 import { CliAccounts } from './cli-accounts.js'
 import { AdvancedSettings, ADVANCED_SETTINGS_CSS } from './advanced-settings.js'
+import {
+  attachedRoleIds, attachmentStatus, BUILTIN_ROLES, CHOOSE_NONE_FIRST, effectiveRoleIds, GENIE_ATTACH_REFUSAL,
+  isPackageRoleId, packageAttachment, packageDeclarations, packageRecoveryId, ROLE_SOURCE_UNCONFIRMED, roleTagOf, rolesOn, sameRolePin,
+} from '../shared/roles.js'
+let PeopleCard
+export function installPeopleCard(component) {
+  PeopleCard = component
+  return () => { if (PeopleCard === component) PeopleCard = undefined }
+}
 
 const capitalize = word => word[0].toUpperCase() + word.slice(1)
 
@@ -62,10 +73,16 @@ export function Switch({ on, label, disabled, onChange }) {
 }
 
 // A row with a switch. Not a label: a click on the copy must not flip it twice.
-export function SwitchRow({ label, hint, on, disabled, onChange }) {
+export function SwitchRow({ label, hint, notes, on, disabled, onChange, details = false }) {
+  const toggle = h(Switch, { on, label, disabled, onChange })
+  // `notes`: more lines under the hint, with the hint's own class (Details only).
+  if (details) return h('div', null,
+    h('div', { className: 'bt-drawer-switch-head' }, h('span', null, label), toggle),
+    hint ? h('div', { className: 'bt-note' }, hint) : null,
+    ...(notes ?? []).map((note, index) => h('div', { key: `note-${index}`, className: 'bt-note' }, note)))
   return h('div', { className: 'bt-set-row bt-bs-row' },
     h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, label), hint ? h('span', { className: 'bt-set-hint' }, hint) : null),
-    h(Switch, { on, label, disabled, onChange }))
+    toggle)
 }
 
 // The selection ring of a picker cell follows the shape: a 1px line 3px outside it.
@@ -79,11 +96,13 @@ function ShapeRing({ shape, size }) {
 }
 
 // Every character shape, six to a row, then the color swatches.
-export function CharacterGrid({ look, hasPhoto = false, onShape, onColor }) {
-  const shapes = [...PICKER_SHAPES, ...Object.keys(SHAPES).filter(id => !Object.hasOwn(CHARACTERS, id))]
-  if (!shapes.includes(look.shape)) shapes.push(look.shape)
+export function CharacterGrid({ look, shapes, hasPhoto = false, onShape, onColor }) {
+  const options = shapes === undefined
+    ? [...PICKER_SHAPES, ...Object.keys(SHAPES).filter(id => !Object.hasOwn(CHARACTERS, id))]
+    : [...shapes]
+  if (shapes === undefined && !options.includes(look.shape)) options.push(look.shape)
   const rows = []
-  for (let index = 0; index < shapes.length; index += PICKER_COLUMNS) rows.push(shapes.slice(index, index + PICKER_COLUMNS))
+  for (let index = 0; index < options.length; index += PICKER_COLUMNS) rows.push(options.slice(index, index + PICKER_COLUMNS))
   return h(Fragment, null,
     h('div', { className: 'bt-shapes', role: 'group', 'aria-label': t('Character shape') }, rows.map((row, index) => h('div', { key: index, className: 'bt-shape-row' }, row.map(id => h('button', {
       key: id, type: 'button', className: 'bt-shape', 'aria-label': t(shapeOf(id).label), title: t(shapeOf(id).label), 'aria-pressed': !hasPhoto && look.shape === id,
@@ -118,10 +137,145 @@ export function parseDenyTools(text) {
   return [...new Set(String(text ?? '').split(/[\n,]+/).map(name => name.trim()).filter(Boolean))]
 }
 
-// A Bot's settings as grouped cards: who it is (avatar, name, role), what it runs on
+export function useRolePackageAction(run) {
+  const [result, setResult] = useState(null)
+  const [pending, setPending] = useState(false)
+  const change = (action, id) => {
+    setPending(true)
+    setResult(null)
+    return run(action(id).then(value => {
+      if (value?.warnings?.length || value?.leftover) setResult(value)
+    }).finally(() => setPending(false)))
+  }
+  return { result, pending, change }
+}
+
+export function rolePackageResult(result) {
+  return result ? h('div', { className: 'bt-bs-shell-note', role: 'status' },
+    result.warnings?.map(field => h('div', { key: field }, t('Ignored role manifest field: {field}', { field }))),
+    result.leftover ? h('div', null, t('Role package folder left at {folder}.', { folder: result.leftover })) : null) : null
+}
+
+function RolePackagesCard({ roster, actions, run }) {
+  const { result, pending, change } = useRolePackageAction(run)
+  const records = roster.roles ?? {}
+  const roles = new Map((roster.roleCatalog?.roles ?? []).map(role => [role.id, role]))
+  for (const id of Object.keys(records)) {
+    if (!roles.has(id)) roles.set(id, { id, name: id })
+  }
+  if (roles.size === 0 && !result && !pending) return null
+
+  const attached = new Set((roster.bots ?? Object.values(roster.byId ?? {})).flatMap(attachedRoleIds))
+  const readOnly = roleReadOnly(roster)
+  return h(Card, { title: t('Roles') },
+    [...roles.values()].map(role => {
+      const record = Object.hasOwn(records, role.id) ? records[role.id] : undefined
+      const inUse = record && attached.has(role.id)
+      const hints = [
+        record?.status === 'broken' && t('Broken'),
+        record?.status === 'damaged' && t('Damaged'),
+        inUse && t('Detach this role from every Bot before uninstalling it.'),
+        !record && role.reason === 'community' && t('Community: not installable yet'),
+      ].filter(Boolean)
+      const version = record ? record.version : role.version
+      const button = record
+        ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: pending || readOnly || inUse,
+          onClick: () => change(actions.uninstallRole, role.id) }, t('Uninstall'))
+        : role.installable && h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: pending || readOnly,
+          onClick: () => change(actions.installRole, role.id) }, t('Install'))
+      return h(Row, { key: role.id, label: [role.name, version].filter(Boolean).join(' · '), hint: hints.join(' · ') }, button || null)
+    }),
+    rolePackageResult(result))
+}
+
+const roleHealthLabels = { broken: 'Broken', damaged: 'Damaged', missing: 'Missing', 'version-mismatch': 'Version mismatch' }
+export const roleHealth = status => t(roleHealthLabels[status] ?? 'Details unavailable')
+export const roleReadOnly = roster => Boolean(roster.readOnly) || roster.roleCatalog?.reason === 'read-only'
+
+function RoleControls({ bot, runtime, actions, run, readOnly }) {
+  const { pin } = runtime
+  const voices = useVoices()
+  const [values, setValues] = useState()
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (readOnly || !runtime.settings.length) return
+    let live = true
+    void run(actions.roleSettings(bot.id, pin).then(value => { if (live) setValues(value) }))
+    return () => { live = false }
+  }, [bot.id, pin.id, pin.version, pin.attachedAt, readOnly])
+  const change = (key, value) => {
+    setValues(before => ({ ...before, [key]: value }))
+    setDirty(true)
+  }
+  const save = () => {
+    setSaving(true)
+    void run(actions.setRoleSettings(bot.id, pin, values).then(value => {
+      setValues(value)
+      setDirty(false)
+    }).finally(() => setSaving(false)))
+  }
+  const grants = bot.roles[0].grants
+  const taskStart = grants.includes('task-start')
+  const routePolicy = grants.includes('route-policy')
+  return h(Fragment, null,
+    runtime.capabilities.includes('audio-out') ? h(SwitchRow, { label: t('Allow speech'), on: grants.includes('audio-out'), disabled: readOnly,
+      onChange: on => void run(actions.grantRole(bot.id, pin, 'audio-out', on)) }) : null,
+    runtime.capabilities.includes('task-start') ? h(SwitchRow, {
+      label: t('Allow starting tasks'), on: taskStart, disabled: readOnly,
+      hint: bot.reviewGuard === true ? t('Tasks require the review guard to be off.') : undefined,
+      onChange: on => void run(actions.grantRole(bot.id, pin, 'task-start', on)),
+    }) : null,
+    runtime.capabilities.includes('route-policy') ? h(SwitchRow, {
+      label: t('Allow its tasks to run on another model'), on: routePolicy, disabled: readOnly || (!taskStart && !routePolicy),
+      onChange: on => void run(actions.grantRole(bot.id, pin, 'route-policy', on)),
+    }) : null,
+    values ? runtime.settings.map(({ key, kind, label }) => {
+      const name = label === 'Voice' ? t('Voice') : label === 'Speed' ? t('Speed') : label
+      const value = values[key]
+      return h(Row, { key, label: name },
+        kind === 'voice'
+          ? h('span', { className: 'bt-voice-set' },
+            h('select', { className: 'bt-input', 'aria-label': name, value, disabled: readOnly || saving,
+              onChange: event => change(key, event.target.value) },
+            h('option', { value: '' }, t('Automatic, by language')),
+            value && !voices.some(voice => voice.voiceURI === value) ? h('option', { value }, t('Saved voice unavailable')) : null,
+            voices.map(voice => h('option', { key: voice.voiceURI, value: voice.voiceURI }, `${voice.name} (${voice.lang})`))))
+          : h('span', { className: 'bt-voice-set' },
+            h('input', { type: 'range', min: 0.5, max: 2, step: 0.1, value, 'aria-label': name, disabled: readOnly || saving,
+              onChange: event => change(key, Number(event.target.value)) }),
+            h('span', { className: 'bt-set-hint' }, `${Number(value.toFixed(2))}×`)))
+    }) : null,
+    dirty ? h(Row, null, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: readOnly || saving, onClick: save }, t('Save'))) : null)
+}
+
+function PackageAttachmentCard({ roster, bot, pin, recoveryId, onDetach, actions, run }) {
+  const declarations = pin && packageDeclarations(pin, roster)
+  const health = pin && attachmentStatus(pin, roster.roles)
+  const recover = !pin || health !== 'ok'
+  const candidate = Object.hasOwn(roster.roleRuntime ?? {}, bot.id) ? roster.roleRuntime[bot.id] : undefined
+  const runtime = !recover && rolesOn(roster.prefs) && sameRolePin(pin, candidate?.pin) ? candidate : undefined
+  const healthReason = pin && Object.hasOwn(roster.roles ?? {}, pin.id) ? roster.roles[pin.id].reason : undefined
+  return h(Card, { title: t('Role') },
+    h(Row, {
+      label: declarations?.name ?? (pin ? `${pin.id}@${pin.version}` : recoveryId),
+      hint: [declarations?.name && `${pin.id}@${pin.version}`, recover && roleHealth(health ?? 'damaged')].filter(Boolean).join(' · '),
+    }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: roleReadOnly(roster), onClick: onDetach }, t('Detach'))),
+    h(Row, { label: runtime ? t('Active tools') : t('Declared tools'), hint: runtime ? undefined : t('Declared, not active yet'), stack: true },
+      (runtime?.tools ?? declarations?.tools)?.join(', ') || (runtime || declarations?.tools ? t('None') : t('Details unavailable'))),
+    runtime ? h(RoleControls, { key: `${bot.id}:${pin.attachedAt}`, bot, runtime, actions, run, readOnly: roleReadOnly(roster) })
+      : h(Row, { label: t('Grants requested'), hint: declarations ? declarations.capabilities.join(', ') || t('None') : t('Details unavailable') }),
+    !runtime && declarations?.fromCatalog ? h(Row, { label: t('From the catalog') }) : null,
+    runtime?.promptWarning ? h(Row, { label: hostText(runtime.promptWarning) })
+      : runtime?.acp ? h(Row, { label: t('ACP coding agents do not receive this role’s prompt.') }) : null,
+    !runtime ? h(Row, { label: healthReason ? hostText(healthReason) : t('Its tools arrive with the role runtime.'),
+      hint: recover ? t('Detach it from every Bot, uninstall, then install again.') : undefined }) : null)
+}
+
+// A Bot's settings as grouped cards: who it is (avatar, name, description, role), what it runs on
 // (model), what it does (instructions), its memory and tasks, its Main Bot role, its
 // sidebar place, and copies.
-export function BotSettingsForm({ bot, roster, actions, run }) {
+export function BotSettingsForm({ bot, roster = {}, actions, run }) {
   const [editing, setEditing] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const closeEditor = useCallback(() => setEditing(false), [])
@@ -137,6 +291,41 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
   const privateHint = t('Other Bots cannot read its folder, memory or chats, and you approve what it shares with them.')
   const privacyHint = bot.private === true ? privateHint : isMainBot ? t('A Main Bot cannot be private.') : inGroup ? t('Leave its group chats before making it private.') : !bot.workDir ? t('Choose a working folder of its own first.') : privateHint
   const save = patch => run(actions.updateBot(bot.id, patch))
+  const teamBot = roster.bots?.some(item => item.id === bot.id)
+    ?? (Object.hasOwn(roster.byId ?? {}, bot.id) && roster.byId[bot.id]?.id === bot.id)
+  const showingRoles = teamBot && rolesOn(roster.prefs)
+  const canCancelSolverWait = teamBot && bot.canCancelSolverWait === true
+  const requestedRoleCatalog = useRef()
+  useEffect(() => {
+    if (!showingRoles || !actions.roleCatalog || requestedRoleCatalog.current === bot.id) return
+    requestedRoleCatalog.current = bot.id
+    void run(actions.roleCatalog())
+  }, [showingRoles, bot.id])
+  const pin = teamBot ? packageAttachment(bot) : undefined
+  const recoveryId = teamBot ? packageRecoveryId(bot) : undefined
+  const roleTag = showingRoles ? roleTagOf(bot, roster.prefs, roster, t) : undefined
+  const rawIds = showingRoles ? attachedRoleIds(bot) : []
+  const effective = showingRoles ? effectiveRoleIds(bot, roster.prefs) : []
+  const activeRole = effective[0] ?? pin?.id ?? rawIds[0]
+  const detach = () => void run(actions.detachRole(bot.id))
+  const readOnly = roleReadOnly(roster)
+  const detachReason = id => t('Detach {name} first.', {
+    name: id === 'genie' ? t('Genie') : (pin?.id === id ? packageDeclarations(pin, roster)?.name : undefined) ?? id,
+  })
+  const genieOccupied = rawIds.find(id => id !== 'genie')
+  const genieReason = genieOccupied !== undefined ? detachReason(genieOccupied)
+    : bot.kind !== BUILTIN_ROLES.genie.kind ? t(GENIE_ATTACH_REFUSAL) : undefined
+  const choices = new Map()
+  if (showingRoles) {
+    for (const [id, record] of Object.entries(roster.roles ?? {})) {
+      if (isPackageRoleId(id) && record.status === 'ok') choices.set(id, record.version)
+    }
+    if (pin) choices.set(pin.id, pin.version)
+  }
+  const rolePicker = choices.size ? 'div' : Segmented
+  const rolePickerProps = choices.size
+    ? { className: 'bt-app-chips', role: 'group', 'aria-label': t('Role') }
+    : { label: t('Role'), value: activeRole }
   // A model whose agent is signed out: the refusal shows as usual, and Sign in opens the sign-in
   // row in this Bot's chat (rule 2). The chat opens only on this click.
   const [signIn, setSignIn] = useState(null)
@@ -146,7 +335,7 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
   const [account, setAccount] = useState(null)
   useEffect(() => { setAccount(null) }, [bot.id, bot.model])
   const pickFailure = ref => (error) => {
-    if (error?.code === 'bot/sign-in-required' && cliProviderOf(ref)) setSignIn(ref)
+    if (error?.code === 'bot/sign-in-required' && signInProviderOf(ref)) setSignIn(ref)
     if (error?.code === 'bot/account-confirm-required' && cliProviderOf(ref)) setAccount(ref)
     throw error
   }
@@ -169,18 +358,42 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
           h('span', { className: 'bt-avatar-pencil', 'aria-hidden': true }, h(PencilIcon))),
         editing ? h(CharacterSelect, { bot, actions, run, onClose: closeEditor, avatarImage }) : null),
       h('div', { className: 'bt-bs-who' },
-        h('span', { className: 'bt-bs-name' }, bot.name),
+        h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-bs-name' }, bot.name),
+          roleTag ? h('span', { className: 'bt-tag' }, roleTag) : null),
         h('span', { className: 'bt-bs-sub' }, [bot.role, isMainBot ? t('Main Bot') : ''].filter(Boolean).join(' · ') || t('Bot')))),
     h(Card, { title: t('Profile') },
       h(Row, { label: t('Name') }, h(InlineText, { label: t('Name'), value: bot.name, placeholder: 'Bob', required: true, maxLength: 40, onSave: name => save({ name }) })),
-      h(Row, { label: t('Role'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Role'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) }))),
+      h(Row, { label: t('Description'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Description'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) })),
+      (showingRoles || canCancelSolverWait) ? h('div', { className: choices.size ? 'bt-set-row bt-bs-row bt-bs-stack' : 'bt-set-row bt-bs-row' },
+        h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Role')),
+          h('span', { className: 'bt-set-hint' }, t('What this Bot can do, on top of what every Bot has.'))),
+        h(rolePicker, rolePickerProps,
+          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': activeRole === undefined && !canCancelSolverWait, disabled: readOnly,
+            onClick: () => { if (!readOnly) detach() } }, t('None')),
+          showingRoles ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': effective.includes('genie'),
+            disabled: readOnly || Boolean(genieReason), title: genieReason,
+            onClick: () => { if (activeRole === undefined && !genieReason && !readOnly) void run(actions.attachRole(bot.id, 'genie')) } }, t('Genie')) : null,
+          ...[...choices].map(([id, version]) => {
+            const installed = Object.hasOwn(roster.roleDetails ?? {}, id) ? roster.roleDetails[id].installed : undefined
+            const pressed = pin?.id === id && activeRole === id
+            const occupied = rawIds.find(rawId => rawId !== id) ?? (!pressed ? rawIds[0] : undefined)
+            const reason = occupied !== undefined ? detachReason(occupied)
+              : effective.includes('genie') ? t(CHOOSE_NONE_FIRST)
+                : !pressed && installed?.attachable !== true ? t(ROLE_SOURCE_UNCONFIRMED) : undefined
+            return h('button', { key: id, type: 'button', className: 'bt-soft bt-soft-sm', 'aria-pressed': pressed,
+              disabled: readOnly || Boolean(reason), title: reason,
+              onClick: () => { if (!pressed && !reason && !readOnly) void run(actions.attachRole(bot.id, id)) } },
+            installed?.verified && installed.version === version ? installed.name : id)
+          }))) : null),
+    (showingRoles ? pin || recoveryId : recoveryId) ? h(PackageAttachmentCard, { roster, bot, pin, recoveryId, onDetach: detach, actions, run }) : null,
+    showingRoles ? h(RolePackagesCard, { key: `role-packages:${bot.id}`, roster, actions, run }) : null,
     h(Card, { title: t('Model') },
       h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Model')), h('span', { className: 'bt-set-hint', role: modelState?.lastFailure?.kept ? 'status' : undefined }, modelHint(bot, roster, modelState))),
         h(ModelMenu, picker)),
       signIn && actions.openCliLogin ? h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-set-hint' }, t('This model needs a sign-in to its coding agent.'))),
-        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => { actions.openCliLogin(bot.id, cliProviderOf(signIn), signIn); setSignIn(null) } }, t('Sign in'))) : null,
+        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => { actions.openCliLogin(bot.id, signInProviderOf(signIn), signIn); setSignIn(null) } }, t('Sign in'))) : null,
       account && actions.openCliLogin ? h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-set-hint' }, t('This model needs you to confirm the account of its coding agent.'))),
         h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => { actions.openCliLogin(bot.id, cliProviderOf(account), account); setAccount(null) } }, t('Confirm account'))) : null),
@@ -197,11 +410,22 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
         disabled: bot.private !== true && (isMainBot || inGroup || !bot.workDir),
         onChange: value => save({ private: value }),
       })),
+    PeopleCard ? h(PeopleCard, { bot, roster }) : null,
     h(Card, { title: t('Instructions') },
       h(Row, { label: t('What this Bot does'), hint: t('Its job on the team. Part of the Bot\'s system prompt.'), stack: true },
         h(InlineText, { label: t('Instructions'), value: bot.instructions, multiline: true, placeholder: t('What this Bot is responsible for…'), onSave: instructions => save({ instructions }) }))),
     h(BotCapabilitiesCard, { bot, roster, actions, run, Card, SwitchRow }),
     h(Card, { title: t('Tools') },
+      h(SwitchRow, {
+        label: t('Shell access'),
+        hint: t('A Bot with shell access can read what the operating-system user can read.'),
+        on: bot.shell !== false,
+        onChange: value => save({ shell: value }),
+      }),
+      h('div', { className: 'bt-bs-shell-note' },
+        t('The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.')),
+      h('div', { className: 'bt-bs-shell-note' },
+        t('This removes this Bot\'s own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.')),
       h(Row, {
         label: t('Denied tools'),
         hint: t('Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.'),
@@ -213,7 +437,12 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
         placeholder: 'bash, write',
         onSave: (text) => {
           const names = parseDenyTools(text)
-          save({ denyTools: names.length ? names : null })
+          // acp_tool is not added while the Bot runs on a model that runs its own tools
+          // (#2026); the host refuses it too. Keeping or removing it saves.
+          if (bot.ownTools === true && addsAcpToolDeny(bot.denyTools, names)) {
+            return run(Promise.reject(new Error(t(OWN_TOOLS_DENY_TEXT))))
+          }
+          return save({ denyTools: names.length ? names : null })
         },
       }))),
     ...extraCards.map(entry => h(entry.Component, { key: entry.id, bot, roster, actions, run, Card, Row, SwitchRow })),
@@ -258,6 +487,7 @@ export const BOT_SETTINGS_CSS = ADVANCED_SETTINGS_CSS + `
 .bt-bs-sub{font-size:13px;line-height:18px;color:var(--bt-ink-2)}
 .bt-bs .bt-avedit{left:0;transform:none;width:min(284px,calc(100vw - 32px))}
 .bt-bs-row{min-height:48px}
+.bt-bs-shell-note{font-size:12px;line-height:16px;padding:0 16px 12px;color:color-mix(in srgb,var(--bt-ink-2) 50%,var(--bt-ink-3))}
 label.bt-bs-row{cursor:text}
 .bt-bs-row>.bt-set-copy{flex:1 1 auto}
 .bt-bs-label{font-size:13px;line-height:18px;font-weight:500}
@@ -273,6 +503,7 @@ label.bt-bs-row{cursor:text}
 .bt-bs-danger .bt-bs-label{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-bs-danger[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 8%,transparent)}
 .bt-bs-danger[data-confirm]:hover{background:color-mix(in srgb,var(--bt-danger) 12%,transparent)}
+.bt-drawer-switch-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .bt-switch{position:relative;flex:none;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--bt-line-2);cursor:pointer;transition:background-color .2s ease}
 .bt-switch[aria-checked=true]{background:var(--bt-accent)}
 .bt-switch:disabled{opacity:.45;cursor:default}

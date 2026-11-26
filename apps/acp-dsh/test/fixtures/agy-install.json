@@ -1,0 +1,39 @@
+{
+  "source": "https://antigravity.google/cli/",
+  "read": "2026-11-23",
+  "scripts": {
+    "install.sh": {
+      "bytes": 7643,
+      "sha256": "62966c07365423bd4dc209355060744058fb30d60f5323e2d360e39de64e5042",
+      "baseLine": "DOWNLOAD_BASE_URL=\"https://antigravity-cli-auto-updater-974169037036.us-central1.run.app\"",
+      "manifestLine": "MANIFEST_URL=\"$DOWNLOAD_BASE_URL/manifests/$platform.json\""
+    },
+    "install.ps1": {
+      "bytes": 7165,
+      "sha256": "51c2cb4fada22ce0228da71b9506370383d6544bfebcec85fe7616a52b805344",
+      "baseLine": "$DOWNLOAD_BASE_URL = \"https://antigravity-cli-auto-updater-974169037036.us-central1.run.app\"",
+      "manifestLine": "$manifest = Invoke-RestMethod -Uri \"$DOWNLOAD_BASE_URL/manifests/$platform.json\""
+    },
+    "install.cmd": {
+      "bytes": 6006,
+      "sha256": "15aa0bd50ea4d4f53df35b96a6347567cf95231d327f69eae74ece23fde52509",
+      "baseLine": "set \"DOWNLOAD_BASE_URL=https://antigravity-cli-auto-updater-974169037036.us-central1.run.app\"",
+      "manifestLine": "set \"MANIFEST_URL=!DOWNLOAD_BASE_URL!/manifests/!PLATFORM!.json\""
+    }
+  },
+  "platforms": [
+    "linux_amd64",
+    "linux_arm64",
+    "linux_amd64_musl",
+    "linux_arm64_musl",
+    "darwin_amd64",
+    "darwin_arm64",
+    "windows_amd64",
+    "windows_arm64"
+  ],
+  "manifestKeys": [
+    "sha512",
+    "url",
+    "version"
+  ]
+}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
   statSync, symlinkSync, writeFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import { syncBuiltinESMExports } from 'node:module'
@@ -28,7 +28,7 @@ const native = (bytes = data, mimeType = ref.mediaType) => ({ type: 'image', dat
 // The real adapter and AgentRun dispatch to the ACP connection boundary. The transport
 // records session/prompt params and ends the turn; this is not real-app acceptance.
 function host(t, overrides = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'acp-upload-'))
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'acp-upload-')))
   const session = Session.create('upload-test')
   const rows = []
   const dshAgent = {
@@ -826,7 +826,7 @@ test('mixed admitted file and image keep their order and copy both attachments',
 
 test('a matching outside hard link sends unreadable text and retains its mode', async t => {
   const { h, ref, projected, folder, path, bytes } = await admittedFile(t)
-  const outside = mkdtempSync(join(tmpdir(), 'acp-upload-outside-'))
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'acp-upload-outside-')))
   t.after(() => rmSync(outside, { recursive: true, force: true }))
   const original = join(outside, 'x.txt')
   writeFileSync(original, bytes, { mode: 0o600 })

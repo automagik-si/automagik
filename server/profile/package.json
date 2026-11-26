@@ -5,6 +5,7 @@
   "dependencies": {
     "@automagik/acp-dsh": "file:vendor/automagik-acp-dsh-3.90.1.tgz",
     "@automagik/bots-dsh": "file:vendor/automagik-bots-dsh-3.90.1.tgz",
+    "@automagik/multiuser-dsh": "file:vendor/automagik-multiuser-dsh-3.90.1.tgz",
     "@automagik/welcome-dsh": "file:vendor/automagik-welcome-dsh-3.90.1.tgz"
   },
   "dsh": {

@@ -15,6 +15,8 @@ const bundle = await build({
       "export * from './src/client/left-bar-rail.js'",
       "export * from './src/client/left-bar-faces.js'",
       "export * from './src/client/left-bar-css.js'",
+      "export * from './src/client/extend.js'",
+      "export { teamOf, channelGlyph, renderArt } from './src/client/left-bar.js'",
       "export { installLocale } from './src/client/i18n.js'",
     ].join('\n'),
     resolveDir: PLUGIN,
@@ -27,6 +29,7 @@ const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
   useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
   useEffect: () => {}, useLayoutEffect: () => {}, useMemo: make => make(), useRef: current => ({ current }), Fragment: 'fragment',
+  useSyncExternalStore: (_subscribe, snapshot) => snapshot(), useCallback: fn => fn,
   isValidElement: value => value !== null && typeof value === 'object' && 'type' in value && 'props' in value,
 }
 const module = { exports: {} }

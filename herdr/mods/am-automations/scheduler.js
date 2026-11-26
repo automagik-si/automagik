@@ -7,15 +7,15 @@
 // installs the same build, so it holds no pin of its own. Pure: no `herdr`, so Node reads the same
 // pins the panel installs. Apache-2.0.
 export const SCHEDULER = Object.freeze({
-  repo: "automagik-dev/automagik",
-  version: "0.12.1-am.1",
+  repo: "automagik-si/automagik",
+  version: "0.12.1-am.3",
   sha256: Object.freeze({
-    arm64: "bcfa2d499668cefedf5c6f465c30331adaeda1eb0341b1982be240d727fad4de",
-    amd64: "f106185b80994074fd439af1f2db23c1eb3464f13710f6e1ae325dd990695c2e",
+    arm64: "bbfadb3fe520a326647c8a7be3e13dfc7df905d3d04763b2f02e023c198ef214",
+    amd64: "2e41b077e798310976a464bd4369adbea2a141f1f4ce4d3e83a4c3642935cfd0",
   }),
   linux: Object.freeze({
-    arm64: "c45a14eadc7adb81e00456c59bede897ed39a79f1421ff4a993769a5b75d8e2c",
-    amd64: "4db0b9e4f13e29d43b2b1af0daa3e647c42c0bc5d8d075d059a8fe9f6082aa13",
+    arm64: "6d29683be59cbde54b9dbe934f10f83467e9ff695fce46bd17f6444212a69622",
+    amd64: "2262dfab7599d658f080c0d739c215a84f3f880103ea5d1f5b5fcfec1f365821",
   }),
 });
 

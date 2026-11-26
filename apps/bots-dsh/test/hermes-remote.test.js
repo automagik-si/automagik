@@ -47,7 +47,7 @@ function fixture(t, overrides = {}) {
   const source = desktop8Session(randomUUID(), randomUUID())
   const snapshot = source.create
   class Socket extends EventTarget {
-    constructor() { super(); queueMicrotask(() => this.event('gateway.ready', { replay_epoch: 'epoch-a', ...overrides.ready })) }
+    constructor() { super(); this.turns = 0; queueMicrotask(() => this.event('gateway.ready', { replay_epoch: 'epoch-a', ...overrides.ready })) }
     frame(frame) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) })) }
     event(type, payload, seq) { this.frame({ jsonrpc: '2.0', method: 'event', params: { type, payload, session_id: snapshot.session_id, ...(seq ? { seq } : {}) } }) }
     reply(frame, result) { this.frame({ jsonrpc: '2.0', id: frame.id, result }) }
@@ -65,6 +65,10 @@ function fixture(t, overrides = {}) {
         result.events = result.events.map((event, index) => ({ session_id: snapshot.session_id, seq: index + 1, ...event }))
         result.count = result.events.length
       }
+      // A real Hermes sends `message.start` with the turn id before the turn streams (and
+      // before its completion). Tests that need the window between a send and that start set
+      // autoStart: false and send the start themselves.
+      if (frame.method === 'prompt.submit' && overrides.autoStart !== false) this.event('message.start', { turn_id: `turn-${++this.turns}` })
       queueMicrotask(() => {
         this.reply(frame, result)
         if (frame.method === 'session.create' && overrides.metadata !== false) queueMicrotask(() => this.event('session.info', { ...source.info, ...overrides.metadata }))
@@ -93,6 +97,19 @@ async function nextTurn(run) {
     rows.push(row)
     if (['done', 'error', 'aborted'].includes(row.kind)) return rows
   }
+}
+
+// One row with a deadline that names the test line that asked for it: a withheld terminal row
+// fails fast at its own line instead of hanging until the file timeout. No unref: the timer is
+// cleared when the row arrives, and a test process may not exit while it is still waiting.
+function boundedNext(run, what, ms = 1500) {
+  const timeout = new Error(`Timed out waiting for ${what}`)
+  Error.captureStackTrace(timeout, boundedNext)
+  const at = timeout.stack.split('\n').find(line => line.includes('hermes-remote.test.js:'))
+  timeout.message = `Timed out waiting for ${what} at ${at?.trim() ?? 'hermes-remote.test.js'}`
+  let timer
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(timeout), ms) })
+  return Promise.race([run.next(), deadline]).finally(() => clearTimeout(timer))
 }
 
 test('a serve restart between turns takes the new epoch seq and the next turn answers', async t => {
@@ -264,6 +281,78 @@ test('reconnect resumes stored ID, refreshes runtime ID and replaces a replay ga
   assert.equal(f.sent.find(frame => frame.method === 'session.resume').params.session_id, f.snapshot.stored_session_id)
   assert.equal(f.run.queue.length, 0)
   assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached reconcile flags an epoch gap with a pending submit and zero cursor', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    pendingSubmit: true,
+  })
+  await f.wire.connect()
+  const result = await f.run.reconcile()
+  assert.equal(result.gap, true)
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+  assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached reconcile flags an epoch gap with an uncertain turn and zero cursor', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    uncertain: true,
+  })
+  await f.wire.connect()
+  const result = await f.run.reconcile()
+  assert.equal(result.gap, true)
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+  assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached prepare has no epoch gap at zero cursor with nothing waiting', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    pendingSubmit: false, uncertain: false,
+  })
+  await f.wire.connect()
+  await f.run.prepare()
+  assert.equal(f.run.joinGap, false)
+  assert.deepEqual(f.run.takeRecovered(), [])
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+})
+
+test('attached prepare has no gap for a waiting turn in the same epoch and runtime', async t => {
+  for (const waiting of ['pendingSubmit', 'uncertain']) {
+    const f = fixture(t, { attached: true, replay: { epoch: 'epoch-a', latest_seq: 0 } })
+    Object.assign(f.identity, {
+      canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+      runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+      [waiting]: true,
+    })
+    await f.wire.connect()
+    await f.run.prepare()
+    assert.equal(f.run.joinGap, false, waiting)
+    assert.deepEqual(f.run.takeRecovered(), [], waiting)
+    assert.equal(f.identity[waiting], true)
+    assert.equal(f.identity.epoch, 'epoch-a')
+    assert.equal(f.identity.runtimeSessionId, f.snapshot.session_id)
+  }
 })
 
 test('a normal turn resets the watermark when an owned SSH backend starts a new replay epoch', async t => {
@@ -486,6 +575,34 @@ test('DSH adapter produces a real mirror tool card then continues the same remot
   assert.equal(f.sent.filter(frame => frame.method === 'prompt.submit').length, 1)
 })
 
+test('a file copy path that changes between asks does not refuse the turn', async t => {
+  // #1340: the guard rebuilds the Session's projection, and the attachment service may name a
+  // different copy on each call. The path is a handle to the same durable bytes, so the turn
+  // must still be accepted; everything else about the handle and the text stays exact.
+  const ref = Object.freeze({ attachmentId: `sha256:${'a'.repeat(64)}`, name: 'sample.txt', bytes: 3 })
+  const fileMessage = Object.freeze({ role: 'user', id: 'm-2', content: Object.freeze([Object.freeze({ type: 'file', attachment: ref })]) })
+  const messages = Object.freeze([
+    Object.freeze({ role: 'user', id: 'm-1', content: Object.freeze([Object.freeze({ type: 'text', text: 'read this' })]) }),
+    fileMessage,
+  ])
+  let calls = 0
+  const ctx = new Context()
+  ctx.provide('attachments'); ctx.set('attachments', { fileHostPath: ref => `/tmp/hermes-copy-${++calls}/${ref.attachmentId.slice(7, 15)}` })
+  ctx.provide('fs'); ctx.set('fs', { processPathFromHostPath: path => path })
+  const adapter = new RemoteChatAdapter({ ctx }, { enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }], identity: () => ({ createKey: randomUUID() }), save: async () => {}, open: async () => { throw Error('not opened') } })
+  t.after(() => adapter.dispose())
+  const session = { deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  const dispatched = deepFreeze(projectFilesToText([...messages], () => '/tmp/hermes-copy-dispatched/sha256'))
+  const envelope = Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: dispatched })
+  assert.equal(RemoteChatAdapter.ownTurn(envelope, agent, ref => adapter.filePath(ref)), true)
+  // A different durable file under the same shape is still not this turn.
+  const other = deepFreeze(projectFilesToText([...messages], () => '/tmp/hermes-copy-dispatched/sha256').map(projected => projected.role === 'user' && projected.id === 'm-2'
+    ? { ...projected, content: projected.content.map(block => block.type === 'text' ? { ...block, text: block.text.replace(ref.attachmentId.slice(7, 15), 'b'.repeat(16)) } : block) }
+    : projected))
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ ...envelope, messages: other }), agent, ref => adapter.filePath(ref)), false)
+})
+
 test('a projected agent-loop request still answers, and a hand-built call is still refused', async t => {
   const f = fixture(t)
   const ctx = new Context(), runtime = new LlmRuntime(ctx)
@@ -691,6 +808,38 @@ test('each hardening check is pinned by a forgery equal to the Session message',
   // Frozen message, unfrozen content: the value could change after the guard.
   const unfrozen = Object.freeze({ role: 'user', id: 'm-1', content: [Object.freeze({ type: 'text', text: 'say OK' })] })
   assert.equal(RemoteChatAdapter.ownTurn(envelope([unfrozen]), agent), false)
+})
+
+test('a plain-data toJSON key in history is ordinary data; a function toJSON is still refused', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  // A tool call in history whose arguments carry an ordinary JSON key named toJSON.
+  const call = Object.freeze({ role: 'assistant', id: 'a-1', content: Object.freeze([Object.freeze({ type: 'tool-call', id: 'call-1', name: 'sample', arguments: Object.freeze({ toJSON: 'x', nested: Object.freeze({ toJSON: 1 }) }) })]), source: Object.freeze({ kind: 'model', provider: 'hermes-remote', model: 'sample:model' }) })
+  const user = Object.freeze({ role: 'user', id: 'm-1', content: Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })]) })
+  const messages = Object.freeze([call, user, Object.freeze({ role: 'developer', id: 'dev-tools', content: Object.freeze([Object.freeze({ type: 'tool-addition', toolName: 'sample' })]) })])
+  const session = { deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const request = markAgentLoopRequest(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages, tools: Object.freeze([]), signal: new AbortController().signal }))
+  const stream = runtime.stream(request)
+  const first = stream.next()
+  await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the prompt to be submitted', first)
+  f.socket().event('message.complete', { text: 'OK' })
+  const chunks = [(await first).value]
+  for await (const chunk of stream) chunks.push(chunk)
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'OK')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  // A function toJSON is not data: JSON.stringify would call it, so it stays refused.
+  const evil = Object.freeze(Object.defineProperty([Object.freeze({ type: 'text', text: 'say OK' })], 'toJSON', { value: () => [], enumerable: false }))
+  const evilUser = Object.freeze({ role: 'user', id: 'm-1', content: evil })
+  const evilAgent = { id: 'sample-chat', session: { deriveMessages: () => [evilUser], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) } }
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([evilUser]) }), evilAgent), false)
 })
 
 test('each request field must be own data: an equal-value accessor envelope is refused', async t => {
@@ -1034,18 +1183,20 @@ const cutCases = () => SECRET_KINDS.flatMap(([whose, make]) => SECRET_LINES.map(
 
 test('a secret cut between two frames reaches no row, wherever the cut is: query values, a bearer, a gateway ticket', async t => {
   for (const { name, value, credential, sent, shown } of cutCases()) {
-    const f = fixture(t, { credential })
+    const f = fixture(t, { credential, autoStart: false })
     await f.wire.connect(); await f.run.submit('Sample')
     for (let cut = 0; cut <= sent.length; cut++) {
-      f.socket().event('message.delta', { text: sent.slice(0, cut) })
-      f.socket().event('message.delta', { text: sent.slice(cut) })
+      f.socket().event('message.start', { turn_id: `turn-cut-${cut}` })
+      f.socket().event('message.delta', { text: sent.slice(0, cut), turn_id: `turn-cut-${cut}` })
+      f.socket().event('message.delta', { text: sent.slice(cut), turn_id: `turn-cut-${cut}` })
       f.socket().event('message.complete', { response_reused: true, status: 'complete' })
       const rows = await textRows(f)
       for (const row of rows) assert.equal(fragment(row, value), undefined, `${name}, cut at ${cut}: a row shows part of the secret`)
       assert.equal(rows.join(''), shown, `${name}, cut at ${cut}`)
     }
     // One character a frame: every cut at once.
-    for (const character of sent) f.socket().event('message.delta', { text: character })
+    f.socket().event('message.start', { turn_id: 'turn-characters' })
+    for (const character of sent) f.socket().event('message.delta', { text: character, turn_id: 'turn-characters' })
     f.socket().event('message.complete', { response_reused: true, status: 'complete' })
     const rows = await textRows(f)
     for (const row of rows) assert.equal(fragment(row, value), undefined, `${name}, one character a frame`)
@@ -1084,13 +1235,14 @@ test('a final text that is not what was streamed starts again: nothing held of t
 })
 
 test('a cut value ends with its turn: the text after it is whole', async t => {
-  const f = fixture(t)
+  const f = fixture(t, { autoStart: false })
   await f.wire.connect(); await f.run.submit('Sample')
   const value = randomBytes(32).toString('hex')
   for (const [end, payload] of [['message.complete', { response_reused: true, status: 'complete' }], ['message.interim', { text: '', already_streamed: true }], ['tool.start', { tool_id: 'tool-a', name: 'sample' }]]) {
-    f.socket().event('message.delta', { text: `See /api/ws?token=${value.slice(0, 20)}` })
+    f.socket().event('message.start', { turn_id: `turn-${end}` })
+    f.socket().event('message.delta', { text: `See /api/ws?token=${value.slice(0, 20)}`, turn_id: `turn-${end}` })
     f.socket().event(end, payload)
-    f.socket().event('message.delta', { text: 'plain-words-after go on' })
+    f.socket().event('message.delta', { text: 'plain-words-after go on', turn_id: `turn-${end}` })
     f.socket().event('message.complete', { response_reused: true, status: 'complete' })
     const rows = []
     for (let done = 0; done < (end === 'message.complete' ? 2 : 1);) { const row = await f.run.next(); if (row.kind === 'text') rows.push(row.text); else if (row.kind === 'done') done++ }
@@ -1135,6 +1287,244 @@ test('an earlier completion never overrides a fresh snapshot of a newly active r
   assert.equal(result.unknown, true)
   assert.equal(f.identity.uncertain, true)
   await assert.rejects(f.run.submit('Do not submit'), /Reconcile/)
+})
+
+// #1401: an attached reconnect joins while the previous turn may still be finishing. The wire
+// stamps starts and deltas with a turn id but a completion carries none, so the transport
+// derives a completion's turn from the turn it opened. A completion with no open turn belongs
+// to an earlier turn and never ends the reply of the turn submitted after the reconnect.
+// autoStart is off so a test can hold the wire between the send and the new turn's start.
+function attachedReconnect(t, { earlier = [], replay = {}, ...overrides } = {}) {
+  const f = fixture(t, {
+    attached: true,
+    autoStart: false,
+    replay: { latest_seq: 10, events: [], ...replay },
+    handle: (frame, socket) => {
+      if (frame.method !== 'session.activate') return false
+      for (const { text, seq } of earlier) socket.event('message.complete', { text, status: 'complete' }, seq)
+      return false
+    },
+    ...overrides,
+  })
+  Object.assign(f.identity, {
+    storedSessionId: f.snapshot.stored_session_id, runtimeSessionId: f.snapshot.session_id,
+    epoch: 'epoch-a', lastSeq: 10,
+  })
+  return f
+}
+
+const terminalRows = rows => rows.filter(row => ['done', 'error', 'aborted'].includes(row.kind))
+
+test('#1401 a completion recovered during an attached reconnect does not end the next reply', async t => {
+  const f = attachedReconnect(t, { earlier: [{ text: 'Earlier reply', seq: 11 }] })
+  await f.wire.connect()
+  await f.run.submit('New prompt')
+  assert.deepEqual(terminalRows(f.run.queue), [], `the new reply stays open: ${JSON.stringify(f.run.queue)}`)
+  assert.deepEqual(f.run.takeRecovered(), ['Earlier reply'], 'the earlier turn’s reply is recovered, not taken as the new turn’s')
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 12)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the new reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1401 a completion landing between the reconnect and the submit does not end the next reply', async t => {
+  const f = attachedReconnect(t)
+  await f.wire.connect()
+  await f.run.prepare()
+  // The reconnect's replay carried no reply; the earlier turn's completion arrives just after it.
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 11)
+  await f.run.submit('New prompt')
+  assert.deepEqual(terminalRows(f.run.queue), [], `the new reply stays open: ${JSON.stringify(f.run.queue)}`)
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 12)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the new reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+})
+
+test('#1401 a completion of the turn just submitted still ends its reply', async t => {
+  const f = attachedReconnect(t)
+  await f.wire.connect()
+  await f.run.submit('New prompt')
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 11)
+  f.socket().event('message.delta', { text: 'New ', turn_id: 'turn-new', segment: 0, offset: 0 }, 12)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the new reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.equal(rows.filter(row => row.kind === 'text').map(row => row.text).join(''), 'New reply')
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1401 two reconnects with out-of-order earlier completions never end the next reply', async t => {
+  const first = attachedReconnect(t, { earlier: [{ text: 'Second earlier reply', seq: 12 }] })
+  await first.wire.connect()
+  await first.run.prepare()
+  assert.deepEqual(terminalRows(first.run.queue), [], `the first reconnect ends no reply: ${JSON.stringify(first.run.queue)}`)
+  assert.deepEqual(first.run.takeRecovered(), ['Second earlier reply'])
+  first.run.dispose()
+
+  const second = attachedReconnect(t, { earlier: [{ text: 'First earlier reply', seq: 11 }] })
+  await second.wire.connect()
+  await second.run.submit('New prompt')
+  assert.deepEqual(terminalRows(second.run.queue), [], `the new reply stays open: ${JSON.stringify(second.run.queue)}`)
+  assert.deepEqual(second.run.takeRecovered(), ['First earlier reply'])
+  second.socket().event('message.start', { turn_id: 'turn-new' }, 12)
+  second.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await boundedNext(second.run, 'the new reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+})
+
+test('#1401 replayed completions stay text-only and the new reply closes on its own completion', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11, events: [{ seq: 11, type: 'message.complete', payload: { text: 'Replayed reply', status: 'complete' } }] } })
+  await f.wire.connect()
+  await f.run.prepare()
+  assert.deepEqual(f.run.takeRecovered(), ['Replayed reply'])
+  assert.deepEqual(terminalRows(f.run.queue), [])
+  await f.run.submit('New prompt')
+  assert.deepEqual(terminalRows(f.run.queue), [], `the new reply stays open: ${JSON.stringify(f.run.queue)}`)
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 12)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the new reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+})
+
+test('#1401 a completion that arrives after the send does not end the new reply before it starts', async t => {
+  const f = attachedReconnect(t)
+  await f.wire.connect()
+  await f.run.submit('New prompt')
+  // The previous turn's completion is the only frame after the send: the new turn has not
+  // started, so this completion names no turn and must stay non-terminal.
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 11)
+  assert.deepEqual(f.run.queue, [], `the new reply has not started and stays open: ${JSON.stringify(f.run.queue)}`)
+  assert.equal(f.run.turn, undefined)
+  // The new turn's own start opens it, and only its own completion closes it.
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 12)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the new reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['New reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1401 a queued or steered send keeps its reply open past the earlier turn’s completion', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11 }, result: { status: 'queued', admission_id: 'queued-1' } })
+  await f.wire.connect()
+  // The previous turn is still open when the next prompt is queued behind it.
+  f.socket().event('message.start', { turn_id: 'turn-old' }, 11)
+  await f.run.submit('Queued prompt')
+  assert.equal(f.identity.admissionId, 'queued-1')
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 13)
+  assert.deepEqual(f.run.queue, [], `the earlier turn’s completion does not end the queued reply: ${JSON.stringify(f.run.queue)}`)
+  assert.equal(f.identity.pendingSubmit, true, 'the queued reply is still waiting for its own turn')
+  f.socket().event('message.start', { turn_id: 'turn-queued' }, 14)
+  f.socket().event('message.complete', { text: 'Queued reply', status: 'complete' }, 15)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the queued reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text), ['Queued reply'])
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+// #1774: a turn that is open when the prompt is sent keeps streaming after the send, which a
+// queued or steered prompt makes the normal case. The submit begins a new generation and
+// retires that turn: its start, deltas and completion cannot open or end the new reply.
+test('#1774 a queued send does not re-adopt the turn that was open at submit', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11 }, result: { status: 'queued', admission_id: 'queued-1' } })
+  await f.wire.connect()
+  f.socket().event('message.start', { turn_id: 'turn-old' }, 11)
+  await f.run.submit('Queued prompt')
+  // The earlier turn is still streaming when the prompt is queued behind it.
+  f.socket().event('message.delta', { text: 'Earlier reply', turn_id: 'turn-old' }, 12)
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 13)
+  assert.deepEqual(f.run.queue, [], `the earlier turn’s frames must not reach the queued reply: ${JSON.stringify(f.run.queue)}`)
+  assert.equal(f.run.turn, undefined, 'the earlier turn did not reopen')
+  assert.equal(f.identity.pendingSubmit, true, 'the queued reply is still waiting for its own turn')
+})
+
+test('#1774 a queued send does not adopt stamped deltas of a turn it never saw start', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11 }, result: { status: 'steered', admission_id: 'steered-1' } })
+  await f.wire.connect()
+  // A reconnect that joins a turn already streaming sees no start: its stamped deltas are the
+  // only trace of the earlier turn, and they must not open the new reply either.
+  await f.run.submit('Queued prompt')
+  f.socket().event('message.delta', { text: 'Earlier reply', turn_id: 'turn-old' }, 12)
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 13)
+  assert.deepEqual(f.run.queue, [], `the earlier turn’s frames must not reach the queued reply: ${JSON.stringify(f.run.queue)}`)
+  assert.equal(f.run.turn, undefined, 'the earlier turn did not reopen')
+  assert.equal(f.identity.pendingSubmit, true, 'the queued reply is still waiting for its own turn')
+})
+
+test('#1774 the new turn after a queued send opens and closes on its own completion', async t => {
+  const f = attachedReconnect(t, { replay: { latest_seq: 11 }, result: { status: 'queued', admission_id: 'queued-1' } })
+  await f.wire.connect()
+  f.socket().event('message.start', { turn_id: 'turn-old' }, 11)
+  await f.run.submit('Queued prompt')
+  f.socket().event('message.delta', { text: 'Earlier reply', turn_id: 'turn-old' }, 12)
+  f.socket().event('message.complete', { text: 'Earlier reply', status: 'complete' }, 13)
+  assert.deepEqual(f.run.queue, [], `the earlier turn’s frames must not reach the queued reply: ${JSON.stringify(f.run.queue)}`)
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 14)
+  f.socket().event('message.delta', { text: 'New ', turn_id: 'turn-new' }, 15)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 16)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the queued reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text).join(''), 'New reply')
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1774 a normal send closes on its own start and completion', async t => {
+  const f = attachedReconnect(t)
+  await f.wire.connect()
+  await f.run.submit('New prompt')
+  f.socket().event('message.start', { turn_id: 'turn-new' }, 11)
+  f.socket().event('message.delta', { text: 'New reply', turn_id: 'turn-new' }, 12)
+  f.socket().event('message.complete', { text: 'New reply', status: 'complete' }, 13)
+  const rows = []
+  for (;;) { const row = await boundedNext(f.run, 'the new reply'); rows.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(rows.filter(row => row.kind === 'text').map(row => row.text).join(''), 'New reply')
+  assert.equal(rows.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
+})
+
+test('#1774 a later reconnect still recovers an earlier completion as text', async t => {
+  let activates = 0
+  const f = attachedReconnect(t, {
+    handle: (frame, socket) => {
+      if (frame.method !== 'session.activate') return false
+      // The second submit's join sees a completion of the turn before it.
+      if (++activates === 2) socket.event('message.complete', { text: 'Earlier reply', status: 'complete' })
+      return false
+    },
+  })
+  await f.wire.connect()
+  await f.run.submit('First prompt')
+  f.socket().event('message.start', { turn_id: 'turn-first' })
+  f.socket().event('message.complete', { text: 'First reply', status: 'complete' })
+  const first = []
+  for (;;) { const row = await boundedNext(f.run, 'the first reply'); first.push(row); if (terminalRows([row]).length) break }
+  assert.equal(first.at(-1).kind, 'done')
+  // The generation a submit retires must not swallow the join's recovery: this completion is
+  // still shown as the earlier turn's text, never as the end of the new reply.
+  await f.run.submit('Second prompt')
+  assert.deepEqual(f.run.takeRecovered(), ['Earlier reply'], 'the earlier turn’s reply is recovered, not taken as the new turn’s')
+  assert.deepEqual(f.run.queue, [], `the new reply stays open: ${JSON.stringify(f.run.queue)}`)
+  f.socket().event('message.start', { turn_id: 'turn-second' })
+  f.socket().event('message.complete', { text: 'Second reply', status: 'complete' })
+  const second = []
+  for (;;) { const row = await boundedNext(f.run, 'the second reply'); second.push(row); if (terminalRows([row]).length) break }
+  assert.deepEqual(second.filter(row => row.kind === 'text').map(row => row.text), ['Second reply'])
+  assert.equal(second.at(-1).kind, 'done')
+  assert.equal(f.identity.pendingSubmit, false)
 })
 
 test('a Hermes that approves on its own (yolo) connects, and its tool runs with no question from us', async t => {
@@ -1215,7 +1605,7 @@ test('epoch restart resets watermark and old stream state, then accepts new delt
   assert.equal(toolReleased, true)
   resolveQuestion('once'); await question
   assert.ok(!f.sent.some(frame => frame.id === 'old-question'))
-  f.socket().event('message.delta', { text: 'New epoch text' }, 2)
+  f.socket().event('message.delta', { text: 'New epoch text', turn_id: 'turn-new' }, 2)
   f.socket().event('message.complete', { text: 'New epoch text', status: 'complete' }, 3)
   assert.deepEqual(await f.run.next(), { kind: 'text', text: 'New epoch text' })
   assert.equal((await f.run.next()).kind, 'done')
@@ -1494,3 +1884,30 @@ test('an attached chat with no visible row still opens so the first open can nor
   assert.equal(chunks.at(-1).type, 'finish')
   assert.equal(chunks.at(-1).reason.kind, 'stop')
 })
+
+for (const [type, field] of [['error', 'message'], ['message.complete', 'error']]) {
+  test(type + ' reason drops a split supplementary character at the cut', async t => {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    const reason = '.'.repeat(498) + '\u{1F600}' + 'tail ' + 'more '.repeat(10)
+    f.socket().event(type, { ...(type === 'message.complete' ? { status: 'error', text: '' } : {}), [field]: reason }, 1)
+    const row = await f.run.next()
+    assert.equal(row.kind, 'error')
+    const detail = row.text.slice(row.text.indexOf(': ') + 2)
+    assert.equal(detail, '.'.repeat(498) + '…')
+    assert.ok(detail.isWellFormed())
+  })
+
+  test(type + ' reason keeps a complete supplementary character before the cut', async t => {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    const reason = '.'.repeat(497) + '\u{1F600}' + 'tail' + 'more '.repeat(10)
+    f.socket().event(type, { ...(type === 'message.complete' ? { status: 'error', text: '' } : {}), [field]: reason }, 1)
+    const row = await f.run.next()
+    assert.equal(row.kind, 'error')
+    const detail = row.text.slice(row.text.indexOf(': ') + 2)
+    assert.equal(detail, '.'.repeat(497) + '\u{1F600}' + '…')
+    assert.equal(detail.length, 500)
+    assert.ok(detail.isWellFormed())
+  })
+}

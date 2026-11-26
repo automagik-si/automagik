@@ -3,7 +3,7 @@
 // default look. Pure: no `herdr`, `gpui-kit`, `gpui-base` or `fs`, so `node --test` runs it.
 // Apache-2.0.
 
-import { AGY_MODES, LEGACY_AGENTS, agyRuleProblem, normalizeAgyPermissions } from "./models.js";
+import { AGY_MODES, LEGACY_AGENTS, agyRuleProblem, codexEffortProblem, normalizeAgyPermissions, permissionModeProblem, resolveAgent, tierProblem } from "./models.js";
 import { hermesPairProblem, hermesPairConflict } from "./hermesPair.js";
 
 /** The hc label key that ties a terminal to a bot; its value is the bot id (A9). */
@@ -13,12 +13,70 @@ export const MAX_INSTRUCTIONS = 4000;
 /** A project's definitions file, relative to its key folder. */
 export const BOTS_PATH = ".herdr/bots.json";
 export const KINDS = ["main", "member"];
+/** A main bot's context threshold when none is stored (#1556): restart it from a handoff over this. */
+export const DEFAULT_MAIN_RESTART_AT = 250_000;
+
+/**
+ * The context threshold a bot restarts at (#1556), in tokens: its own `restartAt` when stored
+ * (a positive whole number), else a main bot's default, else null (a member's, unset until one
+ * is configured). The sidebar, the CLI and the briefing read this one number.
+ */
+export function restartAtOf(bot) {
+  if (Number.isInteger(bot?.restartAt) && bot.restartAt > 0) return bot.restartAt;
+  return bot?.kind === "main" ? DEFAULT_MAIN_RESTART_AT : null;
+}
+
+/** Why a `restartAt` can't be used, or null: a positive whole number of tokens. */
+export function restartAtProblem(value) {
+  if (value === undefined || value === null || value === "") return null;
+  return Number.isInteger(value) && value > 0
+    ? null : `restartAt ${JSON.stringify(value)} isn't a positive whole number of tokens`;
+}
+
+/**
+ * How a project reacts to a Claude Code seat blocked on its rate-limit dialog (#1557):
+ * `park` keeps the pane and rechecks one minute after the recorded reset.
+ * `switch` is the legacy spelling and round-trips in the project file.
+ * The setting is the project file's top-level `onRateLimit`, beside `version` and `categories`.
+ */
+export const RATE_LIMIT_MODES = ["park", "switch"];
+
+/** The stored spelling of the project's pane-preserving rate-limit policy. */
+export const rateLimitModeOf = (file) => (file?.onRateLimit === "switch" ? "switch" : "park");
+
+/** Why a project's `onRateLimit` can't be used, or null: absent, or park/switch. */
+export function onRateLimitProblem(value) {
+  if (value === undefined || value === null) return null;
+  return RATE_LIMIT_MODES.includes(value)
+    ? null : `onRateLimit ${JSON.stringify(value)} isn't one of ${RATE_LIMIT_MODES.join(", ")}`;
+}
+
+/** A daily wake is a two-digit time on the machine that owns the roster. */
+export function wakeProblem(value) {
+  return typeof value === "string" && /^daily@(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)
+    ? null : `wake ${JSON.stringify(value)} isn't daily@HH:MM`;
+}
+
+export function wakeCron(value) {
+  if (wakeProblem(value)) return null;
+  const [hour, minute] = value.slice(6).split(":");
+  return `${Number(minute)} ${Number(hour)} * * *`;
+}
+
+/** FNV-1a over the project key's UTF-8 bytes keeps identical bot ids in clones apart. */
+export function wakeAutomationName(botId, projectKey) {
+  const bytes = encodeURIComponent(projectKey).replace(/%([0-9A-F]{2})/g,
+    (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+  return `wake-${botId}-${fnv1a(bytes).toString(16).padStart(8, "0")}`;
+}
 /**
  * A bot's rank (A16): a closed set, for the pane's `role=` label the event meter reads. The
  * free-text `role` stays for the briefing. Optional. `main` is not a rank: role=main is the
  * main bot's alone, derived from its kind.
  */
 export const RANKS = ["captain", "dev", "tester", "reviewer", "fixer", "integrator", "pm", "owner"];
+export const SEND_GRANT_ROLES = Object.freeze(["reviewer", "fixer"]);
+export const isSendGrantRole = (value) => SEND_GRANT_ROLES.includes(value);
 /** A category id: a lowercase slug, as it goes into a pane's `category=` label (A16). */
 export const CATEGORY_ID = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
@@ -74,6 +132,62 @@ export const TEMPLATE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** The worker fields a bot may set (`worker: { agent?, model?, effort?, template?, agyMode? }`), each optional text. */
 export const WORKER_FIELDS = ["agent", "model", "effort", "template", "agyMode"];
+
+// ---- a chosen login home for a bot's workers (#1208; agentHome.js has the launch side) ----
+
+/** The variable each agent that takes a chosen login home reads it from. */
+export const AGENT_HOME_VARS = Object.freeze({ claude: "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" });
+/** Whether `agent` is one a chosen home can be given to. */
+export const agentHomeAgent = (agent) => typeof agent === "string" && Object.hasOwn(AGENT_HOME_VARS, agent);
+/** Whether a worker defaults object names `agentHome` at all (any value, even an unusable one). */
+export const hasWorkerHome = (worker) => worker !== null && typeof worker === "object" && Object.hasOwn(worker, "agentHome");
+/** Why `path` isn't shaped as a login folder (absolute, printable, not the root), or null. Nothing is read. */
+export function agentHomePathProblem(path) {
+  if (typeof path !== "string" || !path) return "needs a folder";
+  if (!path.startsWith("/")) return "must be an absolute path";
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(path)) return "has a control character";
+  if (/^\/+$/u.test(path)) return "must name a login folder, not /";
+  return null;
+}
+
+/** The agent a bot's workers run by default: its worker agent, else its own (the default table's aliases resolved). */
+const workerAgentOf = (bot) => resolveAgent(bot?.worker?.agent ?? bot?.agent);
+/**
+ * #1208: a worker object parseBots had to drop (a field not text, a bad template) keeps its
+ * `agentHome` and the reason here, beside the bot object, so a launch that would use that home is
+ * refused instead of running without the dropped defaults. Nothing else reads it.
+ */
+const droppedWorkerHome = new WeakMap();
+
+/**
+ * A bot's `worker.agentHome` as its file wrote it (#1208): { present, home, error }. `present`:
+ * the field is there, whatever its value; `error`: why its worker object was dropped when it
+ * was (parseBots), else null. A worker launch refuses a present home it can't use.
+ */
+export function workerHomeOf(bot) {
+  if (hasWorkerHome(bot?.worker)) return { present: true, home: bot.worker.agentHome, error: null };
+  const kept = bot !== null && typeof bot === "object" ? droppedWorkerHome.get(bot) : undefined;
+  return kept ? { present: true, home: kept.home, error: kept.error } : { present: false, home: undefined, error: null };
+}
+
+/**
+ * Why a bot's written `worker.agentHome` can't be saved (#1208), or null when it is absent or
+ * fine: an absolute folder path (its folder is checked at each launch, on its own machine), for a
+ * Claude or Codex default worker agent, and no worker template beside it.
+ */
+function workerHomeProblem(bot) {
+  if (!hasWorkerHome(bot?.worker)) return null;
+  return agentHomePathProblem(bot.worker.agentHome)
+    ?? (!agentHomeAgent(workerAgentOf(bot)) ? "needs a Claude or Codex default worker agent" : null)
+    ?? (bot.worker.template !== undefined ? "can't be used with a worker template" : null);
+}
+
+/** Why a launch that would use the bot's `worker.agentHome` is refused by its file alone, or null. */
+export function workerHomeLaunchProblem(bot) {
+  const written = workerHomeOf(bot);
+  if (!written.present) return null;
+  return written.error ?? workerHomeProblem(bot);
+}
 
 /**
  * Why a bot's `worker` (its workers' defaults) can't be used, or null when it is absent or
@@ -187,6 +301,12 @@ export function parseBots(text) {
       warnings.push(`${where}: codexAuto false no longer opts out: every Codex seat and worker runs in auto mode `
         + "(--approve-for-me) with its sandbox on (#1125); remove the field");
     }
+    // Claude Code's person-feature opt-out (#1558): a boolean, true to keep them. Anything else is
+    // ignored, so a hand-written value never changes what a launch turns off.
+    if (bot.personFeatures !== undefined && typeof bot.personFeatures !== "boolean") {
+      warnings.push(`${where}: personFeatures is not a boolean; ignored`);
+      delete bot.personFeatures;
+    }
     if (!ID_SHAPE.test(bot.id)) warnings.push(`${where}: id is not b- plus 10 base32 characters`);
     if (typeof bot.role !== "string") { if (bot.role !== undefined) warnings.push(`${where}: role is not text`); bot.role = ""; }
     if (typeof bot.instructions !== "string") { if (bot.instructions !== undefined) warnings.push(`${where}: instructions are not text`); bot.instructions = ""; }
@@ -205,6 +325,48 @@ export function parseBots(text) {
     if (bot.agent !== undefined && !isText(bot.agent)) delete bot.agent;
     if (!bot.agent && !bot.planned) warnings.push(`${where}: no coding agent`);
     if (bot.model !== undefined && typeof bot.model !== "string") delete bot.model;
+    // #1411: a bot's own reasoning effort and service tier, Codex's: stored as words the roster
+    // reads, dropped with a warning when malformed or when the bot runs another agent.
+    const effortWhy = typeof bot.effort === "string" ? codexEffortProblem(bot.effort) : null;
+    if (bot.effort !== undefined && (typeof bot.effort !== "string" || effortWhy)) {
+      warnings.push(`${where}: ${typeof bot.effort === "string" ? effortWhy : `effort ${JSON.stringify(bot.effort)} isn't an effort level`}; ignored`);
+      delete bot.effort;
+    }
+    const tierWhy = tierProblem(bot.tier);
+    if (bot.tier !== undefined && tierWhy) {
+      warnings.push(`${where}: ${tierWhy}; ignored`);
+      delete bot.tier;
+    }
+    if ((bot.effort !== undefined || bot.tier !== undefined) && resolveAgent(bot.agent) !== "codex") {
+      warnings.push(`${where}: reasoning effort and service tier are Codex's; ignored`);
+      delete bot.effort;
+      delete bot.tier;
+    }
+    // #1556: the context threshold this seat restarts at, in tokens. A malformed one is
+    // ignored, so a hand-written value never makes a seat restart at an unintended size.
+    const restartWhy = restartAtProblem(bot.restartAt);
+    if (bot.restartAt !== undefined && restartWhy) {
+      warnings.push(`${where}: ${restartWhy}; ignored`);
+      delete bot.restartAt;
+    }
+    if ("wake" in bot) {
+      const why = wakeProblem(bot.wake);
+      if (why) {
+        warnings.push(`${where}: ${why}; ignored`);
+        delete bot.wake;
+      }
+    }
+    // #1413: a bot's own Claude Code permission mode. Kept as text so `show` can report what was
+    // written; a value Claude Code doesn't accept, or one on another agent, is dropped with the
+    // reason (the CLI refuses it before saving, and checkBots refuses a hand-written file).
+    if (bot.permissionMode === "") delete bot.permissionMode;
+    else if (bot.permissionMode !== undefined) {
+      const why = permissionModeProblem(resolveAgent(bot.agent), bot.permissionMode);
+      if (typeof bot.permissionMode !== "string" || why) {
+        warnings.push(`${where}: ${typeof bot.permissionMode === "string" ? why : `permission mode ${JSON.stringify(bot.permissionMode)} isn't text`}; ignored`);
+        delete bot.permissionMode;
+      }
+    }
     // Antigravity's launch mode: kept when it is text, even an unknown one, so a start refuses
     // it by name instead of silently launching on the default.
     if (bot.agyMode !== undefined) {
@@ -230,10 +392,16 @@ export function parseBots(text) {
       delete bot.worker.agyMode;
     }
     const workerWhy = workerProblem(bot.worker);
-    if (workerWhy) { warnings.push(`${where}: ${workerWhy}; ignored`); delete bot.worker; }
+    if (workerWhy) {
+      if (hasWorkerHome(bot.worker)) droppedWorkerHome.set(bot, { home: bot.worker.agentHome, error: workerWhy });
+      warnings.push(`${where}: ${workerWhy}; ignored`);
+      delete bot.worker;
+    }
     else if (isObject(bot.worker) && typeof bot.worker.agyMode === "string" && !AGY_MODES.includes(bot.worker.agyMode)) {
       warnings.push(`${where}: worker agyMode ${JSON.stringify(bot.worker.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
+    const homeWhy = workerHomeLaunchProblem(bot);
+    if (homeWhy) warnings.push(`${where}: worker.agentHome: ${homeWhy}; launches using it will be refused`);
     const retired = (k) => (typeof k === "string" && Object.hasOwn(LEGACY_AGENTS, k) ? k : null);
     const seatOld = retired(bot.agent);
     const workerOld = isObject(bot.worker) ? retired(bot.worker.agent) ?? (bot.worker.agent ? null : seatOld) : null;
@@ -314,6 +482,8 @@ export function parseBots(text) {
   const mains = bots.filter((b) => b.kind === "main");
   if (mains.length === 0) warnings.push("no main bot");
   if (mains.length > 1) warnings.push(`${mains.length} main bots; ${mains[0].id} counts`);
+  const rateIssue = onRateLimitProblem(raw.onRateLimit);
+  if (rateIssue) warnings.push(`${rateIssue}; the project parks rate-limited seats`);
   const file = { ...raw, version: 1, categories, bots };
   for (const b of bots) {
     if (b.leadProject) {
@@ -553,6 +723,33 @@ export function effectiveLead(file, botId, { project = null, projects = null } =
 }
 
 /**
+ * A bot pane's `role=` (A16): the main bot is `main`; a member that leads another bot (by
+ * effective lead) is `captain`; else its rank. No rank: null (no label).
+ */
+export function roleOf(file, botOrId, opts = {}) {
+  const botId = typeof botOrId === "string" ? botOrId : botOrId?.id;
+  const bot = file.bots.find((b) => b.id === botId);
+  if (!bot) return null;
+  if (bot === mainBotOf(file)) return "main";
+  if (file.bots.some((b) => {
+    if (b.id === botId || b.kind !== "member") return false;
+    const eff = effectiveLead(file, b.id, opts);
+    return !eff.leadProject && eff.lead === botId;
+  })) return "captain";
+  if (opts?.projects) {
+    for (const [otherKey, otherFile] of projectEntriesOf(opts.projects)) {
+      if (opts.project && otherKey === opts.project) continue;
+      for (const b of otherFile?.bots ?? []) {
+        if (!b?.leadProject) continue;
+        const eff = effectiveLead(otherFile, b.id, { project: otherKey, projects: opts.projects });
+        if (eff.lead === botId && (!opts.project || eff.leadProject === opts.project)) return "captain";
+      }
+    }
+  }
+  return bot.rank || null;
+}
+
+/**
  * A bot's squad (RFC 0021 (e)): the id of the bot heading its chain of effective leads, the
  * last one before the main bot. A bot that reports to the main bot directly is its own squad,
  * whether it leads others or not. Null for the main bot, an unknown id, a file with no main bot,
@@ -591,6 +788,8 @@ export function checkBots(file, before = null, { project = null, projects = null
   const oldIds = new Set((Array.isArray(had?.categories) ? had.categories : []).map((c) => c?.id).filter(isText));
   const errors = [];
   if (!isObject(file) || file.version !== 1 || !Array.isArray(file.bots)) return ["not a version-1 bots file"];
+  const rateIssue = onRateLimitProblem(file.onRateLimit);
+  if (rateIssue) errors.push(rateIssue);
   const cats = Array.isArray(file.categories) ? file.categories : [];
   if (!Array.isArray(file.categories)) errors.push("no categories list");
   const catIds = new Set();
@@ -622,15 +821,41 @@ export function checkBots(file, before = null, { project = null, projects = null
     if (b.codexAuto !== undefined && typeof b.codexAuto !== "boolean") {
       errors.push(`${at}: codexAuto is not a boolean`);
     }
+    if (b.personFeatures !== undefined && typeof b.personFeatures !== "boolean") {
+      errors.push(`${at}: personFeatures is not a boolean`);
+    }
     if (typeof b.instructions !== "string") errors.push(`${at}: no instructions`);
     else if (b.instructions.length > MAX_INSTRUCTIONS) errors.push(`${at}: instructions longer than ${MAX_INSTRUCTIONS} characters`);
     if (b.planned !== undefined && (!isObject(b.planned) || !isWave(b.planned.wave))) errors.push(`${at}: planned needs a positive whole wave`);
     if (!b.planned && !isText(b.agent)) errors.push(`${at}: no coding agent`);
+    // #1411: a bot's own reasoning effort and service tier are Codex's.
+    if (b.effort !== undefined) {
+      const why = typeof b.effort === "string" ? codexEffortProblem(b.effort) : `effort ${JSON.stringify(b.effort)} isn't an effort level`;
+      if (why) errors.push(`${at}: ${why}`);
+    }
+    const tierIssue = tierProblem(b.tier);
+    if (tierIssue) errors.push(`${at}: ${tierIssue}`);
+    if ((b.effort !== undefined || b.tier !== undefined) && resolveAgent(b.agent) !== "codex") {
+      errors.push(`${at}: reasoning effort and service tier are Codex's (this bot runs ${b.agent ?? "no agent"})`);
+    }
+    const restartIssue = restartAtProblem(b.restartAt);
+    if (restartIssue) errors.push(`${at}: ${restartIssue}`);
+    // #1413: a bot's own permission mode is Claude Code's, and one of its own names.
+    if (b.permissionMode !== undefined) {
+      const why = permissionModeProblem(resolveAgent(b.agent), b.permissionMode);
+      if (why) errors.push(`${at}: ${why}`);
+    }
     if (b.agyMode !== undefined && b.agyMode !== "" && !AGY_MODES.includes(b.agyMode)) {
       errors.push(`${at}: agyMode ${JSON.stringify(b.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
     if (isObject(b.worker) && b.worker.agyMode !== undefined && b.worker.agyMode !== "" && !AGY_MODES.includes(b.worker.agyMode)) {
       errors.push(`${at}: worker agyMode ${JSON.stringify(b.worker.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
+    }
+    if (hasWorkerHome(b.worker)) {
+      // workerPlan resolves an explicit worker agent and uses the seat agent's raw key as its fallback.
+      const why = workerProblem(b.worker) ?? workerHomeProblem(b)
+        ?? (!b.worker.agent && !agentHomeAgent(b.agent) ? "set worker.agent to Claude or Codex, or use its canonical key as the bot agent" : null);
+      if (why) errors.push(`${at}: worker.agentHome: ${why}`);
     }
     if (b.agyPermissions !== undefined) {
       if (!isObject(b.agyPermissions)) errors.push(`${at}: agyPermissions is not an object with allow and deny lists`);
@@ -861,13 +1086,16 @@ export function newCategoryId(title, categories = []) {
  * A copy of `raw` (parseBots' raw file, or a new one) with one bot created or edited, the
  * Create form's write-back. `entry` holds every field the form edits; an optional one it
  * leaves out or empty is removed (planned, lead, leadProject, category, agent, model, agyMode);
- * other keys the stored entry had are kept. `rank` (A16) and `worker` are removed only when
- * `entry` names them empty, so a front end that doesn't edit them (the form has no worker fields)
- * keeps the stored ones; a `worker` with none of its fields left is removed too.
+ * other keys the stored entry had are kept. `rank` (A16), `worker`, `effort` and `tier` (#1411)
+ * and `permissionMode` (#1413) are removed only when `entry` names them empty, so a front end
+ * that doesn't edit them (the form has no worker, effort, tier or permission-mode fields) keeps
+ * the stored ones; a `worker` with none of its fields left is removed too.
  * A lead equal to the main bot (with no leadProject) is stored as no lead; a category goes only
  * with the main bot as lead; `newCategory` ({ title, sub }) is added to the categories and used.
+ * `workerHomeGiven`: the entry's `worker.agentHome` is the person's own (create/edit
+ * --worker-agent-home, #1208); without it the stored one is kept or dropped as said below.
  */
-export function applyBotEdit(raw, entry, newCategory = null) {
+export function applyBotEdit(raw, entry, newCategory = null, { workerHomeGiven = false } = {}) {
   const out = JSON.parse(JSON.stringify(raw ?? { version: 1, categories: [], bots: [] }));
   out.version ??= 1;
   if (!Array.isArray(out.categories)) out.categories = [];
@@ -892,22 +1120,66 @@ export function applyBotEdit(raw, entry, newCategory = null) {
   }
   const i = out.bots.findIndex((b) => b?.id === bot.id);
   const merged = i >= 0 ? { ...out.bots[i], ...bot } : bot;
+  // #1411: a bot's own effort and tier are a Codex bot's, and a tier goes with the model it was
+  // stored for. An edit that now runs another agent drops them; one that runs another model
+  // while naming no tier stores standard, so the launch says -c service_tier=default and neither
+  // a profile nor the host config can leave Fast on the new model. `model` here is the entry's
+  // own field when it has one (a front end's), else the stored one it leaves alone.
+  if (resolveAgent(merged.agent) !== "codex") {
+    delete merged.effort;
+    delete merged.tier;
+  } else if (i >= 0) {
+    const modelAfter = "model" in bot ? (bot.model || null) : (out.bots[i].model ?? null);
+    if ((out.bots[i].model ?? null) !== modelAfter && !("tier" in bot)) merged.tier = "standard";
+  }
+  // #1413: a stored permission mode is Claude Code's; an edit that now runs another agent drops
+  // it, and one that names it empty clears it (the loop below).
+  if (resolveAgent(merged.agent) !== "claude") delete merged.permissionMode;
   if (Object.hasOwn(bot, "hermes") && bot.hermes === undefined) delete merged.hermes;
   for (const k of ["planned", "lead", "leadProject", "category", "agent", "model", "agyMode", "agyPermissions"]) {
     if (!(k in bot) || bot[k] === undefined || bot[k] === null || bot[k] === "") delete merged[k];
   }
+  // #1411/#1413: a front end with no effort, tier or permission mode field keeps the stored
+  // ones; one that names the field empty clears it.
+  for (const k of ["effort", "tier", "permissionMode"]) {
+    if (k in bot && (bot[k] === undefined || bot[k] === null || bot[k] === "")) delete merged[k];
+  }
+  // #1556: the context threshold a seat restarts at. A front end that doesn't edit it keeps the
+  // stored one; one that names it empty (--no-restart-at) clears it.
+  if ("restartAt" in bot && (bot.restartAt === undefined || bot.restartAt === null || bot.restartAt === "")) delete merged.restartAt;
+  if ("wake" in bot && (bot.wake === undefined || bot.wake === null || bot.wake === "")) delete merged.wake;
   if (("crossMembers" in entry || "members" in entry) && !bot.crossMembers) {
     delete merged.crossMembers;
     delete merged.members;
   }
   if ("rank" in bot && (bot.rank === undefined || bot.rank === null || bot.rank === "")) delete merged.rank;
   if ("code" in bot && (bot.code === undefined || bot.code === null || bot.code === "")) delete merged.code;
+  // Off is the default: only a bot that keeps Claude Code's person features stores the field (#1558).
+  if ("personFeatures" in bot && bot.personFeatures !== true) delete merged.personFeatures;
   if (isObject(merged.worker) && merged.worker.agyMode === "") {
     merged.worker = { ...merged.worker };
     delete merged.worker.agyMode;
     if (!Object.keys(merged.worker).length) delete merged.worker;
   }
   if ("worker" in bot && (!isObject(bot.worker) || Object.keys(bot.worker).length === 0)) delete merged.worker;
+  // #1208: worker.agentHome belongs to the default worker agent. Only a writer that gives it
+  // (`workerHomeGiven`: create/edit --worker-agent-home; empty clears) sets it. Any other writer
+  // (the Herdr form, restart --save, an edit without the flag) keeps the stored one while the
+  // default worker agent stays the same, drops it when that agent changes, and never brings back
+  // one its own copy of the entry still carries.
+  const previous = i >= 0 ? out.bots[i] : null;
+  if ((hasWorkerHome(previous?.worker) || hasWorkerHome(merged.worker)) && (merged.worker === undefined || isObject(merged.worker))) {
+    const worker = { ...merged.worker };
+    if (workerHomeGiven) {
+      if (worker.agentHome === "") delete worker.agentHome;
+    } else {
+      delete worker.agentHome;
+      if (hasWorkerHome(previous?.worker) && workerAgentOf(previous) === workerAgentOf({ ...merged, worker })) {
+        worker.agentHome = previous.worker.agentHome;
+      }
+    }
+    if (Object.keys(worker).length) merged.worker = worker; else delete merged.worker;
+  }
   if (i >= 0) out.bots[i] = merged; else out.bots.push(merged);
   return out;
 }

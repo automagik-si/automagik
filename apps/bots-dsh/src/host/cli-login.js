@@ -16,8 +16,13 @@
 // latest: the Bot's model has not changed since, no newer choice for that Bot was made, and no
 // turn ran on another model. A view that only attaches registers nothing.
 //
-// A pasted code: acp-dsh keeps keyed hashes of the Claude states it showed (24 h) and answers
-// only whether a text carries one (`loginTextMatches`). The team's send endpoints, its
+// Antigravity (#2048, parity): its app sign-in in acp-dsh answers the same five sign-in calls,
+// with Google's link and a field for the address the browser ends on after the person signs in
+// on any computer (`prompt.id` `agy-callback`). It has no account step and no account controls.
+//
+// A pasted code: acp-dsh keeps keyed hashes of the Claude states it showed, and of the states of
+// the Antigravity links it took (24 h), and answers only whether a text carries one
+// (`loginTextMatches`). The team's send endpoints, its
 // deliveries (rt.deliver), a group's running round (groups.js drainRoomInbox) and Pocket
 // (pocket-chat.js send) refuse such a text before anything records it, and a Bot's or a group's
 // step drops such a message before it reaches a model or a transcript row (`dropLoginCodes`, from
@@ -34,15 +39,29 @@
 // account is shown on these owner-only endpoints and nowhere else: not in team state, a
 // message, a tool, a model call or a log. `cli-login-accounts` and `cli-login-noticed` serve
 // the one-time notice for older ACP hosts. New isolated homes never carry terminal consent.
+// The owner-only `cli-login-start` and `cli-login-status` ready views can also name the account.
 //
 // Residual risk (RFC 0003's amendment, RFC 0023 section 3): a send from DSH's own composer is
 // admitted by DSH's session controller, which records it (`agent/inbox/spliced`) before any
 // plugin hook runs. The page refuses it only for a state that page showed; after a reload or in a
 // window that never showed the link, the code reaches that Session record, and only the step's
 // drop keeps it from a model and the transcript. DSH 0.2.2 offers no hook before admission.
-import { ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT } from '../shared/cli-account.js'
+import {
+  ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT, installationNameOf,
+} from '../shared/cli-account.js'
+import { createAccountReservations } from './account-reservations.js'
+import { isSignInUrl as isAgySignInUrl } from '../shared/agy-sign-in-url.js'
+import { crossesHarness } from '../shared/routes.js'
 
 const PROVIDERS = new Set(['acp-codex', 'acp-claude'])
+// The agents a Bot's chat signs in to (#2048, parity): Claude Code and Codex, plus Antigravity's
+// app sign-in in acp-dsh. Only the five sign-in calls and the ready listener take it; the account
+// controls (switch, sign out, reset, confirm, accounts, noticed) stay Claude Code's and Codex's:
+// acp-dsh has no account read for Antigravity.
+const SIGN_IN_PROVIDERS = new Set([...PROVIDERS, 'acp-antigravity'])
+const SIGN_IN_ACTIONS = new Set(['start', 'current', 'status', 'answer', 'cancel'])
+// The address the browser ended on, pasted for Antigravity, that is not printable text.
+export const CALLBACK_REFUSED = 'This link is not from this sign-in.'
 const STATUS = new Set(['starting', 'waiting', 'ready', 'failed', 'cancelled', 'expired'])
 const BOT_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
 const ATTEMPT = /^[A-Za-z0-9_-]{24,128}$/
@@ -55,10 +74,33 @@ export const OUTCOME_TTL_MS = 60_000
 const METHODS = { start: 'loginStart', current: 'loginCurrent', status: 'loginStatus', answer: 'loginAnswer', cancel: 'loginCancel' }
 export const CODE_HINT = 'Paste the complete code shown by Claude, including the part after #.'
 export const CODE_REFUSED = 'This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step.'
-const DEVICE_FAILURES = new Set([
-  'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.',
-  'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.',
+const DEVICE_ACCESS = 'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.'
+const DEVICE_START = 'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.'
+const DEVICE_FAILURES = new Set([DEVICE_ACCESS, DEVICE_START])
+// Why an attempt failed, as fixed words. acp-dsh computes one cause from a closed set it never
+// fills with CLI output (its own words: what the CLI printed is never kept), so a failed row can
+// say what happened instead of one dead end. A host from before the cause existed carries only
+// its fixed message; the two this side already knew are still recognized.
+const CODE_NOT_READY = 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
+const FAILED_REASONS = new Map([
+  ['no CLI found', CODE_NOT_READY],
+  ['no sign-in link in time', 'The CLI did not offer a sign-in link in time. Try again.'],
+  ['the CLI could not be started', 'The CLI could not be started. Run it once in a terminal, then try again.'],
+  ['unsupported sign-in link', 'The CLI returned an old sign-in link. Update it, then try again.'],
+  ['short sign-in link unsupported', 'The CLI returned a short sign-in link Automagik cannot use yet. Update Automagik, then try again.'],
+  ['the CLI did not confirm the sign-in', 'The CLI did not confirm the sign-in. Try again.'],
+  ['the CLI exited', 'The CLI exited before the sign-in finished. Try again.'],
+  // A Switch account whose CLI ended before its link while still signed in (#2064).
+  ['the account did not change', 'The account did not change. Try again.'],
 ])
+const DEVICE_CAUSES = new Map([['device-code login is not enabled', DEVICE_ACCESS], ['device sign-in did not start', DEVICE_START]])
+const failedMessageOf = (value, provider) => {
+  const cause = typeof value?.cause === 'string' ? value.cause : ''
+  if (provider === 'acp-codex' && DEVICE_CAUSES.has(cause)) return DEVICE_CAUSES.get(cause)
+  if (FAILED_REASONS.has(cause)) return FAILED_REASONS.get(cause)
+  if (value?.message === 'Install the CLI before signing in.') return CODE_NOT_READY
+  return provider === 'acp-codex' && DEVICE_FAILURES.has(value?.message) ? value.message : 'Sign-in did not finish. Try again.'
+}
 const ERRORS = {
   'acp-account/unverified-login': ACCOUNT_RECOVERY_HINT,
   'acp-login/invalid': 'This sign-in request is no longer valid. Start again.',
@@ -66,6 +108,51 @@ const ERRORS = {
   'acp-login/not-found': 'This sign-in has ended. Start again.',
   'acp-login/unavailable': 'This CLI cannot sign in yet. Check its installation and try again.',
   'acp-login/disposed': 'The connection restarted. Start sign-in again.',
+  // This agent signs in from its own terminal; acp-dsh says which command, but the row says
+  // the shape of it without naming a path a person has to paste anywhere.
+  'acp-login/terminal': 'This coding agent signs in from its own terminal. Run its sign-in command there, then try again.',
+  // Antigravity's app sign-in (#2048): a pasted address that is not this attempt's, one for an
+  // attempt that ended (the chat's own sentence), and an agent that is off or not installed.
+  'acp-sign-in/not-this-sign-in': CALLBACK_REFUSED,
+  'acp-sign-in/expired': 'This sign-in expired. Start again.',
+  'acp-sign-in/off': 'Turn this coding agent on in Settings, under Coding agents, then try again.',
+  'acp-sign-in/missing': 'Install this coding agent in Settings, under Coding agents, then try again.',
+}
+// acp-dsh refuses the sign-in with its own fixed sentences: an account change another live
+// instance holds, a home that is changing, a Bot account reset, a CLI that is not there. Its
+// sentences never carry what the CLI printed, and several of them name the one thing left to the
+// person, so the exact text is an allowlist here and nothing else is echoed. The code is the
+// fallback for a sentence this side has not seen yet.
+const ACCOUNT_FIXED = new Map([
+  ['Close other Automagik sessions before changing the Bot account.',
+    'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.'],
+  ['The Bot account is already changing. Try again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
+  ['The Bot account is changing. Try again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
+  ['The Bot account is changing. Sign in again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
+  ['The Bot account is changing.', 'The Bot account is already changing. Try again when it finishes.'],
+  ['The Bot account changed. Start this work again after signing in.', 'The Bot account changed. Sign in again.'],
+  ['The account changed since it was shown.', 'The account changed. Check it and confirm again.'],
+  ['This CLI is not signed in any more.', 'This coding agent is not signed in any more. Press Sign in again.'],
+  ['Automagik is restarting.', 'Automagik is restarting. Try again in a moment.'],
+  ['Automagik is restarting. Try again.', 'Automagik is restarting. Try again in a moment.'],
+  ['This installation keeps no account record.',
+    'This installation keeps no record of the Bot account. Sign in again; if it keeps happening, the instance needs its profile repaired.'],
+  ['The Bot account cannot be changed here.', 'The Bot account cannot be changed from this session. Use the app on this computer.'],
+  ['Install the CLI before changing accounts.', 'Install the coding agent before signing in.'],
+  ['Sign-out did not finish. Try again.', 'Signing out of the Bot account did not finish. Try again.'],
+  ['Sign-out could not be verified. Try again.', 'Signing out of the Bot account could not be verified. Try again.'],
+  ['Bot sign-in was reset. Retry sign-in in the app.', 'The Bot account was reset. Press Sign in again.'],
+])
+// The code, for a sentence this side does not know yet: every code acp-dsh can refuse a sign-in
+// with says something a person can act on.
+const ACCOUNT_SENTENCES = {
+  'acp-account/busy': 'The Bot account is busy in another Automagik session on this computer. Close it, then press Sign in again.',
+  'acp-account/unavailable': 'The Bot account cannot be changed from this session. Use the app on this computer.',
+  'acp-account/invalid': 'This sign-in is not available for this Bot.',
+  'acp-account/logout': 'Signing out of the Bot account did not finish. Try again.',
+  'acp-account/disposed': 'Automagik is restarting. Try again in a moment.',
+  'acp-account/changed': 'The account changed. Check it and confirm again.',
+  'acp-account/signed-out': 'This coding agent is not signed in any more. Press Sign in again.',
 }
 // The page branches on these two, never on their (translated) wording: an ended attempt asks the
 // agent's own sign-in first (rule 4), a restart interrupts the row.
@@ -81,13 +168,35 @@ const ACCOUNT_ERRORS = {
   'acp-account/signed-out': ['This coding agent is not signed in any more. Sign in to use it.', 'bot/account-signed-out'],
 }
 const failed = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
+// A native failure the team has no sentence for: the CLI's own words never reach the person
+// (a CLI may print an account name or a secret, #970), but its failure class does. The class is
+// a bounded identifier, so the row can say which kind of failure it was instead of one dead end.
+// Only an ACP failure namespace: a relative path, a scheme and a token, or any other two-segment
+// string an error happens to carry is not a class and is never put in the row.
+const FAILURE_CLASS = /^acp-[a-z0-9-]{1,27}\/[a-z0-9-]{1,40}$/
+const failureClassOf = error => (typeof error?.code === 'string' && FAILURE_CLASS.test(error.code) ? error.code : '')
+const unmappedFailure = (error) => {
+  const kind = failureClassOf(error)
+  return kind === '' ? 'Could not continue this sign-in. Try again.' : `Could not continue this sign-in (${kind}). Try again.`
+}
+// The sentence for an account refusal, from the fixed sets only: acp-dsh's own allowlisted
+// message first (its words are the most precise), then a code this side knows. A message or a
+// code the sets do not hold gets no sentence here, so what the CLI printed never fits.
+const accountSentence = (error) => {
+  const code = typeof error?.code === 'string' ? error.code : ''
+  return ACCOUNT_FIXED.get(error?.message)
+    ?? (Object.hasOwn(ERRORS, code) ? ERRORS[code]
+      : Object.hasOwn(ACCOUNT_SENTENCES, code) ? ACCOUNT_SENTENCES[code] : undefined)
+}
 const invalid = () => failed('This sign-in request is not valid.', 'bot/invalid')
 
 // Keep the browser link on a provider's official authorization page: Claude's must ask for
-// the manual code (`code=true`); Codex uses one fixed device page, usable from any device.
+// the manual code (`code=true`); Codex uses one fixed device page, usable from any device;
+// Antigravity's is Google's own, with agy's loopback return address and its state.
 export function cliLoginUrl(value, provider) {
   if (typeof value !== 'string' || value.length > 16384 || /\s/u.test(value)
     || [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return undefined
+  if (provider === 'acp-antigravity') return isAgySignInUrl(value) ? value : undefined
   let url
   try { url = new URL(value) } catch { return undefined }
   if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return undefined
@@ -124,13 +233,24 @@ export function cliLoginView(value, provider, attemptId) {
     if (provider === 'acp-claude' && value.status === 'waiting' && value.prompt?.secret === true && typeof value.prompt.id === 'string' && PROMPT.test(value.prompt.id)) {
       view.prompt = { id: value.prompt.id, label: 'Authorization code', secret: true }
     }
+    // Antigravity: the field for the address the browser ends on (#2048, paste-back).
+    if (provider === 'acp-antigravity' && value.status === 'waiting' && value.prompt?.secret === true && value.prompt.id === 'agy-callback') {
+      view.prompt = { id: 'agy-callback', label: 'Sign-in address', secret: true }
+    }
     if (value.checking === true) view.checking = true
   }
-  if (value.status === 'failed') view.message = value.message === 'Install the CLI before signing in.'
-    ? 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
-    : provider === 'acp-codex' && DEVICE_FAILURES.has(value.message) ? value.message : 'Sign-in did not finish. Try again.'
+  if (value.status === 'failed') view.message = failedMessageOf(value, provider)
   if (value.status === 'expired') view.message = 'This sign-in expired. Start again.'
   if (value.status === 'cancelled') view.message = 'Sign-in cancelled.'
+  // A Switch account attempt (#2064): booleans only, never an account.
+  if (value.fresh === true) {
+    view.fresh = true
+    if (['failed', 'expired', 'cancelled'].includes(value.status)) {
+      if (value.settling === true) view.settling = true
+      if (typeof value.signedInAfter === 'boolean') view.signedInAfter = value.signedInAfter
+    }
+  }
+  if (value.status === 'ready' && value.sameAccount === true) view.sameAccount = true
   return view
 }
 
@@ -173,11 +293,17 @@ function fields(payload, action) {
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw invalid()
   const allowed = new Set(ACTIONS[action])
   if (Object.keys(payload).some(key => !allowed.has(key)) || typeof payload.botId !== 'string' || !BOT_ID.test(payload.botId)
-    || !PROVIDERS.has(payload.provider)
+    || !(SIGN_IN_ACTIONS.has(action) ? SIGN_IN_PROVIDERS : PROVIDERS).has(payload.provider)
     || (allowed.has('attemptId') && (typeof payload.attemptId !== 'string' || !ATTEMPT.test(payload.attemptId)))) throw invalid()
   // The model the entry is for: one of this agent's, or none (a view that only attaches).
   if (payload.model !== undefined && (typeof payload.model !== 'string' || !MODEL_REF.test(payload.model) || payload.model.split('/')[0] !== payload.provider)) throw invalid()
   if (payload.ref !== undefined && (typeof payload.ref !== 'string' || !ACCOUNT_REF.test(payload.ref))) throw invalid()
+  // Antigravity's pasted address: the spaces around a paste go, then the same printable check.
+  if (action === 'answer' && payload.provider === 'acp-antigravity') {
+    const value = typeof payload.value === 'string' ? payload.value.trim() : undefined
+    if (value === undefined || value.length > 8192 || !/^[\x21-\x7e]+$/.test(value)) throw failed(CALLBACK_REFUSED, 'bot/invalid')
+    return { ...payload, value }
+  }
   if (action === 'answer' && (typeof payload.value !== 'string' || payload.value.length > 8192 || !/^[\x21-\x7e]+$/.test(payload.value))) {
     throw payload.provider === 'acp-claude' ? failed(CODE_HINT, 'bot/invalid') : invalid()
   }
@@ -209,10 +335,18 @@ const textOf = message => (Array.isArray(message?.content)
   ? message.content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n')
   : typeof message?.content === 'string' ? message.content : '')
 
-export function install(rt) {
+export function install(rt, reservationDeps) {
   const { ctx } = rt
+  const reservationStore = reservationDeps && createAccountReservations(rt, reservationDeps)
+  if (reservationDeps?.machine) rt.reservationWritesIdle = reservationStore.idle
   const acp = () => {
     try { return ctx.get?.('acpAgents') } catch { return undefined }
+  }
+  // Which installation this app is, for the account card: the DSH profile it runs, the same
+  // label acp-dsh puts on its ownership records. A host that does not name one, or whose
+  // lookup throws, is an unnamed installation and the card leaves the line out.
+  const installation = () => {
+    try { return installationNameOf(ctx.get?.('profileContext')?.name) } catch { return undefined }
   }
 
   /** Whether a text carries a Claude sign-in state acp-dsh showed. Never throws. */
@@ -247,33 +381,89 @@ export function install(rt) {
     const ref = refOf(event.data?.header?.config)
     if (ref === undefined) return
     for (const [key, choice] of choices) if (choice.botId === botId && ref !== choice.baseline) choices.delete(key)
+    // A choice that waits for a running reply is dropped the same way.
+    for (const choice of waiting) if (choice.botId === botId && ref !== choice.baseline) choice.dropped = true
   })
 
+  // Choices waiting for the Bot's running reply to end before they switch its agent.
+  const waiting = new Set()
+  // How long such a choice waits for the reply (a test may set a shorter bound).
+  const crossingWaitMs = () => rt.config?.crossingWaitMs ?? 120_000
+  const stillWanted = (bot, choice) => bot !== undefined && choice.dropped !== true && latest.get(bot.id) === choice.seq
+    && (bot.model ?? null) === choice.baseline && bot.model !== choice.ref
+  const refusedMessage = error => (typeof error?.code === 'string' && error.code.startsWith('bot/') && typeof error.message === 'string' ? error.message.slice(0, 300) : 'The model could not be selected.')
+
+  async function applyChoice(provider, key, choice, bot) {
+    const kept = bot.model ?? null
+    applying.set(key, choice)
+    try {
+      await rt.updateBot(bot.id, { model: choice.ref })
+      outcomes.set(key, { ref: choice.ref, ok: true, at: Date.now() })
+    } catch (error) {
+      // Only a message written for the person (a `bot/` refusal) is shown; anything else is
+      // said by kind, as the rest of the route does.
+      outcomes.set(key, { ref: choice.ref, ok: false, message: refusedMessage(error), kept, at: Date.now() })
+      rt.warn('ds-bot: %s signed in, but %s was not put on %s: %s', provider, bot.name, choice.ref, error?.code ?? 'error')
+    } finally {
+      if (applying.get(key) === choice) applying.delete(key)
+    }
+  }
+
+  // A pick on another harness while the Bot's chat runs a reply: the sign-in never stops that
+  // reply. The choice waits for it to end (at most crossingWaitMs), still reading pending,
+  // then switches like an idle pick; past the bound the person picks again from the menu.
+  async function applyAfterReply(provider, key, choice) {
+    try {
+      const bot = rt.botOf(choice.botId)
+      const agent = await rt.resolveAgent(rt.chatOf(choice.botId)).catch(() => undefined)
+      let timer
+      const idle = await Promise.race([
+        Promise.resolve(agent?.whenIdle?.()).then(() => true, () => true),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), crossingWaitMs()); timer.unref?.() }),
+      ]).finally(() => clearTimeout(timer))
+      const now = rt.botOf(choice.botId)
+      if (now !== bot || !stillWanted(now, choice)) return
+      if (!idle || rt.replyRunning?.(now.id)) {
+        const message = `This stops the current reply and continues on ${rt.agentNameOf?.(choice.ref) ?? choice.ref}.`
+        outcomes.set(key, { ref: choice.ref, ok: false, message, kept: now.model ?? null, at: Date.now() })
+        return
+      }
+      await applyChoice(provider, key, choice, now)
+    } finally {
+      waiting.delete(choice)
+      if (applying.get(key) === choice) applying.delete(key)
+    }
+  }
+
   async function applyChoices(provider) {
+    const later = []
     for (const [key, choice] of choices) {
       if (choice.provider !== provider) continue
       choices.delete(key)
       const bot = rt.botOf(choice.botId)
-      if (bot === undefined || latest.get(bot.id) !== choice.seq || (bot.model ?? null) !== choice.baseline) continue
-      if (bot.model === choice.ref) continue
-      const kept = bot.model ?? null
-      applying.set(key, choice)
-      try {
-        await rt.updateBot(bot.id, { model: choice.ref })
-        outcomes.set(key, { ref: choice.ref, ok: true, at: Date.now() })
-      } catch (error) {
-        // Only a message written for the person (a `bot/` refusal) is shown; anything else is
-        // said by kind, as the rest of the route does.
-        const message = typeof error?.code === 'string' && error.code.startsWith('bot/') && typeof error.message === 'string' ? error.message.slice(0, 300) : 'The model could not be selected.'
-        outcomes.set(key, { ref: choice.ref, ok: false, message, kept, at: Date.now() })
-        rt.warn('ds-bot: %s signed in, but %s was not put on %s: %s', provider, bot.name, choice.ref, error?.code ?? 'error')
-      } finally {
-        if (applying.get(key) === choice) applying.delete(key)
+      if (!stillWanted(bot, choice)) continue
+      const from = bot.model ?? bot.appliedModel
+      if (typeof from === 'string' && crossesHarness(from, choice.ref) && rt.replyRunning?.(bot.id) === true) {
+        // The acp_tool rule refuses before any wait (#2026).
+        try {
+          rt.assertOwnToolsModel?.(bot, { next: choice.ref, denyTools: bot.denyTools })
+        } catch (error) {
+          outcomes.set(key, { ref: choice.ref, ok: false, message: refusedMessage(error), kept: bot.model ?? null, at: Date.now() })
+          continue
+        }
+        applying.set(key, choice)
+        waiting.add(choice)
+        later.push([key, choice])
+        continue
       }
+      await applyChoice(provider, key, choice, bot)
     }
+    await Promise.allSettled(later.map(([key, choice]) => applyAfterReply(provider, key, choice)))
   }
   ctx.on('acp-dsh/login-ready', (payload) => {
-    if (!PROVIDERS.has(payload?.id)) return
+    if (!SIGN_IN_PROVIDERS.has(payload?.id)) return
+    rt.clearAsideQuota?.(payload.id)
+    rt.liftMemoryHolds?.()
     void applyChoices(payload.id).catch(error => rt.warn('ds-bot: the model chosen for %s was not applied: %s', payload.id, error?.message ?? error))
       // Then the Bots that waited on this CLI's sign-in move to it (subscription-move.js, #868):
       // after the choices, so a model the person picked with the sign-in is theirs.
@@ -303,7 +493,8 @@ export function install(rt) {
   // nothing is spawned unless that answer already says the account waits.
   async function pendingAccount(provider, { probe }) {
     const service = acp()
-    if (typeof service?.account !== 'function') return undefined
+    // Antigravity has no account read and no consent step (#2048): nothing to confirm.
+    if (provider === 'acp-antigravity' || typeof service?.account !== 'function') return undefined
     try {
       if (!probe) {
         const rows = typeof service.status === 'function' ? (await service.status())?.agents : undefined
@@ -330,30 +521,59 @@ export function install(rt) {
     try {
       await service.accountConfirm(body.provider, body.ref === undefined ? {} : { ref: body.ref })
     } catch (error) {
-      const [message, code] = ACCOUNT_ERRORS[error?.code] ?? ['The account could not be confirmed. Try again.', 'bot/refused']
+      // Read through Object.hasOwn, as the sign-in path does: `error.code` can be a name of
+      // Object.prototype ('toString', '__proto__'), and a plain index would then hand back a
+      // function and break the destructuring into an internal error.
+      const known = typeof error?.code === 'string' && Object.hasOwn(ACCOUNT_ERRORS, error.code)
+        ? ACCOUNT_ERRORS[error.code] : undefined
+      const [message, code] = known
+        ?? [`The account could not be confirmed${failureClassOf(error) === '' ? '' : ` (${failureClassOf(error)})`}. Try again.`, 'bot/refused']
       throw failed(message, code)
     }
     const choice = choiceOf(body.botId, body.provider)
     return { id: body.provider, status: 'ready', ...(choice ? { choice } : {}) }
   }
 
-  // The vendors Bots use on a sign-in that was already there before this version (carried), for
-  // the one-time notice. acp-dsh's last answer is read first; the CLI is asked only for a vendor
-  // that may be due its notice.
+  // The owner card and the one-time carried-consent notice share this list.
   const accounts = async (payload) => {
-    if (payload !== undefined && payload !== null && (typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 0)) throw invalid()
+    if (payload !== undefined && payload !== null && (typeof payload !== 'object' || Array.isArray(payload)
+      || !(Object.keys(payload).length === 0 || (Object.keys(payload).length === 1 && payload.reservations === true)))) throw invalid()
+    // Only the card asks for reservations: each one is another CLI read, and the start-up notice
+    // (announceCarried) must not pay for it.
+    const reservations = payload?.reservations === true ? reservationStore : undefined
     const out = {}
     const service = acp()
-    if (typeof service?.account !== 'function' || typeof service.status !== 'function') return { accounts: out }
+    // The card names the installation it is in (#1399): the Bot sign-in may be shared with
+    // another installation that uses this team's home, and a person should not have to guess
+    // which one this window is. A name, never a path; omitted when the host does not say.
+    const name = installation()
+    const view = accounts => ({ accounts, ...(name === undefined ? {} : { installation: name }) })
+    const withMachine = async () => {
+      const check = payload?.reservations === true && rt.machineReservations
+      if (check) {
+        for (const id of Object.keys(out)) {
+          await check.fresh(id, 'card')
+          out[id].machine = { ...check.status(id), claims: reservations?.machineClaims(id) ?? [] }
+        }
+      }
+      return view(out)
+    }
+    if (typeof service?.account !== 'function') return view(out)
     if (service.authScope === 'isolated') {
+      const recoveries = new Map([...PROVIDERS].map(id => [id, Promise.resolve()
+        .then(() => service.accountRecovery?.(id))]))
+      // Observe early failures while the other vendor's reads are pending.
+      for (const recovery of recoveries.values()) recovery.catch(() => {})
       for (const id of PROVIDERS) {
-        let seen, terminal, recoveryRequired = false
+        let seen, terminal, recoveryRequired = false, unread = false
         try {
-          recoveryRequired = (await service.accountRecovery?.(id))?.required === true
+          recoveryRequired = (await recoveries.get(id))?.required === true
           if (!recoveryRequired) seen = await service.account(id, { fresh: true })
         } catch (error) {
           recoveryRequired = error?.code === 'acp-account/unverified-login'
+          unread = !recoveryRequired
         }
+        const reservation = await reservations?.list(service, id, seen, { recoveryRequired, unread })
         // An unreadable vendor never hides the other vendor or leaks its diagnostics.
         try { terminal = await service.terminalAccount?.(id) } catch {}
         out[id] = {
@@ -361,25 +581,51 @@ export function install(rt) {
           ...(recoveryRequired ? { recoveryRequired: true } : {}),
           ...(seen?.signedIn === true ? { account: cliAccountView(seen) } : {}),
           ...(terminal?.account ? { terminal: cliAccountView(terminal) } : {}),
+          ...(reservation === undefined ? {} : { reservation }),
         }
       }
-      return { accounts: out }
+      return withMachine()
     }
     let rows
-    try { rows = (await service.status())?.agents } catch {}
+    try { rows = (await service.status?.())?.agents } catch {}
     for (const id of PROVIDERS) {
       const row = Array.isArray(rows) ? rows.find(agent => agent?.id === id) : undefined
       if (row === undefined || row.on === false || row.cli?.found === false || row.signedIn === false) continue
-      if (row.signedIn === true && row.consent !== 'carried') {
-        if (CONSENTS.has(row.consent)) out[id] = { consent: row.consent }
+      if (reservations && typeof service.accountEvidence === 'function') {
+        let seen, unread = false, recoveryRequired = false
+        try { seen = await service.account(id, { fresh: true }) } catch (error) {
+          recoveryRequired = error?.code === 'acp-account/unverified-login'
+          unread = !recoveryRequired
+        }
+        if (seen?.id === id && seen.signedIn === true || seen?.signedIn === undefined && row.signedIn === true) {
+          const consent = seen?.consent ?? row.consent
+          if (consent === 'given' || consent === 'carried') {
+            out[id] = {
+              consent, signedIn: true,
+              ...(seen?.signedIn === true ? { account: cliAccountView(seen) } : {}),
+              ...(consent === 'carried' && seen?.notice === true ? { notice: true } : {}),
+              reservation: await reservations.list(service, id, seen, { unread, recoveryRequired }),
+            }
+          } else if (consent === 'needed') out[id] = { consent }
+        }
         continue
       }
-      let seen
-      try { seen = await service.account(id) } catch { continue }
-      if (seen?.id !== id || seen.signedIn !== true || !CONSENTS.has(seen.consent)) continue
-      out[id] = { consent: seen.consent, ...(seen.consent === 'carried' && seen.notice === true ? { notice: true, account: cliAccountView(seen) } : {}) }
+      // Older ACP hosts still serve the notice without new account probes. The card supplies
+      // the unsupported line, and any existing reservations still come from the local record.
+      if (row.signedIn === true && row.consent !== 'carried') {
+        if (CONSENTS.has(row.consent)) out[id] = { consent: row.consent }
+      } else {
+        let seen
+        try { seen = await service.account(id) } catch { continue }
+        if (seen?.id !== id || seen.signedIn !== true || !CONSENTS.has(seen.consent)) continue
+        out[id] = { consent: seen.consent, ...(seen.consent === 'carried' && seen.notice === true ? { notice: true, account: cliAccountView(seen) } : {}) }
+      }
+      if (out[id]?.consent === 'given' || out[id]?.consent === 'carried') {
+        const reservation = await reservations?.list(service, id)
+        if (reservation && (reservation.state !== 'unsupported' || reservation.claims.length > 0)) out[id].reservation = reservation
+      }
     }
-    return { accounts: out }
+    return withMachine()
   }
 
   const noticed = async (payload) => {
@@ -426,9 +672,10 @@ export function install(rt) {
         return { id: body.provider, status: 'confirm', account, ...(choice ? { choice } : {}) }
       }
     }
+    let service
     let value
     try {
-      const service = acp()
+      service = acp()
       const method = METHODS[action]
       if (typeof service?.[method] !== 'function') throw Object.assign(new Error('Unavailable'), { code: 'acp-login/unavailable' })
       const args = action === 'start' ? [body.provider, { label: body.botId }]
@@ -438,7 +685,13 @@ export function install(rt) {
       value = await service[method](...args)
     } catch (error) {
       const code = error?.code ?? ''
-      throw failed(Object.hasOwn(ERRORS, code) ? ERRORS[code] : 'Could not continue this sign-in. Try again.', Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
+      // acp-dsh's own fixed sentence first (more precise, and its text is the allowlist), then a
+      // code the team knows, then the failure class, then the one line. What the CLI printed never
+      // reaches the person: the sentence is only taken from a fixed set. Both code tables are read
+      // through Object.hasOwn: `error.code` can name Object.prototype ('toString', '__proto__'),
+      // and a plain index would hand back a function or an object in place of the one line.
+      const sentence = accountSentence(error)
+      throw failed(sentence ?? unmappedFailure(error), Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
     }
     if (action === 'current' && (value === undefined || value === null)) {
       const choice = choiceOf(body.botId, body.provider)
@@ -450,7 +703,16 @@ export function install(rt) {
     // An attempt that ended ready on a CLI that was already signed in (it raced the check
     // above): the same confirm step, never "done".
     if (view.status === 'ready') {
-      const account = await pendingAccount(body.provider, { probe: false })
+      let account = await pendingAccount(body.provider, { probe: false })
+      if (account === undefined && (action === 'start' || action === 'status') && body.provider !== 'acp-antigravity') {
+        try {
+          const seen = await service.account?.(body.provider)
+          if (seen?.id === body.provider && seen.signedIn === true) {
+            if (seen.consent === 'needed') account = cliAccountView(seen)
+            else view.signedInAs = cliAccountView({ account: seen.account, ref: seen.ref })
+          }
+        } catch {}
+      }
       if (account !== undefined) {
         const waiting = { id: body.provider, status: 'confirm', account, ...(choice ? { choice } : {}) }
         return action === 'current' ? { id: body.provider, attempt: null, account, ...(choice ? { choice } : {}) } : waiting
@@ -472,18 +734,27 @@ export function install(rt) {
         throw failed('Bot account controls are unavailable. Update Automagik and try again.')
       }
       try {
-        await service[method](body.provider, { label: body.botId })
-        return { id: body.provider, signedIn: false }
+        const result = await service[method](body.provider, { label: body.botId })
+        if (action !== 'switch') return { id: body.provider, signedIn: false }
+        // The switch's own attempt (#2064): its id lets the row read it even after it ended.
+        try { return { ...cliLoginView(result, body.provider), signedIn: false } } catch { return { id: body.provider, signedIn: false } }
       } catch (error) {
         if (error?.code === 'acp-account/unverified-login') {
           throw failed(ACCOUNT_RECOVERY_HINT, ACCOUNT_RECOVERY_CODE)
         }
-        throw failed('Account change failed. Close other app windows and try again.')
+        // A refused change says which one it was (#1399): another live session using the Bot
+        // account, a change already running, a failed sign-out. The card used to replace every
+        // one of these with the same line, so the person could not tell whose sign-in held it.
+        throw failed(accountSentence(error) ?? 'Account change failed. Close other app windows and try again.')
       }
     }])),
     'cli-login-connections': connections,
     'cli-login-confirm': confirm,
     'cli-login-accounts': accounts,
+    ...(reservationStore ? {
+      'cli-login-reserve': payload => reservationStore.reserve(acp(), payload),
+      'cli-login-release': reservationStore.release,
+    } : {}),
     'cli-login-noticed': noticed,
     ...Object.fromEntries(Object.keys(METHODS).map(action => [`cli-login-${action}`, run(action)])),
   }
@@ -496,21 +767,33 @@ export function install(rt) {
   // never re-queued; the rest of the batch goes on. The claimed array itself is changed, so
   // DSH's own default decision, which reads it, no longer holds the message either. A message
   // the team delivered was noted for a resend after a restart (resume.js); that note goes too.
+  const isLoginCodeInput = (agentId, message) => message?.role === 'user'
+    && (rt.isBotSession?.(agentId) || rt.roomOf?.(agentId) !== undefined)
+    && loginTextMatches(textOf(message))
+
   function dropLoginCodes(payload) {
     const agentId = payload?.agent?.id
     if (!Array.isArray(payload?.messages) || payload.messages.length === 0) return
     if (!rt.isBotSession?.(agentId) && rt.roomOf?.(agentId) === undefined) return
     for (let index = payload.messages.length - 1; index >= 0; index--) {
       const message = payload.messages[index]
-      if (message?.role === 'user' && loginTextMatches(textOf(message))) {
+      if (isLoginCodeInput(agentId, message)) {
         payload.messages.splice(index, 1)
+        rt.forgetHeldInput?.(agentId, message.id)
         const exchangeId = message.source?.exchangeId
         if (typeof exchangeId === 'string' && exchangeId !== '') {
-          try { rt.forgetDelivery?.(exchangeId) } catch {}
+          try {
+            if (!rt.wakeLog?.discardLoginCode(payload.agent, message)) rt.forgetDelivery?.(exchangeId)
+          } catch {}
         }
         rt.warn('ds-bot: a message in %s carried a sign-in code and was not sent', agentId)
       }
     }
+  }
+
+  const reportHasLoginCode = (args) => {
+    if (args?.role !== 'task-done' && args?.role !== 'report') return false
+    return loginTextMatches(args.note) || loginTextMatches(rt.reportHeader?.(args))
   }
 
   // Every delivery between Bots, groups, schedules and reports: one that carries a shown
@@ -519,14 +802,14 @@ export function install(rt) {
   // so this check runs first.
   const deliver = rt.deliver
   if (typeof deliver === 'function') {
-    rt.deliver = async (args) => {
-      if (loginTextMatches(args?.text)) {
+    rt.deliver = async (args, options) => {
+      if (loginTextMatches(args?.text) || reportHasLoginCode(args)) {
         rt.warn('ds-bot: a delivery to %s carried a sign-in code and was not sent', args?.toId)
         throw failed(CODE_REFUSED)
       }
-      return await deliver(args)
+      return await deliver(args, options)
     }
   }
 
-  Object.assign(rt, { cliLoginActions: actions, loginTextMatches, dropLoginCodes, cliLoginChoice: choiceOf })
+  Object.assign(rt, { cliLoginActions: actions, loginTextMatches, reportHasLoginCode, isLoginCodeInput, dropLoginCodes, cliLoginChoice: choiceOf })
 }

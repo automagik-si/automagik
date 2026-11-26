@@ -130,3 +130,39 @@ test('Auto\'s refusals are worded with the Bot\'s name in Chinese and in the pt-
     assert.equal(hostText(person), 'Só a pessoa ativa o Automático, na escolha de permissão do Bot.')
   } finally { off() }
 })
+
+test('route policy refusals translate the route and preserve the Bot name in zh and pt-BR', () => {
+  const message = 'Model cannot use the Native route.'
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const [active, words, expected] of [
+    ['zh-CN', undefined, 'Model 无法使用“原生”路线。'],
+    ['pt-BR', pt, 'Model não pode usar a rota “Nativo”.'],
+  ]) {
+    let dictionary = words
+    const off = installLocale({
+      register: (_ns, locale, entries) => { if (locale === 'zh') dictionary ??= entries; return () => {} },
+      bind: () => (key, params) => (dictionary?.[key] ?? key).replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match),
+      getLocale: () => ({ active }),
+    })
+    try {
+      assert.equal(hostText(message), expected)
+    } finally { off() }
+  }
+})
+
+test('hostText words all four Solver look refusals in Chinese', () => {
+  const dicts = new Map()
+  const off = installLocale({
+    register: (namespace, language, words) => { dicts.set(`${namespace}:${language}`, words); return () => {} },
+    bind: namespace => key => dicts.get(`${namespace}:zh`)?.[key] ?? key,
+    getLocale: () => ({ active: 'zh-CN' }),
+  })
+  try {
+    for (const [message, translated] of [
+      ['Only a Solver wears the Solver characters. Choose another character.', '只有 Solver 才能使用 Solver 角色。请选择其他角色。'],
+      ['A Solver wears one of the Solver characters. Choose one of those characters.', 'Solver 只能使用 Solver 角色。请从这些角色中选择一个。'],
+      ['Only the person can make a Bot a Solver.', '只有本人才能把 Bot 设为 Solver。'],
+      ['That look is not valid. Choose another character.', '这个形象无效。请选择其他角色。'],
+    ]) assert.equal(hostText(message), translated)
+  } finally { off() }
+})

@@ -13,7 +13,8 @@
 // Environment: MOCK_PORT, MOCK_LOG, MOCK_DELAY_MS, MOCK_JITTER_MS (random extra latency),
 // MOCK_LOG_CHARS (prompt length kept per log entry), MOCK_SUMMARY_DELAY_MS (handoff notes
 // and backend compaction only), MOCK_NATIVE_SEARCH=off (ignore web_search_* tools and
-// answer like an endpoint without search), MOCK_REJECT_IMAGES=1 (reject requests with images).
+// answer like an endpoint without search), MOCK_REJECT_IMAGES=1 (reject requests with images),
+// MOCK_SUBAGENT_WAIT_MS (the reply after a subagent tool result, default 0).
 //
 // Commands to a Bot:
 //   建群 名: A, B · 群发[回报] 名: 消息 · 改群 名 公告|管理员|模式|加|踢: 值 · 删群 名
@@ -21,6 +22,7 @@
 //   进目录 路径 (working_directory with cd) · 开任务 标题: 指令 (start_task, from a Main Bot)
 //   插话 名: 消息 (message_bot when "now") · 排队 名: 消息 (message_bot when "queue") · 叫停 名: 原因 (stop_bot)
 //   In a message from a Bot: 转告 名: 消息 (hands it on with message_bot) · 慢慢做 N (answers after N seconds)
+//   重复调用 N S: 工具 JSON (repeat one call N times, S seconds apart)
 //   长文 N / long N (N×1000 characters) · 长任务 N [K] (N steps of K×1000, default 4)
 //   查记录 词 [词…] · 查锚点 part N #序号 · 查第 N 段 (read_own_chat)
 //   上下文里有 词 (searches the context except the last message) · 撑爆 (fake overflow, 400)
@@ -68,6 +70,7 @@ const DELAY = Number(process.env.MOCK_DELAY_MS ?? 600)
 const JITTER = Number(process.env.MOCK_JITTER_MS ?? 0)
 // Latency of summary (handoff or compaction) calls, to leave time to send input meanwhile.
 const SUMMARY_DELAY = Number(process.env.MOCK_SUMMARY_DELAY_MS ?? DELAY)
+const SUBAGENT_WAIT = Number(process.env.MOCK_SUBAGENT_WAIT_MS ?? 0)
 // How much of each call's last message the log keeps; raise it to read whole prompts.
 const LOG_CHARS = Number(process.env.MOCK_LOG_CHARS ?? 160)
 const WATCH = process.env.MOCK_WATCH ?? ''
@@ -99,6 +102,33 @@ const WRITTEN_CALL = '我先看一下目录。\n<tool_call>\n<function=pwsh>\n<p
 // Deterministic filler that grows a conversation by about `chars` characters.
 const filler = (chars, tag) => Array.from({ length: Math.ceil(chars / 20) }, (_, index) => `${tag}第${index + 1}段：这是一段用来撑长上下文的测试文字。`).join('').slice(0, chars)
 const isResults = message => Array.isArray(message?.content) && message.content.some(block => block.type === 'tool_result')
+
+// Rebuild progress from this turn's tool results so each repeat has a fresh call id.
+function repeatedCall(messages, tools) {
+  const at = messages.findLastIndex(message => message.role === 'user' && !isResults(message))
+  if (at === -1) return
+  const line = textBlocks(messages[at].content).flatMap(block => block.split('\n'))
+    .map(line => line.trim()).find(line => line.startsWith('重复调用 '))
+  const parsed = /^重复调用\s+(\d+)\s+(\d+)\s*[:：]\s*(\S+)\s+(.+)$/.exec(line ?? '')
+  if (!parsed) return
+  const [, count, seconds, name, input] = parsed
+  const total = Number(count)
+  const pause = Number(seconds)
+  if (total < 1 || total > 20 || pause > 60 || !tools.has(name)) return
+  let args
+  try { args = JSON.parse(input) } catch { return }
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return
+  const later = messages.slice(at + 1)
+  const calls = new Set(later.filter(message => message.role === 'assistant')
+    .flatMap(message => Array.isArray(message.content) ? message.content : [])
+    .filter(block => block.type === 'tool_use' && block.name === name).map(block => block.id))
+  const results = new Set(later.filter(isResults).flatMap(message => message.content)
+    .filter(block => block.type === 'tool_result' && calls.has(block.tool_use_id))
+    .map(block => block.tool_use_id))
+  if (results.size >= total) return [text('重复调用完成。')]
+  const out = [tool(name, args)]
+  return results.size > 0 ? Object.assign(out, { delay: pause * 1000 }) : out
+}
 // 'handoff' or 'backend' for a summary request, by its final prompt. The adapter merges
 // that prompt into the user message before it, so it is the last text block, not the
 // whole message.
@@ -191,6 +221,8 @@ function decide(body) {
 
   // A stopped call's result can share a message with the next group turn, which wins.
   const fresh = textBlocks(last?.content).some(value => value.trimStart().startsWith('[Group chat'))
+  const repeat = repeatedCall(messages, tools)
+  if (repeat !== undefined) return repeat
   const result = fresh ? undefined : blocks.find(block => block.type === 'tool_result')
   if (result) {
     const resultText = typeof result.content === 'string' ? result.content : textOf(result.content)
@@ -281,11 +313,15 @@ function decide(body) {
         const body = (resultText.split(/^Text[^\n]*:\n/m)[1] ?? '').split('\n\nLinks and controls')[0].replace(/\s+/g, ' ').trim()
         return [text(title ? `我看了你开的页面「${title}」。开头写的是：${body.slice(0, 120)}` : `没读到页面：${resultText.slice(0, 160)}`)]
       }
+      // Keep the parent's turn open so a background subagent can ask before its parent ends.
+      case 'subagent': return SUBAGENT_WAIT > 0 ? Object.assign([text('好了。')], { delay: SUBAGENT_WAIT }) : [text('好了。')]
       default: return [text('好了。')]
     }
   }
 
   const userText = textOf(last?.content).trim()
+  // DSH appends guidance and context blocks after the user's words.
+  const firstText = (textBlocks(last?.content)[0] ?? userText).trim()
   // "撑爆": the provider rejects the request as past its window.
   if (userText.startsWith('撑爆')) return 'overflow'
   // A file in the message (a long Bot message, a file the user sent): DSH gives its saved
@@ -432,7 +468,7 @@ function decide(body) {
   if ((order = /^叫停\s*(\S+?)\s*[:：]\s*(.+)$/.exec(userText))) return [tool('stop_bot', { bot: order[1], reason: order[2] })]
   // 调用 <tool> <json>: emit the named tool call verbatim — the generic way to
   // drive a tool the mock has no dedicated trigger for (e.g. the cua methods).
-  if ((order = /^调用\s*(\S+)(?:\s+([\s\S]+))?$/.exec(userText))) {
+  if ((order = /^调用\s*(\S+)(?:\s+([\s\S]+))?$/.exec(firstText))) {
     if (!tools.has(order[1])) return [text(`The tool ${order[1]} is not in my tool list.`)]
     try { return [tool(order[1], order[2] ? JSON.parse(order[2]) : {})] }
     catch { return [text(`Bad JSON for ${order[1]}.`)] }
@@ -447,7 +483,7 @@ function decide(body) {
   if ((order = /^搜索\s*[:：]\s*([^\n]+)/.exec(userText)) && tools.has('web_search')) return [tool('web_search', { queries: order[1].trim().split(/\s*[|｜]\s*/) })]
   if ((order = /^进目录\s+(.+)$/.exec(userText)) && tools.has('working_directory')) return [tool('working_directory', { cd: order[1].trim() })]
   // 开任务 标题: 指令 (start_task, a Main Bot's): the task card in its chat.
-  if ((order = /^开任务\s*(.+?)\s*[:：]\s*([\s\S]+)$/.exec(userText)) && tools.has('start_task')) return [tool('start_task', { title: order[1], instructions: order[2] })]
+  if ((order = /^开任务\s*(.+?)\s*[:：]\s*([\s\S]+)$/.exec(firstText)) && tools.has('start_task')) return [tool('start_task', { title: order[1], instructions: order[2] })]
   if (/^看(?:网页|页面)/.test(userText) && tools.has('read_browser')) return [tool('read_browser', {})]
   if (userText.startsWith('写成文字')) return [text(WRITTEN_CALL)]
   // Context-line tests: grow the context, run a long multi-step turn, search history.

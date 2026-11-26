@@ -4,6 +4,7 @@ import { chatSuggestions, useEntries } from './extend.js'
 import * as icons from './icons.js'
 import { HEADER } from './text.js'
 import { t } from './i18n.js'
+import { roleOutletVisible } from '../shared/roles.js'
 
 // -------------------------------------------------------------------------
 // What an empty chat offers: up to three chips above the composer, each filling it with a
@@ -48,6 +49,7 @@ export function personWrote(outline, hiddenTurns = []) {
 export function suggestionsFor(entries, context) {
   const items = []
   for (const entry of entries) {
+    if (!roleOutletVisible('suggestions', entry.id, context.bot, context.roster)) continue
     try {
       if (entry.when && !entry.when(context)) continue
       for (const item of entry.items(context) ?? []) if (item?.label && item?.text) items.push({ ...item, key: `${entry.id}:${item.id ?? item.label}` })
@@ -70,10 +72,10 @@ function fillComposer(text) {
 export function SuggestionDock({ sessionId, input, session, useRoster, useSessions }) {
   const roster = useRoster(value => value)
   // A Bot's own chat only (the Session shown is one of its parts), not a group or a task.
-  const bot = roster.byId[sessionId]
+  const bot = roster?.byId?.[sessionId]
   const part = sessionId
   const outline = list => list.projectionsBySession?.[part]?.values?.turnOutline ?? list.byId?.[part]?.projectionValues?.turnOutline
-  const wrote = useSessions ? useSessions(list => personWrote(outline(list), roster.exchangeTurns?.[part] ?? [])) : true
+  const wrote = useSessions ? useSessions(list => personWrote(outline(list), roster?.exchangeTurns?.[part] ?? [])) : true
   const entries = useEntries(chatSuggestions)
   const [images, setImages] = useState(false)
   // Asked when the chat opens, so a chat opened after signing in offers drawing.

@@ -9,9 +9,10 @@ import { readFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { CATALOG, entryOf, customId, tokenSecretOf, refreshSecretOf, clientSecretOf, keySecretOf, envSecretOf } from './catalog.js'
+import { CATALOG, CONNECTOR_SECRET_REF, entryOf, customId, tokenSecretOf, refreshSecretOf, clientSecretOf, keySecretOf, envSecretOf } from './catalog.js'
+import { CREDENTIAL_UNAVAILABLE } from './credential-key.js'
 import * as oauth from './oauth.js'
-import { createGateway } from './gateway.js'
+import { createGateway, parseConnectorUrl } from './gateway.js'
 import { install as installMail } from './mail/index.js'
 import { CONNECTOR_IDS } from '../capabilities.js'
 import { output } from '../tools.js'
@@ -22,7 +23,6 @@ export const GITHUB_SECRET = 'GITHUB_TOKEN'
 const MCP_CLIENT = '@deepseek-ai/dsh-mcp-client'
 const CHECK_TIMEOUT_MS = 15_000
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000
-const SECRET_REF = /\$DSH_SECRET_([A-Z][A-Z0-9_]*)/g
 const MAX_REQUESTS = 20
 
 // Asks GitHub who the token belongs to. Any token GitHub accepts passes.
@@ -30,7 +30,7 @@ export async function signIn(token, { api = 'https://api.github.com', fetch: req
   let response
   try {
     response = await request(`${api.replace(/\/$/, '')}/user`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'ds-bot', 'X-GitHub-Api-Version': '2022-11-28' },
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'automagik-bots', 'X-GitHub-Api-Version': '2022-11-28' },
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
     })
   } catch {
@@ -39,7 +39,7 @@ export async function signIn(token, { api = 'https://api.github.com', fetch: req
   if (response.status === 401) throw refusal('GitHub did not accept this token')
   if (!response.ok) throw refusal(`GitHub answered ${response.status}`)
   const user = await response.json().catch(() => ({}))
-  if (typeof user?.login !== 'string') throw new Error('GitHub did not say who this token belongs to')
+  if (typeof user?.login !== 'string') throw refusal('GitHub did not say who this token belongs to')
   return { login: user.login }
 }
 
@@ -77,10 +77,16 @@ export function install(rt) {
   }
   const known = (id) => {
     const entry = entryFor(String(id ?? ''))
-    if (entry === undefined || entry.id === 'github' && options === null) throw new Error('No such connector')
+    if (entry === undefined || entry.id === 'github' && options === null) throw refusal('No such connector')
     return entry
   }
-  const reason = (error) => rt.redactSecrets([error, error?.cause].filter(Boolean).map(part => String(part?.message ?? part)).join(': ') || 'error').slice(0, 300)
+  const reason = (error, mask = rt.connectorDiagnosticRedactor()) => {
+    const text = [error, error?.cause].filter(Boolean).map(part => String(part?.message ?? part)).join(': ') || 'error'
+    return (mask?.(text) ?? text).slice(0, 300)
+  }
+  const checkCredentials = (entry) => {
+    if (rt.connectorCredentialsUnavailable(entry?.custom)) throw refusal(CREDENTIAL_UNAVAILABLE)
+  }
 
   // --- credentials ------------------------------------------------------
 
@@ -110,6 +116,7 @@ export function install(rt) {
   const upstreamOf = (id) => {
     const entry = entryFor(id)
     if (entry === undefined || !hasCredential(id)) return undefined
+    checkCredentials(entry)
     let url = entry.custom?.url ?? entry.remote?.url
     if (url === undefined) return undefined
     const headers = { ...(entry.headers ?? {}) }
@@ -125,7 +132,7 @@ export function install(rt) {
     }
     if (entry.custom !== undefined) {
       for (const [name, raw] of Object.entries(entry.custom.headers ?? {})) {
-        headers[name] = String(raw).replace(SECRET_REF, (_m, n) => rt.secretValue(n) ?? '')
+        headers[name] = resolveRefs(raw)
       }
     }
     return { url, headers }
@@ -137,6 +144,7 @@ export function install(rt) {
       readOnly: id => state.connectors?.[id]?.readOnly === true,
       onUnauthorized: id => refreshConnector(id),
       log: (...args) => rt.warn(...args),
+      redactor: rt.connectorDiagnosticRedactor,
     })
     await gateways.gw.listen()
     return gateways.gw
@@ -145,17 +153,22 @@ export function install(rt) {
   const loadMcpPlugin = async () => {
     pluginP.p ??= (async () => {
       const loader = ctx.get?.('loader')
-      if (typeof loader?.import !== 'function') throw new Error('This DSH cannot load connectors')
+      if (typeof loader?.import !== 'function') throw refusal('This DSH cannot load connectors')
       const mod = await loader.import(MCP_CLIENT)
       return loader.unwrapExports?.(mod) ?? mod?.default ?? mod
     })()
     return pluginP.p
   }
 
-  const resolveRefs = (value) => String(value).replace(SECRET_REF, (_m, name) => rt.secretValue(name) ?? '')
+  const resolveRefs = (value) => String(value).replace(CONNECTOR_SECRET_REF, (_match, name) => {
+    const unavailable = rt.secretSourceReason(name)
+    if (unavailable !== undefined) throw refusal(unavailable)
+    return rt.secretValue(name) ?? ''
+  })
 
   async function configFor(id) {
     const entry = entryFor(id)
+    checkCredentials(entry)
     if (entry?.custom !== undefined && entry.custom.command !== undefined) {
       const env = {}
       for (const [key, raw] of Object.entries(entry.custom.env ?? {})) env[key] = resolveRefs(raw)
@@ -179,13 +192,16 @@ export function install(rt) {
   }
 
   async function mountOne(id) {
-    const fp = await fingerprint(id)
-    if (mounts.get(id)?.fp === fp) return
-    await unmount(id)
-    statuses.set(id, { state: 'connecting' })
+    let fp
+    let mask = rt.connectorDiagnosticRedactor()
     try {
+      fp = await fingerprint(id)
+      if (mounts.get(id)?.fp === fp) return
+      await unmount(id)
+      statuses.set(id, { state: 'connecting' })
       const plugin = await loadMcpPlugin()
       if (stopped) return
+      mask = rt.connectorDiagnosticRedactor()
       const config = { ...(await configFor(id)), failOnStartupError: true }
       const fiber = ctx.plugin(plugin, config)
       const mount = { fp, fiber }
@@ -196,8 +212,8 @@ export function install(rt) {
       settleRequests(id)
     } catch (error) {
       await unmount(id)
-      mounts.set(id, { fp })
-      statuses.set(id, { state: 'error', error: reason(error) })
+      if (fp !== undefined) mounts.set(id, { fp })
+      statuses.set(id, { state: 'error', error: reason(error, mask) })
       rt.warn('omni-ui: connector %s failed: %s', id, statuses.get(id).error)
     }
   }
@@ -230,7 +246,7 @@ export function install(rt) {
     await rt.loadSecrets()
     for (const name of [tokenSecretOf(id), refreshSecretOf(id), clientSecretOf(id), keySecretOf(id)]) {
       if (id !== 'github' || name === GITHUB_SECRET || name !== tokenSecretOf(id)) {
-        if (rt.secretValue(name) !== undefined) await rt.secretEndpoint('secret-delete', { name }).catch(() => {})
+        if (rt.secretStored(name)) await rt.secretEndpoint('secret-delete', { name }).catch(() => {})
       }
     }
   }
@@ -336,7 +352,7 @@ export function install(rt) {
     if (pending === undefined || pending.kind !== 'browser') return
     try {
       if (result.error !== null && result.error !== undefined) throw new Error(result.errorDescription ?? result.error)
-      if (result.state !== pending.expectedState) throw new Error('The sign-in answer did not match this attempt (state mismatch). Try again.')
+      if (result.state !== pending.expectedState) throw refusal('The sign-in answer did not match this attempt (state mismatch). Try again.')
       const entry = entryFor(id)
       const tokens = await oauth.exchange(pending.discovery, pending.clientInformation, { code: result.code, codeVerifier: pending.codeVerifier, redirectUri: pending.redirectUri, iss: result.iss ?? undefined })
       await endPending(id)
@@ -381,7 +397,7 @@ export function install(rt) {
 
   async function beginSignIn(id) {
     const entry = known(id)
-    if (entry.auth.kind !== 'oauth') throw new Error('This connector does not sign in')
+    if (entry.auth.kind !== 'oauth') throw refusal('This connector does not sign in')
     if (entry.auth.client?.deviceFlow && !entry.auth.client.id) {
       statuses.set(id, { state: 'needs-client', error: 'NOT SET UP: configure an Automagik sign-in app' })
       return
@@ -397,10 +413,10 @@ export function install(rt) {
         return
       }
       const remote = entry.remote?.url
-      if (remote === undefined) throw new Error('This connector has no server address')
+      if (remote === undefined) throw refusal('This connector has no server address')
       if (insecure(remote)) throw refusal('Connector addresses must start with https://')
       const discovery = await oauth.discover(remote)
-      if (discovery.metadata === undefined) throw new Error('This service does not publish OAuth sign-in metadata')
+      if (discovery.metadata === undefined) throw refusal('This service does not publish OAuth sign-in metadata')
       state.connectors = { ...(state.connectors ?? {}), [id]: { ...state.connectors?.[id], oauth: { authorizationServerUrl: discovery.authorizationServerUrl, resource: discovery.resource, scope: discovery.scope } } }
       await rt.save()
       await startBrowserFlow(id, entry, { discovery })
@@ -565,6 +581,10 @@ export function install(rt) {
 
   // --- import -------------------------------------------------------------
 
+  const importUrl = spec => typeof spec.url === 'string' ? spec.url : typeof spec.serverUrl === 'string' ? spec.serverUrl : undefined
+  const checkAddress = url => {
+    if (parseConnectorUrl(url) === undefined) throw refusal('Connector addresses must use https:// or loopback http://, without user information')
+  }
   const importFiles = () => {
     const home = homedir()
     const appData = platform() === 'win32' ? (process.env.APPDATA ?? join(home, 'AppData', 'Roaming')) : null
@@ -584,7 +604,7 @@ export function install(rt) {
       if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) continue
       for (const [name, spec] of Object.entries(servers)) {
         if (spec === null || typeof spec !== 'object') continue
-        const url = typeof spec.url === 'string' ? spec.url : typeof spec.serverUrl === 'string' ? spec.serverUrl : undefined
+        const url = importUrl(spec)
         const command = typeof spec.command === 'string' ? spec.command : undefined
         if (url === undefined && command === undefined) continue
         found.push({
@@ -608,7 +628,7 @@ export function install(rt) {
       const servers = parsed?.[file.key] ?? {}
       for (const [name, spec] of Object.entries(servers)) {
         if (!wanted.has(`${file.source}:${name}`) || spec === null || typeof spec !== 'object') continue
-        if (scanned.some(entry => entry.source === file.source && entry.name === name)) picked.push({ name, spec })
+        if (scanned.some(entry => entry.source === file.source && entry.name === name)) picked.push({ name, spec, url: importUrl(spec) })
       }
     }
     return picked
@@ -618,7 +638,8 @@ export function install(rt) {
 
   const rowFor = (entry) => {
     const saved = state.connectors?.[entry.id]
-    const status = statuses.get(entry.id) ?? (entry.auth.client?.deviceFlow && !entry.auth.client.id && !hasCredential(entry.id) ? { state: 'needs-client', error: 'NOT SET UP: configure an Automagik sign-in app' } : undefined)
+    const status = rt.connectorCredentialsUnavailable(entry.custom) ? { state: 'error', error: CREDENTIAL_UNAVAILABLE }
+      : statuses.get(entry.id) ?? (entry.auth.client?.deviceFlow && !entry.auth.client.id && !hasCredential(entry.id) ? { state: 'needs-client', error: 'NOT SET UP: configure an Automagik sign-in app' } : undefined)
     const connected = hasCredential(entry.id)
     const remote = entry.custom === undefined || entry.custom.url !== undefined
     const state_ = status?.state ?? (connected && mounts.has(entry.id) ? 'ready' : connected ? 'connecting' : 'off')
@@ -648,7 +669,6 @@ export function install(rt) {
   const endpoints = {
     async 'connector-connect'(body) {
       const entry = known(body.id)
-      if (entry.id === 'github' && options === null) throw new Error('No such connector')
       if (entry.auth.kind === 'none') {
         await saveState(entry.id, { connectedAt: Date.now() })
         await sync()
@@ -656,7 +676,7 @@ export function install(rt) {
       }
       if (entry.auth.kind === 'key') {
         const key = typeof body.key === 'string' ? body.key.trim() : ''
-        if (key === '') throw new Error('Paste a key first')
+        if (key === '') throw refusal('Paste a key first')
         const remote = entry.remote?.url
         if (remote !== undefined && insecure(remote)) throw refusal('Connector addresses must start with https://')
         await writeSecret(keySecretOf(entry.id), key, `${entry.name} connector`)
@@ -678,7 +698,7 @@ export function install(rt) {
         await sync()
         return connectorsView()
       }
-      if (entry.id === 'github' && (entry.auth.client?.id ?? '') === '') throw new Error('NOT SET UP: configure an Automagik sign-in app or paste a token')
+      if (entry.id === 'github' && (entry.auth.client?.id ?? '') === '') throw refusal('NOT SET UP: configure an Automagik sign-in app or paste a token')
       await beginSignIn(entry.id)
       return connectorsView()
     },
@@ -686,7 +706,10 @@ export function install(rt) {
       const entry = known(body.id)
       await endPending(entry.id)
       await dropSecrets(entry.id)
-      if (state.connectors?.[entry.id] !== undefined) {
+      if (entry.custom !== undefined) {
+        const remove = team => { delete team.connectors?.[entry.id] }
+        await rt.saveCopy(remove, { afterWrite: () => remove(state) })
+      } else if (state.connectors?.[entry.id] !== undefined) {
         delete state.connectors[entry.id]
         await rt.save()
       }
@@ -698,6 +721,7 @@ export function install(rt) {
       const entry = known(body.id)
       statuses.delete(entry.id)
       await rt.loadSecrets()
+      rt.retryConnectorCredentials()
       await sync(true)
       return connectorsView()
     },
@@ -709,25 +733,21 @@ export function install(rt) {
     async 'connector-sign-in-code'(body) {
       const entry = known(body.id)
       const pending = pendings.get(entry.id)
-      if (pending === undefined || pending.kind !== 'browser') throw new Error('No sign-in is waiting')
+      if (pending === undefined || pending.kind !== 'browser') throw refusal('No sign-in is waiting')
       const input = String(body.input ?? body.code ?? '').trim()
-      if (input === '') throw new Error('Paste the address or the code')
-      let code = input, stateParam, iss
-      if (/^https?:\/\//i.test(input)) {
-        const url = new URL(input)
-        code = url.searchParams.get('code') ?? ''
-        stateParam = url.searchParams.get('state')
-        iss = url.searchParams.get('iss') ?? undefined
-        if (stateParam !== pending.expectedState) throw new Error('This address is not from this sign-in attempt (state mismatch). Copy the whole address again.')
-      }
-      if (code === '') throw new Error('The address has no code')
-      await completeBrowser(entry.id, { code, state: pending.expectedState, iss })
+      const url = /^https?:\/\//i.test(input) ? URL.parse(input) : null
+      if (url === null) throw refusal('Paste the whole callback address')
+      const stateParam = url.searchParams.get('state')
+      if (!stateParam || stateParam !== pending.expectedState) throw refusal('This address is not from this sign-in attempt (state mismatch). Copy the whole address again.')
+      const code = url.searchParams.get('code')
+      if (!code) throw refusal('The address has no code')
+      await completeBrowser(entry.id, { code, state: stateParam, iss: url.searchParams.get('iss') ?? undefined })
       return connectorsView()
     },
     async 'connector-client'(body) {
       const entry = known(body.id)
       const clientId = String(body.clientId ?? '').trim()
-      if (clientId === '') throw new Error('Enter the client ID')
+      if (clientId === '') throw refusal('Enter the client ID')
       const clientSecret = typeof body.clientSecret === 'string' && body.clientSecret.trim() !== '' ? body.clientSecret.trim() : undefined
       if (clientSecret !== undefined) await writeSecret(clientSecretOf(entry.id), clientSecret, `${entry.name} connector`)
       await saveState(entry.id, { client: { via: 'manual', clientId } })
@@ -748,24 +768,29 @@ export function install(rt) {
     },
     async 'connector-add'(body) {
       const name = String(body.name ?? '').trim()
-      if (name === '') throw new Error('Name the connector')
+      if (name === '') throw refusal('Name the connector')
       const url = typeof body.url === 'string' ? body.url.trim() : undefined
       const command = typeof body.command === 'string' ? body.command.trim() : undefined
-      if (url !== undefined && insecure(url) && !/^http:\/\/(localhost|127\.)/i.test(url)) throw refusal('Connector addresses must start with https://')
-      if (url === undefined && command === undefined) throw new Error('Enter an address or a command')
-      const taken = new Set(Object.keys(state.connectors ?? {}))
-      const id = customId(name, taken)
-      CONNECTOR_IDS.add(id)
+      if (url !== undefined) checkAddress(url)
+      if (url === undefined && command === undefined) throw refusal('Enter an address or a command')
       const custom = url !== undefined
         ? { name, url, headers: body.headers && typeof body.headers === 'object' ? body.headers : {} }
         : { name, command, args: Array.isArray(body.args) ? body.args.map(String) : [], env: body.env && typeof body.env === 'object' ? body.env : {} }
-      await saveState(id, { custom, connectedAt: Date.now() })
+      let id
+      const row = { custom, connectedAt: Date.now() }
+      await rt.saveCopy(team => {
+        id = customId(name, new Set(Object.keys(team.connectors ?? {})))
+        team.connectors = { ...team.connectors, [id]: row }
+      }, { afterWrite: () => {
+        CONNECTOR_IDS.add(id)
+        state.connectors = { ...state.connectors, [id]: row }
+      } })
       await sync(true)
       return connectorsView()
     },
     async 'connector-remove'(body) {
       const entry = known(body.id)
-      if (entry.custom === undefined) throw new Error('Only added connectors can be removed')
+      if (entry.custom === undefined) throw refusal('Only added connectors can be removed')
       await endpoints['connector-disconnect']({ id: entry.id })
       return connectorsView()
     },
@@ -774,13 +799,14 @@ export function install(rt) {
     },
     async 'connector-import'(body) {
       const picked = await importPick(body.items)
+      for (const { url } of picked) if (url !== undefined) checkAddress(url)
       const created = []
-      for (const { name, spec } of picked) {
+      for (const { name, spec, url } of picked) {
         const taken = new Set(Object.keys(state.connectors ?? {}))
         const id = customId(name, taken)
         const custom = { name }
-        if (typeof spec.url === 'string' || typeof spec.serverUrl === 'string') {
-          custom.url = spec.url ?? spec.serverUrl
+        if (url !== undefined) {
+          custom.url = url
           custom.headers = {}
           for (const [header, raw] of Object.entries(spec.headers ?? {})) {
             const secretName = envSecretOf(id, `HEAD_${header}`)
@@ -811,8 +837,8 @@ export function install(rt) {
         }
         return undefined
       })()
-      if (found === undefined) throw new Error('This request is gone')
-      if (found.request.status !== 'pending') throw new Error('This request was already answered')
+      if (found === undefined) throw refusal('This request is gone')
+      if (found.request.status !== 'pending') throw refusal('This request was already answered')
       found.request.status = 'canceled'
       found.request.settledAt = Date.now()
       await rt.save()
@@ -862,6 +888,7 @@ export function install(rt) {
       return prefixes
     },
     connectorSettleRequests: settleRequests,
+    connectorStateChanged: sync,
     secretsChanged: () => { void sync() },
     connectorsInternals: { mounts, statuses, pendings, gateways, refreshConnector, upstreamOf },
   })

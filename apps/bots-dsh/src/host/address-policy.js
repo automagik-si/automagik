@@ -3,11 +3,38 @@
 // navigation or fetch without restarting the profile. Both lists start empty: localhost,
 // LAN and tailnet addresses are reachable by default. A deny entry always wins; when the
 // allow list is not empty, only a matching target opens.
-import { decideAddress, normalizeAddressList } from './browser/address-policy.js'
+import { decideAddress, localRefusal, normalizeAddressList } from './browser/address-policy.js'
 
 export { normalizeAddressList }
 
 export function install(rt) {
+  const services = {}
+  if (typeof rt.ctx.inject === 'function') {
+    for (const name of ['webServer', 'webApp']) {
+      rt.ctx.inject([name], scope => {
+        const service = scope[name]
+        scope.effect(() => {
+          services[name] = service
+          return () => {
+            if (services[name] === service) delete services[name]
+          }
+        })
+      })
+    }
+  }
+  const own = () => {
+    const { webServer, webApp } = services
+    let port, host, advertised
+    try { port = webServer?.port } catch { /* unavailable */ }
+    try { host = webServer?.host } catch { /* unavailable */ }
+    try {
+      if (webApp) advertised = new URL(webApp.getAdvertisedUrl())
+    } catch { /* unavailable */ }
+    return {
+      listener: Number.isInteger(port) && port > 0 && port <= 65535 ? { port, host } : undefined,
+      advertised,
+    }
+  }
   const lists = () => {
     const prefs = rt.state?.prefs ?? {}
     return {
@@ -19,7 +46,7 @@ export function install(rt) {
     const { allow, deny } = lists()
     return decideAddress(url, { allow, deny, action })
   }
-  rt.addressPolicy = { lists, check }
+  rt.addressPolicy = { lists, check, local: async (url, kind) => localRefusal(url, kind, own()) }
 
   // web_fetch is a host tool over DSH's web seam. Its provider is local and has no address
   // policy of its own, so the same lists gate the tool before it reaches the provider.

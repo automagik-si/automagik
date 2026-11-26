@@ -30,4 +30,21 @@ describe('docs/brand components stylesheet', () => {
     expect(() => bundle(add('@media (prefers-color-scheme:dark) and (max-width:480px){.a{color:red}}\n'))).toThrow('does not know')
     expect(() => bundle(site.replace(':root{--bg:', ':root{--new:0;--bg:'))).toThrow('its head changed')
   })
+
+  test('every custom property bundle.css reads is defined in the token file or by the bundle itself', () => {
+    const css = (path: string) => read(path).replace(/\/\*[\s\S]*?\*\//g, '')
+    const bundleCss = css(TARGET)
+    const readVars = new Set([...bundleCss.matchAll(/var\(\s*(--[a-zA-Z0-9_-]+)/g)].map(match => match[1]))
+    const tokenVars = new Set([...css('docs/brand/tokens/tokens.css').matchAll(/(--[a-zA-Z0-9_-]+)\s*:/g)].map(match => match[1]))
+    const ownVars = new Set([...bundleCss.matchAll(/(--[a-zA-Z0-9_-]+)\s*:/g)].map(match => match[1]))
+    // The family drawer is a byte copy loaded beside the bundle on its page; it declares this one
+    // host value itself (apps/landing/assets/family/family.css), and no component preview matches
+    // its rule. Every other read must resolve from the token file or from the bundle itself.
+    const fromFamilyPiece = '--fam-clear'
+    expect(read('apps/landing/assets/family/family.css')).toContain(`${fromFamilyPiece}:`)
+    expect(readVars.has(fromFamilyPiece)).toBe(true)
+    for (const n of [1, 2, 3]) expect(readVars.has(`--heading-${n}-letter-spacing`)).toBe(true)
+    const missing = [...readVars].filter(name => !tokenVars.has(name) && !ownVars.has(name) && name !== fromFamilyPiece).sort()
+    expect(missing).toEqual([])
+  })
 })

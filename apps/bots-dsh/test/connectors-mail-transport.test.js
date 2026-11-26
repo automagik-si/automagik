@@ -18,17 +18,53 @@ const transport = ({ connect = async () => {}, verify = async () => {} } = {}) =
   class ImapFlow extends EventEmitter {
     usable = false
     closed = false
-    constructor() { super(); imap = this }
-    async connect() { await connect(); this.usable = true }
+    constructor(options) { super(); imap = this; this.options = options }
+    async connect() { await connect(this.options); this.usable = true }
     close() { this.closed = true; this.usable = false; this.emit('close') }
     async logout() { this.close() }
   }
   const smtp = new EventEmitter()
-  smtp.verify = verify
   smtp.closed = false
   smtp.close = () => { smtp.closed = true }
-  return { modules: { ImapFlow, nodemailer: { createTransport: () => smtp } }, get imap() { return imap }, smtp }
+  const createTransport = (options) => {
+    smtp.options = options
+    smtp.verify = () => verify(options)
+    return smtp
+  }
+  return { modules: { ImapFlow, nodemailer: { createTransport } }, get imap() { return imap }, smtp }
 }
+
+test('mail without implicit TLS requires STARTTLS before authentication', async () => {
+  const authenticated = []
+  const authenticate = (protocol, required) => {
+    if (required) throw new Error(`${protocol} STARTTLS unavailable`)
+    authenticated.push(protocol)
+  }
+  const fake = transport({
+    connect: async opts => authenticate('IMAP', opts.doSTARTTLS),
+    verify: async opts => authenticate('SMTP', opts.requireTLS),
+  })
+  await assert.rejects(connectImap({
+    ...account, imap: { ...account.imap, secure: false }, smtp: { ...account.smtp, secure: false },
+  }, { modules: fake.modules }), /STARTTLS unavailable/)
+  assert.equal(fake.imap.options.doSTARTTLS, true)
+  assert.equal(fake.smtp.options.requireTLS, true)
+  assert.deepEqual(authenticated, [])
+})
+
+test('mail with implicit TLS can still verify and send', async () => {
+  const fake = transport()
+  fake.smtp.sendMail = async () => ({ messageId: 'sent' })
+  const session = await connectImap({
+    ...account, imap: { ...account.imap, secure: true }, smtp: { ...account.smtp, secure: true },
+  }, { modules: fake.modules })
+  assert.equal(fake.imap.options.secure, true)
+  assert.equal(fake.smtp.options.secure, true)
+  assert.notEqual(fake.imap.options.doSTARTTLS, true)
+  assert.notEqual(fake.smtp.options.requireTLS, true)
+  assert.equal((await session.send({ to: 'other@invalid.test', subject: 'Test', text: 'body' })).messageId, 'sent')
+  await session.close()
+})
 
 test('idle IMAP errors and close retire the session without escaping', async () => {
   const fake = transport()
@@ -128,9 +164,13 @@ test('a verified SMTP transport opens a fresh socket when sending', async (t) =>
   t.after(() => server.close())
   const fake = transport()
   const nodemailer = await import('nodemailer')
+  // Stand in for an already-secured connection to exercise socket ownership with the SMTP fixture.
+  const modules = { ImapFlow: fake.modules.ImapFlow, nodemailer: {
+    createTransport: options => nodemailer.createTransport({ ...options, secured: true }),
+  } }
   const session = await connectImap({
-    ...account, smtp: { host: '127.0.0.1', port: server.address().port, secure: false },
-  }, { modules: { ImapFlow: fake.modules.ImapFlow, nodemailer } })
+    ...account, smtp: { host: '127.0.0.1', port: server.address().port, secure: true },
+  }, { modules })
   t.after(() => session.close())
   await session.send({ to: 'other@invalid.test', subject: 'Test', text: 'body' })
   assert.equal(connections, 2)

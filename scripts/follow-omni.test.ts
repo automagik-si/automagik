@@ -5,7 +5,7 @@
 // never carried.
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -49,11 +49,51 @@ describe('Follow Omni triggers', () => {
     expect(workflow.jobs.follow.if).toBeUndefined();
   });
 
-  test('keeps the dispatch fast path, schedule fallback and shared concurrency', () => {
+  test('keeps the dispatch fast path, the outside daily clock, the schedule backstop and shared concurrency', () => {
     expect(Object.keys(workflow.on).sort()).toEqual(['repository_dispatch', 'schedule', 'workflow_dispatch', 'workflow_run']);
-    expect(workflow.on.repository_dispatch).toEqual({ types: ['omni-release'] });
+    expect(workflow.on.repository_dispatch).toEqual({ types: ['omni-release', 'daily-carry'] });
     expect(workflow.on.schedule).toEqual([{ cron: '11,41 * * * *' }]);
     expect(workflow.concurrency).toEqual({ group: 'follow-omni', 'cancel-in-progress': false });
+  });
+
+  test('a daily-carry dispatch is the clock, not an Omni hint: it looks the newest Omni up itself', () => {
+    const newest = runOf('The newest Omni release');
+    // Only Omni's own dispatch logs (and waits for) a hinted release; the daily clock has none.
+    expect(newest).toContain('"${EVENT_ACTION}" == omni-release');
+    expect(jobOf('follow').map(line => line.trim())).toContain('EVENT_ACTION: ${{ github.event.action }}');
+    // The hold still decides whether that run carries: the dispatch adds no skip input.
+    expect(workflow.on.repository_dispatch.types).toContain('daily-carry');
+    expect(workflow.on.workflow_dispatch.inputs.skip_daily_hold.default).toBe(false);
+  });
+
+  test('a daily-carry dispatch never reads Omni\'s payload as a hint; omni-release still does', () => {
+    const newest = runOf('The newest Omni release');
+    const hint = newest.split('\n');
+    const start = hint.findIndex(line => line.includes('GITHUB_EVENT_NAME}" == repository_dispatch'));
+    expect(start).toBeGreaterThan(-1);
+    const indent = hint[start].length - hint[start].trimStart().length;
+    const end = hint.findIndex((line, i) => i > start && line.trim() === 'fi' && line.length - line.trimStart().length === indent);
+    expect(end).toBeGreaterThan(start);
+    const block = hint.slice(start, end + 1).join('\n');
+    const prelude = 'set -euo pipefail\nlookup() { :; }\nabove() { return 1; }\nnewest=2.261115.8\n';
+    const run = (action: string) => spawnSync('bash', ['-c', `${prelude}\n${block}`], {
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH ?? '',
+        GITHUB_EVENT_NAME: 'repository_dispatch',
+        EVENT_ACTION: action,
+        HINT_VERSION: '2.261115.9',
+        HINT_TAG: 'v2.261115.9',
+        HINT_SHA: '36c548a556887514c65874b385f33d3f6ef968d2',
+        GITHUB_STEP_SUMMARY: '/dev/null',
+      },
+    });
+    const daily = run('daily-carry');
+    expect(daily.status).toBe(0);
+    expect(daily.stdout).toBe('');
+    const omni = run('omni-release');
+    expect(omni.status).toBe(0);
+    expect(omni.stdout).toContain('Omni dispatched 2.261115.9');
   });
 });
 
@@ -260,5 +300,263 @@ describe('Follow Omni\'s jobs around the hold', () => {
   test('the release still follows only a carried bump, never a dry run', () => {
     expect(ifOf('release')).toBe("if: needs.carry.outputs.sha != '' && !inputs.dry_run");
     expect(jobOf('release').map(line => line.trim())).toContain('needs: carry');
+  });
+});
+
+// The newest step, run as written with a stand-in `gh`: from its top to where it has chosen
+// `newest`, then the plugin check on that release. Omni's releases of February 2026 were
+// 2.YYYYMMDD.N, which sort -V ranks above every 2.YYMMDD.N since (#1564).
+describe('Follow Omni\'s candidate', () => {
+  const step = runOf('The newest Omni release');
+  const cut = step.indexOf('read_json() {');
+  const choose = step.slice(0, cut);
+  const check = step.slice(cut, step.indexOf('\ndone\n', cut) + '\ndone\n'.length);
+  const legacy = ['2.20260216.5', '2.20260221.1'];
+
+  type Choice = { pin?: string; releases?: string[]; want?: string; dryRun?: boolean };
+  function candidate({ pin = '2.261120.2', releases = [], want = '', dryRun = false }: Choice) {
+    const dir = mkdtempSync(join(tmpdir(), 'follow-omni-candidate-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      mkdirSync(join(dir, 'apps', 'desktop'), { recursive: true });
+      writeFileSync(join(dir, 'apps', 'desktop', 'omni.json'), JSON.stringify({ version: pin }));
+      writeFileSync(join(dir, 'versions'), releases.map(version => `${version}\n`).join(''));
+      writeFileSync(join(dir, 'requests'), '');
+      writeFileSync(join(dir, 'bin', 'gh'), '#!/usr/bin/env bash\necho "$*" >> requests\ncat versions\n', { mode: 0o755 });
+      const run = spawnSync('bash', ['-c', `${choose}\nprintf 'selected=%s\\n' "$newest"`], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: {
+          PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`,
+          OMNI: 'automagik-si/omni',
+          DRY_RUN: dryRun ? 'true' : 'false',
+          WANT_VERSION: want,
+          WANT_COMMIT: '',
+          WANT_DEV: '',
+          SKIP_HOLD: 'false',
+          GITHUB_EVENT_NAME: want ? 'workflow_dispatch' : 'schedule',
+          EVENT_ACTION: '',
+          GITHUB_STEP_SUMMARY: '/dev/null',
+        },
+      });
+      return { status: run.status, out: run.stdout.trim(), asked: readFileSync(join(dir, 'requests'), 'utf8') !== '' };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // The plugin check for the release `newest`, Omni's two plugins at the given versions
+  // (`undefined`: its package.json cannot be read).
+  function plugins(newest: string, versions: { channels?: string; canvas?: string }) {
+    const dir = mkdtempSync(join(tmpdir(), 'follow-omni-plugins-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      for (const [app, version] of [['omni-channels-dsh', versions.channels], ['omni-canvas-dsh', versions.canvas]] as const) {
+        if (version !== undefined) writeFileSync(join(dir, `${app}.json`), JSON.stringify({ version }));
+      }
+      writeFileSync(join(dir, 'requests'), '');
+      writeFileSync(join(dir, 'bin', 'gh'), `#!/usr/bin/env bash
+set -euo pipefail
+echo "$2" >> requests
+[[ "$1" == api && "$3 $4" == '--jq .content' ]]
+app="\${2#repos/automagik-si/omni/contents/apps/}"
+app="\${app%%/*}"
+[[ "$2" == "repos/automagik-si/omni/contents/apps/\${app}/package.json?ref=v\${newest}" ]]
+base64 "\${app}.json"
+`, { mode: 0o755 });
+      const run = spawnSync('bash', ['-c', `set -euo pipefail\n${check}\necho passed`], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`, OMNI: 'automagik-si/omni', newest },
+      });
+      return { status: run.status, out: run.stdout.trim(), requests: readFileSync(join(dir, 'requests'), 'utf8').trim().split('\n') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test('is found as the workflow writes it', () => {
+    expect(cut).toBeGreaterThan(-1);
+    expect(choose).toContain('newest="${WANT_VERSION}"');
+    expect(choose).toContain('# follow: end');
+    expect(check).toContain('for app in omni-channels-dsh omni-canvas-dsh; do');
+    expect(check).toContain('not following it');
+  });
+
+  test('a legacy date-style release is never the candidate, wherever the list has it', () => {
+    const current = ['2.261120.2', '2.261121.9', '2.261121.12'];
+    for (const releases of [[...legacy, ...current], [...current.toReversed(), ...legacy.toReversed()]]) {
+      expect(candidate({ releases })).toEqual({ status: 0, out: 'selected=2.261121.12', asked: true });
+    }
+  });
+
+  test('never lower than the pin: a legacy release beside a pin at or above every current one is not followed', () => {
+    const lists: [string[], string][] = [
+      [[...legacy, '2.261119.2', '2.261120.2'], '2.261120.2'],
+      [['2.261119.2', ...legacy], '2.261119.2'],
+      [legacy, 'none'],
+    ];
+    for (const [releases, newest] of lists) {
+      expect(candidate({ releases })).toEqual({ status: 0, out: `Omni ${newest}: omni.json is at 2.261120.2, nothing to follow`, asked: true });
+    }
+  });
+
+  test('omni_version is the candidate as given with dry_run, also one that is not newer, and the releases are not read', () => {
+    for (const want of ['2.261121.12', '2.261119.2', '2.261120.2', '2.20260221.1']) {
+      expect(candidate({ want, dryRun: true, releases: [...legacy, '2.261121.12'] })).toEqual({ status: 0, out: `selected=${want}`, asked: false });
+    }
+  });
+
+  test('omni_version is refused without dry_run, and when it is not a release version', () => {
+    const real = candidate({ want: '2.261121.12', releases: ['2.261121.12'] });
+    expect(real.status).toBe(1);
+    expect(real.out).toContain('::error ::omni_version, omni_commit and dev_sha are only taken with dry_run');
+    expect(real.asked).toBe(false);
+    for (const want of ['v2.261121.12', '2.261121', '2.261121.12-rc.1', '2.261121.12\nversion=x']) {
+      const run = candidate({ want, dryRun: true });
+      expect(run.status).toBe(1);
+      expect(run.out).toBe('::error ::omni_version is not a release version (x.y.z)');
+      expect(run.asked).toBe(false);
+    }
+  });
+
+  test('the plugins at or below their release pass, read at that release\'s tag', () => {
+    const run = plugins('2.261121.12', { channels: '2.261121.12', canvas: '2.261121.6' });
+    expect(run).toEqual({
+      status: 0,
+      out: 'passed',
+      requests: [
+        'repos/automagik-si/omni/contents/apps/omni-channels-dsh/package.json?ref=v2.261121.12',
+        'repos/automagik-si/omni/contents/apps/omni-canvas-dsh/package.json?ref=v2.261121.12',
+      ],
+    });
+  });
+
+  test('a plugin ahead of its release, or unreadable, is not followed', () => {
+    const ahead = plugins('2.261121.12', { channels: '2.261121.13', canvas: '2.261121.6' });
+    expect(ahead.status).toBe(0);
+    expect(ahead.out).toBe("::notice ::Omni 2.261121.12: omni-channels-dsh is at '2.261121.13', ahead of its release or unreadable: not following it");
+    const canvas = plugins('2.261121.12', { channels: '2.261121.12', canvas: '2.261122.1' });
+    expect(canvas.status).toBe(0);
+    expect(canvas.out).toBe("::notice ::Omni 2.261121.12: omni-canvas-dsh is at '2.261122.1', ahead of its release or unreadable: not following it");
+    const unreadable = plugins('2.261121.12', { canvas: '2.261121.6' });
+    expect(unreadable.status).toBe(0);
+    expect(unreadable.out).toBe("::notice ::Omni 2.261121.12: omni-channels-dsh is at '', ahead of its release or unreadable: not following it");
+  });
+
+  test('the plugin check stays as strict across the two schemes: a legacy version beside a current release is refused', () => {
+    const run = plugins('2.261121.12', { channels: '2.20260221.1', canvas: '2.261121.6' });
+    expect(run.status).toBe(0);
+    expect(run.out).toBe("::notice ::Omni 2.261121.12: omni-channels-dsh is at '2.20260221.1', ahead of its release or unreadable: not following it");
+    // A legacy release given by omni_version is checked against its own plugins, in its scheme.
+    expect(plugins('2.20260221.1', { channels: '2.20260220.6', canvas: '2.20260221.1' }).out).toBe('passed');
+  });
+});
+
+// Follow Omni pushes its bump with GITHUB_TOKEN, so no CI run tests the pin it carries before a
+// release is cut on it: v3.172.0 went out with a welcome test red on dev. The boot job
+// (boot-check.yml, called with the candidate) writes the candidate pin as carry does and runs the
+// tests that read the pin on it; carry, which makes the commit, needs that job.
+describe('Follow Omni tests the candidate pin before it commits it', () => {
+  const root = join(import.meta.dir, '..');
+  const workflow = Bun.YAML.parse(lines.join('\n')) as any;
+  const boot = (Bun.YAML.parse(readFileSync(join(root, '.github', 'workflows', 'boot-check.yml'), 'utf8')) as any).jobs.boot;
+  const steps: any[] = boot.steps;
+  const at = (name: string) => steps.findIndex(step => step.name === name);
+  const name = 'The tests that read the pin';
+  const tests = steps[at(name)];
+
+  test('the step runs on a candidate, on the pin written as carry writes it', () => {
+    expect(tests).toBeDefined();
+    expect(tests.if).toBe("inputs.omni_version != ''");
+    const written = steps[at('The candidate Omni')];
+    expect(written.if).toBe("inputs.omni_version != ''");
+    for (const file of ['apps/desktop/omni.json', 'apps/welcome-dsh/package.json']) expect(written.run).toContain(file);
+    expect(at(name)).toBeGreaterThan(at('The candidate Omni'));
+    // The welcome's tests need the installed harness, and its tool list the candidate's plugins.
+    expect(at(name)).toBeGreaterThan(at('Install'));
+    expect(at(name)).toBeGreaterThan(at("Omni's plugins at the candidate"));
+    expect(steps[at("Omni's plugins at the candidate")].run).toContain('origin "${OMNI_COMMIT}"');
+  });
+
+  test('it runs the tests that read omni.json or the welcome\'s pin', () => {
+    const listed = [
+      'apps/desktop/test/version.test.js',
+      'test/bot-types.test.js',
+      'test/install-resolved.test.js',
+      'test/omni-github-contract.test.js',
+      'test/release-resolve.test.js',
+    ];
+    for (const file of listed) expect(tests.run).toContain(file);
+    expect(tests.run).toContain('cd apps/welcome-dsh\n');
+    // A welcome test that names the pin (OMNI_RELEASE) is in the step: a new one is added here.
+    const welcome = join(root, 'apps', 'welcome-dsh', 'test');
+    const naming = readdirSync(welcome)
+      .filter(file => file.endsWith('.test.js') && readFileSync(join(welcome, file), 'utf8').includes('OMNI_RELEASE'))
+      .map(file => `test/${file}`);
+    expect(naming).toContain('test/release-resolve.test.js');
+    for (const file of naming) expect(tests.run).toContain(file);
+  });
+
+  test('a failing test fails the boot job, and carry never runs without that job', () => {
+    for (const part of [tests, boot, workflow.jobs.boot]) expect(part['continue-on-error']).toBeUndefined();
+    expect(workflow.jobs.boot.uses).toBe('./.github/workflows/boot-check.yml');
+    expect(workflow.jobs.boot.with).toEqual({
+      ref: '${{ needs.follow.outputs.dev }}',
+      omni_version: '${{ needs.follow.outputs.version }}',
+      omni_commit: '${{ needs.follow.outputs.commit }}',
+    });
+    expect(workflow.jobs.carry.needs).toEqual(['follow', 'boot']);
+    // No status function in carry's `if`: a failed or skipped boot job skips it.
+    expect(ifOf('carry')).not.toMatch(/always|failure|cancelled|success/);
+    // The commit is made in carry alone, on the dev commit the boot job tested.
+    expect(lines.filter(line => line.includes('git commit')).length).toBe(1);
+    expect(runOf('Move omni.json and the welcome to it')).toContain('git commit');
+    expect(jobOf('carry').map(line => line.trim())).toContain('ref: ${{ needs.follow.outputs.dev }}');
+  });
+
+  // The step as written, with stand-ins for node and bun that log their arguments; `fail` is a
+  // word of the command line that makes the stand-in fail.
+  function runStep(fail = '') {
+    const dir = mkdtempSync(join(tmpdir(), 'follow-omni-pin-tests-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      mkdirSync(join(dir, 'apps', 'welcome-dsh'), { recursive: true });
+      const standIn = '#!/usr/bin/env bash\necho "$(basename "$0") $*" >> "$CALLS"\n[[ -z "$FAIL" || " $* " != *" $FAIL "* ]]\n';
+      for (const bin of ['node', 'bun']) writeFileSync(join(dir, 'bin', bin), standIn, { mode: 0o755 });
+      const calls = join(dir, 'calls');
+      writeFileSync(calls, '');
+      const run = spawnSync('/bin/bash', ['-c', tests.run], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { PATH: `${join(dir, 'bin')}:/usr/bin:/bin`, CALLS: calls, FAIL: fail },
+      });
+      return { status: run.status, calls: readFileSync(calls, 'utf8').trim().split('\n') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test('as written, it runs the desktop test, installs the welcome and runs its tests', () => {
+    expect(runStep()).toEqual({
+      status: 0,
+      calls: [
+        'node --test apps/desktop/test/version.test.js',
+        'bun install --frozen-lockfile --ignore-scripts',
+        'node --import ./test/harness-resolve.mjs --test test/bot-types.test.js test/install-resolved.test.js test/omni-github-contract.test.js test/release-resolve.test.js',
+      ],
+    });
+  });
+
+  test('as written, any failure stops it: nothing later runs and the step fails', () => {
+    const desktop = runStep('apps/desktop/test/version.test.js');
+    expect(desktop.status).not.toBe(0);
+    expect(desktop.calls).toEqual(['node --test apps/desktop/test/version.test.js']);
+    const install = runStep('install');
+    expect(install.status).not.toBe(0);
+    expect(install.calls.length).toBe(2);
+    const welcome = runStep('test/release-resolve.test.js');
+    expect(welcome.status).not.toBe(0);
+    expect(welcome.calls.length).toBe(3);
   });
 });

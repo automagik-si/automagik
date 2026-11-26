@@ -4,6 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync as mkdir, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createRoleCatalog } from '../apps/bots-dsh/src/host/role-catalog.js';
+import { KEY_ID, rolesManifest, verifyRoles } from './lane';
 import { AM, METER, METER_CONTRACT, METER_KEYS, addonPinsOnly, contractHeld, keysHeld, meterHold, amPaths, globPattern, herdrShips, kindOf, LANE_ADDONS, manifest, meterHeld, meterPaths, meterShips, meterSince, nextPatch, pocketShips, pocketSince, sequenceOf, ships, signLane, unpackedIn, verifyLane, versionOnly } from './lane';
 
 describe('the plugin lane', () => {
@@ -24,6 +26,19 @@ describe('the plugin lane', () => {
     expect(kindOf(['meter/statusline/automagik-statusline.mjs', 'meter/statusline/test/statusline.test.mjs', 'apps/bots-dsh/client.js'], none)).toBe('plugins');
   });
 
+  test('kindOf can filter changes since the last release against their own baseline', () => {
+    const desktop = 'apps/desktop/package.json';
+    const welcome = 'apps/welcome-dsh/package.json';
+    const am = 'am/bin/am.mjs';
+    const changed = [desktop, am];
+    const sinceLast = [welcome, am];
+    const inert = (path: string) => path === desktop || path === welcome;
+    const installChanged = () => false;
+
+    expect(kindOf(changed, installChanged, inert, sinceLast)).toBe('am');
+    expect(kindOf(changed, installChanged, inert, sinceLast, () => false)).toBe('plugins');
+  });
+
   test('an engines-only rc.2 floor change selects a full release', () => {
     const repo = mkdtempSync(join(tmpdir(), 'lane-engines-'));
     const root = join(import.meta.dir, '..');
@@ -34,7 +49,7 @@ describe('the plugin lane', () => {
     try {
       for (const path of ['scripts/lane.ts', 'scripts/version.ts', 'scripts/release-plugins.ts', 'package.json', 'am/part.json', 'meter/usagemeter/part.json',
         'meter/usagemeter/Cargo.toml', 'meter/usagemeter/Cargo.lock', 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
-        'apps/locale-pt-br-dsh/package.json', 'apps/welcome-dsh/package.json']) {
+        'apps/locale-pt-br-dsh/package.json', 'apps/multiuser-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) {
         mkdir(dirname(join(repo, path)), { recursive: true });
         cpSync(join(root, path), join(repo, path));
       }
@@ -50,6 +65,181 @@ describe('the plugin lane', () => {
       expect(result.status).toBe(0);
       expect(result.stdout.trim()).toBe('full');
     } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
+  test('the server adapter stays on the plugin lane and a shipped NOTICE moved into its harness still ships', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'lane-server-plugin-'));
+    const root = join(import.meta.dir, '..');
+    const git = (...args: string[]) => {
+      const result = spawnSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8' });
+      expect(result.status).toBe(0);
+      return result.stdout.trim();
+    };
+    const copy = (file: string) => {
+      mkdir(dirname(join(repo, file)), { recursive: true });
+      cpSync(join(root, file), join(repo, file));
+    };
+    try {
+      for (const file of ['scripts/lane.ts', 'scripts/version.ts', 'scripts/release-plugins.ts', 'package.json', 'am/part.json',
+        'meter/usagemeter/part.json', 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
+        'apps/locale-pt-br-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) copy(file);
+      git('init', '-q'); git('add', '.'); git('commit', '-qm', 'base');
+      const base = git('rev-parse', 'HEAD');
+      for (const file of ['package.json', 'dev/harness/package.json', 'index.js', 'src/carrier.js', 'NOTICE']) copy('apps/multiuser-dsh/' + file);
+      git('add', '.'); git('commit', '-qm', 'feat: add caller adapter');
+      const result = spawnSync('bun', [join(repo, 'scripts/lane.ts'), 'kind', base, base], { cwd: repo, encoding: 'utf8' });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe('plugins');
+      const installed = git('rev-parse', 'HEAD');
+      const notice = 'apps/multiuser-dsh/NOTICE';
+      const harnessNotice = 'apps/multiuser-dsh/dev/harness/NOTICE';
+      git('mv', notice, harnessNotice);
+      git('commit', '-qm', 'refactor: move adapter notice into the harness');
+      expect(git('diff', '--name-status', '--find-renames', `${installed}..HEAD`)).toBe(`R100\t${notice}\t${harnessNotice}`);
+      const shipping = spawnSync('bun', [join(repo, 'scripts/lane.ts'), 'ships', installed], { cwd: repo, encoding: 'utf8' });
+      expect(shipping.status).toBe(0);
+      expect(shipping.stdout.trim()).toBe('yes');
+    } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
+  describe('renames in the lane CLI', () => {
+    const full = 'v3.200.0';
+    const patch = 'v3.200.1';
+    const desktop = 'apps/desktop/src/x.js';
+    const checkRename = (
+      from: string, to: string, check: (lane: (...args: string[]) => string) => void,
+      { base = full, content, patchChange }: {
+        base?: string; content?: string; patchChange?: { path: string; edit: (text: string) => string };
+      } = {},
+    ) => {
+      const repo = mkdtempSync(join(tmpdir(), 'lane-rename-'));
+      const root = join(import.meta.dir, '..');
+      const git = (...args: string[]) => {
+        const result = spawnSync('git', [
+          '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+          '-c', 'tag.gpgsign=false', ...args,
+        ], { cwd: repo, encoding: 'utf8' });
+        expect(result.status).toBe(0);
+        return result.stdout.trim();
+      };
+      const copy = (file: string) => {
+        mkdir(dirname(join(repo, file)), { recursive: true });
+        cpSync(join(root, file), join(repo, file));
+      };
+      const lane = (...args: string[]) => {
+        const result = spawnSync('bun', [join(repo, 'scripts/lane.ts'), ...args], { cwd: repo, encoding: 'utf8' });
+        expect(result.status).toBe(0);
+        return result.stdout.trim();
+      };
+      try {
+        for (const file of ['scripts/lane.ts', 'scripts/version.ts', 'package.json', 'am/part.json',
+          'meter/usagemeter/part.json', METER_CONTRACT, 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
+          'apps/locale-pt-br-dsh/package.json', 'apps/multiuser-dsh/package.json', 'apps/vault-dsh/package.json',
+          'apps/welcome-dsh/package.json']) copy(file);
+        writeFileSync(join(repo, METER_KEYS), '{"keys":[]}\n');
+        git('init', '-q');
+        git('config', '--local', 'diff.renames', 'true');
+        git('config', '--local', 'core.quotePath', 'true');
+        git('add', '.');
+        git('commit', '-qm', 'lane inputs');
+        if (content === undefined) copy(from);
+        else {
+          mkdir(dirname(join(repo, from)), { recursive: true });
+          writeFileSync(join(repo, from), content);
+        }
+        git('add', from);
+        git('commit', '-qm', 'add the carried file');
+        git('tag', full, base === patch && !patchChange ? 'HEAD^' : 'HEAD');
+        if (patchChange) {
+          const file = join(repo, patchChange.path);
+          const original = readFileSync(file, 'utf8');
+          writeFileSync(file, patchChange.edit(original));
+          git('commit', '-qam', 'publish the patch edit');
+          writeFileSync(file, original);
+        }
+        if (base === patch) git('tag', patch);
+        mkdir(dirname(join(repo, to)), { recursive: true });
+        git('mv', from, to);
+        git('commit', '-qam', 'move the file');
+        const rename = ['R100', from, to, ''];
+        const status = patchChange ? ['M', patchChange.path, ...rename] : rename;
+        expect(git('diff', '-O/dev/null', '--name-status', '-z', `${base}..HEAD`)).toBe(status.join('\0'));
+        check(lane);
+      } finally { rmSync(repo, { recursive: true, force: true }); }
+    };
+
+    test('a desktop file moved into the server harness ships on a full release', () => {
+      checkRename(desktop, 'apps/multiuser-dsh/dev/harness/x.js', lane => {
+        expect([lane('ships', full), lane('kind', full, full)]).toEqual(['yes', 'full']);
+      }, { content: 'export {};\n' });
+    });
+
+    test('a desktop file moved into docs still ships on a full release', () => {
+      checkRename(desktop, 'docs/x.js', lane => {
+        expect([lane('ships', full), lane('kind', full, full)]).toEqual(['yes', 'full']);
+      }, { content: 'export {};\n' });
+    });
+
+    test('a plugin file added by a patch and moved into am stays on the plugin lane', () => {
+      checkRename('apps/welcome-dsh/src/host/busy.js', 'am/lib/busy.js', lane => {
+        expect(lane('kind', full, patch)).toBe('plugins');
+      }, { base: patch });
+    });
+
+    test('a plugin patch rollback still selects the plugin lane when an am file moves to docs', () => {
+      checkRename('am/runner/VM-RUN.md', 'docs/VM-RUN.md', lane => {
+        expect(lane('kind', full, patch)).toBe('plugins');
+      }, {
+        base: patch,
+        patchChange: {
+          path: 'apps/welcome-dsh/package.json',
+          edit: text => {
+            const manifest = JSON.parse(text);
+            manifest.automagik.genie.commit = 'b'.repeat(40);
+            return JSON.stringify(manifest, null, 2) + '\n';
+          },
+        },
+      });
+    });
+
+    test('a pack file moved into docs still ships on the herdr lane', () => {
+      checkRename('herdr/mods/am-sidebar/spaceIcon.js', 'docs/spaceIcon.js', lane => {
+        expect([lane('herdr', full), lane('ships', full)]).toEqual(['yes', 'yes']);
+      });
+    });
+
+    test('a Pocket file moved into its docs still builds Pocket', () => {
+      checkRename('apps/pocket/android/app/build.gradle.kts', 'apps/pocket/docs/build.gradle.kts', lane => {
+        expect(lane('pocket', full)).toBe('yes');
+      });
+    });
+
+    test('a rename within docs ships nothing', () => {
+      checkRename('docs/a.md', 'docs/café.md', lane => {
+        expect(lane('ships', full)).toBe('no');
+      }, { content: '# Docs\n' });
+    });
+
+    test('a rename between carried plugin paths stays on the plugin lane', () => {
+      checkRename('apps/welcome-dsh/src/host/endpoint.js', 'apps/welcome-dsh/src/host/companion.js', lane => {
+        expect(lane('kind', full, full)).toBe('plugins');
+      });
+    });
+  });
+
+  test('the server adapter ships source and stays outside the signed desktop lane', () => {
+    const files = JSON.parse(readFileSync(join(import.meta.dir, '../apps/multiuser-dsh/package.json'), 'utf8')).files;
+    const unpacked = unpackedIn({ 'multiuser-dsh': files });
+    expect(ships(['apps/multiuser-dsh/src/carrier.js'], unpacked)).toBe(true);
+    expect(ships(['apps/multiuser-dsh/index.js'], unpacked)).toBe(true);
+    expect(ships(['apps/multiuser-dsh/scripts/lint.mjs', 'apps/multiuser-dsh/test/carrier.test.js'], unpacked)).toBe(false);
+    expect(ships(['apps/multiuser-dsh/dev/harness/package.json'], unpacked)).toBe(false);
+    expect(ships(['apps/multiuser-dsh/bun.lock', 'apps/multiuser-dsh/dev/harness/bun.lock'], unpacked)).toBe(false);
+    expect(kindOf(['apps/bots-dsh/dev/harness/package.json', 'apps/multiuser-dsh/index.js'], () => false)).toBe('full');
+    const lane = manifest({ version: '3.160.2', commit: 'a'.repeat(40), repository: 'automagik-si/automagik',
+      packages: { '@automagik/multiuser-dsh': { version: '3.160.2', file: 'adapter.tgz', integrity: 'sha512-unused', size: 1 } },
+    }, { base: '3.160.0', issuedAt: '2026-11-20T00:00:00Z', dir: '/unused', engines: () => { throw new Error('desktop engines only'); } });
+    expect(lane.plugins).toEqual([]);
   });
 
   test('the usagemeter crate ships on the meter lane, its notes and tests never (RFC 0017 delivery 4)', () => {
@@ -249,7 +439,7 @@ describe('the plugin lane', () => {
     try {
       for (const path of ['scripts/lane.ts', 'scripts/version.ts', 'scripts/release-plugins.ts', 'am/part.json', 'meter/usagemeter/part.json',
         'meter/usagemeter/Cargo.toml', 'meter/usagemeter/Cargo.lock', 'apps/acp-dsh/package.json', 'apps/bots-dsh/package.json',
-        'apps/locale-pt-br-dsh/package.json', 'apps/welcome-dsh/package.json']) copy(path);
+        'apps/locale-pt-br-dsh/package.json', 'apps/multiuser-dsh/package.json', 'apps/vault-dsh/package.json', 'apps/welcome-dsh/package.json']) copy(path);
       put('meter/usagemeter/src/main.rs', 'fn main() {}\n');
       put(METER_KEYS, NO_KEY);
       put(METER_CONTRACT, DEV);
@@ -339,11 +529,36 @@ describe('the plugin lane', () => {
     expect(ships(['.gitignore'], none)).toBe(false);
   });
 
+  test('the project toolchain manifest (.automagik-toolchain.json) is repo-local and cuts no release', () => {
+    const none = () => false;
+    const manifest = '.automagik-toolchain.json';
+    // Alone: the release's first `ships` question is no, so there is no release at all.
+    expect(ships([manifest], none)).toBe(false);
+    expect(herdrShips([manifest])).toBe(false);
+    expect(pocketShips([manifest])).toBe(false);
+    expect(meterShips([manifest])).toBe(false);
+    // Beside a shipped file follows that file's lane, as every other never-shipped path does.
+    expect(ships([manifest, 'apps/bots-dsh/src/host/turns.js'], none)).toBe(true);
+    expect(kindOf([manifest, 'apps/bots-dsh/src/host/turns.js'], none)).toBe('plugins');
+    expect(kindOf([manifest, 'apps/desktop/src/main.js'], none)).toBe('full');
+  });
+
   test('a .gitignore change beside a shipped file takes that file\'s lane', () => {
     const none = () => false;
     const changed = ['.gitignore', 'herdr/mods/am-sidebar/main.js'];
     expect(ships(changed, none)).toBe(true);
     expect(kindOf(changed, none, none, changed)).toBe('herdr');
+  });
+
+  test('the canonical lane verifier leaves a plugin-only release on the plugin lane', () => {
+    const none = () => false;
+    const verifier = 'plugin-lane/verify.mjs';
+    const copy = 'apps/bots-dsh/src/host/lane-verify.js';
+    const unpacked = unpackedIn({ 'bots-dsh': ['src/host/'] });
+    expect(ships([verifier], unpacked)).toBe(false);
+    expect(unpacked(copy)).toBe(false);
+    expect(ships([verifier, copy], unpacked)).toBe(true);
+    expect(kindOf([verifier, copy], none, unpacked, [verifier, copy])).toBe('plugins');
   });
 
   test('the Windows helper\'s image and launcher (apps/desktop/wslc/) ship nothing until Windows reads them', () => {
@@ -686,5 +901,94 @@ describe('the plugin lane', () => {
     expect(() => verifyLane(Buffer.from(JSON.stringify({ ...lane, sequence: 999999 })), signature, keys)).toThrow(/signature/);
     const other = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
     expect(() => verifyLane(bytes, signature, [{ keyId: 'automagik-2026-10', publicKey: other }])).toThrow(/signature/);
+  });
+});
+
+describe('the versioned role catalog', () => {
+  const version: string = JSON.parse(readFileSync(join(import.meta.dir, '../apps/bots-dsh/package.json'), 'utf8')).version;
+  const issuedAt = '2026-11-20T03:00:00Z';
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const keys = [{ keyId: KEY_ID, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+  const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const sign = (bytes: Buffer) => signLane(bytes, privatePem);
+  const laneCli = join(import.meta.dir, 'lane.ts');
+  const env = { PATH: process.env.PATH ?? '' };
+
+  function manifestBytes(version: string) {
+    const run = spawnSync('bun', [laneCli, 'roles-manifest', version, issuedAt], { env });
+    expect(run.stderr.toString()).toBe('');
+    expect(run.status).toBe(0);
+    expect(run.stdout.toString()).toBe(`${JSON.stringify(rolesManifest({ version, issuedAt }), null, 2)}\n`);
+    return run.stdout;
+  }
+
+  test('emits the catalog envelope for a numeric release version', () => {
+    expect(rolesManifest({ version, issuedAt })).toEqual({
+      schemaVersion: 1, publisher: 'automagik', keyId: KEY_ID, issuedAt,
+      repository: 'https://github.com/automagik-si/automagik', version, roles: [],
+    });
+    for (const invalid of ['', 'v3.1.0', '3.1', '3.1.0-rc.1']) {
+      expect(() => rolesManifest({ version: invalid, issuedAt })).toThrow(/major\.minor\.patch/);
+    }
+  });
+
+  test('verifies the exact CLI output and rejects byte changes', () => {
+    const bytes = manifestBytes(version);
+    const signature = sign(bytes);
+    expect(verifyRoles(bytes, signature, keys, version)).toEqual(rolesManifest({ version, issuedAt }));
+    expect(() => verifyRoles(bytes.subarray(0, -1), signature, keys, version)).toThrow(/signature does not match/);
+    expect(() => verifyRoles(bytes, `!${signature}`, keys, version)).toThrow(/base64 signature/);
+  });
+
+  test('refuses signed catalogs with invalid encoding or envelope fields', () => {
+    const valid = rolesManifest({ version, issuedAt });
+    const invalidUtf8 = Buffer.from(JSON.stringify({ ...valid, issuedAt: '!' }));
+    invalidUtf8[invalidUtf8.indexOf('!')] = 0xff;
+    expect(() => verifyRoles(invalidUtf8, sign(invalidUtf8), keys, version)).toThrow(/UTF-8 JSON/);
+    for (const [override, error] of [
+      [{ keyId: 'other' }, /unknown signing key/],
+      [{ schemaVersion: 2 }, /schema version/],
+      [{ publisher: 'other' }, /publisher/],
+      [{ repository: 'https://example.invalid/other' }, /repository/],
+      [{ roles: {} }, /roles must be an array/],
+    ] as const) {
+      const bytes = Buffer.from(JSON.stringify({ ...valid, ...override }));
+      expect(() => verifyRoles(bytes, sign(bytes), keys, version)).toThrow(error);
+    }
+    const bytes = Buffer.from(JSON.stringify(valid));
+    expect(() => verifyRoles(bytes, sign(bytes), keys, `${version}.0`)).toThrow(/catalog version does not match/);
+  });
+
+  test('the Bot consumer fetches the versioned pair and refuses a signed catalog for another version', async () => {
+    const base = `https://github.com/automagik-si/automagik/releases/download/v${version}/`;
+    const urls = [`${base}roles.json`, `${base}roles.json.sig`];
+    async function load(catalogVersion: string, file: string) {
+      const bytes = manifestBytes(catalogVersion);
+      writeFileSync(file, bytes);
+      const signature = spawnSync('bun', [laneCli, 'sign', file], { env: { ...env, PLUGIN_LANE_KEY: privatePem } });
+      expect(signature.status).toBe(0);
+      const assets = new Map([[urls[0], bytes], [urls[1], signature.stdout]]);
+      const fetched: string[] = [];
+      const catalog = createRoleCatalog({
+        fetch: async (url: string) => {
+          fetched.push(url);
+          const asset = assets.get(url);
+          return asset ? new Response(asset) : new Response(null, { status: 404 });
+        },
+        keys, canFetch: () => true, warn() {},
+      });
+      const { view } = await catalog.snapshot();
+      expect(fetched).toEqual(urls);
+      return view;
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), 'lane-roles-'));
+    try {
+      const file = join(dir, 'roles.json');
+      expect(await load(version, file)).toEqual({ available: true, roles: [] });
+      expect(await load(version === '9.9.9' ? '9.9.8' : '9.9.9', file)).toEqual({ available: false, roles: [], reason: 'unverified' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

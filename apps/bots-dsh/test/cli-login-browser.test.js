@@ -83,6 +83,24 @@ test('account settings distinguish terminal and Bot identities and confirm switc
     assert.deepEqual(await page.evaluate(() => window.accountCalls),
       ['switch', 'open', 'signout'])
   })
+test('account settings name this installation and say the Bot sign-in may be shared', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.showAccounts())
+  await page.getByText('This installation: desktop', { exact: true }).waitFor()
+  await page.getByText('Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.', {
+    exact: true,
+  }).waitFor()
+})
+test('a busy account change keeps the host sentence instead of one generic line', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  const busy = 'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.'
+  await page.evaluate(message => window.showAccounts('bot/refused', message), busy)
+  await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+  assert.equal(await page.getByRole('alert').innerText(), busy)
+})
 test('blocked account recovery shows the reset action and no private process diagnostic',
   async t => {
     const page = await fixture(t)
@@ -532,3 +550,203 @@ for (const [width, dark] of [[1440, false], [1440, true], [420, false], [420, tr
     assert.equal(await loginNodes(page), 0)
   })
 }
+
+test('the consent-mode account card reserves, renames and makes shared through the real client actions', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.showReservationAccounts())
+  await page.getByText('Bots: owner@example.test', { exact: true }).waitFor()
+  await page.getByText('Workspace plan: covers every ChatGPT workspace of this email', { exact: true }).waitFor()
+  await page.getByText('Shared with other instances (default).', { exact: true }).waitFor()
+  for (const name of ['Switch account', 'Sign out', 'Reset Bot sign-in']) {
+    assert.equal(await page.getByRole('button', { name, exact: true }).count(), 0)
+  }
+  const reserve = page.getByRole('button', { name: 'Reserve for a project', exact: true })
+  const project = page.getByRole('textbox', { name: 'Project name', exact: true })
+  const next = page.getByRole('button', { name: 'Continue', exact: true })
+  await reserve.click()
+  await project.fill('My project')
+  await page.getByText(/Anyone who can read this team's files and the key could test a guessed email/).waitFor()
+  await next.click()
+  await page.getByText('Reserved for My project. This holds in this installation only for now; other installations are not checked yet.', { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  assert.equal(await project.inputValue(), 'My project')
+  await project.fill('Renamed project')
+  await project.press('Enter')
+  await page.getByText('Reserved for Renamed project. This holds in this installation only for now; other installations are not checked yet.', { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Make shared', exact: true }).click()
+  await page.getByText('Shared with other instances (default).', { exact: true }).waitFor()
+  assert.equal(await project.count(), 0)
+
+  const [created, renamed] = (await calls(page, 'cli-login-reserve')).map(call => call.payload)
+  assert.deepEqual(created, { offerId: created.offerId, label: 'My project' })
+  assert.deepEqual(renamed, { offerId: renamed.offerId, label: 'Renamed project', claimId: renamed.claimId, rev: renamed.rev })
+  assert.notEqual(renamed.offerId, created.offerId)
+  const [released] = (await calls(page, 'cli-login-release')).map(call => call.payload)
+  assert.deepEqual(released, { claimId: renamed.claimId, rev: released.rev })
+  assert.notEqual(released.rev, renamed.rev)
+  for (const action of ['switch', 'signout', 'reset']) assert.deepEqual(await calls(page, `cli-login-${action}`), [])
+})
+
+test('the isolated account card disables Reserve with a reason and closes a replaced offer form', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.showReservationAccounts({ isolated: true, instance: '' }))
+  const codex = page.locator('.bt-set-row').filter({ has: page.getByText('Codex', { exact: true }) })
+  const reserve = codex.getByRole('button', { name: 'Reserve for a project', exact: true })
+  const label = codex.getByRole('textbox', { name: 'Project name', exact: true })
+  await codex.getByText('This installation has no instance id; reservations are off.', { exact: true }).waitFor()
+  assert.equal(await reserve.isDisabled(), true)
+  for (const [state, message] of [
+    ['unknown', 'The sign-in could not be read; reservations wait.'],
+    ['recovery', 'Recover the Bot sign-in before reserving this account.'],
+    ['unsupported', 'This version cannot read the account evidence needed for reservations.'],
+    ['signed-out', 'Sign in to reserve this account.'],
+    ['ambiguous', 'This Codex plan is not known to this version.'],
+    ['unread', 'The account could not be read for reservations. Try again.'],
+    ['changed', 'This reservation changed. Look again.'],
+  ]) {
+    await page.evaluate(state => window.refreshReservations({ instance: 'test-instance', state }), state)
+    await codex.getByText(message, { exact: true }).waitFor()
+    assert.equal(await reserve.isDisabled(), true, state)
+  }
+  await page.evaluate(() => window.refreshReservations({ state: 'complete' }))
+  await reserve.click()
+  await label.fill('Do not send')
+  await page.evaluate(() => window.refreshReservations({ exact: 'c'.repeat(43) }))
+  await label.waitFor({ state: 'detached' })
+  assert.deepEqual(await calls(page, 'cli-login-reserve'), [])
+  await reserve.click()
+  assert.equal(await label.inputValue(), '')
+  await codex.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await label.waitFor({ state: 'detached' })
+})
+
+test('the machine account card renames and releases by handle and shows the OS owner', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  const machineId = 'fixture-machine-handle'
+  await page.evaluate(machineId => window.showReservationAccounts({ isolated: true, machine: {
+    state: 'mine', claims: [{ machineId, label: 'Machine project', owner: 'alice', current: true }],
+  } }), machineId)
+  await page.getByText('Reserved for Machine project on this machine.', { exact: true }).waitFor()
+  await page.getByText('File owner: alice', { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  const label = page.getByRole('textbox', { name: 'Project name', exact: true })
+  assert.equal(await label.inputValue(), 'Machine project')
+  await label.fill('Machine rename')
+  await label.press('Enter')
+  await page.getByText('Reserved for Machine rename on this machine.', { exact: true }).waitFor()
+  const [{ payload }] = await calls(page, 'cli-login-reserve')
+  assert.deepEqual(payload, { offerId: payload.offerId, label: 'Machine rename', machineId })
+  await page.getByRole('button', { name: 'Make shared', exact: true }).click()
+  await page.getByText('Shared with other instances (default).', { exact: true }).waitFor()
+  const released = await calls(page, 'cli-login-release')
+  assert.deepEqual(released.map(call => call.payload), [{ machineId }])
+})
+
+test('the machine card shows the sign-out reason and missing folder notice', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.showReservationAccounts({ isolated: true, machine: {
+    state: 'refused', label: 'Other project', owner: 'bob', signedOut: true, claims: [],
+  } }))
+  const codex = page.locator('.bt-set-row')
+    .filter({ has: page.getByText('Codex', { exact: true }) })
+  const message = 'Reserved for Other project on another instance. Sign in with another '
+    + 'account, or ask its owner to make it shared.'
+  await codex.getByText(message, { exact: true }).waitFor()
+  await codex.getByText('File owner: bob', { exact: true }).waitFor()
+  await codex.getByText('Bots: Sign in again in the app to resume Bots', { exact: true }).waitFor()
+  const reserve = codex.getByRole('button', { name: 'Reserve for a project', exact: true })
+  assert.equal(await reserve.count(), 0)
+  await page.evaluate(() => window.refreshReservations({
+    machine: { state: 'notice', notice: 'absent', claims: [] },
+  }))
+  const notice = 'Reservations are not checked across instances here: '
+    + 'this machine has no reservations folder.'
+  await codex.getByText(notice, { exact: true }).waitFor()
+})
+
+// ---- Antigravity in a Bot's chat (#2048, r6 parity) ------------------------------------------
+
+async function antigravityStep(page, id = 'alpha') {
+  await page.evaluate(id => window.openLogin(id, 'acp-antigravity'), id)
+  await row(page, id).getByRole('button', { name: 'Sign in', exact: true }).click()
+  await field(page).waitFor()
+}
+const pasteInto = async (page, editor, text) => {
+  await editor.click()
+  await page.evaluate(value => navigator.clipboard.writeText(value), text)
+  await page.keyboard.press('Control+v')
+}
+
+test('Antigravity: the row shows Google\'s link, Copy link, the address field and Finishing; then Done', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await seed(page)
+  const link = await page.evaluate(() => window.AGY_LINK)
+  const callback = await page.evaluate(() => window.AGY_CALLBACK)
+  // Nothing opens the link by itself (#2048, r9): only a person's click does.
+  await page.evaluate(() => { window.OPENED = 0; window.open = () => { window.OPENED += 1; return null } })
+  await antigravityStep(page)
+  const shown = row(page)
+  assert.equal(await shown.locator('a').getAttribute('href'), link)
+  await shown.getByRole('button', { name: 'Copy link' }).waitFor()
+  await shown.filter({ hasText: 'Paste here the address your browser ends on after you sign in:' }).waitFor()
+  await shown.filter({ hasText: 'Expires at' }).waitFor()
+  assert.equal(await page.evaluate(() => window.OPENED), 0)
+  assert.equal(await shown.locator('a').getAttribute('target'), '_blank')
+  assert.equal(await field(page).getAttribute('aria-label'), 'Sign-in address')
+  assert.equal(await field(page).getAttribute('type'), 'password')
+  // While the paste step shows, the native editor takes no edit (D18).
+  await editorOf(page).click()
+  await page.keyboard.type('typed')
+  assert.doesNotMatch(await editorOf(page).innerText(), /typed/)
+  // A wrong address: refused, the field emptied, the step kept.
+  await field(page).click()
+  await page.keyboard.type('http://localhost:1/auth/callback?code=x&state=y')
+  await page.keyboard.press('Enter')
+  await shown.getByRole('alert').filter({ hasText: 'This link is not from this sign-in.' }).waitFor()
+  assert.equal(await field(page).inputValue(), '')
+  await field(page).click()
+  await page.evaluate(text => navigator.clipboard.writeText(`  ${text}\n`), callback)
+  await page.keyboard.press('Control+v')
+  await shown.getByRole('button', { name: 'Send', exact: true }).click()
+  await shown.filter({ hasText: 'Finishing the sign-in to Antigravity…' }).waitFor()
+  assert.equal((await calls(page, 'cli-login-answer')).at(-1).payload.value, callback)
+  await page.evaluate(() => window.finishSignIn('acp-antigravity'))
+  await shown.filter({ hasText: 'Done: signed in to Antigravity.' }).waitFor()
+})
+
+test('Antigravity: the address it ends on is refused in the composer in any shape; Google\'s link is allowed', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await seed(page)
+  const state = await page.evaluate(() => window.AGY_STATE)
+  const link = await page.evaluate(() => window.AGY_LINK)
+  const callback = await page.evaluate(() => window.AGY_CALLBACK)
+  await antigravityStep(page)
+  await row(page).getByRole('button', { name: 'Cancel sign-in' }).click()
+  await row(page).getByRole('button', { name: 'Yes, cancel' }).click()
+  await row(page).waitFor({ state: 'detached' })
+  // Only an Antigravity state was shown on this page (no Claude link): still refused (G7-5).
+  const editor = editorOf(page)
+  const redirectFirst = 'https://accounts.google.com/o/oauth2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback'
+    + `&access_type=offline&state=${state}&client_id=c`
+  for (const text of [callback, `(${callback})`, `${callback}.`, `${callback},`, `"${callback}"`,
+    callback.replace(state, `${state.slice(0, 5)}\n${state.slice(5)}`), callback.replace('~', '%7E'), `${redirectFirst} then ${callback}`]) {
+    await pasteInto(page, editor, text)
+    assert.doesNotMatch(await editor.innerText(), /auth\/callback/, text)
+  }
+  assert.ok(await page.evaluate(() => window.refusedNotices) > 0)
+  // Google's link itself, in either parameter order, goes in as typed text.
+  for (const text of [link, redirectFirst]) {
+    await page.evaluate(() => window.forceDraft('alpha', ''))
+    await pasteInto(page, editor, text)
+    assert.match(await editor.innerText(), /accounts\.google\.com/, text)
+  }
+  await page.keyboard.press('Enter')
+  await page.waitForFunction(() => window.sends.length === 1)
+  assert.match((await page.evaluate(() => window.sends))[0].text, /accounts\.google\.com/)
+})

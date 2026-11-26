@@ -1,0 +1,14 @@
+{
+  "claude": {
+    "version": "2.1.330",
+    "package": "@anthropic-ai/claude-code-darwin-arm64",
+    "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/-/claude-code-darwin-arm64-2.1.330.tgz",
+    "integrity": "sha512-rgzAjrRJJsIdZXGF9CCFFbURxKuJNobRr+krV3dNmqNJWIws74rLD0CABe4+nXlx/9WwRECTrveprWB96mubqw=="
+  },
+  "codex": {
+    "version": "0.171.0",
+    "package": "@openai/codex-darwin-arm64",
+    "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.171.0-darwin-arm64.tgz",
+    "integrity": "sha512-hIYTkRUpuYpkVfTq4cpby0PXqhAVcIgE7f6FoyY1lt2RyARj3GXS1Can/dIYUBItVhXzhb98HYHZNzCX74QRlQ=="
+  }
+}

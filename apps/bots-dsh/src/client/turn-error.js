@@ -1,4 +1,5 @@
-import { createElement as h, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { createElement as h, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { CLI_NAMES, cliProviderOf } from './cli-login-model.js'
 import { currentPart, isHiddenTurn } from './text.js'
 import { CheckIcon, CopyIcon } from './icons.js'
 import { ModelKeyCard, manageModels } from './model-menu.js'
@@ -23,10 +24,13 @@ const KEY_CODES = new Set(['MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH'])
 // Until the credentials change the host keeps these on the Bot, and a retry would fail
 // the same way, so Retry waits for the fix.
 const CREDENTIAL_CODES = new Set([...KEY_CODES, ...SIGNED_OUT])
+const USAGE_LIMIT = { ACP_CLAUDE_USAGE_LIMIT: 'acp-claude', ACP_CODEX_USAGE_LIMIT: 'acp-codex' }
 
 // The sentence for one failure. `status` is the HTTP status, when the host has it.
 export function failureText(code, { name, provider, status }) {
   switch (code) {
+    case 'ACP_CLAUDE_USAGE_LIMIT':
+    case 'ACP_CODEX_USAGE_LIMIT': return t('{provider} reached its usage limit.', { provider: CLI_NAMES[USAGE_LIMIT[code]] })
     case 'MISSING_CREDENTIAL': return t("{name}'s model has no API key yet.", { name })
     case 'INVALID_CREDENTIAL': return t('This API key is not in the right format.')
     case 'AUTH': return status === undefined
@@ -51,10 +55,12 @@ export function failureText(code, { name, provider, status }) {
 // The fixes one failure offers, the one to try first leading. Each is offered only
 // where this window can carry it out. A Bot moved onto the account route since a key
 // failure has nothing left to fix there.
-export function fixesFor(code, { canSignIn, official, topUp, onAccount = false }) {
+export function fixesFor(code, { canSignIn, canSwitch, official, topUp, onAccount = false }) {
   if (onAccount && KEY_CODES.has(code)) return []
   if (SIGNED_OUT.has(code)) return canSignIn ? ['sign-in-again'] : ['model']
   switch (code) {
+    case 'ACP_CLAUDE_USAGE_LIMIT':
+    case 'ACP_CODEX_USAGE_LIMIT': return canSwitch ? ['switch-account'] : []
     case 'MISSING_CREDENTIAL': return ['key', canSignIn ? 'sign-in' : null, 'model'].filter(Boolean)
     case 'INVALID_CREDENTIAL': return ['rekey', 'model']
     case 'AUTH': return ['rekey', canSignIn ? 'use-account' : null, 'model'].filter(Boolean)
@@ -72,6 +78,7 @@ const FIX_LABELS = {
   'sign-in': signedIn => (signedIn ? t('Use the DeepSeek account') : t('Sign in with a DeepSeek account')),
   'use-account': () => t('Use a DeepSeek account instead'),
   'sign-in-again': () => t('Sign in again'),
+  'switch-account': () => t('Switch account'),
   model: () => t('Pick another model'),
   'top-up': () => t('Top up ↗'),
 }
@@ -151,13 +158,35 @@ export function FailureCell({ node, sessionId, useRoster, useTurnClock, actions 
   const [keying, setKeying] = useState(false)
   const [retry, setRetry] = useState('idle')
   const [error, setError] = useState('')
+  const [switching, setSwitching] = useState('idle')
+  const switchBusy = useRef(false)
   // A sign-in started here to leave a failing key route, with the model the Bot was on.
   const [joining, setJoining] = useState(null)
   const blocked = bot?.blocked?.code === data.code ? bot.blocked : undefined
   const provider = blocked?.provider ?? providerOf(bot, roster)
   const text = failureText(data.code, { name: bot?.name ?? t('This Bot'), provider: providerName(roster, provider), status: blocked?.status })
   const facts = failureFacts(data, blocked)
-  const current = bot !== undefined && currentPart(bot) === sessionId && !later
+  const inCurrentPart = bot !== undefined && currentPart(bot) === sessionId
+  const current = inCurrentPart && !later
+  const cliProvider = Object.hasOwn(USAGE_LIMIT, data.code) ? USAGE_LIMIT[data.code] : undefined
+  const canSwitch = typeof actions.cliLoginSwitch === 'function' && typeof actions.openCliLogin === 'function'
+  const settledSwitch = !current && inCurrentPart && canSwitch && cliProvider !== undefined && cliProviderOf(bot.model) === cliProvider
+  const switchAccount = async () => {
+    if (switchBusy.current) return
+    switchBusy.current = true
+    setSwitching('busy')
+    setError('')
+    try {
+      // The switch's own attempt (#2064): the row reads it, even when it already ended.
+      const switched = await actions.cliLoginSwitch(bot.id, cliProvider)
+      await actions.refreshModels?.()
+      actions.openCliLogin(bot.id, cliProvider, ...(typeof switched?.attemptId === 'string' ? [undefined, switched.attemptId] : []))
+      setSwitching('idle')
+    } catch (failure) {
+      setError(hostText(failure?.message ?? String(failure)))
+      setSwitching('confirm')
+    } finally { switchBusy.current = false }
+  }
   // The key route never takes the account's credential, so a sign-in alone leaves the Bot
   // failing; it moves onto the account route. With no account model listed yet, the
   // user picks one.
@@ -180,12 +209,8 @@ export function FailureCell({ node, sessionId, useRoster, useTurnClock, actions 
     const timer = setTimeout(() => { setJoining(null); actions.showDetails?.(sessionId) }, ACCOUNT_MODELS_WAIT_MS)
     return () => clearTimeout(timer)
   }, [joining, signedIn, listed])
-  const settled = () => h('div', { className: 'bt-fail', 'data-settled': '', role: 'status' },
-    h('div', { className: 'bt-fail-head' }, h('span', { className: 'bt-fail-dot', 'aria-hidden': true }), h('span', { className: 'bt-fail-text' }, text)),
-    h(TechnicalDetails, { facts }))
-  if (!current) return settled()
   const official = provider === OFFICIAL
-  const canSignIn = typeof actions.signIn === 'function' && actions.canSignIn?.() === true
+  const canSignIn = current && typeof actions.signIn === 'function' && actions.canSignIn?.() === true
   const keyHere = typeof actions.setProviderKey === 'function' && provider !== undefined
   const keyElsewhere = official && actions.openHarnessOnboarding ? () => actions.openHarnessOnboarding(OFFICIAL) : manageModels(actions)
   const viaAccount = () => {
@@ -199,13 +224,16 @@ export function FailureCell({ node, sessionId, useRoster, useTurnClock, actions 
     'sign-in': viaAccount,
     'use-account': viaAccount,
     'sign-in-again': () => actions.signIn(),
+    'switch-account': () => { setError(''); setSwitching('confirm') },
     model: actions.showDetails ? () => actions.showDetails(sessionId) : undefined,
   }
-  const fixes = fixesFor(data.code, { canSignIn, official, topUp: topUp !== undefined, onAccount: provider === ACCOUNT }).filter(fix => fix === 'top-up' || runs[fix] !== undefined)
+  const fixes = current
+    ? fixesFor(data.code, { canSignIn, canSwitch, official, topUp: topUp !== undefined, onAccount: provider === ACCOUNT }).filter(fix => fix === 'top-up' || runs[fix] !== undefined)
+    : settledSwitch ? ['switch-account'] : []
   // A turn another Bot asked for answers that Bot, which was already told it failed.
   // Retry would answer the user's last message instead, so it is not offered.
-  const asked = isHiddenTurn(roster, sessionId, data.turn)
-  const retrying = !asked && typeof actions.resume === 'function' && retryShown(data.code, blocked)
+  const asked = current && isHiddenTurn(roster, sessionId, data.turn)
+  const retrying = current && !asked && typeof actions.resume === 'function' && retryShown(data.code, blocked)
   // Once a credential failure is fixed, going on is the next step.
   const retryFirst = retrying && (fixes.length === 0 || CREDENTIAL_CODES.has(data.code))
   const resume = () => {
@@ -225,14 +253,18 @@ export function FailureCell({ node, sessionId, useRoster, useTurnClock, actions 
   const retryButton = primary => h('button', { key: 'retry', type: 'button', className: primary ? 'bt-send bt-fail-go' : 'bt-soft bt-soft-sm', disabled: retry !== 'idle', onClick: resume }, retry === 'idle' ? t('Retry') : t('Retrying…'))
   const row = retryFirst
     ? [retryButton(true), ...fixes.map(fix => button(fix, false))]
-    : [...fixes.map((fix, index) => button(fix, index === 0)), retrying ? retryButton(false) : null]
-  // With nothing to do here the card reads as one a later turn moved past.
-  if (!row.some(Boolean)) return settled()
-  return h('div', { className: 'bt-fail', role: 'status' },
+    : [...fixes.map((fix, index) => button(fix, current && index === 0)), retrying ? retryButton(false) : null]
+  const hasActions = row.some(Boolean)
+  const confirmSwitch = switching !== 'idle' && fixes.includes('switch-account')
+  return h('div', { className: 'bt-fail', 'data-settled': !current || !hasActions ? '' : undefined, role: 'status' },
     h('div', { className: 'bt-fail-head' }, h('span', { className: 'bt-fail-dot', 'aria-hidden': true }), h('span', { className: 'bt-fail-text' }, text)),
-    h('div', { className: 'bt-fail-actions' }, row),
-    keying && keyHere ? h(ModelKeyCard, { model: { provider, providerName: providerName(roster, provider) }, actions, onSaved: () => setKeying(false) }) : null,
-    error ? h('div', { className: 'bt-fail-error', role: 'alert' }, error) : null,
+    hasActions ? h('div', { className: 'bt-fail-actions' }, confirmSwitch ? [
+      h('span', { key: 'confirm' }, t('This stops running Bot work for this account. Continue?')),
+      h('button', { key: 'continue', type: 'button', className: current ? 'bt-send bt-fail-go' : 'bt-soft bt-soft-sm', disabled: switching === 'busy', onClick: switchAccount }, t('Continue')),
+      h('button', { key: 'cancel', type: 'button', className: 'bt-soft bt-soft-sm', disabled: switching === 'busy', onClick: () => { setSwitching('idle'); setError('') } }, t('Cancel')),
+    ] : row) : null,
+    current && hasActions && keying && keyHere ? h(ModelKeyCard, { model: { provider, providerName: providerName(roster, provider) }, actions, onSaved: () => setKeying(false) }) : null,
+    hasActions && error && (current || confirmSwitch) ? h('div', { className: 'bt-fail-error', role: 'alert' }, error) : null,
     h(TechnicalDetails, { facts }))
 }
 

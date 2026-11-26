@@ -1,6 +1,6 @@
 {
   "name": "@automagik/bots-dsh",
-  "version": "3.149.2",
+  "version": "3.175.11",
   "description": "Omni for DeepSeek Harness: a team of long-lived Bots with Omni as the Main Bot; its channels and canvases come with @automagik/omni-channels-dsh and @automagik/omni-canvas-dsh",
   "keywords": [
     "dsh-plugin",
@@ -25,7 +25,11 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./read-scope-files": "./src/host/read-scope-files.js",
+    "./read-scope-search": "./src/host/read-scope-search.js",
+    "./sandbox-local": "./src/host/sandbox-local.js",
     "./web-search": "./web-search.js",
+    "./member-wall/fs": "./src/host/member-wall/fs.js",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
@@ -34,7 +38,10 @@
     "src/host/",
     "src/shared/",
     "src/office/",
+    "roles/solver/",
+    "scripts/seed-registry.mjs",
     "client.js",
+    "client.gated.js",
     "client.pane.js",
     "office.js",
     "locale/",
@@ -46,7 +53,7 @@
   ],
   "scripts": {
     "build": "node scripts/build-client.mjs && node scripts/build-script-child.mjs",
-    "test": "node ../../scripts/test-guard.mjs --import ./test/harness-resolve.mjs --test --test-timeout=120000 --test-concurrency=2 \"test/*.test.js\" \"src/host/live-chat/*.test.mjs\"",
+    "test": "node ../../scripts/test-guard.mjs --import ./test/harness-resolve.mjs --test --test-timeout=120000 \"test/*.test.js\" \"src/host/live-chat/*.test.mjs\"",
     "lint": "node scripts/lint.mjs",
     "harness": "bun install --cwd dev/harness --no-save --no-summary",
     "check": "sh dev/check.sh",
@@ -66,10 +73,48 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-fs-local": "*",
+    "@deepseek-ai/dsh-fs-patch": "*",
+    "@deepseek-ai/dsh-fs-sandbox": "*",
     "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-sandbox": "*",
+    "@deepseek-ai/dsh-sandbox-local": "*",
     "@deepseek-ai/dsh-scope": "*",
+    "@deepseek-ai/dsh-subprocess-local": "*",
+    "@deepseek-ai/dsh-tool-fs": "*",
+    "@deepseek-ai/dsh-tool-fs-search": "*",
     "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-util-ripgrep": "*",
     "@deepseek-ai/dsh-web": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-fs-local": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-fs-patch": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-fs-sandbox": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-sandbox": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-sandbox-local": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subprocess-local": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-fs": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-fs-search": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-util-ripgrep": {
+      "optional": true
+    }
   },
   "dsh": {
     "client": {

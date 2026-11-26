@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
@@ -12,7 +13,7 @@ import { build } from 'esbuild'
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 const { outputFiles } = await build({
   stdin: {
-    contents: "export { TeamSidebar } from './src/client/sidebar.js'\nexport { badges, botChildren } from './src/client/extend.js'",
+    contents: "export { TeamSidebar } from './src/client/sidebar.js'\nexport { badges, botChildren, botChannels } from './src/client/extend.js'",
     resolveDir: PLUGIN,
   },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
@@ -35,7 +36,7 @@ runInNewContext(outputFiles[0].text, {
   document: { body: { dataset: {} } },
   matchMedia: () => ({ matches: false }),
 })
-const { TeamSidebar, badges, botChildren } = module.exports
+const { TeamSidebar, badges, botChildren, botChannels } = module.exports
 
 const pip = { id: 'pip', name: 'Pip', role: 'Orchestrator', sessionId: 'pip', createdAt: 1 }
 const omni = { id: 'omni', name: 'Omni', role: 'Channel keeper', kind: 'omni', sessionId: 'omni', createdAt: 2 }
@@ -83,6 +84,19 @@ test('the first Main Bot is the bar\'s first row, then the others; what hangs un
   assert.ok(find(after('pip'), named('BotChildren')).some(node => node.props.bot.id === 'pip'))
 })
 
+test('a Bot served by a channel source keeps the team\'s old rows off, and its chats open through the source', (t) => {
+  const opened = []
+  const source = { id: 'fake-channels', botId: 'pip', useChannels: () => [], open: chatId => opened.push(chatId) }
+  t.after(botChannels.register(source))
+  const { bar, teamRows, after } = sidebar()
+  const pipRow = teamRows().props.team.bots.find(bot => bot.id === 'pip')
+  assert.equal(pipRow.channelSource, source, 'the bar reads the one source that serves it')
+  assert.equal(find(after('pip', pipRow), named('BotChildren')).length, 0, 'the bar draws its channels instead')
+  assert.equal(find(after('pip', pipRow), named('BotThreads')).length, 1, 'its running tasks stay')
+  bar.props.open({ kind: 'chat', id: 'chat-1', botId: 'pip', source })
+  assert.deepEqual(opened, ['chat-1'])
+})
+
 test('rows other plugins hang under a Bot get the rows\' own props, and opening one folds the sidebar', (t) => {
   const Thread = () => null
   t.after(botChildren.register({ id: 'thread', Component: Thread }))
@@ -95,6 +109,46 @@ test('rows other plugins hang under a Bot get the rows\' own props, and opening 
   t.after(() => { window.innerWidth = 1280 })
   thread.props.actions.openSession('thread-1')
   assert.deepEqual(calls, [['open', 'thread-1'], ['fold']])
+})
+
+test('the Team row and legacy sidebar show the Genie tag and the shared child outlet follows the role', (t) => {
+  const WishRows = () => null
+  const OtherRows = () => null
+  t.after(botChildren.register({ id: 'genie-wishes', Component: WishRows }))
+  t.after(botChildren.register({ id: 'other-rows', Component: OtherRows }))
+  const tagged = tree => find(tree, node => node.props?.className === 'bt-tag' && node.props.children.includes('Genie')).length === 1
+  for (const [kind, roles, prefs, showTag, showWishes] of [
+    ['genie', undefined, {}, true, true],
+    ['genie', [], {}, false, false],
+    ['genie', [], { roles: false }, false, true],
+    [undefined, undefined, {}, false, false],
+  ]) {
+    const record = { id: 'role-fixture', name: 'Bot', kind, ...(roles === undefined ? {} : { roles }) }
+    const team = { ...roster, bots: [record], byId: { [record.id]: record }, mainBotId: record.id, mainBotIds: [record.id], prefs }
+    const wide = sidebar({ team })
+    const rows = wide.teamRows()
+    const row = find(rows.type(rows.props), node => node.type === 'button' && node.props['data-id'] === record.id)[0]
+    assert.equal(tagged(row), showTag)
+    const outlet = find(wide.after(record.id), named('BotChildren'))[0]
+    const children = outlet.type(outlet.props)
+    assert.equal(find(children, node => node.type === WishRows).length, Number(showWishes))
+    assert.equal(find(children, node => node.type === OtherRows).length, 1)
+    const [legacy] = sidebar({ wide: false, team }).rows
+    assert.equal(tagged(legacy.type({ ...legacy.props, wide: true })), showTag)
+  }
+})
+
+test('the child outlet keeps registered rows when the roster is missing', (t) => {
+  const WishRows = () => null
+  const OtherRows = () => null
+  t.after(botChildren.register({ id: 'genie-wishes', Component: WishRows }))
+  t.after(botChildren.register({ id: 'other-rows', Component: OtherRows }))
+  const record = { id: 'detached', name: 'Genie', kind: 'genie', roles: [] }
+  const { after } = sidebar({ team: { ...roster, bots: [record], byId: { [record.id]: record } } })
+  const outlet = find(after(record.id), named('BotChildren'))[0]
+  const children = outlet.type({ ...outlet.props, roster: undefined })
+  assert.equal(find(children, node => node.type === WishRows).length, 1)
+  assert.equal(find(children, node => node.type === OtherRows).length, 1)
 })
 
 test('badges other plugins add still end a Bot\'s row, with the row\'s Bot, and never a DSH bot\'s', (t) => {
@@ -126,6 +180,44 @@ test('in the narrow rail the crowned row keeps the crown at the rail size', () =
   assert.equal(row.props.title, 'Pip')
 })
 
+test('a Bot whose plugin is not installed says so, in the bar and in the rail', () => {
+  const missing = { ...omni, installed: false, reason: 'the @automagik/omni-channels-dsh plugin is missing from this DSH' }
+  const team = { ...roster, bots: [pip, missing], byId: { pip, missing } }
+  // The wide bar's left-bar status is not idle.
+  const barRow = sidebar({ team }).teamRows().props.team.bots.find(bot => bot.id === 'omni')
+  assert.equal(barRow.status, 'not-installed')
+  // The narrow rail's row says it in its accessible name and its line, with the reason.
+  const { rows, render } = sidebar({ wide: false, team })
+  const row = render(rows[1])
+  assert.match(row.props['aria-label'], /Not installed/)
+  assert.match(JSON.stringify(row), /Not installed/)
+  assert.match(JSON.stringify(row), /plugin is missing/)
+})
+
+test('the wide bar row carries the reason, and the dead missing-preview line is gone', () => {
+  const missing = { ...omni, installed: false, reason: 'the @automagik/omni-channels-dsh plugin is missing from this DSH' }
+  const team = { ...roster, bots: [pip, missing], byId: { pip, missing } }
+  const rows = sidebar({ team }).teamRows()
+  // The bar draws its rows through TeamRows; call it as React would.
+  const bots = rows.props.team.bots.map(bot => bot.id === 'omni' ? { ...bot, roleTag: 'Maintainer', unread: true } : bot)
+  const list = rows.type({ ...rows.props, team: { ...rows.props.team, bots } })
+  const [row] = find(list, node => node.type === 'button' && node.props?.['data-id'] === 'omni')
+  assert.equal(row.props['aria-label'], undefined, 'keep the accessible name from the row contents')
+  assert.equal(row.props['aria-description'], missing.reason)
+  for (const word of ['Omni', 'Maintainer', 'Unread activity']) {
+    assert.ok(find(row, node => node.props?.children?.includes(word)).length > 0, word)
+  }
+  // The mark's own title says why too, where a pointer or a reader arrives at it.
+  const [status] = find(row, node => node.type?.name === 'Status')
+  assert.equal(status.type(status.props).props.title, `Not installed · ${missing.reason}`)
+  // BotRow's wide-only preview was never reachable: the bar does not draw that class.
+  assert.equal(find(list, node => String(node.props?.className).includes('bt-row-preview-missing')).length, 0)
+  const barSource = readFileSync(new URL('../src/client/sidebar.js', import.meta.url), 'utf8')
+  assert.equal(barSource.includes('bt-row-preview-missing'), false, 'the dead preview branch is gone')
+  const sheet = readFileSync(new URL('../src/client/styles.js', import.meta.url), 'utf8')
+  assert.equal(sheet.includes('bt-row-preview-missing'), false, 'its sheet rule is gone too')
+})
+
 test('a DSH bot row wears DSH\'s blue whale, not a generic terminal mark', () => {
   const brain = { id: 'brain', kind: 'dsh', name: 'Cogna Brain', sessions: ['session-brain'], createdAt: 3 }
   const team = { ...roster, agents: [brain], agentsById: { brain } }
@@ -138,4 +230,28 @@ test('a DSH bot row wears DSH\'s blue whale, not a generic terminal mark', () =>
   assert.equal(mark.props.look.color, 'blue')
   // The tasks row keeps its own mark; only a DSH bot wears the whale.
   assert.equal(rows.props.renderArt({ id: 'tasks', dsh: 'tasks' }, 28, 'idle').type.name, 'TasksIcon')
+})
+
+test('both sidebar variants use the exact package name and hide it with roles off', () => {
+  const record = { id: 'fixture', name: 'Fixture', roles: [{ id: 'constructor', version: '1.0.0', attachedAt: '', grants: [] }] }
+  const key = 'constructor'
+  const details = { version: '1.0.0', sha256: 'a'.repeat(64) }
+  const team = {
+    ...roster, bots: [record], byId: { [record.id]: record }, mainBotId: record.id, mainBotIds: [record.id],
+    roleCatalog: { roles: [{ id: key, version: details.version, name: '<Catalog fixture>', capabilities: [] }] },
+    roleDetails: { [key]: { installed: details, catalog: details } },
+  }
+  const tags = tree => find(tree, node => node.props?.className === 'bt-tag').map(node => node.props.children[0])
+  for (const [prefs, catalogDigest, expected] of [
+    [{}, details.sha256, ['<Catalog fixture>']],
+    [{}, 'b'.repeat(64), [key]],
+    [{ roles: false }, details.sha256, []],
+  ]) {
+    const live = { ...team, prefs, roleDetails: { [key]: { installed: details, catalog: { ...details, sha256: catalogDigest } } } }
+    const rows = sidebar({ team: live }).teamRows()
+    const row = find(rows.type(rows.props), node => node.type === 'button' && node.props['data-id'] === record.id)[0]
+    assert.deepEqual(tags(row), expected)
+    const [legacy] = sidebar({ wide: false, team: live }).rows
+    assert.deepEqual(tags(legacy.type({ ...legacy.props, wide: true })), expected)
+  }
 })

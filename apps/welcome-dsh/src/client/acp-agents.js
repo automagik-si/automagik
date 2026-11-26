@@ -14,7 +14,18 @@ import { raised } from './clay.js'
 // A signed-out CLI is signed in from a Bot's chat (the Bot team's sign-in row, plan v3 2.3): the
 // row's Sign in button opens that chat, in the selected Bot or else the Main Bot, through the Bot
 // team's bridge. Opening it starts no sign-in, picks no model and sends nothing; the page never
-// sees a link, a code or a credential. The terminal command stays as the other way (D7).
+// sees a link, a code or a credential. The terminal command signs in to a shared CLI home.
+//
+// Antigravity runs in this installation's own home (#2048, `appSignIn`): its row signs in here,
+// over ACP (Sign in), as Claude Code's and Codex's rows read, never with a terminal command or
+// a path. Signed in, its Settings row offers Switch account, as theirs do: one action that
+// signs out (retiring the home) and starts a new sign-in at once; Connect AI's row offers
+// Sign out. Its sign-in link shows with a Copy
+// button; nothing opens it by itself: a person's click opens it. Signed in on another computer,
+// the person pastes back the address the browser ended on (`acp-sign-in-callback`).
+// The same lines draw in Connect AI (AcpLine). On Windows its account is shared with the
+// person's own agy (`sharedAccount`): every state of the row says so, and there is no Sign out
+// (nor Switch account, which signs out first).
 
 export const CLI_OF = { 'acp-claude': 'claude', 'acp-codex': 'codex', 'acp-hermes': 'hermes', 'acp-antigravity': 'agy', 'acp-omp': 'omp' }
 export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'HM', 'acp-antigravity': 'AG', 'acp-omp': 'OM' }
@@ -23,17 +34,25 @@ export const LOGO_OF = { 'acp-claude': 'CC', 'acp-codex': 'CX', 'acp-hermes': 'H
 // command that signs in (`cli.signInHint`). They are off until the person turns one on, which
 // is their word that the app may use the sign-in that CLI already has on this computer.
 export const isNative = agent => agent?.connector?.native === true
+// acp-dsh's two refusals of a pasted address (#2048): read in the page's language.
+const NOT_THIS_SIGN_IN = 'This link is not from this sign-in.'
+const EXPIRED_SIGN_IN = 'This sign-in expired. Start again.'
+const signInWords = message => (message === NOT_THIS_SIGN_IN ? t('This link is not from this sign-in.')
+  : message === EXPIRED_SIGN_IN ? t('This sign-in expired. Start again.') : message)
+const isolatedSignIn = agent => agent.authScope === 'isolated' && !isNative(agent)
 const signInCommand = agent => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key
 // How the person signs in to the CLI in a terminal, the other way to the chat's row.
 export const SIGN_IN_OF = { 'acp-claude': 'claude auth login', 'acp-codex': 'codex login' }
 // The Bot team's bridge (apps/bots-dsh src/client/cli-login.js, CLI_LOGIN_BRIDGE): open(provider)
-// opens the sign-in row in a Bot's chat and answers whether it could.
+// opens the sign-in row in a Bot's chat and answers whether it could. A Switch account hands
+// its own attempt over (`attemptId`, #2064), so the row reads that attempt even if it ended.
 export const CHAT_LOGIN = Symbol.for('automagik.cli-login')
-export function openChatLogin(provider, scope = globalThis) {
+export function openChatLogin(provider, scope = globalThis, { attemptId } = {}) {
   if (!Object.hasOwn(SIGN_IN_OF, provider)) return false
-  try { return scope[CHAT_LOGIN]?.open?.(provider) === true } catch { return false }
+  try { return scope[CHAT_LOGIN]?.open?.(provider, attemptId === undefined ? undefined : { attemptId }) === true } catch { return false }
 }
 export const POLL_MS = 2000
+const UNREACHABLE_POLL_MS = 15_000
 export const SETTINGS_SECTION = 'acp-agents'
 const cliBusy = agent => agent.cli.state === 'installing' || agent.cli.updating === true
 
@@ -80,13 +99,37 @@ export { redactText }
 /**
  * What the row says under its name, line by line: the CLI, the connector, the sign-in, and
  * where to find the model. Each line: { tone: ok|wait|bad|muted, text, link?, action? }, an
- * action being 'check' (look again), 'login' (the sign-in row in a Bot's chat) or 'retry' (the
- * connector's install, or the CLI's).
+ * action being 'check' (look again), 'login' (the sign-in row in a Bot's chat), 'retry' (the
+ * connector's install, or the CLI's) or 'install' (a CLI the app installs only on the person's
+ * click). An account in Settings can also offer 'switch'; an agent that signs in here offers
+ * 'native-switch' in Settings (`settings`) and 'native-sign-out' elsewhere (Connect AI).
  */
-export function agentLines(agent) {
+export function agentLines(agent, entry, { settings = false } = {}) {
   const name = agent.name
   const cli = CLI_OF[agent.id] ?? agent.key
   const lines = []
+  // A CLI the app installs only when the person clicks Install (Antigravity): never on its own,
+  // and only while the agent is on. Its install page shows only when the app's install failed.
+  const manual = agent.cli.install === 'manual'
+  if (manual && !agent.cli.found) {
+    if (cliBusy(agent)) lines.push({ tone: 'wait', text: t('Installing {name}…', { name }) })
+    else if (agent.cli.state === 'failed' || agent.cli.error) {
+      lines.push({
+        tone: 'bad',
+        text: agent.cli.error ? t('The {name} installation or update failed: {error}', { name, error: redactText(agent.cli.error) }) : t('The {name} installation or update failed.', { name }),
+        // Retry installs, so it shows only while the agent is on; off keeps the text and the link.
+        ...(agent.on ? { action: 'install', label: t('Retry') } : {}),
+        ...(agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t('Install it yourself instead') } } : {}),
+        ...(agent.cli.diagnostic ? { details: { diagnostic: redactText(agent.cli.diagnostic), ...(agent.cli.logPath ? { logPath: agent.cli.logPath } : {}) } } : {}),
+      })
+    } else if (agent.on) {
+      lines.push({ tone: 'muted', text: t('The {cli} CLI is not on this computer. Automagik can install it for you.', { cli }), action: 'install' })
+    } else {
+      lines.push({ tone: 'muted', text: t('The {cli} CLI is not on this computer. Turn {name} on to install it.', { cli, name }) })
+    }
+    if (agent.sharedAccount === true) lines.push(sharedLine(name))
+    return lines
+  }
   if (cliBusy(agent)) {
     lines.push({ tone: 'wait', text: agent.cli.updating ? t('Updating {name} automatically…', { name }) : t('Installing {name} automatically…', { name }) })
   } else if (agent.cli.state === 'failed' || agent.cli.error) {
@@ -99,33 +142,66 @@ export function agentLines(agent) {
   }
   if (!agent.cli.found) {
     if (lines.length === 0) lines.push({ tone: 'muted', text: t('The {cli} CLI is not on this computer. Install it, sign in, then check again.', { cli }), ...(agent.cli.installUrl ? { link: { href: agent.cli.installUrl, text: t('Install {name}', { name }) } } : {}), action: 'check' })
+    if (agent.sharedAccount === true) lines.push(sharedLine(name))
     return lines
   }
-  lines.push({ tone: 'ok', text: agent.cli.version ? t('Found the {cli} CLI on this computer (version {version}).', { cli, version: agent.cli.version }) : t('Found the {cli} CLI on this computer.', { cli }) })
-  if (agent.signedIn === true && agent.consent !== 'needed') lines.push({ tone: 'ok', text: t('Signed in to {name}.', { name }) })
+  lines.push({
+    tone: 'ok',
+    text: manual && agent.cli.managed === true && agent.cli.version
+      ? t('Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).', { cli, version: agent.cli.version })
+      : agent.cli.version ? t('Found the {cli} CLI on this computer (version {version}).', { cli, version: agent.cli.version }) : t('Found the {cli} CLI on this computer.', { cli }),
+  })
+  if (agent.sharedAccount === true) lines.push(sharedLine(name))
+  const app = agent.appSignIn === true
+  if (agent.signedIn === true && agent.consent !== 'needed' && app) {
+    // Settings switches the account, as Claude Code's and Codex's rows there do; Connect AI signs
+    // out. Both retire this installation's home: not where the account is shared (Windows).
+    lines.push({ tone: 'ok', text: t('Signed in to {name}.', { name }), ...(agent.sharedAccount === true ? {} : { action: settings ? 'native-switch' : 'native-sign-out' }) })
+  } else if (agent.signedIn === true && agent.consent !== 'needed') {
+    const canSwitch = isolatedSignIn(agent) && entry?.authScope === 'isolated' && entry.signedIn === true
+    const account = canSwitch && entry.account?.kind === 'account' ? entry.account.email ?? entry.account.org : undefined
+    lines.push({
+      tone: 'ok',
+      text: account ? t('Signed in to {name} as {account}.', { name, account }) : t('Signed in to {name}.', { name }),
+      ...(canSwitch ? { action: 'switch' } : {}),
+    })
+    if (canSwitch) lines.push({ tone: 'muted', text: t('Bots in this installation share this account. Your terminal sign-in stays as it is.') })
+  }
   // Already signed in on this computer (the terminal's sign-in): the Bot's chat shows the
   // account and asks before any Bot uses it.
   if (agent.signedIn === true && agent.consent === 'needed' && !cliBusy(agent)) lines.push({ tone: 'bad', text: t('{name} is signed in on this computer. Confirm its account in a Bot\'s chat before Bots use it.', { name }), action: 'login', label: t('Confirm account') })
+  // An agent with its own home signs in here, while it is on (acp-dsh refuses it off).
+  if (app && agent.on && !cliBusy(agent)) lines.push(...appSignInLines(agent, name))
   // A native agent signs in only in a terminal, with its own command.
-  if (agent.signedIn === false && isNative(agent)) lines.push({ tone: 'bad', text: t('Not signed in to {name}. Run {command} in a terminal, then check again.', { name, command: signInCommand(agent) }), action: 'check' })
-  // Signed out (and only then): the chat's sign-in row, or the terminal command (D7).
+  if (agent.signedIn === false && isNative(agent) && !app) lines.push({ tone: 'bad', text: t('Not signed in to {name}. Run {command} in a terminal, then check again.', { name, command: signInCommand(agent) }), action: 'check' })
+  // A terminal sign-in cannot reach the isolated home used by the app.
   if (agent.signedIn === false && !isNative(agent) && !cliBusy(agent)) {
     lines.push({ tone: 'bad', text: t('Not signed in to {name}. Sign in from a Bot\'s chat.', { name }), action: 'login' })
-    lines.push({ tone: 'muted', text: t('Or run {command} in a terminal, then check again.', { command: SIGN_IN_OF[agent.id] ?? cli }), action: 'check' })
+    if (!isolatedSignIn(agent)) lines.push({ tone: 'muted', text: t('Or run {command} in a terminal, then check again.', { command: SIGN_IN_OF[agent.id] ?? cli }), action: 'check' })
   }
   // A native agent that is off is never started, so there is no sign-in to check yet.
-  if (agent.signedIn === undefined && !cliBusy(agent) && (agent.on || !isNative(agent))) lines.push({ tone: 'muted', text: t('The sign-in to {name} has not been checked yet.', { name }), action: 'check' })
+  if (agent.signedIn === undefined && !cliBusy(agent) && (agent.on || !isNative(agent))) {
+    const text = agent.signInCheck === 'timeout'
+      ? t('Could not check the sign-in to {name}: {cli} took too long to answer.', { name, cli })
+      : agent.signInCheck === 'unreadable'
+        ? t('Could not tell whether you are signed in to {name}.', { name })
+        : t('The sign-in to {name} has not been checked yet.', { name })
+    lines.push({ tone: 'muted', text, action: 'check' })
+  }
   if (!agent.on) {
     lines.push({ tone: 'muted', text: t('Off. Turn it on to use {name} as a model in DSH.', { name }) })
-    if (isNative(agent)) lines.push({ tone: 'muted', text: t('Turning it on lets Automagik use the sign-in {name} already has on this computer.', { name }) })
+    if (app && agent.sharedAccount !== true) lines.push({ tone: 'muted', text: t('Automagik keeps its own {name} sign-in, apart from the one in your terminal.', { name }) })
+    else if (isNative(agent)) lines.push({ tone: 'muted', text: t('Turning it on lets Automagik use the sign-in {name} already has on this computer.', { name }) })
     return lines
   }
-  const { state, version, error, diagnostic, logPath } = agent.connector
+  const { state, version, error, diagnostic, logPath, unreachable } = agent.connector
   if (state === 'installing') lines.push({ tone: 'wait', text: t('Installing its connector in the background. This takes a minute or two.') })
   if (state === 'failed') {
     lines.push({
       tone: 'bad',
-      text: error ? t('The connector did not install: {error}', { error: redactText(error) }) : t('The connector did not install.'),
+      text: unreachable === true
+        ? t('Could not reach the connector registry. Automagik tries again by itself, or press Retry.')
+        : error ? t('The connector did not install: {error}', { error: redactText(error) }) : t('The connector did not install.'),
       action: 'retry',
       // What DSH 0.2.2 shows for a failed plugin install: the full diagnostic and its log file.
       // The panel and its expander read this one value, so the shared table runs here too: a
@@ -146,10 +222,46 @@ export function agentLines(agent) {
   return lines
 }
 
+// Windows keeps Antigravity's sign-in in Credential Manager, shared with the person's own agy.
+const sharedLine = name => ({ tone: 'muted', text: t('On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.', { name }) })
+
+// The time a sign-in link stops being good, in the page's own clock.
+const timeOf = at => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+
+// The sign-in lines of an agent that signs in here (`appSignIn`), as Claude Code's and Codex's
+// read: under way (with the sign-in link agy handed over, a Copy button, and the field for the
+// address the browser ends on when the sign-in happens on another computer), why the last one
+// failed, and signed out with Sign in. Never a terminal command or a path (#2048, owner); never
+// the pasted address.
+function appSignInLines(agent, name) {
+  const lines = []
+  if (agent.signingIn === true) {
+    if (agent.signInChecking === true) return [{ tone: 'wait', text: t('Finishing the sign-in to {name}…', { name }) }]
+    lines.push({
+      tone: 'wait',
+      text: t('Finish the sign-in to {name} in your browser…', { name }),
+      ...(agent.signInUrl ? { link: { href: agent.signInUrl, text: t('Sign in with {name}', { name }) }, copy: agent.signInUrl } : {}),
+    })
+    if (agent.signInPaste === true && agent.signInUrl && typeof agent.signInAttempt === 'string') {
+      lines.push({ tone: 'muted', text: t('Signed in on another computer? Paste the address the browser ends on:'), action: 'callback' })
+    }
+    if (Number.isFinite(agent.signInExpiresAt)) lines.push({ tone: 'muted', text: t('Expires at {time}', { time: timeOf(agent.signInExpiresAt) }) })
+    return lines
+  }
+  if (agent.signInError === 'expired') lines.push({ tone: 'bad', text: t('This sign-in expired. Start again.') })
+  if (agent.signInError === 'unsupported') lines.push({ tone: 'bad', text: t('{name} did not offer a Google sign-in. Try again.', { name }) })
+  if (agent.signInError === 'timeout') lines.push({ tone: 'bad', text: t('The sign-in to {name} took too long. Try again.', { name }) })
+  if (agent.signInError === 'failed') lines.push({ tone: 'bad', text: t('The sign-in to {name} did not finish. Try again.', { name }) })
+  if (agent.signInError === 'no-browser') lines.push({ tone: 'bad', text: t('The CLI did not offer a sign-in link in time. Try again.') })
+  if (agent.signedIn !== false) return lines
+  lines.push({ tone: 'bad', text: t('Not signed in to {name}.', { name }), action: 'native-login' })
+  return lines
+}
+
 // The agents' state from the host, refreshed (CLI search, sign-in) when the page opens and
-// polled while a CLI or a connector installs or a switch has not settled yet. `onLoginOpen`
-// runs once a Bot's chat took a sign-in, so the page around it can step aside; `open` is the
-// bridge (a test hands its own).
+// polled while a CLI or a connector installs, a switch is settling, or the connector registry
+// is unreachable. `onLoginOpen` runs once a Bot's chat took a sign-in, so the page around it
+// can step aside; `open` is the bridge (a test hands its own).
 export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {}) {
   const [view, setView] = useState(null)
   const [busy, setBusy] = useState(null)
@@ -173,16 +285,19 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
   }, [request, show])
   useEffect(() => { void load(true) }, [load])
 
-  const settling = view?.agents?.some(agent => cliBusy(agent) || (agent.on && agent.cli.found && agent.connector.state === 'installing') || (wanted[agent.id] !== undefined && wanted[agent.id] !== agent.on)) === true
+  const settling = view?.agents?.some(agent => cliBusy(agent) || agent.signingIn === true || (agent.on && agent.cli.found && agent.connector.state === 'installing') || (wanted[agent.id] !== undefined && wanted[agent.id] !== agent.on)) === true
+  const unreachable = view?.agents?.some(agent => agent.on && agent.cli.found && agent.connector.state === 'failed' && agent.connector.unreachable === true) === true
+  const pollMs = settling ? POLL_MS : unreachable ? UNREACHABLE_POLL_MS : undefined
   useEffect(() => {
-    if (!settling) return undefined
-    const timer = setInterval(() => { void load(false) }, POLL_MS)
+    if (pollMs === undefined) return undefined
+    const timer = setInterval(() => { void load(false) }, pollMs)
     return () => clearInterval(timer)
-  }, [settling, load])
-
+  }, [pollMs, load])
+  // The agent whose Sign out waits for the person's Continue.
+  const [signingOut, setSigningOut] = useState(null)
   const say = (id, message) => setProblems(previous => ({ ...previous, [id]: message }))
   // Whether the host took it; a refusal leaves its words on the row.
-  const act = async (id, endpoint, payload) => {
+  const act = async (id, endpoint, payload, words = message => message) => {
     say(id, null)
     setBusy(id)
     let ok = true
@@ -190,7 +305,7 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
       show(await request(endpoint, payload))
     } catch (error) {
       ok = false
-      say(id, error.message)
+      say(id, words(error.message))
     }
     if (live.current) setBusy(null)
     return ok
@@ -199,26 +314,50 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     view,
     busy,
     problems,
+    setProblem: say,
     isOn: agent => wanted[agent.id] ?? agent.on,
     flip: async (agent) => {
       const on = !(wanted[agent.id] ?? agent.on)
       setWanted(previous => ({ ...previous, [agent.id]: on }))
       // Refused: the switch goes back to what acp-dsh has, and nothing waits for it to settle.
-      if (!(await act(agent.id, 'acp-switch', { id: agent.id, on })) && live.current) {
+      const ok = await act(agent.id, 'acp-switch', { id: agent.id, on })
+      if (!ok && live.current) {
         setWanted(previous => (previous[agent.id] === on ? Object.fromEntries(Object.entries(previous).filter(([id]) => id !== agent.id)) : previous))
       }
+      return ok
     },
     retry: agent => act(agent.id, 'acp-retry', { id: agent.id }),
+    // The person's click on Install (a CLI the app installs only then).
+    install: agent => act(agent.id, 'acp-install', { id: agent.id }),
     check: agent => act(agent.id, 'acp', { refresh: true }),
+    // An agent that signs in here: Sign in starts it (its link shows; a person's click opens it),
+    // and Sign out and Switch account ask first, with the account switch's words.
+    // acp-dsh's fixed refusals read in the page's language.
+    nativeLogin: agent => act(agent.id, 'acp-sign-in', { id: agent.id }, signInWords),
+    // The address the browser ended on, for the attempt the row shows (#2048, paste-back).
+    callback: (agent, url) => act(agent.id, 'acp-sign-in-callback', { id: agent.id, attempt: agent.signInAttempt, url }, signInWords),
+    signOutPending: signingOut,
+    askSignOut: (agent) => { say(agent.id, null); setSigningOut(agent.id) },
+    cancelSignOut: () => setSigningOut(null),
+    nativeSignOut: (agent) => { setSigningOut(null); return act(agent.id, 'acp-sign-out', { id: agent.id }) },
+    // Switch account (Settings), one action as Claude Code's and Codex's: sign out, then a new
+    // sign-in at once. A refused sign-out starts none.
+    switchAccount: async (agent) => {
+      setSigningOut(null)
+      if (!await act(agent.id, 'acp-sign-out', { id: agent.id })) return false
+      return act(agent.id, 'acp-sign-in', { id: agent.id }, signInWords)
+    },
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
-    // Opens the sign-in row in a Bot's chat; nothing is asked of the host here. Without the Bot
-    // team (or a Bot), the row says to use the terminal.
-    login: (agent) => {
+    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat. A switch
+    // passes its own attempt (#2064); a plain Sign in passes none.
+    login: (agent, { attemptId } = {}) => {
       say(agent.id, null)
-      if (!open(agent.id)) {
-        say(agent.id, t('No Bot chat to sign in from here. Run {command} in a terminal instead.', { command: signInCommand(agent) }))
+      if (!open(agent.id, undefined, { attemptId })) {
+        say(agent.id, isolatedSignIn(agent)
+          ? t('Sign-in needs a Bot chat. If you have no Bot yet, set one up first.')
+          : t('No Bot chat to sign in from here. Run {command} in a terminal instead.', { command: signInCommand(agent) }))
         return false
       }
       onLoginOpen?.(agent)
@@ -227,25 +366,78 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
   }
 }
 
-export function AcpLine({ line, agent, acp, busy }) {
+// Arms the Bot team's chat guard (bots-dsh cli-login.js bridge `remember`) with a sign-in link
+// this page shows, so a chat message carrying the address it ends on is refused there too.
+function rememberSignInLink(url, scope = globalThis) {
+  try { scope[CHAT_LOGIN]?.remember?.(url) } catch {}
+}
+
+// The link's Copy button, as the welcome's other Copy buttons (oai-copy).
+function CopyLink({ url }) {
+  const [copied, setCopied] = useState(false)
+  return h('button', {
+    type: 'button', className: 'oai-copy oai-acp-act',
+    onClick: () => globalThis.navigator?.clipboard?.writeText(url).then(() => setCopied(true), () => {}),
+  }, copied ? t('Copied') : t('Copy'))
+}
+
+// The field for the address the browser ended on (#2048, paste-back): never kept in the page's
+// state; Send empties the field before the request.
+function CallbackField({ agent, acp, busy }) {
+  const send = (event) => {
+    event.preventDefault()
+    const input = event.currentTarget?.elements?.namedItem?.('sign-in-address')
+    if (!input) return
+    const value = input.value
+    input.value = ''
+    if (typeof value === 'string' && value.trim() !== '') void acp.callback(agent, value)
+  }
+  return h('form', { className: 'oai-setup-form', onSubmit: send },
+    h('div', { className: 'oai-field' },
+      h('input', {
+        type: 'password', name: 'sign-in-address', autoComplete: 'off', spellCheck: false,
+        'aria-label': t('Signed in on another computer? Paste the address the browser ends on:'),
+        'data-1p-ignore': 'true', 'data-lpignore': 'true', 'data-bwignore': 'true',
+      }),
+      h('button', { type: 'submit', className: 'oai-ghost oai-acp-act', disabled: busy }, t('Send'))))
+}
+
+export function AcpLine({ line, agent, acp, busy, accountControls }) {
+  if (line.copy) rememberSignInLink(line.copy)
+  const canSwitch = line.action === 'switch' && accountControls !== undefined
+  const signOut = line.action === 'native-sign-out'
+  const nativeSwitch = line.action === 'native-switch'
+  const confirmingOut = (signOut || nativeSwitch) && acp.signOutPending === agent.id
+  const confirming = (canSwitch && accountControls.pending === agent.id) || confirmingOut
+  const accountButton = (label, onClick) => h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick }, label)
   return h('div', { className: 'oai-acp-line-block' },
     h('p', { className: `oai-acp-line oai-acp-${line.tone}${line.tone === 'wait' ? ' oai-waiting' : ''}`, ...(line.tone === 'bad' ? { role: 'status' } : {}) },
-      line.text,
+      confirming ? t('This stops running Bot work for this account. Continue?') : line.text,
       line.link ? [' ', h('a', { key: 'link', className: 'oai-link', href: line.link.href, target: '_blank', rel: 'noreferrer' }, line.link.text)] : null,
+      line.copy ? h(CopyLink, { url: line.copy }) : null,
       line.action === 'retry' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.retry(agent) }, t('Retry')) : null,
+      line.action === 'install' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.install(agent) }, line.label ?? t('Install')) : null,
       line.action === 'login' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.login(agent) }, line.label ?? t('Sign in')) : null,
-      line.action === 'check' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.check(agent) }, t('Check again')) : null),
+      line.action === 'check' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.check(agent) }, t('Check again')) : null,
+      line.action === 'native-login' ? h('button', { type: 'button', className: 'oai-ghost oai-acp-act', disabled: busy, onClick: () => acp.nativeLogin(agent) }, t('Sign in')) : null,
+      canSwitch && !confirming ? accountButton(t('Switch account'), () => accountControls.ask(agent)) : null,
+      nativeSwitch && !confirming ? accountButton(t('Switch account'), () => acp.askSignOut(agent)) : null,
+      signOut && !confirming ? accountButton(t('Sign out'), () => acp.askSignOut(agent)) : null,
+      confirming ? accountButton(t('Continue'), () => (!confirmingOut ? accountControls.confirm(agent) : nativeSwitch ? acp.switchAccount(agent) : acp.nativeSignOut(agent))) : null,
+      confirming ? accountButton(t('Cancel'), confirmingOut ? acp.cancelSignOut : accountControls.cancel) : null),
+    line.action === 'callback' ? h(CallbackField, { agent, acp, busy }) : null,
     line.details ? h('details', { className: 'oai-acp-details' },
       h('summary', null, t('Install details')),
       h('pre', { className: 'oai-acp-diagnostic' }, line.details.diagnostic),
       line.details.logPath ? h('p', { className: 'oai-acp-log' }, t('Log: {path}', { path: line.details.logPath })) : null) : null)
 }
 
-export function AcpAgentRow({ agent, acp }) {
+export function AcpAgentRow({ agent, acp, accountControls }) {
   const on = acp.isOn(agent)
-  const busy = acp.busy !== null
+  const busy = acp.busy !== null || accountControls?.busy === true
   const badge = badgeOf({ ...agent, on })
-  const lines = agentLines(agent)
+  // The switch as the person just set it: Install follows it at once. This row is Settings'.
+  const lines = agentLines({ ...agent, on }, accountControls?.accounts[agent.id], { settings: true })
   return h('div', { className: `oai-ai oai-acp${on ? ' oai-ai-on' : ''}`, 'data-acp': agent.id, 'data-state': stateOf({ ...agent, on }) },
     h('div', { className: 'oai-ai-row' },
       h('div', { className: 'oai-logo', 'aria-hidden': true }, LOGO_OF[agent.id] ?? agent.name.slice(0, 1)),
@@ -254,27 +446,83 @@ export function AcpAgentRow({ agent, acp }) {
         h('span', null, t('Your own {cli} CLI, as a model in DSH', { cli: CLI_OF[agent.id] ?? agent.key }))),
       badge ? h('em', { className: 'oai-found' }, badge) : null,
       h('button', { type: 'button', role: 'switch', className: 'oai-switch', 'aria-checked': on ? 'true' : 'false', 'aria-label': agent.name, disabled: busy, onClick: () => acp.flip(agent) })),
-    h('div', { className: 'oai-acp-lines' }, lines.map((line, i) => h(AcpLine, { key: i, line, agent, acp, busy }))),
+    h('div', { className: 'oai-acp-lines' }, lines.map((line, i) => h(AcpLine, { key: i, line, agent, acp, busy, accountControls }))),
     acp.problems[agent.id] ? h('p', { className: 'oai-error oai-ai-problem', role: 'alert' }, acp.problems[agent.id]) : null)
 }
 
 /** The agents' list, or nothing while loading or without acp-dsh. */
-export function AcpAgents({ acp }) {
+export function AcpAgents({ acp, accountControls }) {
   if (acp.view?.available !== true || acp.view.agents.length === 0) return null
-  return h('section', { className: 'oai-group oai-acp-group', 'aria-label': t('Claude Code and Codex') },
-    h('div', { className: 'oai-list' }, acp.view.agents.map(agent => h(AcpAgentRow, { key: agent.id, agent, acp }))))
+  return h('section', { className: 'oai-group oai-acp-group', 'aria-label': t('Coding agents') },
+    h('div', { className: 'oai-list' }, acp.view.agents.map(agent => h(AcpAgentRow, { key: agent.id, agent, acp, accountControls }))))
 }
 
-/** Settings → Claude Code and Codex: the same rows, after onboarding. Signing in closes the
+const BOTS_CLIENT = '@automagik/bots-dsh/client'
+const loadBots = () => require(BOTS_CLIENT)
+
+async function readAccounts(load) {
+  try {
+    const omni = load()?.omni
+    const face = omni?.face?.()
+    if (typeof face?.actions?.cliLoginAccounts !== 'function' || typeof face.actions.cliLoginSwitch !== 'function') return null
+    const result = await face.actions.cliLoginAccounts()
+    return { face, hostText: face.hostText ?? omni.hostText, accounts: result?.accounts ?? {} }
+  } catch {
+    return null
+  }
+}
+
+/** Settings → Coding agents: the same rows, after onboarding. Signing in closes the
  * settings panel (its `close`), so the Bot's chat with the sign-in row is in view. */
-export function AcpSettingsSection({ close } = {}) {
+export function AcpSettingsSection({ close, load = loadBots } = {}) {
   const acp = useAcp(undefined, { onLoginOpen: () => close?.() })
+  const [accountView, setAccountView] = useState(null)
+  const [pending, setPending] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const switchBusy = useRef(false)
+  // Read both accounts when Settings opens, apart from the agent status poll.
+  useEffect(() => {
+    let live = true
+    void readAccounts(load).then(view => { if (live) setAccountView(view) })
+    return () => { live = false }
+  }, [])
+  const confirm = async (agent) => {
+    if (switchBusy.current) return
+    switchBusy.current = true
+    setBusy(true)
+    acp.setProblem(agent.id, null)
+    try {
+      const { face } = accountView
+      const snapshot = face.hooks?.roster?.getSnapshot?.()
+      const main = [...(snapshot?.mainBotIds ?? []), snapshot?.mainBotId].find(id => id && snapshot.byId?.[id])
+      if (!main) {
+        acp.setProblem(agent.id, t('Sign-in needs a Bot chat. If you have no Bot yet, set one up first.'))
+        return
+      }
+      // The switch's own attempt (#2064): the row reads it, even when it already ended.
+      const switched = await face.actions.cliLoginSwitch(main, agent.id)
+      await face.actions.refreshModels?.()
+      acp.login(agent, { attemptId: typeof switched?.attemptId === 'string' ? switched.attemptId : undefined })
+    } catch (error) {
+      const message = error?.message ?? String(error)
+      acp.setProblem(agent.id, accountView.hostText?.(message) ?? message)
+    } finally {
+      setPending(null)
+      setBusy(false)
+      switchBusy.current = false
+    }
+  }
+  const accountControls = accountView === null ? undefined : {
+    accounts: accountView.accounts, pending, busy, confirm,
+    ask: agent => { acp.setProblem(agent.id, null); setPending(agent.id) },
+    cancel: () => setPending(null),
+  }
   return h('div', { className: 'oai-acp-page' },
     h('div', { className: 'oai-card' },
-      h('h1', null, t('Claude Code and Codex')),
+      h('h1', null, t('Coding agents')),
       h('p', null, t('Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.')),
       acp.view === null ? h('p', { className: 'oai-muted oai-waiting' }, t('Looking at what this computer has…'))
-        : acp.view.available ? h(AcpAgents, { acp })
+        : acp.view.available ? h(AcpAgents, { acp, accountControls })
           : h('p', { className: 'oai-muted' }, t('The ACP agents plugin is not running in this DSH.'))))
 }
 
@@ -296,11 +544,11 @@ export function AcpSectionIcon({ size = 16 }) {
   h('path', { d: 'M4.6 6.2 6.8 8l-2.2 1.8M8.3 10.2h3.1' }))
 }
 
-// Settings → Claude Code and Codex, after onboarding too: DSH's settings and the
+// Settings → Coding agents, after onboarding too: DSH's settings and the
 // Bot team's both list it. Always there, so an acp-dsh turned on after the page loaded has its
 // page without a reload; without acp-dsh the page says the plugin is not running.
 export function installAcpSection(ctx) {
-  const section = ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: SETTINGS_SECTION, order: 30, label: () => t('Claude Code and Codex') }, AcpSettingsSection)) ?? (() => {})
+  const section = ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: SETTINGS_SECTION, order: 30, label: () => t('Coding agents') }, AcpSettingsSection)) ?? (() => {})
   const icon = ctx.slots.inject('settings.section.icon', () => ctx.slots.register({ name: 'settings.section.icon', id: SETTINGS_SECTION, order: 30 }, AcpSectionIcon)) ?? (() => {})
   return () => {
     section()

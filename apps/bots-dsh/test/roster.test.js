@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import fsp from 'node:fs/promises'
 import { syncBuiltinESMExports } from 'node:module'
 import { hostname, tmpdir } from 'node:os'
@@ -10,6 +11,9 @@ import { format } from 'node:util'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { until } from './until.js'
+import { reviewerPayload } from '../src/client/solver-draft.js'
+import { solverDefaultShape } from '../src/client/solver-looks.js'
+import { solverInstructions } from '../src/shared/solver-method.js'
 
 // DSH's settings and credentials for a DeepSeek route that takes an API key. A key set
 // or removed is announced the way DSH announces it. `records` are the stored records
@@ -29,7 +33,7 @@ function keyed(ctx, stored, records) {
 // Enough of the dsh services for the roster to make Sessions; kickoff messages are dropped.
 // With `keys`, the models' route takes an API key and these are the ones set.
 let rt
-function start(team, { models = [], reasoning = {}, archiveError, config = {}, keys, selection } = {}) {
+function start(team, { models = [], reasoning = {}, archiveError, renameError, config = {}, keys, selection } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-roster-'))
   if (team !== undefined) writeFileSync(join(home, 'state.json'), JSON.stringify(team))
   const services = {}
@@ -44,6 +48,7 @@ function start(team, { models = [], reasoning = {}, archiveError, config = {}, k
   const sent = []
   const selected = []
   const archived = []
+  const titles = new Map()
   const warnings = []
   let sessions = 0
   ctx.logger.warn = (...args) => warnings.push(format(...args))
@@ -72,7 +77,10 @@ function start(team, { models = [], reasoning = {}, archiveError, config = {}, k
       resolveAgent: async sessionId => ({ agent: { session: { id: sessionId }, followup: message => sent.push({ sessionId, message }) } }),
       selectModel: async (request) => { selected.push(request) },
     },
-    sessionTitle: { rename: async () => {} },
+    sessionTitle: { rename: async (session, title) => {
+      if (renameError !== undefined) throw renameError
+      titles.set(session.id, title)
+    } },
     sessions: { flush: async () => {} },
   })
   let route
@@ -90,7 +98,7 @@ function start(team, { models = [], reasoning = {}, archiveError, config = {}, k
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { call, stop, home, sent, selected, ctx, archived, warnings, records }
+  return { call, stop, home, sent, selected, ctx, archived, titles, warnings, records }
 }
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 20))
@@ -410,7 +418,7 @@ test('a team from before the octopus was stored gets it once, on its first Main 
 })
 
 test('set-main keeps one Main Bot and replaces only a Main Bot', async (t) => {
-  const { call, stop } = start()
+  const { call, stop, home } = start()
   t.after(stop)
   const chief = (await call('state', {})).value.mainBotId
   const writer = (await call('create-bot', { name: 'Writer' })).value
@@ -419,6 +427,28 @@ test('set-main keeps one Main Bot and replaces only a Main Bot', async (t) => {
   assert.equal((await call('set-main', { id: 'nope', main: true })).ok, false)
   assert.equal((await call('set-main', { id: reader.id, main: false })).ok, true)
   assert.deepEqual((await call('state', {})).value.mainBotIds, [chief])
+
+  // A replacement whose required save fails is refused, and neither this host nor a
+  // later ordinary save shows the roster that never reached the file.
+  await call('set-flags', { id: writer.id, hidden: true })
+  const saved = () => JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
+  const blocker = join(home, `state.json.${process.pid}.tmp`)
+  mkdirSync(blocker)
+  assert.equal((await call('set-main', { id: writer.id, main: true, replace: chief })).ok, false)
+  let team = (await call('state', {})).value
+  assert.deepEqual(team.mainBotIds, [chief])
+  assert.equal(team.bots.find(bot => bot.id === writer.id).hidden, true)
+  rmSync(blocker, { recursive: true })
+  assert.equal((await call('set-prefs', { theme: 'dark' })).ok, true)
+  assert.deepEqual(saved().mainBotIds, [chief])
+  assert.equal(saved().bots[writer.id].hidden, true)
+
+  // Once the file can be written, the same replacement is saved and then shown.
+  team = (await call('set-main', { id: writer.id, main: true, replace: chief })).value
+  assert.deepEqual(team.mainBotIds, [writer.id])
+  assert.equal(team.bots.find(bot => bot.id === writer.id).hidden, undefined)
+  assert.deepEqual(saved().mainBotIds, [writer.id])
+  assert.equal(saved().bots[writer.id].hidden, undefined)
 })
 
 test('deleting a Bot or group chat stops its Session, so its tasks are removed', async (t) => {
@@ -1519,4 +1549,503 @@ test('a Bot wears a pet Genie ships with; a photo set after it wins, and a pet f
   assert.equal(odd.avatar, undefined)
   const missing = await call('pet-use', { botId: writer.id, source: 'team', id: 'nobody' })
   assert.equal(missing.ok, false)
+})
+
+const SOLVER_ONLY = 'Only a Solver wears the Solver characters. Choose another character.'
+const SOLVER_WEARS = 'A Solver wears one of the Solver characters. Choose one of those characters.'
+const SOLVER_BY_PERSON = 'Only the person can make a Bot a Solver.'
+const LOOK_INVALID = 'That look is not valid. Choose another character.'
+const MAIN_ONLY = 'Could not create the Bot: Only the Main Bot can create Bots. Ask the Main Bot instead.'
+const solverProfile = () => ({ role: 'Solver', instructions: solverInstructions() })
+
+function lookRoster(t, team = OLD_TEAM, options) {
+  const host = start(team, options)
+  t.after(host.stop)
+  const state = () => JSON.parse(readFileSync(join(host.home, 'state.json'), 'utf8'))
+  const tool = (name, args, caller = 'm1') => rt.teamTools.find(item => item.name === name)
+    .execute(args, { agent: { id: caller } })
+  const create = t.mock.method(host.ctx.sessionController, 'create')
+  return { ...host, state, tool, create }
+}
+
+const liveBots = () => structuredClone(rt.state.bots)
+const botSnapshot = host => ({ disk: host.state().bots, live: liveBots() })
+async function assertSameBots(host, before) {
+  await rt.save()
+  assert.deepEqual(host.state().bots, before.disk)
+  assert.deepEqual(liveBots(), before.live)
+}
+
+function pause() {
+  const entered = Promise.withResolvers()
+  const gate = Promise.withResolvers()
+  return {
+    entered: entered.promise,
+    release: gate.resolve,
+    wait: () => { entered.resolve(); return gate.promise },
+  }
+}
+
+function seedReadScope(host) {
+  const directory = join(host.home, 'session-read-scopes')
+  const file = id => join(directory, `${createHash('sha256').update(id).digest('hex')}.json`)
+  mkdirSync(directory)
+  writeFileSync(file('m1'), JSON.stringify({ version: 1, id: 'm1', folder: host.home }))
+  return { directory, file }
+}
+
+test('native update refuses to make a Solver from either an ordinary caller or a Main Bot', async t => {
+  const host = lookRoster(t, { ...OLD_TEAM, mainBotIds: ['m1'], whaleStored: true })
+  await rt.load()
+  await rt.save()
+  for (const [caller, target] of [['w2', {}], ['m1', { bot: rt.botOf('w2').name }]]) {
+    const before = botSnapshot(host)
+    const answer = await host.tool('update_bot', { ...target, ...solverProfile() }, caller)
+    await assertSameBots(host, before)
+    assert.equal(answer, `Could not update the Bot: ${SOLVER_BY_PERSON}`)
+  }
+})
+
+test('native update allows a Solver to keep the method while editing its instructions', async t => {
+  const host = lookRoster(t, { ...OLD_TEAM, bots: { ...OLD_TEAM.bots,
+    w2: { ...OLD_TEAM.bots.w2, ...solverProfile(), avatar: { shape: 'frog' } } } })
+  const instructions = `${solverInstructions()}\nKeep notes short.`
+  assert.match(await host.tool('update_bot', { instructions }, 'w2'), /^Updated /)
+  assert.equal(host.state().bots.w2.instructions, instructions)
+})
+
+test('native update refuses a photo for a Solver', async t => {
+  const host = lookRoster(t, { ...OLD_TEAM, bots: { ...OLD_TEAM.bots,
+    w2: { ...OLD_TEAM.bots.w2, ...solverProfile(), avatar: { shape: 'frog' } } } })
+  await rt.load()
+  await rt.save()
+  const before = botSnapshot(host)
+  const answer = await host.tool('update_bot', { avatar: PNG_DATA_URL }, 'w2')
+  await assertSameBots(host, before)
+  assert.equal(answer, `Could not update the Bot: ${SOLVER_WEARS}`)
+})
+
+test('native create cannot make a Solver even for a Main Bot', async t => {
+  const host = lookRoster(t)
+  await rt.load()
+  await rt.save()
+  const before = botSnapshot(host)
+  const answer = await host.tool('create_bot', { name: 'Candidate', ...solverProfile() })
+  await assertSameBots(host, before)
+  assert.equal(answer, `Could not create the Bot: ${SOLVER_BY_PERSON}`)
+  assert.equal(host.create.mock.callCount(), 0)
+})
+
+for (const phase of ['folder approval', 'folder approval and deletion', 'read-scope reservation', 'workspace lookup']) {
+  test(`native create rechecks its caller after ${phase}`, { timeout: 10000 }, async t => {
+    const workspace = phase === 'workspace lookup' ? {} : { workspaceId: 'w-test' }
+    const host = lookRoster(t, { ...OLD_TEAM, whaleStored: true, ...workspace })
+    if (workspace.workspaceId !== undefined) {
+      host.ctx.workspaceRegistry.get = () => ({ id: workspace.workspaceId, path: host.home })
+    }
+    const gate = pause()
+    const args = { name: 'Candidate', role: 'Writer', instructions: 'Write notes.' }
+    const scopeDir = join(host.home, 'session-read-scopes')
+    let reserved
+    let scopeFiles
+    if (phase.startsWith('folder approval')) {
+      args.work_dir = tempAvatarDir(t)
+      rt.approveFolder = gate.wait
+    } else if (phase === 'read-scope reservation') {
+      host.ctx.sessions.get = id => id === 'm1' ? { id, header: { id } } : undefined
+      const scopeFile = id => join(scopeDir, `${createHash('sha256').update(id).digest('hex')}.json`)
+      mkdirSync(scopeDir, { recursive: true })
+      writeFileSync(scopeFile('m1'), JSON.stringify({ version: 1, id: 'm1', folder: host.home }))
+      scopeFiles = readdirSync(scopeDir).sort()
+      const reserve = rt.reserveReadScope
+      rt.reserveReadScope = async (...options) => {
+        reserved = await reserve(...options)
+        assert.equal(typeof reserved, 'string')
+        assert.ok(existsSync(scopeFile(reserved)))
+        await gate.wait()
+        return reserved
+      }
+    } else {
+      host.ctx.workspaceRegistry.resolveByPath = async () => { await gate.wait(); return undefined }
+    }
+    const workspaceCreate = t.mock.method(host.ctx.workspaceRegistry, 'create')
+    await rt.load()
+    await rt.save()
+    const creating = host.tool('create_bot', args)
+    let before
+    let workspaceId
+    let archives
+    let saves
+    try {
+      await Promise.race([gate.entered, creating.then(answer => assert.fail(answer))])
+      assert.equal((await host.call('set-main', { id: 'm1', main: false })).ok, true)
+      if (phase.endsWith('deletion')) assert.equal((await host.call('delete-bot', { id: 'm1' })).ok, true)
+      await rt.save()
+      before = botSnapshot(host)
+      workspaceId = host.state().workspaceId
+      archives = structuredClone(host.archived)
+      saves = t.mock.method(rt, 'save')
+    } finally {
+      gate.release()
+    }
+    const answer = await creating
+    assert.equal(saves.mock.callCount(), 0)
+    assert.deepEqual(host.archived, archives)
+    assert.equal(host.create.mock.callCount(), 0)
+    assert.equal(workspaceCreate.mock.callCount(), 0)
+    await assertSameBots(host, before)
+    assert.equal(host.state().workspaceId, workspaceId)
+    assert.equal(answer, MAIN_ONLY)
+    if (reserved !== undefined) {
+      assert.equal(existsSync(join(scopeDir, `${createHash('sha256').update(reserved).digest('hex')}.json`)), false)
+      assert.deepEqual(readdirSync(scopeDir).sort(), scopeFiles)
+    }
+  })
+}
+
+for (const hasWorkspace of [true, false]) {
+  const scenario = hasWorkspace ? 'writes no reservation' : 'leaves the workspace and grants unchanged'
+  test(`native create ${scenario} when the caller is lost during lineage lookup`, { timeout: 10000 }, async t => {
+    const host = lookRoster(t, { ...OLD_TEAM, whaleStored: true, ...(hasWorkspace ? { workspaceId: 'w-test' } : {}) })
+    if (hasWorkspace) host.ctx.workspaceRegistry.get = () => ({ id: 'w-test', path: host.home })
+    const scope = seedReadScope(host)
+    const gate = pause()
+    const get = host.ctx.get
+    host.ctx.get = name => name === 'sessionPersistence' ? { stat: async id => {
+      if (id !== 'm1') return undefined
+      await gate.wait()
+      return { header: { id } }
+    } } : get(name)
+    await rt.load()
+    await rt.save()
+    const workspaceId = host.state().workspaceId
+    const dropGrants = rt.dropAllShellGrants = t.mock.fn()
+    const register = t.mock.method(host.ctx.workspaceRegistry, 'create')
+    const open = fsp.open
+    const scopeOpens = []
+    fsp.open = (...args) => {
+      if (String(args[0]).startsWith(`${scope.directory}/`) && args[1] === 'wx') scopeOpens.push(args[0])
+      return open(...args)
+    }
+    syncBuiltinESMExports()
+    t.after(() => { fsp.open = open; syncBuiltinESMExports() })
+    const args = { name: 'Candidate', role: 'Writer', instructions: 'Write notes.' }
+    const creating = host.tool('create_bot', args)
+    let before
+    let saves
+    try {
+      await Promise.race([gate.entered, creating.then(answer => assert.fail(answer))])
+      assert.equal((await host.call('set-main', { id: 'm1', main: false })).ok, true)
+      await rt.save()
+      before = botSnapshot(host)
+      saves = t.mock.method(rt, 'save')
+    } finally {
+      gate.release()
+    }
+    assert.equal(await creating, MAIN_ONLY)
+    assert.equal(host.create.mock.callCount(), 0)
+    assert.deepEqual(host.archived, [])
+    assert.equal(saves.mock.callCount(), 0)
+    if (!hasWorkspace) {
+      assert.equal(rt.state.workspaceId, workspaceId, 'keep the live team workspace')
+      assert.equal(host.state().workspaceId, workspaceId, 'keep the saved team workspace')
+      assert.equal(dropGrants.mock.callCount(), 0)
+      assert.equal(register.mock.callCount(), 1)
+      const workspace = await host.ctx.workspaceRegistry.resolveByPath(rt.defaultTeamFolder())
+      assert.equal(workspace?.path, rt.defaultTeamFolder())
+      assert.ok(existsSync(workspace.path))
+    }
+    assert.deepEqual(scopeOpens, [], 'never open a reservation for writing')
+    assert.deepEqual(readdirSync(scope.directory).map(name => join(scope.directory, name)), [scope.file('m1')])
+    await assertSameBots(host, before)
+  })
+}
+
+test('native create publishes the resolved workspace after Session allocation', { timeout: 10000 }, async t => {
+  const host = lookRoster(t, { ...OLD_TEAM, whaleStored: true })
+  await rt.load()
+  await rt.save()
+  const workspaceId = host.state().workspaceId
+  const dropGrants = rt.dropAllShellGrants = t.mock.fn()
+  const gate = pause()
+  let place
+  host.ctx.sessionController.create = async options => {
+    place = options
+    await gate.wait()
+    return { sessionId: 'allocated' }
+  }
+  const creating = host.tool('create_bot', { name: 'Candidate', role: 'Writer', instructions: 'Write notes.' })
+  let workspace
+  try {
+    await Promise.race([gate.entered, creating.then(answer => assert.fail(answer))])
+    workspace = await host.ctx.workspaceRegistry.resolveByPath(rt.defaultTeamFolder())
+    assert.equal(place.workspaceId, workspace.id)
+    assert.equal(rt.state.workspaceId, workspaceId)
+    assert.equal(host.state().workspaceId, workspaceId)
+    assert.equal(dropGrants.mock.callCount(), 0)
+  } finally {
+    gate.release()
+    await creating
+  }
+  assert.equal(host.state().bots.allocated.name, 'Candidate')
+  assert.equal(rt.state.workspaceId, workspace.id)
+  assert.equal(host.state().workspaceId, workspace.id)
+  assert.equal(dropGrants.mock.callCount(), 1)
+})
+
+test('native create refuses empty, whitespace and non-string supplied photos before approval', async t => {
+  const host = lookRoster(t)
+  await rt.load()
+  await rt.save()
+  const approval = t.mock.method(rt, 'approveFolder')
+  const args = { name: 'Candidate', role: 'Writer', instructions: 'Write notes.' }
+  for (const avatar of ['', '   ']) {
+    const before = botSnapshot(host)
+    const answer = await host.tool('create_bot', { ...args, avatar })
+    await assertSameBots(host, before)
+    assert.match(answer, /^Could not create the Bot: Give an image path or a data URL\./)
+  }
+  const before = botSnapshot(host)
+  await assert.rejects(host.tool('create_bot', { ...args, avatar: false }), { code: 'INVALID_ARGS' })
+  await assertSameBots(host, before)
+  assert.equal(approval.mock.callCount(), 0)
+  assert.equal(host.create.mock.callCount(), 0)
+})
+
+test('native create treats an explicit null photo as omitted', async t => {
+  const host = lookRoster(t)
+  assert.match(await host.tool('create_bot', { name: 'Candidate', role: 'Writer', instructions: 'Write notes.', avatar: null }), /^Created /)
+  assert.equal(host.create.mock.callCount(), 1)
+  const created = Object.values(host.state().bots).find(bot => bot.id === 's1')
+  assert.ok(created)
+  assert.equal(created.avatar, undefined)
+})
+
+test('person create refuses unusable supplied avatars without a Bot or Session', async t => {
+  const host = lookRoster(t)
+  await rt.load()
+  await rt.save()
+  for (const [profile, message] of [[solverProfile(), SOLVER_WEARS], [{ role: 'Writer' }, LOOK_INVALID]]) {
+    for (const avatar of [null, {}, { shape: 'Bad!' }]) {
+      const before = botSnapshot(host)
+      const result = await host.call('create-bot', { name: 'Candidate', ...profile, avatar })
+      await assertSameBots(host, before)
+      assert.equal(result.error?.message, message)
+    }
+  }
+  const before = botSnapshot(host)
+  const result = await host.call('create-bot', { name: 'Candidate', role: 'Writer', avatar: { shape: 'frog' } })
+  await assertSameBots(host, before)
+  assert.equal(result.error?.message, SOLVER_ONLY)
+  assert.equal(host.create.mock.callCount(), 0)
+})
+
+test('person create stores a Solver’s default or chosen shape and leaves an omitted ordinary avatar empty', async t => {
+  const host = lookRoster(t)
+  for (const [name, profile, avatar] of [
+    ['Candidate one', solverProfile(), undefined],
+    ['Candidate two', solverProfile(), { shape: 'frog' }],
+    ['Candidate three', { role: 'Writer' }, undefined],
+  ]) {
+    const result = await host.call('create-bot', { name, ...profile, ...(avatar ? { avatar } : {}) })
+    assert.equal(result.ok, true, result.error?.message)
+    const id = result.value.id
+    const expected = avatar ?? (profile.role === 'Solver' ? { shape: solverDefaultShape(id) } : undefined)
+    assert.deepEqual(host.state().bots[id].avatar, expected)
+  }
+})
+
+test('a refused create on an empty team does not bootstrap a Main Bot', async t => {
+  const host = lookRoster(t, { version: 1, bots: {}, rooms: {}, mainBotIds: [] })
+  await rt.load()
+  await rt.save()
+  const before = botSnapshot(host)
+  const result = await host.call('create-bot', { name: 'Candidate', role: 'Writer', avatar: { shape: 'frog' } })
+  await assertSameBots(host, before)
+  assert.equal(result.error?.message, SOLVER_ONLY)
+  assert.deepEqual(host.state().mainBotIds, [])
+  assert.deepEqual(host.state().bots, {})
+  assert.equal(host.create.mock.callCount(), 0)
+})
+
+test('New Solver’s dedicated reviewer takes the ordinary create look rule', async t => {
+  const host = lookRoster(t, { version: 1, bots: {}, rooms: {}, mainBotIds: [] })
+  await rt.load()
+  await rt.save()
+  const before = botSnapshot(host)
+  const reviewer = look => reviewerPayload({ name: 'Candidate', look })
+  const refused = await host.call('create-bot', reviewer({ shape: 'frog', color: 'red' }))
+  await assertSameBots(host, before)
+  assert.equal(refused.error?.message, SOLVER_ONLY)
+  assert.deepEqual(host.state().bots, {})
+  assert.equal(host.create.mock.callCount(), 0)
+  const ordinary = await host.call('create-bot', reviewer({ shape: 'star', color: 'blue' }))
+  assert.equal(ordinary.ok, true, ordinary.error?.message)
+  const record = host.state().bots[ordinary.value.id]
+  assert.equal(record.role, 'Reviewer')
+  assert.deepEqual(record.avatar, { shape: 'star' })
+  assert.equal(record.color, 'blue')
+})
+
+test('create rechecks a reviewer lost during Session allocation before publishing the Bot or section', { timeout: 10000 }, async t => {
+  const host = lookRoster(t, { ...OLD_TEAM, mainBotIds: ['m1'] })
+  const gate = pause()
+  host.ctx.sessionController.create = async () => {
+    await gate.wait()
+    return { sessionId: 'allocated' }
+  }
+  const creating = host.call('create-bot', { name: 'Candidate', role: 'Solver', instructions: 'Plain',
+    reviewerId: 'w2', section: 'Brand new', avatar: { shape: 'frog' } })
+  let before
+  try {
+    await Promise.race([gate.entered, creating.then(result => assert.fail(JSON.stringify(result)))])
+    assert.equal((await host.call('delete-bot', { id: 'w2' })).ok, true)
+    await rt.save()
+    before = botSnapshot(host)
+  } finally {
+    gate.release()
+  }
+  const result = await creating
+  await assertSameBots(host, before)
+  assert.equal(result.error?.message, SOLVER_ONLY)
+  assert.ok(!host.state().sections?.some(section => section.name === 'Brand new'))
+  assert.ok(host.archived.some(([id]) => id === 'allocated'))
+})
+
+test('a rejected existing-Session rename publishes neither the Bot nor its new section', async t => {
+  const host = lookRoster(t, OLD_TEAM, { renameError: new Error('Rename refused') })
+  await rt.load()
+  await rt.save()
+  const before = botSnapshot(host)
+  const { titles } = host
+  titles.set('existing', 'Original')
+  const rename = host.ctx.sessionTitle.rename
+  host.ctx.sessionTitle.rename = async (session, title) => {
+    assert.equal(session.id, 'existing')
+    assert.equal(title, 'Candidate')
+    assert.equal(rt.botOf(session.id), undefined)
+    assert.ok(!rt.state.sections?.some(section => section.name === 'Brand new'))
+    await rename(session, title)
+  }
+  await assert.rejects(rt.createBot({ name: 'Candidate', existingSessionId: 'existing', section: 'Brand new' }), /Rename refused/)
+  await assertSameBots(host, before)
+  assert.ok(!host.state().sections?.some(section => section.name === 'Brand new'))
+  assert.equal(titles.get('existing'), 'Original')
+  assert.equal(host.create.mock.callCount(), 0)
+  assert.deepEqual(host.archived, [])
+})
+
+test('a failed create rolls back its newly appended section and archives the Session', async t => {
+  const host = lookRoster(t, { ...OLD_TEAM, agents: { standalone: { id: 'standalone', name: 'DSH agent' } } }, { models: ['v4'] })
+  await rt.load()
+  await rt.save()
+  const before = botSnapshot(host)
+  t.mock.method(rt, 'applyPermission', async () => { throw new Error('Permission refused') }, { times: 1 })
+  await assert.rejects(rt.createBot({ name: 'Candidate', model: 'deepseek/v4', section: 'Brand new' }), /Permission refused/)
+  await assertSameBots(host, before)
+  assert.ok(!host.state().sections?.some(section => section.name === 'Brand new'))
+  assert.deepEqual(host.archived.map(([id]) => id), ['s1'])
+
+  const gate = pause()
+  t.mock.method(rt, 'applyPermission', async () => {
+    await gate.wait()
+    throw new Error('Permission refused')
+  }, { times: 1 })
+  const creating = assert.rejects(rt.createBot({ name: 'Candidate', model: 'deepseek/v4', section: 'Brand new' }), /Permission refused/)
+  let section
+  try {
+    await Promise.race([gate.entered, creating.then(() => assert.fail('Create ended before applying permission'))])
+    section = rt.state.sections.find(entry => entry.name === 'Brand new')
+    assert.equal((await host.call('set-flags', { id: 'standalone', sectionId: section.id })).ok, true)
+  } finally {
+    gate.release()
+  }
+  await creating
+  await assertSameBots(host, before)
+  assert.deepEqual(rt.state.sections.find(entry => entry.id === section.id), section)
+  assert.deepEqual(host.state().sections.find(entry => entry.id === section.id), section)
+  assert.equal(rt.state.agents.standalone.sectionId, section.id)
+  assert.equal(host.state().agents.standalone.sectionId, section.id)
+  assert.deepEqual(host.archived.map(([id]) => id), ['s1', 's2'])
+})
+
+for (const setup of ['reservation mismatch', 'agent resolution', 'title rename']) {
+  test(`native create archives its Session and removes its reservation after ${setup} fails`, async t => {
+    const host = lookRoster(t, { ...OLD_TEAM, whaleStored: true, workspaceId: 'w-test' })
+    host.ctx.workspaceRegistry.get = () => ({ id: 'w-test', path: host.home })
+    host.ctx.sessions.get = id => id === 'm1' ? { id, header: { id } } : undefined
+    const scope = seedReadScope(host)
+    let reserved
+    let allocated
+    host.ctx.sessionController.create = async ({ sessionId }) => {
+      reserved = sessionId
+      allocated = setup === 'reservation mismatch' ? 'different-session' : reserved
+      return { sessionId: allocated }
+    }
+    const setupError = `${setup} failed`
+    const resolveAgent = rt.resolveAgent
+    if (setup === 'agent resolution') t.mock.method(rt, 'resolveAgent', async id => {
+      if (id === allocated) throw new Error(setupError)
+      return resolveAgent(id)
+    })
+    if (setup === 'title rename') t.mock.method(host.ctx.sessionTitle, 'rename', async () => { throw new Error(setupError) })
+    await rt.load()
+    await rt.save()
+    const before = botSnapshot(host)
+    const answer = await host.tool('create_bot', { name: 'Candidate', role: 'Writer', instructions: 'Write notes.' })
+    assert.match(answer, setup === 'reservation mismatch' ? /DSH did not use the Session reserved/ : new RegExp(setupError))
+    assert.equal(typeof reserved, 'string')
+    assert.deepEqual(host.archived.map(([id]) => id), [allocated])
+    assert.equal(existsSync(scope.file(reserved)), false)
+    assert.ok(existsSync(scope.file('m1')))
+    await assertSameBots(host, before)
+  })
+}
+
+test('an adopted Session refuses a creator, reviewer or review guard before rename', async t => {
+  const host = lookRoster(t)
+  await rt.load()
+  await rt.save()
+  const renamed = t.mock.method(host.ctx.sessionTitle, 'rename')
+  for (const options of [{ createdBy: 'm1' }, { reviewerId: 'w2' }, { reviewGuard: false }]) {
+    const before = botSnapshot(host)
+    await assert.rejects(rt.createBot({ name: 'Candidate', existingSessionId: 'existing', section: 'Brand new', ...options }),
+      /An adopted Session takes no creator or reviewer\./)
+    await assertSameBots(host, before)
+  }
+  assert.equal(renamed.mock.callCount(), 0)
+  assert.ok(!host.state().sections?.some(section => section.name === 'Brand new'))
+  assert.equal(host.create.mock.callCount(), 0)
+})
+
+test('pet-use refuses a Solver before any fetch, then installs the same pet for an ordinary Bot', async t => {
+  const id = 'fixture-pet'
+  const url = 'https://codex-pets.net/assets/fixture.webp'
+  const sheet = Buffer.alloc(40)
+  sheet.write('RIFF', 0, 'latin1')
+  sheet.write('WEBP', 8, 'latin1')
+  sheet.write('VP8X', 12, 'latin1')
+  sheet.writeUIntLE(1536 - 1, 24, 3)
+  sheet.writeUIntLE(1872 - 1, 27, 3)
+  const fetch = t.mock.method(globalThis, 'fetch', async input => {
+    if (input === url) return new Response(sheet)
+    assert.equal(input, `https://codex-pets.net/api/pets/${id}`)
+    return Response.json({ pet: { id, displayName: 'Fixture', spritesheetUrl: url } })
+  })
+  const host = lookRoster(t, { ...OLD_TEAM, bots: { ...OLD_TEAM.bots,
+    w2: { ...OLD_TEAM.bots.w2, ...solverProfile(), avatar: { shape: 'frog' } } } })
+  await rt.load()
+  await rt.save()
+  const before = botSnapshot(host)
+  const pets = join(host.home, 'pets')
+  const result = await host.call('pet-use', { botId: 'w2', source: 'market', id })
+  await assertSameBots(host, before)
+  assert.equal(result.error?.message, SOLVER_WEARS)
+  assert.equal(fetch.mock.callCount(), 0)
+  assert.equal(existsSync(join(pets, id)), false)
+  assert.ok(!existsSync(pets) || !readdirSync(pets).some(name => name.startsWith(`.${id}.`) && name.endsWith('.tmp')))
+  const ordinary = await host.call('pet-use', { botId: 'm1', source: 'market', id })
+  assert.equal(ordinary.ok, true, ordinary.error?.message)
+  assert.equal(fetch.mock.callCount(), 2)
+  assert.deepEqual(host.state().bots.m1.avatar.pet, { source: 'team', id, version: 1 })
 })

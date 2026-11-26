@@ -34,6 +34,7 @@ const react = {
   Fragment: 'fragment',
   useCallback: fn => fn,
   useEffect() {}, useLayoutEffect() {},
+  useSyncExternalStore: (subscribe, get) => get(),
   useState: (init) => {
     const i = idx++
     if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init

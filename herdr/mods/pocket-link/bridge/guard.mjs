@@ -2,7 +2,7 @@
 // handshake and the first line, a cap on connections, a throttle on the log lines a stranger can
 // cause and a size cap on the log. bridge.mjs hands it iroh's objects; nothing here imports iroh,
 // so `node --test` runs it without npm.
-import { copyFileSync, chmodSync, statSync, truncateSync } from 'node:fs'
+import { closeSync, constants, fchmodSync, fstatSync, ftruncateSync, lstatSync, openSync, readSync, writeFileSync } from 'node:fs'
 
 /** The handshake, the first stream and its header line, together; and a whole pairing. */
 export const HANDSHAKE_MS = 10_000
@@ -16,6 +16,29 @@ export const MAX_OPEN = 64
 export const MAX_LINE = 4096
 /** The log is copied to <log>.1 and emptied past this size. */
 export const LOG_MAX = 1024 * 1024
+
+function checkLog(path, file) {
+  if (!file.isFile() || file.nlink !== 1 || file.uid !== process.getuid()) {
+    throw new Error(`Unsafe Pocket Link log destination: ${path}`)
+  }
+  return file
+}
+
+function logInfo(path) {
+  try { return checkLog(path, lstatSync(path)) } catch (e) { if (e.code !== 'ENOENT') throw e }
+}
+
+export function assertSafeLogs(path) {
+  logInfo(path)
+  logInfo(`${path}.1`)
+}
+
+function openLog(path, flags) {
+  const fd = openSync(path, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600)
+  try { checkLog(path, fstatSync(fd)); return fd } catch (e) { closeSync(fd); throw e }
+}
+
+export const openAppendLog = path => openLog(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT)
 
 /** One line of JSON from a stream, at most MAX_LINE bytes; the rest of what was read comes back too. */
 export async function readLine(recv) {
@@ -103,13 +126,25 @@ export function throttle(log, { burst = 5, per = 60_000, now = Date.now } = {}) 
  * service's stderr is opened to append (launchd, `start`), so it keeps writing at the new end.
  */
 export function rotateLog(path, max = LOG_MAX) {
-  let size
-  try { size = statSync(path).size } catch { return false }
-  if (size <= max) return false
-  copyFileSync(path, `${path}.1`)
-  chmodSync(`${path}.1`, 0o600)
-  truncateSync(path, 0)
-  return true
+  const file = logInfo(path)
+  if (!file || file.size <= max) return false
+  const from = openLog(path, constants.O_RDWR)
+  try {
+    const to = openLog(`${path}.1`, constants.O_WRONLY | constants.O_CREAT)
+    try {
+      fchmodSync(to, 0o600)
+      ftruncateSync(to, 0)
+      const chunk = Buffer.alloc(64 * 1024)
+      for (let offset = 0; offset < file.size;) {
+        const count = readSync(from, chunk, 0, Math.min(chunk.length, file.size - offset), offset)
+        if (!count) break
+        writeFileSync(to, chunk.subarray(0, count))
+        offset += count
+      }
+      ftruncateSync(from, 0)
+      return true
+    } finally { closeSync(to) }
+  } finally { closeSync(from) }
 }
 
 const closeConn = (conn, why) => { try { conn.close(1n, [...Buffer.from(why)]) } catch {} }
@@ -203,7 +238,7 @@ export function routesFor({ paired, codeLive, pair, session, chat }) {
 
 /**
  * End what removed phones still have open: every entry of `live` ({ phone, end() }) whose phone
- * is not among `paired` ids. bridge.mjs runs it every 2 s, for terminal sessions and chats alike.
+ * is not among `paired` ids. bridge.mjs runs it every second, for terminal sessions and chats alike.
  * @returns {number} how many were ended
  */
 export function endRemoved(live, paired, log = () => {}) {

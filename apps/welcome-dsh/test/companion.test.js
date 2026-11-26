@@ -73,6 +73,21 @@ test('the vendored characters and inks are still the team plugin\'s own', () => 
   }
 })
 
+test('the companion picker lists the 21 characters any Bot may pick, and no Solver', async () => {
+  // The vendored catalogue itself (pure): companion-art.js draws React, so it is read as text.
+  const { PICKER_SHAPES, SOLVER_SHAPES } = await import('../src/client/vendor/characters.js')
+  assert.deepEqual(PICKER_SHAPES, ['whale', 'octopus', 'star', 'moon', 'wave', 'squircle', 'zed', 'hex', 'gumdrop', 'peanut', 'saucer', 'bunny', 'kitty', 'beacon', 'plus', 'magnet', 'acorn', 'pebbles', 'cushion', 'ring', 'gem'])
+  assert.equal(SOLVER_SHAPES.length, 12)
+  assert.deepEqual(PICKER_SHAPES.filter(id => SOLVER_SHAPES.includes(id)), [])
+  // The picker draws exactly that list, as one grid.
+  const art = readFileSync(new URL('../src/client/companion-art.js', import.meta.url), 'utf8')
+  assert.ok(art.includes('export const SHAPES = PICKER_SHAPES\n'))
+  assert.ok(!art.includes('SOLVER_SHAPES'))
+  const step = readFileSync(new URL('../src/client/companion.js', import.meta.url), 'utf8')
+  assert.ok(step.includes('SHAPES.map(id => h(\'button\', {'))
+  assert.ok(!step.includes('Solvers') && !step.includes('SOLVER_SHAPES'))
+})
+
 test('companion says which image source is ready, and never what it holds', async () => {
   assert.equal((await host().handle('companion')).value.generate, null)
 
@@ -87,8 +102,9 @@ test('companion says which image source is ready, and never what it holds', asyn
   assert.deepEqual(keyed.value.generate, { kind: 'openai', ready: true })
   assert.doesNotMatch(JSON.stringify(keyed), new RegExp(KEY))
 
-  const fromEnv = await host({ credentials: { OPENAI_API_KEY: KEY } }).handle('companion')
-  assert.deepEqual(fromEnv.value.generate, { kind: 'openai', ready: true })
+  // A key saved in the app (DSH's credential file: fake-ctx resolves source: 'file').
+  const saved = await host({ credentials: { OPENAI_API_KEY: KEY } }).handle('companion')
+  assert.deepEqual(saved.value.generate, { kind: 'openai', ready: true })
 
   // The Bots' order: a key, then a signed-in Codex, then a grant on a shared scope.
   const both = await host({ recordValues: { ...grant(), [OPENAI_RECORD]: { kind: 'api-key', key: KEY } }, codex: codexOf() }).handle('companion')
@@ -97,6 +113,34 @@ test('companion says which image source is ready, and never what it holds', asyn
   assert.deepEqual(codex.value.generate, { kind: 'codex', ready: true })
   const signedOut = await host({ recordValues: grant(), codex: codexOf({ ready: false }) }).handle('companion')
   assert.equal(signedOut.value.generate, null)
+})
+
+test('an OPENAI_API_KEY inherited from the environment is not used for the companion', async () => {
+  const codex = codexOf()
+  for (const { source, service, kind } of [
+    { source: 'env' }, { source: 'env', service: codex, kind: 'codex' },
+    {}, { source: '' }, { source: 'user-env', kind: 'openai' }, { source: 'keychain', kind: 'openai' },
+  ]) {
+    const drawing = host({ codex: service })
+    drawing.ctx.credentials.resolve = async ref => ref === 'OPENAI_API_KEY'
+      ? { value: KEY, ...(source === undefined ? {} : { source }) } : undefined
+
+    const status = await drawing.handle('companion')
+    const reply = await drawing.handle('companion-generate', { description: 'a fox' })
+    assert.deepEqual(status.value.generate, kind ? { kind, ready: true } : null)
+    assert.doesNotMatch(JSON.stringify([status, reply]), new RegExp(KEY))
+    if (kind === undefined) {
+      assert.equal(reply.error.code, 'omni-ai/refused')
+      assert.match(reply.error.message, /Sign in to Codex first/)
+    } else assert.equal(reply.value.via, kind)
+    assert.equal(drawing.requests.length, kind === 'openai' ? 1 : 0)
+    if (kind === 'openai') {
+      assert.equal(drawing.requests[0].url, OPENAI_IMAGES)
+      assert.equal(drawing.requests[0].init.headers.authorization, `Bearer ${KEY}`)
+    }
+  }
+  assert.equal(codex.calls.length, 1)
+  assert.doesNotMatch(JSON.stringify(codex.calls), new RegExp(KEY))
 })
 
 for (const [name, codex] of [
@@ -304,6 +348,8 @@ test('Omni joining the team adds the Omni Bot once, in its own project, with its
     assert.equal(reply.value.omniBot.name, 'Omni')
     const [, options] = team.calls.find(call => call[0] === 'createBot')
     assert.deepEqual({ ...options, avatar: { ...options.avatar } }, { ...OMNI_BOT, avatar: { ...OMNI_BOT.avatar }, workDir: join(folder, 'omni'), pickModel: true })
+    assert.equal(team.botOf(reply.value.omniBot.id).kind, 'omni')
+    assert.deepEqual(team.botOf(reply.value.omniBot.id).avatar, { shape: 'octopus' })
     assert.ok(statSync(join(folder, 'omni')).isDirectory())
     assert.deepEqual(fake.valueOf('omni-ai'), { teamOmni: true, teamGenie: false, teamOmniAbilities: '{"channels":true,"shell":false}' })
 
@@ -312,6 +358,35 @@ test('Omni joining the team adds the Omni Bot once, in its own project, with its
   } finally {
     rmSync(folder, { recursive: true, force: true })
   }
+})
+
+test('the Welcome team step reports the same look refusal as companion save', async () => {
+  const bots = readFileSync(new URL('../../bots-dsh/src/shared/solver-looks.js', import.meta.url), 'utf8')
+  const welcome = readFileSync(new URL('../src/host/companion.js', import.meta.url), 'utf8')
+  assert.equal(bots.match(/^export const SOLVER_WEARS = '(.+)'$/m)[1], welcome.match(/^const SOLVER_LOOK_REFUSAL = '(.+)'$/m)[1])
+
+  const team = fakeTeam({ mainName: 'Mochi' })
+  const message = 'A Solver wears one of the Solver characters. Choose one of those characters.'
+  team.updateBot = async () => { throw Object.assign(new Error(message), { code: 'bot/refused' }) }
+  const fake = host({ team, entries: { 'omni-ai': { companionName: 'Pip', companionShape: 'octopus' } } })
+  const direct = await fake.handle('companion-save', { name: 'Pip', shape: 'octopus' })
+  assert.equal(direct.error?.message, message)
+  const result = await fake.handle('team-save', { omni: true })
+  assert.deepEqual(result, direct)
+  assert.deepEqual(team.calls, [])
+})
+
+test('the Welcome team step saves the choice and joins Omni after a non-look refusal', async () => {
+  const team = fakeTeam({ mainName: 'Mochi' })
+  team.updateBot = async () => { throw Object.assign(new Error('Unknown Bot'), { code: 'bot/refused' }) }
+  const fake = host({ team, entries: { 'omni-ai': { companionName: 'Pip', companionShape: 'octopus' } } })
+
+  const result = await fake.handle('team-save', { omni: true, genie: true })
+
+  assert.deepEqual(fake.valueOf('omni-ai'), { companionName: 'Pip', companionShape: 'octopus', teamOmni: true, teamGenie: true })
+  assert.equal(result.error, undefined)
+  assert.equal(team.botOf(result.value.omniBot.id).kind, 'omni')
+  assert.deepEqual(fake.logs, [['omni-ai: the companion was not applied: %s', 'Unknown Bot']])
 })
 
 test('a deleted Omni Bot comes back from the Bot team\'s Add Omni, made as the team step makes it', async () => {
@@ -331,6 +406,8 @@ test('a deleted Omni Bot comes back from the Bot team\'s Add Omni, made as the t
     assert.equal(bot.name, 'Omni')
     const [, options] = team.calls.find(call => call[0] === 'createBot')
     assert.equal(options.kind, OMNI_BOT.kind)
+    assert.equal(team.botOf(bot.id).kind, 'omni')
+    assert.deepEqual(team.botOf(bot.id).avatar, { shape: 'octopus' })
     assert.equal(options.workDir, join(folder, 'omni'))
     assert.equal(addable(), false)
   } finally {
@@ -377,6 +454,23 @@ test('Connect AI finished with an AI on gives the companion, the Omni Bot and th
   assert.deepEqual(reply.value, { connectAiDone: true })
   assert.deepEqual(team.calls, [['updateBot', 'main', { model: 'anthropic/claude-opus-5-5' }], ['updateBot', 'omni', { model: 'anthropic/claude-opus-5-5' }], ['updateBot', 'genie', { model: 'anthropic/claude-opus-5-5' }]])
   assert.equal(team.state.bots.other.model, undefined)
+})
+
+// G6-18 (#2048): with only Antigravity on, the first model that can run is an Antigravity one
+// (bots-dsh pickDefault), and the first Bots start on it, as with Claude or Codex alone.
+test('Connect AI finished with only Antigravity on gives the first Bots its model; none yet sets nothing', async () => {
+  const team = withModels(fakeTeam({ mainName: 'Pip' }), ['acp-antigravity/x'])
+  team.state.bots.omni = { id: 'omni', name: 'Omni', kind: 'omni' }
+  team.state.bots.genie = { id: 'genie', name: 'Genie', kind: 'genie' }
+  const fake = host({ team })
+  assert.deepEqual((await fake.handle('done', { stepId: 'omni-connect-ai', connected: true })).value, { connectAiDone: true })
+  assert.deepEqual(team.calls, [['updateBot', 'main', { model: 'acp-antigravity/x' }], ['updateBot', 'omni', { model: 'acp-antigravity/x' }], ['updateBot', 'genie', { model: 'acp-antigravity/x' }]])
+  const none = withModels(fakeTeam(), [undefined])
+  none.state.bots.omni = { id: 'omni', name: 'Omni', kind: 'omni' }
+  const { install: installAgain } = await import('../src/host/endpoint.js')
+  const quick = installAgain(host({ team: none }).ctx, { assignWaitMs: 0 })
+  assert.equal((await quick.handle('done', { stepId: 'omni-connect-ai', connected: true })).ok, true)
+  assert.deepEqual(none.calls, [])
 })
 
 test('a skipped Connect AI, a Bot with a model, or no model that can run sets nothing', async () => {

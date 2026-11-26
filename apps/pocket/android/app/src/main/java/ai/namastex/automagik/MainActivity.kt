@@ -15,6 +15,9 @@ import androidx.activity.compose.setContent
 import android.content.Intent
 import android.os.Build
 import android.Manifest
+import android.provider.Settings
+import android.view.ViewGroup
+import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -38,7 +41,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.ui.input.pointer.pointerInput
 import kotlinx.coroutines.launch
+import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.text.KeyboardActions
@@ -51,36 +56,90 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import java.util.UUID
 
 
 class MainActivity : ComponentActivity() {
     private val vm get() = (application as PocketApplication).vm
+    private lateinit var lockAuth: AppLockAuth
+    private var heldUpdate: Intent? = null
+    private var appContentComposed = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lockAuth = AppLockAuth(this, savedInstanceState)
         if (savedInstanceState == null) { openLink(intent); openAlert(intent); openUpdate(intent) }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.auto(0xfffbf6ee.toInt(), 0xff262029.toInt())
         )
+        var handledEpisode = AppLock.state.value.let { if (it.locked) it.episode - 1 else it.episode }
+        lifecycleScope.launch {
+            AppLock.state.collect { lock ->
+                if (lock.episode != handledEpisode) {
+                    handledEpisode = lock.episode
+                    vm.cancelRepair()
+                    WindowCompat.getInsetsController(window, window.decorView).hide(WindowInsetsCompat.Type.ime())
+                    window.currentFocus?.clearFocus()
+                }
+                if (!lock.locked && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) openHeldUpdate()
+            }
+        }
         setContent {
             AutomagikTheme {
-                PocketApp(vm)
+                val lock by AppLock.state.collectAsState()
+                SideEffect { appContentComposed = !lock.locked }
+                LockGate(lock, cover = {
+                    lockAuth.AutoPrompt(lock)
+                    LockCover(lockAuth.canLock, { requestAppLock(AppLock.Purpose.UNLOCK) },
+                        { startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS)) }, vm::setForeground)
+                }, content = { PocketApp(vm) })
             }
         }
     }
+    override fun onResume() {
+        // Activity results arrive before resume. Dispose stale content before its install effects can resume.
+        if (appContentComposed && AppLock.locked()) {
+            val root = findViewById<ViewGroup>(android.R.id.content)
+            (root?.getChildAt(0) as? ComposeView)?.disposeComposition()
+        }
+        super.onResume()
+        openHeldUpdate()
+    }
+    override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); lockAuth.save(outState) }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); openLink(intent); openAlert(intent); openUpdate(intent) }
     // A waiting update doesn't install under someone using the app.
-    override fun onUserInteraction() { super.onUserInteraction(); Updater.touched() }
+    override fun onUserInteraction() { super.onUserInteraction(); AppUpdates.touched() }
+
+    fun requestAppLock(purpose: AppLock.Purpose) {
+        if (purpose == AppLock.Purpose.ENABLE && !AppLock.canLock(this)) {
+            Toast.makeText(this, "Set a screen lock in Android settings first.", Toast.LENGTH_SHORT).show()
+        } else lockAuth.request(purpose)
+    }
+
+    private fun openHeldUpdate() {
+        if (AppLock.locked()) return
+        val update = heldUpdate ?: return
+        heldUpdate = null
+        openUpdate(update)
+    }
+
     // The "ready" notification: show Settings → About, where the update's progress is, and run Android's confirm flow.
     private fun openUpdate(intent: Intent?) {
-        if (intent?.action != Updater.ACTION_INSTALL) return
-        vm.navigate(Nav.SETTINGS)
-        Updater.installFromNotification(this)
-        setIntent(Intent(this, MainActivity::class.java))
+        if (AppLock.locked()) {
+            if (intent?.action == "ai.namastex.automagik.INSTALL_UPDATE") {
+                heldUpdate = intent
+                setIntent(Intent(this, MainActivity::class.java))
+            }
+            return
+        }
+        if (AppUpdates.openInstallNotification(this, intent) { vm.navigate(Nav.SETTINGS) }) {
+            setIntent(Intent(this, MainActivity::class.java))
+        }
     }
     // A notification's tap opens its agent.
     private fun openAlert(intent: Intent?) {
@@ -111,9 +170,15 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
 @Composable fun PocketApp(vm: PocketViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    val context = LocalContext.current
     var pairDesktop by remember { mutableStateOf(false) }
     // Pocket Link's QR code; a cancelled scan returns no contents, and leaves a legacy SSH card it came from as it was.
-    val scanner = rememberLauncherForActivityResult(ScanContract()) { result -> vm.scanned(result.contents) }
+    val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+        if (AppLock.locked()) {
+            vm.scanned(null)
+            Toast.makeText(context, "Unlock Automagik, then scan again.", Toast.LENGTH_SHORT).show()
+        } else vm.scanned(result.contents)
+    }
     fun scan() { scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("Scan the code in Pocket Link").setBeepEnabled(false).setOrientationLocked(false)) }
     // A legacy SSH machine's "Pair with QR" ([LegacySsh]): straight to the scanner; the pairing replaces that card.
     fun repair(host: HostProfile) { vm.repairWithQr(host.id); scan() }
@@ -178,6 +243,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
     val teams = rememberTeams(state, vm)
     // The Bots' `dsh:` chats, for Team's bubbles and Home's rows: a main bot's pane opens its DSH chat (RFC 0015 D29).
     val dsh = rememberDshChats(state, vm, reading = selected == null && state.screen in setOf(Nav.TEAM, Nav.HOME_TAB))
+    val groupChats = remember(dsh) { ChatGroups.rows(dsh) }
     val paneChats = remember(teams, dsh) { Teams.paneChats(Teams.bubbles(teams, dsh)) }
     // Home counts the Bots' chats with the terminals: a chat that needs the person is a row, a Bot with a pane one row (#732).
     val watched by vm.chatWatch.collectAsStateWithLifecycle()
@@ -193,19 +259,13 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
     val gitScreen = selected == null && state.screen == Nav.CODE
     LaunchedEffect(gitScreen) { vm.gitShown(gitScreen) }
     LaunchedEffect(state.message) { state.message?.let { snackbar.showSnackbar(it); vm.dismissMessage() } }
-    // Self-update runs in the background and speaks through notifications (see Updater); the screen only opens Android's
-    // confirm prompt for an install the person started, and continues after the install permission screen.
-    val update by Updater.state.collectAsStateWithLifecycle()
-    LaunchedEffect(update) {
-        when (val u = update) {
-            is UpdateState.Confirm -> { runCatching { activity?.startActivity(u.intent) }; Updater.confirming(u.release) }
-            is UpdateState.Available -> if (Updater.takeStartWhenFound()) activity?.let(Updater::start)
-            else -> {}
-        }
-    }
-    LifecycleResumeEffect(Unit) { activity?.let(Updater::resume); onPauseOrDispose { } }
+    AppUpdates.InstallEffects()
     // A stopped screen (the app left, or the screen off) lets go of the terminal and chat streams; a start takes them back.
-    LifecycleStartEffect(Unit) { vm.setForeground(true); vm.streams(true); onStopOrDispose { vm.setForeground(false); vm.streams(false) } }
+    LifecycleStartEffect(Unit) {
+        val showingApp = !AppLock.locked()
+        if (showingApp) { vm.setForeground(true); vm.streams(true) }
+        onStopOrDispose { if (showingApp) { vm.setForeground(false); vm.streams(false) } }
+    }
     // Android 13+ asks before an app's first notification: once, when a machine first connects.
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val anyConnected = state.machines.values.any { it.connected }
@@ -271,8 +331,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
                         IconButton(onClick = { newTerminal = true }) { Icon(Icons.Outlined.Add, "New terminal", tint = Accent) }
                     if (root && state.screen == Nav.SETTINGS) IconButton(onClick = { pairDesktop = true }) { Icon(Icons.Outlined.Add, "Pair a machine", tint = Accent) }
                 }
-                (update as? UpdateState.Downloading)?.takeIf { it.manual }?.let { LinearProgressIndicator(progress = { it.progress }, Modifier.fillMaxWidth().height(2.dp), color = Accent, trackColor = Border) }
-                    ?: HorizontalDivider(color = Border)
+                AppUpdates.ToolbarDivider()
                 if (state.demo) Row(Modifier.fillMaxWidth().background(Accent.copy(alpha = .09f)).padding(start = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Interface preview · sample data", color = Accent, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     TextButton(onClick = vm::leaveDemo) { Text("Exit", fontSize = 12.sp) }
@@ -293,7 +352,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
                 state.screen == Nav.CODE && project != null -> ProjectScreen(state, vm, project, pulse, remember(rows, project) { Projects.tree(rows, project) })
                 state.screen == Nav.CODE -> CodeScreen(state, vm, pulse, rows, codeView, { codeView = it }, tasksOnly) { tasksOnly = it }
                 // Team opens from the cache while no machine is connected; with nothing cached, the welcome shows instead.
-                state.screen == Nav.TEAM && !(disconnected && teams.isEmpty()) -> TeamsScreen(state, vm, teams, dsh) { opens ->
+                state.screen == Nav.TEAM && !(disconnected && teams.isEmpty()) -> TeamsScreen(state, vm, teams, dsh, groupChats, onOpenGroup = { vm.selectTerminal(it) }) { opens ->
                     when (opens) {
                         is Teams.Opens.DshChat -> vm.selectTerminal(opens.ref)
                         is Teams.Opens.TerminalChat -> vm.selectTerminal(opens.ref, chat = true)
@@ -301,7 +360,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
                     }
                 }
                 disconnected -> WelcomeScreen(state, onPair = { pairDesktop = true }, onRepair = ::repair, onConnect = { vm.connect(it) }, onPreview = vm::enterDemo)
-                else -> OverviewScreen(state, null, vm, pulse, paneChats, onAll = vm::showAll, onReviewNeedsYou = openDeck)
+                else -> OverviewScreen(state, null, vm, pulse, paneChats, onAll = vm::showAll, onReviewNeedsYou = openDeck, groupChats = groupChats)
             }
         } }
     }
@@ -324,7 +383,7 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
     }
     vm.sheet.collectAsStateWithLifecycle().value?.let { StatsSheetHost(it, onDismiss = vm::closeStats) }
     if (pairDesktop) PairDialog(state.pairing, onDismiss = { pairDesktop = false }, onScan = ::scan, onPair = vm::pair)
-    state.offeredPairing?.let { link -> ConfirmPairDialog(link, onPair = { vm.pair(link) }, onCancel = vm::dismissOfferedPairing) }
+    state.offeredPairing?.let { offer -> ConfirmPairDialog(offer, onPair = { vm.confirmOfferedPairing(offer.id) }, onCancel = { vm.dismissOfferedPairing(offer.id) }) }
     editHost?.takeIf { it.paired }?.let { host -> PairedHostDialog(host, onDismiss = { editHost = null }, onSave = { vm.saveHost(it); editHost = null }) }
     botChats?.let { id -> BotChatsDialog(vm, id) { botChats = null } }
     if (newTerminal) NewTerminalDialog(state, onDismiss = { newTerminal = false }) { host, cwd, command -> vm.startTerminal(host, cwd, command); newTerminal = false }
@@ -408,7 +467,8 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun OverviewScreen(state: PocketState, space: PocketSpace?, vm: PocketViewModel, pulse: Projects.Pulse,
-                               paneChats: Map<TerminalRef, TerminalRef>, onAll: () -> Unit, onReviewNeedsYou: () -> Unit = {}) {
+                               paneChats: Map<TerminalRef, TerminalRef>, onAll: () -> Unit, onReviewNeedsYou: () -> Unit = {},
+                               groupChats: List<Pair<TerminalRef, Chat.Terminal>> = emptyList()) {
     // A main bot's pane opens the bot's DSH chat, as its Team bubble does ([Teams.paneChats]); any other agent its terminal.
     val open: (TerminalRef) -> Unit = { ref -> vm.selectTerminal(paneChats[ref] ?: ref, row = ref) }
     var search by remember { mutableStateOf("") }
@@ -532,6 +592,12 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
                     Text("Agents that need you or finish show up here.", color = Muted, fontSize = 13.sp)
                 }
             }
+            if (groupChats.isNotEmpty()) {
+                item(key = "section:groups") { SectionHeader(ChatGroups.HEADING, groupChats.size) }
+                items(groupChats, key = { "g:${it.first.hostId}:${it.first.address}" }) { (ref, g) ->
+                    GroupCard(g, vm.hostName(ref.hostId)) { vm.selectTerminal(ref) }
+                }
+            }
             // Working and idle agents, then terminals without a status: Projects has them too, by space.
             val listed = sections.values.flatMap { it.entries.map { e -> e.ref } }.toSet()
             val plain = all.filter { it.first !in listed }
@@ -619,7 +685,7 @@ fun statusLabel(word: String, kind: String) = stateName(word).let { if (word == 
 }
 
 @Composable fun TerminalCard(t: CoreTerminal, location: String, address: String, status: String = t.status,
-                             waiting: String? = null, onClick: () -> Unit) {
+                             waiting: String? = null, messageLines: Int = 2, onClick: () -> Unit) {
     val color = stateColor(status)
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Surface).border(1.dp, if (status == "blocked" || status == "error") Blocked.copy(alpha = .32f) else Border, RoundedCornerShape(12.dp))
         .clickable(onClick = onClick).padding(16.dp), verticalAlignment = Alignment.Top) {
@@ -634,7 +700,7 @@ fun statusLabel(word: String, kind: String) = stateName(word).let { if (word == 
                 Dot(color, 6); Spacer(Modifier.width(6.dp)); Text(waiting ?: stateName(status), color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.height(6.dp)); Text(t.title, fontWeight = FontWeight.Medium, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (t.message.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(t.message, color = Muted, fontSize = 13.sp, lineHeight = 19.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+            if (t.message.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(t.message, color = Muted, fontSize = 13.sp, lineHeight = 19.sp, maxLines = messageLines, overflow = TextOverflow.Ellipsis) }
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.FolderOpen, null, Modifier.size(12.dp), tint = Muted); Spacer(Modifier.width(5.dp))
@@ -644,4 +710,9 @@ fun statusLabel(word: String, kind: String) = stateName(word).let { if (word == 
             }
         }
     }
+}
+
+@Composable internal fun GroupCard(g: Chat.Terminal, host: String, onClick: () -> Unit) {
+    TerminalCard(ChatGroups.card(g), host, ChatGroups.ADDRESS, waiting = ChatGroups.waiting(g),
+        messageLines = Int.MAX_VALUE, onClick = onClick)
 }

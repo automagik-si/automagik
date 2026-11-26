@@ -48,6 +48,19 @@ export const badges = registry()
 // state, and `actions.openSession` folds the sidebar below 1024 px. The Omni channels plugin
 // hangs the Omni Bot's channels and their chats there.
 export const botChildren = registry()
+// A Bot's channels as the new left bar draws them, one source per Bot:
+// `{ id, order?, botId? or owns?(bot), useChannels(botId, { open }), open(chatId) }`.
+// `useChannels` is a hook returning the channels (their chats only while `open`, i.e. the Bot's
+// Session is shown or a channel of it is unfolded); `open` opens one of its chats. While a
+// source serves a Bot its rows take the place of the team's own botChildren rows for it, never
+// both, so a team with no source keeps today's rows. The bar only reads what the source returns.
+export const botChannels = registry()
+/** The one source serving a Bot: one naming its id wins over one that owns it. */
+export const botChannelSource = (bot) => {
+  if (!bot) return undefined
+  const entries = botChannels.entries()
+  return entries.findLast(entry => entry.botId === bot.id) ?? entries.findLast(entry => entry.owns?.(bot) === true)
+}
 // Header buttons: drawn in a Bot's chat header, `Component({ bot, roster, actions, useWork })`.
 export const headerButtons = registry()
 // Sidebar tools: buttons in the sidebar's top row, between the update cloud and Search, and in
@@ -58,6 +71,11 @@ export const sidebarTools = registry()
 // Bot settings: cards of a Bot's settings page, after its capabilities,
 // `Component({ bot, roster, actions, run, Card, Row, SwitchRow })`.
 export const botSettings = registry()
+
+// Official install: how the Apps page's Omni and Genie rows install in place. The welcome
+// registers { id, order, kinds, subscribe, version, pending, row, act, refresh }. The last
+// entry wins. With no entry, the rows open the team step as before.
+export const officialInstall = registry()
 
 // Chat suggestions: what an empty chat offers above its composer, chips that fill it with a
 // start the person finishes. `{ id, order, when?({ bot, roster }), items({ bot, roster }) }`:

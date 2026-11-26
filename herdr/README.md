@@ -419,20 +419,120 @@ a place in a team, and keeps that team in front of every agent and of you.
 The pack replaces Herdr's `spaces` sidebar with one that draws each project's team under its
 space: the main bot as a card, categories as headers, captains with their members folded
 under them, planned bots dimmed with their wave. Each bot shows its character, its role and
-model, its agent's icon and its status. Right-click a bot for its menu: Configure opens the edit
-form (name, agent, model, role, category, lead, worker defaults); Prompt edits its instructions
-in place and saves them as the form does; Run starts it, or focuses its pane when it has one,
-restarts it (Restart runs `am restart`; Restart on… restarts it on another installed
-agent, a new conversation, the bot's definition keeping its agent), attaches it to the focused
-pane or detaches it; What happened shows `am history` for it (its panes, starts,
-sessions, the newest transcript, which a click copies, its workers) and the helpers its pane runs
-now. A planned bot's menu has no Run items. A queued restart waits for its next idle. A busy-pane
-refusal offers "Restart anyway". With helpers, choose "Restart with its helpers" to restart immediately and resume
+model, its agent's icon and its status. The rows and their clicks follow the attach ledger
+(`am whois --all`) for the panes it names at the current session's `created_ms`: after a
+relabel, a bot is drawn and focused on the pane the ledger binds it to; in that project a bot
+it binds is never drawn from another pane's label. A live pane carrying
+`bot=` that no ledger row names at its generation — an empty answer, a bot bound on another
+machine's ledger, or a snapshot address the ledger kept bare (`wsl/t2y`) — is drawn and
+focused from its label. A replaced pane (a new session at the same address) never inherits
+the old card's status or click; its own `bot=` label may draw it as the bot whose label it
+carries. A planned bot's card stays planned, and a pane labelled with a planned bot is drawn
+as a plain agent row.
+Right-click a bot for its menu: Configure opens the edit form (name, agent, model, role,
+category, lead, worker defaults); Prompt edits its instructions in place and saves them
+as the form does; Run starts it, or focuses its pane when it has one, restarts it (Restart
+runs `am restart`; Restart on… restarts it on another installed agent, a new conversation, the
+bot's definition keeping its agent), attaches it to the focused pane or detaches it; What
+happened shows `am history` for it (its panes, starts, sessions, the newest transcript, which a
+click copies, its workers) and the helpers its pane runs now. A planned bot's menu has no Run
+items. A queued restart waits for its next idle. A busy-pane refusal offers "Restart anyway".
+With helpers, choose "Restart with its helpers" to restart immediately and resume
 those conversations, or "End helpers and restart" to end them. On a linked machine, the first choice
 runs the installed CLI's local `--tree --force` restart on the machine holding the panes, then updates
 this sidebar's attachment. Saved configuration changes use these same choices when you restart to apply
 them. Pack updates reload mods and do not restart bot panes. The Bots list and the Attach picker open
 on the bots the sidebar already knows and refresh behind.
+
+**Restart at a context threshold.** A running Claude Code seat's `context_tokens` is the newest
+assistant message's input plus cache-read and cache-creation tokens; `am ls --json` and
+`am show <bot>` report it. A bot may store a threshold in tokens (`restartAt`, set with
+`am edit <bot> --restart-at N` or cleared with `--no-restart-at`): a main bot defaults to 250000,
+a member has none until one is set. `am restart --due [--dry-run] [--all]` asks every seat over
+its threshold to write a handoff to the exact path printed by the command, under
+`<app home>/automagik-herdr/handoff/<project hash>/<bot>.md`. The handoff covers what's in
+flight, what waits on whom, and the next three actions. After the seat ends its turn, it restarts
+fresh with its helpers (`--fresh --tree`) and the handoff becomes its new conversation's first
+message. A working or blocked seat is queued until its next idle (`am restart --queued` lists
+it). The old conversation is not resumed: what survives is the handoff file, the bot's definition
+and briefing, and its helpers' own conversations (resumed under the new pane); nothing else from
+the old conversation does. A seat that doesn't write the file within the time limit, or a handoff
+home that can't be written, is reported and left running: the pass refuses rather than restarting
+without the handoff. A handoff restart that fails, or is dropped after waiting, is also kept in
+`<app home>/automagik-herdr/handoff-failures.json`: `am restart --queued` lists it after the queued
+watcher's own pane is gone, and a queued watcher tells the project's main bot (the same report
+`am revive` uses). A restart whose handoff can't be sent as the new conversation's first message is
+kept there as a `send` warning: the seat is restarted and the pass exits 0, and the file stays for a
+person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
+nothing.
+
+**A seat on Claude Code's rate-limit dialog.** A running Claude Code seat blocked on Claude
+Code's rate-limit options dialog is reported as `rate-limited` by `am ls`, `am show` and the
+sidebar, with the reset time the dialog shows (the field is left out when it shows none). The
+detector matches the dialog's own shape, never a word: at least two numbered options must end the
+pane tail, start at 1 and be consecutive, one must carry the `❯` selection cursor, and the limit
+cue must be the dialog's own line: one of the three non-empty lines directly above the choices,
+with only the dialog's limit/reset words between it and them. A limit sentence in a report or in
+scrollback above the options is therefore not a cue, and a screen whose question the permission
+detector owns (a permission/selection dialog) is never a rate-limit match. The footer both
+dialogs may show (`Esc to cancel`, `Press enter to confirm`) is marked as a footer, so the
+options/limit shape decides the rate-limit rule while the send guard still treats the pane as
+held. A quoted, fenced or patched transcript is text, not the live dialog: a patch stays
+text however far above the dialog its hunk header sits within the visible tail (the rule never
+measures that distance).
+A raw, unmarked paste that ends the pane tail is the accepted limit of a text-only rule: it is
+byte-for-byte the live modal, so the rule cannot tell them apart, and every marked form (a
+quote, a fence, a patch) is refused. An ordinary report
+whose text says "rate limit" and lists findings is not the dialog, and an unreadable or empty tail
+is never a match. Detection only reads the pane tail. Automatic delivery checks that tail
+before sending and holds delivery on a dialog or an unreadable screen. A dialog can still open
+between the read and the paste. Closing that interval requires a conditional paste in herdr-core.
+Both project settings for `onRateLimit` (`"park"` and `"switch"`) preserve the original
+pane and its workers. Resume in that pane when the provider allows it. Herdr cannot atomically
+retire a pane only if it has no dependent workers, and a session named in a launch command
+does not confirm which conversation the provider actually opened.
+
+`am rate-limit [--all] [--dry-run]` runs one sweep. The scheduled `am restart --due` checks
+the dialog first. Each episode writes one item in `<app home>/automagik-herdr/attention.json`
+for `am ls` and `am show`. If the dialog names a reset time, `am restart --queued` shows a
+recheck one minute later. An unknown reset has no timed recheck. The watcher observes the
+original pane until it recovers or the watch expires. A live watcher on a reachable core rechecks
+within two minutes of the scheduled time. An unreadable screen or expired watcher keeps the hold,
+attention item and first deadline. A later sweep reattaches the watcher. Canceling the queued
+entry closes its attention item. An already queued restart keeps its operation, and a handoff
+continues after recovery with the same ask and response file. The updated Herdr automations scheduler checks `am delivery-status` before sending
+to a target or a notification recipient and preserves each automation's `enabled` setting.
+The pinned scheduler release (0.12.1-am.3) has that check; an older installed scheduler needs the update.
+
+**Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
+`am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
+including for a linked project named with `--machine M --project DIR`. Its scheduler must
+be running, with backend `hc` and bot targets (`herdr-automations` 0.12.1-am.2 or later; the
+pack pins 0.12.1-am.3). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
+just before the send, hc refuses to type into it and the failed run shows the reason.
+A new wake starts at its next occurrence. An already registered wake missed while the
+scheduler was stopped can catch up once on startup within 1380 elapsed minutes (23 hours).
+Daylight saving time follows the scheduler's cron library.
+
+`am ls` and `am show` report the schedule and the last run. Rerun the same `am edit` with
+`--wake` or `--no-wake` to repair a failed sync. A worktree edit saves to that worktree's
+roster. Run the same edit against the main checkout to change the live schedule.
+
+**A question is not a permission.** An agent that ends its turn waiting on you sets the pane
+label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
+`hc label <terminal> automagik-herdr.needs-owner=` once you have answered).
+Every `am worker` task, whatever its agent except Hermes, ends with the same rule.
+A bot started by the pack as Claude Code, Codex, omp, pi, grok or guarded dsh-tui is told to
+set and clear it in its launch briefing. Attached Claude Code seats get the guidance when the
+briefing hook prints. `am brief` and Hermes omit it. The dsh-tui guard and per-pane proxy
+allow exactly this key on the caller's own pane.
+The sidebar draws a **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
+**Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
+clears the moment the pane works again or the label is removed: the sidebar reads the label from
+the one terminal snapshot it already takes. The label is the signal for the question, without a
+screen scan or a herdr-core status word for it. The chip also clears when
+the pane exits or leaves the snapshot, and once the label is past the pack's stale window (a day,
+the same rule as `am tidy`'s `stale-needs-owner`), so a label left behind never keeps asking.
 
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
@@ -449,9 +549,10 @@ once am is installed there, its per-turn hook in that project's
 bot gets the briefing as text. A start never creates an app home on another machine, which may be
 shared: when that app home isn't a folder there, a Claude bot starts with one warning and no
 briefing file or hook. Codex and Hermes bots start there without it, since their own
-config, which may hold a prompt the briefing would replace, is only read on this computer. What
-happened isn't shown for those bots yet. A machine that isn't answering shows its bots as last
-seen, dimmed, and its menu says so.
+config, which may hold a prompt the briefing would replace, is only read on this computer.
+**What happened** shows the attach, detach and end events this computer recorded for the bot on
+that machine and project. A machine that isn't answering shows its bots as last seen, dimmed,
+and its menu says so.
 
 A project there can carry a pane-env file, `<project>/.herdr/pane-env` on that machine, for its
 bots' panes only: other panes there never read it. It takes two keys, one per line:
@@ -515,11 +616,12 @@ am create --name N --agent A [--kind main|member] [--role R] [--code true|false]
        [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
        [--cross-member BOT@DIR]...
        [--character C --colour K | --omni] [--model M] [--rank R]
-       [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
+       [--person-features on|off] [--effort E] [--tier fast|standard]
+       [--permission-mode MODE] [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
        [--planned-wave N [--planned-note T]]
        [--worker-agent A] [--worker-model M] [--worker-effort E] [--worker-agy-mode M]
        [--worker-template T]
-am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=]
+am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=] [--permission-mode=]
 am rm <bot>
 am category ls | add --title T [--sub S] [--id ID] | edit <id> | rm <id> | order <id>...
 am start <bot> [--space ID] [--tab ID]
@@ -529,15 +631,15 @@ am restart <bot> [--fresh] [--agent A] [--model M [--save]] [--force]
 am attach <bot> <terminal> [--move]
 am detach <bot>
 am import --from-hc [--squad-label L] [--apply]
-am whois <terminal> | whois --bot <bot>
+am whois <terminal> | whois --bot <bot> | whois --all
 am history <bot>
 am brief <bot>
 am forget <project>
 am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
-       [--task ID [--lead BOT]]
-am worker kill <pane>   # from a bot's pane: end one worker that bot started; any other pane is refused
-am update [--check | --rollback]
+       [--task ID [--lead BOT]] [--agent-home DIR]
+am worker kill <pane>   # end a worker you started with am worker. Plain hc run cleanup belongs to the project's main bot.
+am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
 am machines [update [--machine M | --linked | --local] | --auto on|off|status [--machine M]]
 am dsh-tui install | update | uninstall | doctor
@@ -628,8 +730,10 @@ am dsh-tui install | update | uninstall | doctor
   conversation started there by hand. A pane that reports
   no status to hc (Hermes) can't say whether it is waiting for an approval, so `restart` refuses
   it unless `--force`. No command ever sends a pane keys: `--force` starts the new pane and ends
-  the old one only once the new one is up. `worker`, `brief`, `history` and `tidy` stay this
-  computer's.
+  the old one only once the new one is up. `worker`, `brief` and `tidy` stay this computer's.
+- `history <bot> --machine M --project <folder>` shows the attach, detach and end events
+  this computer recorded for that machine's core and project. `--json` adds `machine` beside
+  the bot's identity. Plain `history <bot>` shows this computer's bots' history.
 - A bot is named by its id or by its name. A refusal exits 1, a usage mistake (such as a
   missing `--project` folder) exits 2, and nothing is written.
 - `start` runs the bot's agent in a new pane with `hc run`, labelled `bot=<id>`, and records it
@@ -645,9 +749,12 @@ am dsh-tui install | update | uninstall | doctor
   with the shell itself in front, idle, and no job of its own running (`sleep 99 &` left at
   the prompt keeps it: its child processes are asked with `pgrep -P`, and an answer that
   can't be read keeps it too), so the space is never left empty and nothing else is closed.
-  The sidebar's Start knows the panes. `start` from the command line, `--machine` too, reads
-  them from `herdr-app ls`, which counts no mod pane: it closes the tab only when it saw that
-  shell, right after its own `space.new`, as the new space's one tab and that tab's one
+  When two starts open spaces on the project, they use the first one. The sidebar can close the
+  extra space identified by its own `space.new` reply, even if it appears after the wait, while
+  it still has just its original tab with a single idle shell. A lost reply can leave the extra
+  space open. `start` from the command line, `--machine` too, reads the panes from `herdr-app ls`,
+  which counts no mod pane: it closes the tab only when it saw that shell, right after its own
+  `space.new`, as the new space's one tab and that tab's one
   terminal. `AUTOMAGIK_HERDR_TAB_WAIT_MS` sets how long `start` and `worker` wait for Herdr to show
   the new pane (5000 by default); `0` turns this tab setup off.
 - `restart <bot>` (also `am restart <bot>`) queues a working or blocked bot for its next
@@ -710,11 +817,17 @@ A restart of the computer ends every agent. herdr-core keeps each pane it was to
 puts a bare shell in it; a pane it did not keep is gone. `am revive` brings the bots
 back:
 
-- Every bot the attach ledger binds on this computer whose pane is gone, or is a bare shell, is
+- An eligible bot the attach ledger binds on this computer whose pane is gone, or is a bare shell, is
   restarted by `am restart --tree`: in its pane's space, tab and folder, resumed by
   its session id where its agent allows it, its helpers (workers included) under the new pane.
   The main bot comes first, each bot after its lead. A pane with a program in front is never
   touched.
+- Revive brings back a local seat ended by holder loss, or ended by a sweep since boot, only
+  in the login service's pass (`--boot`) and only if its attach row says it started more than
+  10 minutes before the estimated boot (wall clock minus uptime). The margin allows for small
+  clock adjustments. Revive reports why it leaves a seat alone and gives manual recovery advice
+  when the destination can be confirmed. After a sweep, `am holders losses` reports seats lost
+  to the holder.
 - Each project's main bot gets one message: who resumed, who is on a new conversation and why,
   who is not back, and the command that brings it back by hand. The same report is kept in
   `<app home>/automagik-herdr/revive-last.json` (it holds no session id).
@@ -726,32 +839,133 @@ back:
   from a restart of the computer. To keep a bot down across restarts, detach it
   (`am detach <bot>`): a detached bot is never brought back. Every report says so.
 
-Session ids. Claude gets its id from Herdr at launch. dsh-TUI and Antigravity take none at
+Session ids. Claude gets its id from Herdr at launch. dsh-TUI, Antigravity, Codex and Kimi take none at
 launch, so the pack reads the id from what each leaves on disk (DSH's session folders for the
-pane's folder, Antigravity's prompt history: only its time, folder and conversation id) and
-records it as it does Claude's: a session row in the workers ledger and the pane's
-`agent.session` label. Anyone can leave a session in that folder with no pane the pack knows (a
-terminal of your own, DSH Desktop), so the pack takes only a pane's first conversation: the one
-session born within two minutes after the pane started. It records none, and the bot comes back
-on a new conversation, which the report says, when two sessions were born then, when none was,
-or when another pane of that agent in that folder (any hc pane, whoever started it, and every
-launch the workers ledger names) started within two minutes before the pane or before that
-session. A session born later is never taken, and a recorded id is never replaced. What stays
-unknowable: a session someone started outside hc in that folder inside those two minutes, when
-the pane's own agent left none. A conversation started later inside the pane is not followed:
-the bot resumes its first one. DSH's home is `$DSH_HOME`, else `~/.dsh`.
+pane's folder, Antigravity's prompt history, Codex's rollout session_meta, Kimi's session index:
+only ids, folders and times) and records it as it does Claude's: a session row in the workers ledger and the pane's
+`agent.session` label. The search root is the seat's own, never the reviving process's: its
+launch records the person's `HOME` and the agent's own home (`$DSH_HOME`, `$CODEX_HOME` or
+`$KIMI_CODE_HOME`, only absolute ones) in the seat row, and a hand launch's own `env` words on
+the pane count too; a search reads those. When the seat's launch names no home, the search
+fails closed and the bot starts new; the reviving process's `HOME` or `$CODEX_HOME` is not used.
+The recorded home is the launching command's environment: a herdr-core started with another
+home isn't followed. A seat started before this release names none, so it comes back on a new
+conversation once, and the report says why. Anyone can leave a session in that folder
+with no pane the pack knows (a terminal of your own, DSH Desktop), so the pack takes only a
+pane's first conversation: the one session born within two minutes after the pane started. It
+records none, and the bot comes back on a new conversation, which the report says, when two
+sessions were born then, when none was, or when another pane of that agent in that folder (any
+hc pane, whoever started it, and every launch the workers ledger names) started within two
+minutes before the pane or before that session. An id another live pane's label or the workers
+ledger ties to another launch is never taken, whatever folder or agent that pane shows, and
+when hc can't read one of its panes nothing is taken. A session born later is never taken,
+and a recorded id is never replaced. A rollout's file name must name the id inside it, and a
+session file that is a symlink, or is replaced under the read, is refused. What stays
+unknowable: a session someone started outside hc in that folder inside those two minutes, or one
+an older pane of that agent there (started more than two minutes before this pane) started inside
+them, when the pane's own agent left none; that one is taken, since ids, folders and times can't
+tell it from the pane's own. A conversation started later inside the pane is not followed:
+the bot resumes its first one. Codex's UUIDv7 dates its thread's creation at launch, even if its
+first turn writes the rollout days later; the pack looks in every dated folder from the launch's
+local day minus one onward. DSH's home is `$DSH_HOME`, else `~/.dsh`; Codex's is `$CODEX_HOME`, else
+`~/.codex`; Kimi's is `$KIMI_CODE_HOME`, else `~/.kimi-code` (only absolute overrides count).
+Revive never guesses Codex's or Kimi's latest conversation, for a bot or its helper: with no
+conversation of its own (recorded, or found by the rule above) it starts a new one, and the report
+says why. A helper whose own shell or template command names that agent's latest-conversation
+flag (`--last`, `--continue`, `-c`) is not started; the report gives the command to run it by hand.
+A manual `am restart` keeps its latest-conversation fallback.
+Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
-runs `am revive service install`: on Linux a systemd user unit,
-`~/.config/systemd/user/automagik-herdr-revive.service`, enabled and never started on the spot.
-The unit has no start timeout (the pass bounds its own waits), and what the pass prints, which
-the user journal keeps, is counts only: no folder, no bot name.
+runs `am revive service install`. On Linux it writes the systemd user unit
+`~/.config/systemd/user/automagik-herdr-revive.service` and enables it; the unit has no start
+timeout (the pass bounds its own waits). On macOS it writes the launchd agent
+`~/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist`, which launchd loads at your next
+login: it is never bootstrapped, because that would run the pass now. Neither is started on the
+spot, and what the pass prints — the user journal on Linux, launchd's unified log on macOS — is
+counts only: no folder, no bot name.
 At login it runs `am revive --boot --wait 600`: it waits for herdr-core, runs once
 per boot, and also takes the bots whose ended pane another command swept since the boot.
-`loginctl enable-linger` makes it run at boot with nobody logged in.
-`am revive service uninstall` (and `install.sh --uninstall`) removes the unit when
-it is the pack's. macOS (launchd) is not built yet: run `am revive` by hand there.
+`loginctl enable-linger` makes the unit run at boot with nobody logged in.
+`am revive service uninstall` (and `install.sh --uninstall`) removes the file when it is the
+pack's. On macOS it asks launchd first and removes the plist only when launchd says the job is
+not loaded: exit 113, or its exact "Could not find service". Any other answer — a usage error,
+EPERM, an I/O error — is a refusal that leaves the plist, exits non-zero and names
+`launchctl bootout gui/<uid>/dev.herdr.automagik-herdr-revive`, so a job launchd still holds is
+never orphaned. It asks even when the plist is already gone, so a second run boots out a label an
+earlier run left behind and says so. `install.sh --uninstall` follows the same rule: it calls that
+command first when its read-only `revive service status --json` answer parses as JSON and carries
+the exact launchd label and a path under `Library/LaunchAgents` — also when the plist is gone. A
+pack from before the macOS agent answers `status` with exit 0, but names the systemd unit and no
+launchd job, and refuses only `uninstall`, so its `uninstall` is never asked. A truncated or
+unparseable answer, a missing field, a wrong type or a label without that path falls back the same
+way. When the command is gone, or its bounded read-only question doesn't answer, it asks launchd
+itself — with the same 113/exact-words rule — before it removes the pack and its link. It never
+overrules a refusal from a command that answered.
 Panes on a linked machine are that machine's own to bring back.
+
+## More than one holder (#1432)
+
+Every pane belongs to one herdr-core **holder**: the process of the core that started it. When a
+holder is lost, hc ends every terminal it held (issue #1432), so on a computer with one core a
+single loss ends every bot. The pack can spread new starts over more than one holder on the same
+computer: each extra holder is another hc session's core, exposed as a linked machine on this
+host, and a bot started there runs the pack's normal linked-machine launch.
+
+- **Default: one holder, `local`, and a limit of 6 agents per holder.** Nothing is spread and no
+  core is started until the lead adds a holder, so a pack that never runs `am holders` behaves
+  exactly as before. The limit is configurable with `am holders limit N` (1-64).
+- `am holders` shows the pool: each holder's agent count against the limit (a binding on a
+  holder whose line is down still counts: its terminal keeps running there), whether its core
+  answers, and the recent losses. `am holders add --local NAME` adds one: it creates the hc
+  session `am-holder-NAME` and links it as the machine `NAME` (`hc machine add --via`), so the
+  holder's panes show in this window in that machine's space on the project. `am holders remove
+  NAME` takes one away only once it holds no agent, live or on a dropped line; the refusal names
+  the agents. `am holders up` starts a holder's core after a reboot.
+- A holder is **full at its limit**: `count >= limit` leaves no room, and `over limit` is
+  `count > limit` (the wording only; the choice and `am holders` use the same meaning). A new
+  `am start` chooses its holder and reserves that seat together under `holders.json`'s lock, so
+  two starts of different bots launched at once go to different holders instead of both picking
+  `local`; the reservation is released once the start's attach row is written, or when the start
+  fails (a reservation left by a killed CLI lapses after the holder-start timeout). `am holders`
+  counts attached agents, not in-flight reservations. One bot never gets two seats: a start is
+  refused when the bot already has a binding (live, or unknown on a holder whose line dropped)
+  or another start is still placing it. The refusal exits non-zero and says the bot and holder;
+  with `--json` it carries `error`, `bot` and `holder`. A start goes to the holder with the
+  fewest of the pack's agents, and never to a holder whose core isn't answering while another
+  is. With N agents and a limit L over two or more holders, a start above the limit goes to
+  another holder: one holder's loss cannot take every seat. A start is never refused for the
+  limit; when every holder is full, the least loaded takes it and says so on stderr (and as
+  `limitWarning` with `--json`).
+- `am ls`, `am show` and `am whois` name the holder; a bot whose holder's line dropped reads
+  `unknown in NAME/tN`, never stopped. `am restart` finds the bot's holder and runs the restart
+  there. A worker started from a holder's pane runs in that holder (its `am` talks to that
+  core). `am holders losses` reads back what each loss took; a lost holder and a dropped
+  machine line are recorded in `<app home>/automagik-herdr/holder-loss.log` with the holder's name
+  and bot IDs. A holder loss also records the seats' terminal IDs, creation stamps, core IDs and
+  machine names. The log and JSON output omit paths, sockets and commands. The loss report reads
+  the attach ledger to say whether each seat was attached again. Only a pool holder's dropped line
+  produces a `holder_unreachable` record.
+- `am holders` also checks, on Linux, for a holder process cut off from its core. It looks for
+  a live holder process on a pool core's holder socket that no pool core lists in two reads.
+  The second read happens only when the first finds a candidate. Set
+  `AUTOMAGIK_HERDR_CUTOFF_RECHECK_MS` to change the delay (5000 ms by default). The check gives
+  the holder name, process ID and number of same-user live direct child processes at the second
+  read. With `--json`, the result is in `cutOff`. The check uses herdr-core's internal process
+  arguments and socket names. An incomplete check or an unsupported platform such as macOS
+  reports `not checked`. The check itself starts nothing, stops nothing, records no loss and writes no
+  file. It does not change what `am revive` does.
+- A `holders.json` that isn't JSON, or whose limit or holder entries are bad, is said on stderr
+  (so `--json` still parses) and the run keeps the one-holder default instead of silently
+  turning spreading off; fix it with `am holders limit N` / `am holders add` / `remove`.
+- After a reboot, `am holders up` starts the extra holders. To bring a bot back on one, use
+  `am restart <bot> --machine NAME --project <folder>`. Restart uses the roster on that machine
+  and starts a new conversation for an unpaired bot with no old pane. On a machine, `--tree`
+  requires `--force`, which can replace a pane started in the meantime. After a holder loss while
+  the computer stayed up, check that the old program stopped before using the manual command from
+  `am holders losses`. The local hint excludes paired Hermes Bots.
+- The upstream half of #1432 - the core logging why it closes a holder's link, and a holder
+  whose link is gone not sweeping its programs - belongs to `herdrdev/herdr-core` (#372 and #303).
 
 ## The attach ledger
 
@@ -760,6 +974,22 @@ Which pane plays which bot is recorded in one file, `<app home>/automagik-herdr/
 `attach` and `detach`, and any run that reads it and finds a pane ended. The sidebar's Start
 and Attach run the command line too. The `bot` label is a display hint: `hc label` changes
 no row, so relabelling a pane moves no bot.
+`am tidy` identifies local bot panes through the attach ledger and uses `bot=` labels for bots the local ledger has never recorded.
+
+**Which app home a restart uses.** `HERDR_APP_HOME` names it. With it unset, restart resolves
+the home before it writes anything: a pane's launch home wins, live or ended (hc keeps an ended
+pane until it is removed, and its launch carries the home); else a live binding wins over a
+stale one; else the project's own app home (`<project>/.herdr/app-home`, RFC 0021 delivery 3)
+is used when it names the bot and the default does not. A binding is **live** while hc still
+gives its terminal with the same `created_ms` (a finished, vanished or reused terminal is
+**stale**), and that one rule is what `restart`, `attach`, `show`, `whois` and `revive` resolve
+with: the live binding is the bot's wherever the command was typed. `ls`, `brief` and `start`
+read the selected home first and fall back to the project's own home when it names nothing
+live. Two live bindings on different panes, and two stale ledgers that both name the bot, have
+no launch record to decide between them: `restart`, `show` and `whois` refuse them, naming both
+ledgers, before anything starts or is written. Set `HERDR_APP_HOME` to the home that owns it.
+`am revive` leaves a bot alone when a live pane carries its label or the project's own home
+still binds it live, so a stale row in another home never brings back a twin.
 
 The file is made with mode 0600; one that is group- or world-writable is refused (every
 command that reads it exits 1, naming the fix: `chmod 600`). Each row is one line, written
@@ -800,14 +1030,21 @@ am whois <terminal> --json
   { "terminal", "core", "created_ms", "bot", "project", "since" }   or   { "terminal", "core", "created_ms", "bot": null }
 am whois --bot <bot> --json
   the same, or { "terminal": null, "core", "created_ms": null, "bot", "project": null, "since": null }
+am whois --all --json
+  { "core", "bindings": [ { "terminal", "core", "created_ms", "bot", "project", "since",
+                            "address", "machine", "state" } ] }
 ```
 
-`since` is the attach row's `at`; `created_ms` is hc's. Both forms fold and confirm with hc first.
+`since` is the attach row's `at`; `created_ms` is hc's. Both single forms fold and confirm with
+hc first. `--all` lists every binding the ledger holds, live or on a machine that is away
+(`state` is `live` or `unknown`), with the hc address and the machine's name; it is the
+interface for tools that draw a bot beside a terminal without reading labels (`bots.whois-all-json@1`).
 
 **The first run.** With no file yet, the first command that reads it imports today's labels
 once: each live pane on this computer carrying `bot=<id>` of a bot some project here defines
 becomes an attach row with `by: "import"` (one pane per bot: an agent in front, then the
-newest). The file is then made, even empty, so this happens once. The briefing hook reads the
+newest). "Defines" means a folder this run names or remembers, or a project the sidebar knows
+from its project list, a sibling folder, or a cross-project reference. The file is then made, even empty, so this happens once. The briefing hook reads the
 file and never writes it; before the file exists it goes by the label.
 
 ## Workers
@@ -890,6 +1127,42 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
   ready (up to 30 s for one that reports no status), then `hc send <pane> "<task>"`. When hc
   refuses the send (the pane waits for a sign-in or a trust answer, or has ended), the worker
   is kept and a warning names the pane and the `hc send` to run by hand; `--json` lists it.
+- **Login home (#1208):** `--agent-home DIR` starts one Claude or Codex worker on the login
+  folder `DIR` (Claude: `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`; Codex:
+  `CODEX_HOME`). Without the flag, a worker that runs the bot's default worker agent uses the
+  bot's `worker.agentHome` when it has one; a worker on any other agent, or a bot with neither,
+  starts exactly as before (Claude on the Accounts login, `claude-logins.json`). The folder must
+  exist, belong to you and have mode exactly `0700`; it is used by its real path, and Claude's
+  default `~/.claude` is refused (omit the flag for the default login). The launch runs the
+  agent's shipped command only (a `programs.json` run for it is refused), never a template, and
+  unsets the variables that would outrank the folder's sign-in (Claude: `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL` and the Bedrock, Vertex
+  and Foundry switches; Codex: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`). The
+  worktree's own settings may not pick another account: Claude's `.claude/settings.json` and
+  `.claude/settings.local.json` with an `apiKeyHelper` or an `env` naming one of those variables
+  (or either folder variable), and Codex's `.codex/config.toml` naming a provider, profile or
+  login method, are refused by file and key (Claude's are read again after the briefing hook is
+  written, just before the start). A call through the hc proxy or behind the full hc guard is
+  refused; the `hc kill` shim every ordinary seat runs behind is fine. An hc that doesn't
+  report a pane's launch argv is refused too: such a worker could never be told apart from a
+  seat. Every
+  refusal comes before any branch, worktree or hook is made, except the settings check, which
+  needs the worktree. Before `hc run` the launch is reserved in the workers ledger (an `intent`
+  row: its launch id, name, folder and home; no reservation, no start), and its argv carries
+  that id (`AUTOMAGIK_AGENT_HOME_LAUNCH`) after the folder words. Right after hc answers (a late
+  answer too) the pane must show that id, the folder and `die_with_parent: false`: one that is
+  this launch but not that is ended, and one hc can't show to be this launch is left alone and
+  named. The start row records `agentHome` and `launch`, and its `env` names the folder, so
+  Codex's session search reads that folder. Under the Bot login policy, the chosen folder must
+  match the reader's folder for that vendor, and the row records the reader's login pair
+  (#1532). With the policy off, both fields are null. A Codex worker reads its model list and
+  its project trust from the chosen folder. The folder decides the sign-in only: the model
+  and effort pins, the pane's PATH (the agent's program is found on it, as for every launch),
+  Codex's granted folders, managed policy, and the
+  folder's own settings (Claude's `settings.json` there, Codex's `config.toml` there) are the
+  person's choices as for any launch. A Codex folder that is also the one the Accounts panel
+  manages is switched with it: the panel replaces that folder's `auth.json`, so a separate
+  account needs a separate folder.
 - **Templates:** `--template T` runs the hc template `T` (`hc templates` lists them)
   instead of an agent, for seats whose command sets more than a model: a custom model
   provider, keys, flags. A template owns its command, so `--template` with `--agent`,
@@ -930,9 +1203,30 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 - **Lifecycle:** the bot checks the worker's result, and ends it with
   `am worker kill <terminal>` once the task merges (see
   [Ending a worker](#ending-a-worker)). The bot's briefing says so. As an hc child, a worker
-  also ends when its bot's program ends; its branch stays.
+  also ends when its bot's program ends; its branch stays. A worker on a chosen login home
+  (#1208) is started with `--outlive-parent` instead: it never ends with its lead, and no
+  restart, `--tree` or revive runs it again; it ends when its task ends, by `am worker kill`, the
+  worktree sweep, or by hand. It is never a Bot's seat: attach (here or on a linked machine),
+  the one-time label import, restart's adoption of a labelled pane and a restart of a binding
+  that names it refuse it, by its launch argv (and here, by its ledger rows too: a pane that
+  shows no argv while a reservation of its name less than ten minutes old has no start row yet
+  is refused as well, and a failed verification marks an observed pane unresolved for the life
+  of that instance). A restart that would end it with its parent (hc saying it doesn't outlive
+  it, at any depth under the pane) is refused before anything, `--force` included. A local start
+  that times out refuses a chosen or unresolved pane that took its name. Linked timeout recovery
+  uses the launch signature when `hc ls` supplies argv. An `am` or pack CLI older than this
+  release can attach such a worker,
+  after which a restart would run it on the seat's login, so chosen homes need both at this
+  version or newer; a worker may run for a moment before its launch is checked (on its chosen
+  folder); a linked reader sees one as ordinary when its hc reply omits launch argv, including
+  the list used for timeout recovery; a process of yours that edits the worktree's settings
+  after the last check is not seen; and hc
+  has no conditional kill, so `--tree` cleanup still reads a helper's address and ends it in two
+  calls (it skips a pane whose core, `created_ms` or launch shows another pane there now). A seat on a
+  chosen home (`am restart --agent-home`) is not done: it needs the seat's relaunch (linked
+  restart, revive, clear and switch, the restart queue) to carry the home.
 - **Cleanup (#567):** a worktree this command made (`created` in the ledger) is removed
-  (`git worktree remove`, no `--force`, then `git worktree prune`) once every worker that ran
+  (`git worktree remove`, no `--force`) once every worker that ran
   in it has ended, done or killed, at least 15 minutes ago (hc's `finished_ms`: restart
   `--tree` runs a bot's workers again one at a time, about 1 + 2k minutes at worst for the k-th),
   and no live terminal works in it. Each `worker` call does
@@ -947,8 +1241,13 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
     included); a tree no longer on the worker's branch; a detached HEAD with commits on no
     remote; commits on no remote branch, unless `gh pr list --head <branch>` shows the
     branch's pull requests all merged or closed (a squash merge). gh missing or failing keeps
-    it. Ignored files (`.env`, build output) do not keep it: they go with the folder, as
-    `git worktree remove` does.
+    it. Ignored files (`.env`, build output) do not keep it, but the cleanup names them before
+    it removes the folder, so what goes with it is never silent; a list git can't give keeps
+    the checkout.
+  - A missing checkout is kept while its recorded repository still lists the worktree, since
+    its actual repository can't be proved. When the repository no longer lists it (a person's
+    `git worktree prune`, say), it is recorded `gone` with a read of `git worktree list`: no
+    remove and no prune. A `removed` or `gone` one is never looked at again (#1143).
   - A worktree only given to a worker (`--worktree`, a branch's existing worktree) is never
     removed. A worker call that waited for a worktree the cleanup removed meanwhile never
     starts in what is left: `--branch` makes the worktree again, `--worktree` is refused.
@@ -959,7 +1258,8 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 - **Ledger:** `worker`, `start` and `attach` append one row per terminal to
   `<app home>/automagik-herdr/workers.jsonl`: `{ event: "start", kind: "worker" | "seat",
   terminal, pid, botId, task, worktree, agent, model, effort, template, role, branch, project,
-  lead, base, created, swap, override, override_requested, at }` (`at` is ISO 8601).
+  lead, base, created, swap, override, override_requested, generation, sequence, at }` (`at` is
+  ISO 8601).
   - `task`: Genie's task id (`--task`), else null; a seat's is null. `project`: the main
     checkout's absolute path, the project key, on seats too. Usage joins to tasks on
     **(project, task)**: task ids are unique per project only.
@@ -971,6 +1271,15 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
     effort or template itself. `override_requested`: on a swap task, what it asked for and
     didn't get, else null.
   - `template` is the hc template a worker runs, else null (seats and agent workers).
+  - `generation` and `sequence`: the vendor's Bot login generation and record sequence the
+    reader resolved at spawn from ACP's `generation.json` (#1527, #1532). The ledger uses that
+    resolution without reading the record again. Both fields are null for a verified legacy
+    login, an unusable advisory sequence, or a launch without a Bot login resolution. A
+    backwards sequence that the reader accepts is recorded as accepted. A launch the policy
+    refuses (a required pointer is missing, the record is unreadable, the chosen home
+    differs, or a template is used with the policy on) writes no start row. `am attach`
+    records null for both fields because it has no launch-time resolution. A failed append
+    is reported and the launch keeps running.
   - Rows written before a field have no such key. A worker row with no `branch` key predates
     the task contract: its `task` is the branch, not a Genie id.
   When a template runs, `agent`, `model` and `effort` are null: the template sets them. The
@@ -1014,18 +1323,25 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
 A pack-started dsh-tui bot pane, and every worker it starts, gets
 `mods/am-sidebar/guard/` first on its PATH (`startArgs` and `workerArgs` add it for the
 `dsh-tui` agent only). Its `hc` is a deny-by-default wrapper around the real `hc` (#624; the
-full send/keys/attach scope is #628): it scans PATH past every guard folder and passes an
-allowed call through unchanged — same stdio, same exit code, same stdout and stderr. It allows
-`send`, `read`, `ls`, `get`, `wait`, `put`, `label` (the caller's own workers only), `kill`,
-`rm`, `events`, `schema`, `templates`, the doc-only `--help`/`-h`/`--version`/`--skill` forms,
+full send/keys/attach scope is #628): it scans PATH past every guard folder and forwards
+allowed calls with the same stdio and exit code. It allows
+`send`, `read`, `ls`, `get`, `wait`, `label` (the caller's own workers and
+`automagik-herdr.needs-owner` on the caller's own pane), `kill`,
+`rm` (the caller's own workers only), `events`, `schema`, `templates`, the doc-only
+`--help`/`-h`/`--version`/`--skill` forms,
 and one `run` shape: the dsh-tui worker start that `am worker` emits (`--bg`, the
 caller as `--parent`, `worker.of=<the caller's bot>`, a `--cwd` under the project's
 `.claude/worktrees/`, and `/usr/bin/env PATH=… dsh-tui` after `--`). Everything else is
 refused with one stderr line naming #624, #628 and #631, and the real `hc` is never called:
 `exec`, any other `run` (including a template or another agent), file writes, edits and reads,
-`machine`, `server`, `update`, `connect`, `keys`, `attach`, a `machine/t7` target on every
-verb but `send` (`hc events --terminal`/`--children-of` included), and any `--on` outside an
-allowed `send`.
+`machine`, `server`, `update`, `connect`, `put`, `keys`, `attach`, a `machine/t7` target on
+every verb but `send` (whether typed or returned by `hc get`), and any `--on` outside an allowed
+`send`. Herdr-core types keys after about 3 seconds of quiet with no condition, so a guard
+check can go stale before delivery. `keys` stays refused until RFC 0044 delivery 6:
+herdr-core binds, marks and grants the caller (R1-R3) and checks that grant with every
+write (R4, advertised as `checked_input`); then the guard and the proxy allow it together,
+to the same set as `send`. `attach` opens a persistent keyboard and stays refused for
+sandboxed panes for good (RFC 0044 Q5).
 
 `send` is scoped to the caller's team: its lead chain (`effectiveLead` up), its declared lead
 chain (`bot.lead`, then that bot's lead, while each id is listed in the project's bots.json,
@@ -1047,16 +1363,40 @@ bots.json entry, never its pane's `role=` label or an environment variable, and 
 such a bot does not inherit the widening. The caller comes from the attach ledger, the
 authority; a worker pane has no ledger row, so its `worker.of` label names its bot and its
 cwd's project. The target is resolved with the real `hc` (`ls` for a name, `get` for the
-labels). Any target outside that team is refused. The launch briefing carries the guard
+labels). Any target outside that team is refused. `read`, `get` and `wait` are scoped to the
+same graph — the caller's own pane, its own workers and its team — and the shared send roles do
+not widen them. For `send`, `read`, `get`, `wait`, `label`, `kill`, `rm` and both `hc events`
+target options, the guard forwards the checked address from `hc get`. A rename between the check
+and the call cannot redirect it. With `--on`, the guard verifies that address is on the named
+machine and forwards its bare terminal ID. `rm` ends the caller's own workers only (`parent` is the caller's pane,
+or `worker.of` is the caller's bot); a team member's seat, another bot's worker and every
+stranger are refused, and a worker pane ends nothing. The launch briefing carries the guard
 paragraph only for a dsh-tui bot; a claude, omp or hermes briefing is unchanged. On a linked
 machine the seat uses the guard folder that machine has, beside its own `automagik-herdr`; with
 none it gets no guard, no briefing paragraph claiming one, and one warning naming #624.
 
+A send to a pane held by a dialog is refused before anything is typed (#1414). The wrapper
+reads the target's herdr-core status and, when it is neither working nor blocked, its screen
+(the restart planner's `pendingDialog`); a pane running agy is also read once when working, for
+Antigravity's two prompts (see "Antigravity's prompts: Needs you");
+a blocked pane or a visible question, permission or sign-in dialog gets one JSON error line on
+stderr, kind `blocked`, naming the pane, and exit 9 (hc's own `blocked` code), so a relay can tell
+it from a transport error and route the message elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
+it. A free pane's message is forwarded as given. When the screen cannot be read, hc handles
+delivery. This is the pack's wrapper: a sender that bypasses it with an
+absolute hc path, `hc connect` or a raw socket still reaches herdr-core's delivery, where the
+hold belongs.
+
 **This is a guardrail, not a boundary.** A bot can bypass it with an absolute path to the real
 `hc`, a raw socket client, or `hc connect`. The team data is still writable: a bot that edits
 its project's `.herdr/bots.json` can widen its own `send` scope (for example by giving itself
-the pm, integrator or fixer rank), and a bot can label its own workers. `kill`, `rm` and `put`
-stay unscoped, and `read`/`ls`/`get` are cross-pane by design; #628 owns that scope. The real
+the pm, integrator or fixer rank), and a bot can label its own workers. For the own-pane label
+exception, the guard trusts `HC_TERMINAL_ID`. Forging it can use that exception to set or clear
+only `automagik-herdr.needs-owner` on another local pane. With the proxy on, the per-pane socket
+fixes the caller's identity independently of that environment variable. `ls` and `events` stay
+cross-pane (a wrapper cannot filter a table's text or a stream without changing what the real
+`hc` printed), and `kill` is the project's main bot's; the per-pane proxy is where a sandboxed
+pane's list is filtered and its events are refused. The real
 fix is the sandboxed socket mask plus the per-pane filtering proxy wish (#624), and #631 is the
 hard boundary. This wrapper only stops the ordinary `hc exec` attempt while that lands. The
 pack's own CLI still reaches the real `hc` for its trusted calls (system status, machine lists,
@@ -1066,11 +1406,12 @@ guarded pane.
 ### The per-pane hc proxy (the sandbox boundary, opt-in)
 
 The proxy is **off by default** for every bot. Set the bot entry's `hcProxy` boolean with
-`am edit <bot> --hc-proxy on|off`, then run `am proxy approve`
-(review the diff), then restart that bot to apply it. The effective value comes from that bot's
+`am edit <bot> --hc-proxy on|off`, then run `am proxy approve --project <dir>`.
+Review the preview, run the printed command with `--confirm <digest>`, and restart that bot.
+The effective value comes from that bot's
 entry in the approved snapshot, read at each start, restart and worker start. Approved on stays
 on when a pane changes the working key to false or removes it. Working on with approval off
-or missing refuses with an instruction to run `am proxy approve` first.
+or missing refuses with an instruction to preview and confirm with `am proxy approve` first.
 Invalid approval refuses working on. Working off starts plain, preserving its argv, with a
 loud STDERR warning naming the record, the problem and `am proxy approve`:
 invalid approval cannot be trusted to say on. Known limit: previously approved on plus a
@@ -1079,12 +1420,16 @@ cannot write the approved record; only an outside change can cause that combinat
 `show` and `dsh-tui doctor` print both values; doctor warns about invalid approval regardless
 of the switches, and warns
 when working off still has a running proxy and retains install checks for a malformed roster.
-Only Linux
-pack-started dsh-tui seats and dsh-tui workers get the helper. `AM_HC_PROXY` no longer opts in
+Only Linux pack-started dsh-tui seats and dsh-tui workers get the helper.
+A local start on macOS ignores the switch and starts plain, with no pack mask yet (RFC 0044 §F).
+While that bot's approved record is valid and on, `am dsh-tui doctor --project <project>` warns for
+it. The rollback's edit, preview and confirmation, each with `--project <project>`, clear the warning.
+`AM_HC_PROXY` no longer opts in
 other bots. C2b-1 prepares the approved switch; leave it off until C2b-2's approved-worker
 allowance and C2c's coordinated sandbox-row enablement have shipped. The profile row stays
-unchanged. For rollback, run `edit <bot> --hc-proxy off`, `proxy approve` (review the diff),
-then `restart <bot>`; end and relaunch any existing workers that also need rollback.
+unchanged. For rollback, run `am edit <bot> --hc-proxy off`, preview with
+`am proxy approve --project <dir>`, review and confirm with `--confirm <digest>`, then run
+`am restart <bot>`. End and relaunch any existing workers that also need rollback.
 Linked starts check the target platform and, on Linux, the target's approved switch.
 Approved on refuses until they can verify the proxy execution path; start locally on the
 target computer instead. Non-Linux targets ignore the switch.
@@ -1096,9 +1441,8 @@ When it is on, a pack-started dsh-tui pane runs through one helper,
 **before DSH starts**, then runs the agent as its child. The proxy reads the project's approved
 roster before the pane can create a sandbox, and it ends when the pane ends. The record
 lives outside the project, is written 0600 by
-`am proxy approve --project <dir>` (which prints the diff first), and is the only
-roster the proxy reads. **A roster change needs a pane restart** after
-`am proxy approve`, so the new pane's
+`am proxy approve --project <dir> --confirm <digest>`, and is the only
+roster the proxy reads. **A roster change needs a pane restart** after confirmation, so the new pane's
 proxy reads the newly approved record. A working-tree edit that differs warns once, naming
 the command, and still starts on the approved roster; a missing record refuses a proxied
 pane. A worker's record is keyed by the main checkout the pack resolved (its lead seat's
@@ -1115,7 +1459,7 @@ Approval-root checks apply only to `proxy approve` and proxied starts. Plain `ds
 install/check keeps the stable execution root checks without validating approval storage.
 
 Residual, in the command's own help too: a sandboxed bot can ask an in-team unsandboxed pane to
-run `proxy approve`. The printed diff is the check, and approving is the person's act.
+run `proxy approve`. The preview is the check, and running `--confirm <digest>` is the person's act.
 
 The helper sets `DSH_SANDBOX_MASK=1`, `AM_HC_REAL_SOCKET` and `AM_HC_PROXY_SOCKET` for the
 pane; the DSH runner wrapper applies its mount rules and binds the proxy at the real core socket
@@ -1123,13 +1467,19 @@ path, so the real socket folder is hidden, and binds the data parent read-only o
 stable execution folder and `approved/` both live there) so a sandboxed bot cannot rewrite its
 helper, runner or guard, or its project's approved roster. The wrapper is copied byte-equal from
 `mods/am-sidebar/bin/hc-socket-mask.mjs` to `~/.local/share/automagik-herdr/dsh-sandbox/` by
-`dsh-tui install`, which also installs the profile's managed sandbox row. The proxy pins
-herdr-core 0.1.14 and refuses any other version; its socket lives in
-`$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock` (0700 folder, 0600 socket), outside
+`dsh-tui install`, which also installs the profile's managed sandbox row. The proxy supports
+herdr-core 0.1.14 and 0.1.21 and checks the serving version on every upstream connection. Its
+socket lives in `$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock` (0700 folder, 0600 socket), outside
 the worktree and the app home. **Fail closed:** if the proxy cannot start, the pane's command is
 never started, so no sandbox exists and `hc` cannot auto-start a core inside one; a proxy that
-dies takes its pane with it. The network stays open: the proxy filters the hc socket, not the
-box's TCP listeners, and localhost admin ports cannot be hidden without a network namespace.
+dies takes its pane with it. The wrapper also gives the pane its own network namespace
+(`--unshare-net`), so the host's loopback, the host's LAN and the host's own addresses are not
+reachable from inside; the only loopback port the pane gets is the wrapper's egress relay on
+127.0.0.1:3128, whose host-side CONNECT proxy allows public destinations only. Raw TCP and SSH
+have no egress, and a host where the namespace cannot be made refuses the pane instead of
+falling back to the host network. The proxy itself still filters the hc socket, not the box's
+listeners; the namespace is the network boundary (#700, #743; `apps/dsh-sandbox/README.md`,
+"The network: own namespace, one loopback relay").
 
 ## The Create form
 
@@ -1157,6 +1507,7 @@ still places panes by the walk-up, so a folder joins its own project once it has
 am update --check      # the installed and the latest version
 am update              # download, verify against the signed pointer, install
 am update --rollback   # put the replaced set of mods back
+am update --retry-skipped  # install the release a rollback skipped, and clear that record
 am update --auto off   # Install updates automatically: on (default), off, or status
 ```
 
@@ -1165,7 +1516,14 @@ release, it installs it the same way `am update` does (the signed pointer, the
 sha256, the replaced set kept for `--rollback`), Herdr reloads the mods, and one notice says
 "Automagik Herdr updated to X". Your bots keep running: they live in herdr-core, not in the mods.
 A version you rolled back with `--rollback` is never installed on its own again; it waits for a
-newer one. A failed install posts one notice with the reason, changes nothing, and tries again
+newer one. The skip outlives the run that wrote it, so an install that already rolled back keeps
+the skipped version in `auto-update.json` (with its cause, `skipCause: "mods"`, when the restore
+knew it); to re-attempt it by hand, run `am update --retry-skipped`, which clears the recorded
+skip for the release it installs and then updates. An ordinary `am update` installs the skipped
+release too (the skip holds only automatic updates) but leaves the record, and a skip recorded
+from a real mod failure is never cleared by an ordinary update: only `--retry-skipped` clears it,
+or a newer release moves past it. A failed install posts one notice with the reason, changes
+nothing, and tries again
 4 hours later; each further failure of that release waits longer (8, 16, then 24 hours, then
 daily), with no second notice. Turn it off with `am update --auto off` or the switch
 in the status bar; then a new release is only announced, as before. It applies only to a pack
@@ -1186,20 +1544,27 @@ Herdr starts `am machines update`: on each connected machine it runs that machin
 own `am update` (am, then the pack where one is installed), so every check is made there, by the
 copy installed there, against the keys it pins: the signed pointer, the tarball's sha256, never a
 release older than one it took, and the replaced copy kept (`am rollback automagik.am`,
-`am update --rollback`). Then usagemeter, as `meter install` does (the signed
-meter-lane pointer checked here, the build's sha256 on the machine, never a downgrade, the old
-binary kept as `usagemeter.prev`): on a machine that has one, or on all of them once you agreed to
-that, and never after `install.sh --no-usagemeter`. This computer's am and usagemeter follow in the
-same run; its pack is the sidebar's own update above.
+`am update --rollback`). The pack there takes the machine's **automatic** path (#1505): its own
+setting (`am update --auto off` on that machine) and a release it rolled back hold the pack,
+exactly as they hold the machine's own auto-update; a person's explicit `am update` there
+(`--retry-skipped` also clears the record) is still the only way to install a skipped release.
+Then usagemeter, as `meter
+install` does (the signed meter-lane pointer checked here, the build's sha256 on the machine, never
+a downgrade, the old binary kept as `usagemeter.prev`): on a machine that has one, or on all of
+them once you agreed to that, and never after `install.sh --no-usagemeter`. This computer's am and
+usagemeter follow in the same run; its pack is the sidebar's own update above.
 
 `am machines` shows the last answer of each machine: its am, pack and usagemeter
-versions, and what the last run did or why it did not (a pointer it could not verify, a download
-that failed, a machine that was not connected). A machine that was not updated is also said once in
-a notice. The record is `<app home>/automagik-herdr/linked-updates.json`.
+versions, both switches (its own pack auto setting and the linked updater's) and what the last run
+did or why it did not (a pointer it could not verify, a download that failed, a machine that was
+not connected). A machine that was not updated is also said once in a notice. The record is
+`<app home>/automagik-herdr/linked-updates.json`.
 
-It is on by default. A machine opts out with its own switch, the file `~/.automagik/linked-update`
-holding `off` (`am machines --auto off` there, or `--machine M` from here): the run
-reads it first and starts nothing on that machine. `AUTOMAGIK_HERDR_NO_UPDATE=1` on the computer
+The linked updater is on by default. A machine opts out with its own switch, the file
+`~/.automagik/linked-update` holding `off` (`am machines --auto off` there, or `--machine M` from
+here): the run reads it first and starts nothing on that machine. This is not the machine's pack
+setting (`am update --auto off`, shown as `pack auto`): that one holds the pack alone, while this
+one stops the whole linked run. `AUTOMAGIK_HERDR_NO_UPDATE=1` on the computer
 that runs Herdr turns the whole run off.
 
 Updates come from the Automagik monorepo's GitHub releases, through one signed pointer: the
@@ -1294,12 +1659,38 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   bot shows the model its pane runs: the one its command line names, else the agent's own
   configured default. A bot that isn't running shows no model in its sidebar row
   ("not running · role"), while `am ls` and `show` print its pin, else that default.
+- `effort` and `tier` are optional Codex settings: the bot's own reasoning effort (`low` …
+  `ultra`) and service tier (`fast` or `standard`). `create|edit --effort E --tier fast|standard`
+  sets them; an empty value clears one. Every start, restart and revive passes them as that
+  launch's own `-c` overrides, after the agent's and its template's own words, so the record wins
+  over a Codex profile and the global config (which is never written). A `--model` change without
+  `--tier` runs the new model on standard, stored and said on the launch line, so a Fast a
+  profile or the host config still names never applies to it. `show` prints both with their
+  source, and `show --json` carries `effort`, `effortSource`, `tier`, `tierSource`,
+  `pinnedEffort` and `pinnedTier`. See
+  [Reasoning effort and service tier](#reasoning-effort-and-service-tier-codex).
+- `permissionMode` is optional: a Claude Code bot's own `--permission-mode`, set with
+  `am create|edit ... --permission-mode MODE`. One of Claude Code's names (`acceptEdits`, `auto`,
+  `bypassPermissions`, `manual`, `dontAsk`, `plan`); `auto` is the pack's default when the field
+  is absent, and an empty value clears a stored one. Every start, restart, revive and Claude
+  worker helper launch passes it from the record, independent of the model, reasoning effort and
+  service tier. A value Claude Code doesn't accept, or one on another agent, is refused with the
+  accepted names rather than passed through or dropped. `show` prints it with its source
+  (`detected`, `live`, `roster` or `default`), and `show --json` carries `permissionMode`,
+  `permissionModeSource` and `pinnedPermissionMode`. See
+  [Permission mode](#permission-mode-claude-code).
 - `codexAuto` is retired (#1125). It used to opt a bot's Codex seat and workers out of Codex's
   auto mode; the owner's ruling (10 and 12 Nov) is that every Codex seat and worker runs in it,
   so `false` no longer opts out: the field is kept as written, ignored, and loading the bots
   file warns once ("codexAuto false no longer opts out"); remove it. A value that isn't a boolean
   is still dropped with a warning (and refused by `check`). See
   [Codex's launch mode](#codexs-launch-mode).
+- `personFeatures` is an optional boolean, defaulting to `false`: a Claude Code bot's launch
+  turns off the suggested next prompt, the away summary and the subagent progress summaries
+  (#1558, [Claude Code's person features](#claude-codes-person-features-1558)). Set it with
+  `am edit <bot> --person-features on` (create accepts it too) for a seat a person talks to all
+  day; `--person-features off` clears it. A value that isn't a boolean is dropped with a warning
+  (and refused by `check`); any other agent ignores it.
 - `agyMode` is optional: the Antigravity execution mode Start and Restart pass as
   `agy --mode <mode>`. One of `auto` (the default when absent), `accept-edits` or `plan`; any
   other value is refused at launch with one line and never passed to agy. It applies only to
@@ -1341,6 +1732,15 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   (an empty value clears one); the form keeps the field as it is. An invalid one is ignored
   with a warning. A Codex worker runs [Codex's launch mode](#codexs-launch-mode) like its bot's
   seat; a `template` owns the command and gets no flag.
+- `worker.agentHome` (#1208) is an optional absolute folder: the login home a worker on the
+  bot's default worker agent (`worker.agent`, else the bot's own agent) runs on, Claude or Codex
+  only, never beside a `worker.template` (see the worker's login home in [Workers](#workers)).
+  `am create|edit --worker-agent-home DIR` sets it and `--worker-agent-home=` clears it. The save
+  checks its shape only; each launch checks the folder on its own machine. An edit that changes
+  the default worker agent drops it unless the same edit gives it again, and a writer that has
+  no field for it (the form, `restart --save`) keeps it while that agent stays and never brings
+  back one that was dropped. A worker object the file has to drop (a field that isn't text) takes
+  no launch with a home: one that would use it is refused, never run without those defaults.
 - Ids are `b-` plus 10 lowercase base32 characters. A bot's terminal carries the hc label
   `bot=<id>`.
 
@@ -1357,17 +1757,39 @@ nothing to it (a Codex seat's template excepted, see [Codex's launch mode](#code
 | Agent | What its launch adds | What that does |
 | --- | --- | --- |
 | Claude Code (`claude`) | `--permission-mode auto` | Claude Code's auto mode: its classifier answers permission requests. |
-| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true`, `--add-dir <folder>` per derived folder | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). No opt-out. |
+| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true -c allow_login_shell=false`, `--add-dir <folder>` per derived folder; worker starts only: `-c 'projects={"<worktree>"={trust_level="trusted"}}'` when the checks below allow it | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). Its commands run in a non-login shell, so a login startup cannot shadow the pane's hc kill shim (#1133). Worker starts pre-trust only their worktree path (#1420); a withheld trust word gets a warning. No opt-out from the launch mode. |
 | Antigravity (`agy`) | `--dangerously-skip-permissions`, `--mode <agyMode>`, `--settings <file>` | No permission prompt and no classifier: everything the file's deny list does not name runs (see [what runs without a prompt](#antigravitys-permission-list)). The file's `trustedWorkspaces` answers the folder-trust question. |
 | dsh-TUI (`dsh-tui`) | nothing | Its DSH profile on the machine it runs on sets the approval policy; dsh-tui takes no such flag. |
 | Oh My Pi (`omp`) | nothing | omp 18.14.2 has only skip-all flags (`--auto-approve`, `--approval-mode=yolo`). |
 | Hermes (`hermes`) | nothing | Hermes 0.22.5 has only a skip-all flag (`--yolo`). |
 | Pi, OpenCode, Cursor, Copilot, Amp, Grok, Kimi, Kiro, Qoder, Crush | nothing | Not checked: none is installed where the flags were read (2026-11-10), and the pack adds no flag it has not seen an agent's own help name. |
 
-Flags read from claude 2.1.322, codex-cli 0.167.0 and agy 1.5.4. No skip-all-approvals flag is
-passed for any agent but Antigravity; one for another agent needs the owner's word first.
+A Claude Code bot may name another of Claude Code's own permission modes for its seat (and its
+Claude workers and helpers) with `permissionMode` / `am edit <bot> --permission-mode MODE`; the
+launch then passes that mode instead of `auto`, and the rest of the table is unchanged. See
+[Permission mode](#permission-mode-claude-code). Codex's and Antigravity's modes are not per-bot
+settings: Codex's launch mode is fixed (#1125), and Antigravity always runs without prompts under
+its deny list, its execution mode set by `agyMode`.
+
+Flags read from claude 2.1.322 (the permission-mode list from 2.1.328), codex-cli 0.167.0 and agy
+1.5.4. No skip-all-approvals flag is passed for any agent but Antigravity; one for another agent
+needs the owner's word first.
 `am show <bot>` prints the bot's `auto mode` line (in `--json`, `autoMode`: its
 words, a note, and for an Antigravity bot on this computer whether agy's sandbox can run here).
+
+### Claude Code's person features (#1558)
+
+A Claude Code bot seat launches with the features meant for a person at the keyboard switched
+off: the suggested next prompt and the away summary, as `promptSuggestionEnabled: false` and
+`awaySummaryEnabled: false`, and the progress summaries of running subagents, as
+`CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES=1`. All three ride on the launch's own
+`--settings` inline JSON (its `env` carries the variable), so the host's
+`~/.claude/settings.json` is never written and a person's own session there keeps them. Every
+Claude launch the pack builds gets them: a start, a restart, a linked-machine start, a worker
+and a Restart --tree helper. A run that names its own `--settings` file is left as it is (that
+file is the person's own, and a linked machine's file can't be read here), and an hc template
+owns its command. A bot a person talks to all day keeps them with `personFeatures: true`
+(`am edit <bot> --person-features on`; off is the default); `am restart` applies an edit.
 
 Antigravity is the exception, measured on agy 1.5.4 on Linux and macOS: `--mode auto` is not
 available where agy's terminal sandbox can't run (restricted unprivileged user namespaces, say)
@@ -1380,6 +1802,95 @@ rule"). So an Antigravity launch gets the flag only beside that file: a launch w
 helper with no bot to write one for, a command that takes no words) has the flag taken out. The
 flag does not answer the folder-trust question; the file's `trustedWorkspaces` does (#953).
 `dsh-tui doctor`'s `agy-sandbox` row and `show` say when this computer can't run `--mode auto`.
+
+### Reasoning effort and service tier (Codex)
+
+A Codex bot may store its own reasoning effort and service tier, so two bots on one host can run
+at different ones without touching the person's global Codex config (#1411):
+
+- `effort` is an optional effort level (`low`, `medium`, `high`, `xhigh`, `max`, `ultra`; whatever
+  the Codex CLI lists for the model), set with `am create|edit ... --effort E`.
+- `tier` is optional, `fast` or `standard`, set with `--tier fast|standard`. It stores the menu's
+  words: Fast is Codex's `priority` service tier, Standard its `default` one.
+
+Both are stored on the bot (`am edit <bot> --effort= --tier=` clears them) and passed on every
+launch as that launch's own overrides: `-c model_reasoning_effort=<effort>` and
+`-c service_tier=<priority|default>`. A start, a restart, a revive after a reboot and a linked
+machine's start all rebuild the command from the bot's record, so all three keep the values. The
+global `~/.codex/config.toml` is read for what a bot with neither inherits, and is never written.
+
+What wins, when more than one names a value:
+
+1. the bot's record (`effort`, `tier`), added after the agent's own words;
+2. the hc template the pane runs, whose own `-c` words come first in the command; the record's go
+   after it, so the record wins when both name one;
+3. the Codex profile the launch names (`-p <profile>`), if any: the file
+   `~/.codex/<profile>.config.toml`, which Codex layers on the global config;
+4. the global Codex config.
+
+Codex reads the last `-c` for a key, so a later word wins. A service tier belongs to the model
+choice: `am edit <bot> --model M` without `--tier` in the same call runs the new model on
+Standard, stored as `standard` and passed as `-c service_tier=default`, so a model swapped for a
+standard one never keeps a Fast that the record, a profile, a template or the host's config still
+names. Workers take their agent, model and effort from the worker defaults or a template, never
+from the seat's `effort`/`tier`.
+
+`am show <bot> --json` reports the effective values and their source: `effort`, `effortSource`,
+`tier` and `tierSource`, beside `pinnedEffort` and `pinnedTier` (what the record stores). A source
+is `detected` (what the live pane's command line runs, a template's own words included), `roster`
+(the bot's own value, when it isn't running), `profile` (the Codex profile the live launch names:
+`-p <name>` layers `~/.codex/<name>.config.toml` on the global config), `global` (that global
+config's top level) or `default` (Codex's own default tier, Standard). The text `am show` prints
+the same two lines.
+
+### Permission mode (Claude Code)
+
+Claude Code's `--permission-mode` decides what a session may run without asking. The pack starts
+every Claude launch in `auto` ([Automatic mode](#automatic-mode)); a Claude Code bot may store one
+of Claude Code's own modes instead, in `.herdr/bots.json` as `permissionMode`:
+
+| Mode | Runs without asking |
+| --- | --- |
+| `manual` | reads only; anything else asks a person |
+| `acceptEdits` | reads and file edits |
+| `plan` | reads and plans; edits wait for a person's approval |
+| `auto` | everything, through Claude Code's classifier (the default) |
+| `dontAsk` | only what is already allowed; anything else is refused instead of asked |
+| `bypassPermissions` | every tool call, with no prompt |
+
+`am create ... --permission-mode MODE` stores one and `am edit <bot> --permission-mode MODE`
+changes it; `am edit <bot> --permission-mode=` clears it back to `auto`. Only Claude Code's own
+names are accepted: another word is refused with the list, and so is a mode on an agent that has
+none (Codex's launch mode is fixed, #1125; Antigravity's execution mode is `agyMode`), never
+passed through or dropped. `bypassPermissions` is the one that runs an orchestrator seat with no
+prompt at all; use it only for a bot the owner means to run that way.
+
+Every launch path the pack builds rebuilds the command from the record: a start, a restart, a
+revive after a reboot, a linked machine's start, a worker and a worker's Restart --tree helper.
+It is independent of the model, reasoning effort and service tier: a model change never rewrites
+it, and it never changes the model. A Claude worker helper inherits its seat's mode; a non-worker
+helper keeps the command a person gave it, its own `--permission-mode` included, and the seat's
+mode is never added to one that names none; a worker template owns its command, so the pack adds
+no flag to it (put the mode in the template's command if it needs one).
+
+`am show <bot>` prints `permission <mode> (<source>)`; `show --json` carries `permissionMode`,
+`permissionModeSource` and `pinnedPermissionMode`. A source is `detected` (what the live pane's
+command line runs), `live` (the pane is running and the pack reads no `--permission-mode` in its
+command line: `permissionMode` is `null`, and the record's mode, or the pack's `auto`, applies to
+the next start), `roster` (the bot's own value while it isn't running) or `default` (the pack's
+`auto` when the record stores none). A live pane is never reported as running the record's mode:
+for one that names none, `am show` says the live command line names none and the record's mode
+applies to the next start, and its `auto mode` line names what the pane actually runs.
+A hand-written value the CLI wouldn't accept is dropped with a warning when the file is read, so
+it never reaches the launch; every command that reads the record says that warning once, `am
+start`, `am restart`, `am revive` and `am show` included, not only `am ls` and `am worker`.
+
+The accepted names are pinned, never read from the CLI at launch: `CLAUDE_PERMISSION_MODES` holds
+Claude Code 2.1.328's `--help` list. `herdr/test/permission-mode.test.mjs` compares it with the
+`--help` of the Claude Code on the PATH of a gate that has one and fails when the lists differ, so
+an upgrade that adds a mode is seen in the gate instead of silently refusing a valid value. The
+test skips where Claude Code isn't installed, so the manual step stays: re-read `claude --help` and
+update `CLAUDE_PERMISSION_MODES` in `models.js` and this table together.
 
 ### Codex's launch mode
 
@@ -1398,14 +1909,53 @@ a worker and a Restart --tree helper:
   Codex captain's `isn't a terminal hc knows` refusal; it was not reproduced in isolation.
 - `-c sandbox_workspace_write.network_access=true`: the sandbox's own network switch, so `hc`'s
   socket and GitHub (`gh`, git's transport) answer. It is off by default under the auto mode.
+- `-c allow_login_shell=false` (#1133): Codex runs every command through the account's login
+  shell by default, and a login startup that prepends a folder (macOS's `/etc/zprofile`, a
+  person's `.bash_profile` or `.zprofile`) puts its own `hc` or `automagik-herdr` ahead of the
+  pane PATH, hiding the hc kill shim. A non-login shell keeps the launch PATH's guard first at
+  command time. The shell's non-login startup and every tool the pane PATH holds still resolve;
+  no shell startup file is edited. A template worker keeps its own command and is warned when
+  it does not name this word. A start, restart, worker or `--tree` helper also refuses to run
+  when the guarded PATH it built does not resolve its first `hc` to the pack's guard shim (an
+  ordinary-named folder ahead of the guard, a missing shim, a relative first word), naming what
+  it found and how to repair; a launch with no guard folder on its PATH (an agentless helper) is
+  left as it was.
+- Worker starts only (#1420): `-c 'projects={"<worktree>"={trust_level="trusted"}}'`, after the
+  mode words and before any extra folders, subcommand or task. Checked on codex-cli 0.169.0:
+  this inline TOML table keeps dots in paths literal, merges with the person's projects table,
+  skips that folder's trust prompt and writes no setting. It trusts the worktree path only,
+  never its repository root, a parent or the home folder. Seats and Restart --tree helpers
+  do not get this word; those are a follow-up.
+  Before adding it, the pack reads `/etc/codex/config.toml`, `/etc/codex/managed_config.toml`
+  and `$CODEX_HOME/config.toml` (the default is `~/.codex/config.toml` when `CODEX_HOME` is unset
+  or empty). A missing file is absent. Codex consults the cwd and its repository root, the
+  parent of the git common dir: the pack checks both, and the project's main checkout too (a git
+  dir kept elsewhere), by written path and resolved aliases,
+  and withholds trust if either has any level other than exactly `trusted` in any read file.
+  A `trusted` entry never blocks it. An invalid worktree path or the home folder, an unknown
+  repository root, an unreadable config, or a relative `CODEX_HOME` also withholds it. So do
+  settings the narrow reader cannot prove: unclosed strings, duplicate project paths, inline
+  project tables, project arrays of tables, non-string trust levels or `project_root_markers`.
+  A Codex run through a wrapper, or one choosing its own folder (`-C`/`--cd`), profile
+  (`-p`/`--profile`) or projects/root markers (`-c`/`--config`), gets no trust word. Proxied
+  workers and Codex template workers keep their commands and get no trust word either.
+  Each withheld case warns why, without printing config contents: its folder wasn't
+  pre-trusted and Codex may stop at its folder-trust prompt until a person answers it in the
+  worker's pane. The pack never observes the pane to answer that prompt. Limit: cloud/MDM
+  Codex layers cannot be read by the pack, so these local checks cannot account for them.
 - `--add-dir <folder>`, derived per launch and only for folders that are there: the launch
   folder's git dirs, which Codex otherwise keeps read-only (`git rev-parse --git-dir
   --git-common-dir`: a checkout's own `.git`; for a linked worktree its own folder under the main
   checkout's `.git/worktrees`, where its index and lock live, then that `.git`), herdr-core's
   state and data folders (`$XDG_STATE_HOME/herdr-core`, `$XDG_DATA_HOME/herdr-core`, else under
-  the home folder: `hc` needs them to reach its core), and the tool caches a build writes: Go's
-  module and build caches (`GOMODCACHE`, `GOCACHE`), npm's (`npm_config_cache`, else `~/.npm`),
-  pnpm's store and cache, and Bun's install cache (`BUN_INSTALL_CACHE_DIR`). Never the root, the
+  the home folder), and the tool caches a build writes: Go's module and build caches (`GOMODCACHE`,
+  `GOCACHE`), npm's (`npm_config_cache`, else `~/.npm`), pnpm's store and cache, and Bun's install
+  cache (`BUN_INSTALL_CACHE_DIR`). The two herdr-core folders are the one pair a running core does
+  not need: #1125's N4 left both out and `hc ls`, `hc get self` and `am brief` still exited 0.
+  They are kept as a narrow defence for the case #1125 did not test, when no core is running and
+  the hc client must start it or take its lock; no isolated check has shown that case works
+  without them, so they stay until one does (#1261). The network word above is required in every
+  case (N3). Never the root, the
   home folder, a folder above it, the app home (its attach binding, locks and ledgers), a folder
   inside it or above it, or a whole XDG, cache, `GOPATH` or Bun folder. Each folder is weighed in
   its canonical form where the launch runs (#1142), resolved the filesystem's way: symlinks
@@ -1552,13 +2102,16 @@ under that flag agy asks nothing and runs no classifier: a command runs unless a
 runs unasked, on a seat, a worker and a read-only review launch alike:
 
 - inline code and scripts: `python3 -c`, `node -e`, `bash -c`, a heredoc, any script file;
+- the test runners: `node --test` and `bun test` run any test file they are given, so a
+  read-only launch can run code through one, exactly as `node -e` would;
 - shells and wrappers: `sh`, `bash`, `env`, `xargs`, `find -exec` and `-delete`, `awk`, `tee`,
   `sed -i`, and so a pipeline such as `cat x | sh`;
 - the network and other machines: `curl`, `ssh`, `hc run --on`, `gh gist create`;
 - a plain (non-force) `git push`, to `dev` or `main` too: only GitHub's branch protection
   stands there;
 - a child agent started by hand (`claude --dangerously-skip-permissions`, another `agy`,
-  `hc run -- ...`), and text typed into another pane with `hc send`;
+  `hc run -- ...`), and text typed into another pane with `hc send` (an agent's prompt or a
+  shell's, as that pane decides);
 - a write to the launch's own settings file or to the roster (the next pack launch writes the
   file again from the roster);
 - `gh api <endpoint> -X PUT ...` with the endpoint first, `--method=PUT`, `-XPUT` and
@@ -1583,6 +2136,11 @@ repository's own gates (`node --test`, `node --check`, `bun test`, `scripts/priv
 launch lists only `hc ls`, `hc get`, `hc read`, `hc wait`, `hc send`, the 24 read-only shell
 tools, the test checks, the `gh` reads and a short list of git subcommands (`log`, `diff`,
 `show`, `status`, …). No release verb and no `gh pr merge` is in either list.
+
+Run repository tests only in a checkout you trust. Tests execute checkout code with the access
+available to the test process, so give that process only the files and credentials its work
+needs. Before sending a message, check the intended recipient. The proxy restricts which
+destinations are available, and each recipient handles messages with its own permissions.
 
 The fixed deny rules are always present, the same for a seat and for every worker role, and a
 roster's `agyPermissions` can only add to them:
@@ -1635,6 +2193,60 @@ terminal sandbox, and so `--mode`, can
 work here: Linux's user namespace controls, or macOS's `/usr/bin/sandbox-exec`. Unreadable evidence
 is a note, not a false warning.
 
+### Antigravity's prompts: Needs you
+
+agy fires no hook while it waits at its folder-trust or file-access prompt, so herdr-core never
+reports that pane as blocked (#917). The sidebar reads the screen of a live pane when the
+foreground argv Herdr reports for it runs `agy`: `agy` itself, its absolute path, `env ... agy`,
+or agy under the pack's `hc keep` wrapper, which covers the pack's bots, workers and helpers and
+an agy typed by hand in a pane. It does not read a pane whose foreground is a script or a shell
+that started agy (`bash run.sh`, `sh -c 'agy; wait'`, an opaque worker template), nor one whose
+record carries no foreground argv. It does read any program the same identity rule names agy:
+past any of the launchers `node`, `bun`, `bunx`, `deno`, `python`, `python3`, `npx`, `pnpm`, `yarn`,
+`uv`, `uvx`, `ruby`, `bundle`, `env`, a privilege wrapper, `nice`, `time`, `watch` and `nodemon` and
+their flags, a program whose file name, without a leading `-` and without a `.js`, `.mjs` or
+`.cjs` suffix, is `agy` or `antigravity`, such as `node /tools/agy.js`. Such a pane is treated as
+agy: when its screen ends in the exact rows of one of agy's two captured prompts (a quotation of
+them, say), the sidebar draws it Needs you after two identical reads and a send into it is
+refused after the wrapper's one read. Each 2.5-second tick reads at most eight of these panes
+shown in the sidebar; when one of the two prompts captured on agy 1.5.16 on Linux is at the
+bottom of the screen in two reads in a row with nothing changed, it draws that pane as
+**Needs you**, its tooltip naming the question. On a small, responsive host that takes about
+5 seconds (two visits): an estimate, not a bound.
+
+- folder trust: "Do you trust the contents of this project?";
+- file access: "Allow access to this file?", directly under agy's "File access" heading, its
+  rule, the "Read:" row naming the file and the reason "outside workspace".
+
+A send through the pack's wrapper into such a pane is refused with the `blocked` error (exit 9) a
+dialog gets (#1414), naming the pane, never the prompt's folder or file: nothing is typed into the
+prompt. Answer it in the pane. The wrapper's check is best effort: it reads the screen once, just
+before the send, so a pane it cannot read or a prompt that opens after that read still reaches
+herdr-core's delivery. Automatic delivery (a message or an update notice the pack sends on its
+own) checks such a pane too: the attempt is withheld; update notices remain pending, and retry
+behavior for other messages depends on the caller.
+
+The pack's own launches carry `--dangerously-skip-permissions` and trust their folder, so they
+stop at neither prompt; a launch at the home folder (left out of `trustedWorkspaces`), a launch
+with no settings file and an agy started by hand can. The supported prompt rows were measured on
+Linux with agy 1.5.16. macOS and other agy releases are unverified. A release that draws the same
+supported rows can match. Only the folder-trust screen requires a separate model row. A question
+wrapped between words still matches. A wrapped path matches while the "File access" heading is
+visible and no continuation resembles a structural row. A word split across rows, a choice or footer
+wrapped onto two rows (a narrow pane), a question scrolled off the top, a prompt worded otherwise, a
+selection marker on no choice or on two, or a file-access block whose heading, rule, "Read:" row or
+reason is missing, reworded, out of order or scrolled off the top draws nothing:
+never a guess. On a matcher miss, a pane reported working proceeds to herdr-core's delivery.
+A pane reported idle or done, or with no status, still gets the generic dialog and rate-limit
+checks. The generic dialog check refuses sends under a visible question, numbered choices or a
+confirm footer. It still recognizes the file-access fixture when just the heading rows, selection
+marker or exact choice wording change. It returns no dialog for the padded folder-trust fixture
+with its selection marker removed. Trimming that same unmarked fixture exposes the question to
+the generic dialog check. Two parts of a matched screen are free: the trust screen's model row,
+so a quotation of those rows with any text there but an input line is taken as the prompt once
+it sits unchanged at the bottom of an agy pane; and the path after "Read:". Its continuation
+rows can contain ordinary text, but must not be a heading, rule, "Read:" or "Reason:" row.
+
 ### Ending a worker
 
 `hc kill` is for the seat of a project's main bot only (`kind: "main"` in `bots.json`). Every
@@ -1649,6 +2261,16 @@ terminal's `worker.of` label names the calling bot (the bot the attach ledger bi
 caller's pane to), it is not a bot's seat, it is not the caller's own pane, it is on this
 computer, and hc does not report it as `working`. A worker stuck mid-turn is the main bot's to
 end.
+
+`am worker` registers the worker to the bot's ID in `worker.of`. The same bot can still end
+its worker from its new seat after a restart. Only the project's main bot can end a terminal
+started with plain `hc run`, including after a handoff or restart. In a Git project, seats
+configured for coding (`code` defaults to `true`) can start with `am worker` when they need
+to end the worker themselves.
+
+Before ending a registered worker, the CLI rereads the caller's and target's attach bindings
+and asks hc again for the target's identity, ownership and turn status. hc provides no
+conditional kill, so the bindings or terminal can still change between the recheck and the kill.
 
 Where the rule is enforced:
 
@@ -1673,6 +2295,11 @@ What the shim does not do, plainly:
 - It stops the honest path only. The real `hc` by its full path, a copy of it, a raw socket,
   `hc connect`, or a `PATH` the agent changes goes around it, as it goes around the guard and
   the deny list. **The boundary is the hc-proxy sandbox, never the shim.**
+- A shell a command starts can still prepend a folder. The pack's Codex launch tells Codex not
+  to use a login shell for its commands (`-c allow_login_shell=false`, #1133), and a launch
+  whose PATH holds a pack guard folder refuses when its first `hc` is not that guard's shim,
+  whatever the folder ahead is called; a launch with no guard on its PATH is left as it is, and
+  a template worker that keeps its own command is warned, not rewritten.
 - A worker started from an hc template in hc's own form (`<template> <task>`) keeps the
   template's command and environment, so it gets no shim; a template the pack rebuilds for a
   Claude login has no PATH word either.

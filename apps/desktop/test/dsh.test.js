@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import * as fs from 'node:fs'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { delimiter, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import { createServer } from 'node:net'
 import { test } from 'node:test'
 import {
-  appHome, backupSettings, backupSettingsOrLog, dshEnv, dshRun, forgetDshLogins, freePort,
+  appHome, automagikHome, backupSettings, backupSettingsOrLog, dshEnv, dshRun, forgetDshLogins, freePort,
   guardContents, installProfile, keepPort, LAUNCH_URL_FILE, launchPort, launchUrlFileOf,
   launchUrlFromFile, launchUrlOf, listenFailed, mergeProfilePackage, mergeProfilePatch,
   migrateRenamed, migrateRetired, navigationOf, pageUrlOf, pinProfileStore, PORT_WAIT_MS,
@@ -15,10 +18,15 @@ import {
   serveDsh, servesOrigin, SHIPPED_STORE, startDsh, startDshOnPort, stopDsh, storedPort,
   storeLayoutOf, toolFileOf, writeTools,
 } from '../src/dsh.js'
+import { ensureOwnerRecord, launchInstance, ownerFileOf } from '../src/owner-record.js'
+import { codeRowPlace } from '../src/herdr-space.js'
 import { batchSafe } from '../scripts/batch-spawn.mjs'
+import { readRegistryTree } from '../../bots-dsh/src/host/code-tree.js'
 
 const posixOnly = { skip: process.platform === 'win32' ? 'the tools are sh scripts here' : false }
 const windowsOnly = { skip: process.platform === 'win32' ? false : 'Windows only' }
+// The dsh launcher a start uses in a checkout (resourcesOf names the packaged one).
+const LAUNCHER = fileURLToPath(new URL('../src/dsh-launch.cjs', import.meta.url))
 // A folder mode that forbids removing a file in it: POSIX only, and never for root.
 const permissionOnly = { skip: process.platform === 'win32' ? 'Windows has no folder write mode' : process.getuid?.() === 0 ? 'root removes a file from any folder' : false }
 
@@ -64,6 +72,60 @@ test('the app keeps everything in one folder under ~/.automagik, apart from a ds
   assert.equal(dshEnv({ base: {}, home: '/a' }).ELECTRON_RUN_AS_NODE, undefined)
 })
 
+test('DSH and the desktop Code row share one registry with tilde and relative home overrides', async t => {
+  const fixture = fs.realpathSync(scratch(t, 'desktop-dsh-registry-').root)
+  const relativeBase = { AUTOMAGIK_HOME: ' ./registry ' }
+  const previous = process.cwd()
+  let relativeRoot
+  try {
+    process.chdir(fixture)
+    relativeRoot = automagikHome(relativeBase)
+  } finally {
+    process.chdir(previous)
+  }
+  assert.equal(relativeRoot, join(fixture, 'registry'))
+  const token = 'desktop-dsh-registry'
+  const botId = 'b-abcdefghij'
+  const { root: tildeParent } = scratch(t, 'desktop-dsh-user-home-')
+  const homeVar = process.platform === 'win32' ? 'USERPROFILE' : 'HOME'
+  const oldHome = process.env[homeVar]
+  const tildeBase = { AUTOMAGIK_HOME: ` ~/${token} ` }
+  let tildeRoot
+  try {
+    process.env[homeVar] = tildeParent
+    tildeRoot = automagikHome(tildeBase)
+  } finally {
+    if (oldHome === undefined) delete process.env[homeVar]
+    else process.env[homeVar] = oldHome
+  }
+  assert.equal(tildeRoot, join(tildeParent, token))
+
+  for (const [root, base, raw] of [[tildeRoot, tildeBase, `~/${token}`], [relativeRoot, relativeBase, './registry']]) {
+    const home = join(root, 'desktop')
+    const project = join(root, 'project')
+    const decoy = join(root, 'decoy')
+    mkdirSync(project, { recursive: true })
+    mkdirSync(decoy)
+    function writeRegistry(root, folder) {
+      const file = join(root, 'bots', 'bots.json')
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, JSON.stringify({ version: 2, bots: [{ id: botId, name: 'Bot', folder }], shown: [{ project: folder, bots: [] }] }))
+    }
+    writeRegistry(root, project)
+    writeRegistry(resolve(home, raw), decoy)
+    writeRegistry(home, decoy)
+    // DSH starts with desktop/ as cwd. Resolve any relative file reads in that directory.
+    const read = env => readRegistryTree({ env, readFile: (file, encoding) => readFileSync(resolve(home, file), encoding) })
+    assert.equal(read({ AUTOMAGIK_HOME: raw }).bots[0].folder, decoy)
+    const env = dshEnv({ base, home, root })
+    assert.equal(env.AUTOMAGIK_HOME, root)
+    const windows = dshEnv({ base: { ...base, Automagik_Home: decoy }, home, root, platform: 'win32' })
+    assert.deepEqual(Object.keys(windows).filter(key => key.toUpperCase() === 'AUTOMAGIK_HOME'), ['AUTOMAGIK_HOME'])
+    assert.equal(read(env).bots[0].folder, project)
+    assert.deepEqual(await codeRowPlace(botId, { registryRoot: root }), { folder: project, machine: null })
+  }
+})
+
 test('settings come back from a copy, once per dsh version, before an upgrade can move them', (t) => {
   const scope = scratch(t, 'omni-desktop-settings-')
   const dshHome = join(scope.root, 'dsh')
@@ -106,9 +168,11 @@ test('resources come from the app when packaged and from build/ in a checkout', 
   assert.deepEqual(resourcesOf({ packaged: true, resourcesPath: '/opt/Omni/resources', appPath: '/x' }), {
     bin: join('/opt/Omni/resources', 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     pnpm: join('/opt/Omni/resources', 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+    launcher: join('/opt/Omni/resources', 'dsh-launch', 'dsh-launch.cjs'),
     profile: join('/opt/Omni/resources', 'profile'),
   })
   assert.equal(resourcesOf({ packaged: false, resourcesPath: '/x', appPath: '/src/apps/omni-desktop' }).profile, join('/src/apps/omni-desktop', 'build', 'profile'))
+  assert.equal(resourcesOf({ packaged: false, resourcesPath: '/x', appPath: '/src/apps/omni-desktop' }).launcher, join('/src/apps/omni-desktop', 'src', 'dsh-launch.cjs'))
 })
 
 test('the shipped profile seeds a new home, and a new build replaces only its packages', async (t) => {
@@ -494,6 +558,156 @@ setInterval(() => {}, 1000)
   assert.match(lines.join(''), /booting omni on 127\.0\.0\.1 with \/app\/profile\/privacy\.patch\.yml/)
   await stopDsh(child)
   assert.notEqual(child.exitCode ?? child.signalCode, null)
+})
+
+// The app's plugin installs, updates and removals are bound to the pnpm it ships (#1466): a
+// stand-in dsh runs a package operation through the invocation startDsh gives it, and the pnpm
+// first on PATH must never run.
+test('plugin operations use the app\'s bundled pnpm, not one first on PATH', async (t) => {
+  const scope = scratch(t, 'omni-desktop-bundled-pnpm-')
+  const { root } = scope
+  const bundled = join(root, 'bundled-pnpm.cjs')
+  writeFileSync(bundled, `
+const { appendFileSync } = require('node:fs')
+appendFileSync(process.env.PNPM_CALLS, 'bundled ' + process.argv.slice(2).join(' ') + '\\n')
+console.log('10.34.6')
+`)
+  // A stand-in pnpm first on PATH: if anything resolves the command `pnpm` it runs this.
+  const pathDir = join(root, 'path', 'bin')
+  const pathMarker = join(root, 'path-pnpm-used')
+  mkdirSync(pathDir, { recursive: true })
+  writeFileSync(join(pathDir, 'pnpm'), `#!/bin/sh\necho path-pnpm > '${pathMarker}'\nexit 97\n`)
+  chmodSync(join(pathDir, 'pnpm'), 0o755)
+  writeFileSync(join(pathDir, 'pnpm.cmd'), `@echo off\r\necho path-pnpm > "${pathMarker}"\r\nexit /b 97\r\n`)
+  // A stand-in dsh: it records the invocation, runs it as a plugin operation would, and starts.
+  const entry = join(root, 'fake-dsh.mjs')
+  writeFileSync(entry, `
+import { execFileSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
+export async function runCli(options = {}) {
+  const manager = options.packageManager
+  writeFileSync(process.env.LAUNCHER_FACTS, JSON.stringify(manager ?? null))
+  writeFileSync(process.env.LAUNCHER_ARGV, process.argv[1])
+  if (!manager) throw new Error('dsh was given no package manager')
+  const version = execFileSync(manager.command, [...manager.args, '--version'], {
+    encoding: 'utf8', env: { ...process.env, ...manager.env },
+  }).trim()
+  process.stdout.write('plugin pnpm ' + version + '\\n')
+  const args = process.argv.slice(2)
+  const port = args[args.indexOf('--port') + 1]
+  setTimeout(() => console.log('dsh web: http://127.0.0.1:' + port + '/?token=pnpm'), 50)
+  setInterval(() => {}, 1000)
+}
+`)
+  const calls = join(root, 'pnpm-calls.txt')
+  const facts = join(root, 'launcher-facts.json')
+  const argvFile = join(root, 'launcher-argv.txt')
+  const port = await freePort()
+  const running = await startDsh({
+    node: process.execPath, bin: entry, launcher: LAUNCHER, bundledPnpm: bundled,
+    env: {
+      ...process.env,
+      PATH: [pathDir, process.env.PATH].filter(Boolean).join(delimiter),
+      PNPM_CALLS: calls, LAUNCHER_FACTS: facts, LAUNCHER_ARGV: argvFile,
+    },
+    port, cwd: root,
+  })
+  scope.stop = () => stopDsh(running.child)
+  assert.equal(running.url, `http://127.0.0.1:${port}/?token=pnpm`)
+  assert.equal(existsSync(pathMarker), false, 'the pnpm first on PATH never ran')
+  assert.equal(readFileSync(calls, 'utf8'), 'bundled --version\n')
+  // argv[1] names dsh's entry, as a direct start did: the Bot team's update check reads it.
+  assert.equal(readFileSync(argvFile, 'utf8'), entry)
+  assert.deepEqual(JSON.parse(readFileSync(facts, 'utf8')), {
+    command: process.execPath,
+    args: [bundled],
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+  })
+})
+
+test('a start without the app\'s bundled pnpm fails clearly and never falls back to PATH', async (t) => {
+  const scope = scratch(t, 'omni-desktop-pnpm-missing-')
+  const missing = join(scope.root, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
+  let spawned = false
+  await assert.rejects(
+    startDsh({
+      node: process.execPath, bin: join(scope.root, 'fake-dsh.mjs'), launcher: LAUNCHER,
+      bundledPnpm: missing, env: process.env, port: 1, cwd: scope.root,
+      spawn: () => { spawned = true },
+    }),
+    error => /the app's bundled pnpm is missing at /.test(error.message) && error.message.endsWith(missing),
+  )
+  assert.equal(spawned, false, 'dsh never starts to fall back to PATH')
+  // The launcher says the same if it is ever started directly: it exits, never tries `pnpm`.
+  const entry = join(scope.root, 'fake-dsh.mjs')
+  writeFileSync(entry, 'export async function runCli() {}\n')
+  const carrier = spawnSync(process.execPath, [LAUNCHER], {
+    env: { ...process.env, AUTOMAGIK_DSH_ENTRY: entry, AUTOMAGIK_DSH_PNPM: missing },
+    encoding: 'utf8',
+  })
+  assert.equal(carrier.status, 1)
+  assert.match(carrier.stderr, /the app's bundled pnpm is missing at .*pnpm\.cjs/)
+})
+
+test('an entry with a direct-run guard starts once, with the package manager', async (t) => {
+  const scope = scratch(t, 'omni-desktop-launcher-guard-')
+  const { root } = scope
+  const bundled = join(root, 'bundled-pnpm.cjs')
+  writeFileSync(bundled, "console.log('10.34.6')\n")
+  const calls = join(root, 'launcher-calls.txt')
+  const facts = join(root, 'launcher-facts.json')
+  // A stand-in entry that runs itself when argv names it, as an installed bin may.
+  const entry = join(root, 'guarded-dsh.mjs')
+  writeFileSync(entry, `
+import { appendFileSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+export async function runCli(options = {}) {
+  appendFileSync(process.env.LAUNCHER_CALLS, JSON.stringify({ manager: options.packageManager !== undefined }) + '\\n')
+  if (!options.packageManager) return
+  writeFileSync(process.env.LAUNCHER_FACTS, JSON.stringify(options.packageManager))
+  const args = process.argv.slice(2)
+  const port = args[args.indexOf('--port') + 1]
+  setTimeout(() => console.log('dsh web: http://127.0.0.1:' + port + '/?token=guard'), 50)
+  setInterval(() => {}, 1000)
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await runCli()
+`)
+  const port = await freePort()
+  const running = await startDsh({
+    node: process.execPath, bin: entry, launcher: LAUNCHER, bundledPnpm: bundled,
+    env: { ...process.env, LAUNCHER_CALLS: calls, LAUNCHER_FACTS: facts },
+    port, cwd: root,
+  })
+  scope.stop = () => stopDsh(running.child)
+  assert.equal(running.url, `http://127.0.0.1:${port}/?token=guard`)
+  // argv[1] is named only after the import: the guard must not start dsh a second time.
+  assert.equal(readFileSync(calls, 'utf8'), '{"manager":true}\n')
+  assert.deepEqual(JSON.parse(readFileSync(facts, 'utf8')), {
+    command: process.execPath,
+    args: [bundled],
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+  })
+})
+
+test('a launcher without the app\'s bundled pnpm is refused, never a direct start', async (t) => {
+  const scope = scratch(t, 'omni-desktop-launcher-alone-')
+  let spawned = false
+  await assert.rejects(
+    startDsh({
+      node: process.execPath, bin: join(scope.root, 'fake-dsh.mjs'), launcher: LAUNCHER,
+      env: process.env, port: 1, cwd: scope.root, spawn: () => { spawned = true },
+    }),
+    /the dsh launcher needs the app's bundled pnpm/,
+  )
+  assert.equal(spawned, false)
+})
+
+test('the launcher that binds the bundled pnpm ships outside the asar', () => {
+  const prepare = readFileSync(new URL('../scripts/prepare-runtime.mjs', import.meta.url), 'utf8')
+  assert.match(prepare, /cpSync\(join\(APP, 'src', 'dsh-launch\.cjs'\)/)
+  const builder = readFileSync(new URL('../electron-builder.yml', import.meta.url), 'utf8')
+  assert.match(builder, /- from: build\/dsh-launch\n {4}to: dsh-launch/)
+  assert.ok(existsSync(LAUNCHER))
 })
 
 // Windows: dsh's whole tree ends, so nothing it started keeps files of the app's folder open
@@ -1215,6 +1429,134 @@ test('main.js guards the origin as it is now, and loads only the URL pageUrlOf h
   assert.match(main, /guard: \(\) => harden\(\(\) => dshOrigin\)/)
   assert.match(main, /const url = pageUrlOf\(running, dshOrigin\)[\s\S]{0,120}loadURL\(url\)/)
   assert.match(main, /serveDsh\(\{\s*run: dshProcess,/)
+  // Every start binds the plugin manager to the app's own pnpm: losing these props would bring
+  // back #1466 with the rest of the suite still green.
+  assert.match(main, /bundledPnpm: resources\.pnpm, launcher: resources\.launcher,/)
   assert.match(main, /urlFile/)
   assert.equal(/stopDsh\(|dshChild/.test(main), false, 'every way out stops dshProcess, the current dsh')
 })
+
+test('only the launcher sets the instance id in a copy of the DSH environment', () => {
+  const base = {
+    AUTOMAGIK_INSTANCE_ID: 'inherited',
+    Automagik_Instance_Id: 'mixed case',
+    automagik_instance_id: 'lower case',
+  }
+  const linux = { base, home: '/fixture', platform: 'linux' }
+  const windows = { ...linux, platform: 'win32' }
+  const keys = env => Object.keys(env).filter(key => key.toUpperCase() === 'AUTOMAGIK_INSTANCE_ID')
+  assert.equal(dshEnv({ ...linux, instanceId: 'from the record' }).AUTOMAGIK_INSTANCE_ID, 'from the record')
+  assert.equal(Object.hasOwn(dshEnv(linux), 'AUTOMAGIK_INSTANCE_ID'), false)
+  assert.equal(Object.hasOwn(dshEnv({ ...linux, instanceId: 123 }), 'AUTOMAGIK_INSTANCE_ID'), false)
+  assert.equal(dshEnv(linux).Automagik_Instance_Id, 'mixed case')
+  assert.deepEqual(keys(dshEnv(windows)), [])
+  const env = dshEnv({ ...windows, instanceId: 'from the record' })
+  assert.deepEqual(keys(env), ['AUTOMAGIK_INSTANCE_ID'])
+  assert.equal(env.AUTOMAGIK_INSTANCE_ID, 'from the record')
+  assert.deepEqual(base, {
+    AUTOMAGIK_INSTANCE_ID: 'inherited',
+    Automagik_Instance_Id: 'mixed case',
+    automagik_instance_id: 'lower case',
+  })
+})
+
+function listeningInstance(root, withId) {
+  const bin = join(root, 'fake-dsh.mjs')
+  const matches = withId
+    ? `process.env.AUTOMAGIK_INSTANCE_ID === JSON.parse(readFileSync(${JSON.stringify(ownerFileOf(root))}, 'utf8')).instance_id`
+    : "!Object.keys(process.env).some(key => key.toUpperCase() === 'AUTOMAGIK_INSTANCE_ID')"
+  writeFileSync(bin, `
+import { readFileSync } from 'node:fs'
+await new Promise(done => process.send(${matches}, done))
+if (process.argv.includes('--instance-only')) process.exit(0)
+${LISTENING_DSH}`)
+  return bin
+}
+
+const childReport = async child => (await once(child, 'message'))[0]
+const transportId = 'A\tUnicode id 🪄\n' + 'x'.repeat(257)
+
+test('a stand-in child receives the persisted id verbatim, or no inherited id', async (t) => {
+  const { fork } = await import('node:child_process')
+  const { root: home } = scratch(t, 'omni-desktop-instance-env-')
+  writeFileSync(ownerFileOf(home), JSON.stringify({ version: 2, instance_id: transportId }))
+  const base = { ...process.env, AUTOMAGIK_INSTANCE_ID: 'inherited' }
+  for (const id of [ensureOwnerRecord(home).instanceId, undefined]) {
+    const bin = listeningInstance(home, id !== undefined)
+    const child = fork(bin, ['--instance-only'], {
+      cwd: home, env: dshEnv({ base, home, instanceId: id }), execArgv: [], stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+    })
+    const exited = once(child, 'exit')
+    assert.equal(await childReport(child), true)
+    assert.deepEqual(await exited, [0, null])
+  }
+})
+
+test('the first DSH child, the port retry and a DSH-only restart receive the persisted instance id', async (t) => {
+  const scope = scratch(t, 'omni-desktop-instance-')
+  const home = scope.root
+  writeFileSync(ownerFileOf(home), JSON.stringify({ version: 2, instance_id: transportId }))
+  const bin = listeningInstance(home, true)
+  let reads = 0
+  const launch = { home, ensure: home => { reads += 1; return ensureOwnerRecord(home) } }
+  const instance = launchInstance(launch)
+  const env = () => dshEnv({ home, instanceId: instance.instanceId })
+  const reports = []
+  const onSpawn = child => reports.push(childReport(child))
+  const portFile = portFileOf(home)
+  const first = dshRun()
+  scope.stop = () => first.stop()
+  const taken = await squat(t)
+  const running = await serveDsh({ run: first, portFile, node: process.execPath, bin, env, port: taken, cwd: home, onSpawn })
+  assert.notEqual(Number(new URL(running.url).port), taken)
+  assert.deepEqual(await Promise.all(reports), [true, true])
+  await first.stop()
+
+  const restarted = dshRun()
+  scope.stop = () => restarted.stop()
+  await serveDsh({ run: restarted, portFile, node: process.execPath, bin, env, port: await freePort(), cwd: home, onSpawn })
+  assert.deepEqual(await Promise.all(reports), [true, true, true])
+  assert.equal(launchInstance(launch), instance)
+  assert.equal(reads, 1)
+})
+
+for (const reason of ['invalid', 'unreadable', 'create-failed']) {
+  test(`DSH starts without an instance id when the owner record is ${reason}`, async (t) => {
+    const scope = scratch(t, 'omni-desktop-owner-')
+    const home = scope.root
+    const file = ownerFileOf(home)
+    const sentinel = 'owner-only sentinel'
+    const bytes = JSON.stringify({ version: 1, instance_id: sentinel })
+    if (reason !== 'create-failed') writeFileSync(file, bytes)
+    const fail = code => () => { throw Object.assign(new Error(sentinel), { code }) }
+    const faults = {
+      invalid: {},
+      unreadable: { readFileSync: fail('EACCES') },
+      'create-failed': { linkSync: fail('EIO') },
+    }
+    const lines = []
+    const launch = {
+      home,
+      log: line => lines.push(line),
+      ensure: home => ensureOwnerRecord(home, { fs: { ...fs, ...faults[reason] } }),
+    }
+    const instance = launchInstance(launch)
+    const base = { ...process.env, AUTOMAGIK_INSTANCE_ID: 'inherited', Automagik_Instance_Id: 'mixed', automagik_instance_id: 'lower' }
+    const env = () => dshEnv({ base, home, platform: 'win32', instanceId: instance.instanceId })
+    const run = dshRun()
+    scope.stop = () => run.stop()
+    const bin = listeningInstance(home, false)
+    const port = await freePort()
+    let report
+    const running = await serveDsh({
+      run, portFile: portFileOf(home), node: process.execPath, bin, env, port, cwd: home,
+      onSpawn: child => { report = childReport(child) },
+    })
+    assert.equal(Number(new URL(running.url).port), port)
+    assert.equal(await report, true)
+    assert.equal(launchInstance(launch), instance)
+    assert.deepEqual(lines, [`owner record ${reason}; reservations are off`])
+    if (reason === 'create-failed') assert.equal(existsSync(file), false)
+    else assert.equal(readFileSync(file, 'utf8'), bytes)
+  })
+}

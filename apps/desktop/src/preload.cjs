@@ -26,8 +26,8 @@ const updates = Object.freeze({
 })
 
 // Code mode (RFC 0013): Herdr's state, and bringing its window forward. The page sends a Bot
-// id and, to an offer of a newer Herdr (`reason: 'update'`), `update: true` or `false`; nothing
-// else, and only during a real click; main finds everything else, the update included, itself.
+// id and, to an offer of a newer Herdr (`reason: 'update'`), `update: true` or `false`.
+// During a real click, Code rows use their own method to choose the registry lookup.
 // User activation is the page's, shared by every script in it (the RFC's threat model).
 const herdr = Object.freeze({
   status: () => ipcRenderer.invoke('automagik-herdr-status'),
@@ -40,9 +40,37 @@ const herdr = Object.freeze({
     if (typeof options?.update === 'boolean') request.update = options.update
     return ipcRenderer.invoke('automagik-herdr-open', request)
   },
+  openCodeRow(botId, options) {
+    if (globalThis.navigator?.userActivation?.isActive !== true) {
+      return Promise.reject(new Error('Herdr opens only on a click'))
+    }
+    const request = { botId: typeof botId === 'string' ? botId : null, source: 'code' }
+    if (typeof options?.update === 'boolean') request.update = options.update
+    return ipcRenderer.invoke('automagik-herdr-open', request)
+  },
 })
 
-contextBridge.exposeInMainWorld('omniDesktop', Object.freeze({ app: 'omni-desktop', platform: process.platform, updates, herdr }))
+// The person's Automagik ID sign-in (RFC 0024 delivery 1; sign-in.js, account.js). The page
+// gets a status and the person's yes: no access token, refresh token, ID token or authorization
+// code ever crosses this bridge. Signing in opens the system browser, never a page in the
+// window; it starts only from a real click.
+const account = Object.freeze({
+  status: () => ipcRenderer.invoke('automagik-account-status'),
+  signIn() {
+    if (globalThis.navigator?.userActivation?.isActive !== true) {
+      return Promise.reject(new Error('Signing in starts from a click'))
+    }
+    return ipcRenderer.invoke('automagik-account-signin')
+  },
+  signOut: () => ipcRenderer.invoke('automagik-account-signout'),
+  subscribe(listener) {
+    const handle = (_event, status) => listener(status)
+    ipcRenderer.on('automagik-account', handle)
+    return () => ipcRenderer.off('automagik-account', handle)
+  },
+})
+
+contextBridge.exposeInMainWorld('omniDesktop', Object.freeze({ app: 'omni-desktop', platform: process.platform, updates, herdr, account }))
 
 // The Bot browsers (main.js, bot-views.js), in the shape the Bot team's panel drives
 // (bots-dsh src/client/bot-browsers.js `bridge.views`): each tab is a view the app lays over

@@ -3,9 +3,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 import { apply } from '../index.js'
-import { foldCalls } from '../src/host/usage.js'
+import { foldCalls, install as installUsage } from '../src/host/usage.js'
 import { fakeContext } from './fake-ctx.js'
+import { captureWaterfall } from './support/capture-waterfall.js'
 
 const header = (provider, model) => ({ type: 'request/header', data: { header: { config: { provider, model } }, reason: 'change' } })
 const message = (turn, step, usage, time = 0) => ({ type: 'assistant/message', time, data: { turn, step, message: { role: 'assistant', content: [] }, stream: [], usage } })
@@ -80,6 +82,7 @@ function start(home, { listedExtra, logsExtra, subagentsExtra } = {}) {
   const pages = []
   const warnings = []
   const ctx = fakeContext()
+  const streamContext = captureWaterfall(ctx, 'llm/stream')
   ctx.logger.warn = (template, ...args) => warnings.push([template, ...args])
   ctx.sessionController = {
     list: async () => ({ items: [
@@ -106,12 +109,21 @@ function start(home, { listedExtra, logsExtra, subagentsExtra } = {}) {
     const response = await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
     return response.json()
   }
-  const meter = ctx.listeners.get('llm/stream').at(-1)
+  const stream = (options, next) => streamContext.waterfall(ctx.llm, 'llm/stream', options, next)
   const stop = async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { call, ctx, home, meter, pages, stop, warnings }
+  return { call, ctx, home, stream, pages, stop, warnings }
+}
+
+function meterBoundary(t, home) {
+  const ctx = new Context()
+  // Leave owner loading pending here. The full fixture exercises journaling separately.
+  const loading = new Promise(() => {})
+  installUsage({ ctx, home, state: {}, load: () => loading })
+  t.after(() => ctx.fiber.dispose())
+  return (options, next) => ctx.waterfall('llm/stream', options, next)
 }
 
 // Total tokens per owner name and use.
@@ -146,7 +158,7 @@ async function drain(stream) {
 }
 
 test('the usage view counts every Session under its owner, by hour in the asked time zone', async (t) => {
-  const { call, meter, pages, stop } = start()
+  const { call, home, pages, stop, stream } = start()
   t.after(stop)
   const view = (await call('usage', { timeZone: 'Asia/Shanghai' })).value
   // Omni: both parts of its own chat and its subagent; its group Session counts as group use.
@@ -157,14 +169,15 @@ test('the usage view counts every Session under its owner, by hour in the asked 
   assert.equal(view.scanning, false)
   assert.ok(!pages.includes('s-empty'))
 
-  // A Session's own requests are in its log, so the meter lets them through untouched.
+  // The group interceptor wraps plain chats. Inspect identity at the meter itself.
+  const meter = meterBoundary(t, home)
   const passed = (async function* () { yield { type: 'usage', usage: usage(1, 1) } })()
   assert.equal(meter({ sessionId: 's-b1', messages: [] }, () => passed), passed)
   // A checkpoint is outside every log: the meter counts it, once.
   const chunk = { type: 'usage', usage: usage(1000, 100) }
-  const chunks = await drain(meter({ sessionId: 's-b1', purpose: 'compaction', provider: 'deepseek', model: 'v4-flash', messages: [] }, async function* () { yield chunk }))
+  const chunks = await drain(stream({ sessionId: 's-b1', purpose: 'compaction', provider: 'deepseek', model: 'v4-flash', messages: [] }, async function* () { yield chunk }))
   assert.deepEqual(chunks, [chunk])
-  await drain(meter({ sessionId: 's-b1', purpose: 'compaction', provider: 'deepseek', model: 'v4-flash', messages: [] }, async function* () { yield chunk }))
+  await drain(stream({ sessionId: 's-b1', purpose: 'compaction', provider: 'deepseek', model: 'v4-flash', messages: [] }, async function* () { yield chunk }))
   const again = (await call('usage', { timeZone: 'Asia/Shanghai' })).value
   assert.equal(totals(again)['Omni/compaction'], 1100)
 })
@@ -193,8 +206,10 @@ test('a plain chat journals its owner before the first scan, so a deleted Bot ke
   t.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5 }))
   // Writer talks once, Usage is never opened: the meter lets the request
   // through, but the Session's owner lands in the ledger on its own.
-  const passed = (async function* () { yield { type: 'text', text: 'hi' } })()
-  assert.equal(first.meter({ sessionId: 'b2', messages: [] }, () => passed), passed)
+  const meter = meterBoundary(t, home)
+  const passed = (async function* () { yield { type: 'text-delta', index: 0, text: 'hi' } })()
+  assert.equal(meter({ sessionId: 'b2', messages: [] }, () => passed), passed)
+  await drain(first.stream({ sessionId: 'b2', messages: [] }, () => passed))
   // The owner is written once the team and the ledger have loaded behind the meter:
   // wait for its row, not for a fixed time, before the shutdown closes the ledger.
   for (let tries = 0; !(await journaledSessions(home)).includes('b2'); tries += 1) {
@@ -307,7 +322,7 @@ test('a ledger from the previous version keeps its metered calls and gains the s
   const { home } = first
   t.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5 }))
   const chunk = { type: 'usage', usage: usage(1000, 100) }
-  await drain(first.meter({ sessionId: 's-b1', purpose: 'compaction', provider: 'deepseek', model: 'v4-flash', messages: [] }, async function* () { yield chunk }))
+  await drain(first.stream({ sessionId: 's-b1', purpose: 'compaction', provider: 'deepseek', model: 'v4-flash', messages: [] }, async function* () { yield chunk }))
   await first.call('usage', { timeZone: 'Asia/Shanghai' })
   await first.ctx.dispose()
   const { DatabaseSync } = await import('node:sqlite')

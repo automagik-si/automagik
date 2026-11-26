@@ -8,17 +8,21 @@
 //   account      the CLI is already signed in on this computer: the account, and that Bots
 //                will use and bill it, shared with the terminal (#869)  [Use this account] [Not now]
 //   attempt      the link, the Codex code or the Claude code field, its expiry   [Cancel sign-in]
-//   done         "Done: signed in to {name}."  gone by itself after DONE_MS
+//   done         "Done: signed in to {name}." (or "The account did not change: …" after a Switch
+//                account that ended on the account it signed out of, #2064)  gone after DONE_MS
 //   applyFailed  signed in, but the chosen model could not be used  gone after APPLY_FAILED_MS
 //   failed       one line                                        [Try again] [Close]
 //   interrupted  a restart ended the attempt                     [Try again] [Close]
+// A Switch account attempt that ended without a sign-in (#2064) stays an attempt while the host
+// settles it (one status read), then fails `switched`: still signed in, [Try again] asks again
+// and switches again; signed out, [Sign in] (a plain sign-in, its home is paused).
 // The account step comes before any sign-in starts: the host answers `confirm` where it would
 // have answered ready at once. "Use this account" is the person's word; the host then applies
 // the model chosen with the entry, exactly as after a sign-in (done, applyFailed).
 // A row that only offers or reports (offer, account, failed, interrupted) closes by itself when the Bot's
 // selected model moves to another provider: it is about a model the Bot left. A live attempt
 // stays, since it belongs to the CLI, not to the Bot's pick.
-import { APPLY_FAILED_MS, CLI_NAMES, DONE_MS, rememberLinkState } from './cli-login-model.js'
+import { APPLY_FAILED_MS, DONE_MS, SIGN_IN_NAMES, rememberCallbackState, rememberLinkState } from './cli-login-model.js'
 
 const ACTIVE = new Set(['starting', 'waiting'])
 // The host's codes for an attempt it no longer has, and for one a restart ended: the message
@@ -29,7 +33,8 @@ const EXPIRED = 'This sign-in expired. Start again.'
 // How often, and how many times, a finished sign-in asks what became of the chosen model.
 const CHOICE_MS = 500
 const CHOICE_TRIES = 8
-const known = provider => Object.hasOwn(CLI_NAMES, provider)
+const known = provider => Object.hasOwn(SIGN_IN_NAMES, provider)
+const PASTES = new Set(['acp-claude', 'acp-antigravity'])
 const CLOSES_ON_MOVE = new Set(['offer', 'account', 'failed', 'interrupted'])
 const ACCESS_REQUIRED = 'MODEL_ACCESS_REQUIRED'
 const ACCOUNT_CHANGED = 'bot/account-changed'
@@ -120,19 +125,28 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
   // A view from the host, for every row of that agent.
   function applyView(provider, view) {
     if (disposed || view === null || view === undefined) return
-    attempts[provider] = view
+    const attempt = { ...view }
+    delete attempt.signedInAs
+    attempts[provider] = attempt
     if (provider === 'acp-claude' && typeof view.url === 'string') rememberLinkState(view.url)
+    // Antigravity's link (#2048): the address it ends on is refused in a message too.
+    if (provider === 'acp-antigravity' && typeof view.url === 'string') rememberCallbackState(view.url)
     if (ACTIVE.has(view.status)) {
-      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt: view })
+      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt })
       armPoll(provider)
     } else if (view.status === 'ready') succeed(provider, view)
     else if (view.status === 'confirm') askAccount(provider, view.account)
     else if (view.status === 'cancelled') {
       stopPoll(provider)
       for (const row of attemptRows(provider)) setRow(row.botId, null)
+    } else if (view.fresh === true && view.settling === true) {
+      // A Switch the host is still settling (#2064): its status read decides what the row says.
+      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, attempt, busy: true })
+      armPoll(provider)
     } else {
       stopPoll(provider)
-      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, stage: 'failed', attempt: null, busy: false, confirm: false, message: view.message ?? 'Sign-in did not finish. Try again.' })
+      const switched = view.fresh === true ? { switched: true, stillSignedIn: view.signedInAfter === true } : {}
+      for (const row of attemptRows(provider)) setRow(row.botId, { ...row, stage: 'failed', attempt: null, busy: false, confirm: false, message: view.message ?? 'Sign-in did not finish. Try again.', ...switched })
     }
   }
 
@@ -168,8 +182,14 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
   function succeed(provider, view) {
     stopPoll(provider)
     void Promise.resolve().then(() => actions.refreshModels?.()).catch(() => {})
+    const signedInAs = view?.signedInAs
     for (const row of attemptRows(provider)) {
-      setRow(row.botId, { ...row, stage: 'done', attempt: null, busy: false, confirm: false, error: null })
+      setRow(row.botId, {
+        ...row, stage: 'done', attempt: null, busy: false, confirm: false, error: null,
+        ...(signedInAs ? { signedInAs: Object.freeze({ ...signedInAs }) } : {}),
+        // A Switch that ended on the account it signed out of says so (#2064).
+        ...(view?.sameAccount === true ? { sameAccount: true } : {}),
+      })
       leaveAfter(row.botId, row.seq, DONE_MS)
       if (view?.choice?.state === 'failed') applyFailed(row.botId, row.seq, view.choice)
       else if (view?.choice?.state === 'pending' || view?.choice === undefined) void followChoice(row.botId, provider, row.seq)
@@ -224,7 +244,8 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
     if (signedIn === true) { succeed(provider, undefined); return }
     const last = attempts[provider]
     if (last?.expiresAt !== undefined && last.expiresAt > now()) interrupt(provider)
-    else applyView(provider, { status: 'expired', message: EXPIRED })
+    // A Switch's attempt stays one (#2064): its row still knows where it came from.
+    else applyView(provider, { status: 'expired', message: EXPIRED, ...(last?.fresh === true ? { fresh: true } : {}) })
   }
 
   function failedCall(provider, error) {
@@ -260,13 +281,16 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
      * The explicit entry (rule 2): a chat where the person chose an agent that is signed out,
      * or the Sign in button in Settings or Welcome. A live attempt of that agent is joined, never
      * started again; `ref` (the model the person chose) is kept by the host for this Bot.
+     * `attemptId` is a Switch account's own attempt (#2064): it is read by its id, even after
+     * it ended, so a switch that failed fast still shows why.
      */
-    async open({ botId, provider, ref }, valid = () => true, owner) {
+    async open({ botId, provider, ref, attemptId }, valid = () => true, owner) {
       nextIntent()
       if (disposed || !valid() || typeof botId !== 'string' || botId === '' || !known(provider)) return false
       const model = typeof ref === 'string' && ref.startsWith(`${provider}/`) ? ref : undefined
+      const switched = typeof attemptId === 'string' && attemptId !== ''
       const existing = rowOf(botId)
-      if (existing?.provider === provider && ['offer', 'attempt', 'account'].includes(existing.stage)) {
+      if (!switched && existing?.provider === provider && ['offer', 'attempt', 'account'].includes(existing.stage)) {
         setRow(botId, { ...existing, reveal: ++sequence, ...(model ? { ref: model } : {}) })
         // Another model chosen while the sign-in runs is the latest intent (rule 5): the host
         // keeps it in place of the older one. Start joins the live attempt, never opens a second.
@@ -285,6 +309,25 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       const seq = ++sequence
       if (owner) owner.seq = seq
       setRow(botId, { botId, provider, ref: model, stage: 'offer', busy: true, reveal: seq, seq, attempt: null, error: null, confirm: false })
+      if (switched) {
+        try {
+          const view = await actions.cliLoginStatus(botId, provider, attemptId)
+          if (!live(botId, seq) || !valid()) return false
+          setRow(botId, { ...rowOf(botId), stage: 'attempt', busy: false })
+          applyView(provider, view)
+          return true
+        } catch (error) {
+          if (!live(botId, seq) || !valid()) return false
+          if (error?.code === ENDED || error?.code === RESTARTED) {
+            setRow(botId, { ...rowOf(botId), stage: 'attempt', busy: false })
+            failedCall(provider, error)
+            return true
+          }
+          // Anything else: the offer stays, as below; its own Sign in reports what failed.
+        }
+        patchRow(botId, seq, { busy: false })
+        return true
+      }
       try {
         const current = await actions.cliLoginCurrent(botId, provider)
         if (!live(botId, seq) || !valid()) return false
@@ -352,7 +395,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       try {
         const view = await actions.cliLoginStart(botId, row.provider, row.ref)
         if (!live(botId, seq) || !valid()) return false
-        setRow(botId, { ...rowOf(botId), stage: 'attempt', busy: false, message: undefined })
+        setRow(botId, { ...rowOf(botId), stage: 'attempt', busy: false, message: undefined, switched: undefined, stillSignedIn: undefined })
         applyView(row.provider, view)
         return true
       } catch (error) {
@@ -367,7 +410,8 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       nextIntent()
       const row = rowOf(botId)
       const attempt = row?.attempt
-      if (disposed || row?.stage !== 'attempt' || row.provider !== 'acp-claude' || row.busy || attempt?.prompt === undefined
+      // Claude's code, or Antigravity's address (#2048): the agents whose attempt asks for a paste.
+      if (disposed || row?.stage !== 'attempt' || !PASTES.has(row.provider) || row.busy || attempt?.prompt === undefined
         || typeof value !== 'string' || value.trim() === '') return false
       const seq = row.seq
       patchRow(botId, seq, { busy: true, error: null })
@@ -435,6 +479,54 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
     },
 
     askCancel(botId) { const row = rowOf(botId); if (row?.stage === 'attempt') patchRow(botId, row.seq, { confirm: true }) },
+
+    /**
+     * Try again after a failed Switch account whose CLI is still signed in (#2064): it asks
+     * first, as every Switch does, since its home runs Bot work again.
+     */
+    askSwitch(botId) {
+      const row = rowOf(botId)
+      if (row?.switched === true && row.stillSignedIn === true && ['failed', 'interrupted'].includes(row.stage) && !row.busy) patchRow(botId, row.seq, { confirm: true })
+    },
+
+    /**
+     * "Continue": the same host switch again (#2064), never a plain sign-in. Its own attempt is
+     * read by its id; only a host that names none is joined through its current attempt.
+     */
+    async switchAgain(botId, valid = () => true) {
+      nextIntent()
+      const row = rowOf(botId)
+      if (disposed || !valid() || row?.switched !== true || row.stillSignedIn !== true || row.busy
+        || !['failed', 'interrupted'].includes(row.stage) || typeof actions.cliLoginSwitch !== 'function') return false
+      const { seq, provider } = row
+      patchRow(botId, seq, { busy: true, error: null })
+      let switched
+      try {
+        switched = await actions.cliLoginSwitch(botId, provider)
+      } catch (error) {
+        // A refused switch keeps the failed row, with the host's sentence: Try again asks again.
+        if (!live(botId, seq) || !valid()) return false
+        patchRow(botId, seq, { busy: false, confirm: false, error: messageOf(error) })
+        return false
+      }
+      void Promise.resolve().then(() => actions.refreshModels?.()).catch(() => {})
+      if (!live(botId, seq) || !valid()) return false
+      setRow(botId, { ...rowOf(botId), stage: 'attempt', attempt: null, busy: false, confirm: false, error: null, message: undefined, switched: undefined, stillSignedIn: undefined })
+      try {
+        if (typeof switched?.attemptId === 'string') {
+          const view = await actions.cliLoginStatus(botId, provider, switched.attemptId)
+          if (live(botId, seq)) applyView(provider, view)
+        } else {
+          const current = await actions.cliLoginCurrent(botId, provider)
+          if (!live(botId, seq)) return false
+          if (current?.attempt) applyView(provider, current.attempt)
+          else await readAccount(botId, provider, seq, null)
+        }
+      } catch (error) {
+        if (live(botId, seq) && !failedCall(provider, error)) await readAccount(botId, provider, seq, messageOf(error))
+      }
+      return true
+    },
     keepAttempt(botId) { const row = rowOf(botId); if (row) patchRow(botId, row.seq, { confirm: false }) },
 
     /** The person's explicit cancel: the only way a row ends an attempt. */
@@ -492,7 +584,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
     async restore(botId) {
       if (disposed || typeof botId !== 'string' || rowOf(botId) !== undefined || restored.has(botId)) return
       restored.add(botId)
-      for (const provider of Object.keys(CLI_NAMES)) {
+      for (const provider of Object.keys(SIGN_IN_NAMES)) {
         const epoch = providerEpochs.get(provider)
         let current
         try { current = await actions.cliLoginCurrent(botId, provider) } catch { continue }

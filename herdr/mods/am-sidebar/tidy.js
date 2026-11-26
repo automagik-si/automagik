@@ -12,6 +12,8 @@
 // drift (gone, a subfolder) is planned only from what was found, and never recreated on
 // another machine (reported instead). Each rule (registryRule, labelRule, spaceRule,
 // terminalRule) reads one contextOf(state) and returns its actions; plan() groups them.
+// `ledger` holds `bound` (confirmed local bindings with terminal, bot and project) and
+// `known` (bot IDs ever recorded locally). When it is null or absent, identity comes from labels.
 //
 // Action: { kind, visual, why, ... }. Non-visual (start, attach and create apply them):
 //   prune-registry { key }; relabel { terminal, set } (role= and category=; "" removes).
@@ -27,12 +29,23 @@
 //   relabel { terminal, set } with `herdr.space` (Herdr places a terminal by that label).
 // Reports (never acted on): report { report: "orphan-helper" | "foreign" |
 //   "stale-worktree-space" | "stale-needs-owner" | "cross-machine", terminal?, space?, note }.
-import { BOT_LABEL, effectiveCategory, mainBotOf, parseBots } from "./model.js";
+import { BOT_LABEL, effectiveCategory, isSendGrantRole, mainBotOf, parseBots } from "./model.js";
 import { CATEGORY_LABEL, ROLE_LABEL, roleOf } from "./launchArgs.js";
 
 export const SPACE_LABEL = "herdr.space";
 export const NEEDS_OWNER_LABEL = "automagik-herdr.needs-owner";
 export const STALE_NEEDS_OWNER_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a terminal's needs-owner label is over the pack's stale window (a day). The label has
+ * no clock of its own: its age is the terminal's status age, else its creation age, and a
+ * missing clock is never stale. One rule, two readers: tidy's stale-needs-owner report and the
+ * sidebar's Question chip (rows.js).
+ */
+export function needsOwnerStale(t, now = Date.now()) {
+  const since = t?.status_ms ?? t?.created_ms;
+  return Number.isFinite(since) && now - since > STALE_NEEDS_OWNER_MS;
+}
 
 const machineOf = (address) => (String(address).includes("/") ? String(address).split("/")[0] : null);
 const baseOf = (p) => p.replace(/\/+$/, "").slice(p.replace(/\/+$/, "").lastIndexOf("/") + 1);
@@ -54,9 +67,9 @@ export function displayName(project) {
 }
 
 /**
- * What every rule reads: the State indexed once. A bot pane's project is the one that defines
- * its bot on the pane's machine; when two do (a copied bots.json), the one the pane's folder
- * keys to, else none (reported, never relabelled).
+ * What every rule reads: the State indexed once. The ledger can name a local pane's bot and
+ * project. Otherwise the project is the one that defines the bot on the pane's machine;
+ * when two do (a copied bots.json), the one the pane's folder keys to, else none.
  */
 export function contextOf(state, { now = Date.now(), home = "~" } = {}) {
   const isHome = (f) => !f || f === "~" || f === home;
@@ -78,17 +91,31 @@ export function contextOf(state, { now = Date.now(), home = "~" } = {}) {
   const terms = (state.terminals ?? []).filter((t) => t?.address);
   const byAddress = new Map(terms.map((t) => [t.address, t]));
   const live = (t) => t?.state === "live";
+  const bound = new Map((state.ledger?.bound ?? []).map((b) => [b.terminal, b]));
+  const known = new Set(state.ledger?.known);
+  const bindingOf = (t) => machineOf(t.address) == null ? bound.get(t.address) : undefined;
+  const idOf = (t) => {
+    const label = t.labels?.[BOT_LABEL];
+    return bindingOf(t)?.bot ?? (machineOf(t.address) == null && known.has(label) ? undefined : label);
+  };
   const folderKey = (t) => {
     if (isHome(t.cwd)) return null;
     const f = facts(t.cwd, machineOf(t.address));
     return f.exists ? f.key : null;
   };
   const owners = new Map(); // address -> project
+  const unresolved = new Map(); // address -> binding whose project doesn't define its bot here
   const ambiguous = []; // { terminal, id, keys }
   for (const t of terms) {
-    const id = t.labels?.[BOT_LABEL];
+    const id = idOf(t);
     if (!live(t) || !id) continue;
     const list = botProjects.get(at(machineOf(t.address), id)) ?? [];
+    const binding = bindingOf(t);
+    if (binding?.project != null) {
+      const project = list.find((p) => p.key === binding.project);
+      if (project) owners.set(t.address, project); else unresolved.set(t.address, binding);
+      continue;
+    }
     const mine = list.length > 1 ? list.filter((p) => p.key === folderKey(t)) : list;
     if (mine.length === 1) owners.set(t.address, mine[0]);
     else if (list.length > 1) ambiguous.push({ terminal: t.address, id, keys: list.map((p) => p.key) });
@@ -117,7 +144,7 @@ export function contextOf(state, { now = Date.now(), home = "~" } = {}) {
   // A terminal's project key: its bot's, the bot it was started from, else its folder's.
   const keyOfTerminal = (t) => { const tie = tiedTo(t); return tie ? botOf(tie).key : folderKey(t); };
   const machinesWithProjects = new Set([...projects.values()].map((p) => p.machine));
-  return { state, now, home, isHome, facts, projects, projectAt, botMachines, terms, byAddress, live, botOf, ambiguous, tiedTo,
+  return { state, now, home, isHome, facts, projects, projectAt, botMachines, terms, byAddress, live, idOf, botOf, ambiguous, unresolved, tiedTo,
     goneParentOf, keyOfTerminal, machinesWithProjects };
 }
 
@@ -135,9 +162,10 @@ export function labelRule(ctx) {
   for (const t of ctx.terms) {
     const project = machineOf(t.address) == null ? ctx.botOf(t) : null;
     if (!project) continue;
-    const id = t.labels[BOT_LABEL];
+    const id = ctx.idOf(t);
     const want = { [ROLE_LABEL]: roleOf(project.file, id) ?? "", [CATEGORY_LABEL]: effectiveCategory(project.file, id) ?? "" };
-    const set = Object.fromEntries(Object.entries(want).filter(([k, v]) => (t.labels[k] ?? "") !== v));
+    if (isSendGrantRole(want[ROLE_LABEL]) || isSendGrantRole(t.labels?.[ROLE_LABEL])) delete want[ROLE_LABEL];
+    const set = Object.fromEntries(Object.entries(want).filter(([k, v]) => (t.labels?.[k] ?? "") !== v));
     if (Object.keys(set).length) {
       const words = Object.entries(set).map(([k, v]) => `${k}=${v}`).join(" ");
       out.push({ kind: "relabel", visual: false, terminal: t.address, set, why: `${project.key}/.herdr/bots.json says ${words}` });
@@ -178,7 +206,7 @@ export function spaceRule(ctx) {
   });
 
   // The canonical space of each project, per machine: on the top level, then holding the main bot.
-  const mainPaneOf = (project) => terms.find((t) => botOf(t) === project && t.labels[BOT_LABEL] === mainBotOf(project.file)?.id);
+  const mainPaneOf = (project) => terms.find((t) => botOf(t) === project && ctx.idOf(t) === mainBotOf(project.file)?.id);
   const holdsMain = (sp) => sp.panes.some((p) => p.t && p.t === mainPaneOf(sp.project));
   const canonical = new Map(); // at(machine, key) -> space entry
   for (const sp of spaces) {
@@ -239,7 +267,7 @@ export function spaceRule(ctx) {
         reports.push(report("cross-machine", { terminal: p.terminal, space: s.id }, `${p.terminal} runs on ${machineOf(p.terminal) ?? "this computer"}, but "${s.name}" is on ${machine ?? "this computer"}`));
         continue;
       }
-      if (!live(p.t)) continue;
+      if (!live(p.t) || ctx.unresolved.has(p.terminal)) continue;
       const key = ctx.keyOfTerminal(p.t);
       const project = key ? projectAt(machine, key) : null;
       // A space with no project (a plain folder) keeps its panes, unless one is a bot's.
@@ -249,9 +277,9 @@ export function spaceRule(ctx) {
       } else if (sp.project && !isCanonical && sp.place !== "worktree" && key === sp.owner) {
         moves.push({ kind: "move-pane", visual: true, terminal: p.terminal, from, to: targetOf(machine, sp.project), reason: "duplicate",
           why: `"${s.name}" is a second space for ${sp.owner}` });
-      } else if (isCanonical && sp.place !== "wrong" && botOf(p.t) && p.t.labels[SPACE_LABEL] !== s.id && machineOf(p.terminal) == null) {
+      } else if (isCanonical && sp.place !== "wrong" && botOf(p.t) && p.t.labels?.[SPACE_LABEL] !== s.id && machineOf(p.terminal) == null) {
         spaceLabels.push({ kind: "relabel", visual: true, terminal: p.terminal, set: { [SPACE_LABEL]: s.id },
-          why: `${p.terminal} shows in "${s.name}", but its ${SPACE_LABEL} says ${p.t.labels[SPACE_LABEL] ?? "nothing"}` });
+          why: `${p.terminal} shows in "${s.name}", but its ${SPACE_LABEL} says ${p.t.labels?.[SPACE_LABEL] ?? "nothing"}` });
       }
     }
   }
@@ -264,7 +292,12 @@ export function terminalRule(ctx) {
   const out = [];
   const shown = new Set((ctx.state.spaces ?? []).flatMap((s) => (s.tabs ?? []).flatMap((t) => (t.panes ?? []).map((p) => p.terminal))));
   for (const t of ctx.terms.filter(live)) {
-    const id = t.labels?.[BOT_LABEL];
+    const binding = ctx.unresolved.get(t.address);
+    if (binding) {
+      out.push(report("foreign", { terminal: t.address }, `${t.address} plays ${binding.bot} of ${binding.project} by the attach ledger, a project tidy can't read here; left alone`));
+      continue;
+    }
+    const id = ctx.idOf(t);
     const machine = machineOf(t.address);
     // Only where this State holds that machine's projects: elsewhere the bot's project is unknown.
     const defined = ctx.botMachines.get(id);
@@ -277,8 +310,7 @@ export function terminalRule(ctx) {
     } else if (!botOf(t) && !tiedTo(t) && !shown.has(t.address) && t.labels?.[SPACE_LABEL] && machine == null) {
       out.push(report("foreign", { terminal: t.address }, `${t.address} is parked and tied to no bot, so no row shows it`));
     }
-    const since = t.status_ms ?? t.created_ms;
-    if (t.labels?.[NEEDS_OWNER_LABEL] && Number.isFinite(since) && now - since > STALE_NEEDS_OWNER_MS) {
+    if (t.labels?.[NEEDS_OWNER_LABEL] && needsOwnerStale(t, now)) {
       out.push(report("stale-needs-owner", { terminal: t.address }, `${t.address} has waited on the owner for over a day: "${t.labels[NEEDS_OWNER_LABEL]}"`));
     }
   }

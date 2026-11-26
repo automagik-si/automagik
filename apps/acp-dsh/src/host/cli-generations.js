@@ -5,13 +5,19 @@ import { randomUUID } from 'node:crypto'
 import {
   closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { LOGIN_RECORD_VERSION, unverifiedLogin } from './login-ownership.js'
 import { processBirth, processState, validBirth } from './process-identity.js'
 
 export const POINTER_ENV = 'AUTOMAGIK_BOT_CLI_POINTER'
 export const GENERATION_ENV = 'AUTOMAGIK_BOT_CLI_GENERATION'
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
+// The generation record: one object beside the per-vendor pointers, so a reader that can open a
+// pointer can open it. It names both vendors because the pointers are per vendor; the pointers
+// stay the truth, and this file is written last, after the home and the pointer it names.
+const RECORD_VERSION = 1
+const RECORD_FILE = 'generation.json'
+const VENDOR_CONFIG = { claude: ['configDir', '.claude'], codex: ['home', '.codex'] }
 const busy = () => Object.assign(new Error(
   'Close other Automagik sessions before changing the Bot account.',
 ), { code: 'acp-account/busy' })
@@ -98,13 +104,18 @@ export function assertGeneration(env) {
 }
 
 export class CliGenerations {
-  constructor(root, instance) {
+  constructor(root, instance, { reader = false } = {}) {
     this.root = root
     this.instance = instance
     this.held = new Map()
     this.registered = new Set()
     this.birth = processBirth(process.pid)
+    this.reader = reader
     this.owned = new Map()
+    // Test seams: a failed rename or fsync can be injected for the record alone. Production
+    // always uses the imported calls.
+    this.rename = renameSync
+    this.fsync = fsyncSync
   }
 
   pointer(vendor) { return join(this.root, 'current', vendor) }
@@ -115,6 +126,83 @@ export class CliGenerations {
   }
   claims(vendor) { return join(this.root, 'mutations', vendor) }
   instances(vendor) { return join(this.root, 'instances', vendor) }
+
+  recordPath() { return join(this.root, 'current', RECORD_FILE) }
+
+  currentRecord() {
+    try {
+      const record = JSON.parse(readFileSync(this.recordPath(), 'utf8'))
+      return record !== null && typeof record === 'object' && !Array.isArray(record) ? record : undefined
+    } catch { return undefined }
+  }
+
+  // A vendor's field as the record names it, or null when ACP holds no generation for it (not
+  // signed in, legacy). The other vendor's field is unaffected by that.
+  recordVendor(vendor) {
+    let generation
+    try { generation = this.current(vendor) } catch { return null }
+    if (generation === 'legacy') return null
+    const [field, config] = VENDOR_CONFIG[vendor]
+    return { generation, [field]: resolve(this.folder(vendor, generation), config) }
+  }
+
+  recordState() {
+    return { version: RECORD_VERSION, claude: this.recordVendor('claude'), codex: this.recordVendor('codex') }
+  }
+
+  matchesRecord(record, state = this.recordState()) {
+    return record?.version === RECORD_VERSION
+      && JSON.stringify(record.claude) === JSON.stringify(state.claude)
+      && JSON.stringify(record.codex) === JSON.stringify(state.codex)
+  }
+
+  // ONE atomic write: the complete object in a temp file in the same directory, fsynced and
+  // renamed over the record, then the directory fsynced. The sequence comes from the record
+  // being replaced, so no write reuses a number; a crash leaves the old record or the new one.
+  writeRecord(state = this.recordState(), previous = this.currentRecord()) {
+    const path = this.recordPath()
+    const directory = dirname(path)
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    const sequence = Number.isSafeInteger(previous?.sequence) && previous.sequence >= 0
+      && previous.sequence < Number.MAX_SAFE_INTEGER
+      ? previous.sequence + 1 : 1
+    const record = {
+      version: RECORD_VERSION, sequence, claude: state.claude, codex: state.codex,
+      updatedAt: new Date().toISOString(),
+    }
+    const next = `${path}.${randomUUID()}`
+    let fd
+    try {
+      fd = openSync(next, 'wx', 0o600)
+      writeFileSync(fd, JSON.stringify(record))
+      this.fsync(fd)
+      closeSync(fd)
+      fd = undefined
+      this.rename(next, path)
+    } catch (error) {
+      if (fd !== undefined) { try { closeSync(fd) } catch {} }
+      rmSync(next, { force: true })
+      throw error
+    }
+    if (process.platform !== 'win32') {
+      const handle = openSync(directory, 'r')
+      try { this.fsync(handle) } finally { closeSync(handle) }
+    }
+    return record
+  }
+
+  // ACP start: an absent or stale record is written once; a matching one is left alone, so a
+  // restart adds no sequence and no updatedAt. Called after each vendor's startup: the second
+  // call is normally the no-op.
+  ensureRecord() {
+    return this.exclusive('generation-record', () => {
+      const state = this.recordState()
+      const previous = this.currentRecord()
+      if (this.matchesRecord(previous, state)) return false
+      this.writeRecord(state, previous)
+      return true
+    })
+  }
 
   publish(path, marker) {
     if (this.owned.has(path)) {
@@ -127,7 +215,7 @@ export class CliGenerations {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     const temporary = join(staging, randomUUID())
     const bytes = JSON.stringify({ format: 'app-birth-v1', pid: process.pid,
-      nonce: basename(path), birth: this.birth, marker })
+      nonce: basename(path), birth: this.birth, marker, ...(marker === 'root' && this.reader ? { reader: true } : {}) })
     const fd = openSync(temporary, 'wx', 0o600)
     try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
     try {
@@ -140,10 +228,11 @@ export class CliGenerations {
     } finally { rmSync(temporary, { force: true }) }
   }
 
-  release(path) {
+  release(path, { strict = false } = {}) {
     const snapshot = this.owned.get(path)
-    this.owned.delete(path)
     if (sameOwnership(snapshot)) rmSync(path, { force: true })
+    else if (strict && snapshot && lstatSync(path, { throwIfNoEntry: false })) throw busy()
+    this.owned.delete(path)
   }
 
   peers(directory, legacy, own, { sweep = false } = {}) {
@@ -165,8 +254,8 @@ export class CliGenerations {
     this.registered.add(vendor)
   }
 
-  unregister(vendor) {
-    this.release(join(this.instances(vendor), this.instance))
+  unregister(vendor, options) {
+    this.release(join(this.instances(vendor), this.instance), options)
     this.registered.delete(vendor)
   }
 
@@ -209,13 +298,19 @@ export class CliGenerations {
   }
 
   select(vendor, generation) {
-    const pointer = this.pointer(vendor)
-    mkdirSync(join(this.root, 'current'), { recursive: true, mode: 0o700 })
-    // An absent selection after activation is damage, never permission to revive legacy.
-    writeFileSync(`${pointer}.activated`, '', { mode: 0o600 })
-    const next = `${pointer}.${randomUUID()}`
-    writeFileSync(next, generation, { mode: 0o600 })
-    renameSync(next, pointer)
+    return this.exclusive('generation-record', () => {
+      const pointer = this.pointer(vendor)
+      mkdirSync(join(this.root, 'current'), { recursive: true, mode: 0o700 })
+      // An absent selection after activation is damage, never permission to revive legacy.
+      writeFileSync(`${pointer}.activated`, '', { mode: 0o600 })
+      const next = `${pointer}.${randomUUID()}`
+      writeFileSync(next, generation, { mode: 0o600 })
+      renameSync(next, pointer)
+      // The pointer is in place first; the record is written last and names it.
+      try { this.writeRecord() } catch (error) {
+        throw new Error('The Bot account pointer moved, but the generation record could not be saved.', { cause: error })
+      }
+    })
   }
 
   dispose() {

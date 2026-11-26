@@ -14,6 +14,7 @@ import {
 } from '../src/host/pocket-chat.js'
 import { CLOSE_GRACE_MS, INTERRUPT_EVERY_MS, MAX_LINE, MAX_WRITES_PER_MINUTE, socketPathOf, startPocketSocket } from '../src/host/pocket-socket.js'
 import { shownReader } from '../src/host/shown.js'
+import { SKILL_ACTIVITY_RECORD } from '../src/shared/skill-activity.js'
 import { fakeContext } from './fake-ctx.js'
 
 // ---- the fake Session Controller
@@ -244,6 +245,29 @@ test('reconnect: a cursor in the window gets only what it missed; an older one i
   // Older rows on request, from the log.
   assert.deepEqual((await handle.backfill('dsh:s-omni-2:5', 10)).map(row => row.id), ['dsh:s-omni-2:1', 'dsh:s-omni-2:4', 'dsh:s-omni-2:4#tokens'])
   source.close()
+})
+
+test('Pocket keeps a single name-only activity row live, on reconnect, and in a cold page', async () => {
+  const controller = fakeController(sessions())
+  const rt = team()
+  const source = sourceOf(controller, rt)
+  const first = watcher()
+  const handle = await source.watch('dsh:omni', first.listener)
+  try {
+    controller.append('s-omni-2', event(7, 'tool/call', { turn: 1, step: 0, callId: 'load', name: 'load_skill', arguments: '{"name":"mint"}' }))
+    const activity = event(8, SKILL_ACTIVITY_RECORD, { id: 'receipt', name: 'mint', turn: 1, step: 0 })
+    activity.event.ignorable = true
+    controller.append('s-omni-2', activity)
+    await settle(); await settle()
+    const row = { id: 'dsh:s-omni-2:8', kind: 'tool-call', turn: 1, at: 1_008, source: 'session', tool: 'Skill', summary: 'mint', input: '', output: '' }
+    assert.deepEqual(first.last('rows').rows, [row])
+    const next = watcher()
+    await source.watch('dsh:omni', next.listener, { after: 'dsh:s-omni-2:6' })
+    assert.deepEqual(next.events[0].rows, [row])
+    assert.deepEqual(await handle.backfill('dsh:s-omni-2:9', 2), [row])
+    rt.state.bots.omni.sessionId = 'new-omni'
+    assert.deepEqual(await handle.backfill('dsh:s-omni-2:9', 2), [])
+  } finally { source.close() }
 })
 
 test('every write is refused and reaches no controller method', async () => {
@@ -1354,4 +1378,12 @@ test('install hands the team’s stop lines to the phone', async (t) => {
   const snapshot = await c.until(line => line.channel === 1 && line.event.type === 'snapshot')
   assert.deepEqual(snapshot.event.rows.filter(row => row.kind === 'status').map(row => [row.id, row.state, row.msg]), [['dsh:s-omni-2:7#stop', 'error', 'x']])
   c.socket.destroy()
+})
+
+test('the source offers settings only with writable Sessions and an enabled host', () => {
+  const adapter = { prompt() {}, cancel() {} }
+  for (const [writable, enabled, expected] of [[false, true, false], [true, false, false], [true, true, true]]) {
+    const source = new DshChatSource({ adapter, writable, settings: { enabled: () => enabled } })
+    assert.equal(source.managesSettings, expected)
+  }
 })

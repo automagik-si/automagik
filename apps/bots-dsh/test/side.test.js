@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { SIDE_MARKER } from '../src/host/side.js'
 import { fakeContext } from './fake-ctx.js'
+import { captureWaterfall } from './support/capture-waterfall.js'
 
 const user = text => ({ role: 'user', content: [{ type: 'text', text }] })
 const assistant = (...blocks) => ({ role: 'assistant', content: blocks })
@@ -133,6 +134,7 @@ async function setup({ state = team(), scripts = [], gate = false, messages, seq
   const queue = [...scripts]
   const services = {}
   const ctx = fakeContext({ services })
+  const streamContext = captureWaterfall(ctx, 'llm/stream')
   services.sessionProjections = projectionRegistry(ctx)
   ctx.llm = {
     listProviders: () => [],
@@ -190,7 +192,8 @@ async function setup({ state = team(), scripts = [], gate = false, messages, seq
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { home, ctx, rt, session, sessions, header, toolHistory, requests, resolved, gates, call: callEndpoint, notices: () => notices, stop: stopRuntime }
+  const stream = (options, next) => streamContext.waterfall(ctx.llm, 'llm/stream', options, next)
+  return { home, ctx, rt, session, sessions, header, toolHistory, requests, resolved, gates, call: callEndpoint, notices: () => notices, stop: stopRuntime, stream }
 }
 
 const chatsOf = (rt, botId = 'b1') => rt.sideView?.()[botId] ?? []
@@ -282,9 +285,8 @@ test('a side question answers from a snapshot and writes nothing into the sessio
   const file = chatsFile(env.home)
   assert.equal(file.length, 1)
   assert.equal(file[0].entries[0].status, 'done')
-  const meter = env.ctx.listeners.get('llm/stream').at(-1)
   for (const options of requests) {
-    for await (const chunk of meter(options, async function* () {
+    for await (const chunk of env.stream(options, async function* () {
       yield { type: 'usage', usage: { inputTokens: 12, outputTokens: 3 } }
     })) assert.equal(chunk.type, 'usage')
   }

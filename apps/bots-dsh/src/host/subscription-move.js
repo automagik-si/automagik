@@ -1,3 +1,4 @@
+import { grantTeamModels, withGrantHold } from './grants.js'
 // A Claude or ChatGPT subscription signs in once, through its own CLI (Claude Code, Codex),
 // which Automagik installs. Bots that still run on a subscription through DSH (pi-ai's
 // `openai-codex`, the ChatGPT sign-in; pi-ai's `anthropic` on a Claude Pro or Max sign-in) move
@@ -331,7 +332,8 @@ export function install(rt) {
     started = true
     const done = state.subscriptionCliMoved !== null && typeof state.subscriptionCliMoved === 'object' ? state.subscriptionCliMoved : {}
     // A Bot its plugin answers for never runs on a DSH model: not moved, restored or counted.
-    const bots = Object.values(state.bots ?? {}).filter(bot => bot !== undefined && bot !== null && rt.hostOwned?.(bot) !== true)
+    const bots = Object.values(state.bots ?? {}).filter(bot => bot !== undefined && bot !== null && rt.hostOwned?.(bot) !== true && bot.shellHeld === undefined)
+    if (bots.length === 0 && Object.values(state.bots ?? {}).some(bot => bot?.shellHeld !== undefined)) return
     const onRoute = (spec, bot) => providerOf(bot.model) === spec.from
     const moved = []
     const restored = []
@@ -406,7 +408,7 @@ export function install(rt) {
           let went = false
           for (const bot of back) {
             // The awaits above let a pick or a removal in: read the Bot and its record again.
-            const record = rt.botOf(bot.id) === bot ? recordOf(bot, spec) : undefined
+            const record = rt.botOf(bot.id) === bot && bot.shellHeld === undefined ? recordOf(bot, spec) : undefined
             if (record === undefined) continue
             if (record.previousOnly === true ? bot.previousModel !== record.previousTarget : bot.model !== record.target) {
               delete bot.subscriptionMoved
@@ -453,7 +455,24 @@ export function install(rt) {
         else if (route.state === 'waiting') unread = true
         continue
       }
+      let heldOnRoute = false
       for (const bot of bots) {
+        // A Bot without a shell cannot move onto a coding CLI that brings its own shell. It
+        // stays where it is, its settings say why, and the person is warned once per hold.
+        // Neither its model nor the model a pending switch would go back to moves.
+        if (bot.shell === false) {
+          if (onRoute(spec, bot)) {
+            heldOnRoute = true
+            const held = bot.subscriptionShellHeld
+            if (held?.from !== spec.from || held?.to !== spec.to || held?.cli !== spec.cli) {
+              bot.subscriptionShellHeld = { from: spec.from, to: spec.to, cli: spec.cli }
+              changed = true
+              rt.warn?.('ds-bot: %s stays on %s: %s is a coding CLI that brings its own shell, '
+                + 'so turn the shell on or pick a native model.', bot.name, spec.from, spec.cli)
+            }
+          }
+          continue
+        }
         // The model a pending switch would go back to follows too, whatever the Bot is on now.
         const before = bot.previousModel
         const previous = movedRef(before, spec, listed)
@@ -482,14 +501,26 @@ export function install(rt) {
         bot.model = target
         moved.push(bot)
       }
-      done[spec.from] = true
-      changed = true
+      // A route still holding a shell-less Bot is not done: a later pass moves it once the
+      // shell is on, and a Bot placed on the route later is not swallowed.
+      if (!heldOnRoute) {
+        done[spec.from] = true
+        changed = true
+      }
       reasons.delete(spec.from)
       // One look after acp-dsh's kept answer has expired confirms the move or repairs it.
       if (spec.restore === true && bots.some(bot => recordOf(bot, spec) !== undefined)) {
         state.subscriptionMovedAt = { ...state.subscriptionMovedAt, [spec.from]: now }
         lookAgain(CONFIRM_AFTER_MS)
       }
+    }
+    // A hold ends when the Bot leaves the source route or its shell comes back.
+    for (const bot of bots) {
+      if (bot.subscriptionShellHeld === undefined) continue
+      const still = bot.shell === false && SUBSCRIPTION_MOVES.some(source => onRoute(source, bot))
+      if (still) continue
+      delete bot.subscriptionShellHeld
+      changed = true
     }
 
     // Three timed looks at a sign-in or CLI that gives no answer, then events only. Only a pass
@@ -565,7 +596,7 @@ export function install(rt) {
       again = true
       return running
     }
-    running = (async () => {
+    running = withGrantHold(rt, { all: true }, () => grantTeamModels(rt), async () => {
       let options = { timed }
       for (;;) {
         again = false
@@ -575,7 +606,7 @@ export function install(rt) {
         if (!again && !(echoed && !echoPass)) break
         echoPass = !again
       }
-    })()
+    })
       .catch(error => rt.warn('ds-bot: the subscription Bots were not moved to their CLI: %s', error))
       .finally(() => {
         running = undefined

@@ -44,10 +44,10 @@ and updaters that find their asset among releases that are mostly someone else's
 | Part | Paths | On a release that rebuilt it | Its updater reads |
 |---|---|---|---|
 | Desktop app | everything not below (`apps/desktop/`, the profile, lockfiles…) | the dmg, AppImage and deb, `latest-*.yml`, `SHA256SUMS` | `apps/desktop/src/update.js`: the newest release with its platform's feed |
-| Plugins | `apps/<plugin>/` | `automagik-<plugin>-<v>.tgz`, `plugins.json`, `PLUGINS.SHA256SUMS`, `lane.json` | the rolling `plugin-lane` release (`scripts/lane.ts`) |
+| Plugins | `apps/<plugin>/` | `automagik-<plugin>-<v>.tgz`, `plugins.json`, `PLUGINS.SHA256SUMS`, `lane.json`. Every versioned release that packs `bots-dsh`, including prereleases, also carries `roles.json` and `roles.json.sig`. It attaches `automagik-role-<id>-<v>.tgz` and its `.sha256` for each official role. A role's version is the release in which its package bytes last changed. Each later plugin cut attaches the same bytes under its own tag. | the rolling `plugin-lane` release (`scripts/lane.ts`) |
 | Server image | `server/` | GHCR image by digest, keyless GitHub build provenance, `server-image.json` on the content release | [server-lane/server-image.json](https://github.com/automagik-si/automagik/releases/download/server-lane/server-image.json); a rolling prerelease, never Latest, advanced only by stable content without downgrades; consumers verify the image attestation (`server/README.md`, Follow) |
 | Herdr pack | `herdr/`, `herdr-layout/` | `automagik-herdr-pack-<v>.tgz` and `automagik-herdr-pack-<v>.tgz.sha256`; the `herdr-lane` pointer is re-signed | the rolling `herdr-lane` release (`scripts/herdr-lane.ts`), checked against the pack's `pack-keys.json` |
-| Pocket | `apps/pocket/` (Pocket Link, `herdr/mods/pocket-link`, is on the herdr lane) | `automagik-pocket-<v>.apk` and `latest.json`; `latest.json` on the rolling `pocket-lane` release is replaced | `latest.json` on `pocket-lane` (`apps/pocket/android/app/build.gradle.kts`, `UPDATE_URL`) |
+| Pocket | `apps/pocket/` (Pocket Link, `herdr/mods/pocket-link`, is on the herdr lane) | `automagik-pocket-<v>.apk` and `latest.json`; `latest.json` on the rolling `pocket-lane` release is replaced. Pocket Link ships as `pocket.link` inside `automagik-am-<v>.tgz` (RFC 0046) | `latest.json` on `pocket-lane` (`apps/pocket/android/app/build.gradle.kts`, `UPDATE_URL`) |
 
 `herdr/` is a top-level folder because Herdr's crawler (herdr.dev) indexes top-level folders. The
 herdr.dev listing waits on the owner's gate: no `herdr-mod` or `herdr-layout` topic is set on this
@@ -58,7 +58,8 @@ The pack's layout is its own top-level entry folder, `herdr-layout/` (`layouts/a
 folder holds `layouts/`, and a skip deletes a listing it had (probe-confirmed, t22n and t259). A
 herdr-mod entry folder is any folder holding `mods/<name>/main.js`, as the mod manager reads a
 package. `herdr/scripts/entries.mjs --check` fails when one holds `layouts/`; CI runs it on every
-pull request and the release with the pack's gates. The probe's layout test
+pull request and the release with the pack's gates. It also refuses a mod's own `mods/<name>/layouts/`,
+defensively: the probe did not test that shape, and no mod needs one (#207). The probe's layout test
 settled the shape: herdr.dev lists a layout only from its entry folder's `layouts/<name>.json`
 and ignores a `.json` at the folder's root (e2 went unlisted for want of `layouts/`, not because of
 its root `.json`: 60 listed layout entries hold one), and the entry needs no `mods/` of its own
@@ -101,6 +102,24 @@ what a release is and whether it attaches the pack:
   measured since the full one, a herdr-only merge after a plugin patch would pack the plugins again
   and re-sign the lane, and every desktop app would reinstall plugins that did not change.
 - A herdr patch, like a plugin patch, is not marked Latest; `main` still moves to it.
+
+### A cut while dev moves or the previous release still posts (#668)
+
+- A push rejected because `dev` moved during the gates is retried on the new tip: the cut re-decides
+  the lane, re-runs the gates and tries again, up to three whole attempts (`scripts/release-cut.sh`).
+- Before deciding the Pocket and meter builds, the cut re-reads `pocket-lane` and `meter-lane` and
+  waits, within one 300 s budget, for a previous stable release's posts still in flight (meter
+  pointers count only when they verify against `meter-keys.json`).
+- Residual windows, accepted (decided by the owner's delegate on 2026-11-21, the recommended
+  option): a previous run slower than the budget; a stable plugin tag without build evidence hiding
+  an older pending post; more than three intervening drafts or prereleases; a meter post during the
+  Pocket wait when the meter did not trigger; a deleted lane release, which reads as bootstrap.
+  Each one ends the same way: the cut builds that part again although its code did not change (one
+  more version, and for Pocket an update prompt for identical code). None loses a tag, posts a
+  wrong or lower pointer, or ships an unsigned or ungated part. A longer wait would slow every
+  release to avoid a rare, harmless rebuild.
+- The process rule covers them: a merge waits until the previous release run is green, lane jobs
+  included.
 
 ## The pack on a release
 
@@ -147,8 +166,9 @@ plugins (`scripts/herdr-lane.ts`):
   `HERDR_PACK_KEY` Actions secret, never `PLUGIN_LANE_KEY` (t22n's recommendation, t259's ruling): a
   leak of one key does not reach the other part. The pointer's `keyId` is the `pack-keys.json` entry
   whose public key is the secret's, so any listed key signs under its own id. The release verifies
-  what it signed before it posts it, and `herdr-lane.ts check-key` stops a release that would ship
-  the pack before it tags when the secret is missing or its public key is not in `pack-keys.json`.
+  what it signed before it posts it. Before tagging, `herdr-lane.ts check-key` validates the slot
+  named by `HERDR_PACK_SIGNER` and the selected key against `pack-keys.json`. On success it prints
+  the effective slot and `keyId`.
 - The trusted public keys are `herdr/mods/am-sidebar/pack-keys.json`, which the pack tarball
   carries, so the installed copy is the trust anchor. `install.sh` embeds the same list
   (`TRUSTED_KEYS`; `herdr-lane.test.ts` keeps the two equal). Rotation is in two phases ("Making
@@ -215,8 +235,9 @@ A rotation is two phases:
    both files in a later release, and leave its slot for the next rotation.
 
 Switched too early, nothing is installed wrongly: those installs stop updating until they reinstall
-with `install.sh`. A release whose secret is missing or unlisted stops at `check-key`, before it
-tags.
+with `install.sh`. The release stops at `check-key` before it tags if the selector names an
+unknown slot, the selected secret is missing or empty, or its public key is absent from
+`pack-keys.json`.
 
 ## CI
 
@@ -231,9 +252,9 @@ tags.
 - am-quota's Keychain tests run against the stand-in `security` in `herdr/test/am-quota-keychain.mjs`,
   and `am-quota-keychain-guard.test.mjs` fails any that could reach the real one.
 - The old repository's workflows were deleted at the import (`herdr/.github/`).
-- Pocket: `ci.yml`'s `pocket` job (JDK 17, the Android SDK 35) runs automagik-pocket's
-  `android.yml` gate from `apps/pocket/android` (`:app:assembleDebug :app:testDebugUnitTest
-  :app:lintDebug`) and the terminal page's Playwright test. It runs when `apps/pocket/`, the root
+- Pocket: `ci.yml`'s `pocket` job (JDK 17, Android SDK Platform 36) builds `githubDebug`, runs
+  unit tests and lint for `githubDebug` and `playDebug`, and tests the terminal page with
+  Playwright. It runs when `apps/pocket/`, the root
   `package.json` (the version Gradle reads), the CI or release workflow, or `scripts/lane.ts` or
   `scripts/version.ts` changed. The `pocket-link` job (Linux and macOS, Node 22) runs the old
   `pocket-link.yml`, syntax and bridge tests, when `herdr/mods/pocket-link/` or `ci.yml` changed.
@@ -291,7 +312,10 @@ README, recipe, keys, licence and preview beside the mod, as the pack's mods kee
   release when there is no lane yet. It is not simply the last tag, because a prerelease never moves
   `pocket-lane`. A Pocket change that shipped only in a prerelease (or whose lane post failed) is
   therefore still ahead of the lane, and the next release builds it again, even when that release
-  changes nothing under `apps/pocket/`. Never shipped in the part: its top-level `*.md`, `docs/`, unit tests (`test/`) and
+  changes nothing under `apps/pocket/`. A missing or unreadable `latest.json` on an existing
+  `pocket-lane` makes the next release measure from the start and rebuild Pocket to restore it,
+  and the cut can wait a bounded time for a previous stable release's Pocket post (#668).
+  Never shipped in the part: its top-level `*.md`, `docs/`, unit tests (`test/`) and
   `android/scripts/` (the terminal page's test, the vendoring script).
 - A release whose shipping changes since the last release are all under `apps/pocket/`, or under
   `apps/pocket/` and the herdr part (`herdr/`, `herdr-layout/`), is a `pocket` patch: 3.N.P, the APK (and the pack when `herdr/`
@@ -321,7 +345,7 @@ README, recipe, keys, licence and preview beside the mod, as the pack's mods kee
 
 - Before the cut, when `pocket` is yes: the `cut` job checks that `POCKET_SIGNING_KEYSTORE` and
   `POCKET_SIGNING_PASSWORD` exist (it reads only whether they are set) and runs the unit tests and
-  lint, so a failing app or a missing key stops the run before a tag.
+  lint for `githubDebug` and `playDebug`, so a failing app or a missing key stops the run before a tag.
 - After it, the `Pocket` job builds the release APK from the tag, signed with the key from those
   secrets (decoded to the runner's temp folder and removed after the build). It checks the APK's
   versionName (the tag) and versionCode (the formula), then attaches `automagik-pocket-<v>.apk` and

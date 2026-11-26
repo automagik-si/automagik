@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09 and 2026-11-10; delivery 7's replay at a harness change to be replaced by [RFC 0030](0030-code-mode-in-the-app.md)'s handoff note, owner 2026-11-10, its Q7) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22); RFC 0030's 2026-11-23 amendment (#2061) carries a Bot's own chat across a harness change with a handoff and read_own_chat, and adds the one-tool dsh-history bridge for agents without the bridge) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -45,8 +45,9 @@ Every model entry gets a descriptor `{ harness, connectedBy }`, derived from its
 
 ### The ACP plugin
 
-- **Agents as DSH models.** Each configured agent is a provider route. A Bot or a chat picks it
-  like any model. DSH keeps the Session, history and sidebar.
+- **Agents as DSH models.** Each configured agent is a provider route. A Bot or a chat can pick
+  it as a model. DSH keeps the Session's record and sidebar. An explicit harness change in a
+  populated Bot own chat follows RFC 0030 Q7a.
 - **DSH tool cards and approvals.** The agent's tool calls render as DSH tool cards. Every call
   the agent asks permission for goes through DSH's approval dialog under the Session's level
   (what the agent's own settings already allow does not ask; see the Session's level below),
@@ -140,9 +141,16 @@ and D17). Claude runs on pi-ai's `anthropic` route until `acp-claude` ships.
   over a per-session stdio MCP bridge; every DSH tool call is approved by DSH, whatever the
   agent's own rules say; the agent's built-in tools are off where its adapter has a switch
   (owner, 2026-11-06, #516). Both ship behind `dshTools`, whose absent default is per agent (the
-  default flipped, see Amendments, "Default and kill switch"); live switching carries history
-  each way, redacted, with a visible provider-boundary notice (owner, 2026-11-06, #516). The
+  default flipped, see Amendments, "Default and kill switch"). Delivery 7 introduced redacted
+  replay and a visible provider-boundary notice (owner, 2026-11-06, #516). RFC 0030 Q7a
+  supersedes the explicit history-carrying route change for a Bot's own chat. The
   council behind this: [dsh-022-council.md](../research/dsh-022-council.md).
+- The owner can opt an eligible Bot into Claude Code's built-in tools from the owner's next
+  message in the Bot's direct chat (decided by the owner's delegate, 2026-11-22, #1564). The Bot's
+  `nativeTools` switch defaults to OFF.
+  See [Amendment: native tools per Bot](#amendment-native-tools-per-bot-2026-11-22-1564).
+  **Superseded 2026-11-23** by [native tools in every chat][everywhere]. The switch applies in
+  every chat of the Bot, not only the owner's direct chat.
 
 ### Per-teammate models (status note)
 
@@ -170,12 +178,12 @@ patch is removed in the release whose DSH carries the change.
   `{ name, value }`. The bridge itself never listens on a port. It reaches DSH over a per-session
   back-channel to acp-dsh, authenticated with `DSH_BRIDGE_CREDENTIAL`: a per-session, unguessable
   value minted by acp-dsh at spawn and passed only in that bridge's `env`. It binds a request to
-  its Session and is revoked when that bridge exits; a fork mints a new one. It is not a boundary
-  against same-user code: third-party code running as the person can read the bridge's
-  environment. What holds regardless is server-side: the credential carries no approval, and
-  every DSH tool call enters DSH's approval service keyed to the Session. It offers the Session's
-  preset's tools, filtered by the Session's level, and answers every DSH tool call through DSH's
-  approval service. Its failure is the turn's: a bridge the adapter skipped (a same-named server
+  its Session. A bridge process exit detaches it, and a respawn can re-attach with the same
+  credential. The host revokes it when the ACP session ends, its agent process exits, a fork
+  replaces it, or the probe ends. Code running as the same user can read the bearer and
+  impersonate a replacement. The bridge offers the Session's preset tools filtered by its level,
+  and answers every DSH tool call through DSH's server-side approval service. Its failure is
+  the turn's: a bridge the adapter skipped (a same-named server
   in the person's Codex config) fails the turn instead of running with half a tool set.
 - Setting `dshTools` (absent means the per-agent default; false is the kill switch): the bridge
   and live
@@ -205,11 +213,11 @@ means the per-agent default (Contracts).
   no listen socket (no port, so no address another process on the machine can reach) and dies
   with the adapter. "Nothing on the machine can address it" is true of this leg only: the
   bridge→DSH leg is a per-session back-channel that has an address by construction. Its
-  credential `DSH_BRIDGE_CREDENTIAL` binds a request to its Session and is revoked with the
-  bridge; it is not a boundary against third-party code running as the person, which can read the
-  bridge's environment (Amendments, "The bridge"). The boundary that does not depend on it is
-  server-side: the credential cannot approve, and DSH's approval service owns every DSH tool call
-  for the Session. The stdio leg's transport is spiked; the credential-bearing back-channel shipped
+  credential `DSH_BRIDGE_CREDENTIAL` binds a request to its Session. A bridge process exit
+  detaches it, and the same credential lets a respawn re-attach. The host owns revocation
+  (Amendments, "The bridge"). Code running as the same user can read the bearer and impersonate
+  a replacement. DSH's server-side approval service owns every DSH tool call for the Session.
+  The stdio leg's transport is spiked; the credential-bearing back-channel shipped
   (#537), and delivery 6 probes both refusals (Deliveries, 6). (`dshTools` off.) No
   bridge exists, so neither leg does.
 - **Credentials.** Stored with mode 0600 or in the OS keychain. Never returned to the client.
@@ -293,12 +301,12 @@ means the per-agent default (Contracts).
    before the prompt runs. The check runs at EVERY session start, not only at delivery 6's start
    or in CI: every spike fact is tied to adapter versions that update themselves (D17). Rollback:
    turn the setting off (the 2026-11-03 behaviour).
-7. **Live switching** (amended, 2026-11-06). A Session moves between providers with its history,
-   each way: the transcript is replayed (redacted) into the target, and what the agent streams is
-   written back into the Session's log. Lane: plugin, behind `dshTools`. Check: a Session moves
-   DSH → `acp-claude` → DSH with its transcript intact; a stored secret in that transcript never
-   appears in an outbound prompt; a provider-boundary row shows at each crossing. Rollback:
-   turn the setting off; the Session keeps the transcript it already has.
+7. **Live switching** (shipped 2026-11-06). Delivery 7 introduced redacted replay between
+   providers and wrote streamed replies and provider-boundary rows back into the Session log.
+   RFC 0030 Q7a refuses the explicit managed harness change for a Bot's own chat with history.
+   Check replay and redaction on same-harness restarts. Check that a refused crossing keeps the
+   original Session and selection. Lane: plugin. The existing `dshTools` setting still
+   governs replay and the bridge as described in the amendments.
 
 Delivery 1 is in milestone 2 (One message box), because the picker needs it. Deliveries 2 to 7
 are milestone 3 (Other agents in the same chat).
@@ -351,12 +359,14 @@ own arguments, named `dsh`. Two legs, one credential story:
   acp-dsh, authenticated with `DSH_BRIDGE_CREDENTIAL`: a per-session, unguessable value minted by
   acp-dsh at spawn and passed only in that bridge's `session/new` `env`. DSH accepts a request
   only with the value minted for that Session; it refuses a missing or another Session's value.
-  The credential is revoked when that bridge exits, and a fork mints a new one. It is not a
-  boundary against same-user code: a process running as the person can read the bridge's
-  environment and reuse the value. The boundary that does not depend on it is server-side: the
-  credential has no approval, every DSH tool call enters DSH's approval service under the
-  Session's level, and a call waits for the person exactly as DSH's own tools do. Delivery 6
-  probes the refusal without the credential, the revocation on fork, and that a credential alone
+  The host revokes the credential when the ACP session ends, its agent process exits, a fork
+  replaces it, or the probe ends. Each bridge process has its own attachment ID. An exit detaches
+  that process and ends its calls. A replacement can list tools with the same credential and a
+  new ID. Only the current attachment can act, and the host revokes the credential on the 65th
+  retirement. Code running as the same user can read the bearer and impersonate a replacement.
+  Approval stays server-side under the Session's level, and a call waits for the person exactly
+  as DSH's own tools do. Delivery 6 probes the refusal without the credential, the revocation on
+  fork, and that a credential alone
   cannot approve. The spike's server was an echo with no DSH link, so no part of this leg ran.
 
 Each call arrives with the ACP session it belongs to; the bridge resolves it to DSH's Session and
@@ -417,15 +427,16 @@ called it), so the fork path stays behind that proof. That the fork continues th
 conversation is not evidenced by the spike; delivery 6 must prove it before the fork counts as a
 refresh.
 
-**Live switching.** DSH keeps the record. A Session moving to an agent has its transcript replayed
-into `session/prompt` content, in order; moving back, what the agent streamed is written into the
-log with its tool calls keeping their cards. Before any text crosses, it passes the redactor: the
-Bot team's secret store for a Bot's Session (`apps/bots-dsh/src/host/secrets.js`), and the
+**Replay and the Session record.** Delivery 7 replayed a moved Session's transcript into an
+agent's `session/prompt` content in order. DSH logged streamed responses and tool cards back to
+the Session. RFC 0030 Q7a supersedes that live move for a populated Bot own chat. Before
+replay text goes into a prompt, it passes the redactor for
+the Bot team's secret store for a Bot's Session (`apps/bots-dsh/src/host/secrets.js`) and the
 credential shapes the Bot team's diagnostics already mask otherwise
 (`apps/bots-dsh/src/host/diagnostics.js`). A stored secret's value never reaches an outbound
-prompt; the test is a saved secret sitting in the transcript. Each crossing writes a
-provider-boundary row into the Session log ("Claude Code via acp-claude", "DSH"), so the chat
-shows who answered, not only a log file.
+prompt. The test puts a saved secret in the transcript. Delivery 7 wrote provider-boundary
+rows into the Session log ("Claude Code via acp-claude", "DSH"). Those rows stay in the
+record of sessions that crossed.
 
 **Setting and order.** Deliveries 4, 6 and 7 shipped behind `dshTools`, off unless set, until
 the owner tried them; off is the 2026-11-03 behaviour and the rollback. The default flipped to on
@@ -469,7 +480,7 @@ keeps the 2026-11-03 path, where an agent sees only its own session.
 | `false` | its own only | no | its own only | no |
 
 With the key absent, Codex therefore sees the chat but not the team's tools, which still need an
-explicit `true`. Beyond a move from another provider, three cases now replay, under the same
+explicit `true`. The November 8 implementation added three replay cases under the same
 redactor and 120,000-character cap: a new agent session in a chat that already has answers (a
 restart, or a session a crossing or a flip ended), with no boundary row since the chat did not
 change provider; a live session resumed after the chat answered elsewhere (a move off Codex keeps
@@ -477,8 +488,19 @@ its session), which gets the turns it missed, from its own last answer on, and t
 its "Switching to X" row, so Codex → API → Codex loses nothing; and a Bot part's handoff package
 (the Bot team's relay marked `handoff`), which stays in the part's first prompt beside the
 person's words and is carried in the replay once the Bot team has answered that first turn itself.
-A move off Claude Code still ends its session (and bridge), and the new session on the way back
-gets the chat; the agent's own context beyond the replay cap is the accepted cost.
+That implementation ended the Claude Code session and bridge on departure and replayed the
+chat on return. The agent's own context beyond the replay cap was the accepted cost.
+RFC 0030 Q7a refuses populated own-chat route picks before the managed move and keeps
+same-harness replay.
+
+**Team Bots on Codex get DSH's extras (2026-11-19, #1544).** With `dshTools` absent, a team Bot's
+current own chat and group Sessions get DSH's extras over the bridge, including `message_bot`
+and the Bot Browser tools. Codex keeps its own tools in place of DSH's twins. Task Sessions
+keep their default. An explicit `true` gives Codex the whole DSH preset, including on a Genie.
+An explicit `false` still turns the bridge and replay off. The historical move away from
+Codex kept its session only while that Session had no bridge. A move to DSH from a bridged
+Codex Session ended the run with a "Switching to DSH" row, and the return path replayed the
+redacted transcript. Explicit route picks in a Bot's own chat now follow RFC 0030 Q7a.
 
 ## Amendment: Bots on Claude Code and Codex, switching and sign-in (2026-11-09)
 
@@ -497,17 +519,34 @@ wrapper delegates to whatever is below it at call time and, on dispose, unwinds 
 top. The method is private to `compaction-basic`, so a guard test pins it. An agent gets the chat
 as the bounded, redacted replay above instead.
 
-**Off an agent, onto an API model (the Bot team).** Before DSH's guard runs, the Bot team measures
-the chat against the destination's own switch threshold, computed as `compaction-basic` does
-(`apps/bots-dsh/src/host/parts.js`). Below it nothing happens. Above it, the chat is condensed into
-a checkpoint only when the team chose a background model in Settings (`prefs.backgroundModel`) and
-the chat fits that model, which is the one charged; the automatic background pick never starts a
-paid call without that choice. Otherwise the Bot continues in a new part that carries the latest
-messages that fit, with no handoff note and no model call. The part it leaves is archived only
-after the new part's first answer from the chosen model; if that first call fails, the Bot goes back
-to it. A team with no model that answers beside its agents skips the steward, the note and the
-checkpoint (it says so once in the log) and, past the hard line, continues in a new part the same
-way. A switch between two agents needs none of this.
+**Explicit harness changes in a Bot's own chat (RFC 0030 Q7a).** Until 2026-11-23,
+`switchRoute` refuses a pick for a chat with history and keeps the old route and Session.
+Start New conversation, then pick the route. If the Bot has an active goal, pause it before
+New conversation. A crossing on a part with nothing said can apply in place, including a
+move between ACP agents. RFC 0030 defines what counts as history for that decision. The
+earlier managed path could open a new part with the latest messages. Automatic moves,
+effort, rollback and default fallbacks, the in-place path's races, and other writers remain
+owed under RFC 0030.
+
+Since 2026-11-23 (RFC 0030 Handoff note, #2061) the pick opens a new part with a handoff on the
+picked route; the new agent reads the chat with `read_own_chat`, over the `dsh` bridge or, for an
+agent whose bridge is off (omp, Antigravity), over `dsh-history`, a bridge that lists and runs only
+that tool.
+
+**Off an agent, onto an API model (the Bot team).** For route writers that remain, including
+the native Session picker and fallback selection, the Bot team measures the chat against
+the destination's own switch threshold before DSH's guard runs, computed as
+`compaction-basic` does (`apps/bots-dsh/src/host/parts.js`). Below the threshold the step goes
+on in the same part. The chat can be condensed into a checkpoint only when the team chose a
+background model in Settings (`prefs.backgroundModel`) and the chat fits that model. The
+chosen background model is the one charged. An automatic background pick cannot start
+a paid call. If a checkpoint is unavailable or the chat still reaches the threshold, the Bot
+continues in a new part that carries the latest messages that fit, with no handoff note and
+no model call. The old part is archived only after the new part's first answer. If that
+first call fails before any answer and no fallback answers, the Bot returns to the old
+part. A team with no model that answers beside its agents skips the steward, note and
+checkpoint, and rolls over without a model call past the hard line. An agent-to-agent move
+has no API destination threshold.
 
 **A switch that fails goes back.** The Bot keeps the last model that answered in its chat as
 `previousModel` (a model that only started a call is never recorded) until the new one answers. A
@@ -522,7 +561,7 @@ own. A signed-out agent
 (ACP's `auth_required`) fails the turn as `MODEL_ACCESS_REQUIRED`, never `ACP_AGENT`, so it never
 moves to the fallback model; the fallback never changes the Bot's model.
 
-**No row claims an answer.** The provider-boundary row (Live switching, above) is written before
+**No row claims an answer.** The provider-boundary row (Replay and the Session record, above) is written before
 the reply, and the call can still fail after it, so it now reads "Switching to X (provider)",
 never "Now answered by X". Whether X answered is derived, never stored as a claim: from the next
 assistant message whose source is X. The Bot's settings show that state (switching and not answered
@@ -600,24 +639,28 @@ a missing sign-in (`needsSignIn`) is never offered; a Bot's current model stays 
 unavailable, and a new Bot's default skips all three. The jobs beside the chats keep their own
 model rule (D-g).
 
-**Images through Codex.** `generate_image` and the companion's drawing use an OpenAI API key as
-before; without one, the Codex CLI on its own ChatGPT sign-in (acp-dsh `generateImage`, a one-off
-session with a per-draw permission profile using Codex's image tool). A ChatGPT grant stored by an earlier version's DSH
-sign-in is read last. CLI auto-updates stay on (D-h).
+**Images through Codex.** `generate_image` and the companion's drawing use an OpenAI API key
+the person gave the app as before (one only inherited from the environment Automagik was started
+in is not used, #869). Without one, they use the Codex CLI on its own ChatGPT sign-in (acp-dsh
+`generateImage`, a one-off session with a per-draw permission profile using Codex's image tool).
+A ChatGPT grant stored by an earlier version's DSH sign-in is read last. CLI auto-updates stay on (D-h).
 
-**Image read boundary (#870).** Each draw writes an owner-only project config in its scratch
-folder with a fresh permission profile and `default_permissions`. It denies `:root`, reads
-only `:workspace_roots`, and has no network table, `extends` or `:minimal`. The adapter must
-offer and acknowledge `permission-profile:<id>` before the prompt. This is containment, not a
-scratch-only read boundary: Codex adds `:minimal` and helper-executable read grants, with
-platform runtime roots. Images there remain readable. Automagik passes only prompt text and
+**Image read boundary (#870).** Each draw uses a fresh scratch folder and selects the image
+permission profile from the Bot's isolated Codex home through its session overrides. The
+folder starts with no project config. The profile denies `:root`, reads `:workspace_roots`,
+and has no network table, `extends` or `:minimal`. The adapter must offer and acknowledge
+`permission-profile:<id>` before the prompt. Codex adds runtime read grants for its helper
+and platform runtime roots. Images there remain readable. Automagik passes only prompt text and
 has no pre-read hook for Codex's image-input paths; output bytes are inline, never opened from
 `savedPath`. No adapter-controlled input path exists to validate. The [security notes and
 pinned source lines][codex-image-security] list Linux, macOS and Windows grants and the real
 helper read tests. Those tests reconstruct the helper policy; they do not prove the signed-in
-ACP image-tool path. **#870 remains open.** Feature and offered-tool checks stay in place.
-An `Invalid configuration` warning fails a pre-session check.
-The run uses the Bot's isolated Codex home and removes the scratch config with the folder.
+ACP image-tool path. **#870 remains open.** Feature and offered-tool checks stay in place,
+and each required switch is read under the session's whole config and proven by its effect
+before the draw; a switch Codex lists but silently ignores refuses the draw.
+An `Invalid configuration` warning fails a pre-session check. A base-config failure retries
+the check sequence once with the same profile. A profile-specific config failure refuses the
+draw or edit before session start. Scratch cleanup is best effort.
 
 **Accepted image security risk (owner decision, 2026-11-11).** If the profile mode is absent
 or rejected, drawing continues in `read-only` with one warning and an internal not-isolated
@@ -627,10 +670,21 @@ A Codex Bot's ordinary chat image tool (`agent-image.js`) is outside this per-dr
 and retains the risk under its chat permissions. Signed-in enforcement on the actual
 per-turn adapter path still needs verification in the app.
 
-An OpenAI API key avoids `generate_image`'s one-off Codex session by using the Images API;
-the API still receives the prompt. Prompt text is outside the file boundary. A Bot running
-on Codex can still invoke its own image tool despite that key. Use a different Bot model or
-turn Codex off to avoid that route. Avoid routing untrusted outside text into Codex drawings;
+2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
+the per-draw profile cannot be used); owner decision pending.
+
+Under the proposed default, if the per-draw profile checks fail, the draw or edit is refused
+before any prompt and legacy `read-only` is never selected as a fallback. A config change is
+one visible at the post-acknowledgement check, which also rejects a scratch `.codex` entry.
+With no profile, the preliminary checks and session may start. Windows has no profile modes.
+Readiness can report ready there even though the one-off Codex draw is refused with
+“Update Automagik and try again.”
+
+An OpenAI API key given to the app (one only inherited from the environment is not used, #869)
+avoids `generate_image`'s one-off Codex session by using the Images API. The API still receives
+the prompt. Prompt text is outside the file boundary. A Bot running on Codex can still invoke
+its own image tool despite that key. Use a different Bot model or turn Codex off to avoid that
+route. Avoid routing untrusted outside text into Codex drawings;
 post-call refusals cannot undo a read, and prompt review is not a file access control.
 See the [user warning and security notes][codex-image-security].
 
@@ -696,8 +750,8 @@ three CLIs before their switches default to on.
 The owner's GO adds **Remote Hermes** as a fourth route, after Native, ACP and Herdr. This
 amends the three-route selector approved in #1016. Local Hermes remains `acp-hermes`;
 remote Hermes is `hermes-remote`, a native `hermes serve` JSON-RPC/WebSocket adapter,
-never an ACP SDK transport. Crossing to or from it starts a new conversation with the
-existing handoff flow (#1007); changing only its model keeps that conversation.
+never an ACP SDK transport. A crossing to or from it follows RFC 0030 Q7a for an explicit
+own-chat pick. Changing only its model keeps the conversation.
 
 One connection, off by default, holds a remote HTTPS address (path prefixes allowed) or SSH
 connection settings, a profile, Bot-secret reference and discovered models. The standing credential is in the mode-0600 Bot secret store with no
@@ -829,8 +883,14 @@ old account consent. It requires fresh in-app sign-in, preserves Bot models and 
 does not log out or copy the old account. Bot CLI user settings also start empty; project
 settings still load from the workspace. The previous physical folder and its unproved records
 remain at their original path: it is never renamed and reused. A surviving vendor process can
-write only to the abandoned generation. Cleanup removes it later only when exit is proven;
-unproved generations, including Windows crash records, stay retained. Both serialization and
+write only to the abandoned generation. The retired folder stays readable at its bound path: its
+`RETIRED.json` holds the disposition, and later starts remove nothing until the measurement
+side's complete post-last-write scan with the root frozen, its retirement record, and the
+session-absorption receipt hold; a `KEEP` file in the home opts out. A marker, note or bound
+path that cannot be proved to be that generation's own is refused and left untouched, and a
+missing, unreadable or unparseable `RETIRED.json` is refused too: without the record of what was
+decided the home is ambiguous. Unproved generations,
+including Windows crash records, stay retained. Both serialization and
 app registrations sit outside the
 replaceable home. Captured launches check the installation's current-generation pointer as well
 as local version markers; delayed account reads and image tickets are invalidated by Reset.
@@ -856,6 +916,7 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
 
 - Open issues: #855, #868, #869, #870.
 - Merged changes that cite this RFC: #186, #187, #189, #349, #520, #522, #537, #557, #559, #569 (last merged 2026-11-06).
+- #1564 (reopened 2026-11-22): native tools per Bot.
 
 ## Links
 
@@ -886,7 +947,7 @@ fake-acp tests cover the inheritance contract, and opened work runs as Workspace
 
 ## Amendment: Auto on every route (RFC 0031, 2026-11-11)
 
-Auto runs at Workspace. Codex uses its own reviewer; Claude Code uses its `auto` mode. Both can take their own mode while bridged. API Bots decide sandbox escalations through their own model in a separate, tool-free compaction request. Hermes, Antigravity and omp use the team's background model and require one to offer Auto. A bridged call keeps its dialog or the background model decides it; a CLI permission question sends the remaining bridge calls of that prompt to the person.
+Auto runs at Workspace. Codex uses its own reviewer, including while bridged. Claude Code is withheld from Auto until its `auto` mode is captured; a saved Claude Code Auto mark is cleared and the Bot runs as Workspace. API Bots decide sandbox escalations through their own model in a separate, tool-free compaction request. Hermes, Antigravity and omp use the team's background model and require one to offer Auto. A bridged call keeps its dialog or the background model decides it; a CLI permission question sends the remaining bridge calls of that prompt to the person.
 
 API marks bind the exact provider/model; own-mode and team marks bind the agent route. Only the person enables Auto. Current chat ownership or explicit inherited task records, revision, Workspace, and route must still match when a decision returns. Grants bind one call, tool and escalation reason and are consumed once. A failure or missing model asks the person. Model decisions never widen saved permissions or answer as the person.
 
@@ -894,7 +955,7 @@ Automagik's judge asks the person for hard-to-undo steps and after three consecu
 
 Codex's reviewer is a single CLI switch; global rules or reviewer policy would also change other Bots. No CLI home is written. Codex review counts can produce a refusal-stop notice, but the actual denial-limit ending and Claude Code auto mode still need captures. The host notice and tool result remain English like their neighbors. The permission questions explain that an allowed API escalation and native-agent tools may change files outside the Bot's folder. Existing Codex wording remains unchanged.
 
-RFC 0031 follow-up: rule 5 is per mark, with exact API models; rule 6 no longer refuses bridges. Questions 4 and 5 are answered by the own model/background model split and explicit failure-to-person behavior. The threat model's bridged-dialog statement gains “or the background model decides it”. “Not scheduled” is narrowed: any request reaching a counting chat may lead to a judged step; schedules themselves are not treated as the person's requests. RFC 0031's text remains for its owner.
+RFC 0031 follow-up: rule 5 is per mark, with exact API models; rule 6 no longer refuses bridges. Question 4 is answered by the own model/background model split and explicit failure-to-person behavior. For question 5, Claude Code is withheld from Auto until its `auto` mode is captured from a signed-in CLI. The threat model's bridged-dialog statement gains “or the background model decides it”. “Not scheduled” is narrowed: any request reaching a counting chat may lead to a judged step; schedules themselves are not treated as the person's requests. RFC 0031's text remains for its owner.
 
 ### Bot identity on ACP (amended 2026-11-14, #1269)
 
@@ -933,8 +994,326 @@ ChatGPT grants cannot edit; older ACP services must update or use an OpenAI key.
 For edits, the Image read boundary's text-only-input statement gains this exception:
 bots-dsh reads the person's verified upload from DSH's store and acp-dsh passes it inline
 when image prompts are supported and writes a 0400 copy in the per-draw scratch. No read
-root is added. Only an acknowledged per-draw profile permits an edit; fallback refuses it
-(D3's recommended default). The scratch and input copy are removed afterwards. Codex still
+root is added. An edit requires an acknowledged per-draw profile before any prompt.
+Any edit the locked run cannot be set up for (sign-in, account,
+configuration, switch check, profile acknowledgement, an older ACP service, a connector or
+session that cannot start) is refused with
+`reason: edit-not-isolated`, so bots-dsh gives the Bot its own verified copy to edit the file
+itself; the original stays unchanged. Scratch cleanup, including its input copy, is best effort. Codex still
 selects its image-tool paths without an adapter pre-read hook; acknowledgement is not proof
 of scratch-only reads, and #870 remains open. Real-app acceptance must demonstrate that
 Codex preserves the reference picture's distinctive shapes and text before this ships.
+
+## Amendment: native tools per Bot (2026-11-22, #1564)
+
+- **Decision and save.** Decided by the owner's delegate, 2026-11-22. The owner asked to use
+  Claude Code's own tools with Automagik's extras (#1564). The Bot has one `nativeTools` boolean
+  shared across routes. Absent is OFF. In PR A, Details offers the switch for Claude Code. Only
+  the owner can change it, through `update-bot` on its own. Bot tools and the agent MCP route
+  cannot set it, and members and guests cannot reach `update-bot`. The normal Bot save must
+  succeed before ON can apply or appear in Details. The switch description reads
+  "Applies from your next message in this Bot's direct chat. Turning it off ends the running session."
+- **Eligibility and launch.** **Superseded 2026-11-23** by [native tools in every chat][everywhere].
+  Once the owner saves ON, it applies from the owner's next message
+  in the eligible Bot's direct chat. A turn there can request ON if it contains at least one
+  valid input from the owner. The transcript, ACK, relay or system context, and regular replay
+  have no bearing on that input check. A turn without valid owner input runs OFF even when the
+  previous turn ran ON. Groups, tasks, scheduled deliveries, IM, LiveShare, DSH subagent Sessions
+  and turns with uncertain ownership run OFF.
+  If Claude Code is already running OFF when an eligible turn requests ON, ACP replaces the
+  process before sending the owner's prompt. The existing Session resumes as it would after a
+  restart. ON is blocked for plugin-managed Bots, the Main Bot when it operates Omni, shared or
+  IM-bound Bots, and Bots with shell access off or any denied tools.
+  An active LiveShare plugin blocks ON for every Bot. The switch is hidden in multi-user
+  workspaces, where support awaits delivery 3 of [RFC 0038](0038-cloud-multiuser-caller-principal.md).
+- **Permission checks.** ON requires an effective sandbox of `workspace-write` or
+  `danger-full-access`. Read only and unreadable or unsupported levels block the ON save and
+  make Details show the switch disabled with the reason. ACP checks the actual Session's effective
+  level again after preparation, just before spawning the process. Read only or an unknown level
+  at that point uses the existing OFF path. A running native process can continue on eligible
+  owner turns and is retired when the eligibility or permission checks no longer permit reuse.
+  Switching the Session to Read only retires a live native process immediately. Saving a change to
+  the Bot's shell access, denied tools or permission setting also retires its Claude Code processes
+  while the switch is ON.
+- **Claude with the bridge.** OFF uses the existing DSH bridge with Claude's built-in tools
+  disabled. ON keeps the built-ins and serves Automagik's extras through the bridge, omitting the
+  DSH tools that duplicate Claude's. ON requires the bridge, and the admin's `dshTools: false`
+  still takes precedence. Bridge-loss handling follows the existing ACP rules. Once a Bot team
+  registers on the host, ACP ignores the hidden `nativeTools` plugin setting for every Claude
+  Session, even if it cannot read the team identity. The hidden setting applies only on standalone
+  ACP hosts that have never registered a Bot team.
+- **Turning OFF.** OFF removes the field and immediately retires only that Bot's live and
+  starting Claude Code sessions, before saving. An answer under way stops and asks the owner to
+  send the message again. If the save fails, the previous preference is restored.
+- **Pending deliveries.** PR B covers Codex OFF, PR C covers omp, and Antigravity awaits a later
+  delivery. Migration of existing settings is outside this amendment.
+- **Threat model.** With the switch on, Claude Code's own commands and edits run outside DSH's
+  file sandbox, read-before-write policy and write guard. The agent runs in the Bot's isolated CLI
+  home and can reach files that the person's OS permissions and Claude Code's rules allow, including
+  private folders. DSH still approves calls through its bridge and answers native ACP permission
+  requests that Claude sends. Which native calls ask depends on the level and Claude's own rules.
+  Hard asks apply below Full access. [ACP README permission matrix](../../apps/acp-dsh/README.md#native-tools-mode-nativetools-1564)
+- **Rollback.** Revert PR A. Older builds keep and ignore the Bot's `nativeTools` field.
+
+## Amendment: Codex native tools (2026-11-23, #1564 PR B)
+
+Decided by the owner's delegate, 2026-11-23. It extends the amendment above ("native tools per
+Bot") to Codex and, for Codex, supersedes its "Pending deliveries" and "Migration ... outside
+this amendment" lines.
+
+- **What OFF means.** Codex works with DSH's tools through the bridge and has none of its own.
+  OFF is not Read only: DSH's tools keep the Session's permission level, so at Workspace, Auto
+  and Full DSH's `edit` and `bash` write with DSH's approvals, as for any bridged agent. Codex's
+  internal sandbox mode is set to its `read-only` id before every prompt (a fork included) only
+  as a backstop against Codex's own tools; it does not limit DSH's tools, which run in DSH.
+- **Eligibility.** **Superseded 2026-11-23** by [native tools in every chat][everywhere].
+  The same as Claude's: ON only on an owner turn in the Bot's own direct chat,
+  with the saved switch ON for `acp-codex`, at Workspace or Full, for a Bot no block applies
+  to. Every other turn opens OFF: scheduled deliveries, relays (`handoff`, `request`, resumed),
+  tasks, groups, IM, LiveShare, DSH subagent Sessions. ON is never inherited: a turn without
+  owner input remakes a live ON process OFF, and an eligible owner turn remakes a live OFF one ON.
+- **No Bot identity (lead decision B-8, 2026-11-23).** (1) Once a Bot team is registered, a Codex
+  Session without a Bot identity (Workspace, the Code pane) runs OFF, fail closed, with DSH's
+  tools only. (2) Codex outside a team, on a host where no Bot team was ever registered, runs as
+  before, with its own tools.
+- **The check (LQ1, LQ2).** Every OFF spawn runs a check against the Codex it starts (its home,
+  its folder) and no verdict is cached. A config (`CODEX_CONFIG`) turns off Codex's features,
+  its v2 sub-agent tools (`multi_agent_v2.disable_native_tools`), its question tool, web search,
+  the person's own MCP servers and skills by name, and gives the process a copy of
+  `codex debug models` with `apply_patch_tool_type` cleared: the only config path that removes
+  the patch tool. What is left is the bridge's transport: `functions.exec`, `functions.wait` and
+  the three MCP resource readers. Every model in the copy is checked once per spawn; a model that
+  offers anything else, or whose read Codex refuses, is not offered while OFF. Each removal is
+  proven by its effect, and a home server named `dsh` refuses. Every read names a model of the
+  copy, never the Codex home's own default (which may be a kept model that shows no tools); the
+  process's config names no model, so DSH's `default` stays the model Codex itself starts on. Any
+  other failure refuses the turn ("Codex could not turn its own tools off ..."), a deadline or a
+  Stop included, except a turn on a model the check measured kept (below); the Session never
+  opens unchecked. Before the check, the spawn writes the chat permission profiles into the
+  Bot's isolated Codex home (`cli-homes`, a new empty home included) and runs one command under
+  them (`codex sandbox -P`) with that home; when Codex cannot, the turn is refused with "its
+  permission profiles are unavailable". (**Superseded 2026-11-23** by [native tools in every
+  chat][everywhere]: these texts point to the Details switch in any Session of a Bot it is not
+  blocked for.) That refusal, and the one with DSH's tools turned off,
+  point to the Details switch only on the owner's own turn in the direct chat of a Bot it is not
+  blocked for; in a group, task or scheduled run (one in that direct chat included), or for a
+  blocked Bot, they say to switch its model, or to update Automagik (to turn Automagik's tools
+  back on, for the second), and a group line shows each refusal's short words, in the interface
+  language. The CLI calls run one after another, and
+  one setup at a time per Codex home: about 5-6 seconds more per new OFF agent session, none per
+  turn. A model the composer picks later must be one the spawn checked, else the turn is refused
+  with zero prompts.
+- **Windows (lead decision, 2026-11-23).** Codex has no chat permission profiles on Windows, so
+  there, and only there, the OFF spawn neither writes nor checks them and is not refused for
+  their absence. Its backstop is Codex's legacy `read-only` mode instead, set before every
+  prompt as on the other systems; a Codex that does not offer that mode fails the turn before
+  any prompt ("Codex would not take DSH's permission level: it offers none of the modes
+  read-only ..."). Everything else is as on Linux and macOS: the same check removes Codex's own
+  tools on every spawn and the bridge is forced. The Details switch is unlocked on Windows, and
+  groups, tasks and scheduled runs there run OFF. Linux and macOS do not change: without the
+  profiles their OFF spawn is still refused.
+- **The catalog file.** The checked copy is written, mode 0600, to the installation's ACP folder
+  (`codex-native-off/models-<sha256>.json`), outside every Codex home and outside `cli-homes`.
+  Copies older than 24 hours are pruned, never the one just written. A fork of an OFF process
+  writes the checked bytes back first when the file is missing (Codex refuses a fork whose
+  catalog file is gone).
+- **Calls that do not ask (LQ3).** A Codex call that is not the bridge's or one of its two MCP
+  list readers is not offered; if one appears anyway its card is not drawn, a permission question
+  for it is refused with the agent's reject option, and the session ends ("Codex used one of its
+  own tools while they are off ...").
+- **Kept models (lead decision B1-4, 2026-11-23).** A model on the Codex row's
+  `nativeKeptModels` (today `gpt-5.5`, whose tools Codex shows to no check) launches as today,
+  with Codex's own tools, in every Session: owner chat, group, task, schedule, relay, sub-agent,
+  identity-less, Read only (Codex's own read-only mode, as today). The Details switch shows OFF
+  and locked with "This model can't turn its native tools off." and makes no OFF promise. A
+  restricted (Q5), managed or shared Codex Bot on a kept model also keeps Codex's own tools, as
+  today; its row shows the kept sentence. The row and ON eligibility follow the Bot's saved
+  model: a Bot saved on a kept model runs its checked-model turns OFF, even in its own chat.
+- **Measured kept models (lead decisions B1-4 and the mixed-model option (b), 2026-11-23).** A
+  model of the copy whose read Codex answers with exit 0 and a JSON prompt list holding no tool
+  block shows nothing to check, like `gpt-5.5`: the accepted signature is a prompt list of known
+  items with no tool block (the real `gpt-5.5` answer is message items only; `[]` counts the
+  same). Such a model is measured kept, whether or not other models are checkable, and also when
+  the check then refuses for a reason that is not its own (another model's read, the final read,
+  or a switch Codex ignores). It runs as today, with Codex's own tools, in every Session, and its
+  row shows OFF and locked with the kept sentence. No turn is refused for it: the OFF turn that
+  measured it runs again at once as a kept one (today's launch, no notice), once. A Codex whose
+  listed models all show no tools is treated as if they were all kept; a `default` there whose
+  start model is not known yet runs as today too. A Codex update whose prompt read shows no tool
+  block for any model makes every model measured kept, which is the behaviour before this PR;
+  the rows then show the kept sentence.
+  - **The record.** The measured set is the last passed check's (a later check that shows a
+    model's tools takes it out; a check refused for another reason adds its no-block models and
+    takes none out), kept beside the catalog's recorded start model in its saved file, so the
+    row is right after a restart. It covers the whole Codex agent row, not each account or
+    Session folder: one Session's check applies to every Session of the row, and a sign-in to
+    another account keeps it (always in the "as today" direction). A turn reads it for the
+    connector and Codex release that measured it, for a day, then checks again; the Details row
+    reads it for that release whatever its age, so the row never unlocks and promises OFF
+    because a day passed. A refused check merges its no-block models into the record and
+    re-dates the older ones, even those it has just read as checkable, so a stale record can
+    keep a model that became checkable on Codex's own tools until a check of that Codex passes,
+    or for a day after the last refused check that measured any model with no tool block.
+  - **The safety limit.** Only that exact answer counts: an exit code, a prompt this code cannot
+    read, a forbidden tool, a deadline, a Stop, Codex's `Invalid configuration` or an unreadable
+    call still refuse
+    (LQ1) and keep no model, because an unreadable answer is never an unverifiable one; a model
+    the check never read (not in Codex's list) is still refused as unchecked.
+  - **Image grant.** A turn that measures a model (the first one, and the first after the record
+    lapses: a day, or a Codex or connector update) runs without the Session's staged image grant
+    (the OFF attempt cleared it); the person asks for the image again. Later turns on that model
+    are kept from their start.
+- **Denied `acp_tool` (#2026, owner's option A, 2026-11-23).** A kept or measured kept model and
+  Antigravity run their own tools whatever the Bot's Denied tools say, so a call denied as
+  `acp_tool` runs and is only recorded as refused after it ran. A Bot whose Denied tools hold
+  `acp_tool` therefore cannot be put on a Codex model known to keep its own tools at save time,
+  or on Antigravity (model menu, Pocket, update, switch-route, create), and `acp_tool` cannot be
+  added to its Denied tools while it runs on one or while its pending way back is one. Only a
+  save that makes the pair is refused: a Bot already there keeps running (no turn is refused),
+  may still edit its other denied tools and re-pick its current model, and Details names what to
+  change. Removing `acp_tool` and moving to such a model in one patch is refused; two steps work.
+  The check fails open on an unknown model (Codex's `default` before its start model is known, a
+  model measured kept later, a measured record from another Codex release), and automatic moves
+  (a subscription move, a refused route) stay allowed; both are covered by the Details notice.
+  Hermes is not covered.
+- **DSH's `default`** is the model Codex itself starts on (the last process with its own tools,
+  else the catalog's recorded start model); a wrong guess is caught after the model is set and
+  that turn ends with "The tools setting changed; send again." and no prompt, including the first
+  turn after an upgrade, before the catalog is read again.
+- **Session files.** The image-file grant ("Allow for this chat session") never activates in an
+  OFF Codex Session, and a staged grant is cleared; DSH's `read_image` reaches images through the
+  bridge.
+- **Read only** retires a live ON Codex at once; an OFF one and one on a kept model keep running.
+- **The switch's agent.** ON is saved with the agent it is for (`nativeToolsAgent`): a Bot moved
+  to another agent reads OFF and reads ON again when it moves back. An ON saved before the tag is
+  Claude's; omp's migrated `nativeToolsKept` is read as omp's. The Details row now shows for Bots
+  on the team default model (`appliedModel`) too.
+- **Migration (Q1/Q5).** Once per team (marker `nativeToolsCodexKept`), every existing Codex Bot
+  keeps Codex's own tools in its own direct chat (`nativeTools: true`,
+  `nativeToolsAgent: 'acp-codex'`), except Bots with shell access off or denied tools, which stay
+  OFF. A Codex Bot whose ON was saved for another agent (a Claude ON from before the tag, omp's
+  migrated one) has it moved to Codex. The app stores an OFF as no value, so such a Bot is
+  migrated like any other Codex Bot; only an explicit `nativeTools: false` stays OFF. Moved back
+  to Claude or omp afterwards, it reads OFF there (its ON names Codex). (**Superseded
+  2026-11-23** by [native tools in every chat][everywhere] for groups, tasks, scheduled runs,
+  relays and shared Bots; managed Bots stay locked.) Groups, tasks, scheduled
+  runs, relays, sub-agents, Read only, multi-user, managed and restricted Bots move to DSH's
+  tools, as do identity-less Sessions on a team host, except Bots on a kept or measured kept
+  model.
+- **Rollback.** Revert PR B. Older builds ignore `nativeToolsAgent`, the marker and the
+  `codex-native-off` folder. A migrated Codex Bot keeps `nativeTools: true`, which a PR A build
+  applies only to Claude, so a rolled-back Bot later moved to Claude or omp would read ON.
+
+## Amendment: native tools in every chat of the Bot (2026-11-23, #1564)
+
+[everywhere]: #amendment-native-tools-in-every-chat-of-the-bot-2026-11-23-1564
+
+- **Decision.** Decided by the owner, 2026-11-23. The `nativeTools` switch belongs to the Bot and
+  applies to Claude Code, Codex and omp in every Session the Bot runs as itself: direct chat,
+  groups, tasks, scheduled runs, relays, LiveShare, IM, whoever sends the turn. ON = the agent's
+  own tools; OFF = none. It is read at process start. Default OFF.
+- **Fresh scheduled Sessions.** A fresh scheduled Session (a `new`/`new_once` target) follows the
+  one Bot behind its task. Each firing of a recurring `new` is a new Session and is ON only while
+  every `new` task on the host belongs to that single Bot with the switch ON. Two Bots, no Bot, or
+  a failed lookup = OFF. If it is reopened after a restart, or after it closed, it reads OFF until
+  it is driven again. Such a Session gets no Bot name, role or instructions: only the switch.
+- **Removed.** Owner-input eligibility, and the `shared`/IM-bound and own-chat-only locks.
+  **Kept:** `managed`: the Bots that operate Omni (the Omni Bot, and a Main Bot while Omni is
+  linked) and Bots another plugin manages (Genie and Unfold-managed Bots). Omni's plugin takes the
+  tools of a Bot that operates it, so its switch stays off and locked. Read only and an
+  unreadable level (per Session), `restricted` (shell access off or denied tools), multi-user
+  server mode (the switch stays hidden and native tools stay off until
+  [RFC 0038](0038-cloud-multiuser-caller-principal.md) delivery 3), and identity-less Sessions
+  (OFF): DSH subagent Sessions and Omni chat threads and answer children. A kept model runs as
+  today, with its own tools, at every level (Read only and shell-off included).
+- **Turning it off.** OFF ends the Bot's chat, group, past and task Sessions and its fresh
+  scheduled Sessions. A live process is reused only while the saved switch still reads ON.
+- **Upgrade.** Once, a Bot that sat in the removed lock with the switch ON gets `nativeTools: false`
+  (marker `nativeToolsLocksRetired`). The removed lock covers Bots shared with people, an active
+  LiveShare share at upgrade, and Bots bound to an IM connection. A Main Bot with Omni configured
+  (linked, or a saved link not read yet at host start) is turned off once the same way. Other
+  `managed` Bots are not part of the upgrade: their saved value is not written, and the lock
+  keeps them off. Bots already
+  off are not written; other Bots do not change. Nothing gains native tools without the person.
+  The check runs on the host that writes the team; until it has run there, an affected Bot shows
+  its old lock reason and runs without native tools.
+- **Omni.** A Bot that operates Omni stays locked (`managed`): Omni's plugin takes its tools, so
+  this amendment gives it no native tools and needs no change in Omni. Omni chat threads and
+  answer children have no Bot identity and run without native tools.
+- **Threat model.** Group members, IM/WhatsApp senders, LiveShare guests and scheduled prompts can
+  drive commands and edits outside DSH's file sandbox on a Bot whose owner turned it ON. This is
+  the owner's decision.
+- **Superseded** (marked in place): the summary line in "Decisions" (owner's direct chat), "native
+  tools per Bot" Eligibility and launch, the Codex amendment's Eligibility (including "ON is never
+  inherited…"), its refusal texts' "owner's own turn in the direct chat", and its migration's
+  "Groups, tasks, scheduled runs … move to DSH's tools".
+- **Rollback.** Revert the change: the removed locks return, a saved `false` stays `false`, and
+  older builds ignore the marker.
+
+## Amendment: Antigravity native tools (2026-11-24, #1564)
+
+- **Decision.** Decided by the owner's delegate (the lead), 2026-11-23/24: Antigravity gets the
+  Bot's `nativeTools` switch, with parity with omp. A new Antigravity Bot starts OFF; an existing
+  one keeps its own tools once. Read only, an unreadable level, `restricted`, `managed` and
+  multi-user apply as for the other agents ([everywhere]).
+- **ON** is today's launch (`agy acp`, agy's own tools, its asks through DSH's approval). **OFF is
+  chat only**, as omp's (agy has no DSH bridge): two agy-side layers, both per process, under
+  acp-dsh's own guard. L1: `--agent automagik-native-off`, our main agent with `tools: []`,
+  `excludeDefaultComponents: true`, `hidden: true`, `subagent: false`. L2: `--cli_dir_name
+  automagik-native-off`, our settings folder whose `permissions.deny` names every documented tool
+  action (`--cli_dir_name` is listed by `agy acp --help` but not on agy's documentation pages).
+  L3: acp-dsh ends the answer at the first tool call agy reports and refuses every ask. Both files
+  are written 0600 at each OFF start into the home the child itself runs in
+  (`AUTOMAGIK_BOT_CLI_HOME`, equal to its `HOME`, else the start refuses).
+- **Proven on one version.** Native tools OFF for Antigravity is proven on agy `AGY_OFF_CHECKED`,
+  the version stage 6 ran. It moves only in a reviewed commit that a stage 6 on the new version
+  then passes before its pull request. On any other version it launches OFF, warns in the host log
+  and in Details, and rests on two agy layers nobody re-checked plus L3. L3 cannot undo an action
+  that needed no permission and had already run when its report arrived (a read, a search, a
+  fetch, a subagent's inner calls), and never sees anything agy runs without reporting a tool
+  call. The Details version line uses the version agy reported at its last start in this host run;
+  before any start it uses the installed folder's version, which an in-place self-update does not
+  change.
+- **L2 check.** At each OFF start, after `session/new` and before the first prompt, acp-dsh reads
+  agy's own log for that process (in our own `automagik-native-off/log/`, bounded: 4096 entries,
+  256 KiB, a fresh regular file only, never through a link or a FIFO) and refuses if agy says it
+  failed to load the OFF settings (a missing or malformed file). With no such log it warns once.
+  Before each OFF start acp-dsh removes, from that folder only, the regular files with agy's log
+  name that are more than 24 hours old (`lstat`, never through a link; any error is ignored and
+  never stops the start), so its own past starts do not fill the 4096-entry bound. It keeps the
+  logs of this host's live OFF processes however old, so a kept OFF Session idle for a day is
+  still checked at its next turn. A `log` that is not a real folder (a link) is neither read nor
+  pruned: the check counts it as no log and warns.
+  Each later turn of a kept OFF Session checks again and ends the Session if the failure appeared.
+  agy writes no line after it loads its settings (one unsigned run set on agy 1.5.16, 2026-11-24),
+  so the first turn is not covered against a failure line written after its `session/new` answer;
+  the next turn's check catches it. Details says so under the switch whenever it is not ON. A
+  settings file in a shape a later agy ignores produces no log
+  line and is not caught. L1 has no runtime check. A crafted log folder can make the start refuse
+  or warn; a link to a folder whose I/O blocks (a mount the same user made) could hold the host,
+  which that user can already stop.
+- **Hooks and plugins.** An OFF start refuses while the Antigravity home holds `config/hooks.json`
+  or `config/plugins` (agy loads hooks from both, outside every tool layer); off Windows the
+  refusal and Details name Switch account in Settings, which starts a new, empty home. Hooks or
+  plugins in a workspace (the Bot's own folder), if agy loads those, including ones the Bot wrote
+  itself while it was ON, are not checked; nor are MCP config or skills in the shared home. If an
+  agy version creates `config/plugins` by itself, every OFF start refuses until Automagik changes;
+  Switch account does not help then.
+- **Threat model.** OFF holds against the OFF Bot's own chat input in that home. It does not hold
+  against another ON Bot of the same installation: same OS user, same agy home, which can already
+  act as that user.
+- **Identity-less Sessions.** An Antigravity chat with no Bot (Workspace, Code pane, DSH
+  subagents, Omni threads and answer children, a scheduled run with no single owner) is chat-only
+  once a Bot team is registered, as omp's. With no Bot team, agy launches as before.
+- **Migration.** Once (marker `nativeToolsAntigravityKept`), each existing Antigravity Bot keeps
+  its own tools with the Codex block's rule: an ON saved for another agent moves to Antigravity,
+  shell access off or denied tools stay off (warned), an explicit `false` is left as it is. On an
+  install where the removed-lock upgrade has not run yet (`nativeToolsLocksRetired` unset), an
+  Antigravity Bot in that lock (shared with people, IM-bound, a live LiveShare share) is kept ON at
+  load and then turned off by that upgrade at the first native read.
+- **Capability.** bots-dsh offers the Antigravity switch only when acp-dsh lists `acp-antigravity`
+  in `nativeArgsAgents`; with an older acp-dsh there is no row (`unoffered`), as before. Details
+  drops #2026's own-tools notice for an Antigravity Bot with the switch (denied tools lock it
+  OFF); the menu and save refusals are kept.
+- **Rollback.** Revert the change: agy launches with its own tools in every Session again, as
+  before; the marker and an ON saved for Antigravity are ignored, and Details shows no row.

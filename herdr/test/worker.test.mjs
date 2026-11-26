@@ -1,3 +1,4 @@
+import { startFakeCore as startStatusCore } from "./fake-core.mjs";
 // `automagik-herdr worker` (bot workers): a bot starts one worker per task, an hc child of its
 // pane, in the task's worktree. Run as a program against scratch git projects under $TMPDIR,
 // with the fake `hc` first on PATH (test/fake-hc.mjs). The real hc is never run.
@@ -5,24 +6,31 @@ import net from "node:net";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { createHash } from "node:crypto";
 
 import { applyBotEdit, checkBots, parseBots, swapProblem } from "../mods/am-sidebar/model.js";
-import { AGENTS, AGY_FIXED_DENY, AGY_SHELL_READ, agySettingsDir, agySettingsFile, effortArgs, promptArgs } from "../mods/am-sidebar/models.js";
+import { AGENTS, AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir, agySettingsFile, effortArgs, promptArgs } from "../mods/am-sidebar/models.js";
 import { ENV, GUARD_DIR, WORKER_OF_LABEL, stableGuardDir, stableHelper, stableRunner, baseCandidates, hcProxyEnabled, branchNamesTask, branchSlug, parseWorktrees, readLedger, reapCandidates, runsTemplate, workLeft, sessionChange, startRow, swapArm, swapByte, templateAgent,
   KILL_GUARD_DIR, workerArgs, workerBranch, workerPlan, workerRole, workerTaskId, writesWorktree,
   PR_ASK_MAX_MS, PR_ASK_MIN_MS, PR_QUIET_EVERY_MS, PR_QUIET_FIRST_MS, PR_QUIET_WATCH_MS, PR_STATES, PR_WATCH_MS, endRow, finishedEnds, prAskDue, prBranchKey,
   prBranches, prChecksPath, prChecksText, prLikely, prRow, prRowsFor, prTime, prWatch, readPrChecks } from "../mods/am-sidebar/workers.js";
 import { approveProject, recordFileOf } from "../mods/am-sidebar/approved.js";
 import { stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
+import { loginFixture, loginPointerFixture, privateFixtureHome } from "./login-fixture.mjs";
+import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 import { startProxy } from "../mods/am-sidebar/hcProxy.mjs";
+import { OWNER_QUESTION_LABEL } from "../mods/am-sidebar/hcGuard.mjs";
+import { NEEDS_OWNER_LABEL } from "../mods/am-sidebar/tidy.js";
+import { OWNER_QUESTION_LINE } from "../mods/am-sidebar/briefingText.mjs";
 import { startFakeCore } from "./fake-hc-core.mjs";
 import { fixturePaneEdit } from "./fixture-pane-edit.mjs";
 import { readJsonLines } from "./log-lines.mjs";
+import { chosenHomeWords } from "../mods/am-sidebar/agentHome.js";
+import { envWords } from "../mods/am-sidebar/logins.js";
 import { assertScratchProject, scratchProject, scratchRoot, shortSocketDir }
   from "./scratch-project.mjs";
 const createHashOf = (text) => createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -31,6 +39,12 @@ const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.ur
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
 const FAKE_APP = new URL("./fake-herdr-app.mjs", import.meta.url).pathname;
 const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", stray: "b-zzzzzzzzzz" };
+// Bot login generations as ACP writes them (#1527): v4 UUIDs, one per vendor generation.
+const GEN = {
+  claude1: "11111111-1111-4111-8111-111111111111",
+  codex1: "22222222-2222-4222-8222-222222222222",
+  codex2: "44444444-4444-4444-8444-444444444444",
+};
 
 const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
 const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
@@ -53,6 +67,31 @@ const team = (extra = {}) => ({
 const term = (address, { bot: b, cwd }) => ({ address, name: address, cwd, state: "live", parent: null, created_ms: 1,
   labels: b ? { bot: b } : {}, foreground: { argv: ["claude"], cwd, pid: 4000 }, status: { app: "claude-code", state: "idle" } });
 
+/**
+ * ACP's generation record for a scratch scene (#1527): `generation.json` beside a pointer, with
+ * both vendors' generations and one sequence. The launch's pointer only needs its folder.
+ */
+function generationRecord(root, { sequence, claude = null, codex = null }) {
+  // ACP's own layout (#1509's reader checks it): each vendor's pointer, its private 0700 config
+  // folder under homes/<vendor>/<generation>, and the record written last.
+  const current = join(root, "acp", "cli-homes", "current");
+  mkdirSync(current, { recursive: true });
+  const home = (vendor, generation) => join(root, "acp", "cli-homes", "homes", vendor, generation, `.${vendor}`);
+  for (const [vendor, generation] of [["claude", claude], ["codex", codex]]) {
+    if (!generation) continue;
+    mkdirSync(home(vendor, generation), { recursive: true, mode: 0o700 });
+    privateFixtureHome(home(vendor, generation));
+    writeFileSync(join(current, vendor), generation);
+  }
+  const pointer = join(current, "claude");
+  const record = join(current, "generation.json");
+  writeFileSync(record, JSON.stringify({ version: 1, sequence,
+    claude: claude ? { generation: claude, configDir: home("claude", claude) } : null,
+    codex: codex ? { generation: codex, home: home("codex", codex) } : null,
+    updatedAt: "2026-11-19T00:00:00.000Z" }));
+  return { pointer, record };
+}
+
 /** A scratch world: a git project on main with its bots, a fake hc whose t1..t3 are panes in it. */
 function scene(t, { file = team(), branch = "main", briefing = true, templates = TEMPLATES } = {}) {
   const root = scratchRoot(t, "hb-worker-");
@@ -66,6 +105,10 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   exe(join(bin, "gh"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(root, "gh.log")}"\n`
     + `if [ -f "${join(root, "gh-hook.sh")}" ]; then sh "${join(root, "gh-hook.sh")}"; fi\n`
     + `if [ -f "${join(root, "gh.json")}" ]; then cat "${join(root, "gh.json")}"; exit 0; fi\necho "fake gh: no answer" >&2\nexit 1\n`);
+  // The same for glab (#1278): a GitLab-hosted project's merge requests are asked there, never
+  // of gh. glab.json is its answer; glab.log what it was asked.
+  exe(join(bin, "glab"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(root, "glab.log")}"\n`
+    + `if [ -f "${join(root, "glab.json")}" ]; then cat "${join(root, "glab.json")}"; exit 0; fi\necho "fake glab: no answer" >&2\nexit 1\n`);
   const home = join(root, "home");
   mkdirSync(join(home, ".claude"), { recursive: true });
   mkdirSync(join(home, ".config/herdr-app"), { recursive: true });
@@ -74,7 +117,8 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   if (briefing) writeFileSync(join(app, "mods/am-sidebar/briefing.mjs"), "// stand-in\n");
   const statePath = join(root, "hc.json");
   const logPath = join(root, "hc.log");
-  const terminals = [term("t1", { bot: ID.dev, cwd: project }), term("t2", { cwd: project }), term("t3", { bot: ID.stray, cwd: project }),
+  const caller = { ...term("t1", { bot: ID.dev, cwd: project }), argv: ["/usr/bin/env", `HERDR_APP_HOME=${app}`, "claude"] };
+  const terminals = [caller, term("t2", { cwd: project }), term("t3", { bot: ID.stray, cwd: project }),
     term("t4", { bot: ID.cap, cwd: project })];
   writeFileSync(statePath, JSON.stringify({ terminals, next: 100, templates }));
   writeFileSync(logPath, "");
@@ -85,10 +129,24 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   writeFileSync(appLog, "");
   const env = { ...process.env, XDG_DATA_HOME: join(root, "data"), PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", GIT_CEILING_DIRECTORIES: root };
+  // The dsh-tui install's stable copies a sandboxed worker's PATH names (guard and kill shim).
+  const stable = join(env.XDG_DATA_HOME, "automagik-herdr", "dsh-sandbox");
+  for (const [dir, from] of [["guard", GUARD_DIR], ["hc-kill", KILL_GUARD_DIR]]) {
+    mkdirSync(join(stable, dir), { recursive: true });
+    copyFileSync(join(from, "hc"), join(stable, dir, "hc"));
+    chmodSync(join(stable, dir, "hc"), 0o755);
+  }
+  const core = startStatusCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SESSION: "" });
   // Worker transport discovery must never inherit a host socket into a fixture scene.
-  env.HC_SOCKET = join(root, "unproxied.sock");
+  env.HC_SOCKET = core.env.AUTOMAGIK_HERDR_CORE_SOCKET;
   env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
   delete env.HC_TERMINAL_ID;
+  // #1420: a Codex worker reads $CODEX_HOME/config.toml; the scene's is under its own HOME, never the host's.
+  delete env.CODEX_HOME;
+  // #1532: a generation pointer from the host must never leak into a scratch launch.
+  delete env.AUTOMAGIK_BOT_CLI_POINTER;
   // Every CLI call, including worker/reap, stays in this scratch world (#1135).
   const preflight = (extra = {}, cwd = project) => {
     const effective = { ...env, ...extra };
@@ -115,18 +173,21 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
     assert.ok(readFileSync(join(bin, "hc"), "utf8").includes(FAKE_HC));
     assert.ok(CLI.endsWith("/herdr/mods/am-sidebar/bin/automagik-herdr.mjs"));
   };
-  const cli = (args, { from = "t1", cwd = project, env: extra = {} } = {}) => {
+  const cli = (args, { from = "t1", cwd = project, env: extra = {}, coreEnv = extra } = {}) => {
+    core.control({ ...env, ...coreEnv });
     preflight(extra, cwd);
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd, env: { ...env, ...extra, ...(from ? { HC_TERMINAL_ID: from } : {}) }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   const cliAsync = (args, { from = "t1", env: extra = {} } = {}) => new Promise((resolve) => {
+    core.control({ ...env, ...extra });
     preflight(extra);
     execFile(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...extra, HC_TERMINAL_ID: from }, encoding: "utf8" },
       (e, out, err) => resolve({ code: e ? e.code : 0, out, err }));
   });
   /** The CLI as a child process, its stderr readable as it comes. */
   const spawnCli = (args, { from = "t1", env: extra = {} } = {}) => {
+    core.control({ ...env, ...extra });
     preflight(extra);
     return spawn(process.execPath, [CLI, ...args],
       { cwd: project, env: { ...env, ...extra, HC_TERMINAL_ID: from },
@@ -157,11 +218,11 @@ const TEMPLATES = [
   { name: "mystery", command: "./run-something.sh" },
 ];
 /** What `hc run` runs after `--`, as raw words. */
-const runArgv = (args) => args.slice(args.indexOf("--") + 1);
+const runArgv = (args) => withoutDone(args.slice(args.indexOf("--") + 1));
 /** A template run: no `--`; the template and the task follow the last option (`--parent P`). */
 const templateArgv = (args) => {
   assert.equal(args.includes("--"), false, `hc's template form has no --: ${JSON.stringify(args)}`);
-  return args.slice(args.indexOf("--parent") + 2);
+  return withoutDone(args.slice(args.indexOf("--parent") + 2));
 };
 /**
  * The agent's argv: after `--`, past the `env PATH=…` every agent worker starts with, and a Claude
@@ -178,6 +239,27 @@ const freshClaude = (words) => {
   assert.equal(words.lastIndexOf("--session-id"), i, "one --session-id");
   return [...words.slice(0, i), ...words.slice(i + 2)];
 };
+// #1558: a Claude launch's person-feature settings are pinned by person-features.test.mjs; the
+// worker tests compare the rest of the launch.
+const withoutPerson = (words) => {
+  const i = words.indexOf("--settings");
+  return i < 0 || words[i + 1] !== CLAUDE_PERSON_SETTINGS ? words : [...words.slice(0, i), ...words.slice(i + 2)];
+};
+const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
+  + "clean (`git status --porcelain` prints nothing).";
+// #2057: the needs-owner rule every non-Hermes worker task carries before the done line,
+// written out (never imported), so a wording change shows here.
+const OWNER_LINE = "Waiting on the person: when you end your turn because only the person can unblock you (a "
+  + "question or a choice, not a permission prompt), ask it in your reply and also mark your own "
+  + "pane so the Herdr sidebar shows a Question, with a short paraphrase in single quotes and no "
+  + "apostrophe, e.g. `hc label \"$HC_TERMINAL_ID\" 'automagik-herdr.needs-owner=Which release should "
+  + "ship?'`. For each new question, set it again with the new paraphrase. Clear it with `hc label "
+  + "\"$HC_TERMINAL_ID\" automagik-herdr.needs-owner=` as soon as you work again or the question is "
+  + "withdrawn. A question your lead bot can answer: ask it in your reply, without the label. If "
+  + "HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
+const TAIL = `${OWNER_LINE}\n\n${DONE_LINE}`;
+const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${TAIL}`)
+  ? w.slice(0, -(TAIL.length + 2)) : w);
 const after = (args) => {
   const argv = runArgv(args);
   assert.equal(argv[0], "/usr/bin/env", `an agent worker runs under /usr/bin/env PATH=…: ${JSON.stringify(argv)}`);
@@ -186,7 +268,15 @@ const after = (args) => {
   assert.match(argv[at], /^PATH=/);
   const rest = argv.slice(at + 1);
   assert.equal(at === 3, rest[0] === "claude", `only a Claude worker gets the login words: ${JSON.stringify(argv)}`);
-  return rest;
+  return withoutPerson(rest);
+};
+/** A reader launch (#1509): /usr/bin/env, its `-u NAME` and NAME=value words, then the command. */
+const afterLogin = (args) => {
+  const argv = runArgv(args);
+  assert.equal(argv[0], "/usr/bin/env", JSON.stringify(argv));
+  let i = 1;
+  while (i < argv.length && (argv[i] === "-u" || /^[A-Z_][A-Z0-9_]*=/.test(argv[i]))) i += argv[i] === "-u" ? 2 : 1;
+  return withoutPerson(argv.slice(i));
 };
 const labelsOf = (args) => args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
 
@@ -217,6 +307,183 @@ test("M4: switch off keeps the complete worker argv byte for byte against C1", (
   assert.deepEqual(s.runs()[0].map((word) => word.split(s.root).join("<root>")
     .split(GUARD_DIR).join("<guard>")), baseline);
 });
+
+test("#1509 no pointer leaves the vendor env exactly as it was", (t) => {
+  const s = scene(t);
+  const r = s.cli(["worker", "no pointer task", "--branch", "feat/no-pointer", "--agent", "claude", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = s.runs().at(-1);
+  assert.deepEqual(runArgv(run).slice(0, 3), ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR"]);
+  assert.equal(run.some((word) => word.startsWith("CLAUDE_CONFIG_DIR=")), false);
+  assert.equal(run.some((word) => word.startsWith("CODEX_HOME=")), false);
+});
+
+test("#1509 a nested DSH worker carries policy from its caller into an unguarded core", (t) => {
+  const file = team();
+  Object.assign(file.bots[2], { agent: "dsh-tui", worker: { agent: "dsh-tui" }, hcProxy: false });
+  const s = scene(t, { file });
+  const env = { [POINTER_VAR]: "", [REQUIRED_VAR]: "required", DSH_HOME: join(s.root, "dsh"), AUTOMAGIK_HOME: s.root };
+  exe(join(s.root, "bin", "dsh-tui"), `#!${process.execPath}
+process.stdout.write(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(env))}.map((key) => [key, process.env[key]]))));
+`);
+  const r = s.cli(["worker", "nested DSH task", "--branch", "feat/dsh-policy", "--json"], { env, coreEnv: {} });
+  assert.equal(r.code, 0, r.err);
+  const [command, ...args] = runArgv(s.runs().at(-1));
+  const launched = spawnSync(command, args, { env: s.env, encoding: "utf8" });
+  assert.equal(launched.status, 0, launched.error?.message ?? launched.stderr);
+  assert.deepEqual(JSON.parse(launched.stdout), env);
+});
+
+test("one exported pointer resolves BOTH vendors to their recorded homes (#1509)", (t) => {
+  const s = scene(t);
+  const current = join(s.root, "acp", "cli-homes", "current");
+  const claudeGen = "11111111-1111-4111-8111-111111111111";
+  const codexGen = "22222222-2222-4222-8222-222222222222";
+  const claudeDir = join(dirname(current), "homes", "claude", claudeGen, ".claude");
+  const codexDir = join(dirname(current), "homes", "codex", codexGen, ".codex");
+  for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
+  privateFixtureHome(claudeDir); privateFixtureHome(codexDir);
+  writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 4,
+    claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
+    updatedAt: "2026-11-16T20:00:00.000Z" }));
+  writeFileSync(join(current, "claude"), claudeGen);
+  writeFileSync(join(current, "codex"), codexGen);
+  // The one export names current/claude; the Codex launch must derive current/codex from it.
+  const pointer = loginPointerFixture(t, join(current, "claude"));
+
+  const claude = s.cli(["worker", "claude pointer task", "--branch", "feat/pointer-claude", "--agent", "claude", "--json"], { env: pointer });
+  assert.equal(claude.code, 0, claude.err);
+  const claudeRun = s.runs().at(-1);
+  assert.ok(claudeRun.includes(`CLAUDE_CONFIG_DIR=${claudeDir}`), JSON.stringify(claudeRun));
+  assert.equal(claudeRun.some((word) => word.startsWith("CODEX_HOME=")), false);
+
+  const codex = s.cli(["worker", "codex pointer task", "--branch", "feat/pointer-codex", "--agent", "codex", "--json"], { env: pointer });
+  assert.equal(codex.code, 0, codex.err);
+  const codexRun = s.runs().at(-1);
+  assert.ok(codexRun.includes(`CODEX_HOME=${codexDir}`), JSON.stringify(codexRun));
+  assert.equal(codexRun.some((word) => word.startsWith("CLAUDE_CONFIG_DIR=")), false);
+});
+
+test("#1509 reader refusals stop the worker before any launch", (t) => {
+  const s = scene(t);
+  const current = join(s.root, "acp", "cli-homes", "current");
+  const claudeGen = "11111111-1111-4111-8111-111111111111";
+  const codexGen = "22222222-2222-4222-8222-222222222222";
+  const claudeDir = join(dirname(current), "homes", "claude", claudeGen, ".claude");
+  const codexDir = join(dirname(current), "homes", "codex", codexGen, ".codex");
+  for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
+  privateFixtureHome(claudeDir); privateFixtureHome(codexDir);
+  const writeRecord = (mode = 0o700) => {
+    chmodSync(codexDir, mode);
+    writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 4,
+      claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
+      updatedAt: "2026-11-16T20:00:00.000Z" }));
+    writeFileSync(join(current, "claude"), claudeGen);
+    writeFileSync(join(current, "codex"), codexGen);
+  };
+  writeRecord();
+  const pointer = loginPointerFixture(t, join(current, "claude"));
+  const baseline = s.runs().length;
+  const args = (extra = []) => ["worker", "reader refusal task", "--branch", "feat/reader-refusal", "--agent", "codex", ...extra, "--json"];
+
+  chmodSync(codexDir, 0o755);
+  const mode = s.cli(args(), { env: pointer });
+  assert.equal(mode.code, 2, mode.err);
+  assert.match(mode.err, /missing or out of date/);
+  assert.match(mode.err, /folder-mode/);
+  assert.equal(mode.err.includes(s.root), false, "the refusal names no path");
+  assert.equal(s.runs().length, baseline, "no launch after a bad mode");
+
+  const required = s.cli(args(), { env: { [REQUIRED_VAR]: "required" } });
+  assert.equal(required.code, 2, required.err);
+  assert.match(required.err, /login-required/);
+  assert.equal(s.runs().length, baseline);
+  assert.deepEqual(s.ledger(), []);
+});
+
+for (const command of ["claude", "codex --no-daemon", "bash -lc 'exec claude'",
+  "CLAUDE_CONFIG_DIR=/other claude", "export CLAUDE_SECURESTORAGE_CONFIG_DIR=/other; exec claude",
+  "env CODEX_HOME=/other codex --no-daemon", "my-unknown-wrapper", "claude;", "codex --no-daemon;"]) {
+  test(`#1509 refuses shell-form worker template ${command}`, (t) => {
+    const s = scene(t, { templates: [{ name: "login-test", command }] });
+    const root = join(s.root, "acp", "cli-homes");
+    loginFixture(t, root, "codex");
+    const login = loginFixture(t, root, "claude");
+    const r = s.cli(["worker", "task", "--template", "login-test", "--branch", "feat/login-template"], { env: login.env });
+    assert.equal(r.code, 2, r.err);
+    assert.equal(r.err.trim(), "am: Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly. (launch-not-direct)");
+    assert.deepEqual(s.runs(), []);
+    assert.deepEqual(s.ledger(), []);
+  });
+}
+
+test("#1509 a worker alias picks the vendor its programs.json command runs", (t) => {
+  const s = scene(t);
+  writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { alternate: { run: ["codex"] } } }));
+  const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "codex");
+  const r = s.cli(["worker", "task", "--agent", "alternate", "--branch", "feat/alternate"], { env: login.env });
+  assert.equal(r.code, 0, r.err);
+  assert.ok(s.runs()[0].includes(`CODEX_HOME=${login.dir}`));
+});
+
+for (const vendor of ["claude", "codex"]) test(`#1509 ${vendor} drops inherited credentials and uses the panel home`, (t) => {
+  const s = scene(t);
+  const login = loginFixture(t, join(s.root, "acp", "cli-homes"), vendor);
+  const variables = vendor === "claude"
+    ? ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_FOUNDRY"]
+    : ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"];
+  const inherited = Object.fromEntries(variables.map((name) => [name, "fixture-override"]));
+  const executable = join(s.root, "bin", vendor);
+  const names = [...variables, "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CODEX_HOME"];
+  const probe = join(s.root, "probe.mjs");
+  writeFileSync(probe, `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(names)}.map(name => [name, process.env[name]]))));`);
+  exe(executable, `#!/bin/sh
+exec "${process.execPath}" "${probe}"
+`);
+  const r = s.cli(["worker", "task", "--agent", vendor, "--branch", "feat/login-env"],
+    { env: { ...login.env, ...inherited, CODEX_HOME: join(s.root, "caller-codex") } });
+  assert.equal(r.code, 0, r.err);
+  const [env, ...words] = runArgv(s.runs()[0]);
+  const seen = spawnSync(env, words, { env: { PATH: s.env.PATH, ...inherited }, encoding: "utf8" });
+  assert.equal(seen.status, 0, seen.stderr);
+  const actual = JSON.parse(seen.stdout);
+  if (vendor === "claude") {
+    assert.equal(actual.CLAUDE_CONFIG_DIR, login.dir);
+    assert.equal(actual.CLAUDE_SECURESTORAGE_CONFIG_DIR, login.dir);
+  } else {
+    assert.equal(actual.CODEX_HOME, login.dir);
+    assert.equal(s.ledger().find((row) => row.event === "start").env.CODEX_HOME, login.dir);
+  }
+  for (const name of variables) assert.equal(actual[name], undefined, name);
+});
+
+for (const usable of [true, false]) {
+  test(`#1509 worker rereads the generation after worktree creation (${usable ? "ready" : "paused"})`, (t) => {
+    const s = scene(t);
+    const root = join(s.root, "acp", "cli-homes");
+    const nextGeneration = "22222222-2222-4222-8222-222222222222";
+    const next = loginFixture(t, root, "claude", nextGeneration);
+    const first = loginFixture(t, root, "claude");
+    if (!usable) writeFileSync(join(dirname(next.dir), "paused"), "");
+    exe(join(s.project, ".git", "hooks", "post-checkout"),
+      `#!/bin/sh
+printf '%s' '${nextGeneration}' > '${next.pointer}'
+printf '%s' '${next.text}' > '${next.recordPath}'
+`);
+    const r = s.cli(["worker", "task", "--agent", "claude", "--branch", "feat/login-switch"], { env: first.env });
+    assert.equal(r.code, usable ? 0 : 2, r.err);
+    if (usable) {
+      assert.ok(s.runs()[0].includes(`CLAUDE_CONFIG_DIR=${next.dir}`), JSON.stringify(s.runs()));
+      // The preflight read [first, 2]; the row must carry the pair the spawn used (#1532).
+      const row = s.ledger().find((entry) => entry.event === "start" && entry.kind === "worker");
+      assert.deepEqual([row.generation, row.sequence], [nextGeneration, JSON.parse(next.text).sequence]);
+    } else {
+      assert.match(r.err, /login-paused/);
+      assert.deepEqual(s.runs(), []);
+    }
+  });
+}
 
 test("M7: fixture pane edits cannot disable the approved switch at the next worker start",
   { skip: process.platform !== "linux" }, (t) => {
@@ -316,7 +583,10 @@ test("a dsh-tui worker reads its bot's approved switch; other agents keep the or
 
 // #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
 // other words (the tool-cache grants follow the runner's environment, so they are not compared).
-const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"];
+const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+  "-c", "allow_login_shell=false"];
+// #1420: a Codex worker start's per-launch trust word for exactly its worktree.
+const TRUST = (worktree) => ["-c", `projects={"${worktree}"={trust_level="trusted"}}`];
 const grantsApart = (words) => {
   const rest = [];
   const dirs = [];
@@ -336,7 +606,7 @@ test("worker: the bot's worker defaults are used, and per-task --agent/--model/-
   const out = r.json();
   assert.deepEqual([out.agent, out.model, out.effort], ["codex", "gpt-5.5", "medium"]);
   const codex = grantsApart(after(s.runs()[0]));
-  assert.deepEqual(codex.words, ["codex", ...CODEX_MODE, "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
+  assert.deepEqual(codex.words, ["codex", ...CODEX_MODE, ...TRUST(out.worktree), "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
   assert.deepEqual(codex.dirs.slice(0, 2), workerGitDirs(s, "feat-login"));
   const o = s.cli(["worker", "review it", "--branch", "feat/review", "--agent", "claude", "--model", "opus", "--effort", "max", "--json"]);
   assert.equal(o.code, 0, o.err);
@@ -350,7 +620,7 @@ test("worker #1125: a bot's codexAuto false no longer opts out (#946 retired): i
   const s = scene(t, { file });
   const r = s.cli(["worker", "fix the login form", "--branch", "feat/login", "--json"]);
   assert.equal(r.code, 0, r.err);
-  assert.deepEqual(grantsApart(after(s.runs()[0])).words, ["codex", ...CODEX_MODE, "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
+  assert.deepEqual(grantsApart(after(s.runs()[0])).words, ["codex", ...CODEX_MODE, ...TRUST(r.json().worktree), "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
   const o = s.cli(["worker", "tune it", "--branch", "feat/tune", "--agent", "codex", "--json"]);
   assert.equal(o.code, 0, o.err);
   assert.deepEqual(grantsApart(after(s.runs()[1])).words.slice(0, 1 + CODEX_MODE.length), ["codex", ...CODEX_MODE], "a per-task --agent codex too");
@@ -404,6 +674,49 @@ test("worker kill (#955): a bot ends a worker it started and nothing else: a sea
   const task = s.cli(["worker", "kill", "the", "flaky", "test", "--branch", "feat/kill-flaky", "--json"]);
   assert.equal(task.code, 0, task.err);
   assert.equal(kills().length, 1);
+});
+
+test("worker kill #1129: a plain hc run child is refused whatever its parent says, and a worker that changes before the kill is not ended", (t) => {
+  const s = scene(t);
+  const kills = () => s.calls().filter((c) => c[0] === "kill");
+  const gets = (address) => s.calls().filter((c) => c[0] === "get" && c[1] === address).length;
+  const edit = (address, change) => {
+    const st = s.hcState();
+    change(st.terminals.find((x) => x.address === address));
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  };
+  // A plain child of the caller's own pane, its turn over: hc's parent is no proof of who started it.
+  const st = s.hcState();
+  st.terminals.push({ ...term("t7", { cwd: st.terminals[0].cwd }), parent: "t1" });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const plain = s.cli(["worker", "kill", "t7"]);
+  assert.equal(plain.code, 1, plain.err);
+  assert.match(plain.err, /t7 isn't a worker \(it has no worker\.of label\)\. Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started\. Nothing was ended\./);
+  assert.deepEqual(kills(), []);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "live", "the child is still there");
+
+  // A worker that exits between the first look and the recheck: said, never killed.
+  const one = s.cli(["worker", "fix the login form", "--branch", "feat/login", "--json"]);
+  assert.equal(one.code, 0, one.err);
+  const gone = one.json().terminal;
+  edit(gone, (x) => { x.status = { state: "idle" }; x.exitAfterGets = 1; });
+  const before = gets(gone);
+  const exited = s.cli(["worker", "kill", gone]);
+  assert.equal(exited.code, 0, exited.err);
+  assert.match(exited.out, /has already ended \(finished\)/);
+  assert.equal(gets(gone) - before, 2, "a first look and one recheck");
+  assert.deepEqual(kills(), []);
+
+  // A worker whose id is another terminal by the recheck: refused, never killed.
+  const two = s.cli(["worker", "tidy the docs", "--branch", "feat/docs", "--json"]);
+  assert.equal(two.code, 0, two.err);
+  const reused = two.json().terminal;
+  edit(reused, (x) => { x.status = { state: "idle" }; x.reuseAfterGets = 1; x.reuseCreated = 77; });
+  const swapped = s.cli(["worker", "kill", reused]);
+  assert.equal(swapped.code, 1, swapped.err);
+  assert.match(swapped.err, new RegExp(`${reused} could not be confirmed as the same terminal\\. Nothing was ended\\.`));
+  assert.deepEqual(kills(), []);
+  assert.equal(s.hcState().terminals.find((x) => x.address === reused).state, "live");
 });
 
 test("worker: a bot with no worker field runs its own agent, with that agent's default model and effort", (t) => {
@@ -611,8 +924,114 @@ test("worker: hc run --bg as a child of the bot's pane, in the worktree, with th
     task: null, worktree: wt, agent: "codex", model: "gpt-5.5", effort: "medium", template: null, role: "dev",
     branch: "feat/login", project: s.project, lead: ID.dev, base: git(s.project, "rev-parse", "main").trim(), created: true,
     swap: false, override: false, override_requested: null,
-    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, at: undefined });
+    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev,
+    env: { HOME: s.env.HOME }, session: null, generation: null, sequence: null, at: undefined });
   assert.ok(!Number.isNaN(Date.parse(row.at)));
+});
+
+// ---- the Bot login generation in the start row (#1532) ----
+
+test("start rows record the Bot login generation and sequence a worker and a seat launch on (#1532)", (t) => {
+  const s = scene(t);
+  const { pointer } = generationRecord(s.root, { sequence: 7, claude: GEN.claude1, codex: GEN.codex1 });
+  const worker = s.cli(["worker", "fix it", "--branch", "feat/generation", "--json"], { env: loginPointerFixture(t, pointer) });
+  assert.equal(worker.code, 0, worker.err);
+  const seat = s.cli(["start", "Genie"], { from: null, env: loginPointerFixture(t, pointer) });
+  assert.equal(seat.code, 0, seat.err);
+  const starts = s.ledger().filter((row) => row.event === "start");
+  const workerRow = starts.find((row) => row.kind === "worker");
+  const seatRow = starts.find((row) => row.kind === "seat");
+  assert.deepEqual([workerRow.generation, workerRow.sequence], [GEN.codex1, 7], "the worker's vendor (Codex) generation");
+  assert.deepEqual([seatRow.generation, seatRow.sequence], [GEN.claude1, 7], "the seat's vendor (Claude) generation");
+});
+
+test("a generation switch during hc run affects the next launch only (#1532)", (t) => {
+  const s = scene(t);
+  const next = generationRecord(s.root, { sequence: 2, claude: GEN.claude1, codex: GEN.codex2 });
+  const nextRecord = readFileSync(next.record, "utf8");
+  const first = generationRecord(s.root, { sequence: 1, claude: GEN.claude1, codex: GEN.codex1 });
+  const codexPointer = join(dirname(first.pointer), "codex");
+  const hcBin = join(s.root, "bin", "hc");
+  // The worker has sent its argv before the panel changes the record beside the pointer.
+  hcStateExtra(s, { onRunWrite: { path: first.record, text: nextRecord } });
+  exe(hcBin, `#!/bin/sh
+"${process.execPath}" "${FAKE_HC}" "$@" || exit $?
+if [ "$1" = run ]; then printf '%s' '${GEN.codex2}' > "${codexPointer}"; fi
+`);
+  const env = loginPointerFixture(t, first.pointer);
+  const one = s.cli(["worker", "one", "--branch", "feat/gen-one", "--json"], { env });
+  assert.equal(one.code, 0, one.err);
+  assert.ok(s.runs()[0].includes(`CODEX_HOME=${join(s.root, "acp", "cli-homes", "homes", "codex", GEN.codex1, ".codex")}`));
+  assert.equal(readFileSync(first.record, "utf8"), nextRecord);
+  assert.equal(readFileSync(codexPointer, "utf8"), GEN.codex2);
+  const two = s.cli(["worker", "two", "--branch", "feat/gen-two", "--json"], { env });
+  assert.equal(two.code, 0, two.err);
+  const rows = s.ledger().filter((row) => row.event === "start" && row.kind === "worker");
+  assert.deepEqual(rows.map((row) => [row.branch, row.generation, row.sequence]),
+    [["feat/gen-one", GEN.codex1, 1], ["feat/gen-two", GEN.codex2, 2]]);
+});
+
+test("a worker records a backwards sequence the reader accepts and null for an unusable one (#1532)", (t) => {
+  const s = scene(t);
+  for (const [branch, sequence] of [["first", 7], ["backwards", 3], ["unusable", -1]]) {
+    const { pointer } = generationRecord(s.root, { sequence, claude: GEN.claude1, codex: GEN.codex1 });
+    const r = s.cli(["worker", branch, "--branch", `feat/${branch}`], { env: loginPointerFixture(t, pointer) });
+    assert.equal(r.code, 0, r.err);
+  }
+  assert.deepEqual(s.ledger().filter((row) => row.event === "start").map((row) => [row.generation, row.sequence]),
+    [[GEN.codex1, 7], [GEN.codex1, 3], [null, null]]);
+});
+
+test("a chosen-home worker records a matching policy login and refuses a different home (#1532)", (t) => {
+  const s = scene(t);
+  const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "codex");
+  const record = JSON.parse(login.text);
+  const run = (branch, folder) => s.cli(["worker", "fix it", "--branch", branch, "--agent", "codex", "--agent-home", folder],
+    { env: login.env });
+  const same = run("feat/matching-home", login.dir);
+  assert.equal(same.code, 0, same.err);
+  const other = join(s.root, "other-home");
+  mkdirSync(other, { mode: 0o700 });
+  const differs = run("feat/other-home", other);
+  assert.equal(differs.code, 2, differs.err);
+  assert.match(differs.err, /\(agent-home-differs\)/);
+  assert.deepEqual(s.ledger().filter((row) => row.event === "start").map((row) => [row.branch, row.generation, row.sequence]),
+    [["feat/matching-home", record.codex.generation, record.sequence]]);
+});
+
+test("a launch with no generation record writes null, never a guess, and the ledger still reads (#1532)", (t) => {
+  const s = scene(t);
+  // No pointer: the launch is as before and its row names no generation.
+  const absent = s.cli(["worker", "no pointer", "--branch", "feat/no-pointer", "--json"]);
+  assert.equal(absent.code, 0, absent.err);
+  // A pointer with no record beside it: since #1509's reader that launch refuses, so no row
+  // can name a generation nobody recorded.
+  const pointer = join(s.root, "acp", "cli-homes", "current", "claude");
+  mkdirSync(dirname(pointer), { recursive: true });
+  writeFileSync(pointer, GEN.claude1);
+  const missing = s.cli(["worker", "no record", "--branch", "feat/no-record", "--json"], { env: loginPointerFixture(t, pointer) });
+  assert.equal(missing.code, 2, missing.err);
+  assert.match(missing.err, /\(record-absent\)/);
+  const rows = s.ledger().filter((row) => row.event === "start" && row.kind === "worker");
+  assert.deepEqual(rows.map((row) => [row.generation, row.sequence]), [[null, null]]);
+  assert.equal(rows.length, 1, "the row reads back");
+});
+
+test("a start row written before generation and sequence still reads beside a new launch (#1532)", (t) => {
+  const s = scene(t);
+  const old = { event: "start", kind: "worker", terminal: "t7", botId: ID.dev, task: "old", branch: "fix/old", project: s.project,
+    worktree: join(s.root, "old"), created: false, at: "2026-01-01T00:00:00.000Z" };
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(s.app, "automagik-herdr", "workers.jsonl"), `${JSON.stringify(old)}\n`, { mode: LEDGER_MODE });
+  const { pointer } = generationRecord(s.root, { sequence: 3, claude: GEN.claude1, codex: GEN.codex1 });
+  const r = s.cli(["worker", "new", "--branch", "feat/new", "--json"], { env: loginPointerFixture(t, pointer) });
+  assert.equal(r.code, 0, r.err);
+  const rows = s.ledger();
+  const oldRow = rows.find((row) => row.terminal === "t7");
+  const newRow = rows.find((row) => row.event === "start" && row.kind === "worker" && row.terminal !== "t7");
+  assert.equal("generation" in oldRow, false);
+  assert.equal("sequence" in oldRow, false);
+  assert.deepEqual([newRow.generation, newRow.sequence], [GEN.codex1, 3]);
 });
 
 test("mode #821: an empty worker mode launches auto without a mode label", (t) => {
@@ -674,11 +1093,11 @@ test("worker #1032: a Kimi worker starts bare and gets its task as its first mes
   assert.deepEqual(out.argv.slice(-1), ["kimi"]);
   // The task goes in once, as a message to the new pane; hc wait comes first (a send to a
   // booting agent can be dropped), both after hc run.
-  assert.deepEqual(s.hcState().sent, [{ to: out.terminal, text: TASK }]);
+  assert.deepEqual(s.hcState().sent, [{ to: out.terminal, text: `${TASK}\n\n${TAIL}` }]);
   const order = s.calls().filter((c) => ["run", "wait", "send"].includes(c[0])).map((c) => c[0]);
   assert.deepEqual(order, ["run", "wait", "send"]);
   assert.deepEqual(s.calls().find((c) => c[0] === "wait").slice(0, 2), ["wait", out.terminal]);
-  assert.deepEqual(s.calls().find((c) => c[0] === "send"), ["send", out.terminal, TASK]);
+  assert.deepEqual(s.calls().find((c) => c[0] === "send"), ["send", out.terminal, `${TASK}\n\n${TAIL}`]);
   assert.deepEqual(out.warnings, [], r.err);
 
   // A send hc refuses (the pane waits for a sign-in or a trust answer, or has ended): the worker
@@ -952,6 +1371,33 @@ test("start and attach append a seat row to the ledger", (t) => {
   assert.equal(seat.template, null, "a seat runs no template");
 });
 
+test("#1262: a seat start gets the longer hc run timeout too, and a timed-out run is recorded by name", (t) => {
+  const s = scene(t);
+  const done = join(s.root, "seat-run-answered");
+  hcStateExtra(s, { runDelayMs: 16_000, runDelayDone: done });
+  const r = s.cli(["start", "Genie"], { from: null, env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "20000" } });
+  assert.equal(r.code, 0, r.err);
+  assert.ok(existsSync(done), "the seat's hc run was allowed to answer past the old 15 s timeout");
+  const seat = s.ledger().find((x) => x.kind === "seat");
+  assert.equal(seat.terminal, "t100");
+  assert.equal(seat.botId, ID.main);
+});
+
+test("#1532 a seat found after hc run times out records the login it launched with", (t) => {
+  const s = scene(t);
+  const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "claude");
+  const record = JSON.parse(login.text);
+  hcStateExtra(s, { runDelayMs: 10_000,
+    onRunWrite: { path: login.recordPath, text: JSON.stringify({ ...record, sequence: record.sequence + 1 }) } });
+  const r = s.cli(["start", "Genie", "--json"], { from: null,
+    env: { ...login.env, AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /hc run didn't answer .* its start is recorded/);
+  assert.ok(s.runs()[0].includes(`CLAUDE_CONFIG_DIR=${login.dir}`));
+  const [row] = s.ledger().filter((x) => x.event === "start" && x.kind === "seat");
+  assert.deepEqual([row.terminal, row.generation, row.sequence], [r.json().terminal, record.claude.generation, record.sequence]);
+});
+
 // ---- hc templates ----
 
 test("worker --template: hc's template form, a child of the bot's pane in the worktree, labelled; ledger names it", (t) => {
@@ -974,7 +1420,7 @@ test("worker --template: hc's template form, a child of the bot's pane in the wo
     task: null, worktree: wt, agent: null, model: null, effort: null, template: "dev-sol", role: "dev",
     branch: "feat/login", project: s.project, lead: ID.dev, base: git(s.project, "rev-parse", "main").trim(), created: true,
     swap: false, override: true, override_requested: null,
-    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, at: undefined });
+    core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, generation: null, sequence: null, at: undefined });
   // A codex template: no Claude hook in the worktree, and no warning about one.
   assert.equal(existsSync(join(wt, ".claude/settings.local.json")), false);
   assert.doesNotMatch(r.err, /session hook/);
@@ -983,6 +1429,86 @@ test("worker --template: hc's template form, a child of the bot's pane in the wo
   assert.equal(text.code, 0, text.err);
   assert.match(text.out, /template  opus-rev \(runs claude\)/);
   assert.ok(existsSync(join(s.project, ".claude/worktrees/feat-review/.claude/settings.local.json")), "a Claude template gets the hook");
+});
+
+// ---- #1262: hc's first-status wait outlasts the old 15 s program timeout ----
+
+/** Puts `fields` on the scene's fake-hc state (a template that reports no status, say). */
+const hcStateExtra = (s, fields) => {
+  const st = s.hcState();
+  Object.assign(st, fields);
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+};
+
+test("#1262: a template worker that reports no status is waited for past hc's 60 s first-status wait and recorded", (t) => {
+  const s = scene(t);
+  // hc itself waits 60 s for a template's new terminal to report a status before it answers.
+  const done = join(s.root, "run-answered");
+  hcStateExtra(s, { runDelayMs: 61_000, runDelayDone: done });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  assert.equal(r.code, 0, r.err);
+  // The fake writes `done` only when its own 61 s wait reaches the answer, never when the CLI
+  // killed the call: its presence is the proof that the wait outlasted the old 15 s timeout.
+  assert.ok(existsSync(done), "hc's run was allowed to answer, not killed at 15 s");
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100");
+  assert.equal(row.template, "mystery");
+  assert.doesNotMatch(r.err, /task wasn't delivered/, "hc answered: the task did go in");
+});
+
+test("#1262: an hc run that outlasts its timeout is still recorded: the terminal it started is found by name", (t) => {
+  const s = scene(t);
+  // The fake hc creates and saves the terminal, then waits far past the call's own timeout, as a
+  // program that never reports a status makes hc wait after the terminal already exists.
+  hcStateExtra(s, { runDelayMs: 10_000 });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /e2e-x started, but its task wasn't delivered/);
+  assert.match(r.err, /hc send t100/);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100");
+  assert.equal(row.template, "mystery");
+  assert.ok(s.hcState().terminals.some((x) => x.address === "t100" && x.state === "live"), "the worker is live");
+});
+
+test("#1262: the late lookup records the worker's own terminal, never a newer one whose name shares its prefix", (t) => {
+  const s = scene(t);
+  // Someone else's newer terminal, named with the worker's prefix: a lookup by prefix (or by the
+  // newest terminal) must not record this one as the worker.
+  const st = s.hcState();
+  st.terminals.push({ address: "t99", name: "e2e-x-helper", cwd: s.project, state: "live", parent: null,
+    created_ms: Date.now() + 1_000_000, labels: {}, foreground: { argv: ["zsh"], cwd: s.project, pid: 4999 },
+    status: { app: "zsh", state: "idle" } });
+  st.runDelayMs = 10_000;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100", "the worker's own terminal, never the newer t99");
+  assert.match(r.err, /hc send t100/);
+});
+
+test("#1262: a timeout with no terminal under the name is a failed start, never a recorded worker", (t) => {
+  const s = scene(t);
+  // The fake waits before it creates the terminal, so the call's timeout leaves nothing behind.
+  hcStateExtra(s, { runDelayBeforeMs: 10_000 });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /didn't answer within 0.8s and no live terminal is named e2e-x/);
+  assert.equal(s.ledger().some((x) => x.kind === "worker"), false, "no worker row for a terminal that never ran");
+});
+
+test("#1262: hc's first_message sent false is said as started without its task, and the worker is recorded", (t) => {
+  const s = scene(t);
+  hcStateExtra(s, { runFirstMessage: { sent: false, reason: "it never reported its status, so it may be showing a dialog" } });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /e2e-x started, but its task wasn't delivered/);
+  assert.match(r.err, /hc send t100/);
+  assert.equal(s.ledger().find((x) => x.kind === "worker").terminal, "t100");
 });
 
 test("worker --template with --agent, --model or --effort is refused; an unknown template too, before any worktree", (t) => {
@@ -1029,7 +1555,7 @@ test("worker: a bots.json template default is used; a per-task --agent sets it a
   const m = s.cli(["worker", "tune it", "--branch", "feat/tune", "--model", "gpt-6", "--json"]);
   assert.equal(m.code, 0, m.err);
   const tuned = grantsApart(after(s.runs()[3]));
-  assert.deepEqual(tuned.words, ["codex", ...CODEX_MODE, "--model", "gpt-6", "-c", "model_reasoning_effort=medium", "tune it"]);
+  assert.deepEqual(tuned.words, ["codex", ...CODEX_MODE, ...TRUST(m.json().worktree), "--model", "gpt-6", "-c", "model_reasoning_effort=medium", "tune it"]);
   assert.deepEqual(tuned.dirs.slice(0, 2), workerGitDirs(s, "feat-tune"));
 });
 
@@ -1182,7 +1708,7 @@ test("effortArgs: claude/antigravity --effort, codex -c model_reasoning_effort, 
   assert.equal(unknown.error.includes("\n"), false, "one clear line");
   // Another agent's worker defaults never add mode words: its argv stays as it was.
   const claude = workerPlan({ id: ID.dev, name: "A", agent: "claude", worker: { agyMode: "plan" } });
-  assert.deepEqual([claude.agyMode, claude.argv], [null, ["claude", "--permission-mode", "auto"]]);
+  assert.deepEqual([claude.agyMode, claude.argv], [null, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto"]]);
   const legacy = workerPlan({ name: "L", agent: "claude" }, { agent: "gemini", effort: "low" });
   assert.equal(legacy.agent, "antigravity", "a typed gemini runs antigravity");
   assert.deepEqual(legacy.argv, ["agy", "--dangerously-skip-permissions", "--mode", "auto", "--effort", "low"]);
@@ -1305,6 +1831,30 @@ test("the bot briefing says a bot doesn't code: one worker per task, checked, en
   assert.match(WORKER_LINE, /end it with `am worker kill <terminal>` once the task merges/);
   assert.doesNotMatch(WORKER_LINE, /hc kill/, "hc kill is the main bot's only (#955)");
   assert.ok(text.length <= BRIEFING_LIMIT);
+});
+
+test("the briefing #1129: a member is told a plain hc run child is the main bot's to end, in both renders; the main bot isn't", async () => {
+  const { briefingText, launchBriefingText, PLAIN_RUN_LINE, WORKER_LINE, BRIEFING_LIMIT } = await import("../mods/am-sidebar/briefingText.mjs");
+  const file = parseBots(JSON.stringify(team())).file;
+  const [main, , member] = file.bots;
+  assert.match(PLAIN_RUN_LINE, /plain `hc run`/);
+  assert.match(PLAIN_RUN_LINE, /`am worker kill` refuses it/);
+  assert.match(PLAIN_RUN_LINE, /Only the project's main bot can end it, including after a handoff or restart/);
+  assert.match(PLAIN_RUN_LINE, /Start with `am worker`/);
+  const cleanup = "A plain `hc run` starts an ordinary terminal. "
+    + "Only the project's main bot can end it, including after a handoff or restart.";
+  for (const render of [briefingText, launchBriefingText]) {
+    const mine = render({ self: member, file });
+    assert.ok(mine.includes(PLAIN_RUN_LINE), `${render.name}: a member`);
+    assert.ok(mine.includes(WORKER_LINE), `${render.name}: the worker line stays`);
+    assert.ok(mine.length <= BRIEFING_LIMIT);
+    for (const [mode, self, isGit] of [["outside git", member, false], ["opted out", { ...member, code: false }, true]]) {
+      const text = render({ self, file, isGit });
+      assert.ok(text.includes(cleanup), `${render.name}: ${mode}`);
+      assert.doesNotMatch(text, /worker/i, `${render.name}: ${mode}`);
+    }
+    assert.doesNotMatch(render({ self: main, file }), /A plain `hc run`/, `${render.name}: the main bot`);
+  }
 });
 
 // ---- review fixes ----
@@ -1647,7 +2197,8 @@ test("worker --task: the ledger row's task, project, lead, worktree, base, creat
   assert.deepEqual({ ...row, at: undefined, pid: undefined }, { event: "start", kind: "worker", terminal: "t100", pid: undefined,
     botId: ID.dev, task: "gl-231", worktree: realpathSync(wt), agent: "codex", model: "gpt-5.5", effort: "medium", template: null,
     role: "dev", branch: "fix/gl-231-login", project: s.project, lead: ID.cap, base, created: false, swap: false, override: false,
-    override_requested: null, core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, at: undefined });
+    override_requested: null, core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev,
+    env: { HOME: s.env.HOME }, session: null, generation: null, sequence: null, at: undefined });
   assert.notEqual(row.base, git(wt, "rev-parse", "HEAD").trim(), "the base the worktree started from, not its head");
   // --branch making the worktree: created, and the base ref as a SHA; a per-task model is an override.
   git(s.project, "commit", "-q", "--allow-empty", "-m", "later");
@@ -1997,18 +2548,93 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
   git(s.project, "worktree", "add", "-q", "-b", "feat/wait", wt);
   const lockDir = join(s.app, "automagik-herdr");
   mkdirSync(lockDir, { recursive: true });
-  // Held by this test's process (fresh: under the 10 s stale limit), let go after 4.5 s.
+  // Startup is not contention: keep our holder fresh until the complete wait notice arrives.
   const lock = worktreeLock(lockDir, wt);
-  writeFileSync(lock, `${process.pid} held-by-the-test`);
-  const call = s.cliAsync(["worker", "go", "--worktree", wt]);
-  const free = setTimeout(() => rmSync(lock, { force: true }), 4500);
-  t.after(() => clearTimeout(free));
-  const r = await call;
-  assert.equal(r.code, 0, r.err);
-  assert.match(r.err, new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
-    + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m"));
-  assert.equal(r.err.split("waiting for").length, 2, "said once");
-  assert.equal(s.runs().length, 1);
+  const holder = `${process.pid} held-by-the-test`;
+  writeFileSync(lock, holder);
+  const ownsLock = () => {
+    try { return readFileSync(lock, "utf8") === holder; }
+    catch (e) { if (e.code === "ENOENT") return false; throw e; }
+  };
+  const notice = new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
+    + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m");
+  let child, fresh, watchdog;
+  let closed = false;
+  let released = false;
+  let terminal = false;
+  let out = "", err = "";
+  let close;
+  try {
+    child = s.spawnCli(["worker", "go", "--worktree", wt]);
+    let finish;
+    const result = new Promise((resolve) => { finish = resolve; });
+    close = new Promise((resolve) => child.once("close", (code, signal) => {
+      terminal = true;
+      closed = true;
+      resolve();
+      finish({ code, signal });
+    }));
+    const fail = (why) => { terminal = true; finish({ failure: why }); };
+    child.on("error", (e) => fail(`scratch CLI error: ${e.message}`));
+    child.stdout.on("error", (e) => fail(`stdout error: ${e.message}`));
+    child.stderr.on("error", (e) => fail(`stderr error: ${e.message}`));
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => {
+      err += d;
+      if (terminal || released || !notice.test(err)) return;
+      released = true; // Accumulated stderr keeps matching; never remove a successor's lock.
+      clearInterval(fresh);
+      clearTimeout(watchdog);
+      try {
+        assert.ok(ownsLock(), "fixture holder lost before its wait notice");
+        rmSync(lock);
+      } catch (e) { fail(e.message); return; }
+      watchdog = setTimeout(() => fail("scratch CLI did not close within 30 s after its notice"), 30_000);
+    });
+    fresh = setInterval(() => {
+      try {
+        assert.ok(ownsLock(), "fixture holder lost while waiting for its notice");
+        const now = new Date();
+        utimesSync(lock, now, now);
+      } catch (e) { clearInterval(fresh); fail(e.message); }
+    }, 200);
+    watchdog = setTimeout(() => fail("no complete wait notice within 30 s"), 30_000);
+    const r = await result;
+    const diagnostic = `${r.failure || "scratch CLI closed"}\nstdout: ${out}\nstderr: ${err}`;
+    assert.equal(r.failure, undefined, diagnostic);
+    assert.equal(r.signal, null, diagnostic);
+    assert.equal(r.code, 0, diagnostic);
+    assert.match(err, notice);
+    assert.equal(err.split("waiting for").length, 2, "said once");
+    assert.equal(s.runs().length, 1);
+  } finally {
+    terminal = true; // Keep draining late output without releasing or rearming during teardown.
+    clearInterval(fresh);
+    clearTimeout(watchdog);
+    try {
+      if (child && !closed) {
+        // Only this scratch child; wait for pipe closure before scene's after-hook removes it.
+        const waitClose = async (ms) => {
+          let timer;
+          try { await Promise.race([close, new Promise((resolve) => { timer = setTimeout(resolve, ms); })]); }
+          finally { clearTimeout(timer); }
+        };
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+        await waitClose(2000);
+        if (!closed) {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          await waitClose(3000);
+        }
+        assert.ok(closed, `scratch CLI did not close after termination\nstdout: ${out}\nstderr: ${err}`);
+      }
+    } finally {
+      clearInterval(fresh);
+      clearTimeout(watchdog);
+      if (ownsLock()) rmSync(lock);
+    }
+  }
 });
 
 test("worker #536: two calls on one new branch at once, a writer and a reviewer: one makes the worktree, the other finds it", async (t) => {
@@ -2173,7 +2799,8 @@ function watchReapGit(s, { count = null } = {}) {
   writeFileSync(log, "");
   exe(join(s.root, "bin/git"), "#!/bin/sh\n"
     + 'if [ "$1" = worktree ] && { [ "$2" = remove ] || [ "$2" = prune ]; }; then\n'
-    + `  printf '%s\\t%s\\n' "$PWD" "$2" >> ${quote(log)}\nfi\n`
+    // The full argv too (#1143): a test can say the remove it saw carried no --force.
+    + `  printf '%s\\t%s\\t%s\\n' "$PWD" "$2" "$*" >> ${quote(log)}\nfi\n`
     + (count === null ? "" : 'if [ "$1" = rev-list ] && [ "$2" = --count ]; then\n'
       + `  printf '%s' ${quote(count)}\n  exit 0\nfi\n`)
     + `exec ${quote(realGit)} "$@"\n`);
@@ -2198,6 +2825,275 @@ function seedReapTree(s, { project = s.project, owner = project, name = "candida
   appendFileSync(file, `${JSON.stringify(row)}\n`, { mode: LEDGER_MODE });
   return { worktree, branch, row, file };
 }
+
+// ---- #1278: a finished worker's terminal, worktree and branch go without the owner ----
+
+test("worker #1278 cause 1: a worker whose branch's PR merged is ended by the sweep, with an end row", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "merge it", "--branch", "fix/merged", "--json"]).json();
+  // Its turn is over (hc shows idle), but the terminal is still live, as a finished worker's is.
+  const state = s.hcState();
+  Object.assign(state.terminals.find((x) => x.address === w.terminal).status, { state: "idle" });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const head = git(w.worktree, "rev-parse", "HEAD").trim();
+  writeFileSync(join(s.root, "gh.json"), JSON.stringify([{
+    number: 9, state: "MERGED", headRefOid: head,
+    createdAt: new Date(Date.now() - 17 * 60_000).toISOString(),
+    mergedAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+  }]));
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().ended, [w.terminal], "the finished worker's terminal is ended");
+  assert.equal(s.hcState().terminals.find((x) => x.address === w.terminal).state, "finished");
+  assert.ok(s.calls().some((c) => c[0] === "kill" && c[1] === w.terminal), "hc kill was called");
+  const end = s.ledger().find((x) => x.event === "end" && x.terminal === w.terminal);
+  assert.ok(end, "the end event is written");
+  assert.equal(end.reason, "finished");
+});
+
+test("worker #1278 cause 2: reap lists a worktree no worker row created, and never removes it", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  // A project the ledger knows (a worker started there), plus a worktree someone else made.
+  assert.equal(s.cli(["worker", "one", "--branch", "fix/one"]).code, 0);
+  const hand = join(s.project, ".claude/worktrees/hand-made");
+  git(s.project, "worktree", "add", "-q", "-b", "hand/made", hand, "origin/main");
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().unowned.map((x) => x.worktree), [hand], "every worktree is seen");
+  assert.match(r.json().unowned[0].why, /not created by a worker/);
+  assert.equal(existsSync(hand), true, "never touched: no worker made it");
+});
+
+test("worker #1278 cause 3: a GitLab remote asks glab, and its merged MR proves the worktree safe", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "gitlab work", "--branch", "gl-231-fix", "--task", "gl-231", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  const head = git(w.worktree, "rev-parse", "HEAD").trim();
+  git(s.project, "remote", "set-url", "origin", "https://gitlab.com/group/proj.git");
+  s.finish(w.terminal);
+  writeFileSync(join(s.root, "glab.json"), JSON.stringify([{
+    iid: 7, state: "merged", sha: head, target_branch: "dev",
+    created_at: new Date(Date.now() - 17 * 60_000).toISOString(),
+    merged_at: new Date(Date.now() - 16 * 60_000).toISOString(),
+  }]));
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree], "the merged MR proves its HEAD preserved");
+  assert.equal(existsSync(w.worktree), false);
+  assert.match(readFileSync(join(s.root, "glab.log"), "utf8"), /--source-branch gl-231-fix/);
+  const ghLog = existsSync(join(s.root, "gh.log")) ? readFileSync(join(s.root, "gh.log"), "utf8") : "";
+  assert.doesNotMatch(ghLog, /gl-231-fix/, "a GitLab remote is never asked of gh");
+});
+
+test("worker #1278 cause 4: a worker's merged branch with no worktree is deleted after a sweep", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "done", "--branch", "fix/done", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  git(w.worktree, "push", "-q", "origin", "fix/done");
+  git(s.project, "merge", "-q", "--no-ff", "fix/done", "-m", "merge fix/done");
+  git(s.project, "push", "-q", "origin", "main");
+  s.finish(w.terminal);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(existsSync(w.worktree), false, "the worktree goes first");
+  assert.deepEqual(r.json().branches, ["fix/done"], "its local branch goes with it");
+  assert.equal(git(s.project, "branch", "--list", "fix/done").trim(), "");
+});
+
+test("worker #1278 cause 4: a hand-made merged branch and an unmerged worker branch are kept", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  git(s.project, "branch", "hand/made");
+  const w = s.cli(["worker", "unmerged", "--branch", "fix/unmerged", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  s.finish(w.terminal);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().branches, [], "neither is a merged branch a worker made");
+  assert.match(git(s.project, "branch", "--list", "hand/made"), /hand\/made/);
+  assert.match(git(s.project, "branch", "--list", "fix/unmerged"), /fix\/unmerged/);
+});
+
+test("worker #1278 cause 5: a worker's task prompt sends it back with a clean worktree", (t) => {
+  const s = scene(t);
+  const r = s.cli(["worker", "do it", "--branch", "fix/clean", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = s.runs().at(-1);
+  assert.match(words.at(-1), /Before you report done: commit or discard/);
+  assert.match(words.at(-1), /git status --porcelain/);
+});
+
+// ---- #2057: the needs-owner Question chip in every worker's task ----
+
+/** The tail a worker task ends with (#2057): the owner line, then the done line, last. */
+const OWNER_TAIL = `\n\n${OWNER_LINE}\n\n${DONE_LINE}`;
+/** A Hermes worker's tail (#1747, the lead's ruling Q-1): the done line only. */
+const DONE_TAIL = `\n\n${DONE_LINE}`;
+
+test("worker #2057: every worker's task teaches the needs-owner Question chip, before the clean-worktree line", (t) => {
+  // The worker line is the bot line (briefingText.mjs) with exactly the two added sentences.
+  const S1 = "For each new question, set it again with the new paraphrase. ";
+  const S2 = "A question your lead bot can answer: ask it in your reply, without the label. ";
+  assert.equal(OWNER_QUESTION_LINE.split("ship?'`. ").length, 2);
+  assert.equal(OWNER_QUESTION_LINE.split("withdrawn. ").length, 2);
+  assert.equal(OWNER_QUESTION_LINE.replace("ship?'`. ", `ship?'\`. ${S1}`).replace("withdrawn. ", `withdrawn. ${S2}`),
+    OWNER_LINE, "the worker line is the bot line plus the two sentences");
+  assert.equal(OWNER_LINE.includes("\n"), false, "one line");
+  // Its only two apostrophes are the single quotes around the example's text.
+  assert.equal(OWNER_LINE.split("'").length - 1, 2);
+  assert.equal(/'([^']*)'/.exec(OWNER_LINE)[1], `${NEEDS_OWNER_LABEL}=Which release should ship?`);
+  const keys = [...OWNER_LINE.matchAll(/hc label "\$HC_TERMINAL_ID" '?([^='\s]+)=/g)].map((m) => m[1]);
+  assert.equal(keys.length, 2, "one set, one clear");
+  for (const key of keys) {
+    assert.equal(key, NEEDS_OWNER_LABEL, "the key the sidebar reads (tidy.js)");
+    assert.equal(key, OWNER_QUESTION_LABEL, "the one key the hc guard lets a caller set on its own pane");
+  }
+  const s = scene(t);
+  for (const [args, what] of [[[], "the default agent"], [["--template", "dev-sol"], "a codex template"],
+    [["--template", "opus-rev"], "a Claude template"]]) {
+    const r = s.cli(["worker", "do it", "--branch", `fix/owner-${s.runs().length}`, ...args, "--json"]);
+    assert.equal(r.code, 0, `${what}: ${r.err}`);
+    const word = s.runs().at(-1).at(-1);
+    assert.equal(word, `do it${OWNER_TAIL}`, what);
+    assert.equal(word.endsWith(`\n\n${DONE_LINE}`), true, `${what}: the done line stays last`);
+  }
+});
+
+test("worker #2057: every agent's worker task carries the SAME tail", async (t) => {
+  const TASK = "review the login form";
+  const stub = (s, ...names) => { for (const n of names) exe(join(s.root, "bin", n), "#!/bin/sh\nexit 0\n"); };
+  const withWorker = (worker, extra = {}) => {
+    const file = team();
+    Object.assign(file.bots[2], extra);
+    if (worker === null) delete file.bots[2].worker;
+    else if (worker !== undefined) file.bots[2].worker = worker;
+    return file;
+  };
+  /** An hc run started by the CLI: its words, and the sends hc saw (none for an argv route). */
+  const started = (s, args, { env = {} } = {}) => {
+    const r = s.cli(["worker", TASK, ...args, "--json"], { env });
+    assert.equal(r.code, 0, r.err);
+    return { words: s.runs().at(-1), sends: (s.hcState().sent ?? []).map((m) => m.text) };
+  };
+  // One table: every route that hands a task to an agent. `before` is the word the prompt
+  // follows on its route; `hermes` rows carry the done line only (#1747, ruling Q-1).
+  const ROUTES = [
+    { row: "1a plain claude, fresh with --session-id", run: (s) => started(s, ["--branch", "r/1a", "--agent", "claude"]) },
+    { row: "1b plain codex, with grants", run: (s) => started(s, ["--branch", "r/1b", "--agent", "codex"]) },
+    { row: "1c plain omp", run: (s) => { stub(s, "omp"); return started(s, ["--branch", "r/1c", "--agent", "omp"]); } },
+    { row: "1d plain hermes", hermes: true,
+      run: (s) => { stub(s, "hermes"); return started(s, ["--branch", "r/1d", "--agent", "hermes"]); } },
+    { row: "1e template form, a template running hermes in a shell", hermes: true, templateForm: true,
+      templates: [...TEMPLATES, { name: "herm", command: "bash -lc 'hermes'" }],
+      run: (s) => started(s, ["--branch", "r/1e", "--template", "herm"]) },
+    { row: "1f plain, a programs.json agent running hermes", hermes: true,
+      run: (s) => {
+        stub(s, "hermes");
+        writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { "my-hermes": { run: ["hermes"] } } }));
+        return started(s, ["--branch", "r/1f", "--agent", "my-hermes"]);
+      } },
+    { row: "1g plain, a programs.json agent running hermes-agent through uvx (QS-1)", hermes: true,
+      run: (s) => {
+        stub(s, "uvx");
+        writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { "my-hermes": { run: ["uvx", "hermes-agent"] } } }));
+        return started(s, ["--branch", "r/1g", "--agent", "my-hermes"]);
+      } },
+    { row: "1i plain, an alias of an overridden hermes program (agentKeyOfArgv)", hermes: true,
+      run: (s) => {
+        stub(s, "hermes-cli");
+        writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { hermes: { run: ["hermes-cli"] }, "my-h": { run: ["hermes-cli"] } } }));
+        return started(s, ["--branch", "r/1i", "--agent", "my-h"]);
+      } },
+    { row: "1j template form, hermes redirected in a shell (QS-2)", hermes: true, templateForm: true,
+      templates: [...TEMPLATES, { name: "herm-log", command: "bash -lc 'hermes>log'" }],
+      run: (s) => started(s, ["--branch", "r/1j", "--template", "herm-log"]) },
+    { row: "1k template form, hermes in a shell's backticks (QS-2)", hermes: true, templateForm: true,
+      templates: [...TEMPLATES, { name: "herm-tick", command: "bash -lc '`hermes`'" }],
+      run: (s) => started(s, ["--branch", "r/1k", "--template", "herm-tick"]) },
+    { row: "2 plain antigravity", before: "-i", run: (s) => started(s, ["--branch", "r/2", "--agent", "antigravity"]) },
+    { row: "3 plain dsh-tui", before: "--",
+      run: (s) => { stub(s, "dsh-tui"); return started(s, ["--branch", "r/3", "--agent", "dsh-tui"]); } },
+    { row: "4 dsh-tui, proxy off (paneArgs)", before: "--", file: withWorker(null, { agent: "dsh-tui", hcProxy: false }),
+      run: (s) => {
+        stub(s, "dsh-tui");
+        return started(s, ["--branch", "r/4"], { env: { PATH: `${s.root}/bin:/usr/bin:/bin`, AM_HC_PROXY: "1" } });
+      } },
+    { row: "5 template form, a codex template", templateForm: true, run: (s) => started(s, ["--branch", "r/5", "--template", "dev-sol"]) },
+    { row: "5b template form, a template whose agent can't be told", templateForm: true,
+      templates: [...TEMPLATES, { name: "shell-codex", command: "bash -lc 'codex'" }],
+      run: (s) => started(s, ["--branch", "r/5b", "--template", "shell-codex"]) },
+    { row: "6 template form, an agy template that can't take words", templateForm: true,
+      file: withWorker({ template: "agy-stuck" }), templates: [...TEMPLATES, { name: "agy-stuck", command: "agy --mode auto; # no words" }],
+      run: (s) => started(s, ["--branch", "r/6"]) },
+    { row: "7 Claude template", before: "sh", run: (s) => started(s, ["--branch", "r/7", "--template", "opus-rev"]) },
+    { row: "8 agy template, after its --settings", file: withWorker({ template: "agy-work" }),
+      templates: [...TEMPLATES, { name: "agy-work", command: "agy --mode auto" }],
+      run: (s) => {
+        const got = started(s, ["--branch", "r/8"]);
+        assert.equal(got.words.at(-3), "--settings", "the task follows the permission list");
+        return got;
+      } },
+    { row: "9 plain kimi, its first message", send: true,
+      run: (s) => { stub(s, "kimi"); return started(s, ["--branch", "r/9", "--agent", "kimi"]); } },
+    { row: "10 proxied kimi, its first message through the proxy", send: true, proxied: true,
+      run: async (t2) => {
+        const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t2, { file: withWorker({ agent: "kimi" }) });
+        try {
+          stub(s, "kimi");
+          const r = await s.cliAsync(["worker", TASK, "--branch", "r/10", "--json"], { env: { ...env, HC_SOCKET: proxy.socket } });
+          assert.equal(r.code, 0, r.err);
+          return { words: fake.calls("terminal.run")[0].params.argv, sends: fake.calls("terminal.send").map(({ params }) => params.text) };
+        } finally {
+          await closeAll();
+        }
+      } },
+    { row: "10b proxied Claude template", before: "sh", proxied: true,
+      run: async (t2) => {
+        // The proxy starts only the bot's approved worker, so the roster names the template.
+        const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t2, { file: withWorker({ template: "opus-rev" }) });
+        try {
+          const r = await s.cliAsync(["worker", TASK, "--branch", "r/10b", "--json"],
+            { env: { ...env, HC_SOCKET: proxy.socket } });
+          assert.equal(r.code, 0, r.err);
+          return { words: fake.calls("terminal.run")[0].params.argv, sends: fake.calls("terminal.send").map(({ params }) => params.text) };
+        } finally {
+          await closeAll();
+        }
+      } },
+  ];
+  const tails = [];
+  // One subtest per route: each scene's fake core ends with its row, and every row reports.
+  for (const route of ROUTES) await t.test(route.row, async (t2) => {
+    const got = route.proxied ? await route.run(t2)
+      : route.run(scene(t2, { ...(route.file ? { file: route.file } : {}), ...(route.templates ? { templates: route.templates } : {}) }));
+    const { words, sends } = got;
+    let text;
+    if (route.send) {
+      // (a) one delivery: no word of the start carries the task; exactly one message does.
+      assert.equal(words.some((w) => String(w).includes(TASK)), false, `no task word in ${JSON.stringify(words)}`);
+      assert.equal(sends.length, 1, "one first message");
+      text = sends[0];
+    } else {
+      // (a) one delivery: exactly one word carries the done line, and it is the prompt's place.
+      assert.equal(words.filter((w) => String(w).includes(DONE_LINE)).length, 1, JSON.stringify(words));
+      assert.deepEqual(sends, [], "no message sent");
+      text = words.at(-1);
+      if (route.before) assert.equal(words.at(-2), route.before);
+      if (route.templateForm) assert.equal(words.includes("--"), false, "hc's template form");
+    }
+    // (b) the task as given, then exactly the route's tail.
+    assert.equal(text.startsWith(TASK), true);
+    assert.equal(text.slice(TASK.length), route.hermes ? DONE_TAIL : OWNER_TAIL);
+    if (!route.hermes) tails.push([route.row, text.slice(TASK.length)]);
+  });
+  // (c) every non-Hermes route's tail is the same.
+  assert.equal(tails.length, ROUTES.filter((r) => !r.hermes).length);
+  assert.deepEqual([...new Set(tails.map(([, tail]) => tail))], [OWNER_TAIL], JSON.stringify(tails.map(([row]) => row)));
+});
 
 test("worker #1135: launch never removes or prunes another repository's ended worktree", (t) => {
   const s = scene(t);
@@ -2288,6 +3184,59 @@ for (const ownership of ["missing", "mismatched", "conflicting", "gone"]) {
   });
 }
 
+test("worker #1143: a missing checkout its repository no longer lists is gone, never kept forever", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = seedReapTree(s);
+  rmSync(w.worktree, { recursive: true });
+  // Somebody else pruned the registration (a person's git worktree prune): the cleanup only reads.
+  git(s.project, "worktree", "prune");
+  assert.equal(worktreesOf(s).includes(w.worktree), false);
+  const calls = watchReapGit(s);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().gone, [w.worktree]);
+  assert.deepEqual(r.json().kept, []);
+  assert.deepEqual(calls(), [], "no remove and no prune: the repository already forgot it");
+  assert.deepEqual(reapFile(s).map((x) => [x.worktree, x.result, x.why]), [[w.worktree, "gone", null]]);
+  assert.equal(s.cli(["reap"], { from: null }).out.trim(), "No finished worker's worktree to remove.",
+    "a gone checkout is not looked at again");
+});
+
+test("worker #1143: a clean checkout's git-ignored files are named, then removed with it", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  writeFileSync(join(s.project, ".gitignore"), "*.local\nbuild/\n");
+  git(s.project, "add", ".gitignore");
+  git(s.project, "commit", "-q", "-m", "ignore local files");
+  git(s.project, "push", "-q", "origin", "main");
+  const w = seedReapTree(s);
+  writeFileSync(join(w.worktree, "secrets.local"), "not committed\n");
+  mkdirSync(join(w.worktree, "build"));
+  writeFileSync(join(w.worktree, "build/out.log"), "ignored too\n");
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree]);
+  const row = reapFile(s).find((x) => x.worktree === w.worktree);
+  assert.equal(row.result, "removed");
+  assert.match(row.why, /git-ignored files removed too/);
+  assert.match(row.why, /secrets\.local/);
+  assert.match(row.why, /build\//);
+  assert.equal(existsSync(join(w.worktree, "secrets.local")), false);
+});
+
+test("worker #567: git worktree remove is called without --force", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = seedReapTree(s);
+  const calls = watchReapGit(s);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree]);
+  const remove = calls().find((line) => line.split("\t")[1] === "remove");
+  assert.equal(remove, `${s.project}\tremove\tworktree remove ${w.worktree}`, "no --force: git itself refuses a tree that changed");
+});
+
 test("worker #1135: canonical owner aliases allow pushed same-project work", (t) => {
   const s = scene(t);
   withOrigin(s);
@@ -2300,7 +3249,7 @@ test("worker #1135: canonical owner aliases allow pushed same-project work", (t)
   const r = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
   assert.equal(r.code, 0, r.err);
   assert.equal(existsSync(w.worktree), false, r.out);
-  assert.ok(calls().some((line) => line.endsWith("\tremove")));
+  assert.ok(calls().some((line) => line.split("\t")[1] === "remove"));
 });
 
 for (const ownership of ["foreign", "unknown"]) {
@@ -2455,7 +3404,8 @@ test("worker #567: a killed worker's created worktree is removed by reap 15 min 
   const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
   const live = s.cli(["reap", "--json"], { from: null });
   assert.equal(live.code, 0, live.err);
-  assert.deepEqual(live.json(), { removed: [], kept: [], failed: [], waiting: 1, more: 0 }, "a live worker's worktree waits");
+  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], ended: [], unowned: [], branches: [],
+    waiting: 1, more: 0 }, "a live worker's worktree waits");
   assert.equal(existsSync(w.worktree), true);
   fakeHc(s, "kill", w.terminal);
   // Within 15 min of its end (restart --tree runs its workers again there, without the lock): waits.
@@ -2466,7 +3416,7 @@ test("worker #567: a killed worker's created worktree is removed by reap 15 min 
   s.finish(w.terminal, 15 * 60_000 + 1000);
   const r = s.cli(["reap"], { from: null });
   assert.equal(r.code, 0, r.err);
-  assert.equal(r.out.trim(), `removed ${w.worktree}: its workers ended`);
+  assert.equal(r.out.trim(), `removed ${w.worktree}: its workers ended\nremoved branch fix/one: merged into main`);
   assert.equal(existsSync(w.worktree), false);
 });
 
@@ -2534,7 +3484,7 @@ test("worker #567: a worktree only given to a worker (--worktree, a branch's exi
   assert.equal(b.json().created, false, "--branch found the existing worktree");
   s.finish(b.json().terminal);
   const r = s.cli(["reap"], { from: null });
-  assert.equal(r.out.trim(), "No finished worker's worktree to remove.", r.err);
+  assert.equal(r.out.trim(), `kept ${pre}: not created by a worker (no start row); left alone`, r.err);
   assert.equal(existsSync(pre), true, "clean, pushed and ended, but not made by a worker call");
   assert.deepEqual(reapFile(s), []);
 });
@@ -2657,7 +3607,8 @@ writeFileSync(p, JSON.stringify(st));
   writeFileSync(join(s.root, "gh-hook.sh"), `"${process.execPath}" "${join(s.root, "gh-hook.mjs")}"\n`);
   const live = s.cli(["reap", "--json"], { from: null });
   assert.equal(live.code, 0, live.err);
-  assert.deepEqual(live.json(), { removed: [], kept: [], failed: [], waiting: 1, more: 0 });
+  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], ended: [], unowned: [], branches: [],
+    waiting: 1, more: 0 });
   assert.equal(existsSync(w.worktree), true);
 });
 
@@ -2668,7 +3619,8 @@ test("worker #567 F6/F7: a worktree on another branch, or a detached HEAD with c
   const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
   s.finish(w.terminal);
   git(w.worktree, "checkout", "-q", "-b", "other");
-  assert.equal(s.cli(["reap"], { from: null }).out.trim(), `kept ${w.worktree}: on other, not the worker's branch fix/one`);
+  assert.equal(s.cli(["reap"], { from: null }).out.trim(),
+    `kept ${w.worktree}: on other, not the worker's branch fix/one\nremoved branch fix/one: merged into main`);
   git(w.worktree, "checkout", "-q", "--detach");
   git(w.worktree, "commit", "-q", "--allow-empty", "-m", "on no branch");
   assert.equal(s.cli(["reap"], { from: null }).out.trim(), `kept ${w.worktree}: HEAD is detached with 1 commit on no remote`, "whatever gh says");
@@ -3110,7 +4062,7 @@ test("worker #899: a pr row that can't be written is said as what it is", (t) =>
   assert.doesNotMatch(r.out, /undefined/);
 });
 
-// Refs #631: the real PATH guard plus a fake hc that forwards only run to the fixture proxy.
+// Refs #631: the real PATH guard plus a fake hc that forwards worker operations to the fixture proxy.
 async function proxyWorkerCli(t, { file } = {}) {
   const s = scene(t, file ? { file } : {});
   const shortDir = shortSocketDir(t, "hw-");
@@ -3122,6 +4074,7 @@ async function proxyWorkerCli(t, { file } = {}) {
   exe(join(stableRoot, "bin", "run.sh"), stableRunnerText(process.execPath));
   writeFileSync(join(stableRoot, "hcPane.mjs"), "// fixture helper\n");
   const env = { ...s.env, PATH: `${GUARD_DIR}:${s.env.PATH}`, XDG_RUNTIME_DIR: runtime,
+    AUTOMAGIK_HERDR_TEST_ROOTS: `${s.env.AUTOMAGIK_HERDR_TEST_ROOTS}:${shortDir}`,
     TMPDIR: paneTmp, HC_FAKE_PROXY_RUN: "1", TERM: "xterm-256color", COLORTERM: "truecolor",
     TERM_PROGRAM: "fixture", TERM_PROGRAM_VERSION: "1.0", AUTOMAGIK_HERDR_TAB_WAIT_MS: "0" };
   let fake = null;
@@ -3140,6 +4093,8 @@ async function proxyWorkerCli(t, { file } = {}) {
     fake = await startFakeCore({ socket: join(shortDir, "f.sock"), terminals: [
       { address: "t1", labels: { bot: ID.dev }, cwd: s.project, state: "live" },
     ] });
+    fake.state.trackRuns = true;
+    fake.state.templates = TEMPLATES;
     s.approve();
     proxy = await startProxy({ terminal: "t1", upstream: fake.socket, appHome: s.app, env,
       caller: { bot: ID.dev, project: s.project }, bound: true,
@@ -3211,11 +4166,12 @@ test("proxied worker CLI #1032: an approved Kimi worker starts bare through the 
   const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t, { file });
   try {
     exe(join(s.root, "bin", "kimi"), "#!/bin/sh\nexit 0\n");
-    // The fixture core names the new pane t200; the file-backed hc knows it as a plain live
-    // pane with no labels, which the pane's guard would refuse a send to.
-    const state = s.hcState();
-    state.terminals.push({ address: "t200", name: "t200", cwd: s.project, state: "live", parent: "t1", labels: {} });
-    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    let firstGet = true;
+    fake.state.reply = ({ id, method, params }) => {
+      if (!firstGet || method !== "terminal.get" || params.terminal !== "t200") return undefined;
+      firstGet = false;
+      return { jsonrpc: "2.0", id, error: { code: -32000, message: "the first observation is unavailable" } };
+    };
     const r = await s.cliAsync(["worker", TASK, "--branch", "feat/proxied-kimi", "--json"], { env: { ...env, HC_SOCKET: proxy.socket } });
     assert.equal(r.code, 0, r.err);
     const out = JSON.parse(r.out);
@@ -3223,8 +4179,11 @@ test("proxied worker CLI #1032: an approved Kimi worker starts bare through the 
     const argv = fake.calls("terminal.run")[0].params.argv;
     assert.equal(argv.at(-1), "kimi", `the proxy approved an argv with no task word: ${JSON.stringify(argv)}`);
     assert.equal(argv.includes(TASK), false);
-    assert.deepEqual(s.hcState().sent, [{ to: "t200", text: TASK }], r.err);
-    assert.deepEqual(s.calls().filter((c) => ["wait", "send"].includes(c[0])).map((c) => c.slice(0, 2)), [["wait", "t200"], ["send", "t200"]]);
+    assert.deepEqual(fake.calls("terminal.send").map(({ params }) => [params.terminal, params.text]),
+      [["t200", `${TASK}\n\n${TAIL}`]], r.err);
+    assert.ok(fake.calls("terminal.get").some(({ params }) => params.terminal === "t200"));
+    assert.deepEqual(fake.log.filter(({ method }) => ["terminal.wait", "terminal.read", "terminal.send"].includes(method))
+      .map(({ method }) => method), ["terminal.wait", "terminal.read", "terminal.send"]);
     assert.deepEqual(out.warnings, [], r.err);
   } finally {
     await closeAll();
@@ -3251,29 +4210,39 @@ test("#858: proxied worker CLI rows pass and exit cleanly when TMPDIR is over 80
   }
 });
 
-test("unproxied worker CLI keeps the guard refusal with switch off and forged env markers", async (t) => {
+test("unproxied worker CLI stays on the guard path with switch off and forged env markers", async (t) => {
   const s = scene(t);
   const r = await s.cliAsync(["worker", "do the task", "--branch", "feat/plain", "--json"],
     { env: { PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: "",
       AM_HC_PROXY: "1", AM_HC_PROXY_SOCKET: join(s.root, "missing.sock"), DSH_SANDBOX_MASK: "1" } });
-  assert.notEqual(r.code, 0);
-  assert.match(r.err, /hc guard: refused run:/);
-  assert.equal(s.runs().length, 0, "no unguarded spawn with the switch off");
+  assert.equal(r.code, 0, r.err);
+  // #1011: the full guard accepts the pack's own worker shape for every agent it launches, so
+  // the run reaches hc once through the pane's guarded PATH; no forged switch chose the proxy.
+  const runs = s.runs();
+  assert.equal(runs.length, 1, "one run, through the pane's guard");
+  assert.ok(runs[0].some((w) => w.startsWith("PATH=") && w.includes(GUARD_DIR)), runs[0].join(" "));
   assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
     "an unproxied pane retains server.status for core id");
 });
 
 async function startOneShotTransportServer(t, socketPath, result) {
-  let probes = 0;
+  const requests = [];
   const sockets = new Set();
   const server = net.createServer((socket) => {
     socket.unref();
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => { sockets.delete(socket); socket.destroy(); });
-    socket.on("data", () => {
-      probes++;
-      socket.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result }) + "\n");
+    let input = "";
+    socket.on("data", (chunk) => {
+      input += chunk;
+      const newline = input.indexOf("\n");
+      if (newline < 0) return;
+      const { id, method } = JSON.parse(input.slice(0, newline));
+      requests.push(method);
+      const answer = method === "server.status" ? { result: { core: { id: "fakecore0000" } } }
+        : method === "proxy.workerTransport" && result ? { result } : { error: { code: -32601, message: "unknown method" } };
+      socket.end(JSON.stringify({ jsonrpc: "2.0", id, ...answer }) + "\n");
     });
   });
   server.unref();
@@ -3294,22 +4263,25 @@ async function startOneShotTransportServer(t, socketPath, result) {
       resolve();
     });
   });
-  return { probes: () => probes, closeServer };
+  return { calls: (method) => requests.filter((request) => request === method).length, closeServer };
 }
 
 test("worker transport rejects a mismatched terminal for core id and routing", async (t) => {
   const s = scene(t);
-  const socketPath = join(shortSocketDir(t, "hw-"), "wrong-terminal.sock");
+  const dir = shortSocketDir(t, "hw-");
+  const socketPath = join(dir, "wrong-terminal.sock");
   const srv = await startOneShotTransportServer(t, socketPath, { v: 1, terminal: "t999", core: { id: "wrong-core" } });
   try {
     const r = await s.cliAsync(["worker", "do the task", "--branch", "feat/wrong-terminal", "--json"],
-      { env: { PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: socketPath } });
-    assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
+      { env: { PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: socketPath,
+        AUTOMAGIK_HERDR_TEST_ROOTS: `${s.env.AUTOMAGIK_HERDR_TEST_ROOTS}:${dir}` } });
+    assert.equal(srv.calls("server.status"), 1,
       "a failed terminal check must ignore the reply's core id");
-    assert.equal(srv.probes(), 1);
-    assert.notEqual(r.code, 0);
-    assert.match(r.err, /hc guard: refused run:/);
-    assert.equal(s.runs().length, 0);
+    assert.equal(srv.calls("proxy.workerTransport"), 1);
+    // The rejected reply means an ordinary unproxied run, which #1011's guard now allows.
+    assert.equal(r.code, 0, r.err);
+    assert.equal(s.runs().length, 1);
+    assert.equal(s.ledger().find((row) => row.event === "start")?.core, "fakecore0000");
   } finally {
     await srv.closeServer();
   }
@@ -3317,20 +4289,22 @@ test("worker transport rejects a mismatched terminal for core id and routing", a
 
 test("unset caller terminal keeps server.status and the guard route", async (t) => {
   const s = scene(t);
-  const socketPath = join(shortSocketDir(t, "hw-"), "missing-terminal.sock");
-  const srv = await startOneShotTransportServer(t, socketPath, { v: 1, core: { id: "wrong-core" } });
+  const dir = shortSocketDir(t, "hw-");
+  const socketPath = join(dir, "missing-terminal.sock");
+  const srv = await startOneShotTransportServer(t, socketPath);
   try {
-    const env = { ...s.env, PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: socketPath };
+    const env = { ...s.env, PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: socketPath,
+      AUTOMAGIK_HERDR_TEST_ROOTS: `${s.env.AUTOMAGIK_HERDR_TEST_ROOTS}:${dir}` };
     delete env.HC_TERMINAL_ID;
     const result = await new Promise((done) => execFile(process.execPath,
       [CLI, "whois", "t1", "--json"], { cwd: s.project, env, encoding: "utf8" },
       (error, stdout, stderr) => done({ code: error?.code ?? 0, stdout, stderr })));
-    assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
+    assert.equal(srv.calls("server.status"), 1,
       "an unset caller terminal must keep the server.status core-id lookup");
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /hc guard: refused a command without HC_TERMINAL_ID/);
     assert.equal(s.runs().length, 0, "no unguarded worker route is selected");
-    assert.equal(srv.probes(), 0, "an unset expected terminal is refused before connecting");
+    assert.equal(srv.calls("proxy.workerTransport"), 0, "an unset expected terminal skips the transport probe");
   } finally {
     await srv.closeServer();
   }
@@ -3350,7 +4324,7 @@ test("worker: a new Claude worker's --session-id is its label and its start row'
   assert.ok(labelsOf(run).includes(`agent.session=${sid}`));
   const row = s.ledger().find((x) => x.event === "start" && x.terminal === r.json().terminal);
   assert.equal(row.session, sid);
-  assert.deepEqual(r.json().argv, ["claude", "--permission-mode", "auto", "--session-id", "***"]);
+  assert.deepEqual(r.json().argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto", "--session-id", "***"]);
   assert.equal(`${r.out}${r.err}`.includes(sid), false, "never printed");
   // A codex worker: no session id, none in its row.
   const text = s.cli(["worker", "review it", "--branch", "feat/other", "--agent", "codex"]);
@@ -3358,4 +4332,423 @@ test("worker: a new Claude worker's --session-id is its label and its start row'
   assert.equal(after(s.runs()[1]).includes("--session-id"), false);
   assert.equal(s.ledger().filter((x) => x.event === "start").at(-1).session, null);
   for (const id of s.ledger().map((x) => x.session).filter(Boolean)) assert.equal(`${text.out}${text.err}`.includes(id), false);
+});
+
+// #1411: the seat's own effort and tier are the seat's; a worker's come from its worker defaults
+// or a template, never from the seat's record, so a worker can't inherit Fast by accident.
+test("#1411: a worker never inherits its seat's own reasoning effort or service tier", (t) => {
+  const file = team();
+  file.bots[0] = { ...file.bots[0], agent: "codex", effort: "high", tier: "fast" };
+  const s = scene(t, { file });
+  // A pane of the main bot: the seat the record's values belong to.
+  const st = s.hcState();
+  st.terminals.push({ ...st.terminals[1], address: "t5", name: "t5", labels: { bot: ID.main } });
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(st));
+  const r = s.cli(["worker", "do the task", "--branch", "feat/fast", "--json"], { from: "t5" });
+  assert.equal(r.code, 0, r.err);
+  const words = after(s.runs()[0]);
+  assert.equal(words[0], "codex");
+  assert.equal(words.some((w) => w.startsWith("model_reasoning_effort=")), false, words.join(" "));
+  assert.equal(words.some((w) => w.startsWith("service_tier=")), false, words.join(" "));
+});
+
+// ---- #1420: a Codex worker's folder trust, per launch ----
+
+/** The `-c projects=…` words a worker's argv carries (any of them), as written. */
+const trustWords = (words) => words.filter((w, i) => words[i - 1] === "-c" && w.startsWith("projects="));
+/** The person's Codex config in a scene's home (or `dir`), as TOML text. */
+const codexConfig = (s, text, dir = join(s.root, "home", ".codex")) => {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.toml"), text);
+};
+const untrustedToml = (path) => `[projects.${JSON.stringify(path)}]\ntrust_level = "untrusted"\n`;
+const TRUST_LOST = /Dev's Codex worker: (.+), so its folder wasn't pre-trusted and Codex may stop at its folder-trust prompt until a person answers it in the worker's pane\./;
+
+test("worker #1420: a Codex worker pre-trusts exactly its own worktree, never the repository root, and writes no Codex setting", (t) => {
+  const s = scene(t);
+  const r = s.cli(["worker", "fix it", "--branch", "feat/trust", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const wt = r.json().worktree;
+  assert.equal(wt, realpathSync(wt), "the resolved worktree");
+  const words = grantsApart(after(s.runs()[0])).words;
+  assert.deepEqual(words.slice(0, 1 + CODEX_MODE.length + 2), ["codex", ...CODEX_MODE, ...TRUST(wt)]);
+  assert.deepEqual(trustWords(words), [`projects={"${wt}"={trust_level="trusted"}}`], "one word, the worktree's only");
+  assert.ok(r.json().argv.includes(`projects={"${wt}"={trust_level="trusted"}}`), "--json's argv shows it");
+  assert.doesNotMatch(r.err, /pre-trusted/);
+  assert.equal(existsSync(join(s.root, "home", ".codex")), false, "nothing written in the person's Codex home");
+  // A trusted entry of the person's own, and another project's refusal, change nothing.
+  codexConfig(s, `[projects.${JSON.stringify(realpathSync(s.project))}]\ntrust_level = "trusted"\n${untrustedToml("/elsewhere/repo")}`);
+  const o = s.cli(["worker", "again", "--branch", "feat/trust2", "--json"]);
+  assert.equal(o.code, 0, o.err);
+  assert.deepEqual(trustWords(after(s.runs()[1])), [`projects={"${o.json().worktree}"={trust_level="trusted"}}`]);
+});
+
+test("worker #1420: --worktree gets the word too; the person's untrusted worktree or repository withholds it with a warning", (t) => {
+  const s = scene(t);
+  const first = s.cli(["worker", "build it", "--branch", "feat/held", "--json"]);
+  assert.equal(first.code, 0, first.err);
+  const wt = first.json().worktree;
+  // A reviewer on the same worktree (--worktree): the word, as a branch start gets it.
+  const review = s.cli(["worker", "review it", "--worktree", wt, "--role", "review", "--json"]);
+  assert.equal(review.code, 0, review.err);
+  assert.deepEqual(trustWords(after(s.runs()[1])), [`projects={"${wt}"={trust_level="trusted"}}`]);
+  // The person marks that worktree untrusted: another bot's reviewer there runs without the word.
+  codexConfig(s, untrustedToml(wt));
+  const held = s.cli(["worker", "review it too", "--worktree", wt, "--role", "review", "--json"], { from: "t4" });
+  assert.equal(held.code, 0, held.err);
+  assert.deepEqual(trustWords(after(s.runs()[2])), []);
+  assert.match(held.err, /Captain's Codex worker: settings mark the worktree or its repository untrusted, so its folder wasn't pre-trusted/);
+  assert.ok(held.json().warnings.some((w) => /wasn't pre-trusted/.test(w)), "--json lists it for the bot");
+  assert.doesNotMatch(held.err, /trust_level/, "no config text printed");
+  // The repository root marked untrusted (the main checkout, the common dir's parent): withheld for a new branch too.
+  codexConfig(s, untrustedToml(realpathSync(s.project)));
+  const root = s.cli(["worker", "next", "--branch", "feat/held2", "--json"]);
+  assert.equal(root.code, 0, root.err);
+  assert.deepEqual(trustWords(after(s.runs()[3])), []);
+  assert.match(root.err, TRUST_LOST);
+  assert.match(root.err.match(TRUST_LOST)[1], /settings mark the worktree or its repository untrusted/);
+});
+
+test("#1509 Codex trust uses the reader's home instead of the caller's", (t) => {
+  const s = scene(t);
+  const login = loginFixture(t, join(s.root, "acp", "cli-homes"), "codex");
+  const empty = join(s.root, "caller-codex");
+  mkdirSync(empty);
+  codexConfig(s, untrustedToml(realpathSync(s.project)), login.dir);
+  const r = s.cli(["worker", "task", "--agent", "codex", "--branch", "feat/login-trust"], { env: { ...login.env, CODEX_HOME: empty } });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(trustWords(afterLogin(s.runs()[0])), []);
+  assert.match(r.err, /settings mark the worktree or its repository untrusted/);
+});
+
+test("worker #1420: CODEX_HOME's config is the one read; an unreadable config or a relative CODEX_HOME withholds the word", (t) => {
+  const s = scene(t);
+  const other = join(s.root, "other-codex");
+  codexConfig(s, untrustedToml(realpathSync(s.project)), other);
+  // ~/.codex marks the root untrusted, but CODEX_HOME names an empty folder: its (missing) config is the one Codex reads.
+  codexConfig(s, untrustedToml(realpathSync(s.project)));
+  const empty = join(s.root, "empty-codex");
+  mkdirSync(empty);
+  const a = s.cli(["worker", "a", "--branch", "feat/ch-a", "--json"], { env: { CODEX_HOME: empty } });
+  assert.equal(a.code, 0, a.err);
+  assert.equal(trustWords(after(s.runs()[0])).length, 1);
+  rmSync(join(s.root, "home", ".codex"), { recursive: true });
+  const b = s.cli(["worker", "b", "--branch", "feat/ch-b", "--json"], { env: { CODEX_HOME: other } });
+  assert.equal(b.code, 0, b.err);
+  assert.deepEqual(trustWords(after(s.runs()[1])), []);
+  assert.match(b.err, /settings mark the worktree or its repository untrusted/);
+  // config.toml that can't be read (a folder): withheld.
+  mkdirSync(join(s.root, "home", ".codex", "config.toml"), { recursive: true });
+  const c = s.cli(["worker", "c", "--branch", "feat/ch-c", "--json"]);
+  assert.equal(c.code, 0, c.err);
+  assert.deepEqual(trustWords(after(s.runs()[2])), []);
+  assert.match(c.err, /Codex's settings can't be read, so its folder wasn't pre-trusted/);
+  const d = s.cli(["worker", "d", "--branch", "feat/ch-d", "--json"], { env: { CODEX_HOME: "rel/codex" } });
+  assert.equal(d.code, 0, d.err);
+  assert.deepEqual(trustWords(after(s.runs()[3])), []);
+  assert.match(d.err, /Codex's settings can't be read/);
+  // A config the narrow reader can't prove (a whole inline projects table): withheld.
+  rmSync(join(s.root, "home", ".codex"), { recursive: true });
+  codexConfig(s, "projects = { \"/x\" = { trust_level = \"trusted\" } }\n");
+  const e = s.cli(["worker", "e", "--branch", "feat/ch-e", "--json"]);
+  assert.equal(e.code, 0, e.err);
+  assert.deepEqual(trustWords(after(s.runs()[4])), []);
+  assert.match(e.err, /project trust settings can't be understood safely/);
+});
+
+test("worker #1420: a git dir kept elsewhere still finds the repository's refusal (common dir's parent and the main checkout)", (t) => {
+  for (const inside of [true, false]) {
+    const s = scene(t);
+    const meta = inside ? join(s.project, "git-meta") : join(s.root, "meta.git");
+    execFileSync("git", ["init", "-q", "--separate-git-dir", meta], { cwd: s.project, env: s.env });
+    if (inside) appendFileSync(join(meta, "info", "exclude"), "git-meta\n");
+    codexConfig(s, untrustedToml(realpathSync(s.project)));
+    const r = s.cli(["worker", "x", "--branch", "feat/sep", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(trustWords(after(s.runs()[0])), [], inside ? "git-meta inside" : "meta.git outside");
+    assert.match(r.err, /settings mark the worktree or its repository untrusted/);
+  }
+});
+
+test("worker #1420: programs.json's Codex command that picks its own folder or projects gets no word, with a warning", (t) => {
+  for (const [run, why] of [[["codex", "-C", "/tmp"], /picks its own folder, profile or projects/],
+    [["codex", "-c", 'projects={"/x"={trust_level="untrusted"}}'], /picks its own folder, profile or projects/],
+    [["codex", "--profile", "restricted"], /picks its own folder, profile or projects/]]) {
+    const s = scene(t);
+    writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { codex: { run } } }));
+    const r = s.cli(["worker", "x", "--branch", "feat/own", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(trustWords(after(s.runs()[0])).filter((w) => w.includes("trusted\"}}") && !w.includes("untrusted")), [], JSON.stringify(run));
+    assert.match(r.err, why);
+  }
+});
+
+test("worker #1420: Claude and Antigravity workers are unchanged; a Codex template worker keeps its command, with a warning", (t) => {
+  const s = scene(t);
+  const claude = s.cli(["worker", "review it", "--branch", "feat/c", "--agent", "claude", "--json"]);
+  assert.equal(claude.code, 0, claude.err);
+  assert.equal(after(s.runs()[0]).some((w) => w.startsWith("projects=")), false);
+  assert.doesNotMatch(claude.err, /pre-trusted/);
+  const agy = s.cli(["worker", "look", "--branch", "feat/g", "--agent", "antigravity", "--json"]);
+  assert.equal(agy.code, 0, agy.err);
+  assert.equal(after(s.runs()[1]).some((w) => w.startsWith("projects=")), false);
+  assert.doesNotMatch(agy.err, /pre-trusted/);
+  const tpl = s.cli(["worker", "fix it", "--branch", "feat/t", "--template", "dev-sol", "--json"]);
+  assert.equal(tpl.code, 0, tpl.err);
+  assert.deepEqual(templateArgv(s.runs()[2]), ["dev-sol", "fix it"], "the template's own form, nothing added");
+  assert.match(tpl.err, /Dev's Codex worker: template dev-sol owns its command, so its folder wasn't pre-trusted and Codex may stop/);
+});
+
+test("proxied worker CLI #1420: a Codex worker through the hc proxy gets no trust word and says so", async (t) => {
+  const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t);
+  try {
+    const r = await s.cliAsync(["worker", "do the task", "--branch", "feat/proxied-trust", "--json"],
+      { env: { ...env, HC_SOCKET: proxy.socket } });
+    assert.equal(r.code, 0, r.err);
+    assert.equal(fake.calls("terminal.run").length, 1);
+    assert.equal(JSON.stringify(fake.calls("terminal.run")[0].params).includes("trust_level"), false);
+    assert.match(r.err, /Dev's Codex worker: starts through the hc proxy, so its folder wasn't pre-trusted and Codex may stop/);
+  } finally {
+    await closeAll();
+  }
+});
+
+/** A loadable #1728 shim with the entry of this release and different hcGuard.mjs bytes. */
+function skewedKillShim(parent) {
+  cpSync(dirname(KILL_GUARD_DIR), parent, { recursive: true });
+  appendFileSync(join(parent, "hcGuard.mjs"), "\n// A different release for #1728.\n");
+  return join(parent, "hc-kill");
+}
+
+/** The scene's fake hc must follow every #1728 fixture shim on PATH. */
+function skewedWorkerEnv(s, dirs) {
+  const env = { ...s.env, AM_HOME: join(s.env.HOME, ".automagik"), HC_TERMINAL_ID: "t1",
+    PATH: [...dirs, s.path].join(":") };
+  assertScratchProject(s.project, { ceiling: s.root, env });
+  const fake = join(s.root, "bin", "hc");
+  const expected = [...dirs.map((dir) => join(dir, "hc")), fake];
+  const entries = env.PATH.split(":").slice(0, expected.length).map((dir) => join(dir, "hc"));
+  assert.deepEqual(entries, expected);
+  for (const file of entries) {
+    const stat = statSync(file);
+    assert.ok(stat.isFile() && (stat.mode & 0o111) !== 0, file);
+  }
+  assert.ok(readFileSync(fake, "utf8").includes(FAKE_HC));
+  const current = readFileSync(join(KILL_GUARD_DIR, "..", "hcGuard.mjs"));
+  for (const dir of dirs) {
+    const real = realpathSync(dir);
+    assert.ok(real.startsWith(`${s.root}/`) && real.endsWith("/hc-kill"), real);
+    assert.notDeepEqual(readFileSync(join(dirname(real), "hcGuard.mjs")), current);
+  }
+  return env;
+}
+
+/** A member's direct kill through each copied shim still hits the shim's own policy. */
+function assertSkewedShimRefuses(s, dirs, terminal, env) {
+  for (const dir of dirs) {
+    const r = spawnSync(join(dir, "hc"), ["kill", terminal], { cwd: s.project, env, encoding: "utf8" });
+    assert.equal(r.status, 2, r.error?.message ?? r.stderr);
+    assert.match(r.stderr, /hc kill shim: refused .*main bot only/);
+  }
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), []);
+}
+
+/** Start a worker and let its turn finish before the #1728 kill checks. */
+function idleSkewWorker(s) {
+  const started = s.cli(["worker", "fix it", "--branch", "feat/skew", "--json"]);
+  assert.equal(started.code, 0, started.err);
+  const { terminal } = started.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status.state = "idle";
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  return terminal;
+}
+
+for (const location of ["am part", "pack mod", "am part before pack mod"]) {
+  test(`#1728 worker kill skips a skewed ${location} shim on PATH`, (t) => {
+    const s = scene(t);
+    const terminal = idleSkewWorker(s);
+    const dirs = [];
+    if (location !== "pack mod") dirs.push(skewedKillShim(join(s.env.HOME, ".automagik", "parts", "automagik.am", "3.158.1")));
+    if (location !== "am part") dirs.push(skewedKillShim(join(s.app, "mods", "am-sidebar")));
+    const env = skewedWorkerEnv(s, dirs);
+    assertSkewedShimRefuses(s, dirs, terminal, env);
+
+    const r = spawnSync(process.execPath, [CLI, "worker", "kill", terminal, "--json"], { cwd: s.project, env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.error?.message ?? r.stderr);
+    assert.equal(JSON.parse(r.stdout).ended, true);
+    assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal]]);
+  });
+}
+
+for (const alias of [false, true]) {
+  test(`#1728 worker kill explains a refusal from a planted shim${alias ? " reached through an alias" : ""}`, (t) => {
+    const s = scene(t);
+    const terminal = idleSkewWorker(s);
+    const shim = skewedKillShim(join(s.root, "planted"));
+    const dir = alias ? join(s.root, "pane-tools") : shim;
+    if (alias) symlinkSync(shim, dir);
+    const env = skewedWorkerEnv(s, [dir]);
+    assertSkewedShimRefuses(s, [dir], terminal, env);
+
+    const r = spawnSync(process.execPath, [CLI, "worker", "kill", terminal], { cwd: s.project, env, encoding: "utf8" });
+    assert.equal(r.status, 1, r.error?.message ?? r.stderr);
+    const folder = alias ? `${dir} (${realpathSync(shim)})` : dir;
+    assert.ok(r.stderr.includes(`hc kill ${terminal} failed: the first hc on this pane's PATH is in ${folder},`), r.stderr);
+    assert.match(r.stderr, /one version/);
+    assert.match(r.stderr, /restart this pane/);
+    assert.doesNotMatch(r.stderr, /hc kill shim: refused/);
+    assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), []);
+  });
+}
+
+test("#1728 a main bot's worker kill still succeeds through an unvouched shim", (t) => {
+  const s = scene(t, { file: team({ bots: [bot(ID.dev, "main", { name: "Dev" })] }) });
+  const terminal = idleSkewWorker(s);
+  const dir = skewedKillShim(join(s.root, "planted"));
+  const env = skewedWorkerEnv(s, [dir]);
+
+  const r = spawnSync(process.execPath, [CLI, "worker", "kill", terminal, "--json"], { cwd: s.project, env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.error?.message ?? r.stderr);
+  assert.equal(JSON.parse(r.stdout).ended, true);
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal]]);
+});
+
+// ---- #1208: an ordinary seat start that times out never binds a chosen-home worker that took its name ----
+
+test("#1208 a timed-out seat start whose name a chosen-home worker took (or one still starting) binds and ends nothing", (t) => {
+  const chosen = ["/usr/bin/env", ...envWords(["PATH=/bin"], chosenHomeWords("codex", "/homes/b", "0f0e0d0c-0b0a-4908-8706-050403020100")), "codex"];
+  for (const [what, reply, intent] of [["chosen", { argv: chosen }, false], ["still starting", {}, true]]) {
+    const s = scene(t);
+    hcStateExtra(s, { runDelayMs: 10_000, getReply: { genie: { address: "t55", name: "genie", state: "live", created_ms: 3, labels: {}, ...reply } } });
+    if (intent) {
+      mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+      appendFileSync(join(s.app, "automagik-herdr/workers.jsonl"), `${JSON.stringify({ event: "intent", kind: "worker",
+        launch: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", name: "genie", project: s.project, worktree: s.project, agent: "codex",
+        agentHome: "/homes/b", at: Date.now() })}\n`);
+    }
+    const r = s.cli(["start", "Genie"], { from: null, env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+    assert.equal(r.code, 1, `${what}: ${r.err}`);
+    assert.match(r.err, /genie was taken by a worker (on|that may be starting on) a chosen agent home \(t55\) before hc run answered; nothing was attached/);
+    assert.equal(s.calls().some((c) => c[0] === "kill"), false, `${what}: nothing ended`);
+    assert.equal(s.ledger().some((x) => x.kind === "seat"), false, `${what}: no seat row`);
+    const whois = s.cli(["whois", "--bot", ID.main, "--json"], { from: null });
+    assert.notEqual(whois.json().terminal, "t55", `${what}: not bound`);
+  }
+});
+
+test("#1208 a normal seat reply to a reused address binds neither a chosen nor an unresolved worker", (t) => {
+  const launch = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const argv = ["/usr/bin/env", ...envWords(["PATH=/bin"], chosenHomeWords("codex", "/homes/b", launch)), "codex"];
+  for (const unresolved of [false, true]) {
+    const s = scene(t);
+    hcStateExtra(s, { getReply: { t100: { address: "t100", name: "worker-reusing-address", state: "live", created_ms: 3,
+      labels: {}, argv: unresolved ? ["codex"] : argv } } });
+    if (unresolved) {
+      const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+      mkdirSync(dirname(ledger), { recursive: true });
+      appendFileSync(ledger, JSON.stringify({ event: "unresolved", terminal: "t100", core: "fakecore0000", created_ms: 3, launch }) + "\n");
+    }
+    const r = s.cli(["start", "Genie"], { from: null });
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /t100 (is|may be) a worker .*on a chosen agent home/);
+    assert.equal(s.calls().some((c) => c[0] === "kill" || c[0] === "label"), false);
+    assert.equal(s.ledger().some((row) => row.kind === "seat"), false);
+    assert.notEqual(s.cli(["whois", "--bot", ID.main, "--json"], { from: null }).json().terminal, "t100");
+  }
+});
+
+// #1509's identity row, isolated: the panel is acp-dsh's own CliHomes on a scratch data folder,
+// "signing in" writes a fake account file into the config folder the panel launches its CLI with,
+// and the identity read is a stand-in vendor CLI that prints the account its CLAUDE_CONFIG_DIR
+// holds. The worker is the real `am worker` under the image's export contract (the pointer under
+// the panel's root, the required marker and both installation homes), its launch
+// recorded by the fake hc and then run as the pane would run it. No real login, account or hc.
+test("#1509 identity row: a native worker reads the panel's account before and after a generation switch", async (t) => {
+  const s = scene(t);
+  const { installationCliHome, installationIdentity } = await import("../../apps/acp-dsh/src/host/installation.js");
+  const { CliHomes } = await import("../../apps/acp-dsh/src/host/cli-homes.js");
+  const data = join(s.root, "data"), acp = join(data, "acp"), dsh = join(data, "dsh");
+  mkdirSync(dsh, { recursive: true });
+  const identityPath = installationIdentity(dsh);
+  const { root } = installationCliHome(acp, dsh, { identity: identityPath });
+  const panel = new CliHomes(root, { acpHome: acp, identity: identityPath,
+    onRecordError: () => { throw new Error("record not saved"); } });
+  t.after(() => panel.dispose());
+  panel.startup("claude");
+  panel.publishSelection();
+  const identityCli = join(s.root, "bin", "claude");
+  exe(identityCli, `#!${process.execPath}
+const { readFileSync } = require("node:fs");
+const argv = process.argv.slice(2);
+const settingsAt = argv.indexOf("--settings");
+process.stdout.write(JSON.stringify({
+  account: readFileSync(process.env.CLAUDE_CONFIG_DIR + "/fake-account", "utf8"),
+  storage: process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR,
+  inherited: process.env.IDENTITY_INHERITED,
+  authOverride: process.env.ANTHROPIC_API_KEY ?? null,
+  settings: settingsAt < 0 ? null : argv[settingsAt + 1],
+  task: argv.at(-1),
+}));
+`);
+  const identity = ([program, ...args], env) => {
+    const r = spawnSync(program, args, { env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.error?.message ?? r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  const paneEnv = { ...s.env, IDENTITY_INHERITED: "preserved", ANTHROPIC_API_KEY: "fixture-override" };
+  const signIn = (account) => {
+    const env = panel.environment("claude", paneEnv);
+    writeFileSync(join(env.CLAUDE_CONFIG_DIR, "fake-account"), account, { mode: 0o600 });
+    panel.resume("claude");
+    return env;
+  };
+  const boundary = panel.environment("claude");
+  const exported = { [POINTER_VAR]: boundary[POINTER_VAR], [REQUIRED_VAR]: "required",
+    DSH_HOME: boundary.DSH_HOME, AUTOMAGIK_HOME: boundary.AUTOMAGIK_HOME };
+  let n = 0;
+  const recordPath = join(root, "current", "generation.json");
+  const starts = () => s.ledger().filter((row) => row.event === "start");
+  const workerLaunch = (pair) => {
+    const before = starts();
+    n += 1;
+    const r = s.cli(["worker", `identity task ${n}`, "--branch", `feat/identity-${n}`, "--agent", "claude", "--json"], { env: exported });
+    assert.equal(r.code, 0, r.err);
+    const rows = starts();
+    const row = rows.at(-1);
+    assert.deepEqual(rows.slice(0, -1), before, "the new launch leaves the earlier rows alone");
+    assert.deepEqual([row.terminal, row.generation, row.sequence], [r.json().terminal, ...pair]);
+    const run = s.runs().at(-1);
+    return run.slice(run.indexOf("--") + 1);
+  };
+  const panelPair = () => {
+    const record = JSON.parse(readFileSync(recordPath, "utf8"));
+    return [record.claude.generation, record.sequence];
+  };
+  const checkWorker = (launch, signedIn, account, task) => {
+    assert.equal(identity([identityCli], signedIn).account, account);
+    assert.deepEqual(identity(launch, paneEnv), { account, storage: signedIn.CLAUDE_CONFIG_DIR,
+      inherited: "preserved", authOverride: null, settings: CLAUDE_PERSON_SETTINGS, task: `identity task ${task}\n\n${TAIL}` });
+  };
+
+  // Before any switch: the panel's first sign-in, a login from before any generation.
+  const panelA = signIn("account-a");
+  const workerA = workerLaunch([null, null]);
+  checkWorker(workerA, panelA, "account-a", 1);
+
+  // The panel switches the Bot account: a new generation, signed in to another account.
+  panel.reset("claude");
+  const panelB = signIn("account-b");
+  assert.notEqual(panelB.CLAUDE_CONFIG_DIR, panelA.CLAUDE_CONFIG_DIR);
+  const pairB = panelPair();
+  checkWorker(workerLaunch(pairB), panelB, "account-b", 2);
+  checkWorker(workerA, panelA, "account-a", 1);
+
+  // And from one generation to the next.
+  panel.reset("claude");
+  const panelC = signIn("account-c");
+  const pairC = panelPair();
+  assert.notEqual(pairC[0], pairB[0]);
+  assert.ok(pairC[1] > pairB[1]);
+  checkWorker(workerLaunch(pairC), panelC, "account-c", 3);
 });

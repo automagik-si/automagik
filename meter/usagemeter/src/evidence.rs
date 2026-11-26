@@ -816,14 +816,44 @@ fn credit_adoption_backing(
     Ok(())
 }
 
+/// Whether the store already holds this call's evidence: the same time, request id and logging.
+/// A call a normal sync read from a log's tail before `evidence_from` (the hour the store migrated
+/// in) is already counted; adopting it again would write an identical second row (issue 1229).
+/// Two real calls can reuse a request id, but not at the same time and logging as well: that pair
+/// is one call and a duplicate row.
+fn has_evidence(tx: &Transaction<'_>, e: &Evidence, ts_ms: i64) -> rusqlite::Result<bool> {
+    let Some(request) = e.request else {
+        return Ok(false);
+    };
+    tx.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM evidence ev JOIN ev_dim d ON d.id = ev.dim
+           WHERE ev.ts_ms = ?1 AND ev.request = ?2
+             AND d.harness = ?3 AND d.model = ?4 AND d.machine = ?5
+             AND d.repo IS ?6 AND d.branch IS ?7 AND d.precision = ?8)",
+        params![
+            ts_ms,
+            request.as_slice(),
+            e.dim.harness,
+            e.dim.model,
+            e.dim.machine,
+            e.dim.repo,
+            e.dim.branch,
+            e.dim.precision
+        ],
+        |r| r.get(0),
+    )
+}
+
 /// Gives one re-read call of an hour before `evidence_from` its evidence (an evidence backfill):
 /// its tokens leave a rollup row that counted it before evidence (a frozen row, or one of an hour
 /// before `evidence_from`) with the same logging (harness, model, machine, repo, branch, hour and
 /// precision) and at least its tokens of every kind remaining beyond the row's evidence, for
 /// the row its derived attribution names, and
 /// its evidence row is written, all in the caller's transaction. A call no such row holds (its
-/// usage was counted under other logging, or never) is left alone: a backfill never adds a token
-/// to a total or takes one from it. Returns whether the call was adopted.
+/// usage was counted under other logging, or never) is left alone, as is one that already has its
+/// evidence: adopting it again would write an identical second row (issue 1229). A backfill never
+/// adds a token to a total or takes one from it. Returns whether the call was adopted.
 #[allow(clippy::too_many_arguments)]
 pub fn adopt(
     tx: &Transaction<'_>,
@@ -835,6 +865,9 @@ pub fn adopt(
     evidence_from: i64,
     now_ms: i64,
 ) -> rusqlite::Result<bool> {
+    if has_evidence(tx, e, ts_ms)? {
+        return Ok(false);
+    }
     let hour = crate::time::hour_start(ts_ms);
     load_adoption_hour(tx, hour)?;
     let found: Option<String> = tx
@@ -962,6 +995,86 @@ pub fn dirty_batch(c: &Connection, limit: usize) -> rusqlite::Result<Vec<String>
 
 pub fn dirty_count(c: &Connection) -> rusqlite::Result<i64> {
     c.query_row("SELECT count(*) FROM ev_dirty", [], |r| r.get(0))
+}
+
+/// At most this many duplicate hours are listed; the rest are counted in `hours_omitted`.
+const DUPLICATE_HOURS: usize = 50;
+
+/// One hour with duplicate evidence rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DuplicateHour {
+    pub hour_ms: i64,
+    pub groups: i64,
+    pub extra_rows: i64,
+}
+
+/// Duplicate evidence rows (issue 1229), for a dry-run report before any removal. A group is the
+/// rows that share a time, logging and request id: two real calls with the same request id are
+/// distinct when their times differ, and one with the same time and logging is one call counted
+/// twice. `exact` counts the groups whose rows are identical in every column but the row id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Duplicates {
+    pub groups: i64,
+    pub extra_rows: i64,
+    pub exact_groups: i64,
+    pub exact_extra_rows: i64,
+    /// The hours that hold at least one group, oldest first, at most [`DUPLICATE_HOURS`].
+    pub hours: Vec<DuplicateHour>,
+    pub hours_omitted: usize,
+}
+
+/// Counts the duplicate evidence rows in the store, without writing anything.
+pub fn duplicates(c: &Connection) -> rusqlite::Result<Duplicates> {
+    let (groups, extra_rows) = c.query_row(
+        "SELECT count(*), coalesce(sum(n - 1), 0) FROM (
+           SELECT count(*) AS n FROM evidence
+           WHERE request IS NOT NULL
+           GROUP BY ts_ms, dim, request
+           HAVING count(*) > 1
+         )",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (exact_groups, exact_extra_rows) = c.query_row(
+        "SELECT count(*), coalesce(sum(n - 1), 0) FROM (
+           SELECT count(*) AS n FROM evidence
+           WHERE request IS NOT NULL
+           GROUP BY ts_ms, dim, actor, session, parent, request, cwd, session_cwd, copied,
+                    input_uncached, cache_read, cache_write_5m, cache_write_1h, output,
+                    reasoning, unsplit, reported_usd
+           HAVING count(*) > 1
+         )",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut st = c.prepare(&format!(
+        "SELECT hour, count(*), coalesce(sum(n - 1), 0) FROM (
+           SELECT (ts_ms / {h}) * {h} AS hour, count(*) AS n FROM evidence
+           WHERE request IS NOT NULL
+           GROUP BY ts_ms, dim, request
+           HAVING count(*) > 1
+         ) GROUP BY hour ORDER BY hour",
+        h = crate::time::HOUR_MS
+    ))?;
+    let mut hours = st
+        .query_map([], |r| {
+            Ok(DuplicateHour {
+                hour_ms: r.get(0)?,
+                groups: r.get(1)?,
+                extra_rows: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let hours_omitted = hours.len().saturating_sub(DUPLICATE_HOURS);
+    hours.truncate(DUPLICATE_HOURS);
+    Ok(Duplicates {
+        groups,
+        extra_rows,
+        exact_groups,
+        exact_extra_rows,
+        hours,
+        hours_omitted,
+    })
 }
 
 /// A launch as one sync derived it ([`crate::ledger::Resolver::records`]).
@@ -1678,6 +1791,73 @@ pub fn freeze_unbacked(
         moved += events as u64;
     }
     Ok(moved)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResidueCounts {
+    pub rows: usize,
+    pub tokens: i64,
+    pub reasoning_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResidueReport {
+    pub totals: ResidueCounts,
+    /// Residue grouped by harness and UTC day.
+    pub by_day: BTreeMap<(String, String), ResidueCounts>,
+    pub discrepancy_rows: usize,
+}
+
+/// Inventory rows with actor state whose tokens exceed their evidence at equal event counts.
+/// Rows below their evidence in any column or in events count as discrepancies.
+pub fn unbacked_residue(
+    c: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+) -> rusqlite::Result<ResidueReport> {
+    let implied = implied_rollups(c)?;
+    let mut st = c.prepare(
+        "SELECT id, harness, hour_ms, input_uncached, cache_read, cache_write_5m, cache_write_1h,
+                output, reasoning, unsplit, events
+         FROM usage WHERE actor_state IS NOT NULL AND hour_ms >= ?1 AND hour_ms < ?2",
+    )?;
+    let mut rows = st.query(params![from_ms, to_ms])?;
+    let mut report = ResidueReport::default();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let (want, want_events) = implied.get(&id).copied().unwrap_or_default();
+        let extra = Tokens {
+            input_uncached: row.get::<_, i64>(3)? - want.input_uncached,
+            cache_read: row.get::<_, i64>(4)? - want.cache_read,
+            cache_write_5m: row.get::<_, i64>(5)? - want.cache_write_5m,
+            cache_write_1h: row.get::<_, i64>(6)? - want.cache_write_1h,
+            output: row.get::<_, i64>(7)? - want.output,
+            reasoning: row.get::<_, i64>(8)? - want.reasoning,
+            unsplit: row.get::<_, i64>(9)? - want.unsplit,
+        };
+        let events = row.get::<_, i64>(10)? - want_events;
+        let parts = [
+            extra.input_uncached,
+            extra.cache_read,
+            extra.cache_write_5m,
+            extra.cache_write_1h,
+            extra.output,
+            extra.reasoning,
+            extra.unsplit,
+        ];
+        if events < 0 || parts.iter().any(|&n| n < 0) {
+            report.discrepancy_rows += 1;
+        } else if events == 0 && parts.iter().any(|&n| n > 0) {
+            let day = crate::time::format_day(row.get(2)?);
+            let day_counts = report.by_day.entry((row.get(1)?, day)).or_default();
+            for counts in [&mut report.totals, day_counts] {
+                counts.rows += 1;
+                counts.tokens += extra.total();
+                counts.reasoning_tokens += extra.reasoning;
+            }
+        }
+    }
+    Ok(report)
 }
 
 /// The rollups the evidence implies, per row id: what every schema 3 row of an hour from

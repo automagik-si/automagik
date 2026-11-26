@@ -1,7 +1,7 @@
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { inkText } from './inks.js'
 import { dayLabel } from './text.js'
-import { colorOf, BotMark } from './mark.js'
+import { BotMark, catalogueLookOf, colorOf } from './mark.js'
 import { Bubbles } from './cells.js'
 import { stripLongNote } from './fold.js'
 import { useEscape, usePaneLeft } from './overlay-hooks.js'
@@ -12,17 +12,23 @@ const SHEET_EXIT_MS = 220
 
 export function ExchangeDialog({ pair, roster, actions }) {
   const [entries, setEntries] = useState(null)
-  const [leaving, setLeaving] = useState(false)
+  const [leavingPair, setLeavingPair] = useState(null)
+  const exitTimer = useRef(undefined)
   const log = useRef(null)
   const atEnd = useRef(true)
   useLayoutEffect(() => {
     if (entries !== null && atEnd.current && log.current) log.current.scrollTop = log.current.scrollHeight
   }, [entries])
   // The sheet slides back down before it unmounts.
+  useLayoutEffect(() => () => {
+    clearTimeout(exitTimer.current)
+    exitTimer.current = undefined
+  }, [pair])
+  const leaving = leavingPair === pair
   const close = () => {
-    if (leaving) return
-    setLeaving(true)
-    setTimeout(() => actions.closeOverlay(), SHEET_EXIT_MS)
+    if (exitTimer.current !== undefined) return
+    setLeavingPair(pair)
+    exitTimer.current = setTimeout(() => actions.closeExchange(pair), SHEET_EXIT_MS)
   }
   useEscape(close)
   useEffect(() => {
@@ -59,12 +65,13 @@ export function ExchangeDialog({ pair, roster, actions }) {
         entries === null ? h('div', { className: 'bt-hint' }, t('Loading…'))
           : entries.length === 0 ? h('div', { className: 'bt-hint' }, t('No messages yet'))
             : entries.map((entry) => {
-              const bot = roster.byId[entry.from] ?? { id: entry.from, name: t('You'), color: 'gray' }
+              const live = roster.byId[entry.from]
+              const bot = live ?? { id: entry.from, name: t('You'), color: 'gray' }
               const showDay = entry.time - lastDay > 30 * 60 * 1000
               lastDay = entry.time
               // A long message comes with its start only; the rest is read on request.
               const whole = entry.length === undefined ? undefined : { length: entry.length, load: () => actions.exchangeText(entry.id, entry.from, entry.to) }
-              const lead = h('span', { className: 'bt-lead' }, h(BotMark, { bot: bot, size: 22 }))
+              const lead = h('span', { className: 'bt-lead' }, h(BotMark, { bot, look: live ? undefined : catalogueLookOf(bot), size: 22 }))
               return h(Fragment, { key: entry.id },
                 showDay ? h('time', { className: 'bt-time' }, dayLabel(entry.time)) : null,
                 h('div', { className: 'bt-group-msg' },

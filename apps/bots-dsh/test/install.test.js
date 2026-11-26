@@ -1,10 +1,25 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { createRuntimeResolution } from '@deepseek-ai/dsh-app-boot'
 import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
+
+test('a linked checkout declares the DSH patch parser as an optional peer', (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'ds-bot-profile-resolution-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const name = '@deepseek-ai/dsh-fs-patch'
+  assert.equal(manifest.peerDependencies[name], '*')
+  assert.equal(manifest.peerDependenciesMeta?.[name]?.optional, true)
+  const installAnchor = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.json'))
+  return createRuntimeResolution({ installAnchor, home }).then(({ entries }) => {
+    assert.equal(entries.find(entry => entry.name === name)?.scope, 'installation')
+  })
+})
 
 let rt
 function start(state, { config = {}, services } = {}) {
@@ -33,6 +48,16 @@ function start(state, { config = {}, services } = {}) {
 // Listeners run in registration order; the team tools are not in this list
 // because they are registered per Bot session scope, not globally.
 test('apply registers listeners and effects in a fixed order', (t) => {
+  const { AUTOMAGIK_APP_BROWSER: flag } = process.env
+  const send = process.send
+  process.env.AUTOMAGIK_APP_BROWSER = '1'
+  process.send = () => true
+  t.after(() => {
+    if (flag === undefined) delete process.env.AUTOMAGIK_APP_BROWSER
+    else process.env.AUTOMAGIK_APP_BROWSER = flag
+    if (send === undefined) delete process.send
+    else process.send = send
+  })
   const { ctx, stop } = start()
   t.after(stop)
   assert.deepEqual(ctx.calls, [
@@ -68,6 +93,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on tools/result',
     'on session/event',
     'effect omni-ui: lost hand-offs',
+    'on session/event',
+    'on agent/status',
     'effect ds-bot: folder access context',
     'prompt context ds-bot:folder-access 650',
     'effect ds-bot: agent tool restrict retry',
@@ -77,6 +104,19 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: tool deny retry',
     'on agent/created',
     'on tools/execute',
+    // A Solver's unread review reply (review-mark.js): released when its turn takes the reply,
+    // claimed when a turn picks it from the inbox, and the claim cleared when it is reinserted.
+    'on session/event',
+    'on agent/inbox/claimed',
+    'on agent/inbox/inserted',
+    // The four file tools' folder (read-scope.js): prepared before the call, guarded, checked
+    // again at dispatch, a refusal noted, and its two endpoints.
+    'on tools/pre-execute',
+    'tools guard',
+    'on tools/execute',
+    'on tools/result',
+    'effect ds-bot: session-read-scope endpoint',
+    'effect ds-bot: set-session-read-scope endpoint',
     'on tools/execute',
     'effect omni-ui: identity section',
     'prompt bot-identity 640',
@@ -101,14 +141,22 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/created',
     'on session/event',
     'effect ds-bot: subagent asks context',
-    'prompt context ds-bot:subagent-asks 121',
+    'prompt context automagik-bots:subagent-asks 121',
     'on agent/inbox/discarded',
     'on session/event',
     'effect omni-ui: resume interrupted turns',
+    'on agent/inbox/inserted',
+    'on agent/inbox/claimed',
+    'on session/event',
+    'on agent/inbox/discarded',
+    'effect omni-ui: durable wake log',
     'effect ds-bot: memory recovery',
     'effect ds-bot: memory section',
     'prompt bot-memory 645',
     'on agent/pre-step',
+    // An active foreground turn preempts the Bot's hidden ACP memory answer.
+    'on agent/status',
+    'effect omni-ui: memory answers',
     'on agent/status',
     'effect omni-ui: memory review',
     // The daily tidy's clock runs so a Bot whose own switch is on gets tidied; with no switch on it does nothing.
@@ -120,6 +168,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: cancel explicit checkpoints',
     // A fresh part opened without a note archives its old part on its first answer.
     'on session/event',
+    'on session/event',
     'on agent/pre-step (prepend)',
     'on system-prompt/assemble (prepend)',
     'on agent/request-error (prepend)',
@@ -130,6 +179,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/status',
     'on llm/stream',
     'on session/event',
+    'provide automagikCallerRoutes',
+    'on webserver/index-inject',
     'on agent/request-error',
     'on session/event',
     // What a Bot's model really did, and a failed switch going back (model-state.js).
@@ -137,6 +188,11 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/request-error (prepend)',
     // A Bot on a signed-out agent fails before dispatch (model-access-hooks.js).
     'on llm/stream',
+    // The machine reservation check observes sign-in and the Bot turn lifecycle.
+    'on acp-dsh/login-ready',
+    'on session/event',
+    'on session/disposed',
+    'on session/created',
     // A CLI sign-in's chosen model, dropped by a turn on another, applied on ready (cli-login.js).
     'on session/event',
     'on acp-dsh/login-ready',
@@ -155,6 +211,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: learning',
     'effect ds-bot: schedule pause retry',
     'on schedule/changed',
+    'on session/disposed',
+    'effect ds-bot: scheduled native owners',
     'on schedule/resolve-agent',
     'on tools/pre-execute',
     'on tools/execute',
@@ -166,6 +224,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on agent/disposed',
     'on user-questions/request (prepend)',
     'on tools/pre-execute',
+    'on tools/result',
     'on tools/execute',
     'on session/event',
     'effect omni-ui: computer use section',
@@ -182,6 +241,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: live feed route',
     'route GET /api/omni-ui/feed',
     'effect ds-bot: live feed',
+    // The Code side's typing routes and watched pane stream (code-side.js), then the shared
+    // gen-UI kit's host half: the live slice, its feed nudge and the media route.
     'effect omni-ui: code typing releases',
     'effect omni-ui: code typing /api/omni-ui/code/take',
     'route POST /api/omni-ui/code/take',
@@ -191,6 +252,12 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'route POST /api/omni-ui/code/release',
     'effect omni-ui: code pane stream',
     'route GET /api/omni-ui/code/stream',
+    'effect omni-ui: genui slice',
+    'effect omni-ui: genui feed nudge',
+    'effect omni-ui: genui media route',
+    'route GET /api/omni-ui/genui-media',
+    'effect omni-ui: role runtime',
+    'on session/event',
     'effect ds-bot: agent access',
     'effect ds-bot: pet route',
     'route GET /api/omni-ui/pet',
@@ -206,8 +273,15 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: seat chat',
     'on agent/created',
     'effect ds-bot: remote Hermes',
+    // Skills adds only the outgoing catalog and a checked, authorized body.
+    'on agent/pre-step (prepend)',
+    'on tools/pre-execute (prepend)',
+    'on llm/stream (prepend)',
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).
     'on approval/request (prepend)',
+    // The review guard, right after it, so it runs before Auto (review-guard.js installAhead).
+    'on approval/request (prepend)',
+    'on tools/pre-execute (prepend)',
     'provide omniTeam',
     'effect omni-ui: stop the team modules',
   ])

@@ -3,14 +3,20 @@
 // the replacement carries over from the old pane. The CLI's `restart` runs it with hc; the
 // sidebar's Restart runs the CLI. Pure: no `herdr`, so `node --test` runs it. Apache-2.0.
 
-import { agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
-  modelArgs, ownsSession, resumeArgs, resumesById, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
-import { SQUAD_LABEL, SQUAD_MARK } from "./launchArgs.js";
+import { AGENTS, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
+  modelArgs, ownsSession, resumeArgs, resumesById, seatSettingsArgs, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
+import { ROLE_LABEL, SQUAD_LABEL, SQUAD_MARK, unwrapKeep } from "./launchArgs.js";
+import { isSendGrantRole } from "./model.js";
 import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, codexCommandCheck,
   codexTemplateRefusal, codexTemplateWarning, templateAgent } from "./workers.js";
 import { CONFIG_VAR, envWords } from "./logins.js";
+import { DIRECT_LOGIN_PROBLEM, POINTER_VAR, botLoginCommandIndex, loginLaunchProblem, loginPolicyActive } from "./loginWords.js";
 import { hermesPairRun } from "./hermesPair.js";
 import { actionError } from "./actionError.js";
+import { isPromptLine, pendingDialog, rateLimitDialog, screenLines } from "./dialog.js";
+
+/** The prompt and dialog helpers stay available from here, their old home (#805, #1414). */
+export { isPromptLine, pendingDialog };
 
 /** The pane label the briefing hook sets to the Claude session a terminal runs (workers.js SESSION_LABEL). */
 const SESSION = "agent.session";
@@ -53,6 +59,9 @@ export function paneCommand(get) {
   let argv = Array.isArray(get?.argv) && get.argv.length && get.argv.every((w) => typeof w === "string") ? [...get.argv] : null;
   if (!argv) return null;
   if (argv[0] === ENV) {
+    // A reader-managed launch (#1509) only under the login policy; otherwise exactly as before.
+    const reader = loginPolicyActive(globalThis.process?.env ?? {}) ? botLoginCommandIndex(argv) : -1;
+    if (reader >= 0) return { argv: argv.slice(reader) };
     const unset = argv[1] === "-u" && argv[2] === CONFIG_VAR;
     let i = unset ? 3 : 1;
     if (unset || argv[i]?.startsWith("PATH=") || argv[i]?.startsWith(`${CONFIG_VAR}=`)) {
@@ -65,6 +74,34 @@ export function paneCommand(get) {
     return { shell: argv.length > 3 && cmd.endsWith(ARGS) ? cmd.slice(0, -ARGS.length) : cmd };
   }
   return { argv };
+}
+
+/**
+ * #1418: a helper's launch as Restart --tree and revive plan it (helperPlan, the CLI's planOf and
+ * its rival scan). { keep, command, foreground }: `command` is its paneCommand, `foreground` the
+ * argv in front. Keep is read only at the launch's own start: hc's keep wrapper (hc run --keep,
+ * launchArgs.js unwrapKeep) around a direct command of an agent of `agents` other than Hermes,
+ * whose program in front, looked through the wrapper, names no other agent, and that the plan's
+ * own agent is (the one in front, else the worker row's `workerAgent`, else the launch's when
+ * `launchAgent`, as helperPlan picks it). Then `command` is the wrapped command, `foreground` the
+ * unwrapped one and `keep` true, so its replacement runs that command again with --keep. Any
+ * other launch, or `keepAware` false (the Bot login policy), gets exactly what it got before:
+ * paneCommand(get), the raw foreground, keep false.
+ */
+export function keptLaunch(get, agents, { keepAware = true, launchAgent = false, workerAgent = null } = {}) {
+  const today = { keep: false, command: paneCommand(get), foreground: get?.foreground?.argv ?? null };
+  if (!keepAware) return today;
+  const inner = unwrapKeep(get?.argv);
+  if (inner === get?.argv) return today;
+  const command = paneCommand({ argv: inner });
+  const innerAgent = command?.argv ? agentKeyOfArgv(command.argv, agents) : null;
+  if (!innerAgent || innerAgent === "hermes") return today;
+  const foreground = unwrapKeep(get?.foreground?.argv);
+  const fgAgent = agentKeyOfArgv(foreground, agents);
+  if (fgAgent && fgAgent !== innerAgent) return today;
+  const planAgent = fgAgent ?? (workerAgent && agents?.[workerAgent] ? workerAgent : null) ?? (launchAgent ? innerAgent : null);
+  if (planAgent !== innerAgent) return today;
+  return { keep: true, command, foreground };
 }
 
 /** `cmd` with its quoted text ('…', "…", a backslash-escaped character) blanked out: what sh reads as syntax. */
@@ -156,9 +193,20 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
     ? agySettingsPlan({ bot, scope: "seat", folder: agy.folder ?? "", settingsDir: agySettingsDir(agy.appHomeDir),
       realpath: agy.realpath ?? null, homeDir: agy.homeDir ?? null }) : null;
   const settingsWords = agySettingsArgs(key, settings?.path);
+  // #1411: the bot's own reasoning effort and service tier (Codex's), after its own words so
+  // they win over a profile, and after a template's own words so the roster wins there too. A
+  // stored tier goes with the model it was picked for: a restart's model swap (the one path that
+  // changes the model with no tier option) runs the new model on Codex's default tier, said
+  // explicitly as standard, so neither the record's Fast nor a profile's can stay on it.
+  const storedModel = typeof bot.model === "string" && bot.model ? bot.model : null;
+  const modelSwitch = model !== undefined && (model || null) !== storedModel;
+  // A Codex seat's own record carries the tier; a bot changing agent (or one that was never
+  // Codex's) has none of its own, so it keeps inheriting as before.
+  const seatSwap = modelSwitch && bot.agent === "codex" && key === "codex";
+  const seatWords = seatSettingsArgs(key, seatSwap ? { ...bot, tier: "standard" } : bot);
   // The source a pane's launch is compared with names no settings file: that one is this
   // launch's own, never a change a restart should report.
-  const source = [...run, ...modeWords, ...modelArgs(key, pin)];
+  const source = [...run, ...modeWords, ...modelArgs(key, pin), ...seatWords];
   // A template owns its command only when it runs the bot's own agent, whatever the pane's
   // foreground says (unknown included): a template for another agent, a swap or a pane on
   // another agent starts from the agent row (the template would cross them).
@@ -182,9 +230,9 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
   // fresh and say why, as a helper does.
   const blocked = "its template's command ends in a separator or a comment, so it can't take resume words";
   const plan = (mode, extra = [], note = null) => {
-    if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin)],
+    if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin), ...seatWords],
       source, template: null, agySettings: settings, note, templateNote, granted: false };
-    const words = [...codexWords, ...settingsWords, ...extra];
+    const words = [...codexWords, ...settingsWords, ...extra, ...seatWords];
     const argv = commandArgv({ shell: tpl.command }, words);
     if (argv) return { mode, agent: key, model: null, resume: extra, argv, source, template: tpl.name, agySettings: settings, note, templateNote, granted };
     // Nothing past the template's own command: neither the permission list nor resume words.
@@ -336,6 +384,37 @@ export function launchChange({ name, launch, agent, argv, template = null, usedT
  */
 export const claudeSlug = (folder) => String(folder ?? "").replace(/[^A-Za-z0-9]/g, "-");
 
+/** Where Claude Code keeps `session`'s log for a pane launched in `cwd` (#1556), as a path. */
+export const claudeTranscriptPath = (home, cwd, session) =>
+  `${String(home ?? "").replace(/\/+$/, "")}/.claude/projects/${claudeSlug(cwd)}/${session}.jsonl`;
+
+/**
+ * The context a Claude Code session's next request carries (#1556): input + cache-read +
+ * cache-creation tokens of the NEWEST assistant message in the session log's JSONL text.
+ * Later assistant messages win; a line that isn't JSON, isn't an assistant message or carries
+ * no usable usage is skipped. Null when the text holds no such message: nothing is measured,
+ * never zero.
+ */
+export function contextTokensOf(text) {
+  const lines = String(text ?? "").split("\n");
+  let tokens = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let row;
+    try { row = JSON.parse(trimmed); } catch { continue; }
+    if (row?.type !== "assistant") continue;
+    const usage = row?.message?.usage;
+    if (!usage || typeof usage !== "object" || Array.isArray(usage)) continue;
+    const parts = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+      .map((k) => usage[k])
+      .filter((n) => typeof n === "number" && Number.isFinite(n) && n >= 0);
+    if (!parts.length) continue;
+    tokens = parts.reduce((sum, n) => sum + n, 0);
+  }
+  return tokens;
+}
+
 /** The old pane's Claude session id (its agent.session label, UUID-shaped), or null. */
 export const sessionOf = (get) => sessionId(get?.labels?.[SESSION]);
 
@@ -411,63 +490,21 @@ export function sharedFresh({ name, old, cwd, sharers = [], agent, words, anywhe
 /** The helpers (hc get answers) that end with their parent's pane: live, die_with_parent. */
 export const doomedHelpers = (helpers = []) => helpers.filter((h) => h?.state === "live" && h.die_with_parent !== false && h.address);
 
-// Only the visible tail matters: old scrollback is not a current prompt or dialog.
-const screenLines = (text) => typeof text === "string" ? text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split("\n").slice(-40) : [];
-
 /** A turn still running: its spinner or interrupt hint, never an idle prompt. */
 const MID_TURN_SCREEN = /\b(?:esc to interrupt|ctrl\+c to interrupt|ctrl\+b to run in background)\b|(?:working|running|thinking)(?:[.…]+)?\s*\(\d+\s*(?:s|sec|m|min)\b/i;
-
-const CONFIRM_FOOTER = /\[y\/n\]|\(y\/n\)|enter to confirm|esc to cancel/i;
-const NUMBERED_DIALOG_CHOICE = /^\s*(?:[>❯›]\s*\d+[.)]\s+|\d+[.)]\s+(?:yes\b|no\b|allow\b|deny\b|proceed\b|cancel\b|skip\b))/i;
-const DIALOG_HEADER = /\?|^\s*(?:choose|select|pick|allow|run|do you|would you|are you sure)\b/i;
-const DIALOG_QUESTION = /(?:run this command\?|do you want to (?:proceed|make this edit|create|delete|run|execute|allow|overwrite)\b.*\?|would you like to run the following command\?|do you trust the contents of\b.*\?|requesting permission for:|^\s*allow\s+[^\n?]+\?|\d+\/\d+ answered.*(?:select|confirm))/i;
-
-/** A prompt glyph, unboxed or inside a frame: `> `, `│ > │`, `⌸ ❯ … ⛶`, `› Ask …`, omp's `╰─`. */
-export function isPromptLine(line) {
-  if (typeof line !== "string" || NUMBERED_DIALOG_CHOICE.test(line) || CONFIRM_FOOTER.test(line)) return false;
-  if (/^\s*╰─(?!─)/.test(line)) return true;
-  const bare = line.replace(/^[\s│┃|⌸]+|[\s│┃|⛶]+$/g, "");
-  if (/^(?:[>❯›$%](?:\s.*)?|.*[>❯›$%])$/.test(bare)) return true;
-  return /^\s*[│┃|⌸].*[│┃|⛶]\s*$/.test(line)
-    && (/[>❯›$%]/.test(line) || /\b(?:ask|type|enter|message|prompt|try)\b/i.test(line));
-}
-
-/** A visible permission or selection dialog belongs to the owner, never Herdr. */
-export function pendingDialog(screenText) {
-  const lines = screenLines(screenText).slice(-15).filter((line) => line.trim() !== "");
-  const isDialogLine = (line) => DIALOG_QUESTION.test(line) || CONFIRM_FOOTER.test(line) || NUMBERED_DIALOG_CHOICE.test(line);
-  let p = -1;
-  for (let i = lines.length - 1; i >= 0; i -= 1) if (isPromptLine(lines[i])) { p = i; break; }
-  // A prompt with only footer lines below it is idle: reply text above it is scrollback, not a
-  // live dialog (a real dialog hides the input line or sits below scrollback prompts).
-  if (p >= 0 && lines.length - 1 - p <= 5 && !lines.slice(p + 1).some(isDialogLine)) return null;
-  // No prompt at the bottom: scan the visible tail (a prompt there made this scrollback).
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (DIALOG_QUESTION.test(lines[i])) return { question: lines[i].trim().slice(0, 200), who: "the owner" };
-    if (!isDialogLine(lines[i])) continue;
-    // A choice belongs to a dialog only with no idle prompt below it (we would have returned).
-    for (let j = i - 1, seen = 0; j >= 0 && seen < 6; j -= 1) {
-      if (lines[j].trim() === "") continue;
-      seen += 1;
-      if (DIALOG_HEADER.test(lines[j])) return { question: lines[j].trim().slice(0, 200), who: "the owner" };
-    }
-    if (CONFIRM_FOOTER.test(lines[i])) return { question: lines[i].trim().slice(0, 200), who: "the owner" };
-  }
-  return null;
-}
 
 /** Missing captures retain the historic status-only behavior. */
 export function hasAgentPrompt(screenText) {
   if (screenText == null || String(screenText).trim() === "") return true;
   const screen = screenLines(screenText);
   const lines = screen.slice(-12);
-  if (pendingDialog(screenText) || MID_TURN_SCREEN.test(screen.join("\n"))) return false;
+  if (pendingDialog(screenText) || rateLimitDialog(screenText) || MID_TURN_SCREEN.test(screen.join("\n"))) return false;
   return lines.some(isPromptLine);
 }
 
 /** A harness may report working while its background shell runs at an empty prompt. */
 export function hasBackgroundShellAtIdlePrompt(screenText) {
-  if (typeof screenText !== "string" || !screenText.trim() || pendingDialog(screenText)) return false;
+  if (typeof screenText !== "string" || !screenText.trim() || pendingDialog(screenText) || rateLimitDialog(screenText)) return false;
   const screen = screenLines(screenText);
   const tail = screen.slice(-12).join("\n");
   // The spinner can be many lines above the prompt (todos in between): scan the whole screen.
@@ -478,7 +515,7 @@ export function hasBackgroundShellAtIdlePrompt(screenText) {
 
 /** The single restart idle rule, including panes that still have background work. */
 export function isPaneIdle(get, screenText = null) {
-  if (!get || get.state === "finished" || get.status?.state === "blocked" || pendingDialog(screenText)) return false;
+  if (!get || get.state === "finished" || get.status?.state === "blocked" || pendingDialog(screenText) || rateLimitDialog(screenText)) return false;
   if (["idle", "done"].includes(get.status?.state)) return hasAgentPrompt(screenText);
   return get.status?.state === "working" && hasBackgroundShellAtIdlePrompt(screenText);
 }
@@ -523,7 +560,8 @@ export function restartRefusal({ name, old, helpers = [], force = false, tree = 
  * bot a rebuilt worker's command comes from: its automatic mode is the definition's (#946, #955).
  * A worker's command is rebuilt from its row (its task, the last word hc was given, isn't sent
  * twice) unless a template owns it;
- * any other helper's is its own launch command (paneCommand). Codex (#1125): only a template
+ * any other helper's is its own launch command (paneCommand; inside hc's keep wrapper, keptLaunch's
+ * command, #1418). Codex (#1125): only a template
  * worker (its worker.template label, or its ledger row's template) keeps its command as it is,
  * the owner's template exception, with a warning when it lacks --no-daemon, never with the pack's
  * folders, and refused when it puts a Codex option after its `--` (#1142). Any other Codex
@@ -532,19 +570,24 @@ export function restartRefusal({ name, old, helpers = [], force = false, tree = 
  * each of `grants` (the folders this launch may write, from helperCwd's folder); a shell command
  * that names no approval or sandbox flag of its own (nor an --add-dir `where`, models.js
  * codexWhere, doesn't allow) and provably forwards words to Codex as options (codexCommandCheck
- * `forwards`) gets the mode words it lacks and the grants through "$@"; any other is refused by name. Returns { name, replaced, cwd,
- * labels, agent, session, mode: "resume" | "fresh", resume, argv, agySettings (the file to write
- * first, or null), note, warning }, or { name, replaced, error } when there is nothing to run.
+ * `forwards`) gets the mode words it lacks and the grants through "$@"; any other is refused by name.
+ * Returns { name, replaced, cwd, labels, agent, template (#1418), session, mode: "resume" | "fresh",
+ * resume, argv, agySettings (the file to write first, or null), note, warning, keep (#1418: run it
+ * again with --keep, keptLaunch) }, or
+ * { name, replaced, error } when there is nothing to run.
  */
-export function helperPlan({ get, worker = null, session = null, agents, fresh = null, agy = null, bot = null, launchAgent = false, grants = [],
+export function helperPlan({ directLogin = false, get, worker = null, session = null, agents, fresh = null, agy = null, bot = null, launchAgent = false, grants = [],
   where = null }) {
   const name = typeof get?.name === "string" && get.name ? get.name : null;
   const replaced = get?.address ?? null;
   const cwd = helperCwd({ get, worker, realpath: agy?.realpath });
   const labels = { ...(get?.labels ?? {}) };
+  if (isSendGrantRole(labels[ROLE_LABEL])) delete labels[ROLE_LABEL];
+  // #1418: hc's keep wrapper around the helper's own command (keptLaunch); off under the login policy.
+  const kept = keptLaunch(get, agents, { keepAware: !directLogin, launchAgent, workerAgent: worker?.agent ?? null });
   // `launchAgent` (#939, revive: the pane is a bare shell hc kept): its agent by its launch command.
-  const agent = agentKeyOfArgv(get?.foreground?.argv, agents) ?? (worker?.agent && agents[worker.agent] ? worker.agent : null)
-    ?? (launchAgent ? agentKeyOfArgv(paneCommand(get)?.argv, agents) : null);
+  const agent = agentKeyOfArgv(kept.foreground, agents) ?? (worker?.agent && agents[worker.agent] ? worker.agent : null)
+    ?? (launchAgent ? agentKeyOfArgv(kept.command?.argv, agents) : null);
   const template = worker?.template ?? labels[WORKER_TEMPLATE_LABEL] ?? get?.template ?? null;
   const isWorker = Boolean(worker || labels[WORKER_OF_LABEL]);
   // #1125: the owner's template exception reaches only a template worker the pack started.
@@ -563,7 +606,11 @@ export function helperPlan({ get, worker = null, session = null, agents, fresh =
     command = { argv: withCodexGrants([...launchRun(agent, agents[agent].run, { ...bot, hermes: undefined }, where ?? agy?.homeDir ?? null),
       ...agyModeArgs(agent, agyMode), ...modelArgs(agent, model), ...effortArgs(agent, effort)], grants) };
   } else {
-    const launch = paneCommand(get);
+    const launch = kept.command;
+    if (directLogin && launch) {
+      const problem = launch.shell !== undefined ? DIRECT_LOGIN_PROBLEM : loginLaunchProblem(launch.argv, agent, AGENTS[agent]?.run);
+      if (problem) return { loginProblem: problem };
+    }
     const check = launch?.shell !== undefined ? codexCommandCheck(launch.shell, agents, where) : null;
     const who = name ?? replaced;
     if (check && templateWorker) {
@@ -626,8 +673,8 @@ export function helperPlan({ get, worker = null, session = null, agents, fresh =
   // #955: with no permission file (no bot to write one for, or a command that takes no words),
   // an Antigravity helper never runs on skip-permissions.
   argv = agyGuarded(agent, argv);
-  return { name, replaced, cwd, labels, agent, session: resume && resumesById(agent) ? id : null, mode: resume ? "resume" : "fresh",
-    resume: resume ?? [], argv, agySettings: settings, note, warning };
+  return { name, replaced, cwd, labels, agent, template, session: resume && resumesById(agent) ? id : null, mode: resume ? "resume" : "fresh",
+    resume: resume ?? [], argv, agySettings: settings, note, warning, keep: kept.keep };
 }
 
 /**
@@ -643,13 +690,20 @@ export function helperCwd({ get, worker = null, realpath = null }) {
  * `hc run` arguments for a helper Restart --tree runs again: in the background, its name (null:
  * hc picks), folder and labels, a child of the bot's new pane, its PATH as a seat's (`path`).
  * `login`: a Claude helper's login words (logins.js chooseLogin), before its argv or its `sh -c`.
+ * `env`: home variables the helper's own launch named (#1490: HOME, DSH_HOME, CODEX_HOME or
+ * KIMI_CODE_HOME), after its PATH, so the replacement records where its session belongs.
+ * `keep` (#1418, helperPlan's keep): `--keep`, so hc keeps its shell once the program exits.
  */
-export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, login = [] }) {
+export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, login = [], env: more = {}, keep = false }) {
   const args = ["run", "--bg", "--json"];
   if (name) args.push("--name", name);
   args.push("--cwd", cwd);
   for (const [k, v] of Object.entries(labels)) if (typeof v === "string" && v) args.push("--label", `${k}=${v}`);
-  const env = envWords(path ? [`PATH=${path}`] : [], login);
+  // An explicitly empty Bot login pointer stays: it keeps the helper under the login policy (#1509).
+  const home = Object.entries(more ?? {}).filter(([k, v]) => typeof v === "string" && (v || k === POINTER_VAR)).map(([k, v]) => `${k}=${v}`);
+  const env = envWords([...(path ? [`PATH=${path}`] : []), ...home], login);
+  // #1418: a helper hc kept (helperPlan's keep) is started kept again.
+  if (keep) args.push("--keep");
   return [...args, "--parent", parent, "--", ...(env.length ? [ENV, ...env] : []), ...argv];
 }
 
@@ -755,4 +809,27 @@ export function restartAnswer(r) {
   // The CLI's refusal is its last stderr line (warnings come before it).
   const raw = String(r?.err ?? "");
   return { refused: actionError(raw, "Restart"), forceable: /pass --force/.test(raw), freshable: /--fresh\b/.test(raw) };
+}
+
+export { durationMs, rateLimitDialog, resetTimeFrom } from "./dialog.js";
+
+/** An ISO instant in the person's own clock as "YYYY-MM-DD HH:MM", or an empty string when it is not one. */
+const localMinute = (iso) => {
+  const at = new Date(iso);
+  if (!Number.isFinite(at.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+};
+
+/** `<bot> is rate-limited until <time>; <outcome>`, or without the time when the dialog names none. */
+export function rateLimitLine(botName, { outcome = "parked", resetsAt = null } = {}) {
+  const at = resetsAt ? localMinute(resetsAt) : "";
+  return `${botName} is rate-limited${at ? ` until ${at}` : ""}; ${outcome}`;
+}
+
+/** How long a parked entry still has to wait (ms): 0 when `wakeAt` is due or absent, never negative. */
+export function wakeWait(wakeAt, now = Date.now()) {
+  if (typeof wakeAt !== "string" || !wakeAt) return 0;
+  const at = Date.parse(wakeAt);
+  return Number.isFinite(at) ? Math.max(0, at - now) : 0;
 }

@@ -89,5 +89,19 @@
         "after": "fae8a417cfa075e3cab004add29a3fe010270fdf925f75b7fafe02775aee51a0"
       }
     ]
+  },
+  {
+    "patch": "mcp-client-no-redirect.patch",
+    "about": "MCP client: a remote (streamable-http) MCP server's transport is built with redirect: \"error\" beside the configured headers, so a redirecting server is refused instead of followed (#475). @modelcontextprotocol/client 2.2.0, which this dsh pins, spreads requestInit into every fetch and leaves redirect at fetch's default: a 307 to another origin re-sent the server's custom headers there (fetch strips only Authorization across origins), and a 302 turned the JSON-RPC POST into a GET at the target. The save path already refuses a 3xx (#474); this covers every later connect. stdio servers are unchanged. Client 2.3.0 and later refuse such redirects by default (redirectPolicy 'same-origin'). Delete it in the DSH release whose dsh-mcp-client uses @modelcontextprotocol/client 2.3.0 or later, or passes its own redirect policy.",
+    "dsh": "0.2.2-rc.2",
+    "files": [
+      {
+        "package": "@deepseek-ai/dsh-mcp-client",
+        "version": "0.2.2-rc.2",
+        "file": "lib/index.js",
+        "before": "879b2364e28563626697dd5e3dcf64dcae61dd215dc8f21b283cb7616a672bde",
+        "after": "19830e050eb6f7600333b111804a2ff7c23e8a3c4b14ce7d1c3c2c4d16858f5d"
+      }
+    ]
   }
 ]

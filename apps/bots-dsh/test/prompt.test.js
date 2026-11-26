@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { install as installHooks } from '../src/host/extend.js'
 import { install } from '../src/host/prompt.js'
+import { install as installNative } from '../src/host/native-tools.js'
 import { fakeContext } from './fake-ctx.js'
 
 const BOTS = [
@@ -79,4 +80,70 @@ test('the group relay and non-Bot sessions do not get progress instructions', (t
   assert.match(prompt('room'), /end your turn with an empty reply/)
   assert.doesNotMatch(prompt('room'), /progress|milestone/)
   assert.equal(prompt('outside'), '')
+})
+
+test('an Agent with a different Session ID keeps its pre-role identity text', t => {
+  const { ctx, prompt } = start()
+  t.after(() => ctx.dispose())
+  const child = { id: 'child-agent', session: { id: 'worker' } }
+  const before = prompt(child.id)
+  const now = ctx.sections.get('bot-identity').text({ agent: child })
+  assert.equal(now, before)
+})
+
+// #1564 follow-up (P-a): a fresh scheduled Session whose task belongs to one Bot follows that
+// Bot's switch through a name-less identity: only the three native getters, no profile.
+test('a fresh scheduled Session of one Bot gets only the native getters; others get no identity', (t) => {
+  let read
+  const sessions = new Map()
+  const bots = new Map([
+    ['worker', { id: 'worker', name: 'Dev', model: 'acp-claude/default', nativeTools: true, nativeToolsAgent: 'acp-claude' }],
+    ['closed', { id: 'closed', name: 'Shy', model: 'acp-claude/default', nativeTools: true, nativeToolsAgent: 'acp-claude', shell: false }],
+    ['kept', { id: 'kept', name: 'Old', model: 'acp-codex/gpt-5.5', nativeTools: true, nativeToolsAgent: 'acp-codex' }],
+  ])
+  const owners = { 'fresh-worker': 'worker', 'fresh-ro': 'worker', 'fresh-closed': 'closed', 'fresh-kept': 'kept' }
+  const ctx = fakeContext({ services: {
+    acpAgents: {
+      botIdentity(reader) { read = reader; return () => { read = undefined } },
+      nativeModelKept: route => route === 'acp-codex/gpt-5.5',
+    },
+    sandboxPolicy: { defaultMode: 'workspace-write', resolve: ({ session }) => ({ mode: session.mode }) },
+  } })
+  ctx.sessions = { get: id => sessions.get(id) }
+  t.after(() => ctx.dispose())
+  const rt = {
+    ctx,
+    state: { nativeToolsLocksRetired: true },
+    chatOwners: new Map([['chat-worker', 'worker']]), groupOwners: new Map(), pastOwners: new Map(), taskOwners: new Map(),
+    selfOf: id => id === 'chat-worker' ? 'worker' : undefined,
+    botOf: id => bots.get(id),
+    chatOf: id => 'chat-' + id,
+    roomOf: () => undefined,
+    isMain: () => false,
+    scheduledNativeOwner: id => owners[id],
+    warn: () => {},
+  }
+  installHooks(rt)
+  installNative(rt)
+  install(rt)
+  sessions.set('fresh-worker', { mode: 'workspace-write' })
+  sessions.set('fresh-ro', { mode: 'read-only' })
+  const fresh = read('fresh-worker')
+  assert.deepEqual(Object.keys(fresh), [])
+  assert.deepEqual(Object.getOwnPropertyNames(fresh).sort(), ['nativeTools', 'nativeToolsAgent', 'nativeToolsBlocked'])
+  for (const key of ['name', 'role', 'instructions', 'rolePrompt', 'needsDshTools']) assert.equal(key in fresh, false, key)
+  assert.equal(fresh.nativeTools, true)
+  assert.equal(fresh.nativeToolsBlocked, false)
+  assert.equal(fresh.nativeToolsAgent, 'acp-claude')
+  // No identity text: a fresh scheduled Session is not the Bot's chat.
+  assert.equal(ctx.sections.get('bot-identity').text({ agent: { id: 'fresh-worker' } }), '')
+  assert.equal(read('chat-worker').name, 'Dev')
+  assert.equal(read('fresh-unknown'), undefined)
+  // Read only, restricted and kept still block the Bot behind it.
+  for (const id of ['fresh-ro', 'fresh-closed', 'fresh-kept']) {
+    assert.equal(read(id).nativeToolsBlocked, true, id)
+    assert.equal(read(id).nativeTools, false, id)
+  }
+  bots.delete('worker')
+  assert.equal(read('fresh-worker'), undefined)
 })

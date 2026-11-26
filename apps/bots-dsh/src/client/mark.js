@@ -1,5 +1,6 @@
 import { createElement as h, useEffect, useRef, useState } from 'react'
-import { fnv1a, lookOf, shapeId, shapeOf, MASK_ID, nextMarkSerial, characterMarkup } from './characters.js'
+import { fnv1a, shapeId, shapeOf, MASK_ID, nextMarkSerial, characterMarkup } from './characters.js'
+import { botLookOf as lookOf } from './bot-look.js'
 import { reducedMotion } from './motion.js'
 import { t } from './i18n.js'
 import { clayArtOf, faceAt, faceOf } from './clay-art.js'
@@ -7,7 +8,9 @@ import { PetSprite, useDrowsy } from './pet.js'
 import { bakedPet, canBake } from './pet-bake.js'
 import { GENIE_AURORA, genieTint } from './genie-tint.js'
 
-export { colorOf, lookOf } from './characters.js'
+export { colorOf } from './characters.js'
+export { lookOf }
+export { catalogueLookOf } from './bot-look.js'
 
 // -------------------------------------------------------------------------
 // Bot mark: the Bot's character (or its uploaded photo), looked up by lookOf.
@@ -17,12 +20,16 @@ export { colorOf, lookOf } from './characters.js'
 // no turn runs, but work it handed on has not come back yet.
 // Past the turn itself: `failed`, its last turn failed (until the next one starts);
 // `review`, a reply waits to be read; `sleeping`, nobody has touched the window a while.
+// `not-installed`: the plugin that runs this Bot is missing, switched off or did not load,
+// so nothing about it is healthy and it cannot run at all (installed.js in the host).
 // A pending approval (`alert`) outranks a running turn: the Bot cannot go on until the
-// user answers, whatever its last tool was doing.
-const STATES = ['idle', 'thinking', 'searching', 'working', 'sending', 'orbit', 'waiting', 'alert', 'done', 'failed', 'review', 'sleeping']
+// user answers, whatever its last tool was doing. Not installed outranks all of them: a
+// Bot that cannot run must never read as working, waiting or failed.
+const STATES = ['idle', 'thinking', 'searching', 'working', 'sending', 'orbit', 'waiting', 'alert', 'done', 'failed', 'review', 'not-installed', 'sleeping']
 const WORK = ['thinking', 'searching', 'working', 'sending', 'orbit']
-export const botState = (running, activity, alert, { failed = false, unread = false } = {}) => (alert ? 'alert'
-  : running ? (WORK.includes(activity) ? activity : 'working') : failed ? 'failed' : activity === 'waiting' ? 'waiting' : unread ? 'review' : 'idle')
+export const botState = (running, activity, alert, { failed = false, unread = false, notInstalled = false, installed } = {}) => (notInstalled === true || installed === false ? 'not-installed'
+  : alert ? 'alert'
+    : running ? (WORK.includes(activity) ? activity : 'working') : failed ? 'failed' : activity === 'waiting' ? 'waiting' : unread ? 'review' : 'idle')
 export const toolState = name => (/^(message_bot|stop_bot|create_bot|update_bot|delete_bot|create_group|update_group|delete_group|post_to_group)$/.test(name) ? 'sending'
   : /search|fetch|browse|read|grep|glob|list|recall/i.test(name) ? 'searching' : 'working')
 
@@ -94,14 +101,14 @@ export function petOf(bot, look, { live, size }) {
 }
 export function useBaked(wanted) {
   const key = wanted ? `${wanted.clay ?? ''}|${wanted.shape ?? ''}|${wanted.color ?? ''}` : ''
-  const [pet, setPet] = useState(null)
+  const [baked, setBaked] = useState(null)
   useEffect(() => {
-    if (!wanted || !canBake()) { setPet(null); return undefined }
+    if (!wanted || !canBake()) { setBaked(null); return undefined }
     let live = true
-    bakedPet(wanted).then((next) => { if (live) setPet(next) }, () => { if (live) setPet(null) })
+    bakedPet(wanted).then((pet) => { if (live) setBaked({ key, pet }) }, () => { if (live) setBaked(null) })
     return () => { live = false }
   }, [key])
-  return pet
+  return baked?.key === key ? baked.pet : null
 }
 
 export function BotMark(props) {
@@ -217,14 +224,16 @@ function Crown() {
 }
 
 // `crown`: the team's first Main Bot, which wears the crown in place of the Main Bot star.
-export function BotAvatar({ bot, size, state = 'idle', count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
+export function BotAvatar({ bot, look, size, state = 'idle', count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state)
   if (bot === undefined) return h(BotMark, { size })
-  const badgeKind = !badge ? null : state === 'alert' ? 'alert' : WORK.includes(state) ? 'working' : admin ? 'admin' : main && !crown ? 'main' : null
+  const badgeKind = !badge ? null : state === 'not-installed' ? 'missing' : state === 'alert' ? 'alert' : WORK.includes(state) ? 'working' : admin ? 'admin' : main && !crown ? 'main' : null
   return h('span', { className: 'bt-mark', style: { width: size, height: size, '--bt-size': `${size}px` } },
-    h(BotMark, { bot, size, state: settled ? 'done' : state, live, gaze, pokeable }),
+    h(BotMark, { bot, look, size, state: settled ? 'done' : state, live, gaze, pokeable }),
     crown ? h(Crown) : null,
     badgeKind === 'working' ? h('span', { className: 'bt-badge bt-badge-working', 'aria-label': t('Working'), role: 'img' }) : null,
+    badgeKind === 'missing' ? h('span', { className: 'bt-badge bt-badge-missing', 'aria-label': t('Not installed'), role: 'img' },
+      h('svg', { viewBox: '0 0 12 12', 'aria-hidden': true }, h('circle', { cx: 6, cy: 6, r: 4.2, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 }), h('path', { d: 'M3.4 3.4l5.2 5.2', stroke: 'currentColor', strokeWidth: 1.6 }))) : null,
     badgeKind === 'alert' ? h('span', { className: 'bt-badge bt-badge-alert', 'aria-label': count > 0 ? (count === 1 ? t('1 approval waiting') : t('{count} approvals waiting', { count })) : t('Waiting for your answer'), role: 'img' }, count > 0 ? (count > 9 ? '9+' : String(count)) : '?') : null,
     badgeKind === 'admin' ? h('span', { className: 'bt-badge bt-badge-admin', 'aria-label': t('Admin'), role: 'img' }, h(StarIcon)) : null,
     badgeKind === 'main' ? h('span', { className: 'bt-badge bt-badge-main', 'aria-label': t('Main Bot'), role: 'img' }, h(MainStar)) : null)

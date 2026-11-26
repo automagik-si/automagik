@@ -2,17 +2,19 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued |
+| Status | Accepted (2026-11-19, approved by the owner's delegate: the design and its proposed bounds; amends RFC 0015; delivery 0: the final contract is written in [RFC 0015's amendment](0015-live-chat-projection.md#rfc-0033-attachments-from-pocket-images-on-dshbotid-chats); delivery 4a: the documents contract in [RFC 0015](0015-live-chat-projection.md#rfc-0033-delivery-4-documents-txt-pdf-on-dshbotid-chats)) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-14 |
+
+> Approved by Guga's delegation while the owner is away (19/11); the owner may amend on return.
 
 ## Summary
 
 Propose sending images from Pocket to a DSH chat through the desktop's upload admission.
 The phone would show attachment rows, upload progress and explicit Retry, with previews on tap.
-This proposes an amendment to RFC 0015's chat route and DSH-write amendment; the owner has not
-yet read it. Formats, caps and compatibility below are proposals, not accepted decisions.
+This amends RFC 0015's chat route and DSH-write amendment. Formats, caps and compatibility below
+are starting bounds, subject to the measurements and answers named in the open questions.
 
 ## Motivation
 
@@ -120,10 +122,11 @@ disk caching. `attachments.readImage(ref,signal)` is verified in
 
 ## Contracts introduced
 
-All method names and limits here are proposed. The proposed RFC 0015 amendment covers message
+All method names and limits here are proposed; the final ones, which supersede them, are in RFC 0015's amendment (delivery 0, 2026-11-20). The proposed RFC 0015 amendment covers message
 and row shapes, attachment transport and limits, rendering, privacy and its DSH-write amendment:
 `docs/rfcs/0015-live-chat-projection.md:254`, `docs/rfcs/0015-live-chat-projection.md:331`,
-`docs/rfcs/0015-live-chat-projection.md:577`. Write it into 0015 only after owner acceptance.
+`docs/rfcs/0015-live-chat-projection.md:577`. Write it into 0015 with this RFC's delivery 0,
+under the acceptance above; the owner may amend on return.
 
 - Retain `herdr-pocket/chat/1`; negotiate `attachments:1`, methods, MIME types and effective caps
   at both handshakes. This explicitly proposes amending 0015's new-ALPN rule for changed method
@@ -161,9 +164,10 @@ Pocket promises memory-only chat data (`apps/pocket/docs/privacy.md:31`), no aut
 loads (`apps/pocket/docs/privacy.md:59`) and camera use only for pairing
 (`apps/pocket/docs/privacy.md:97`). Propose memory-only previews and tap-to-load reads, with no
 camera capture initially. The pocket delivery would update `privacy.md` in the same PR to name
-picker bytes and display names sent to the computer, desktop persistence and workspace copies,
-retention/cleanup, and authenticated thumbnail reads. It would keep the phone-memory, explicit
-load and pairing-only camera promises. This follows `apps/pocket/AGENTS.md:43`.
+picker bytes, declared type and length and opaque upload ids sent to the computer, desktop
+persistence and workspace copies, retention/cleanup, and authenticated thumbnail reads. Images
+carry no display name. Documents carry a reduced display name. The privacy notice would keep the
+phone-memory, explicit load and pairing-only camera promises. This follows `apps/pocket/AGENTS.md:43`.
 
 ## Deliveries
 
@@ -172,7 +176,7 @@ Proposed order: plugin, Pocket Link, Pocket, as in the DSH-write rollout
 its peers negotiate support. Owner answers precede any delivery they block.
 
 0. **Docs only.** This RFC and both indexes; precise proposed amendment to 0015.
-   *Check:* citations verified and owner blockers recorded. *Rollback:* revert proposal docs.
+   *Check:* citations verified and owner blockers recorded. *Rollback:* revert the docs.
 1. **Plugin (3.N.P).** Gated socket admission, receipt sends, attachment rows and authorized
    thumbnail reads. *Check:* real DSH admission fixtures reject foreign Session/device receipts,
    prove bounded memory and interruption cleanup, and retry once after acknowledgement loss.
@@ -185,9 +189,11 @@ its peers negotiate support. Owner answers precede any delivery they block.
    privacy changes in the same PR. *Check:* Android gate and all staggered-version cases above,
    including reconnect without retargeting. *Rollback:* a later APK hides attachments;
    desktop copies remain.
-4. **Later, separate PRs on all three lanes.** Explicit documents, then broader files or camera
-   capture only if approved. *Check:* each negotiated type passes admission and privacy checks.
-   *Rollback:* withdraw each capability independently; already admitted data remains.
+4. **Documents (TXT, PDF).** 4a writes the contract in RFC 0015. The acp-dsh copy-warning fix
+   (#1829) precedes 4b (plugin admission and sends), then 4c (Pocket Link) and 4d (Pocket picker
+   and privacy update). Broader files or camera capture need separate approval.
+   *Check:* each negotiated type passes admission and privacy checks.
+   *Rollback:* withdraw the documents offer. Already admitted data remains.
 
 ## Open questions
 

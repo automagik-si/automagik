@@ -1,19 +1,32 @@
+import { grantModelFields, grantTeamModels, withGrantHold } from './grants.js'
 // Models. Every Bot runs on one model of its own, fixed when it is created and changed
 // only in its settings or by a Main Bot. The team's first Main Bot has none until the
 // user picks one in its chat. The Session keeps the selection durably.
 import { BlockAssembler, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
-import { cliRoute, leavesCli, piAiRoutes, routeOf } from '../shared/routes.js'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { cliRoute, commandCapableAgent, leavesCli, piAiRoutes, routeOf } from '../shared/routes.js'
+import { hasSolverSetup, isAntigravityModel } from '../shared/solver-agent.js'
+import { CHOOSE_CONCRETE, CHOOSE_DIFFERENT, chosenIdentityOf } from '../shared/solver-model.js'
 import { refusal } from './refusal.js'
 import { normalize, splitRef } from './text.js'
 import { install as installHostModels } from './host-models.js'
 import { PI_AI_CLAUDE, claudeFamilyOf, supersededClaude } from './claude-models.js'
+import { SettingsSelectionRejected } from './pocket-settings.js'
+import { readableRoute } from './session-route.js'
 
+const CLAUDE_PIN_REFS = new Set([
+  'acp-claude/claude-sonnet-5-5',
+  'acp-claude/claude-opus-5-5',
+  'acp-claude/claude-fable-5-2',
+  'acp-claude/claude-haiku-5-5',
+])
 const CATALOG_TTL_MS = 10_000
+const quiet = new AsyncLocalStorage()
 // What a refused model says, by case; `{connection}` is the agent's name and route. The client
 // words each template in the interface language (i18n.js hostText).
 export const ACCESS_MESSAGES = Object.freeze({
-  off: 'Turn on {connection} in Settings → Claude Code and Codex before using this model.',
-  installing: 'Wait for {connection} to finish installing, or retry it in Settings → Claude Code and Codex.',
+  off: 'Turn on {connection} in Settings → Coding agents before using this model.',
+  installing: 'Wait for {connection} to finish installing, or retry it in Settings → Coding agents.',
   signIn: 'Sign in to {connection} before using this model.',
   // Signed in on this computer, to an account the person has not confirmed for Bots (#869).
   account: 'Confirm the account of {connection} before using this model.',
@@ -75,6 +88,8 @@ function resolvedDefault(provider, model) {
 // The DeepSeek account's sign-in grant (dsh-deepseek-account-platform).
 const ACCOUNT_RECORD = 'deepseek-account-platform/default'
 const TRANSIENT_LLM_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
+export const QUOTA_CODES = new Set(['QUOTA', 'ACCOUNT_QUOTA', 'acp/aside-quota'])
+const QUOTA_HOLD_MS = 60 * 60_000
 
 function retryPolicyOf(ctx, provider) {
   try {
@@ -129,10 +144,12 @@ function canRetryPolicy(policy, code, retry) {
 // bypass the agent loop's `agent/request-error` hook, so `dsh-llm-retry` never sees
 // their transport or stream-idle failures. Retry those transient codes on the same
 // route with the provider's own retry policy, discarding partial chunks from failed attempts.
-export async function assembleLlmStream(ctx, options, { signal, backoff, random = Math.random, check } = {}) {
+export async function assembleLlmStream(ctx, options, { signal, backoff, random = Math.random, check, dispatch } = {}) {
   const fused = options.signal && signal ? AbortSignal.any([options.signal, signal]) : (options.signal ?? signal)
   const request = fused === options.signal ? options : { ...options, signal: fused }
   for (let retry = 1; ; retry += 1) {
+    if (dispatch?.prepare !== undefined) await dispatch.prepare()
+    dispatch?.check()
     const assembler = new BlockAssembler()
     let thrown
     try {
@@ -169,6 +186,17 @@ export async function assembleLlmStream(ctx, options, { signal, backoff, random 
 
 export function install(rt) {
   const { ctx, state } = rt
+  const asideQuota = new Map()
+  const quotaUntil = provider => {
+    const until = asideQuota.get(provider)
+    if (until > Date.now()) return until
+    asideQuota.delete(provider)
+    return undefined
+  }
+  const liftQuota = () => {
+    asideQuota.clear()
+    rt.liftMemoryHolds?.()
+  }
   // Bots a plugin answers for on its own engine (host-models.js) never run on a DSH model.
   installHostModels(rt)
   const onDsh = bot => !rt.hostOwned(bot)
@@ -184,6 +212,14 @@ export function install(rt) {
   // and nothing chooses it again until that provider serves different models.
   const refused = new Map()
   const answerable = entries => (refused.size === 0 ? entries : entries.filter(entry => !refused.has(entry.ref)))
+  // `held`: the snapshot as last listed, whatever its age, or undefined when none is held
+  // (never listed, or dropped by a key, sign-in or route change). Pocket reads only this:
+  // the desktop lists models when its menus need them, so a phone could wait a long time
+  // for one listed in the last few seconds (RFC 0036, Models).
+  const cachedCatalog = ({ held = false } = {}) => {
+    if (held && catalogCache.at === 0) return undefined
+    return answerable(catalogCache.value)
+  }
   // The models a ref's provider serves, as a string to compare; undefined when it
   // cannot be listed, e.g. the provider is not registered.
   async function servedModels(ref) {
@@ -217,7 +253,10 @@ export function install(rt) {
   })
   ctx.on?.('credentials/reference-updated', async (ref) => {
     invalidate()
-    if (await inPlace(credentials => credentials.describe(ref))) rt.unblockBots?.({ ref })
+    if (await inPlace(credentials => credentials.describe(ref))) {
+      liftQuota()
+      rt.unblockBots?.({ ref })
+    }
   })
   // A sign-in writes the account's record. A sign-out removes it, and so does a token
   // the provider refused, while the turn that failed on it still runs. Other plugins'
@@ -225,7 +264,10 @@ export function install(rt) {
   ctx.on?.('credentials/record-updated', async (key) => {
     invalidate()
     if (String(key) !== ACCOUNT_RECORD) return
-    if (await inPlace(credentials => credentials.describeRecord(key))) rt.unblockBots?.({ signedIn: true })
+    if (await inPlace(credentials => credentials.describeRecord(key))) {
+      liftQuota()
+      rt.unblockBots?.({ signedIn: true })
+    }
   })
   ctx.on?.('settings/document-updated', invalidate)
 
@@ -280,6 +322,7 @@ export function install(rt) {
     try { rows = (await Promise.race([Promise.resolve().then(() => agents.status()), late]))?.agents } catch {} finally { clearTimeout(timer) }
     if (epoch !== catalogEpoch || !Array.isArray(rows)) return
     signInsDirty = false
+    const bots = Object.values(state.bots ?? {})
     for (const row of rows) {
       if (typeof row?.id !== 'string') continue
       noteConsent(row)
@@ -287,6 +330,9 @@ export function install(rt) {
       agentSignIn.delete(row.id)
       const last = signInChecks.get(row.id)
       if (row.on === false || row.connector?.state !== 'ready' || typeof agents.inspect !== 'function' || (last !== undefined && Date.now() - last < SIGN_IN_CHECK_MS)) continue
+      const providerMatches = bot => [bot.model, bot.appliedModel].some(ref => typeof ref === 'string' && ref.split('/')[0] === row.id)
+      if (bots.some(bot => providerMatches(bot) && bot.shellHeld !== undefined)
+        && !bots.some(bot => providerMatches(bot) && bot.shellHeld === undefined)) continue
       signInChecks.set(row.id, Date.now())
       void Promise.resolve().then(() => agents.inspect(row.id)).then((seen) => {
         if (epoch !== catalogEpoch || typeof seen?.signedIn !== 'boolean') return
@@ -300,30 +346,47 @@ export function install(rt) {
   // A provider's model list can change in DSH settings without any event, so a picker
   // that is about to be used asks for a `fresh` one. Entries for models a Bot uses
   // also carry their `reasoning`, so the picker can offer thinking levels.
-  async function catalog({ fresh = false, remember = true } = {}) {
-    if (!fresh && Date.now() - catalogCache.at < CATALOG_TTL_MS && catalogCache.value.length > 0) return answerable(catalogCache.value)
+  // Auxiliary Bot work without a runner can list API providers without probing
+  // command-capable adapters or changing the owner's catalog cache.
+  async function catalog({ fresh = false, remember = true, noCommands = false } = {}) {
+    const visible = entries => noCommands ? entries.filter(entry => !commandCapableAgent(entry.provider)) : entries
+    // Pocket's work can use the existing snapshot. Even a module-local catalog call
+    // must leave desktop enumeration, cache population and unblocking to the desktop.
+    if (quiet.getStore() === rt) return visible(cachedCatalog({ held: true }) ?? [])
+    if (!fresh && Date.now() - catalogCache.at < CATALOG_TTL_MS && catalogCache.value.length > 0) return answerable(visible(catalogCache.value))
     const epoch = catalogEpoch
     const listed = []
     let directory = []
     try { directory = ctx.llm.listConfigurableProviders?.() ?? [] } catch {}
     const piAi = piAiRoutes(directory)
     for (const provider of ctx.llm.listProviders()) {
+      if (noCommands && commandCapableAgent(provider.id)) continue
       let models = []
       try { models = await ctx.llm.listModels(provider.id) } catch { continue }
+      const acp = provider.id === 'acp-claude' ? ctx.get?.('acpAgents') : undefined
       for (const model of models) {
+        const ref = `${provider.id}/${model.id}`
+        const identity = chosenIdentityOf(ref)
+        let proof
+        if (acp && CLAUDE_PIN_REFS.has(identity) && identity !== ref) {
+          try { proof = acp.modelIdentityOf?.(provider.id, model.id) } catch {}
+        }
         listed.push({
-          ref: `${provider.id}/${model.id}`,
+          ref,
           provider: provider.id,
           providerName: brandOf(provider, directory),
           id: model.id,
           name: model.name ?? model.id,
+          solverIdentity: identity,
+          ...(proof?.status === 'offered' && `${provider.id}/${proof.model}` === identity ? { solverRef: identity } : {}),
           route: routeOf(provider.id, { piAi }),
           ...(model.inputModalities ? { input: [...model.inputModalities] } : {}),
           ...resolvedDefault(provider.id, model),
         })
       }
     }
-    const used = new Set(Object.values(state.bots ?? {}).filter(onDsh).flatMap(bot => [bot.model, bot.appliedModel].filter(Boolean)))
+    const used = new Set(Object.values(state.bots ?? {}).filter(bot => onDsh(bot) && bot.shellHeld === undefined)
+      .flatMap(bot => [bot.model, bot.appliedModel].filter(Boolean)))
     const entries = listed
     // Claude on pi-ai's anthropic route: the menu offers each family's newest model.
     const claude = entries.filter(entry => entry.provider === PI_AI_CLAUDE)
@@ -350,15 +413,17 @@ export function install(rt) {
     }
     // DSH's own ChatGPT or Claude sign-in: its CLI serves that plan, signed in or not.
     for (const entry of entries) if (coveredBy(entry) !== undefined) entry.covered = true
-    if (remember) noteConnected(entries)
-    // A key can arrive without an event (an environment variable at the next start), so
-    // a provider listed with its key again lifts what its missing key blocked.
-    rt.unblockBots?.({ keyed: new Set(entries.filter(entry => !entry.needsKey).map(entry => entry.provider)) })
+    if (remember && !noCommands) {
+      noteConnected(entries)
+      // A key can arrive without an event, so a provider listed with its key again lifts
+      // what its missing key blocked. Catalog reads used to validate a pick stay read-only.
+      rt.unblockBots?.({ keyed: new Set(entries.filter(entry => !entry.needsKey).map(entry => entry.provider)) })
+    }
     await Promise.all(entries.filter(entry => used.has(entry.ref)).map(async (entry) => {
       const reasoning = await reasoningOf(entry.ref, epoch)
       if (reasoning !== undefined) entry.reasoning = reasoning
     }))
-    if (epoch === catalogEpoch) catalogCache = { at: Date.now(), value: entries }
+    if (epoch === catalogEpoch && !noCommands) catalogCache = { at: Date.now(), value: entries }
     return answerable(entries)
   }
 
@@ -390,23 +455,24 @@ export function install(rt) {
   // and a route a CLI covers; the jobs beside the chats keep their own rule.
   // DSH's default on a ChatGPT or Claude sign-in it cannot run that way is read as the same
   // model on that plan's CLI, when the CLI can run.
-  function pickDefault(entries, canRun = configured) {
+  function pickDefault(entries, canRun = configured, captured) {
     // Neither a refused route nor one that cannot run is picked.
     const usable = answerable(entries).filter(canRun)
-    const ref = defaultRef()
+    const ref = captured === undefined ? defaultRef() : captured.modelDefault
     const chosen = usable.find(entry => entry.ref === ref)
     if (chosen) return chosen.ref
     const signIn = entries.find(entry => entry.ref === ref && entry.covered === true)
     const peer = signIn === undefined ? undefined : cliPeerOf(signIn, usable)
     if (peer) return peer.ref
-    const seen = Array.isArray(state.providersSeen) ? state.providersSeen : []
+    const seen = captured === undefined ? providersSeen() : JSON.parse(captured.providersSeen)
     const rank = entry => (seen.includes(entry.provider) ? seen.indexOf(entry.provider) : seen.length)
     const ordered = usable.map((entry, index) => ({ entry, index })).sort((a, b) => rank(a.entry) - rank(b.entry) || a.index - b.index).map(({ entry }) => entry)
     const first = ordered[0]?.provider
     const own = ordered.filter(entry => entry.provider === first)
     return (own.find(entry => entry.id !== 'default' && entry.superseded !== true) ?? own.find(entry => entry.id !== 'default') ?? own[0])?.ref
   }
-  const defaultModel = async () => pickDefault(await catalog())
+  const providersSeen = () => Array.isArray(state.providersSeen) ? state.providersSeen : []
+  const defaultModel = async ({ noCommands = false } = {}) => pickDefault(await catalog({ noCommands }))
 
   // The model a create that names none starts on: the team's pick while the catalog
   // still serves it, else the DSH default. A create fixes the ref then, so a later
@@ -424,13 +490,25 @@ export function install(rt) {
   // model (DeepSeek, unless the person chose another there) when that can; else the first
   // account connected here, as for a Bot's default.
   const answersAside = entry => !['acp', 'hermes-remote'].includes(routeOf(entry.provider).connectedBy)
-  function pickBackground(entries) {
+  function pickBackground(entries, canRun = entry => !entry.needsKey && !quotaUntil(entry.provider)) {
     const aside = entries.filter(answersAside)
     const chosen = state.prefs?.backgroundModel
-    if (typeof chosen === 'string' && aside.some(entry => entry.ref === chosen && !entry.needsKey)) return chosen
-    return pickDefault(aside, entry => !entry.needsKey)
+    if (typeof chosen === 'string' && aside.some(entry => entry.ref === chosen && canRun(entry))) return chosen
+    return pickDefault(aside, canRun)
   }
-  const backgroundModel = async () => pickBackground(await catalog())
+  const backgroundModel = async (sessionId, { noCommands = false } = {}) => {
+    rt.assertBotRunnerProvider?.(state.prefs?.backgroundModel, sessionId)
+    return pickBackground(await catalog({ noCommands: noCommands || rt.botRunnerRequired?.(sessionId) }))
+  }
+  const memoryBackground = async (sessionId) => {
+    rt.assertBotRunnerProvider?.(state.prefs?.backgroundModel, sessionId)
+    const entries = await catalog({ noCommands: true })
+    const ref = pickBackground(entries)
+    if (ref !== undefined) return { ref }
+    const holds = entries.filter(entry => answersAside(entry) && !entry.needsKey)
+      .map(entry => quotaUntil(entry.provider)).filter(Boolean)
+    return { retryAt: holds.length ? Math.min(...holds) : undefined }
+  }
   /** Whether a `provider/model` ref can answer a job beside the chats (not an ACP agent). */
   const answersAsideRef = ref => typeof ref === 'string' && ref.includes('/') && !['acp', 'hermes-remote'].includes(routeOf(ref.split('/')[0]).connectedBy)
 
@@ -451,8 +529,8 @@ export function install(rt) {
 
   // A full `provider/model` ref, or a model id or name that only one provider serves.
   // `checkAccess`: a model that cannot run now (modelAccess) is refused here, before anything
-  // is written. `remember: false` leaves the team's record of connected providers alone, so a
-  // refused pick changes nothing. `keep`: the Bot's current model, never moved (onPlanCli).
+  // is written. `remember: false` leaves team state alone while validating the pick.
+  // `keep`: the Bot's current model, never moved (onPlanCli).
   async function resolveModel(text, { checkAccess = false, remember = true, keep } = {}) {
     const entries = await catalog({ fresh: true, remember })
     const wanted = String(text ?? '').trim()
@@ -464,10 +542,21 @@ export function install(rt) {
       if (checkAccess) await assertModelAccess(found)
       return found
     }
+    if (named.length > 1) {
+      throw refusal(`Model ${wanted} is served by more than one provider; use one of ${named.map(entry => entry.ref).join(', ')}`)
+    }
     const known = entries.map(entry => entry.ref).join(', ') || 'none'
-    throw refusal(named.length > 1
-      ? `Model ${wanted} is served by more than one provider; use one of ${named.map(entry => entry.ref).join(', ')}`
-      : `Model ${wanted} is not available. Available models: ${known}`)
+    throw Object.assign(refusal(`Model ${wanted} is not available. Available models: ${known}`), { modelUnavailable: true })
+  }
+
+  async function checkSolverModel(ref, reviewer) {
+    const selected = chosenIdentityOf(ref)
+    if (!selected) throw refusal(CHOOSE_CONCRETE)
+    if (!reviewer) return
+    const saved = reviewer.model ?? reviewer.appliedModel
+    const other = chosenIdentityOf(saved)
+    if (!other || rt.botOf(reviewer.id) !== reviewer || (reviewer.model ?? reviewer.appliedModel) !== saved) throw refusal(CHOOSE_CONCRETE)
+    if (other === selected) throw refusal(CHOOSE_DIFFERENT)
   }
 
   // Whether a model can run now, read-only: nothing is installed, enabled or signed in, and no
@@ -515,6 +604,8 @@ export function install(rt) {
 
   // A Bot with no model yet waits for the user to pick one and changes nothing. A
   // model that is no longer served falls back to the last one it ran on, then the default.
+  // A Solver can keep its saved Antigravity pick while it is served. Recovery only picks
+  // supported models for a Solver.
   // A Session at Full access of a Bot whose model is a coding CLI's (acp-claude, acp-codex) is
   // not moved to another provider this way: there the CLI itself runs without asking, and
   // another model would run DSH's own tools unasked at that level. The rule is read per
@@ -523,12 +614,27 @@ export function install(rt) {
   // for a Bot that waits; another model of the same CLI is still taken. `aside`: a call
   // beside the chat that runs no tool (memory.js) keeps the plain rule.
   const stayed = new Set()
-  const plainModel = async (bot) => {
-    const entries = await catalog()
+  const fallbackEntries = (entries, solver) => solver ? entries.filter(entry => !isAntigravityModel(entry.ref)) : entries
+  function plainModelIn(bot, entries, captured) {
     if (entries.some(entry => entry.ref === bot.model)) return bot.model
     // A fallback is never one that needs a key.
-    return entries.some(entry => entry.ref === bot.appliedModel && entry.needsKey !== true) ? bot.appliedModel : pickDefault(entries)
+    const eligible = fallbackEntries(entries, captured?.solver ?? hasSolverSetup(bot))
+    return eligible.some(entry => entry.ref === bot.appliedModel && entry.needsKey !== true)
+      ? bot.appliedModel : pickDefault(eligible, configured, captured)
   }
+  const plainModel = async (bot, noCommands) => {
+    // Keep a Claude Code pin through a catalog outage so ACP can refuse it at dispatch.
+    if (!noCommands && CLAUDE_PIN_REFS.has(bot.model)) return bot.model
+    return plainModelIn(bot, await catalog({ noCommands }))
+  }
+  // A role task uses the same choice as desiredModel's aside route, from the
+  // captured Bot and the catalog already read for the eligibility scan.
+  const taskAskerState = bot => ({
+    model: bot.model, appliedModel: bot.appliedModel, solver: hasSolverSetup(bot),
+    asideAllowed: Boolean(bot.model) && onDsh(bot) && !rt.switchingChat?.(bot.id),
+    modelDefault: defaultRef(), providersSeen: JSON.stringify(providersSeen()),
+  })
+  const taskAskerModel = (captured, entries) => captured.asideAllowed ? plainModelIn(captured, entries, captured) : undefined
   // Whether going from the Bot's saved model to `ref` leaves its coding CLI.
   const offCli = (bot, ref) => ref !== undefined && ref !== bot.model && leavesCli(splitRef(bot.model), splitRef(ref))
   const stays = (bot, ref) => {
@@ -546,18 +652,25 @@ export function install(rt) {
     return new Set(ids.filter(id => typeof id === 'string' && rt.sessionWide(id, open.get(id)) === true))
   }
   const ownSessions = bot => [rt.chatOf?.(bot.id), ...(rt.groupSessionsOf?.(bot.id) ?? [])]
-  async function desiredModel(bot, { aside = false, sessionId, session } = {}) {
+  async function desiredModel(bot, { aside = false, sessionId, session, noCommands = false } = {}) {
     if (!bot.model || !onDsh(bot)) return undefined
     // A Bot's own chat is moving to a new route: its old part must not be selected, but the
     // fresh part asks with its own Session (freshRoute) and may. A plain fresh-part switch
     // has no target and keeps the old behavior.
     if (sessionId === undefined && rt.switchingChat?.(bot.id)) return undefined
-    const ref = await plainModel(bot)
+    const ref = await plainModel(bot, noCommands)
     if (aside || !offCli(bot, ref)) return ref
     const wide = sessionId !== undefined ? rt.sessionWide?.(sessionId, session) === true : wideAmong(ownSessions(bot)).size > 0
     if (!wide) return ref
     stays(bot, ref)
     return undefined
+  }
+  async function memoryModel(bot) {
+    if (!bot?.model || !onDsh(bot) || rt.switchingChat?.(bot.id)) return undefined
+    if (routeOf(splitRef(bot.model)?.provider).connectedBy === 'acp') return bot.model
+    if (!answersAsideRef(bot.model)) return undefined
+    const entries = await catalog({ noCommands: true })
+    return entries.some(entry => entry.ref === bot.model && configured(entry)) ? bot.model : undefined
   }
   // Before a Session of the Bot takes a turn by itself (a task, a group seat, a fresh part, a
   // greeting): when the Bot's saved CLI model is not served, so the Session would run on
@@ -574,11 +687,13 @@ export function install(rt) {
   }
 
   // The thinking level a Bot asked for, when the model it runs on serves it; else the
-  // model's own default applies. A level the model does not have is ignored, never
-  // sent: an explicit effort a provider does not know is a hard refusal there.
-  async function desiredEffort(bot, ref) {
+  // model's own default applies. A pinned pick with no cached reasoning metadata
+  // lets DSH handle the saved effort without a plugin catalog lookup.
+  async function desiredEffort(bot, ref, entry) {
     if (bot.effort === undefined || ref === undefined) return undefined
-    const reasoning = await reasoningOf(ref)
+    const reasoning = entry === undefined ? await reasoningOf(ref)
+      : entry.reasoning ?? reasoningCache.get(ref)?.value
+    if (entry !== undefined && reasoning === undefined) return bot.effort
     const efforts = reasoning?.efforts ?? []
     if (efforts.some(effort => effort.id === bot.effort)) return bot.effort
     // A model may name the same level with another id, as resolveEffort already reads.
@@ -619,14 +734,31 @@ export function install(rt) {
   // Recheck group Sessions after every restart: Bot-level applied fields cannot
   // prove that an older group Session received the member's thinking level.
   const sessionSelections = new Map()
-  function selectSessionModel(sessionId, { provider, model, reasoningEffort }) {
+  function selectSessionModel(sessionId, { provider, model, reasoningEffort }, pocket) {
+    const release = rt.holdGrants?.({ sessionIds: [sessionId] }, () => {
+      const selected = sessionSelections.get(sessionId)
+        ?? readableRoute(ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config)
+      return [selected?.provider, selected?.model]
+    })
     const run = selecting.then(async () => {
+      pocket?.check()
+      rt.assertShellChoice?.(sessionId)
       const defaults = ctx.get?.('agentDefaultModel')
       const before = defaults?.currentSelection?.()
-      const result = await ctx.sessionController.selectModel({
-        sessionId, provider, model,
-        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-      })
+      const controller = ctx.sessionController
+      const select = controller?.selectModel
+      if (pocket !== undefined && typeof select !== 'function') throw new Error('Model selection is unavailable.')
+      let result
+      try {
+        result = await select.call(controller, {
+          sessionId, provider, model,
+          ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+        })
+      } catch (error) {
+        if (pocket !== undefined) throw new SettingsSelectionRejected()
+        throw error
+      }
+      pocket?.selected?.()
       const saved = result?.selected ?? { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
       if (before?.provider && before?.model && !sameSelection(before, saved)) {
         await defaults.saveSelection(before).catch((error) => {
@@ -637,74 +769,191 @@ export function install(rt) {
       return result
     })
     selecting = run.catch(() => {})
+    if (release) void run.then(() => release(false), () => release(true))
     return run
+  }
+
+  async function reselectOwnRoute(agent, check) {
+    await rt.load()
+    const sessionId = agent.session.id
+    if (!rt.isBotSession(sessionId)) return false
+    const bot = rt.botOf(rt.selfOf(sessionId))
+    if (!bot?.model) return false
+    const canSelect = () => modelTargetLive(bot) && !rt.hostOwned?.(bot)
+      && !rt.pickingModel?.(bot.id) && !rt.switchingChat?.(bot.id)
+    if (!canSelect()) return false
+    const { model, effort: savedEffort } = bot
+    const noCommands = rt.botRunnerRequired?.(sessionId, agent) === true
+    const ref = await desiredModel(bot, { sessionId, session: agent.session, noCommands })
+    if (ref === undefined || await keepsCarriedRoute(sessionId, ref)) return false
+    // A group conversation whose history ran on another harness keeps its route: it follows
+    // an agent switch only with a handoff of its own (RFC 0030, Handoff note).
+    if (rt.groupOwners?.has?.(sessionId) && await rt.crossingHistory?.(sessionId, ref)) return false
+    const effort = await desiredEffort(bot, ref)
+    const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
+
+    // The selection queue can already be waiting for this Agent's creation to finish.
+    // Select on the Agent in hand without changing the profile's default model.
+    if (!canSelect() || !rt.isBotSession(sessionId) || rt.selfOf(sessionId) !== bot.id
+      || bot.model !== model || bot.effort !== savedEffort || !check(route)) return false
+    try {
+      rt.assertShellChoice?.(sessionId)
+    } catch {
+      return false
+    }
+    agent.model.select(route)
+    sessionSelections.set(sessionId, route)
+    return true
   }
 
   const sameSelection = (a, b) => a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort
 
+  function storedRouteEvent(route, event) {
+    if (event?.type === 'model/selection') return { ...route, pendingSelection: readableRoute(event.data) }
+    if (event?.type !== 'request/header') return route
+    const header = event.data?.header
+    const used = readableRoute(header?.config)
+    const selected = used && header?.adapterDefaults?.reasoningEffort === true ? { ...used, reasoningEffort: undefined } : used
+    // History callers read the last request. Prompt delivery follows DSH's pending choice
+    // until a request uses that choice.
+    const pending = route.pendingSelection
+    if (pending === undefined || (pending && selected && sameSelection(pending, selected))) return { used }
+    return { used, pendingSelection: pending }
+  }
+  async function storedRoute(sessionId) {
+    // undefined means the store confirms there is no log or the log has no events.
+    // null means the route could not be read.
+    // bots-dsh does not inject sessionPersistence: in real cordis a sibling plugin's
+    // service throws on a property read but is readable through ctx.get.
+    let handle
+    try {
+      const persistence = ctx.get?.('sessionPersistence')
+      if (typeof persistence?.open !== 'function') return null
+      handle = await persistence.open(sessionId, 'read')
+      if (typeof handle?.read !== 'function') return null
+      const { events } = await handle.read()
+      if (!Array.isArray(events)) return null
+      if (events.length === 0) return undefined
+      const { used, pendingSelection } = events.reduce(storedRouteEvent, {})
+      if (used === null || pendingSelection === null || (used === undefined && pendingSelection === undefined)) return null
+      return pendingSelection === undefined ? used : { ...used, pendingSelection }
+    } catch (error) {
+      return error?.name === 'SessionPersistenceNotFoundError' && error.sessionId === sessionId ? undefined : null
+    } finally {
+      try { await handle?.close?.() } catch {}
+    }
+  }
+
+  // THE RULE: a chat already on a Remote Hermes route never takes the in-place model
+  // switch to the attach row, whatever came before. The attached serve answers on its
+  // one row whatever ref the request names (remote-chat-adapter.js stream), so the
+  // Session keeps its route and the exact-route guard accepts the turn. The decision is
+  // the chat's ACTUAL route: the live Session's request header, or, for an unloaded
+  // chat, the last request/header in its stored log. It is never the history of picks.
+  // An unreadable route blocks a selection without confirming a carried Hermes chat.
+  /** @returns {Promise<boolean | 'unreadable'>} */
+  async function keepsCarriedRoute(sessionId, ref) {
+    if (ref !== 'hermes-remote/attach') return false
+    try {
+      const header = ctx.sessions?.get?.(sessionId)?.requestHeader?.()
+      const route = readableRoute(header?.config)
+      if (header != null) return route ? route.provider === 'hermes-remote' : 'unreadable'
+    } catch { return 'unreadable' }
+    const stored = await storedRoute(sessionId)
+    const route = readableRoute(stored)
+    if (route) return route.provider === 'hermes-remote'
+    // A valid selection before the first request confirms there is no carried route yet.
+    return readableRoute(stored?.pendingSelection) ? false : 'unreadable'
+  }
+
+  const unreadableRouteMessage = bot => `${bot.name} could not switch because its current Session route could not be read.`
+  async function assertReadableRoute(bot, ref) {
+    if (await keepsCarriedRoute(rt.chatOf(bot.id), ref) === 'unreadable') throw refusal(unreadableRouteMessage(bot))
+  }
+
+  // The store can replace a Bot while a model choice is in flight.
+  const modelTargetLive = bot => bot.shellHeld === undefined
+    && (rt.botOf === undefined || rt.botOf(bot.id) === bot)
+
   // `force` re-selects even when the record says it is applied: the composer's own
   // model picker can move the Session without telling this plugin.
-  async function applyModel(bot, { force = false } = {}) {
+  function applyModel(bot, options) {
+    return withGrantHold(rt, { botId: bot.id }, () => grantModelFields(bot), () => applyModelHeld(bot, options))
+  }
+
+  // Group Sessions already logged as keeping their route, so the warning comes once.
+  const keptGroupRoutes = new Set()
+  async function applyModelHeld(bot, { force = false, requireReadable = false, modelEntry, checkChoice, selected } = {}) {
+    const pinned = modelEntry !== undefined
+    const expectedChat = pinned ? rt.chatOf(bot.id) : undefined
+    const live = () => modelTargetLive(bot) && !rt.switchingChat?.(bot.id)
+    const check = () => {
+      if (!live() || rt.hostOwned(bot) || rt.chatOf(bot.id) !== expectedChat) {
+        throw new Error('The Bot changed during model selection.')
+      }
+      checkChoice()
+    }
+    const accept = () => { check(); selected?.() }
+    if (pinned) check()
+    if (!live()) return undefined
     // The Bot's own part is in a route switch: selecting the new model there would move the
     // old conversation, and restore() would then leave that Session on the target route. A
     // plain fresh part has no target and keeps taking the pick on the old part.
-    if (rt.switchingChat?.(bot.id)) return undefined
-    const ref = await desiredModel(bot, { aside: true })
+    const ref = pinned ? modelEntry.ref : await desiredModel(bot, { aside: true })
     if (ref === undefined) return ref
     // A move off the Bot's coding CLI skips each Session that is at Full access; the others
     // take the model as before. When every one stays, nothing moved and the record stands.
     const chat = rt.chatOf(bot.id)
+    if (!modelTargetLive(bot)) return undefined
     const staying = offCli(bot, ref) ? wideAmong([chat, ...rt.groupSessionsOf(bot.id)]) : new Set()
     if (staying.size > 0) stays(bot, ref)
     if (staying.has(chat) && rt.groupSessionsOf(bot.id).every(sessionId => staying.has(sessionId))) return undefined
-    const effort = await desiredEffort(bot, ref)
+    const effort = await desiredEffort(bot, ref, modelEntry)
     const ownChanged = force || staying.size > 0 || bot.appliedModel !== ref || (bot.appliedEffort ?? undefined) !== effort
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-    // THE RULE: a chat already on a Remote Hermes route never takes the in-place model
-    // switch to the attach row, whatever came before. The attached serve answers on its
-    // one row whatever ref the request names (remote-chat-adapter.js stream), so the
-    // Session keeps its route and the exact-route guard accepts the turn. The decision is
-    // the chat's ACTUAL route: the live Session's request header, or, for an unloaded
-    // chat, the last request/header in its stored log. It is never the history of picks.
-    const storedRoute = async (sessionId) => {
-      // bots-dsh does not inject sessionPersistence: in real cordis a sibling plugin's
-      // service throws on a property read but is readable through ctx.get.
-      let persistence
-      try { persistence = ctx.get?.('sessionPersistence') } catch { return undefined }
-      if (typeof persistence?.open !== 'function') return undefined
-      let handle
-      try {
-        handle = await persistence.open(sessionId, 'read')
-        const { events } = await handle.read()
-        for (let index = events.length - 1; index >= 0; index -= 1) {
-          if (events[index]?.type === 'request/header') return events[index].data?.header?.config
-        }
-        return undefined
-      } catch { return undefined } finally {
-        try { await handle?.close?.() } catch {}
+    const applyOwn = ownChanged && !staying.has(chat)
+    const carried = applyOwn ? await keepsCarriedRoute(chat, ref) : false
+    if (applyOwn) {
+      if (carried === 'unreadable') {
+        if (pinned) throw Object.assign(new SettingsSelectionRejected(unreadableRouteMessage(bot)), { code: 'bot/refused' })
+        if (requireReadable) throw refusal(unreadableRouteMessage(bot))
+      } else if (carried === true) {
+        if (pinned) accept()
+      } else {
+        await selectSessionModel(chat, route, pinned ? { check, selected: accept } : undefined)
       }
     }
-    const onHermesRoute = async (sessionId) => {
-      if (ref !== 'hermes-remote/attach') return false
-      let config
-      try { config = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config } catch { return false }
-      if (config === undefined) config = await storedRoute(sessionId)
-      return config?.provider === 'hermes-remote'
-    }
-    if (ownChanged && !staying.has(chat) && !(await onHermesRoute(chat))) await selectSessionModel(chat, route)
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
       if (staying.has(sessionId)) continue
-      if (await onHermesRoute(sessionId)) continue
       const applied = sessionSelections.get(sessionId)
       if (!force && applied !== undefined && sameSelection(applied, route)) continue
-      await selectSessionModel(sessionId, route)
-        .catch(error => rt.warn('omni-ui: model for %s in a group not applied: %s', bot.name, error))
+      if (await keepsCarriedRoute(sessionId, ref)) continue
+      // A group conversation with history on another harness is never moved across in place:
+      // it keeps its route until it follows with a handoff of its own (RFC 0030, Handoff note).
+      if (await rt.crossingHistory?.(sessionId, ref)) {
+        if (!keptGroupRoutes.has(sessionId)) {
+          keptGroupRoutes.add(sessionId)
+          rt.warn('ds-bot: %s keeps its route in group Session %s: its history ran on another harness than %s', bot.name, sessionId, ref)
+        }
+        continue
+      }
+      keptGroupRoutes.delete(sessionId)
+      await selectSessionModel(sessionId, route, pinned ? { check: () => {
+        check()
+        if (!rt.groupSessionsOf(bot.id).includes(sessionId)) throw new Error('The group Session changed.')
+      } } : undefined)
+        .catch(error => {
+          if (pinned) rt.warn('pocket settings: group selection unavailable')
+          else rt.warn('omni-ui: model for %s in a group not applied: %s', bot.name, error)
+        })
     }
     // Some Sessions moved and some stayed, so no one model is applied to all of them. The
     // record, which is one per Bot, says what the Bot's own chat runs on: the model it just
     // took, or, when it is the chat that stayed, nothing unless the record already names that
     // model. A record left naming the CLI would skip the selection when the CLI is served
     // again, and the Sessions moved here would stay off it. Nothing is returned as applied.
+    if (pinned) check()
+    if (!modelTargetLive(bot) || carried === 'unreadable') return undefined
     if (staying.size > 0 && staying.has(chat)) {
       if (bot.appliedModel === undefined || bot.appliedModel === ref) return undefined
       delete bot.appliedModel
@@ -716,7 +965,7 @@ export function install(rt) {
     bot.appliedModel = ref
     if (effort === undefined) delete bot.appliedEffort
     else bot.appliedEffort = effort
-    await rt.save()
+    await rt.save(pinned ? { required: true } : undefined)
     return staying.size > 0 ? undefined : ref
   }
 
@@ -755,15 +1004,20 @@ export function install(rt) {
   // the catalog from now on, the Bots pinned to it move to what they would be given
   // today, and each of them re-selects even when its record looks applied (`force`):
   // its Session may still be on the route, or on another Bot's route in a group.
-  async function routeRefused(ref, bot) {
+  function routeRefused(ref, bot) {
+    return withGrantHold(rt, { all: true }, () => grantTeamModels(rt),
+      () => routeRefusedHeld(ref, bot))
+  }
+
+  async function routeRefusedHeld(ref, bot) {
     const served = await servedModels(ref)
     if (!refused.has(ref)) {
       refused.set(ref, served)
       rt.warn('omni-ui: %s is not a model endpoint, so it is not chosen again', ref)
       const entries = await catalog()
-      const pinned = Object.values(state.bots).filter(other => other.model === ref || other.appliedModel === ref)
+      const pinned = Object.values(state.bots).filter(other => other.shellHeld === undefined && (other.model === ref || other.appliedModel === ref))
       for (const other of pinned) {
-        if (other.model === ref) other.model = pickDefault(entries)
+        if (other.model === ref) other.model = pickDefault(fallbackEntries(entries, hasSolverSetup(other)))
         if (other.appliedModel === ref) delete other.appliedModel
       }
       await rt.save()
@@ -775,16 +1029,27 @@ export function install(rt) {
   }
 
   const lifetime = new AbortController()
-  ctx.effect?.(() => () => { lifetime.abort() }, 'ds-bot: auxiliary llm retry')
-  const assembleLlm = (options, { check } = {}) => assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff, check })
+  ctx.effect?.(() => () => lifetime.abort(), 'ds-bot: auxiliary llm retry')
+  const assembleLlm = async (options, { check, dispatch } = {}) => {
+    rt.assertBotRunnerProvider?.(options.provider, options.sessionId)
+    return assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff, check, dispatch })
+  }
 
   Object.assign(rt, {
     assembleLlm,
     modelsEpoch: () => catalogEpoch,
-    catalog, cachedCatalog: () => answerable(catalogCache.value), cachedDefault: () => pickDefault(catalogCache.value),
-    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
+    catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
+    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, checkSolverModel, modelAccess, assertModelAccess, desiredModel, taskAskerState, taskAskerModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, applyModel, waitForModel, syncModels, routeRefused,
-    dropCatalog: () => { catalogCache = { at: 0, value: [] } },
+    memoryModel, memoryBackground, quotaUntil,
+    quotaHeld: provider => quotaUntil(provider) !== undefined,
+    noteAsideQuota: provider => asideQuota.set(provider, Date.now() + QUOTA_HOLD_MS),
+    clearAsideQuota: provider => asideQuota.delete(provider),
+    selectSessionModel, reselectOwnRoute, keepsCarriedRoute, assertReadableRoute, storedRouteOf: storedRoute,
+    applyModel, waitForModel, syncModels, routeRefused,
+    dropCatalog: () => {
+      invalidate()
+      catalogCache = { at: 0, value: [] }
+    },
   })
 }

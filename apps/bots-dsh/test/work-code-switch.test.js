@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 
-// The switch's module as the browser gets it, with a minimal React: components run as plain
+// The row control's module as the browser gets it, with a minimal React: components run as plain
 // functions, effects are collected for the test to run, and the store hook reads the snapshot.
 const bundle = await build({
   entryPoints: [fileURLToPath(new URL('../src/client/work-code-switch.js', import.meta.url))],
@@ -12,9 +12,14 @@ const bundle = await build({
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
 let effects = []
+const owners = new Map()
+let mountedTree
 const react = {
   createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.flat(Infinity) } }),
-  useEffect: effect => effects.push(effect), useMemo: make => make(), useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+  useEffect: effect => effects.push(effect), useState: make => {
+    if (!owners.has(mountedTree)) owners.set(mountedTree, make())
+    return [owners.get(mountedTree)]
+  }, useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
 }
 const listeners = {}
 const context = {
@@ -26,7 +31,7 @@ const context = {
 }
 context.exports = context.module.exports
 runInNewContext(bundle.outputFiles[0].text, context)
-const { WorkCodeSwitch, createCodeSwitch, noteKindOf, showsSwitch, shownBotId } = context.module.exports
+const { createCodeSwitch, noteKindOf, showsSwitch, useCodeRowHerdr } = context.module.exports
 // The module's arrays and objects are the sandbox's: compare them as plain values.
 const plain = value => (value === undefined ? value : JSON.parse(JSON.stringify(value)))
 const codeNotices = result => plain(context.module.exports.codeNotices(result))
@@ -37,26 +42,26 @@ function fakeBridge(status, answers = []) {
   return {
     calls,
     status: async () => { calls.status++; return status },
-    open: async (request) => { calls.open.push(plain(request)); return answers.shift() ?? { ok: true, raised: true } },
+    open: async request => { calls.open.push(plain(request)); return answers.shift() ?? { ok: true, raised: true } },
   }
 }
 
-const writer = { id: 'writer', name: 'Writer', sessionId: 'writer-s2' }
-const roster = { bots: [writer], byId: { writer, 'writer-s2': writer }, tasks: { task1: { from: 'writer', status: 'working' } } }
-const shownSession = id => select => select({ byId: { [id]: { id, retainedBy: { mainView: 1 } } } })
+const WRITER = 'b-aaaaaaaaaa'
+const BUILDER = 'b-bbbbbbbbbb'
 
-// Renders the switch's tree, components called as functions, and runs its effects once.
+// Draw the row's notices with the same owner held across renders.
 function render(node) {
   if (node === null || node === undefined || typeof node !== 'object') return node
   if (typeof node.type === 'function') return render(node.type(node.props))
   return { ...node, props: { ...node.props, children: node.props.children.map(render) } }
 }
-function mount(bridge, session = 'writer-s2') {
+function mount(bridge, tree = 'one') {
   context.omniDesktop = bridge === undefined ? undefined : { herdr: bridge }
   effects = []
-  const out = render({ type: WorkCodeSwitch, props: { roster, useSessions: shownSession(session), children: [] } })
+  mountedTree = tree
+  const herdr = useCodeRowHerdr()
   for (const effect of effects.splice(0)) effect()
-  return out
+  return { ...herdr, notices: render(herdr.notices) }
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 0))
 const all = (node, found = []) => {
@@ -68,61 +73,50 @@ const all = (node, found = []) => {
 }
 const textOf = node => all(node).flatMap(n => n.props.children.filter(c => typeof c === 'string')).join(' ')
 const button = (tree, label) => all(tree).find(n => n.type === 'button' && n.props.children.includes(label))
-const segment = (tree, label) => all(tree).find(n => n.props.className === 'bt-code-seg' && n.props.children.includes(label))
 
-test('the switch shows only with the app\'s bridge and a herdr-app that is set up', async () => {
-  assert.equal(mount(undefined), null)
-  assert.equal(mount({ status: async () => ({ state: 'open' }) }), null, 'a bridge without open() is not one')
+test('the row action shows only with the app bridge and a herdr-app that is set up', async () => {
+  assert.equal(mount(undefined).visible(), false)
+  assert.equal(mount({ status: async () => ({ state: 'open' }) }).visible(), false, 'a bridge without open() is not one')
   for (const state of ['missing', 'unsupported']) {
     const bridge = fakeBridge({ state })
     mount(bridge)
     await settle()
-    assert.equal(mount(bridge), null, state)
+    assert.equal(mount(bridge).visible(), false, state)
     assert.equal(bridge.calls.status > 0, true)
   }
   for (const state of ['open', 'closed']) {
     const bridge = fakeBridge({ state, source: 'path' })
-    assert.equal(mount(bridge), null, 'nothing shows before status() answers')
+    assert.equal(mount(bridge).visible(), false, 'nothing shows before status() answers')
     await settle()
-    const tree = mount(bridge)
-    assert.ok(segment(tree, 'Work') && button(tree, 'Code'), state)
+    assert.equal(mount(bridge).visible(), true, state)
   }
-  // herdr-app found but its `status` failed: it is set up, the switch shows.
   assert.equal(showsSwitch({ state: 'error', source: 'path', message: 'boom' }), true)
   assert.equal(showsSwitch(null), false)
-  // A status() that rejects hides it.
   const failing = { status: async () => { throw new Error('ipc') }, open: async () => ({}) }
   mount(failing)
   await settle()
-  assert.equal(mount(failing), null)
+  assert.equal(mount(failing).visible(), false)
 })
 
-test('Code sends the shown Bot\'s id, and nothing calls open() without a click', async () => {
+test('mount, focus and pointer entry only refresh; a row click opens the chosen Bot', async () => {
   const bridge = fakeBridge({ state: 'closed', source: 'path' })
+  const rows = []
+  bridge.openCodeRow = (...args) => { rows.push(plain(args)); return { ok: true, raised: true } }
   mount(bridge)
   await settle()
-  let tree = mount(bridge)
-  // Mounting, the window's focus and the pointer entering read the state; none opens Herdr.
+  assert.equal(bridge.calls.status, 1)
   for (const listener of listeners.focus ?? []) listener()
-  all(tree).find(n => n.props.role === 'group').props.onPointerEnter()
-  // Work is where the person is, a mark and not a control: nothing to click or focus.
-  assert.equal(segment(tree, 'Work').type, 'span')
-  assert.equal(segment(tree, 'Work').props['aria-current'], 'true')
-  assert.equal(button(tree, 'Code').props['aria-current'], undefined)
   await settle()
+  assert.equal(bridge.calls.status, 2)
+  mount(bridge).refresh()
+  await settle()
+  assert.equal(bridge.calls.status, 3)
   assert.deepEqual(bridge.calls.open, [])
-  assert.ok(bridge.calls.status >= 2)
-  // No keyboard shortcut: nothing in the switch listens for keys.
-  assert.equal(all(tree).some(n => Object.keys(n.props).some(name => name.startsWith('onKey'))), false)
+  assert.deepEqual(rows, [])
   assert.equal(listeners.keydown, undefined)
-  tree = mount(bridge)
-  button(tree, 'Code').props.onClick()
+  mount(bridge).openRow(WRITER)
   await settle()
-  assert.deepEqual(bridge.calls.open, [{ botId: 'writer' }])
-  // A task the Bot started counts as the Bot; a room or nothing shown sends no Bot.
-  assert.equal(shownBotId(roster, 'task1'), 'writer')
-  assert.equal(shownBotId(roster, 'room'), null)
-  assert.equal(shownBotId(roster, ''), null)
+  assert.deepEqual(rows, [[WRITER]])
 })
 
 test('an offer of a newer Herdr asks first: yes updates, no opens the installed one', async () => {
@@ -130,21 +124,20 @@ test('an offer of a newer Herdr asks first: yes updates, no opens the installed 
   const bridge = fakeBridge({ state: 'open', source: 'path' }, [offer, offer, { ok: true, raised: true }, offer])
   mount(bridge)
   await settle()
-  button(mount(bridge), 'Code').props.onClick()
+  mount(bridge).openRow(WRITER)
   await settle()
-  let tree = mount(bridge)
+  let tree = mount(bridge).notices
   assert.match(textOf(tree), /Herdr 1\.0\.0 is out/)
   button(tree, 'Update and open').props.onClick()
   await settle()
-  tree = mount(bridge)
+  tree = mount(bridge).notices
   button(tree, 'Open this version').props.onClick()
   await settle()
-  assert.deepEqual(bridge.calls.open, [{ botId: 'writer' }, { botId: 'writer', update: true }, { botId: 'writer', update: false }])
-  // Neither: the offer can be put away without opening anything.
-  button(mount(bridge), 'Code').props.onClick()
+  assert.deepEqual(bridge.calls.open, [{ botId: null }, { botId: null, update: true }, { botId: null, update: false }])
+  mount(bridge).openRow(WRITER)
   await settle()
-  button(mount(bridge), 'Dismiss').props.onClick()
-  assert.equal(button(mount(bridge), 'Update and open'), undefined)
+  button(mount(bridge).notices, 'Dismiss').props.onClick()
+  assert.equal(button(mount(bridge).notices, 'Update and open'), undefined)
   assert.equal(bridge.calls.open.length, 4)
 })
 
@@ -195,7 +188,7 @@ test('a failed or refused open shows its label and can be dismissed', async () =
   const refused = { status: async () => ({ state: 'open', source: 'path' }), open: () => Promise.reject(new Error('Herdr opens only on a click')) }
   const control = createCodeSwitch(refused)
   await control.refresh()
-  const result = await control.open({ botId: 'writer' })
+  const result = await control.open({ botId: WRITER })
   assert.equal(result.reason, 'error')
   assert.equal(control.snapshot().busy, false)
   assert.deepEqual(codeNotices(control.snapshot().result).map(n => n.label), ["Herdr didn't open"])
@@ -203,13 +196,69 @@ test('a failed or refused open shows its label and can be dismissed', async () =
   assert.equal(control.snapshot().result, null)
   // An app that refused the page answers null: a failed open, not silence.
   const silent = createCodeSwitch({ status: async () => ({ state: 'open' }), open: async () => null })
-  await silent.open({ botId: 'writer' })
+  await silent.open({ botId: WRITER })
   assert.deepEqual(codeNotices(silent.snapshot().result).map(n => n.label), ["Herdr didn't open"])
   // One open at a time: a second click while the first runs does not reach the bridge again.
   const slow = fakeBridge({ state: 'open', source: 'path' })
   const twice = createCodeSwitch(slow)
-  const first = twice.open({ botId: 'writer' })
-  void twice.open({ botId: 'writer' })
+  const first = twice.open({ botId: WRITER })
+  void twice.open({ botId: WRITER })
   await first
   assert.equal(slow.calls.open.length, 1)
+})
+
+test('Retry repeats the modern Code row without invoking the legacy open', async () => {
+  const bridge = fakeBridge({ state: 'open' })
+  const calls = []
+  bridge.openCodeRow = (...args) => {
+    calls.push(plain(args))
+    return { ok: false, reason: 'start' }
+  }
+  mount(bridge)
+  await settle()
+  mount(bridge).openRow(WRITER)
+  assert.deepEqual(calls, [[WRITER]])
+  await settle()
+  button(mount(bridge).notices, 'Retry').props.onClick()
+  assert.deepEqual(calls, [[WRITER], [WRITER]])
+  assert.deepEqual(bridge.calls.open, [])
+  await settle()
+})
+
+test('a second Code row retargets the offer and Retry to its own Bot', async () => {
+  const offer = { ok: false, reason: 'update', latest: '2.0.0' }
+  const answers = [offer, offer, { ok: false, reason: 'start' }, { ok: true, raised: true }]
+  const bridge = fakeBridge({ state: 'open' })
+  const calls = []
+  bridge.openCodeRow = (...args) => { calls.push(plain(args)); return answers.shift() }
+  mount(bridge)
+  await settle()
+  mount(bridge).openRow(WRITER)
+  await settle()
+  mount(bridge).openRow(BUILDER)
+  await settle()
+  button(mount(bridge).notices, 'Update and open').props.onClick()
+  await settle()
+  button(mount(bridge).notices, 'Retry').props.onClick()
+  await settle()
+  assert.deepEqual(calls, [[WRITER], [BUILDER], [BUILDER, { update: true }], [BUILDER]])
+  assert.deepEqual(bridge.calls.open, [])
+})
+
+test('missing or unsupported Herdr refreshes availability without hiding the row notice', async () => {
+  for (const reason of ['missing', 'unsupported']) {
+    let statusReads = 0
+    const bridge = {
+      status: async () => ({ state: ++statusReads === 1 ? 'open' : reason }),
+      open: async () => ({ ok: false, reason }),
+    }
+    const control = createCodeSwitch(bridge)
+    await control.refresh()
+    assert.equal(showsSwitch(control.snapshot().status), true)
+    await control.open({ botId: WRITER })
+    await settle()
+    assert.equal(statusReads, 2)
+    assert.equal(showsSwitch(control.snapshot().status), false)
+    assert.equal(codeNotices(control.snapshot().result)[0].kind, reason)
+  }
 })

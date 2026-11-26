@@ -3,8 +3,11 @@
 // DSH does not fence reads, so this closes the
 // tools Omni owns and checks the paths that the file tools and the shell are given;
 // a shell can still reach any file the account can (see docs/plans).
-import { join, resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { readdir } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { install as installPrivateForward } from './private-forward.js'
+import { CONNECTOR_KEY, CONNECTOR_KEY_ORIGINS, keyFileName, readConnectorKeyOrigins } from './connectors/credential-key.js'
 import { within } from './folders.js'
 import { refusal } from './refusal.js'
 import { unquote } from './text.js'
@@ -14,6 +17,44 @@ const WRITE_TOOLS = ['write', 'edit', 'str_replace_editor']
 const SEARCH_TOOLS = ['glob', 'grep']
 const SHELL_TOOLS = ['bash', 'pwsh', 'terminal_open', 'terminal_send']
 const SESSION_TOOLS = ['session_search', 'session_event_search', 'session_trace', 'session_event_trace', 'session_event_read']
+const HOST_PATH_REFUSAL = "That path belongs to the Bot team's host; no Bot reads it."
+
+// DSH's patch parser trims Unicode White_Space, including NEL and excluding BOM.
+function trimPatchEnd(line) {
+  let end = line.length
+  while (end > 0 && /\p{White_Space}/u.test(line[end - 1])) end--
+  return line.slice(0, end)
+}
+const trimPatchStart = line => line.replace(/^\p{White_Space}+/u, '')
+
+function scanPatchHeaders(input) {
+  let lines = trimPatchStart(trimPatchEnd(input)).split(/\r?\n/u)
+  if (lines.length >= 4 && ['<<EOF', "<<'EOF'", '<<"EOF"'].includes(lines[0]) && lines.at(-1).endsWith('EOF')) {
+    lines = lines.slice(1, -1)
+  }
+  const trim = line => trimPatchStart(trimPatchEnd(line))
+  if (trim(lines[0]) !== '*** Begin Patch' || trim(lines.at(-1)) !== '*** End Patch') return undefined
+
+  const paths = []
+  let operation
+  for (const line of lines.slice(1, -1)) {
+    const endTrimmed = trimPatchEnd(line)
+    // Leading spaces in an update mark context, even when the text looks like a header.
+    const header = operation === 'Update File' ? endTrimmed : trimPatchStart(endTrimmed)
+    const file = /^\*\*\* (Add File|Update File|Delete File): (.+)$/su.exec(header)
+    if (file) {
+      operation = file[1]
+      paths.push(file[2])
+    } else if (operation === 'Update File' && header.startsWith('*** Move to: ')) {
+      paths.push(header.slice('*** Move to: '.length))
+    } else if (operation === 'Update File' && (/^[ +-]/u.test(line) || line === '' || /^@@(?: |$)/u.test(header) || header === '*** End of File')) {
+      continue
+    } else if (operation !== 'Add File' || !line.startsWith('+')) {
+      return undefined
+    }
+  }
+  return paths
+}
 
 // Windows and macOS file systems ignore case.
 const fold = text => (process.platform === 'linux' ? text : text.toLowerCase())
@@ -26,15 +67,29 @@ const asShell = (path) => {
   return drive ? [slashed, `/${drive[1]}${slashed.slice(2)}`] : [slashed]
 }
 
+export async function hostOnlyTargets(path, { bases, homedir, realBeyond }) {
+  if (typeof path !== 'string' || path === '') return []
+  const tilde = process.platform === 'win32' ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/
+  const expanded = tilde.test(path) ? homedir() + path.slice(1) : path
+  const rawPaths = isAbsolute(expanded) ? [expanded] : [...new Set(bases.filter(Boolean))].map(base => base + sep + expanded)
+  const keys = await Promise.all(rawPaths.map(async (raw) => {
+    const resolved = resolve(raw)
+    return [resolved, await realBeyond(raw), await realBeyond(resolved)].map(fold)
+  }))
+  return [...new Set(keys.flat())]
+}
+
 export function install(rt) {
   const { ctx, state } = rt
   installPrivateForward(rt)
+  let patchParser
 
   const isPrivate = id => rt.botOf(id)?.private === true
   const privateBots = () => Object.values(state.bots).filter(bot => bot.private === true)
   // Deleting a private Bot does not make the files and memory it leaves behind public.
   const protectedBots = () => [...new Map([...(state.privateArchives ?? []), ...privateBots()].map(bot => [bot.id, bot])).values()]
   const sessionsOf = bot => [...new Set([bot.id, ...(bot.sessionIds ?? [rt.chatOf(bot.id), ...(bot.segments ?? []).map(segment => segment.sessionId), ...rt.groupSessionsOf(bot.id)])])]
+  const privatePathsKey = () => JSON.stringify(protectedBots().map(bot => [sessionsOf(bot), bot.workDir, bot.archivePath]))
   const dataRoots = () => [rt.dshHome, rt.home, process.env.DS_BOT_USER_DSH_HOME?.trim()].filter(Boolean)
 
   // A path as it is and as the file system resolves it, folded for comparing. realBeyond
@@ -78,9 +133,14 @@ export function install(rt) {
     join(rt.home, 'usage.sqlite-wal'),
     join(rt.home, 'usage.sqlite-shm'),
     join(rt.home, 'inflight.json'),
+    join(rt.home, 'wake.jsonl'),
     join(rt.home, 'learning', 'state.json'),
     join(rt.home, 'ocr.json'),
     join(rt.home, 'secrets.json'),
+    join(rt.home, CONNECTOR_KEY),
+    join(rt.home, 'vault-sources.json'),
+    join(rt.home, 'vault-audit.jsonl'),
+    join(rt.home, 'vault-audit.jsonl.1'),
     join(rt.home, 'memory', 'journal.jsonl'),
     join(rt.home, 'memory', 'journal.torn'),
     join(rt.home, 'memory', 'pending.json'),
@@ -302,8 +362,59 @@ export function install(rt) {
     }
   }
 
+  async function guardHostOnly(exec) {
+    const args = exec.arguments ?? {}
+    const name = exec.name
+    let paths
+    if (Object.hasOwn(FILE_TOOLS, name)) paths = [args[FILE_TOOLS[name]]]
+    else if (name === 'apply_patch' && typeof args.input === 'string') {
+      const parser = await (patchParser ??= import('@deepseek-ai/dsh-fs-patch').catch(() => undefined))
+      if (parser === undefined) paths = scanPatchHeaders(args.input)
+      else {
+        try {
+          paths = parser.parsePatch(args.input).flatMap(op => op.kind === 'update' ? [op.path, op.moveTo] : [op.path])
+        } catch (error) {
+          if (!(error instanceof parser.PatchParseError)) throw error
+        }
+      }
+      if (paths === undefined && ['wake.jsonl', CONNECTOR_KEY].some(file => fold(args.input).includes(file))) throw refusal(HOST_PATH_REFUSAL)
+    } else if (SEARCH_TOOLS.includes(name)) {
+      paths = [name === 'grep' && !args.path ? '.' : args.path]
+      if (name === 'glob' && typeof args.pattern === 'string') {
+        const target = args.pattern.split(/[*?[{]/, 1)[0]
+        if (/^(?:[a-z]:|[\\/]|~)/i.test(target)) paths.push(target)
+        else if (keyFileName(basename(fold(target)))) paths.push(args.path ? join(args.path, target) : target)
+      }
+    }
+    if (!paths?.some(path => typeof path === 'string' && path !== '')) return
+    const session = exec.agent?.session ?? exec.agent
+    const bases = [rt.sessionFolder(session), session?.header?.cwd]
+    let keyHomes
+    try { keyHomes = [rt.home, ...readConnectorKeyOrigins(rt.home)] } catch { throw refusal(HOST_PATH_REFUSAL) }
+    const guardHomes = await Promise.all(keyHomes.map(async home => ({ home, paths: await spellings(home) })))
+    const homes = guardHomes[0].paths
+    for (const path of paths) {
+      const targets = await hostOnlyTargets(path, { bases, homedir, realBeyond: rt.realBeyond })
+      if (targets.some((key) => {
+        const base = basename(key)
+        return homes.includes(dirname(key)) && (base === 'wake.jsonl' || /^wake\.jsonl\.[^\\/]+\.tmp$/.test(base))
+      })) throw refusal(HOST_PATH_REFUSAL)
+      for (const { home, paths: roots } of guardHomes) {
+        if (targets.some(key => roots.some(root => (dirname(key) === root && keyFileName(basename(key)))
+          || within(key, join(root, CONNECTOR_KEY_ORIGINS))))) throw refusal(HOST_PATH_REFUSAL)
+        if (name !== 'grep' || !targets.some(key => roots.some(root => within(root, key)))) continue
+        const files = await readdir(home).catch(error => {
+          if (error?.code === 'ENOENT') return []
+          throw refusal(HOST_PATH_REFUSAL)
+        })
+        if (files.some(file => keyFileName(fold(file)))) throw refusal(HOST_PATH_REFUSAL)
+      }
+    }
+  }
+
   // Before the tools' own hooks, so that a closed call never reaches a card they show.
   ctx.on('tools/execute', async (exec, next) => {
+    await guardHostOnly(exec)
     if (protectedBots().length === 0) return next()
     const self = await callerOf(exec)
     await guardTeam(exec, self)
@@ -371,5 +482,5 @@ export function install(rt) {
   // What the settings list shows. Session ids stay on the host.
   const archivesView = () => (state.privateArchives ?? []).map(({ id, name, workDir }) => ({ id, name, ...(workDir === undefined ? {} : { workDir }) }))
 
-  Object.assign(rt, { isPrivate, privateClash, checkPrivacyChange: checkChange, checkNoPrivate, releaseArchive, archivesView })
+  Object.assign(rt, { isPrivate, privateClash, privatePathOwner: ownerOfPath, privatePathsKey, checkPrivacyChange: checkChange, checkNoPrivate, releaseArchive, archivesView })
 }

@@ -9,9 +9,10 @@
 // more output; kind 2 is a stream close. The attach is `observe: true`: herdr-core itself
 // refuses to let this viewer type or resize, so the pane is a watcher, not a second owner.
 //
-// This module is the protocol and the process only: no files, no registry, no policy. The
+// This module probes for a running core and manages its protocol connection. The
 // tree and the route (code-side.js) decide which terminal may be attached.
 import { spawn } from 'node:child_process'
+import { answersStatus, probeCore } from './core-probe.js'
 
 export const KINDS = Object.freeze({ data: 0, credit: 1, close: 2, resize: 3, focus: 4 })
 /** The core's cap on one frame's payload; a header above it is a broken stream. */
@@ -22,6 +23,8 @@ export const CALL_TIMEOUT_MS = 10_000
 export const HELLO_TIMEOUT_MS = 10_000
 /** A terminal's history sent on attach, in lines. The core keeps its own bound. */
 export const HISTORY_LINES = 1000
+const MAX_EARLY_RESIZES = 8
+const MAX_UNANNOUNCED_CHANNELS = 16
 
 /** One frame: the 9-byte little-endian header and the payload. */
 export function encodeFrame(channel, kind, payload = Buffer.alloc(0)) {
@@ -59,13 +62,17 @@ export class CoreError extends Error {
 }
 
 /**
- * Open one `hc connect` and read its hello.
- * @param {{ bin?: string, env?: NodeJS.ProcessEnv, cwd?: string, onStderr?: (text: string) => void, spawn?: typeof spawn }} [options]
+ * Open one `hc connect` and read its hello. `socket` pins the connection to that one path: it is
+ * checked alone and nothing else is tried when it does not answer.
+ * @param {{ bin?: string, env?: NodeJS.ProcessEnv, cwd?: string, socket?: string, onStderr?: (text: string) => void, spawn?: typeof spawn }} [options]
  * @returns {Promise<CoreConnection>}
  */
-export async function connectCore({ bin, env = process.env, cwd, onStderr = () => {}, spawn: spawnProcess = spawn } = {}) {
+export async function connectCore({ bin, env = process.env, cwd, socket: pinned, onStderr = () => {}, spawn: spawnProcess = spawn } = {}) {
+  const socket = pinned === undefined ? await probeCore(env) : (await answersStatus(pinned, 3000) ? pinned : null)
+  if (socket === null) throw new CoreError('no-core')
+  // Use the socket that answered, even when hc's first choice was stale.
   const command = bin ?? (env.HERDR_HC && String(env.HERDR_HC).trim() ? env.HERDR_HC : 'hc')
-  const child = spawnProcess(command, ['connect'], { stdio: ['pipe', 'pipe', 'pipe'], env, cwd, windowsHide: true })
+  const child = spawnProcess(command, ['connect'], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...env, HC_SOCKET: socket }, cwd, windowsHide: true })
   const core = new CoreConnection(child, { onStderr })
   try {
     await core.start()
@@ -89,6 +96,7 @@ export class CoreConnection {
     // same read as the reply that names its channel, before `watch` runs. Bounded.
     this.early = new Map()
     this.earlyBytes = 0
+    this.detachedChannel = null
     this.buffer = Buffer.alloc(0)
     this.started = false
     this.closed = false
@@ -133,9 +141,10 @@ export class CoreConnection {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
+        if (method === 'terminal.attach') this.discardUnannouncedFrames()
         reject(new CoreError('core-timeout', `herdr-core did not answer ${method}`))
       }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer })
+      this.pending.set(id, { resolve, reject, timer, method })
       // After the hello line every call is a DATA frame on channel 0, as herdr-core reads it.
       this.writeFrame(0, KINDS.data, Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }), 'utf8'))
     })
@@ -161,23 +170,15 @@ export class CoreConnection {
     return { channel: result.channel, terminal: result.terminal ?? null }
   }
 
-  /** Hear one attached stream: `onData(buffer)` for its bytes, `onClose(reason)` when it ends. */
-  watch(channel, { onData, onClose = () => {} }) {
-    const handler = { onData, onClose }
+  /** Hear one attached stream's bytes, close reason and payload-free resize hints. */
+  watch(channel, { onData, onClose = () => {}, onResize = () => {} }) {
+    const handler = { onData, onClose, onResize }
     this.channels.set(channel, handler)
-    const early = this.early.get(channel)
+    const early = this.takeEarly(channel)
     if (early) {
-      this.early.delete(channel)
-      for (const frame of early) {
-        this.earlyBytes -= frame.payload.length
-        if (frame.kind === KINDS.data) onData(frame.payload)
-        else if (frame.kind === KINDS.close) {
-          this.channels.delete(channel)
-          let reason = 'closed'
-          try { reason = String(JSON.parse(frame.payload.toString('utf8'))?.reason ?? 'closed') } catch { /* a bare close */ }
-          onClose(reason)
-          break
-        }
+      for (const frame of early.frames) {
+        if (this.channels.get(channel) !== handler) break
+        this.dispatch({ channel, kind: frame.kind }, frame.payload)
       }
     }
     return () => { this.channels.delete(channel) }
@@ -191,9 +192,29 @@ export class CoreConnection {
 
   /** Close one attached stream (its terminal keeps running). */
   detach(channel) {
-    if (!this.channels.has(channel)) return
-    this.channels.delete(channel)
+    const early = this.takeEarly(channel)
+    if (!this.channels.delete(channel) && !early) return
+    this.detachedChannel = channel
     this.writeFrame(channel, KINDS.close)
+  }
+
+  takeEarly(channel) {
+    const early = this.early.get(channel)
+    if (!early) return null
+    this.early.delete(channel)
+    this.earlyBytes -= early.bytes
+    return early
+  }
+
+  awaitingAttach() {
+    return [...this.pending.values()].some(entry => entry.method === 'terminal.attach')
+  }
+
+  discardUnannouncedFrames() {
+    if (this.awaitingAttach()) return
+    for (const [channel, early] of this.early) {
+      if (!early.announced) this.takeEarly(channel)
+    }
   }
 
   /** End the connection: every stream closes, the terminal keeps running, the process goes. */
@@ -204,6 +225,8 @@ export class CoreConnection {
       try { this.writeFrame(channel, KINDS.close) } catch { /* the process is going */ }
     }
     this.channels.clear()
+    this.early.clear()
+    this.earlyBytes = 0
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timer)
       entry.reject(new CoreError('core-closed', 'herdr-core connection closed'))
@@ -264,23 +287,46 @@ export class CoreConnection {
       if (!entry) return
       this.pending.delete(answer.id)
       clearTimeout(entry.timer)
-      if (answer.error) entry.reject(new CoreError(String(answer.error?.data?.kind ?? 'core-refused'), String(answer.error?.message ?? 'herdr-core refused it')))
-      else entry.resolve(answer.result ?? null)
+      if (answer.error) {
+        entry.reject(new CoreError(String(answer.error?.data?.kind ?? 'core-refused'), String(answer.error?.message ?? 'herdr-core refused it')))
+      } else {
+        const result = answer.result
+        if (entry.method === 'terminal.attach' && Number.isSafeInteger(result?.channel)) {
+          const early = this.early.get(result.channel) ?? { frames: [], bytes: 0, resizes: 0 }
+          early.announced = true
+          this.early.set(result.channel, early)
+        }
+        entry.resolve(result ?? null)
+      }
+      if (entry.method === 'terminal.attach') this.discardUnannouncedFrames()
       return
     }
     const channel = this.channels.get(header.channel)
     if (!channel) {
-      // The attach's first paint can share a read with the reply that names its channel:
-      // keep it, bounded, until `watch` claims it.
-      if (header.kind !== KINDS.data && header.kind !== KINDS.close) return
+      if (header.kind !== KINDS.data && header.kind !== KINDS.close && header.kind !== KINDS.resize) return
+      let early = this.early.get(header.channel)
+      if (!early) {
+        // A first paint can race the attach reply. The reply claims these frames by
+        // channel number and any strays are discarded when the attach settles.
+        if (header.channel === this.detachedChannel || this.early.size >= MAX_UNANNOUNCED_CHANNELS || !this.awaitingAttach()) return
+        early = { frames: [], bytes: 0, resizes: 0, announced: false }
+        this.early.set(header.channel, early)
+      }
+      if (header.kind === KINDS.resize) {
+        if (early.resizes < MAX_EARLY_RESIZES) {
+          early.frames.push({ kind: header.kind })
+          early.resizes += 1
+        }
+        return
+      }
       if (this.earlyBytes + payload.length > MAX_FRAME) return
-      const list = this.early.get(header.channel) ?? []
-      list.push({ kind: header.kind, payload: Buffer.from(payload) })
-      this.early.set(header.channel, list)
+      early.frames.push({ kind: header.kind, payload: Buffer.from(payload) })
+      early.bytes += payload.length
       this.earlyBytes += payload.length
       return
     }
     if (header.kind === KINDS.data) channel.onData(payload)
+    else if (header.kind === KINDS.resize) channel.onResize()
     else if (header.kind === KINDS.close) {
       let reason = 'closed'
       try { reason = String(JSON.parse(payload.toString('utf8'))?.reason ?? 'closed') } catch { /* a bare close */ }

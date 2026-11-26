@@ -6,6 +6,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -59,13 +60,22 @@ if (existsSync(base)) {
 }
 const packageNameOf = specifier => specifier.split('/').slice(0, 2).join('/')
 const pluginUrl = `${pathToFileURL(plugin).href}/`
+// role-runtime.test.js loads acp-dsh's adapter (RFC 0037 P4). Its DSH peers come from
+// this same pinned harness; that test checks both plugins pin one release.
+const parents = [pluginUrl, `${pathToFileURL(resolve(plugin, '../acp-dsh')).href}/`]
+
+// member-wall-adapter.test.js mounts the multiuser adapter on the same Cordis root.
+parents.push(`${pathToFileURL(resolve(plugin, '../multiuser-dsh')).href}/`)
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith('@deepseek-ai/') && context.parentURL?.startsWith(pluginUrl)) {
+    if (specifier.startsWith('@deepseek-ai/')
+      && parents.some(prefix => context.parentURL?.startsWith(prefix))) {
       const parentURL = workspacePackages.get(packageNameOf(specifier)) ?? anchor
       return nextResolve(specifier, { ...context, parentURL })
     }
     return nextResolve(specifier, context)
   },
 })
+
+process.env.AUTOMAGIK_RESERVATIONS_DIR = join(tmpdir(), `automagik-no-reservations-${process.pid}`)

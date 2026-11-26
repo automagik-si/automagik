@@ -98,7 +98,7 @@ export async function prepareUpload({ blocks, replay = [], run, attachments, cwd
       ])
       valid()
       controller.signal.throwIfAborted()
-      if (result.error) warn(`Upload copy unavailable: ${result.error.message}`)
+      if (result.error) warn('Upload copy unavailable')
       if (input.type === 'file') {
         block.text = fileHandleText(input.attachment, result.path)
       } else if (result.path) {

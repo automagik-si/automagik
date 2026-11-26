@@ -14,16 +14,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRuntime } from '../index.js'
 import { createAgentAccess, agentBindAddress, AGENT_TOOLS } from '../src/host/agent-access.js'
+import { createDraftSweep } from '../src/client/draft-sweep.js'
 import { fakeContext } from './fake-ctx.js'
+import { solverInstructions } from '../src/shared/solver-method.js'
 
-async function fixture(t) {
+async function fixture(t, { bots = {}, rooms = {}, empty = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'agent-access-'))
   await writeFile(join(home, 'state.json'), JSON.stringify({ version: 1, revision: 1,
-    mainBotIds: ['a'], workspaceId: 'w', bots: {
+    mainBotIds: empty ? [] : ['a'], workspaceId: 'w', bots: empty ? {} : {
       a: { id: 'a', name: 'Alpha', instructions: 'Help', capabilities: [] },
       b: { id: 'b', name: 'Beta', instructions: '', capabilities: [] },
       c: { id: 'c', name: 'Gamma', instructions: '', capabilities: [] },
-    }, rooms: {}, agents: {}, exchanges: [] }))
+      ...bots,
+    }, rooms, agents: {}, exchanges: [] }))
   const ctx = fakeContext()
   const agents = new Map()
   let count = 0
@@ -575,6 +578,103 @@ test('SDK sessions through the exact web gate route require the agent token', as
   assert.equal(without.status, 401)
 })
 
+test("P14: one workspace's agent token is refused at another's listener and gate origin",
+  async t => {
+    async function gateRoute({ home, mcpRoute }, origin) {
+      const upstream = createServer(async (req, res) => {
+        if (req.headers.cookie !== 'dsh-fixture=value' || req.url !== '/api/omni-mcp') {
+          res.writeHead(401).end()
+          return
+        }
+        try {
+          const response = await mcpRoute.fetch(new Request(`http://localhost${req.url}`, {
+            method: req.method, headers: req.headers, body: Readable.toWeb(req), duplex: 'half',
+          }))
+          res.writeHead(response.status, Object.fromEntries(response.headers))
+          res.end(Buffer.from(await response.arrayBuffer()))
+        } catch (error) { res.destroy(error) }
+      })
+      t.after(() => new Promise(resolve => {
+        upstream.close(resolve)
+        upstream.closeAllConnections()
+      }))
+      upstream.listen(0, '127.0.0.1')
+      await once(upstream, 'listening')
+      const { port } = upstream.address()
+      const gate = createGate({ origin, sessions: new SessionStore(join(home, 'gate')),
+        credentials: { port, authority: `127.0.0.1:${port}`, cookie: async () => 'dsh-fixture=value' },
+        auditAccess: () => {},
+      })
+      t.after(() => gate.closeGate())
+      gate.listen(0, '127.0.0.1')
+      await once(gate, 'listening')
+      return { url: `http://127.0.0.1:${gate.address().port}/api/omni-mcp`,
+        host: new URL(origin).host }
+    }
+
+    function listTools({ url, host }, token) {
+      return new Promise((resolve, reject) => {
+        const req = httpRequest(url, { method: 'POST', headers: {
+          ...(host ? { host } : {}), authorization: `Bearer ${token}`,
+          accept: 'application/json, text/event-stream', 'content-type': 'application/json',
+        } }, res => {
+          let body = ''
+          res.setEncoding('utf8')
+          res.on('data', chunk => { body += chunk })
+          res.on('error', reject)
+          res.on('end', () => resolve({ status: res.statusCode, body }))
+        })
+        req.on('error', reject)
+        req.setTimeout(5000, () => req.destroy(new Error('MCP fixture request timed out')))
+        req.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+      })
+    }
+
+    const a = await fixture(t)
+    const b = await fixture(t)
+    const workspaces = [
+      { label: 'A', owner: a, other: b, gate: await gateRoute(a, 'https://workspace-a.invalid') },
+      { label: 'B', owner: b, other: a, gate: await gateRoute(b, 'https://workspace-b.invalid') },
+    ]
+    for (const workspace of workspaces) {
+      const direct = { url: (await workspace.owner.view()).url }
+      assert.match(direct.url, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
+      workspace.routes = [['listener', direct], ['gate', workspace.gate]]
+      for (const [route, target] of workspace.routes) {
+        const label = `Workspace ${workspace.label} ${route} own-token control`
+        const response = await listTools(target, workspace.owner.token)
+        assert.equal(response.status, 200, label)
+        assert.ok(Array.isArray(JSON.parse(response.body).result?.tools), label)
+      }
+    }
+
+    for (const { label, owner, other, routes } of workspaces) {
+      const auditPath = join(owner.home, 'agent-audit.jsonl')
+      for (const [route, target] of routes) {
+        const request = `Workspace ${label} ${route} cross-home request`
+        const before = await readFile(auditPath, 'utf8')
+        const response = await listTools(target, other.token)
+        assert.notEqual(response.status, 502, `${request}: fixture upstream unavailable`)
+        assert.equal(response.status, 401, request)
+        const after = await readFile(auditPath, 'utf8')
+        assert.equal(after.startsWith(before), true, request)
+        const lines = after.slice(before.length).trimEnd().split('\n')
+        assert.equal(lines.length, 1, request)
+        const { time, callId, ...refusal } = JSON.parse(lines[0])
+        assert.ok(Number.isFinite(time), request)
+        assert.match(callId, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
+          request)
+        assert.deepEqual(refusal, { tokenName: 'Unknown token', action: 'http', target: null,
+          outcome: 'refused', reason: 'Invalid agent token' }, request)
+      }
+    }
+    // After every cross-home request: neither home's audit holds either raw token.
+    for (const { owner } of workspaces) {
+      const audit = await readFile(join(owner.home, 'agent-audit.jsonl'), 'utf8')
+      assert.equal(audit.includes(a.token), false)
+      assert.equal(audit.includes(b.token), false)
+    }
+  })
 
 test('Origin admission requires an explicit exact origin in a list', async t => {
   const { rt, rpc, token } = await fixture(t)
@@ -626,3 +726,261 @@ test('conversation state distinguishes running, waiting and idle without exposin
     rt.state.questions['group-member-session'] = { text: 'Private group question' }
     assert.equal((await tool('get_conversation', { id: 'r' })).value.status, 'waiting')
   })
+
+// #2056 D1.5 (G13b): while a Bot's review guard is on, an outside agent cannot move it to another
+// model; its other fields, and an unguarded Bot's model, still change.
+test('agent access cannot change a guarded Bot\'s model; other fields and unguarded Bots are unchanged', async t => {
+  const { rt, tool, view } = await fixture(t)
+  rt.resolveModel = async ref => ref
+  rt.resolveEffort = async (ref, effort) => effort
+  rt.applyModel = async () => {}
+  rt.state.bots.b.reviewerId = 'c'
+  rt.state.bots.b.reviewGuard = true
+  await rt.save({ required: true })
+  const refused = await tool('update_bot', { id: 'b', model: 'provider/model' })
+  assert.equal(refused.isError, true)
+  assert.deepEqual(refused.value, { error: 'Action refused', code: 'bot/review-guard' })
+  assert.equal(rt.botOf('b').model, undefined)
+  assert.ok((await view()).audit.some(entry => entry.action === 'update_bot' && entry.target === 'b' && entry.outcome === 'refused'))
+  const instructions = await tool('update_bot', { id: 'b', instructions: 'Still editable' })
+  assert.equal(instructions.isError, false)
+  assert.equal(rt.botOf('b').instructions, 'Still editable')
+  const free = await tool('update_bot', { id: 'c', model: 'provider/model' })
+  assert.equal(free.isError, false)
+  assert.equal(rt.botOf('c').model, 'provider/model')
+})
+
+test('agent access audits and refuses Solver Auto on create and update', async t => {
+  const { rt, tool, view } = await fixture(t)
+  for (const [name, args] of [['create_bot', { name: 'Solver', role: 'Solver' }], ['update_bot', { id: 'b' }]]) {
+    const refused = await tool(name, { ...args, solverAuto: true })
+    assert.equal(refused.isError, true)
+    assert.deepEqual(refused.value, { error: 'Action refused', code: 'bot/solver-auto' })
+    assert.ok((await view()).audit.some(entry => entry.action === name && entry.outcome === 'refused'))
+  }
+  assert.equal(rt.botOf('b').solverAuto, undefined)
+  assert.equal(Object.keys(rt.state.bots).length, 3)
+})
+
+test('a Bot an agent token deletes is listed for the page\'s composer sweep; a reading host cannot clear it', async t => {
+  const { rt, tool, call } = await fixture(t)
+  const bot = (await tool('create_bot', { name: 'Scratch', instructions: 'Temporary' })).value
+  assert.equal((await tool('delete_bot', { id: bot.id })).isError, false)
+  assert.equal((await call('state')).value.draftSweep.includes(bot.id), true)
+  rt.readOnly = () => 'Owner has read-only access'
+  const refused = await call('drafts-swept', { ids: [bot.id] })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.error.code, 'bot/read-only')
+  assert.equal(rt.state.draftSweep.includes(bot.id), true)
+})
+
+// The owner's page over the host route: a storage holding the named composer keys, and a
+// `call` that rejects a refused request.
+async function pageSweep(call, keys) {
+  const items = new Map(keys.map(key => [key, '{"draft":"x"}']))
+  const storage = { items, getItem: key => (items.has(key) ? items.get(key) : null), removeItem: (key) => { items.delete(key) } }
+  const drafts = createDraftSweep({ storage, openSession: () => undefined, call: async (endpoint, payload) => {
+    const answer = await call(endpoint, payload)
+    if (!answer.ok) throw new Error(answer.error?.message ?? 'refused')
+    return answer.value
+  } })
+  drafts.note((await call('state')).value.draftSweep)
+  await drafts.run()
+  return [...items.keys()]
+}
+
+test('a moved Bot an agent token deletes has its current chat swept by the page', async t => {
+  const { tool, call } = await fixture(t, { bots: {
+    b: { id: 'b', name: 'Beta', instructions: '', capabilities: [], sessionId: 'b-next', segments: [{ sessionId: 'b', endedAt: 1 }] },
+  } })
+  assert.equal((await tool('delete_bot', { id: 'b' })).isError, false)
+  const left = await pageSweep(call, ['dsh.conversation.b', 'dsh.conversation.b-next', 'dsh.conversation.c'])
+  assert.deepEqual(left, ['dsh.conversation.c'])
+  assert.equal(Object.hasOwn((await call('state')).value, 'draftSweep'), false)
+})
+
+test('a group an agent token deletes has its composer keys swept by the page', async t => {
+  const { tool, call } = await fixture(t, { rooms: {
+    r1: { id: 'r1', name: 'Ops', members: ['a', 'b', 'c'], mode: 'admin', admin: 'b', named: true,
+      sessionId: 'r1-next', parts: [{ sessionId: 'r1' }], sessions: { b: 'gb' } },
+  } })
+  assert.equal((await tool('delete_group', { id: 'r1' })).isError, false)
+  const left = await pageSweep(call, ['dsh.conversation.r1', 'dsh.conversation.r1-next', 'dsh.conversation.gb', 'dsh.conversation.c'])
+  assert.deepEqual(left, ['dsh.conversation.c'])
+  assert.equal(Object.hasOwn((await call('state')).value, 'draftSweep'), false)
+})
+
+const solverProfile = () => ({ role: 'Solver', instructions: solverInstructions() })
+
+test('an authenticated agent cannot create a Solver or bootstrap an empty team through it', async t => {
+  const { rt, home, ctx, tool } = await fixture(t, { empty: true })
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  const create = t.mock.method(ctx.sessionController, 'create')
+  await rt.save()
+  const disk = await state()
+  const live = structuredClone(rt.state.bots)
+  const result = await tool('create_bot', { name: 'Candidate', ...solverProfile() })
+  await rt.save()
+  assert.deepEqual((await state()).bots, disk.bots)
+  assert.deepEqual((await state()).mainBotIds, [])
+  assert.deepEqual(rt.state.bots, live)
+  assert.equal(create.mock.callCount(), 0)
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'bot/refused')
+})
+
+test('an explicit null avatar is refused by the MCP create schema', async t => {
+  const { rt, home, ctx, tool } = await fixture(t, { empty: true })
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  const create = t.mock.method(ctx.sessionController, 'create')
+  await rt.save()
+  const disk = (await state()).bots
+  const live = structuredClone(rt.state.bots)
+  const result = await tool('create_bot', { name: 'Candidate', avatar: null })
+  await rt.save()
+  assert.deepEqual((await state()).bots, disk)
+  assert.deepEqual(rt.state.bots, live)
+  assert.equal(create.mock.callCount(), 0)
+  assert.equal(result.error?.code, -32602)
+})
+
+test('an authenticated agent cannot turn an ordinary Bot into a Solver through an update', async t => {
+  const { rt, home, tool } = await fixture(t)
+  const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'))
+  await rt.save()
+  const disk = (await state()).bots.b
+  const live = structuredClone(rt.botOf('b'))
+  const result = await tool('update_bot', { id: 'b', name: 'Changed', ...solverProfile() })
+  await rt.save()
+  assert.deepEqual((await state()).bots.b, disk)
+  assert.deepEqual(rt.botOf('b'), live)
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'bot/refused')
+})
+
+test('an authenticated agent can rename a Solver', async t => {
+  const { rt, tool } = await fixture(t, { bots: { b: { id: 'b', name: 'Candidate', ...solverProfile() } } })
+  const result = await tool('update_bot', { id: 'b', name: 'Changed' })
+  assert.equal(result.isError, false)
+  assert.equal(rt.botOf('b').name, 'Changed')
+  assert.equal(rt.botOf('b').instructions, solverInstructions())
+})
+
+test('the MCP agent cannot read or activate Skills or set them through update_bot', async t => {
+  const f = await fixture(t)
+  const form = { name: 'fixture-skill', description: 'A checked description.', content: 'CHECKED-FIXTURE-BODY' }
+  assert.equal((await f.call('skill-library-save', form)).ok, true)
+  const privateValue = 'private-untrusted-argument'
+  for (const [name, args] of [
+    ['skill-library-get', { name: form.name }],
+    ['bot-skill-add', { id: 'b', name: form.name, content: privateValue }],
+    ['bot-skill-mode', { id: 'b', name: form.name, mode: 'automatic' }],
+    ['update_bot', { id: 'b', skills: [form.name] }],
+  ]) {
+    const result = await f.tool(name, args)
+    assert.equal(result.error.code, -32602)
+    assert.doesNotMatch(JSON.stringify(result), /CHECKED-FIXTURE-BODY|private-untrusted-argument/)
+  }
+  assert.deepEqual((await f.call('skill-library', {})).value.active, {})
+  const audit = await readFile(join(f.home, 'skill-library', 'audit.jsonl'), 'utf8')
+  for (const action of ['skill-library-get', 'bot-skill-add', 'bot-skill-mode', 'update_bot']) {
+    const row = audit.trim().split('\n').map(JSON.parse).find(row => row.action === action)
+    assert.equal(row.caller, 'agent')
+    assert.equal(row.outcome, 'refused')
+  }
+  assert.doesNotMatch(audit, /CHECKED-FIXTURE-BODY|private-untrusted-argument/)
+})
+
+test('Skills data stays out of serialized judge, title and MCP inputs', async t => {
+  const f = await fixture(t, { rooms: { room: { id: 'room', name: 'Room', members: ['a', 'b'], log: [
+    { kind: 'automagik-skill-notice', text: 'PRIVATE-NOTICE', time: 1 },
+  ] } } })
+  const [{ Context }, testkit, llm, { default: SessionTitle }, FirstTitle, AllTitles, skills] = await Promise.all([
+    import('@deepseek-ai/cordis'),
+    import('@deepseek-ai/dsh-agent-loop-testkit'),
+    import('@deepseek-ai/dsh-llm'),
+    import('@deepseek-ai/dsh-session-title'),
+    import('@deepseek-ai/dsh-session-title-first-prompt-llm'),
+    import('@deepseek-ai/dsh-session-title-all-prompts-llm'),
+    import('../src/host/skill-library-call.js'),
+  ])
+  const skill = { name: 'fixture-skill', description: 'PRIVATE-CATALOG', content: 'CHECKED-FIXTURE-BODY', hash: 'fixture', mode: 'automatic' }
+  const person = '/fixture-skill hello'
+  const provider = 'deepseek-fixture'
+  const route = { provider, model: 'fixture' }
+  const root = new Context()
+  t.after(() => root.fiber.dispose())
+  await testkit.mountAgentLoopTestDependencies(root, { workingDirectory: true })
+  const outgoing = []
+  class Adapter extends llm.LlmAdapter {
+    async resolveModel(_, id) { return { provider, id, name: id, context: { contextWindow: 100_000 } } }
+    async *stream(options) {
+      outgoing.push(options)
+      yield { type: 'text-delta', index: 0, text: 'Fixture reply' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  root.llm.registerAdapter([provider], new Adapter())
+  await testkit.mountAgentLoopTestHarness(root)
+  await root.plugin(SessionTitle, { fallbackMaxWords: 8, fallbackMaxBytes: 200, maxTitleBytes: 256 })
+  skills.install({ ctx: root, selfOf: () => 'a', botOf: () => ({ id: 'a' }), load: async () => {},
+    skillLibrary: { active: () => [skill] } })
+  const agent = await root.agentLoop.create('a', route)
+  agent.followup(llm.createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: person }] }))
+  await agent.whenIdle()
+  const main = outgoing.find(request => request.purpose === undefined)
+  assert.match(JSON.stringify(main.messages), /CHECKED-FIXTURE-BODY/)
+  assert.match(JSON.stringify(main.messages), /PRIVATE-CATALOG/)
+
+  const titleConfig = { ...route, targetWords: 5, targetCjkCharacters: 12, maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 2000 }
+  for (const plugin of [FirstTitle, AllTitles]) {
+    const registration = root.plugin(plugin, titleConfig)
+    await registration
+    await root.sessionTitle.refresh(agent.session)
+    await registration.dispose()
+  }
+  const titles = outgoing.filter(request => request.purpose === 'session-title')
+  assert.equal(titles.length, 2)
+
+  const judgeRequests = []
+  f.ctx.llm = {
+    resolveModelInfo: async () => ({}),
+    async *stream(request) {
+      judgeRequests.push(request)
+      yield { type: 'text-delta', index: 0, text: '{"decision":"allow","reason":"fixture"}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  const events = agent.session.snapshotEvents()
+  const marked = { ...events.find(event => event.type === 'user/message' && event.data.source.kind === 'user') }
+  marked.data = { ...marked.data, content: [{ type: 'text', text: person }, skills.skillPart('a', skill)] }
+  const loadCall = { type: 'tool/call', data: { callId: 'load', name: 'load_skill', arguments: { name: skill.name } } }
+  const judgement = await f.rt.autoJudge({ sessionId: 'a', session: { snapshotEvents: () => [marked, loadCall] },
+    bot: { name: 'Alpha', permissionAuto: 'own:deepseek-fixture/fixture' }, judge: 'own',
+    step: { callId: 'check', tool: 'read', args: { path: 'README.md' } } })
+  assert.equal(judgement.decision, 'allow')
+  assert.equal(judgeRequests.length, 1)
+  const judge = JSON.parse(judgeRequests[0].messages[0].content[0].text)
+
+  f.ctx.sessionController.page = async () => ({ records: [{ event: marked }], hasMore: false })
+  f.rt.roomSkillNotice('room', 'a', 'PRIVATE-NOTICE')
+  f.rt.logRoom(f.rt.roomOf('room'), { text: 'Normal group message' })
+  const chat = await f.tool('read_messages', { id: 'a' })
+  const group = await f.tool('read_messages', { id: 'room' })
+  const refusal = await f.tool('bot-skill-add', { id: 'b', name: skill.name })
+  assert.equal(refusal.error.code, -32602)
+  assert.deepEqual({
+    titles: titles.map(request => ({
+      person: JSON.stringify(request.messages).includes(person),
+      private: /CHECKED-FIXTURE-BODY|PRIVATE-CATALOG/.test(JSON.stringify(request.messages)),
+    })),
+    judge: { requests: judge.requests.map(row => row.text), calls: judge.callsThisTurn },
+    chat: chat.value?.items.map(row => row.text),
+    group: group.value?.items.map(row => row.text),
+    refusal: /Skills screen|Details/.test(JSON.stringify(refusal)),
+  }, {
+    titles: [{ person: true, private: false }, { person: true, private: false }],
+    judge: { requests: [person], calls: [] },
+    chat: [person], group: ['Normal group message'], refusal: false,
+  })
+})

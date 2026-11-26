@@ -3,6 +3,7 @@
 import { approvalPolicyOf } from './approval-policy.js'
 import { isAbsolute, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { lstat, readdir, rm } from 'node:fs/promises'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { mountBrowserPlugin } from './browser/mount.js'
 import { openBotBrowser } from './browser/session.js'
@@ -119,9 +120,24 @@ async function authorizeBrowserAction(rt, exec, botId, action) {
 }
 
 export function install(rt) {
+  if (inUnfoldInstance()) return
   const name = browserPluginOf(rt.config)
   const injected = rt.config.browserPluginApi
-  if ((!name && !injected) || inUnfoldInstance()) return
+  const profileRoot = join(rt.home, 'browser-profiles')
+  // The app panel can open tabs without going through openBotBrowser.
+  void (async () => {
+    if (!(await lstat(profileRoot)).isDirectory()) return
+    for (const entry of await readdir(profileRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const file = join(profileRoot, entry.name, 'cookies.json')
+      const stat = await lstat(file).catch(() => undefined)
+      if (stat?.isFile() || stat?.isSymbolicLink()) await rm(file, { force: true }).catch(() => {})
+    }
+  })().catch(() => {})
+  if (!name && !injected) {
+    wrapDeleteBot()
+    return
+  }
   const plugin = injected ?? browserPlugins[name]
   if (!plugin) throw new Error(`Unknown browser plugin "${name}". Choose ${NAMES.join(', ')}.`)
   const playwrightUrl = optionalString(rt.config, 'playwrightUrl') ?? DEFAULT_PLAYWRIGHT
@@ -139,6 +155,7 @@ export function install(rt) {
   }
   const mounted = {}
   rt.browserFrame = botId => mounted.frame?.(botId)
+  rt.browserControl = (botId, action, args) => mounted.control?.(botId, action, args)
   mountBrowserPlugin(rt.ctx, {
     api: mounted,
     onAddressRefused: (exec, tool) => rt.noteStop?.(exec.agent?.id ?? exec.agent?.session?.id, { why: 'address', tool, callId: exec.callId }, exec.agent),
@@ -174,12 +191,17 @@ export function install(rt) {
       return id
     },
   })
-  // A deleted Bot leaves no browser state behind: close its session and drop the profile dir.
-  if (typeof rt.deleteBot === 'function') {
+  // Drop the local profile after deletion, closing a mounted browser session first.
+  wrapDeleteBot(mounted.drop)
+  function wrapDeleteBot(drop) {
+    if (typeof rt.deleteBot !== 'function') return
     const originalDelete = rt.deleteBot.bind(rt)
     rt.deleteBot = async (id) => {
       const result = await originalDelete(id)
-      await mounted.drop(id).catch(() => {})
+      if (drop) await drop(id).catch(() => {})
+      else if (typeof id === 'string' && id && id !== '.' && id !== '..' && !/[/\\\0]/.test(id)) {
+        await rm(join(profileRoot, id), { recursive: true, force: true }).catch(() => {})
+      }
       return result
     }
   }

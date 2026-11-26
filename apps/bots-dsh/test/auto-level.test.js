@@ -266,6 +266,24 @@ test('Auto offer and fallback follow bridge availability and change the permissi
   assert.notEqual(w.rt.autoKey(), key)
 })
 
+test('Auto offer reads the bridge for the Bot\'s current chat', async t => {
+  const w = team(t, { bots: { m1: { ...codex, sessionId: 's1' } } }); await w.rt.load()
+  const bot = w.rt.botOf('m1')
+  const chatId = w.rt.chatOf(bot.id)
+  assert.ok(chatId)
+  assert.notEqual(chatId, bot.id)
+  assert.equal(bot.permissionAuto, undefined)
+  const calls = []
+  w.acpAgents.ownModeOf = (provider, sessionId) => {
+    calls.push([provider, sessionId])
+    return { mode: 'agent', bridged: sessionId === chatId, answerer: true }
+  }
+  const view = w.rt.autoViewOf(bot)
+  assert.equal(view.autoOffered, true)
+  assert.equal(view.autoJudge.bridged, true)
+  assert.deepEqual(calls, [['acp-codex', undefined], ['acp-codex', chatId]])
+})
+
 test('Auto key counts a Bot as false when the session list throws', async t => {
   const w = await enabled(t)
   const key = w.rt.autoKey()
@@ -435,4 +453,36 @@ test('set-bot-auto accepts a Codex Bot with a deny list', async t => {
   assert.equal(w.rt.botOf('m1').permissionAuto, 'acp-codex')
   assert.equal(diskOf(w).bots.m1.permissionAuto, 'acp-codex')
   assert.deepEqual(diskOf(w).bots.m1.denyTools, ['bash'])
+})
+
+test('D2S set-bot-auto keeps Solver internals off both owner responses', async t => {
+  const w = team(t, { bots: { m1: { ...codex, role: 'Solver', reviewerId: 'b2' } } })
+  await w.rt.load()
+  const bot = w.rt.botOf('m1')
+  const waitingRole = { id: 'solver', role: 'Solver', instructions: 'a'.repeat(64) }
+  Object.assign(bot, { waitingRole, reviewerMade: true })
+  for (const rev of [0, 1]) {
+    const reply = await w.call('set-bot-auto', { id: bot.id, rev })
+    assert.equal(reply.ok, true, JSON.stringify(reply))
+    assert.equal(reply.value.permissionAuto, 'acp-codex')
+    assert.equal(reply.value.permissionRev, 1)
+    assert.equal(Object.hasOwn(reply.value, 'waitingRole'), false)
+    assert.equal(Object.hasOwn(reply.value, 'reviewerMade'), false)
+  }
+  assert.deepEqual(diskOf(w).bots.m1.waitingRole, waitingRole)
+  assert.equal(diskOf(w).bots.m1.reviewerMade, true)
+})
+test('Auto: a report group (#1294) leaves the mark as the same start without it', async t => {
+  const w = await enabled(t); const id = w.rt.chatOf('m1')
+  const start = (sessionId, extra = {}) => inCall(w, sessionId, 'start_task', () => w.rt.startTask({ title: 'x', text: 'Do x', from: 'm1', ...extra }))
+  for (const sessionId of [id, 'g1']) {
+    const plain = await start(sessionId)
+    const reported = await start(sessionId, { reportRoomId: 'r1' })
+    await w.settle()
+    assert.equal(w.rt.state.tasks[reported].reportRoomId, 'r1')
+    assert.equal(w.rt.state.tasks[reported].auto, w.rt.state.tasks[plain].auto, sessionId)
+    assert.equal(w.rt.state.tasks[reported].autoRev, w.rt.state.tasks[plain].autoRev, sessionId)
+    assert.equal(w.answer(reported), w.answer(plain), sessionId)
+  }
+  assert.equal(w.rt.state.tasks[Object.keys(w.rt.state.tasks).find(key => w.rt.state.tasks[key].reportRoomId && !w.rt.state.tasks[key].levelRoomId)].auto, 'acp-codex')
 })

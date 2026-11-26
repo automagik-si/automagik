@@ -1,5 +1,19 @@
 [
   {
+    "file": "usr/local/bin/herdr-core",
+    "rule": "home-path",
+    "sha256": "b1cbc5f347543a03701354923cd95344068142e4aa08c74d259fbfe7c62984fc",
+    "reason": "herdr-core's Go build records its GitHub-hosted build account in embedded paths, not a host account; the pinned release tarball's sha256 and this copy's fileSha256 bind the bytes",
+    "fileSha256": "baa9d208d6400556a6e379152455fe1301e0e1acdbc114ff60b79d64425179cf"
+  },
+  {
+    "file": "usr/local/bin/hc",
+    "rule": "home-path",
+    "sha256": "b1cbc5f347543a03701354923cd95344068142e4aa08c74d259fbfe7c62984fc",
+    "reason": "the same herdr-core binary, copied as hc: its Go build account is not a host account; the pinned release tarball's sha256 and this copy's fileSha256 bind the bytes",
+    "fileSha256": "baa9d208d6400556a6e379152455fe1301e0e1acdbc114ff60b79d64425179cf"
+  },
+  {
     "file": "opt/automagik/runtime/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
     "rule": "home-path",
     "match": "/home/CLI",
@@ -247,8 +261,8 @@
     "file": "nodejs/bin/node",
     "rule": "home-path",
     "match": "/home/iojs",
-    "fileSha256": "e237a2839d0cbdc9a9a2adda1a184afc0f5b20306ffbe923af5686550472d8a8",
-    "reason": "the Node project's build account in the pinned distroless node binary, not a host account"
+    "fileSha256": "c24b06d48724f95850d5ab1a262e199c518b2d34597c46d13b4499b2eb73070d",
+    "reason": "the Node project's build account in the pinned distroless node binary (its debug sections are stripped in the tools stage; the match is unchanged), not a host account"
   },
   {
     "file": "opt/automagik/offline-store/v10/files/3a/b0b312eddc7fe813b0c0ecdac2d2fdd1ee73ba0bd321f1e876109d5b859ffe3b79dff17bc0d6e9db50ae0a21b7eddb7303ed9ccad46e6d8270f0377ce8d6ac",
@@ -258,46 +272,130 @@
     "reason": "Byte-identical offline cache of the already-reviewed playwright-core/lib/coreBundle.js container-user example; both the content-addressed cache path and module digest are pinned."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/7f/861a67335aad7e52daebb5dcdbbe5a4f2073667434a049449d363d9bb2d9718a7958b2450a0a2daab049f64ab280a85d7dcbcf32ee592a58969481d9f63d43",
+    "file": "opt/automagik/offline-store/v10/files/43/6dd3533495badd3699e035564266b46aa4e788e3e322e5135ba8de0505667fb412b6d950f3ee685f23113b4ea05f7b1a61965bfe6bc61f43611b73bd699e4f",
     "rule": "home-path",
     "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
-    "fileSha256": "4fb9c0276f1d94ba8960acb00cffc476810b03abf6498f1e3fc78f1592a80ff6",
-    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 schema/v2/schema.unstable.json: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "89c47f89a27fe9a464c46dc0cfb2a2cd78b480f5f1bee46095a457faf3d50020",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.8.0 schema/v2/schema.unstable.json, verified byte for byte against the locked npm tarball."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/52/55995b4a474deccb66a48981338ef6cee31591ee61320eaca6bff7c20786414a5a0397124cbf35ead301495fe1ca26ffe21fbd9d2e71f93056d69f02b74a6b",
+    "file": "opt/automagik/offline-store/v10/files/6c/758c79c99f4fad702b5a8bb135708f32e7b1b8227b5cdbf721e2509f94b817fd8adee768a21d20761e1eea8662958f00c6d930eefd5e489781fea20f76865a",
     "rule": "home-path",
     "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
-    "fileSha256": "317e1eba9052ec879a26d3e59c575e66d4c67476464cb49a640e1dd4bbf70c12",
-    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 dist/v2/unstable/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "9599513a3cfe3fe34c2e899fc85bf8eaee299fbd99b4eee42606ce2a60cfdffb",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.8.0 dist/v2/schema/zod.gen.js, verified byte for byte against the locked npm tarball."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/52/55995b4a474deccb66a48981338ef6cee31591ee61320eaca6bff7c20786414a5a0397124cbf35ead301495fe1ca26ffe21fbd9d2e71f93056d69f02b74a6b",
+    "file": "opt/automagik/offline-store/v10/files/6c/758c79c99f4fad702b5a8bb135708f32e7b1b8227b5cdbf721e2509f94b817fd8adee768a21d20761e1eea8662958f00c6d930eefd5e489781fea20f76865a",
     "rule": "home-path",
     "sha256": "6600e9264f9f11ce58bd63caf7a2ae1f56bee1cda6f13410faf84bf30a80ae3e",
-    "fileSha256": "317e1eba9052ec879a26d3e59c575e66d4c67476464cb49a640e1dd4bbf70c12",
-    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 dist/v2/unstable/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "9599513a3cfe3fe34c2e899fc85bf8eaee299fbd99b4eee42606ce2a60cfdffb",
+    "reason": "Generated Windows AbsolutePath example in ACP SDK 2.8.0 dist/v2/schema/zod.gen.js, verified byte for byte against the locked npm tarball."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/46/5481d2c6323d6c6bff8538acca47380460bb3a8fc642d2a928443595f1a2736bb11450561a93c7efd597f80644e7ce6a68c812ab7669f879422b91ae922b6e",
+    "file": "opt/automagik/offline-store/v10/files/a3/5cef239ef3257f993d901a8adbe2d92a9532972b6a80f80a638198b4015f96f72428112506446dfe8eac9e206134aa6ebb28d90f6f9e55e1ef3faf96db0b9a",
     "rule": "home-path",
     "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
-    "fileSha256": "22a631a896e2df061f64f81f3414949d46f1d25151ceb3f74bda2255ad36773d",
-    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 schema/v2/schema.json: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "006f4bc12e9b4c02e5dc28339386c6c2c61bc1104c381fd66625ec43093a38b4",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.8.0 schema/v2/schema.json, verified byte for byte against the locked npm tarball."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/82/1487c4bcc5a289720239783d1ae36c3311b016e781d62f6e45fdbab10da3942798c975ed02045184d20cba1a0afc9a48e08f41c5af839096db93ef77f8518b",
+    "file": "opt/automagik/offline-store/v10/files/b4/ab8a222795f359d5cb4bebd6b4fa3690704f1b764594991254b07fd2ea777d933d49df7a8e21c36eeb08de6959117bc9d8c500ca58b395633a73f0ebd01dfe",
     "rule": "home-path",
     "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
-    "fileSha256": "f3b967a7d99a1b65b92353289af0adf056a510f243628d104367f06d2ca7abc4",
-    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 dist/v2/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "1c8fc993d39f15d1e00987e17300fd0d7cbef9c40ffaeb3dc3acbb0133b794b7",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.8.0 dist/v2/unstable/schema/zod.gen.js, verified byte for byte against the locked npm tarball."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/82/1487c4bcc5a289720239783d1ae36c3311b016e781d62f6e45fdbab10da3942798c975ed02045184d20cba1a0afc9a48e08f41c5af839096db93ef77f8518b",
+    "file": "opt/automagik/offline-store/v10/files/b4/ab8a222795f359d5cb4bebd6b4fa3690704f1b764594991254b07fd2ea777d933d49df7a8e21c36eeb08de6959117bc9d8c500ca58b395633a73f0ebd01dfe",
     "rule": "home-path",
     "sha256": "6600e9264f9f11ce58bd63caf7a2ae1f56bee1cda6f13410faf84bf30a80ae3e",
-    "fileSha256": "f3b967a7d99a1b65b92353289af0adf056a510f243628d104367f06d2ca7abc4",
-    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 dist/v2/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "1c8fc993d39f15d1e00987e17300fd0d7cbef9c40ffaeb3dc3acbb0133b794b7",
+    "reason": "Generated Windows AbsolutePath example in ACP SDK 2.8.0 dist/v2/unstable/schema/zod.gen.js, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/c7/ce02d76d7d2e683055068c8af2f9fed9566e031ceecf11fa9b8048a22c53fb16b00241f272d9a3466ae8e07342a79a39242edbfc19596df8a6ee935cc7485e",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "2f1c84178605a71d3cb7edf4c03f6aa44f431c4bf8d2f34f254373fb4bc17812",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.9.0 schema/v2/schema.unstable.json, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/4f/38b5fafe3f2ea6f3b0b8604a8760c9507dbe28331ad2656df6b4118e4e1bd2295ac36f9ffc05fa02be9958a56f04ccb609158da3336b5303275ec6f0776258",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "825e6b1c5a503f39466e49c233da271ee144510a56e6163f0cccdbb110ea62c3",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.9.0 and 2.9.1 dist/v2/schema/zod.gen.js (the same bytes in both), verified byte for byte against the locked npm tarballs."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/4f/38b5fafe3f2ea6f3b0b8604a8760c9507dbe28331ad2656df6b4118e4e1bd2295ac36f9ffc05fa02be9958a56f04ccb609158da3336b5303275ec6f0776258",
+    "rule": "home-path",
+    "sha256": "6600e9264f9f11ce58bd63caf7a2ae1f56bee1cda6f13410faf84bf30a80ae3e",
+    "fileSha256": "825e6b1c5a503f39466e49c233da271ee144510a56e6163f0cccdbb110ea62c3",
+    "reason": "Generated Windows AbsolutePath example in ACP SDK 2.9.0 and 2.9.1 dist/v2/schema/zod.gen.js (the same bytes in both), verified byte for byte against the locked npm tarballs."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/19/ac189be6abcaf0215f7837d137314c747bd574f680bd42bde45be21a12002b361929664d8372a685ec19c6388f608d82c57d0381c853b44887849a8e7b0deb",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "5fd05ab6892df8dd95f225985d7ac7aa22b2732b6590e0defe76631039627826",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.9.0 schema/v2/schema.json, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/81/78ad03e134fd6dad45fc61ea8f232619b946221c953c11440bf6d342fd6ad7bd01b29379d82eb356b9c67b0c704d860ceaa63f86105049e96a53ae0458f198",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "fa330aabcede2d410ee991e1d72baeb1829c24e9018b91e1b64bd35c9dc7d889",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.9.0 and 2.9.1 dist/v2/unstable/schema/zod.gen.js (the same bytes in both), verified byte for byte against the locked npm tarballs."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/81/78ad03e134fd6dad45fc61ea8f232619b946221c953c11440bf6d342fd6ad7bd01b29379d82eb356b9c67b0c704d860ceaa63f86105049e96a53ae0458f198",
+    "rule": "home-path",
+    "sha256": "6600e9264f9f11ce58bd63caf7a2ae1f56bee1cda6f13410faf84bf30a80ae3e",
+    "fileSha256": "fa330aabcede2d410ee991e1d72baeb1829c24e9018b91e1b64bd35c9dc7d889",
+    "reason": "Generated Windows AbsolutePath example in ACP SDK 2.9.0 and 2.9.1 dist/v2/unstable/schema/zod.gen.js (the same bytes in both), verified byte for byte against the locked npm tarballs."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/e6/1b8697817ed29193b41e7a755b93c0df123c78b6acf81be3940e535c4ced71dc936a0451861489264eca49c1b9d017f5f1226383a47819cc83e7de0f236539",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "48b0a9298527adf35d6ac217f9894fb716e93a17a8eca69eea7f26874dd42c0b",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.9.1 schema/v2/schema.json, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/3b/929783b2862b91a1b209f8aae61362d8af258ba9db4dc75b198afa274c08810cf207757492562bae1fe8ae6da59c0dfd097c4f06a278411281a9007de04f24",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "dccabd97e7867822dfb086a5090771d4bdc44e795a9143306623bb0db20b6199",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.9.1 schema/v2/schema.unstable.json, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/eb/e68d46ab56213721d5c576e2e0588586892e27ca26fc6c7c46dd85f95b829c84342a7da769e63a18822f98efd4bdc9b9746e5989759f5ae99d855455422215",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "99df705ebdd5399ef0ed4ae71eeb22be613dc72fe755fbecae9390d087f53fd7",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.12.0 dist/v2/unstable/schema/zod.gen.js, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/eb/e68d46ab56213721d5c576e2e0588586892e27ca26fc6c7c46dd85f95b829c84342a7da769e63a18822f98efd4bdc9b9746e5989759f5ae99d855455422215",
+    "rule": "home-path",
+    "sha256": "6600e9264f9f11ce58bd63caf7a2ae1f56bee1cda6f13410faf84bf30a80ae3e",
+    "fileSha256": "99df705ebdd5399ef0ed4ae71eeb22be613dc72fe755fbecae9390d087f53fd7",
+    "reason": "Generated Windows AbsolutePath example in ACP SDK 2.12.0 dist/v2/unstable/schema/zod.gen.js, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/ad/fc4edd30704e22e20963d566501783eb7868f7ccaafe48e80541fe366c171a6b7cc35f674ead0681f913a87cafa7afe234b97e37ddf7a2f025d4686a44002a",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "86dae71cce55d412b927383cb3838ea560bdbf683ea8903bede75785fc79c494",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.12.0 schema/v2/schema.json, verified byte for byte against the locked npm tarball."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/25/d1b9363e345614a5ba0db06ca222b2b818b8c9d408dbf8f105f6b6b9836ac672346313c60b42110cc94458cb484a03df7d93d119eec4c4eb047fbc051c4f04",
+    "rule": "home-path",
+    "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
+    "fileSha256": "8514da63fb39f050ca56a49470a90dc3fd194ebae3f08eb29301504a71bcde66",
+    "reason": "Generated Unix AbsolutePath example in ACP SDK 2.12.0 schema/v2/schema.unstable.json, verified byte for byte against the locked npm tarball."
   },
   {
     "file": "opt/automagik/runtime/node_modules/@deepseek-ai/dsh-app-boot/src/config-schema/document.ts",

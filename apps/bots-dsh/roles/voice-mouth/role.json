@@ -1,0 +1,22 @@
+{
+  "id": "voice-mouth",
+  "version": "0.0.0",
+  "name": "Voice / Mouth",
+  "description": "Speak a short message aloud in the open voice chat.",
+  "publisher": "automagik",
+  "entry": "role.mjs",
+  "prompt": "prompt.md",
+  "tools": [
+    {
+      "name": "speak",
+      "description": "Say a short message aloud in the user's open voice pane for this chat. Text is limited to 2,000 characters.",
+      "parameters": { "text": { "type": "string", "required": true, "maxLength": 2000 } }
+    }
+  ],
+  "capabilities": ["audio-out"],
+  "settings": [
+    { "key": "voice", "kind": "voice", "label": "Voice" },
+    { "key": "speed", "kind": "speed", "label": "Speed" }
+  ],
+  "ui": []
+}

@@ -8,13 +8,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, workerArgs } from "../mods/am-sidebar/workers.js";
+import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, stableRootOf, workerArgs } from "../mods/am-sidebar/workers.js";
 import { startArgs } from "../mods/am-sidebar/launchArgs.js";
-import { hcVerbOf } from "../mods/am-sidebar/hcGuard.mjs";
+import { hcVerbOf, launchHomeOf, sharedSendAllowed } from "../mods/am-sidebar/hcGuard.mjs";
+import { STABLE_FILES, STABLE_FOLDERS, stableFilesCurrent, stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
+import { observe } from "../mods/am-sidebar/agyScan.js";
+import { SYNTHETIC, trustScreen, fileScreen, capture } from "./agy-prompt-fixture.mjs";
+import { GUARD_APP, quietScreen, agyHookSource } from "./agy-guard-shapes.mjs";
 
 const ID = {
   main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc",
@@ -36,25 +41,45 @@ const team = () => ({
   ],
 });
 
-// The stub: logs every call, answers hc ls/get from the state file, and for any other verb
-// prints the pass-through markers and exits HC_STUB_CODE.
+// The stub: logs every call, answers hc ls/get/read from the state file, and for any other
+// verb prints the pass-through markers and exits HC_STUB_CODE. A pane's `screen` is what a
+// `read` returns; a pane's `readFail` makes that read fail as a transport error would.
 const STUB = `#!/usr/bin/env node
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.HC_STUB_LOG, JSON.stringify({ argv: args, marker: process.env.AM_HC_GUARD_REENTRY ?? null }) + "\\n");
 const state = JSON.parse(readFileSync(process.env.HC_STUB_STATE, "utf8"));
+const found = (at) => state.get[at] ?? Object.values(state.get).find((g) => g.name === at);
 if (args[0] === "ls") { process.stdout.write(JSON.stringify({ terminals: state.terminals }) + "\\n"); process.exit(0); }
 if (args[0] === "get") {
   const at = args[1];
-  const found = state.get[at] ?? Object.values(state.get).find((g) => g.name === at);
-  if (!found) { process.stderr.write(JSON.stringify({ error: { kind: "not_found" } }) + "\\n"); process.exit(3); }
-  process.stdout.write(JSON.stringify(found) + "\\n"); process.exit(0);
+  const hit = found(at);
+  if (!hit) { process.stderr.write(JSON.stringify({ error: { kind: "not_found" } }) + "\\n"); process.exit(3); }
+  process.stdout.write(JSON.stringify(hit) + "\\n"); process.exit(0);
+}
+if (args[0] === "read") {
+  // The target is the first positional; #628 reads may name their options before it
+  // (read --lines 5 t102), so skip a value-taking option and its word.
+  const optionValue = new Set(["--lines"]);
+  let at = null;
+  for (let i = 1; i < args.length; i += 1) {
+    const word = args[i];
+    if (optionValue.has(word)) { i += 1; continue; }
+    if (word.startsWith("-")) continue;
+    at = word;
+    break;
+  }
+  const hit = found(at);
+  if (!hit) { process.stderr.write(JSON.stringify({ error: { kind: "not_found" } }) + "\\n"); process.exit(3); }
+  if (hit.readFail) { process.stderr.write("the screen could not be read\\n"); process.exit(1); }
+  process.stdout.write(JSON.stringify({ text: hit.screen ?? "", complete: true, how: "screen", why: null }) + "\\n"); process.exit(0);
 }
 process.stdout.write("stub-out " + JSON.stringify(args) + "\\n");
 process.stderr.write("stub-err " + args[0] + "\\n");
 process.exit(Number(process.env.HC_STUB_CODE ?? 0));
 `;
 
+const launchArgv = (app) => ["/usr/bin/env", `HERDR_APP_HOME=${app}`, "dsh-tui"];
 const get = (address, labels, extra = {}) => ({ address, state: "live", created_ms: 100, labels, ...extra });
 
 /** One hermetic scene: temp app home, project, worktree, stub hc and a ledger-bound bot pane. */
@@ -72,6 +97,10 @@ function scene(t, { caller = "t100" } = {}) {
     { address: "t107", name: "fixer", state: "live" }, { address: "t108", name: "tester", state: "live" },
     { address: "t110", name: "worker-dev", state: "live" },
     { address: "t120", name: "other", state: "live" }, { address: "t121", name: "bare", state: "live" },
+    // Linked machine panes, reachable by name through `hc ls`; the guard must refuse the
+    // resolved `machine/tN` address, never forward it (the proxy-off path, #628).
+    { address: "m/t101", name: "cap-m", state: "live" }, { address: "m/t120", name: "other-m", state: "live" },
+    { address: "m/t105", name: "worker-m", state: "live" },
   ];
   const state = {
     terminals,
@@ -89,8 +118,10 @@ function scene(t, { caller = "t100" } = {}) {
       t121: get("t121", {}, { cwd: project, name: "bare" }),
       "m/t101": get("m/t101", { bot: ID.cap }, { cwd: project, name: "cap" }),
       "m/t120": get("m/t120", { bot: ID.other }, { cwd: project, name: "other" }),
+      "m/t105": get("m/t105", { "worker.of": ID.dev }, { cwd: worktree, name: "worker-m", parent: "t100" }),
     },
   };
+  for (const pane of Object.values(state.get)) pane.argv = launchArgv(app);
   const statePath = join(root, "hc-state.json"), logPath = join(root, "hc.log");
   writeFileSync(statePath, JSON.stringify(state));
   writeFileSync(logPath, "");
@@ -128,6 +159,47 @@ const readLog = (s) => readFileSync(s.logPath, "utf8").split("\n").filter(Boolea
 const calls = (s) => readLog(s).map((row) => row.argv);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+/** Patch one pane's hc get answer in the scene's state file (its status, screen, readFail). */
+const editPane = (s, address, patch) => {
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get[address] = { ...state.get[address], ...patch };
+  writeFileSync(s.statePath, JSON.stringify(state));
+};
+/** A visible question dialog, as the pack's pendingDialog reads one. */
+const DIALOG_SCREEN = "This command requires approval\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel · Tab to amend";
+/** A free pane: its prompt is the last line, with no dialog below it. */
+const FREE_SCREEN = "all done\n❯ ";
+
+test("launchHomeOf reads only the env prefix and resolves the default lazily (#628)", () => {
+  const defaultHome = () => "/default";
+  const unexpectedDefault = () => { throw new Error("default should never be needed"); };
+  for (const argv of [
+    ["/usr/bin/env", "HERDR_APP_HOME=/seat", "dsh-tui"],
+    ["/usr/bin/env", "HERDR_APP_HOME=/seat///", "dsh-tui"],
+    ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR", "HERDR_APP_HOME=/seat", "claude"],
+    ["/usr/bin/env", "-u", "HERDR_APP_HOME", "HERDR_APP_HOME=/old", "HERDR_APP_HOME=/seat", "dsh-tui"],
+  ]) {
+    assert.deepEqual(launchHomeOf(argv, unexpectedDefault), { home: "/seat" }, JSON.stringify(argv));
+  }
+  for (const argv of [
+    ["/usr/bin/env", "-u", "HERDR_APP_HOME", "dsh-tui"],
+    ["/usr/bin/env", "PATH=/bin", "dsh-tui"],
+    ["/usr/bin/env", "dsh-tui", "HERDR_APP_HOME=/ignored"],
+    ["claude", "HERDR_APP_HOME=/ignored"],
+  ]) {
+    assert.deepEqual(launchHomeOf(argv, defaultHome), { home: "/default" }, JSON.stringify(argv));
+  }
+  for (const argv of [
+    null, [], ["claude", 1], ["/usr/bin/env", "-u"], ["/usr/bin/env", "HERDR_APP_HOME=/seat"],
+    ["/usr/bin/env", "HERDR_APP_HOME=relative", "dsh-tui"],
+    ["/usr/bin/env", "HERDR_APP_HOME=/bad\npath", "dsh-tui"],
+  ]) {
+    assert.match(launchHomeOf(argv, defaultHome).error, /caller/, JSON.stringify(argv));
+  }
+  assert.match(launchHomeOf(["claude"], unexpectedDefault).error,
+    /start or restart the bot from the sidebar or with HERDR_APP_HOME set/i);
+});
+
 function assertRefused(r) {
   assert.notEqual(r.status, 0, "a refusal exits non-zero");
   const lines = r.stderr.trim().split("\n");
@@ -138,13 +210,27 @@ function assertRefused(r) {
   assert.equal(r.stdout, "", "a refusal prints no stdout");
 }
 
+/** A held-pane refusal: hc's blocked exit, one JSON error line, the pane and the reason. */
+function assertHeld(r, address) {
+  assert.equal(r.status, 9, `a held pane exits 9 (hc's blocked code): ${r.stderr}`);
+  assert.equal(r.stdout, "", "a held refusal prints no stdout");
+  const lines = r.stderr.trim().split("\n");
+  assert.equal(lines.length, 1, `exactly one stderr line: ${JSON.stringify(r.stderr)}`);
+  const error = JSON.parse(lines[0]).error;
+  assert.equal(error.kind, "blocked", "a relay can tell it from a transport error");
+  assert.ok(error.message.includes(address), `the pane is named: ${error.message}`);
+  assert.match(error.message, /held by a dialog/);
+  assert.match(error.message, /nothing was sent/);
+  assert.match(error.hint, /answer the dialog|route this message/i);
+}
+
 // ---- the allow list ----
 
 test("every allowed verb reaches the stub unchanged", (t) => {
   const s = scene(t);
   const allowed = [
     ["send", "t101", "hello"], ["read", "t101"], ["ls"], ["get", "t101"], ["wait", "t101"],
-    ["put", "t101", "/tmp/file"], ["label", "t105", "role=dev"], ["rm", "t101"],
+    ["label", "t105", "role=dev"],
     ["events"], ["schema"], ["templates"],
   ];
   for (const args of allowed) {
@@ -158,11 +244,11 @@ test("every allowed verb reaches the stub unchanged", (t) => {
 
 test("the allowed call keeps the stub's stdout, stderr and exit code", (t) => {
   const s = scene(t);
-  const r = guardRun(s, ["read", "t101"], { HC_STUB_CODE: "7" });
+  const r = guardRun(s, ["templates"], { HC_STUB_CODE: "7" });
   assert.equal(r.status, 7);
-  assert.equal(r.stdout, 'stub-out ["read","t101"]\n');
-  assert.equal(r.stderr, "stub-err read\n");
-  assert.deepEqual(calls(s), [["read", "t101"]]);
+  assert.equal(r.stdout, 'stub-out ["templates"]\n');
+  assert.equal(r.stderr, "stub-err templates\n");
+  assert.deepEqual(calls(s), [["templates"]]);
 });
 
 test("the doc-only forms pass; a doc flag on a refused command does not", (t) => {
@@ -303,7 +389,7 @@ function sharedScene(t) {
   const state = JSON.parse(readFileSync(s.statePath, "utf8"));
   const add = (address, labels, extra = {}) => {
     state.terminals.push({ address, name: address, state: "live" });
-    state.get[address] = get(address, labels, { cwd: s.project, name: address, ...extra });
+    state.get[address] = get(address, labels, { cwd: s.project, name: address, argv: launchArgv(s.app), ...extra });
   };
   add("t200", { bot: SHARED_ID.pm, role: "pm" });
   add("t201", { bot: SHARED_ID.integrator, role: "integrator" });
@@ -397,7 +483,7 @@ test("a pm caller cannot send to a pane whose bot= is not listed", (t) => {
   assert.equal(calls(s).some((argv) => argv[0] === "send"), false, "an unlisted bot= target never reaches send");
 });
 
-test("the widening is send only: keys is refused, kill is the main bot's (#955) and rm keeps today's unscoped pass", (t) => {
+test("the widening is send only: keys and rm are refused, kill is the main bot's (#955)", (t) => {
   const s = sharedScene(t);
   writeFileSync(s.logPath, "");
   const keys = guardRun(s, ["keys", "t203", "enter"], { HC_TERMINAL_ID: "t200" });
@@ -407,13 +493,12 @@ test("the widening is send only: keys is refused, kill is the main bot's (#955) 
   writeFileSync(s.logPath, "");
   assertRefused(guardRun(s, ["kill", "t203"], { HC_TERMINAL_ID: "t200" }));
   assert.deepEqual(calls(s).filter((argv) => argv[0] === "kill"), []);
-  // #636 leaves rm unscoped (#628 owns that scope); the widening does not touch it.
-  for (const args of [["rm", "t203"]]) {
-    writeFileSync(s.logPath, "");
-    const r = guardRun(s, args, { HC_TERMINAL_ID: "t200" });
-    assert.equal(r.status, 0, `${args[0]} is unchanged: ${r.stderr}`);
-    assert.ok(calls(s).some((argv) => same(argv, args)), `${args[0]} arrives unchanged`);
-  }
+  // #628: rm is the caller's own workers only; a foreign pane is refused even for a pm.
+  writeFileSync(s.logPath, "");
+  const rm = guardRun(s, ["rm", "t203"], { HC_TERMINAL_ID: "t200" });
+  assertRefused(rm);
+  assert.match(rm.stderr, /own worker/);
+  assert.equal(calls(s).some((argv) => argv[0] === "rm"), false, "a foreign rm never reaches hc");
 });
 
 // ---- kill: a project's main bot only (#955, the owner's rule) ----
@@ -455,6 +540,24 @@ test("hc kill (#955): a main bot's seat ends a pane; the roster's kind decides, 
     assert.match(worker.stderr, /hc kill is for a project's main bot only, never a worker/);
     assert.deepEqual(killsSeen(s), []);
   }
+});
+
+test("with the proxy off, a main bot's kill refuses a machine-resolving name and the direct address (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. `worker-m` is a pane
+  // `hc ls` resolves to `m/t105`; the guard refuses the resolved address, never forwards the
+  // name, and the main bot still ends a local pane at the address it checked.
+  const s = killScene(t);
+  for (const args of [["kill", "worker-m"], ["kill", "m/t105"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args, { HC_TERMINAL_ID: "t103" });
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.deepEqual(killsSeen(s), [], `${args.join(" ")} never reaches hc`);
+  }
+  writeFileSync(s.logPath, "");
+  const local = guardRun(s, ["kill", "worker"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(local.status, 0, local.stderr);
+  assert.deepEqual(killsSeen(s), [["kill", "t105"]], "the checked address is the one forwarded");
 });
 
 test("hc kill (#955): a flag before the command is refused for everyone, the main bot too; an unknown caller is refused", (t) => {
@@ -546,21 +649,26 @@ test("kill shim (#955): a main bot's own worker is a worker; a seat on a roster 
   assert.deepEqual(killsSeen(s), []);
 });
 
-test("kill shim (#955): every other hc call goes to the real hc untouched, for a seat, a worker and an unknown pane", (t) => {
+test("kill shim (#955): every other hc call goes to the real hc untouched; a send is read first (#1414)", (t) => {
   const s = killScene(t);
   const others = [["send", "t105", "status?"], ["send", "t105", "kill"], ["--json", "send", "t105", "kill"], ["exec", "--", "sh", "-c", "echo kill"],
     ["run", "--bg", "claude"], ["keys", "t105", "enter"], ["interrupt", "t105"], ["rm", "t105"], ["read", "t105"], ["label", "t105", "a=b"],
     ["file", "write", "/x"], ["machine", "ls"], ["server", "status"], ["attach", "t105"], ["ls", "--all"], ["get", "t105"],
     ["--version"], ["--skill"], ["--help"], ["kill", "--help"], ["kill", "-h"], []];
+  // A send first resolves its target and looks at its screen (one call each); the text then
+  // goes to the real hc word for word, exactly once.
+  const sendLookups = [["ls", "--json"], ["get", "t105", "--json"], ["read", "t105", "--lines", "40", "--json"]];
   for (const terminal of ["t103", "t101", "t100", "t105", "t121"]) {
     for (const args of others) {
       writeFileSync(s.logPath, "");
       const r = shimRun(s, args, { HC_TERMINAL_ID: terminal, HC_STUB_CODE: "7" });
-      // The stub answers ls and get itself (exit 0); everything else exits with the code it was given.
-      const stubAnswers = ["ls", "get"].includes(args[0]);
+      // The stub answers ls, get and read itself (exit 0); everything else exits with the code it was given.
+      const stubAnswers = ["ls", "get", "read"].includes(args[0]);
       assert.equal(r.status, stubAnswers ? 0 : 7, `hc ${args.join(" ")} from ${terminal}: the real hc's exit code (${r.stderr})`);
       assert.doesNotMatch(r.stderr, /hc kill shim/, `hc ${args.join(" ")}: the shim says nothing`);
-      assert.deepEqual(calls(s), [args], `hc ${args.join(" ")} from ${terminal}: one call, word for word, and nothing read for it`);
+      const isSend = args[0] === "send" || args[1] === "send";
+      const expected = isSend ? [...sendLookups, args] : [args];
+      assert.deepEqual(calls(s), expected, `hc ${args.join(" ")} from ${terminal}: the lookups then one call, word for word`);
     }
   }
   // No HC_TERMINAL_ID at all: still passed on (only a kill needs a caller).
@@ -571,7 +679,7 @@ test("kill shim (#955): every other hc call goes to the real hc untouched, for a
     return env;
   })(), encoding: "utf8" });
   assert.equal(bare.status, 0, bare.stderr);
-  assert.deepEqual(calls(s), [["send", "t105", "hi"]]);
+  assert.deepEqual(calls(s), [...sendLookups, ["send", "t105", "hi"]]);
 });
 
 test("kill shim (#955): a kill it cannot check is refused; no real hc is exit 127; it never hands a call to another guard", (t) => {
@@ -692,7 +800,7 @@ test("a machine target is refused on every allowed verb but send", (t) => {
   const s = scene(t);
   const cases = [
     ["read", "m/t101"], ["read", "--lines", "5", "m/t101"], ["get", "m/t101"], ["wait", "m/t101"],
-    ["put", "m/t101", "/tmp/file"], ["label", "m/t101", "role=reviewer"], ["kill", "m/t101"], ["rm", "m/t101"],
+    ["label", "m/t101", "role=reviewer"], ["kill", "m/t101"], ["rm", "m/t101"],
   ];
   for (const args of cases) {
     writeFileSync(s.logPath, "");
@@ -711,6 +819,60 @@ test("a machine target is refused on every allowed verb but send", (t) => {
     assertRefused(r);
     assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
   }
+});
+
+test("with the proxy off, a machine target named by a name is refused (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. The lexical check
+  // above cannot see a name; the resolved address decides, for reads/waits and rm alike.
+  const s = scene(t);
+  for (const [args, address] of [
+    [["read", "cap-m"], "m/t101"], [["get", "cap-m"], "m/t101"], [["wait", "cap-m"], "m/t101"],
+    [["rm", "worker-m"], "m/t105"],
+    [["read", "other-m"], "m/t120"], [["rm", "other-m"], "m/t120"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => same(argv, [args[0], address])), false,
+      `${args.join(" ")} never forwards its machine address`);
+  }
+});
+
+test("with the proxy off, label and events refuse a machine-resolving name and the direct address (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. A name passes the
+  // lexical check; the address hc resolves decides, and the checked address is what is
+  // forwarded. `worker-m` is the caller's own worker on a machine, so label's own-worker
+  // check passes and only the resolved-address rule refuses it.
+  const s = scene(t);
+  for (const args of [
+    ["label", "worker-m", "role=reviewer"], ["label", "m/t105", "role=reviewer"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => argv[0] === "label"), false, `${args.join(" ")} never reaches hc`);
+  }
+  for (const args of [
+    ["events", "--terminal", "cap-m"], ["events", "--terminal=m/t101"],
+    ["events", "--children-of", "worker-m"], ["events", "--children-of=m/t105"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => argv[0] === "events"), false, `${args.join(" ")} never reaches hc`);
+  }
+  // A local name still passes, at the address the guard checked.
+  writeFileSync(s.logPath, "");
+  const label = guardRun(s, ["label", "worker", "role=dev"]);
+  assert.equal(label.status, 0, label.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["label", "t105", "role=dev"])), JSON.stringify(calls(s)));
+  writeFileSync(s.logPath, "");
+  const events = guardRun(s, ["events", "--terminal", "cap"]);
+  assert.equal(events.status, 0, events.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["events", "--terminal", "t101"])), JSON.stringify(calls(s)));
 });
 
 test("a machine target named by an hc events option is refused", (t) => {
@@ -749,11 +911,206 @@ test("label is the caller's own workers only; a label cannot widen send", (t) =>
   assert.ok(calls(s).some((argv) => same(argv, ["label", "t105", "role=dev"])));
 });
 
+// ---- #628: reads and waits, rm, and put, on the same team boundary as the proxy ----
+
+test("read, get and wait see the caller's pane, its own workers and its team (#628)", (t) => {
+  const s = scene(t);
+  // Its own pane, its lead, a member, the main bot and its own workers: the team graph.
+  for (const args of [["read", "t100"], ["read", "t101"], ["read", "--lines", "5", "t102"],
+    ["get", "t103"], ["wait", "t102"], ["read", "t110"], ["wait", "--timeout", "1", "t105"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, `${args.join(" ")}: ${r.stderr}`);
+  }
+  // A name is resolved once and the checked address is the one forwarded.
+  writeFileSync(s.logPath, "");
+  assert.equal(guardRun(s, ["get", "cap"]).status, 0);
+  assert.ok(calls(s).some((argv) => same(argv, ["get", "t101"])), "the resolved address is forwarded");
+  // The shared send roles stay send only: a reviewer/fixer label, a roster reviewer rank, a
+  // stranger's pane, a bare pane and an unknown target are all refused.
+  for (const args of [["read", "t106"], ["read", "t107"], ["get", "t108"], ["wait", "t108"],
+    ["read", "t120"], ["get", "t120"], ["wait", "t120"], ["read", "t121"], ["read", "t999"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    const verb = args[0];
+    if (verb !== "get") {
+      assert.equal(calls(s).some((argv) => same(argv, [verb, args.at(-1)])), false,
+        `${args.join(" ")} never reaches ${verb}`);
+    }
+  }
+  assert.match(guardRun(s, ["read", "t120"]).stderr, /not in the caller's team/);
+  assert.match(guardRun(s, ["read", "t999"]).stderr, /not resolvable/);
+});
+
+test("rm ends the caller's own workers only (#628)", (t) => {
+  const s = scene(t);
+  for (const target of ["t105", "t110"]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, ["rm", target]);
+    assert.equal(r.status, 0, `rm ${target}: ${r.stderr}`);
+    assert.ok(calls(s).some((argv) => same(argv, ["rm", target])), `rm ${target} arrives at its address`);
+  }
+  for (const target of ["t101", "t102", "t106", "t108", "t120", "t121"]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, ["rm", target]);
+    assertRefused(r);
+    assert.match(r.stderr, /own worker/);
+    assert.equal(calls(s).some((argv) => same(argv, ["rm", target])), false, `rm ${target} never reaches hc`);
+  }
+  const self = guardRun(s, ["rm", "t100"]);
+  assertRefused(self);
+  assert.match(self.stderr, /own pane/);
+  const unknown = guardRun(s, ["rm", "t999"]);
+  assertRefused(unknown);
+  assert.match(unknown.stderr, /not resolvable/);
+  // A worker pane ends nothing, not even a sibling of its own bot.
+  writeFileSync(s.logPath, "");
+  const worker = guardRun(s, ["rm", "t105"], { HC_TERMINAL_ID: "t110" });
+  assertRefused(worker);
+  assert.match(worker.stderr, /worker pane ends no panes/);
+  assert.equal(calls(s).some((argv) => same(argv, ["rm", "t105"])), false);
+});
+
+test("put is refused: a guarded pane writes nothing beside another pane (#628)", (t) => {
+  const s = scene(t);
+  for (const args of [["put", "t101", "/tmp/file"], ["put", "t105", "/tmp/file"],
+    ["put", "t120", "/tmp/file"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /terminal\.put/);
+    assert.deepEqual(calls(s), [], `${args.join(" ")} never reaches hc`);
+  }
+  // Its help still passes, like every other named command's.
+  writeFileSync(s.logPath, "");
+  const help = guardRun(s, ["put", "--help"]);
+  assert.equal(help.status, 0, help.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["put", "--help"])));
+});
+
 // ---- the dsh-tui worker run shape ----
 
 const exactRun = (s, over = {}) => workerArgs({
   botId: ID.dev, branch: "feat/x", role: "dev", name: "feat-x", cwd: s.worktree, parent: "t100",
   agent: "dsh-tui", argv: ["dsh-tui"], task: "do it", path: "/usr/bin:/bin", space: "sp1", ...over,
+});
+
+function forgedMainHome(s) {
+  const app = join(s.root, "forged-app");
+  const ledger = join(s.app, "automagik-herdr", "attach.jsonl");
+  const row = JSON.parse(readFileSync(ledger, "utf8"));
+  mkdirSync(join(app, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(app, "automagik-herdr", "attach.jsonl"),
+    `${JSON.stringify({ ...row, bot: ID.main })}\n`, { mode: 0o600 });
+  return { HERDR_APP_HOME: app };
+}
+
+test("a forged invocation home grants neither a foreign send nor a main-only kill (#628)", (t) => {
+  const s = scene(t);
+  const env = forgedMainHome(s);
+  const foreign = guardRun(s, ["send", "t120", "hi"], env);
+  assertRefused(foreign);
+  assert.match(foreign.stderr, /not in the caller's team/);
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+
+  writeFileSync(s.logPath, "");
+  const team = guardRun(s, ["send", "t101", "hi"], env);
+  assert.equal(team.status, 0, team.stderr);
+  assert.deepEqual(calls(s).at(-1), ["send", "t101", "hi"]);
+
+  for (const invoke of [guardRun, shimRun]) {
+    writeFileSync(s.logPath, "");
+    const kill = invoke(s, ["kill", "t120"], env);
+    if (invoke === guardRun) assertRefused(kill);
+    else assertShimRefused(kill);
+    assert.match(kill.stderr, /main bot only/);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+  }
+});
+
+test("guarded sends, kills and worker starts require a live caller with a valid launch record (#628)", (t) => {
+  const cases = [
+    ["not found", null, /not resolvable/],
+    ["different address", { address: "t101" }, /not resolvable/],
+    ["finished", { state: "finished" }, /not live/],
+    ["absent argv", { argv: undefined }, /no valid launch argv/],
+    ["non-array argv", { argv: "dsh-tui" }, /no valid launch argv/],
+    ["absent created_ms", { created_ms: undefined }, /no valid created_ms/],
+    ["unsafe created_ms", { created_ms: Number.MAX_SAFE_INTEGER + 1 }, /no valid created_ms/],
+  ];
+  for (const [name, patch, reason] of cases) {
+    const s = killScene(t);
+    if (patch) editPane(s, "t100", patch);
+    else {
+      const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+      delete state.get.t100;
+      writeFileSync(s.statePath, JSON.stringify(state));
+    }
+    for (const args of [["send", "t101", "hi"], ["kill", "t105"], exactRun(s)]) {
+      writeFileSync(s.logPath, "");
+      const r = guardRun(s, args);
+      assertRefused(r);
+      assert.match(r.stderr, reason, name);
+      assert.deepEqual(calls(s), [["get", "t100", "--json"]], name);
+    }
+    writeFileSync(s.logPath, "");
+    assertShimRefused(shimRun(s, ["kill", "t105"]), reason);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"]], name);
+  }
+});
+
+test("a machine-qualified caller is refused before hc is queried (#628)", (t) => {
+  const s = scene(t);
+  const env = { HC_TERMINAL_ID: "m/t101" };
+  const r = guardRun(s, ["send", "t100", "hi"], env);
+  assertRefused(r);
+  assert.match(r.stderr, /caller.*machine-qualified/);
+  assertShimRefused(shimRun(s, ["kill", "t100"], env), /caller.*machine-qualified/);
+  assert.deepEqual(calls(s), []);
+});
+
+test("a binding from an earlier pane lifetime grants no seat (#628)", (t) => {
+  const s = scene(t);
+  editPane(s, "t100", { created_ms: 101 });
+  const r = guardRun(s, ["send", "t101", "hi"]);
+  assertRefused(r);
+  assert.match(r.stderr, /neither bound in the attach ledger nor a worker pane/);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+});
+
+test("a worker's caller lookup also supplies its worker.of fallback (#628)", (t) => {
+  const s = scene(t);
+  const r = guardRun(s, ["send", "t100", "hi"], { HC_TERMINAL_ID: "t110" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s).filter((argv) => argv[0] === "get" && argv[1] === "t110"),
+    [["get", "t110", "--json"]]);
+});
+
+test("a worker launch cannot set HERDR_APP_HOME in its env prefix (#628)", (t) => {
+  const s = scene(t);
+  const args = exactRun(s);
+  args.splice(args.indexOf("--") + 3, 0, `HERDR_APP_HOME=${s.app}`);
+  const r = guardRun(s, args);
+  assertRefused(r);
+  assert.match(r.stderr, /worker launch cannot set HERDR_APP_HOME/);
+  assert.deepEqual(calls(s), []);
+});
+
+test("a recognized worker program still requires the caller's real ledger binding (#628)", (t) => {
+  const s = scene(t);
+  const env = forgedMainHome(s);
+  const worker = { agent: "codex", argv: ["codex"], path: `${GUARD_DIR}:/usr/bin:/bin` };
+  const wrongBot = guardRun(s, exactRun(s, { ...worker, botId: ID.main }), env);
+  assertRefused(wrongBot);
+  assert.match(wrongBot.stderr, /worker\.of is not the caller's bot/);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+
+  writeFileSync(s.logPath, "");
+  const exact = exactRun(s, worker);
+  const ownBot = guardRun(s, exact, env);
+  assert.equal(ownBot.status, 0, ownBot.stderr);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact]);
 });
 
 test("the exact dsh-tui worker argv reaches the stub unchanged", (t) => {
@@ -764,7 +1121,39 @@ test("the exact dsh-tui worker argv reaches the stub unchanged", (t) => {
   writeFileSync(s.logPath, "");
   const r = guardRun(s, exact);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [exact]);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact]);
+});
+
+// #1011: a dsh-tui lead's full guard starts a worker of any agent the pack launches, not dsh-tui
+// alone. Claude carries its agent.session label and its login words (the default login puts
+// `-u CLAUDE_CONFIG_DIR` before PATH); every other agent kind starts from its own program.
+test("a dsh-tui lead's guard accepts a Claude worker with its session label (#1011)", (t) => {
+  const s = scene(t);
+  const exact = exactRun(s, {
+    agent: "claude", argv: ["claude", "--session-id", "session-1"], session: "session-1", login: ["-u", "CLAUDE_CONFIG_DIR"],
+    path: `${GUARD_DIR}:/usr/bin:/bin`,
+  });
+  assert.ok(exact.includes("agent.session=session-1"), exact.join(" "));
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, exact);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], "the Claude worker launch reached hc unchanged");
+});
+
+test("a dsh-tui lead's guard accepts every other agent kind's worker launch (#1011)", (t) => {
+  const s = scene(t);
+  const starts = {
+    codex: ["codex"], antigravity: ["agy", "--mode", "auto"], omp: ["omp"], pi: ["pi"],
+    opencode: ["opencode"], cursor: ["cursor-agent"], copilot: ["copilot"], amp: ["amp"], grok: ["grok"],
+    kimi: ["kimi"], kiro: ["kiro-cli"], hermes: ["hermes"], qoder: ["qodercli"], crush: ["crush"],
+  };
+  for (const [agent, argv] of Object.entries(starts)) {
+    const exact = exactRun(s, { agent, argv, task: "do it", path: `${GUARD_DIR}:/usr/bin:/bin` });
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, exact);
+    assert.equal(r.status, 0, `${agent}: ${r.stderr}`);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], `${agent}: the worker launch reached hc unchanged`);
+  }
 });
 
 test("a run that is not the worker shape is refused before hc", (t) => {
@@ -777,15 +1166,15 @@ test("a run that is not the worker shape is refused before hc", (t) => {
   const noGuardPath = [...exact];
   noGuardPath[noGuardPath.indexOf("--") + 2] = "PATH=/usr/bin:/bin";
   const template = [...exact.slice(0, parentAt), "--label", "worker.template=dev-sol", ...exact.slice(parentAt)];
-  const otherAgent = [...exact];
-  otherAgent[otherAgent.indexOf("--") + 3] = "claude";
+  const notAnAgent = [...exact];
+  notAnAgent[notAnAgent.indexOf("--") + 3] = "bash";
   const wrongCwd = exactRun(s, { cwd: s.project });
   const foreignParent = exactRun(s, { parent: "t101" });
   const foreignBot = exactRun(s, { botId: ID.cap });
   const bare = ["run", "--bg", "--parent", "t100", "--", "/usr/bin/env", `PATH=${GUARD_DIR}:/usr/bin`, "dsh-tui", "--", "task"];
   const cases = [
     ["bare", bare], ["foreign parent", foreignParent], ["foreign worker.of", foreignBot],
-    ["cwd outside the worktrees", wrongCwd], ["template", template], ["another agent", otherAgent],
+    ["cwd outside the worktrees", wrongCwd], ["template", template], ["not an agent", notAnAgent],
     ["no parent", withoutParent], ["outlive-parent", withFlag("--outlive-parent")], ["keep", withFlag("--keep")],
     ["--on", withFlag("--on")], ["no guard on PATH", noGuardPath],
   ];
@@ -838,7 +1227,7 @@ test("a mixed am+pack guard PATH reaches the real hc once, never a guard as hc",
   writeFileSync(s.logPath, "");
   const r = guardRun(s, exact, { PATH: `${amGuard}:${GUARD_DIR}:${s.bin}:${dirname(process.execPath)}` });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [exact], "the real hc got the mixed-PATH worker argv once");
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], "the real hc got the mixed-PATH worker argv once");
   assert.equal(existsSync(marker), false, "the am guard copy was skipped, not run as hc");
 });
 
@@ -852,7 +1241,8 @@ test("a pair of guard copies never loops: both are skipped and the stub runs onc
   writeFileSync(s.logPath, "");
   const r = guardRun(s, ["read", "t101"], { PATH: `${a.guard}:${b.guard}:${s.bin}:${dirname(process.execPath)}` });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [["read", "t101"]], "the real hc ran once; the guard copies did not");
+  assert.deepEqual(calls(s).filter((argv) => argv[0] === "read"), [["read", "t101"]],
+    "the real hc ran once; the guard copies did not");
   assert.equal(existsSync(a.marker), false, "the first guard copy was skipped");
   assert.equal(existsSync(b.marker), false, "the second guard copy was skipped");
 });
@@ -865,8 +1255,11 @@ test("a planted hcGuard.mjs is not a guard: its hc is an ordinary PATH entry, no
   chmodSync(join(guard, "hc"), 0o755);
   writeFileSync(s.logPath, "");
   const r = guardRun(s, ["read", "t101"], { PATH: `${GUARD_DIR}:${guard}:${dirname(process.execPath)}` });
-  assert.equal(r.status, 7, r.stderr);
+  assert.equal(r.status, 2, r.stderr);
   assert.equal(existsSync(marker), true, "the planted hc was reached, not skipped");
+  // The planted hc answered no target record, so the team check fails closed instead of
+  // forwarding a read it could not check.
+  assert.match(r.stderr, /not resolvable/);
   assert.deepEqual(calls(s), [], "the stub never ran: the planted folder was not skipped");
 });
 
@@ -912,14 +1305,14 @@ test("a guard copy that calls its caller stops at once instead of looping", (t) 
   const s = scene(t);
   const mod = join(s.root, "other-guard"), copyGuard = join(mod, "guard");
   mkdirSync(copyGuard, { recursive: true });
-  for (const file of ["hcGuard.mjs", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+  for (const file of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "loginWords.js", "retired.js", "hermesPair.js"]) {
     copyFileSync(join(GUARD_DIR, "..", file), join(mod, file));
   }
   appendFileSync(join(mod, "hcGuard.mjs"), "\n// not this guard\n");
   copyFileSync(join(GUARD_DIR, "hc"), join(copyGuard, "hc"));
   chmodSync(join(copyGuard, "hc"), 0o755);
   writeFileSync(s.logPath, "");
-  const r = spawnSync(process.execPath, [s.guard, "read", "t101"], {
+  const r = spawnSync(process.execPath, [s.guard, "ls"], {
     env: envFor(s, { PATH: `${GUARD_DIR}:${copyGuard}:${s.bin}:${dirname(process.execPath)}` }),
     encoding: "utf8", timeout: 15000,
   });
@@ -933,7 +1326,7 @@ test("an older guard copy after this one cannot turn a refusal into an allow", (
   const mod = join(s.root, "older-guard"), olderGuard = join(mod, "guard");
   const log = join(mod, "older.log");
   mkdirSync(olderGuard, { recursive: true });
-  for (const file of ["hcGuard.mjs", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "retired.js", "hermesPair.js"]) {
+  for (const file of ["hcGuard.mjs", "agyPrompt.js", "launchArgs.js", "dialog.js", "approved.js", "attach.js", "model.js", "models.js", "workers.js", "logins.js", "loginWords.js", "retired.js", "hermesPair.js"]) {
     copyFileSync(join(GUARD_DIR, "..", file), join(mod, file));
   }
   // An older copy: it predates the re-entry marker, so it ignores the marker on its env.
@@ -1146,9 +1539,9 @@ test("cross-project lead (#850): hc send and proxy require reciprocal crossMembe
     { address: "t201", name: "unrelated", state: "live" },
     { address: "t202", name: "hubtop", state: "live" },
   );
-  st.get.t200 = get("t200", { bot: coordId }, { cwd: hubDir, name: "coord" });
-  st.get.t201 = get("t201", { bot: unrelatedHubId }, { cwd: hubDir, name: "unrelated" });
-  st.get.t202 = get("t202", { bot: hubTopId }, { cwd: hubDir, name: "hubtop" });
+  st.get.t200 = get("t200", { bot: coordId }, { cwd: hubDir, name: "coord", argv: launchArgv(s.app) });
+  st.get.t201 = get("t201", { bot: unrelatedHubId }, { cwd: hubDir, name: "unrelated", argv: launchArgv(s.app) });
+  st.get.t202 = get("t202", { bot: hubTopId }, { cwd: hubDir, name: "hubtop", argv: launchArgv(s.app) });
   writeFileSync(s.statePath, JSON.stringify(st));
   const ledger = join(s.app, "automagik-herdr", "attach.jsonl");
   const rows = [
@@ -1225,4 +1618,1051 @@ test("cross-project lead (#850): hc send and proxy require reciprocal crossMembe
   assertRefused(guardRun(s, ["send", "t200", "nope-member-team"], { HC_TERMINAL_ID: "t100" }));
   assertRefused(guardRun(s, ["send", "t100", "nope-member-team"], { HC_TERMINAL_ID: "t200" }));
   assertRefused(guardRun(s, ["send", "t103", "nope-from-hubtop"], { HC_TERMINAL_ID: "t202" }));
+});
+
+// ---- #1421: send text must not become an agent command ----
+
+test("#1421 commandPrefixOf truth table: only a leading ! or / after whitespace", async () => {
+  const { commandPrefixOf } = await import("../mods/am-sidebar/hcGuard.mjs");
+  for (const [text, expected] of [
+    ["!x", "!"], ["/x", "/"], ["!", "!"], ["/", "/"],
+    [" \t!x", "!"], [" \t/x", "/"], ["\n!x", "!"], ["\r\n /x", "/"],
+    ["hello /x", null], ["a!b", null], ["x", null], ["", null], [" \n\t", null],
+    [null, null], [undefined, null], [42, null], [{}, null],
+  ]) assert.equal(commandPrefixOf(text), expected, JSON.stringify(text));
+});
+
+test("#1421 prefixTarget truth table: status agents, stale shell argv, other and unknown", async () => {
+  const { prefixTarget } = await import("../mods/am-sidebar/hcGuard.mjs");
+  for (const [value, expected] of [
+    [null, "unknown"], [undefined, "unknown"], [false, "unknown"], [42, "unknown"], ["bash", "unknown"],
+    [{}, "other"], [{ status: {} }, "other"], [{ foreground: { argv: [] } }, "other"],
+    [{ status: { app: "bash" }, foreground: { argv: ["bash"] } }, "other"],
+    [{ status: { app: "python3" }, foreground: { argv: ["python3", "script.py"] } }, "other"],
+    ...["claude-code", "codex", "dsh-tui", "antigravity"].map((app) => [{ status: { app } }, "agent"]),
+    [{ status: { app: "bash" }, foreground: { argv: ["claude"] } }, "agent"],
+    [{ foreground: { argv: ["claude"] } }, "agent"],
+  ]) assert.equal(prefixTarget(value), expected, JSON.stringify(value));
+});
+
+test("#1421 sendTextProblem truth table: prefixed texts refuse agents and unknown targets only", async () => {
+  const { sendTextProblem } = await import("../mods/am-sidebar/hcGuard.mjs");
+  const targets = [
+    ["unknown", null, true], ["missing", undefined, true],
+    ...["claude-code", "codex", "dsh-tui", "antigravity"].map((app) => [app, { status: { app } }, true]),
+    ["stale bash", { status: { app: "bash" }, foreground: { argv: ["claude"] } }, true],
+    ["bash", { status: { app: "bash" }, foreground: { argv: ["bash"] } }, false],
+    ["python3", { status: { app: "python3" }, foreground: { argv: ["python3", "script.py"] } }, false],
+    ["empty object", {}, false],
+  ];
+  for (const [name, target, refusesPrefix] of targets) {
+    for (const [texts, prefix] of [
+      [[], null], [["hello /x", "a!b", "x"], null], [["", " \n"], null],
+      [["!x"], "!"], [["/x"], "/"], [[" \n\t!x"], "!"], [["\n /x"], "/"],
+      [["hello", "/x"], "/"], [["/x", "!x"], "/"], [["!x", "/x"], "!"],
+    ]) {
+      const expected = prefix && refusesPrefix
+        ? `a message starting with "${prefix}" would run as a command in that agent, not reach it as text (#1421)`
+        : null;
+      assert.equal(sendTextProblem(texts, target), expected, `${name}: ${JSON.stringify(texts)}`);
+    }
+  }
+});
+
+test("#1421 shim refuses prefixed sends to each agent, unknown targets and option/name forms", async (t) => {
+  const agentCases = [
+    ...["claude-code", "codex", "dsh-tui", "antigravity"].map((app) => [app, { status: { app } }]),
+    ["claude argv under stale bash", { status: { app: "bash" }, foreground: { argv: ["claude"] } }],
+  ];
+  const cases = agentCases.flatMap(([name, report]) => ["!x", "/x"].map((text) => ({
+    name: `${name}: ${text}`, report, args: ["send", "t101", text], target: "t101", prefix: text[0],
+  })));
+  cases.push(
+    { name: "leading space before !", args: ["send", "t101", " \t!x"], target: "t101", prefix: "!" },
+    { name: "leading space before /", args: ["send", "t101", " \t/x"], target: "t101", prefix: "/" },
+    { name: "leading newline before !", args: ["send", "t101", "\n!x"], target: "t101", prefix: "!" },
+    { name: "leading newline before /", args: ["send", "t101", "\n/x"], target: "t101", prefix: "/" },
+    { name: "global --json send", args: ["--json", "send", "t101", "/x"], target: "t101", prefix: "/" },
+    { name: "--if idle and --", args: ["send", "--if", "idle", "t101", "--", "/x"], target: "t101", prefix: "/" },
+    { name: "name resolved through ls", args: ["send", "cap", "!x"], target: "cap", prefix: "!" },
+    { name: "later text word", args: ["send", "t101", "hello", "/x"], target: "t101", prefix: "/" },
+    { name: "unresolvable address", args: ["send", "t999", "!x"], target: "t999", prefix: "!" },
+    { name: "unresolvable name", args: ["send", "missing", "/x"], target: "missing", prefix: "/" },
+    { name: "get returns an error", report: { error: { kind: "not_found" } }, args: ["send", "t101", "/x"], target: "t101", prefix: "/" },
+  );
+  for (const c of cases) {
+    await t.test(c.name, (t) => {
+      const s = killScene(t);
+      const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+      Object.assign(state.get.t101, c.report ?? { status: { app: "claude-code" } });
+      writeFileSync(s.statePath, JSON.stringify(state));
+      const r = shimRun(s, c.args);
+      assert.ifError(r.error);
+      assert.equal(r.status, 2, r.stderr);
+      assert.equal(r.stdout, "");
+      assert.equal(r.stderr.trim().split("\n").length, 1, JSON.stringify(r.stderr));
+      assert.match(r.stderr, /^hc send: refused a message starting with /);
+      assert.ok(r.stderr.includes(`starting with "${c.prefix}" to ${c.target}:`), r.stderr);
+      assert.match(r.stderr, /#1421/);
+      assert.match(r.stderr, /Start it with other text/);
+      assert.match(r.stderr, /a real command goes with hc keys/);
+      assert.match(r.stderr, /would run as a command/);
+      assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "no send reached hc");
+      if (c.target === "cap") {
+        assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t101", "--json"]], "ls resolves the name before get");
+      }
+    });
+  }
+});
+
+test("#1421 shim passes prefixed sends to bash and python3 at the resolved address", async (t) => {
+  for (const app of ["bash", "python3"]) {
+    for (const [args, expected] of [
+      [["send", "cap", "!x"], ["send", "t101", "!x"]],
+      [["--json", "send", "cap", "\n/x"], ["--json", "send", "t101", "\n/x"]],
+      [["send", "--if", "idle", "cap", "--", "/x"], ["send", "--if", "idle", "t101", "--", "/x"]],
+    ]) {
+      await t.test(`${app}: ${JSON.stringify(args)}`, (t) => {
+        const s = killScene(t);
+        const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+        state.get.t101.status = { app };
+        state.get.t101.foreground = { argv: [app] };
+        writeFileSync(s.statePath, JSON.stringify(state));
+        const r = shimRun(s, args, { HC_STUB_CODE: "7" });
+        assert.ifError(r.error);
+        assert.equal(r.status, 7, r.stderr);
+        assert.equal(r.stdout, `stub-out ${JSON.stringify(expected)}\n`);
+        assert.equal(r.stderr, `stub-err ${expected[0]}\n`);
+        assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t101", "--json"], ["read", "t101", "--lines", "40", "--json"], expected]);
+      });
+    }
+  }
+});
+
+test("#1421 shim plain texts pass unchanged after the target check", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.t101.status = { app: "claude-code" };
+  state.get.t101.foreground = { argv: ["claude"] };
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const target of ["t101", "cap", "t999"]) {
+    for (const text of ["hello /x", "a!b", "x"]) {
+      for (const args of [["send", target, text], ["--json", "send", target, text]]) {
+        writeFileSync(s.logPath, "");
+        const r = shimRun(s, args);
+        assert.ifError(r.error);
+        assert.equal(r.status, 0, r.stderr);
+        const forwarded = args.map((word, i) => i === args.indexOf("send") + 1 && word === "cap" ? "t101" : word);
+        assert.equal(r.stdout, `stub-out ${JSON.stringify(forwarded)}\n`);
+        assert.equal(r.stderr, `stub-err ${args[0]}\n`);
+        // The checked target is canonical. The message text and flag order are preserved.
+        const expected = target === "t999"
+          ? [["ls", "--json"], ["get", "t999", "--json"], forwarded]
+          : [["ls", "--json"], ["get", "t101", "--json"], ["read", "t101", "--lines", "40", "--json"], forwarded];
+        assert.deepEqual(calls(s), expected);
+      }
+    }
+  }
+});
+
+test("#1421 full guard refuses !x and /x to a team agent without hc keys advice", async (t) => {
+  for (const text of ["!x", "/x"]) {
+    await t.test(text, (t) => {
+      const s = scene(t);
+      const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+      state.get.t101.status = { app: "claude-code" };
+      state.get.t101.foreground = { argv: ["claude"] };
+      writeFileSync(s.statePath, JSON.stringify(state));
+      const r = guardRun(s, ["send", "cap", text], { HC_TERMINAL_ID: "t100" });
+      assert.ifError(r.error);
+      assertRefused(r);
+      assert.equal(r.status, 2);
+      assert.match(r.stderr, /^hc guard: refused send: /);
+      assert.match(r.stderr, /#1421/);
+      assert.ok(r.stderr.includes(`starting with "${text[0]}"`), r.stderr);
+      assert.match(r.stderr, /start it with other text/);
+      assert.doesNotMatch(r.stderr, /hc keys/);
+      assert.ok(calls(s).some((argv) => same(argv, ["get", "t101", "--json"])), "checks the resolved team target");
+      assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "no send reached hc");
+    });
+  }
+});
+
+test("#1421 full guard keeps the non-team or unresolvable target's own refusal reason", async (t) => {
+  for (const [target, reason] of [
+    ["t120", /the target is not in the caller's team/],
+    ["t999", /the target is not resolvable with hc/],
+  ]) {
+    for (const text of ["!x", "/x"]) {
+      await t.test(`${target}: ${text}`, (t) => {
+        const s = scene(t);
+        const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+        state.get.t120.status = { app: "claude-code" };
+        state.get.t120.foreground = { argv: ["claude"] };
+        writeFileSync(s.statePath, JSON.stringify(state));
+        const r = guardRun(s, ["send", target, text], { HC_TERMINAL_ID: "t100" });
+        assert.ifError(r.error);
+        assertRefused(r);
+        assert.equal(r.status, 2);
+        assert.match(r.stderr, reason);
+        assert.doesNotMatch(r.stderr, /#1421|hc keys|would run as a command/);
+        assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "no send reached hc");
+      });
+    }
+  }
+});
+
+test("#1421 full guard passes prefixed sends to a shell team target at its address", (t) => {
+  const s = scene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.t101.status = { app: "bash" };
+  state.get.t101.foreground = { argv: ["bash"] };
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const args of [["send", "cap", "!x"], ["send", "--if", "idle", "cap", "--", "/x"]]) {
+    writeFileSync(s.logPath, "");
+    const expected = args.map((word) => word === "cap" ? "t101" : word);
+    const r = guardRun(s, args, { HC_TERMINAL_ID: "t100" });
+    assert.ifError(r.error);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, `stub-out ${JSON.stringify(expected)}\n`);
+    assert.equal(r.stderr, "stub-err send\n");
+    assert.ok(calls(s).some((argv) => same(argv, ["ls", "--json"])));
+    assert.ok(calls(s).some((argv) => same(argv, ["get", "t101", "--json"])));
+    assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [expected]);
+  }
+});
+
+// ---- a send to a pane held by a dialog (#1414) ----
+//
+// A question dialog takes an incoming send as its own answer: the text is pasted into the
+// dialog's input and submitted, and a person's question disappears unanswered. A dialog is a
+// blocked status in herdr-core, or a visible prompt/banner on the pane's screen when the pane's
+// status is stale or absent (a linked machine, a revived pane). These cases pin both.
+
+test("#1414 a blocked question pane refuses the send before anything is typed", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "blocked", kind: "question" }, screen: DIALOG_SCREEN });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, ["send", "t101", "the report"]);
+  assertHeld(r, "t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "nothing was typed into the dialog");
+  assert.equal(calls(s).some((argv) => argv[0] === "read"), false, "a blocked status is enough; no screen read");
+});
+
+test("#1414 a visible dialog whose status says idle is refused, not answered", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen: DIALOG_SCREEN });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, ["send", "t101", "the report"]);
+  assertHeld(r, "t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+  assert.ok(calls(s).some((argv) => same(argv, ["read", "t101", "--lines", "40", "--json"])), "the screen was looked at");
+});
+
+test("#1557 a footerless rate-limit dialog holds a message to an idle seat", (t) => {
+  const s = scene(t);
+  const screen = "You've hit your usage limit.\nYour limit resets in 2 hours.\n❯ 1. Wait for reset\n  2. Dismiss";
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen });
+  writeFileSync(s.logPath, "");
+  assertHeld(guardRun(s, ["send", "t101", "the report"]), "t101");
+  assert.equal(calls(s).some(args => hcVerbOf(args) === "send"), false);
+});
+
+test("#1414 a linked-machine pane with no status is checked by its screen", (t) => {
+  const s = scene(t);
+  editPane(s, "m/t101", { screen: DIALOG_SCREEN });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, ["send", "m/t101", "the report"]);
+  assertHeld(r, "m/t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+});
+
+test("#1414 a free pane's send is unchanged, byte for byte", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen: FREE_SCREEN });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, ["send", "t101", "hello"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'stub-out ["send","t101","hello"]\n');
+  assert.equal(r.stderr, "stub-err send\n");
+  assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [["send", "t101", "hello"]]);
+});
+
+test("#1414 a finished pane's last dialog screen is not mistaken for a live hold", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { state: "finished", status: { state: "done", app: "claude-code" }, screen: DIALOG_SCREEN });
+  const r = guardRun(s, ["send", "t101", "hello"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [["send", "t101", "hello"]]);
+});
+
+test("#1414 --force cannot answer a person's dialog", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "blocked", kind: "question" } });
+  const r = guardRun(s, ["send", "--force", "t101", "the report"]);
+  assertHeld(r, "t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+});
+
+test("#1414 two messages while held are both refused; order is kept once it is free", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, screen: DIALOG_SCREEN });
+  assertHeld(guardRun(s, ["send", "t101", "first"]), "t101");
+  assertHeld(guardRun(s, ["send", "t101", "second"]), "t101");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "neither was typed");
+  editPane(s, "t101", { screen: FREE_SCREEN });
+  for (const text of ["first", "second"]) {
+    const r = guardRun(s, ["send", "t101", text]);
+    assert.equal(r.status, 0, r.stderr);
+  }
+  assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"),
+    [["send", "t101", "first"], ["send", "t101", "second"]]);
+});
+
+test("#1414 a screen that cannot be read is left to hc's own send", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { status: { state: "idle", app: "claude-code" }, readFail: true });
+  const r = guardRun(s, ["send", "t101", "hello"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [["send", "t101", "hello"]]);
+});
+
+test("#1414 the kill shim refuses a send to a held pane too", (t) => {
+  const s = killScene(t);
+  editPane(s, "t105", { status: { state: "blocked", kind: "question" }, screen: DIALOG_SCREEN });
+  const r = shimRun(s, ["send", "t105", "the report"], { HC_TERMINAL_ID: "t103" });
+  assertHeld(r, "t105");
+  assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+});
+
+// Older guard/hc shipped in the tags checked for #1728. Keep its bytes, including the final newline.
+const OLD_GUARD_ENTRY = `#!/usr/bin/env node
+// The guard's executable entry (automagik#624): a tiny shim, so the logic stays in
+// hcGuard.mjs, which the pack's node --check gate covers. Dynamic import works whether this
+// extensionless file loads as CommonJS (an installed pack has no package.json) or as ESM
+// (\`herdr/package.json\` says type module). Apache-2.0.
+"use strict";
+import("../hcGuard.mjs").then(
+  ({ runGuard }) => runGuard(process.argv.slice(2), process.env),
+  () => {
+    process.stderr.write("hc guard: failed closed (#624): the guard's logic did not load; this wrapper is a guardrail, not a boundary (#631).\\n");
+    return 1;
+  },
+).then(
+  (code) => { process.exitCode = Number.isInteger(code) ? code : 1; },
+  () => {
+    process.stderr.write("hc guard: failed closed (#624): internal error; this wrapper is a guardrail, not a boundary (#631).\\n");
+    process.exitCode = 1;
+  },
+);
+`;
+
+test("#1728 the CLI vouches for skewed guard entries only at recognized install paths", async (t) => {
+  const { isGuardFolder, isInstalledGuardFolder } = await import("../mods/am-sidebar/hcGuard.mjs");
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "hc-guard-install-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const env = { HOME: root, AM_HOME: join(root, "am") + "/" };
+  const store = join(env.AM_HOME, "parts", "automagik.am");
+  const app = join(root, ".config", "herdr-app");
+  const pack = join(app, "mods", "am-sidebar");
+  const fixture = (parent, name = "guard", entry = readFileSync(join(GUARD_DIR, "hc"))) => {
+    const dir = join(parent, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(parent, "hcGuard.mjs"), "// a different release\n");
+    writeFileSync(join(dir, "hc"), entry);
+    return dir;
+  };
+  const version = fixture(join(store, "3.158.1"));
+  const reinstall = fixture(join(store, "3.158.1-a1b2"), "hc-kill", readFileSync(join(KILL_GUARD_DIR, "hc")));
+  const named = fixture(join(store, "restored"));
+  symlinkSync(dirname(named), join(store, "current"));
+  symlinkSync(dirname(reinstall), join(store, "previous"));
+  const packGuard = fixture(pack, "guard", OLD_GUARD_ENTRY);
+  const alias = join(root, "pane-tools");
+  symlinkSync(packGuard, alias);
+  const linkedApp = join(root, "linked-app");
+  mkdirSync(join(linkedApp, "mods"), { recursive: true });
+  symlinkSync(pack, join(linkedApp, "mods", "am-sidebar"));
+  for (const [name, dir] of [
+    ["version", version],
+    ["hex reinstall", reinstall],
+    ["current pointing to a non-version child", join(store, "current", "guard")],
+    ["non-version child linked as current", named],
+    ["previous", join(store, "previous", "hc-kill")],
+    ["pack mod with the older shipped entry", packGuard],
+    ["stable root", fixture(stableRootOf(env))],
+    ["alias to the guard folder", alias],
+  ]) assert.equal(isInstalledGuardFolder(dir, env), true, name);
+  assert.equal(isInstalledGuardFolder(packGuard, { ...env, HERDR_APP_HOME: linkedApp + "/" }), true, "symlinked pack mod root");
+  assert.equal(isGuardFolder(version), false, "the #643/#721 byte-equal rule still rejects skew");
+
+  const staging = fixture(join(store, ".staging"));
+  unlinkSync(join(store, "previous"));
+  symlinkSync(dirname(staging), join(store, "previous"));
+  for (const [name, dir] of [
+    ["planted outside the roots", fixture(join(root, "planted"))],
+    ["staging even when linked as previous", join(store, "previous", "guard")],
+    ["unlinked non-version child", fixture(join(store, "unlinked"))],
+    ["other folder basename", fixture(pack, "bin")],
+    ["different entry", fixture(join(store, "3.158.2"), "guard", "#!/bin/sh\nexit 1\n")],
+    ["pack kept for rollback", fixture(join(app, "automagik-herdr", ".prev", "am-sidebar"))],
+    ["missing folder", join(root, "missing")],
+    ["empty path", ""],
+  ]) assert.equal(isInstalledGuardFolder(dir, env), false, name);
+});
+
+test("#628 send forwards a name at its checked address and keeps flags and text", (t) => {
+  const s = scene(t);
+  for (const [args, expected] of [
+    [["send", "cap", "hello"], ["send", "t101", "hello"]],
+    [["send", "--if", "idle", "cap", "--", "hi"], ["send", "--if", "idle", "t101", "--", "hi"]],
+    [["send", "cap", "--", "--on", "m"], ["send", "t101", "--", "--on", "m"]],
+  ]) {
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+});
+
+test("#628 send preserves direct terminal IDs and existing --on sends by ID", (t) => {
+  const s = scene(t);
+  for (const args of [["send", "t101", "hello"], ["send", "--on", "m", "t101", "hello"]]) {
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(calls(s).at(-1), args);
+  }
+});
+
+test("#628 send with --on forwards the bare checked terminal ID", (t) => {
+  const s = scene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get["m/cap"] = state.get["m/t101"];
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const [args, expected] of [
+    [["send", "--on", "m", "cap", "hello"], ["send", "--on", "m", "t101", "hello"]],
+    [["send", "--on=m", "cap", "--", "hello"], ["send", "--on=m", "t101", "--", "hello"]],
+    [["send", "--on=m", "m/t101", "hello"], ["send", "--on=m", "t101", "hello"]],
+  ]) {
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+});
+
+test("#628 send with --on refuses an address off the named machine", (t) => {
+  const s = scene(t);
+  for (const address of ["t101", "other/t101"]) {
+    editPane(s, "m/t101", { address });
+    const r = guardRun(s, ["send", "--on", "m", "t101", "hello"]);
+    assertRefused(r);
+    assert.match(r.stderr, /hc resolved the target off the --on machine/);
+  }
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+});
+
+test("#628 a machine address returned only by get is refused for every checked non-send verb", (t) => {
+  const s = killScene(t);
+  editPane(s, "ghost", get("m/t120", { bot: ID.cap, "worker.of": ID.dev }, {
+    cwd: s.project, parent: "t100",
+  }));
+  for (const args of [
+    ["read", "ghost"], ["get", "ghost"], ["wait", "ghost"],
+    ["label", "ghost", "role=dev"], ["kill", "ghost"], ["rm", "ghost"],
+    ["events", "--terminal", "ghost"], ["events", "--children-of=ghost"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const caller = args[0] === "kill" ? "t103" : "t100";
+    const r = guardRun(s, args, { HC_TERMINAL_ID: caller });
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.ok(calls(s).some((argv) => same(argv, ["get", "ghost", "--json"])));
+    assert.equal(calls(s).some((argv) => same(argv, args)), false, `${args.join(" ")} never reaches hc`);
+  }
+});
+
+test("#628 read and events forward a local alias resolved only by get", (t) => {
+  const s = scene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.alias = state.get.t101;
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const read = guardRun(s, ["read", "alias"]);
+  assert.equal(read.status, 0, read.stderr);
+  assert.deepEqual(calls(s).at(-1), ["read", "t101"]);
+  const events = guardRun(s, ["events", "--terminal=alias"]);
+  assert.equal(events.status, 0, events.stderr);
+  assert.deepEqual(calls(s).at(-1), ["events", "--terminal=t101"]);
+});
+
+test("#628 a name shaped like a terminal ID can resolve through get alone", (t) => {
+  const s = scene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.terminals = state.terminals.filter((row) => row.name !== "tester");
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const r = guardRun(s, ["send", "tester", "hello"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["get", "tester", "--json"])));
+  assert.deepEqual(calls(s).at(-1), ["send", "t108", "hello"]);
+});
+
+test("#628 the guard refuses invalid terminal addresses from get", (t) => {
+  const s = scene(t);
+  for (const address of ["cap", "", "t 1", 101, "m/n/t1"]) {
+    editPane(s, "t101", { address });
+    const r = guardRun(s, ["send", "cap", "hello"]);
+    assertRefused(r);
+    assert.match(r.stderr, /the target's address from hc is not a terminal id/);
+  }
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+});
+
+test("#628 the guard refuses when ls and get resolve to different panes", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { address: "t103" });
+  for (const target of ["cap", "t101"]) {
+    const r = guardRun(s, ["send", target, "hello"]);
+    assertRefused(r);
+    assert.match(r.stderr, /hc resolved the target to two different panes/);
+  }
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+});
+
+test("#628 the kill shim forwards a get-only alias by address and preserves --json", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.alias = state.get.t105;
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const r = shimRun(s, ["--json", "kill", "alias"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(killsSeen(s), [["--json", "kill", "t105"]]);
+});
+
+test("#628 checked verbs forward get-only local aliases at their canonical addresses", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.memberAlias = state.get.t101;
+  state.get.workerAlias = state.get.t105;
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const [args, expected, caller] of [
+    [["get", "memberAlias"], ["get", "t101"], "t100"],
+    [["wait", "memberAlias"], ["wait", "t101"], "t100"],
+    [["label", "workerAlias", "role=dev"], ["label", "t105", "role=dev"], "t100"],
+    [["rm", "workerAlias"], ["rm", "t105"], "t100"],
+    [["kill", "workerAlias"], ["kill", "t105"], "t103"],
+    [["events", "--children-of=memberAlias"], ["events", "--children-of=t101"], "t100"],
+  ]) {
+    const r = guardRun(s, args, { HC_TERMINAL_ID: caller });
+    assert.equal(r.status, 0, `${args.join(" ")}: ${r.stderr}`);
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+});
+
+test("#540 a bot can set and clear the owner question on its own pane", (t) => {
+  const s = scene(t);
+  const expected = [
+    ["label", "t100", "automagik-herdr.needs-owner=Ship?"],
+    ["label", "t100", "automagik-herdr.needs-owner="],
+  ];
+  for (const args of expected) {
+    const result = guardRun(s, args);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), expected);
+});
+
+test("#540 the guard forwards the canonical own-pane address returned by hc get", (t) => {
+  const s = scene(t);
+  editPane(s, "t100", { name: "renamed" }); // hc ls still has the old name.
+  const label = "automagik-herdr.needs-owner=Ship?";
+  const result = guardRun(s, ["label", "renamed", label]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(calls(s), [
+    ["ls", "--json"], ["get", "renamed", "--json"], ["label", "t100", label],
+  ]);
+});
+
+test("#540 an unbound pane can label itself without ledger identity or worker labels", (t) => {
+  const s = scene(t, { caller: "t121" });
+  editPane(s, "t121", { labels: undefined });
+  const args = ["label", "t121", "automagik-herdr.needs-owner=Ship?"];
+  const result = guardRun(s, args, { HC_TERMINAL_ID: "t121" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t121", "--json"], args]);
+});
+
+test("#540 a guarded worker can label its own pane", (t) => {
+  const s = scene(t);
+  const args = ["label", "t105", "automagik-herdr.needs-owner=Ship?"];
+  const result = guardRun(s, args, { HC_TERMINAL_ID: "t105" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), [args]);
+});
+
+test("#540 the guard refuses other self-label keys and extra arguments", (t) => {
+  const s = scene(t);
+  const label = "automagik-herdr.needs-owner=Ship?";
+  for (const words of [
+    ["t100", "role=reviewer"],
+    ["t100", "automagik-herdr.needs-owner"],
+    ["t100", label, "role=reviewer"],
+    ["--json", "t100", label],
+    ["t100", label, "--json"],
+    ["--", "t100", label],
+    ["t100", "--", label],
+  ]) {
+    const result = guardRun(s, ["label", ...words]);
+    assertRefused(result);
+    assert.match(result.stderr, /the caller's own pane takes only the automagik-herdr\.needs-owner label/, words.join(" "));
+  }
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
+});
+
+test("#540 the guard refuses owner questions on a stranger's pane or a worker's sibling", (t) => {
+  const s = scene(t);
+  editPane(s, "t110", { parent: "t100" });
+  const label = "automagik-herdr.needs-owner=Ship?";
+  for (const [caller, target] of [["t100", "t120"], ["t105", "t110"]]) {
+    const result = guardRun(s, ["label", target, label], { HC_TERMINAL_ID: caller });
+    assertRefused(result);
+    assert.match(result.stderr, /the target is not the caller's own worker/);
+  }
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
+});
+
+test("#540 guard labelling refuses a machine-qualified canonical address", (t) => {
+  const s = scene(t);
+  editPane(s, "t105", { address: "m/t105" });
+  const result = guardRun(s, ["label", "worker", "automagik-herdr.needs-owner=Ship?"]);
+  assertRefused(result);
+  // #628's checked resolution refuses the ls/get disagreement first; either way it never reaches hc.
+  assert.match(result.stderr, /a machine target is not allowed|hc resolved the target to two different panes/);
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
+});
+
+test("#540 a non-self label still needs a verified caller, an address and target labels", (t) => {
+  const s = scene(t);
+  const args = ["label", "t105", "role=dev"];
+  editPane(s, "t105", { labels: undefined });
+  const unbound = guardRun(s, args, { HC_TERMINAL_ID: "t121" });
+  assertRefused(unbound);
+  assert.match(unbound.stderr, /neither bound in the attach ledger nor a worker pane/);
+
+  const noLabels = guardRun(s, args);
+  assertRefused(noLabels);
+  assert.match(noLabels.stderr, /the target is not resolvable with hc/);
+
+  editPane(s, "t105", { labels: { "worker.of": ID.dev }, address: undefined });
+  const noAddress = guardRun(s, args);
+  assertRefused(noAddress);
+  assert.match(noAddress.stderr, /the target's address from hc is not a terminal id/);
+  assert.deepEqual(calls(s).filter(([verb]) => verb === "label"), []);
+});
+
+test("#540 the guard uses the label key the sidebar and tidy read", async () => {
+  const { OWNER_QUESTION_LABEL } = await import("../mods/am-sidebar/hcGuard.mjs");
+  const { NEEDS_OWNER_LABEL } = await import("../mods/am-sidebar/tidy.js");
+  assert.equal(OWNER_QUESTION_LABEL, NEEDS_OWNER_LABEL);
+});
+
+// ---- an Antigravity pane at its prompt (RFC 0042 delivery 2) ----
+// agy fires no hook while it waits, so the guard reads a candidate's screen on each send.
+// These shapes are synthetic and are armed only in the wrapper's child process by a load hook.
+// The stable copy keeps the installed bytes, so the test still exercises its real imports.
+const MOD = join(GUARD_DIR, "..");
+const AGY_FG = { argv: ["agy", "--mode", "auto"] };
+const KEEP = ["sh", "-c", '"$@"; exec "${SHELL:-sh}" -i', "sh"];
+const heldLine = (address) => `${JSON.stringify({ error: { kind: "blocked",
+  message: `${address} is held by a dialog: a person must answer a question, permission or sign-in in it, so nothing was sent.`,
+  hint: "Answer the dialog in that pane, or route this message to another pane; it was not typed and was not dropped." } })}\n`;
+const readsOf = (s) => calls(s).filter((argv) => argv[0] === "read");
+const sendsOf = (s) => calls(s).filter((argv) => hcVerbOf(argv) === "send");
+const readOf = (address) => ["read", address, "--lines", "40", "--json"];
+
+function agyStable(s, { drop = null, name = "stable" } = {}) {
+  const dir = join(s.root, name);
+  const copy = (file) => {
+    const from = join(MOD, file), to = join(dir, file);
+    copyFileSync(from, to);
+    chmodSync(to, statSync(from).mode & 0o777);
+  };
+  for (const file of STABLE_FILES) {
+    const to = join(dir, file);
+    mkdirSync(dirname(to), { recursive: true });
+    if (file === "bin/run.sh") writeFileSync(to, stableRunnerText(process.execPath), { mode: 0o755 });
+    else copy(file);
+  }
+  for (const folder of STABLE_FOLDERS) {
+    mkdirSync(join(dir, folder), { recursive: true });
+    for (const file of readdirSync(join(MOD, folder))) copy(join(folder, file));
+  }
+  const hook = join(s.root, `${name}-hook.mjs`);
+  if (drop) unlinkSync(join(dir, drop));
+  else {
+    assert.equal(stableFilesCurrent(MOD, dir), true);
+    const target = pathToFileURL(realpathSync(join(dir, "agyPrompt.js"))).href;
+    writeFileSync(hook, agyHookSource(target));
+  }
+  return { dir, guard: join(dir, "guard", "hc"), shim: join(dir, "hc-kill", "hc"), hook };
+}
+
+function agyRun(s, st, entry, args, { armed = true, ...extra } = {}) {
+  const hookArgs = armed ? ["--import", pathToFileURL(st.hook).href] : [];
+  return spawnSync(process.execPath, [...hookArgs, entry, ...args], {
+    env: envFor(s, { PATH: `${dirname(entry)}:${s.bin}:${dirname(process.execPath)}`, ...extra }),
+    encoding: "utf8",
+  });
+}
+
+const agyWrappers = [
+  { entry: "guard", at: "t101", packRun: guardRun, env: {} },
+  { entry: "shim", at: "t105", packRun: shimRun, env: { HC_TERMINAL_ID: "t103" } },
+];
+const agySend = (s, st, wrapper, args = ["send", wrapper.at, "x"], { armed = true, pack = false } = {}) => {
+  writeFileSync(s.logPath, "");
+  return pack ? wrapper.packRun(s, args, wrapper.env)
+    : agyRun(s, st, st[wrapper.entry], args, { armed, ...wrapper.env });
+};
+
+function assertAgyHeld(s, result, address, reads = [readOf(address)]) {
+  assert.ifError(result.error);
+  assertHeld(result, address);
+  assert.equal(result.stderr, heldLine(address));
+  assert.deepEqual(sendsOf(s), []);
+  assert.deepEqual(readsOf(s), reads);
+}
+
+function assertAgyForwarded(s, result, args, reads) {
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `stub-out ${JSON.stringify(args)}\n`);
+  assert.equal(result.stderr, "stub-err send\n");
+  assert.deepEqual(sendsOf(s), [args]);
+  assert.deepEqual(readsOf(s), reads);
+  const log = calls(s);
+  const sendIndex = log.findIndex((argv) => same(argv, args));
+  for (const read of reads) {
+    assert.ok(log.findIndex((argv) => same(argv, read)) < sendIndex, "the guard reads before forwarding");
+  }
+}
+
+test("RFC 0042 with the shipped shapes both wrappers read a working Antigravity pane at a synthetic screen once and forward it", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "working" }, screen: trustScreen, foreground: AGY_FG });
+    const args = ["send", at, "x"];
+    for (const pack of [true, false]) {
+      const result = agySend(s, st, wrapper, args, { armed: false, pack });
+      assertAgyForwarded(s, result, args, [readOf(at)]);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 both wrappers refuse a working Antigravity pane at either prompt with #1414's line", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    for (const screen of [trustScreen, fileScreen("x/y")]) {
+      editPane(s, wrapper.at, { status: { state: "working" }, screen, foreground: AGY_FG });
+      assertAgyHeld(s, agySend(s, st, wrapper), wrapper.at);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the kill shim refuses a working Antigravity pane at the captured trust prompt with the issue 1414 line", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const wrapper = agyWrappers.find((w) => w.entry === "shim");
+  editPane(s, wrapper.at, { status: { state: "working" }, screen: capture("folder-trust.txt"), foreground: AGY_FG });
+  const result = agySend(s, st, wrapper, undefined, { armed: false });
+  assertAgyHeld(s, result, wrapper.at);
+  assert.doesNotMatch(result.stdout + result.stderr, /\/work/);
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the refusal names the pane, never the prompt's folder or words", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const folder = "/srv/agy-distinct-folder-q93z";
+  for (const wrapper of agyWrappers) {
+    for (const screen of [fileScreen(folder), quietScreen(folder)]) {
+      editPane(s, wrapper.at, { status: { state: "idle", app: GUARD_APP }, screen, foreground: AGY_FG });
+      const result = agySend(s, st, wrapper);
+      assertAgyHeld(s, result, wrapper.at);
+      for (const output of [result.stdout, result.stderr]) {
+        assert.doesNotMatch(output, /agy-distinct-folder-q93z|\/srv\/|SYNTHETIC|outside the workspace/);
+      }
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 a linked target and --force are refused the same way", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    const linked = `m/${at}`;
+    for (const address of [at, linked]) {
+      editPane(s, address, { status: { state: "working" }, screen: trustScreen, foreground: AGY_FG });
+    }
+    for (const [args, address] of [
+      [["send", linked, "x"], linked],
+      [["send", "--on", "m", at, "x"], linked],
+      [["send", "--force", at, "x"], at],
+    ]) {
+      assertAgyHeld(s, agySend(s, st, wrapper, args), address);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the kill shim reads and names the address hc get answered, never a typed name", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const shim = agyWrappers[1];
+  const address = "m/t105", name = "agy-solo";
+  const args = ["send", name, "x"];
+  // hc ls still calls it worker-m. Only hc get knows agy-solo.
+  editPane(s, address, { name, status: { state: "working" }, screen: trustScreen, foreground: AGY_FG });
+  const result = agySend(s, st, shim, args);
+  assertAgyHeld(s, result, address);
+  assert.doesNotMatch(result.stderr, /agy-solo/);
+
+  editPane(s, address, { status: { state: "idle" }, screen: DIALOG_SCREEN });
+  const generic = agySend(s, st, shim, args);
+  assertAgyHeld(s, generic, address, [readOf(address)]);
+  assert.doesNotMatch(generic.stderr, /agy-solo/);
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 idle, done and no status are refused on a shape pendingDialog does not know", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    for (const status of [{ state: "idle", app: GUARD_APP }, { state: "done" }, undefined]) {
+      editPane(s, at, { status, screen: quietScreen(), foreground: AGY_FG });
+      assertAgyHeld(s, agySend(s, st, wrapper), at);
+      const args = ["send", at, "x"];
+      assertAgyForwarded(s, agySend(s, st, wrapper, args, { pack: true }), args, [readOf(at)]);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 an Antigravity miss still falls to #1414 only where it applied", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "working" }, screen: DIALOG_SCREEN, foreground: AGY_FG });
+    const args = ["send", at, "x"];
+    assertAgyForwarded(s, agySend(s, st, wrapper, args), args, [readOf(at)]);
+    editPane(s, at, { status: { state: "idle", app: GUARD_APP } });
+    assertAgyHeld(s, agySend(s, st, wrapper), at);
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 a second send against the same block is refused again, each after its own read", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "working" }, screen: trustScreen, foreground: AGY_FG });
+    for (const text of ["first", "second"]) {
+      assertAgyHeld(s, agySend(s, st, wrapper, ["send", at, text]), at);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 output changing above a quoted block: every send is refused, the sidebar holds nothing", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const a = "SYNTHETIC output 1\n" + trustScreen, b = "SYNTHETIC output 2\n" + trustScreen;
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "working" }, screen: a, foreground: AGY_FG });
+    assertAgyHeld(s, agySend(s, st, wrapper), at);
+    editPane(s, at, { screen: b });
+    assertAgyHeld(s, agySend(s, st, wrapper), at);
+  }
+  const first = observe(null, { ok: true, text: a }, 100, SYNTHETIC);
+  assert.equal(observe(first, { ok: true, text: b }, 100, SYNTHETIC).held, null);
+  assert.notEqual(observe(first, { ok: true, text: a }, 100, SYNTHETIC).held, null);
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 a mid-turn Antigravity pane is forwarded word for word", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    const screen = "SYNTHETIC building step 3 of 9\nSYNTHETIC thinking";
+    editPane(s, at, { status: { state: "working" }, screen, foreground: AGY_FG });
+    const args = ["send", at, "a message unchanged", "a second line"];
+    assertAgyForwarded(s, agySend(s, st, wrapper, args), args, [readOf(at)]);
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 a working Claude or Codex pane is still not read", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    const args = ["send", at, "x"];
+    for (const [argv0, app] of [["claude", "claude-code"], ["codex", "codex"]]) {
+      editPane(s, at, { status: { state: "working", app }, screen: trustScreen, foreground: { argv: [argv0] } });
+      assertAgyForwarded(s, agySend(s, st, wrapper, args), args, []);
+    }
+    editPane(s, at, {
+      status: { state: "idle", app: "claude-code" }, screen: quietScreen(), foreground: { argv: ["claude"] },
+    });
+    assertAgyForwarded(s, agySend(s, st, wrapper, args), args, [readOf(at)]);
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the hc get record decides who is Antigravity", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const working = { state: "working" };
+  const reported = { state: "working", app: GUARD_APP };
+  const evidence = [
+    { pane: { foreground: { argv: [...KEEP, "agy"] } }, held: true, both: true },
+    { pane: { status: reported, foreground: { argv: ["zsh", "-i"] } }, held: false, both: true },
+    { pane: { status: reported }, held: true },
+    { pane: { status: { state: "working", app: "gemini" } }, held: false },
+    { pane: { foreground: AGY_FG, created_ms: null }, held: false },
+    { pane: { argv: ["agy"] }, held: false },
+  ];
+  for (const { pane, held, both } of evidence) {
+    for (const wrapper of both ? agyWrappers : agyWrappers.slice(0, 1)) {
+      const { at } = wrapper;
+      editPane(s, at, {
+        status: working, screen: trustScreen, created_ms: 100, foreground: undefined, ...pane,
+      });
+      const args = ["send", at, "x"];
+      const result = agySend(s, st, wrapper, args);
+      if (held) assertAgyHeld(s, result, at);
+      else assertAgyForwarded(s, result, args, []);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 an unreadable screen, a finished pane, blocked and error keep #1414's answers", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const states = [
+    { pane: { readFail: true }, read: true, held: false },
+    { pane: { state: "finished" }, read: false, held: false },
+    { pane: { status: { state: "blocked" } }, read: false, held: true },
+    { pane: { status: { state: "error" }, screen: quietScreen() }, read: true, held: false },
+  ];
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    const args = ["send", at, "x"];
+    for (const { pane, read, held } of states) {
+      editPane(s, at, {
+        state: "live", status: { state: "working" }, screen: trustScreen, foreground: AGY_FG,
+        readFail: false, ...pane,
+      });
+      const result = agySend(s, st, wrapper, args);
+      const reads = read ? [readOf(at)] : [];
+      if (held) assertAgyHeld(s, result, at, reads);
+      else assertAgyForwarded(s, result, args, reads);
+    }
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+});
+
+test("RFC 0042 the stable folder from STABLE_FILES runs the guard; a missing file fails closed", (t) => {
+  const s = killScene(t), st = agyStable(s);
+  const short = agyStable(s, { drop: "agyPrompt.js", name: "stable-short" });
+  for (const wrapper of agyWrappers) {
+    const { at } = wrapper;
+    editPane(s, at, { status: { state: "idle" }, screen: FREE_SCREEN });
+    const args = ["send", at, "x"];
+    assertAgyForwarded(s, agySend(s, st, wrapper, args, { armed: false }), args, [readOf(at)]);
+
+    const result = agySend(s, short, wrapper, args, { armed: false });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    const failure = wrapper.entry === "guard" ? /the guard's logic did not load/
+      : /its logic did not load, so this hc call was not run/;
+    assert.match(result.stderr, failure);
+    assert.deepEqual(calls(s), []);
+  }
+  assert.equal(stableFilesCurrent(MOD, st.dir), true);
+  assert.equal(stableFilesCurrent(MOD, short.dir), false);
+});
+
+test("#1557 the kill shim sends to the canonical address it inspected, including with --on", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get["only-in-get"] = { ...state.get.t105, address: "t105", screen: FREE_SCREEN };
+  state.get["m/only-in-get"] = { ...state.get.t105, address: "m/t105", screen: FREE_SCREEN };
+  state.get["m/off-machine"] = { ...state.get.t105, address: "other/t105", screen: FREE_SCREEN };
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const [input, expected, inspected] of [
+    [["send", "only-in-get", "ping"], ["send", "t105", "ping"], "t105"],
+    [["send", "--on=m", "only-in-get", "ping"], ["send", "--on=m", "t105", "ping"], "m/t105"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const result = shimRun(s, input, { HC_TERMINAL_ID: "t103" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(calls(s).some(args => args[0] === "read" && args[1] === inspected));
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+  writeFileSync(s.logPath, "");
+  const offMachine = shimRun(s, ["send", "--on=m", "off-machine", "ping"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(offMachine.status, 2, offMachine.stderr);
+  assert.match(offMachine.stderr, /off the --on machine/);
+  assert.equal(calls(s).some(args => args[0] === "send"), false);
+});
+
+test("#1557 the kill shim refuses a plain send when ls and get disagree", (t) => {
+  const s = killScene(t);
+  editPane(s, "t101", { address: "m/t105", screen: DIALOG_SCREEN });
+  const result = shimRun(s, ["send", "cap", "plain text"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /different panes \(t101 and m\/t105\)/);
+  assert.equal(calls(s).some(args => args.includes("send")), false);
+});
+
+test("the guard and proxy docs say what RFC 0044 decided for keys, attach, events and the list (#628)", () => {
+  // Whitespace is normalized: the README and the comment wrap sentences across lines.
+  const flat = (text) => text.replace(/\s+/g, " ");
+  const guard = readFileSync(join(MOD, "hcGuard.mjs"), "utf8");
+  const header = flat(guard.slice(0, guard.indexOf("\nimport ")).replace(/^\/\/ ?/gm, ""));
+  const readme = readFileSync(join(MOD, "..", "..", "README.md"), "utf8");
+  const at = readme.indexOf("## The hc guard (a guardrail, not a boundary)");
+  const end = readme.indexOf("\n\n`send` is scoped", at);
+  assert.ok(at >= 0 && end > at, "the README's guard section is found");
+  const section = flat(readme.slice(at, end));
+  const doc = readFileSync(join(MOD, "hcProxy.md"), "utf8");
+  // Two separate passages of hcProxy.md: the policy table's terminal.list row and the list paragraph.
+  const rowAt = doc.indexOf("| `terminal.list` |");
+  assert.ok(rowAt >= 0, "hcProxy.md's terminal.list policy row is found");
+  const row = flat(doc.slice(rowAt, doc.indexOf("\n", rowAt)));
+  const listAt = doc.indexOf("`terminal.list` is filtered");
+  assert.ok(listAt >= 0, "hcProxy.md's list paragraph is found");
+  const list = flat(doc.slice(listAt, doc.indexOf("\n\n", listAt)));
+  for (const [where, text] of [["hcGuard.mjs's header", header], ["the README's guard section", section]]) {
+    assert.doesNotMatch(text, /Both wait on herdr-core/, `${where} promises no joint upstream unlock for keys and attach`);
+    assert.match(text, /attach[^.]*refused for sandboxed panes for good \(RFC 0044 Q5\)/i, `${where}: attach is refused for good`);
+    assert.match(text, /keys[^.]*RFC 0044 delivery 6[^.]*\(R1-R3\)[^.]*\(R4, advertised as `checked_input`\)/i,
+      `${where}: keys waits on delivery 6, and checked_input is R4's per-write check`);
+  }
+  assert.doesNotMatch(header, /list and events are filtered/, "the proxy refuses the event subscription; it filters none");
+  assert.match(header, /refuses its event subscription/, "hcGuard.mjs's header: the proxy refuses the subscription");
+  const crossTeam = /by the recipient's role or the caller's\)?, which may belong to another team/;
+  for (const [where, text] of [["hcProxy.md's terminal.list row", row], ["hcProxy.md's list paragraph", list]]) {
+    assert.doesNotMatch(text, /(other teams'|another team's) panes (are|and)[^.|]*(left out|never named)/i,
+      `${where} does not claim other teams' panes are always left out`);
+    assert.match(text, crossTeam, `${where} names the authorized cross-team recipients, by either role`);
+  }
+  assert.match(row, /linked-machine row[^|]*left out, and the `machines` inventory is empty/, "the row keeps machines out");
+  assert.match(list, /as the core answered it, nested fields included/, "hcProxy.md: only the envelope is reviewed");
+});
+
+test("#628 r3 G1 shared send grants require the exact role key and value", () => {
+  const caller = { bot: ID.dev, worker: false };
+  for (const role of ["reviewer", "fixer"]) assert.equal(sharedSendAllowed(team(), caller, { role }), true);
+  for (const labels of [{ role: "Reviewer" }, { role: "reviewer " }, { Role: "reviewer" }]) {
+    assert.equal(sharedSendAllowed(team(), caller, labels), false);
+  }
 });

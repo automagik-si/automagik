@@ -10,6 +10,7 @@ import { EDGE_MIN } from '../src/host/secrets.js'
 import { apply } from '../index.js'
 import { canUse, encodeUrlComponent, normalizeName, redactDeep, redactor, SECRET_NAME } from '../src/host/secrets.js'
 import { fakeContext } from './fake-ctx.js'
+import { captureWaterfall } from './support/capture-waterfall.js'
 
 // Test values are random on every run, so a leak can only come from this run.
 const fresh = () => `t-${randomBytes(12).toString('hex')}`
@@ -362,6 +363,7 @@ function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-secrets-')), warnings
     },
   }
   const ctx = fakeContext({ services: { shellEnv } })
+  const streamContext = captureWaterfall(ctx, 'llm/stream')
   if (warnings !== undefined) ctx.logger = { info() {}, warn: (...args) => warnings.push(args.slice(1).join(' ')) }
   const listeners = {}
   const on = ctx.on
@@ -376,9 +378,13 @@ function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-secrets-')), warnings
   ctx.sessions = { flush: async () => {} }
   ctx.workspaceRegistry = { archiveSession: async () => {} }
   const streamed = []
-  ctx.llm.stream = (options) => {
+  const dispatch = (options, next) => streamContext.waterfall(ctx.llm, 'llm/stream', options, next)
+  ctx.llm.stream = (options) => dispatch(options, () => {
     streamed.push(options)
     return (async function* () {})()
+  })
+  const stream = async (options, next) => {
+    for await (const chunk of dispatch(options, next)) void chunk
   }
   let route
   ctx.connection.fetch.register = (options) => { route = options; return () => {} }
@@ -400,7 +406,7 @@ function start({ home = mkdtempSync(join(tmpdir(), 'ds-bot-secrets-')), warnings
   }
   const env = (agentId, command = '') => contributors.filter(entry => entry.live).at(-1)?.resolve({ agent: { id: agentId, session: { header: { id: agentId } } }, arguments: { command } }) ?? {}
   const stop = async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) }
-  return { ctx, home, call, tool, view, env, listeners, delivered, streamed, contributors, stop }
+  return { ctx, home, call, tool, view, env, listeners, delivered, streamed, contributors, stop, stream }
 }
 
 // Bootstrap would create a Main Bot when none exists; this team has one, so it only loads.
@@ -604,15 +610,14 @@ test('tool results and model requests lose the values', async (t) => {
   const plain = { isError: false, value: 'nothing here' }
   assert.equal(await execute({}, async () => plain), plain)
 
-  // The usage meter registers after the secrets listener.
-  const stream = bench.listeners['llm/stream'].at(-2)
+  const { stream } = bench
   const passed = []
   const next = () => { passed.push(true); return (async function* () {})() }
   const options = {
     provider: 'p', model: 'm', sessionId: 'b2', system: `sys ${value}`,
     messages: [{ role: 'user', content: [{ type: 'text', text: `my key is ${value}` }] }, { role: 'tool', content: [{ type: 'text', text: value }] }],
   }
-  stream(options, next)
+  await stream(options, next)
   assert.equal(passed.length, 0)
   const sent = bench.streamed.at(-1)
   assert.equal(sent.system, 'sys [secret:DEMO_TOKEN]')
@@ -620,14 +625,14 @@ test('tool results and model requests lose the values', async (t) => {
   assert.ok(!JSON.stringify(sent).includes(value))
   assert.ok(JSON.stringify(options).includes(value))
   // The rewritten request passes through, even when a value sits inside its own label.
-  stream(sent, next)
+  await stream(sent, next)
   assert.equal(passed.length, 1)
-  stream({ ...options, system: 'clean', messages: [] }, next)
+  await stream({ ...options, system: 'clean', messages: [] }, next)
   assert.equal(passed.length, 2)
   // DSH deep-freezes each message before a request; the rewritten request still redacts.
   const frozenMessages = [{ role: 'user', content: [{ type: 'text', text: `my key is ${value}` }] }]
   for (const node of [frozenMessages[0].content[0], frozenMessages[0].content, frozenMessages[0], frozenMessages]) Object.freeze(node)
-  stream({ ...options, messages: frozenMessages }, next)
+  await stream({ ...options, messages: frozenMessages }, next)
   assert.equal(passed.length, 2)
   assert.equal(bench.streamed.at(-1).messages[0].content[0].text, 'my key is [secret:DEMO_TOKEN]')
 })
@@ -637,7 +642,7 @@ test('secret rewrites preserve only existing agent loop marks across turns', asy
   t.after(bench.stop)
   const value = fresh()
   assert.equal((await bench.call('secret-set', { name: 'DEMO_TOKEN', value })).ok, true)
-  const stream = bench.listeners['llm/stream'].at(-2)
+  const { stream } = bench
   const first = markAgentLoopRequest({
     provider: 'acp', model: 'agent', sessionId: 'b2',
     system: [{ type: 'text', text: `Use ${value}` }],
@@ -668,7 +673,7 @@ test('secret rewrites preserve only existing agent loop marks across turns', asy
     const before = structuredClone(original)
     freeze(original)
     const count = bench.streamed.length
-    stream(original, () => assert.fail('a saved value must be redacted before dispatch'))
+    await stream(original, () => assert.fail('a saved value must be redacted before dispatch'))
     assert.equal(bench.streamed.length, count + 1)
     const sent = bench.streamed.at(-1)
     assert.notEqual(sent, original)
@@ -703,7 +708,7 @@ test('secret rewrites preserve only existing agent loop marks across turns', asy
     }],
   })
   freeze(withSignal)
-  stream(withSignal, () => assert.fail('a saved value must be redacted before dispatch'))
+  await stream(withSignal, () => assert.fail('a saved value must be redacted before dispatch'))
   const sent = bench.streamed.at(-1)
   assert.equal(isAgentLoopRequest(sent), true)
   assert.equal(sent.messages[0].content[0].text, '[secret:DEMO_TOKEN]')

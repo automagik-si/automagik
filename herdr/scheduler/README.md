@@ -46,6 +46,7 @@ a Friday digest — deserve better than you retyping the same prompt every morni
 - **Survives sleep** — occurrences are computed off the wall clock, so a run due while the laptop slept fires on wake (within `catch_up_minutes`) instead of vanishing; anything too late is recorded as `missed`
 - **Schedules that overlap say so** — the wizard warns while you are still choosing the cron, and `list` reports every overlap in the week ahead. Herdr starts them all; the plugin never quietly holds one back, it just makes sure you knew
 - **Overlap guard** — a tick that fires while *that same* automation is still working is skipped, never queued into a pile-up
+- **Targets a bot** — `target: bot:<id>` hands the prompt to a bot's own terminal (starting it when it is not running, and re-reading it before the send), or `worker:<id>` starts a worker of that bot for the run and ends it once its turn finishes (a worker still mid-turn at the timeout stays, logged; ADR 0014). By id from the project's `bots.json`, never by a terminal address
 - **Agent-agnostic** — anything `herdr agent start` supports: `claude`, `codex`, `opencode`, `gemini`, `cursor`, …
 - **MCP attach** — `mcp_config: path.json` hands the agent its MCP servers (GitHub, Slack, your DB…)
 - **Full run history** — append-only JSONL: `scheduled → running → done | failed | skipped | missed`, with workspace and pane IDs to jump back into
@@ -332,6 +333,11 @@ automations:
   terminal labelled `bot=<id>`, else a terminal by that name. A bot that is
   blocked or not running gets nothing, and `history --json` says so in
   `notified`. The run's status never depends on it.
+- Both notify and bot-target prompts check `am delivery-status <terminal> --json`
+  immediately before sending. A parked terminal, a dialog waiting for a person,
+  or a pack unable to check the terminal holds the delivery. The check leaves
+  the automation's enabled setting as the person set it. The scheduler binary
+  containing this check requires a pack that provides the command.
 - A command entry takes no `repo`, `workspace`, `session`, `agent`, `model`,
   `template`, `agent_args`, `mcp_config`, `blocked_grace_minutes` or
   `close_workspace: on-success`: the loader refuses each by name.
@@ -500,7 +506,7 @@ An automation is one piece of work on a clock: a prompt, or a plain command. Tha
 ```bash
 go build -o bin/herdr-automations . && go test ./...
 herdr plugin link .        # use your checkout as the installed plugin
-go test -tags hc ./internal/host/ -run Live   # against the real herdr-core, Herdr app open
+AUTOMAGIK_HERDR_APP_CHECK=1 go test -tags hc ./internal/host/ -run Live   # against the real herdr-core, Herdr app open
 scripts/dev-app.sh         # copy the panel into the app (a symlink is not reloaded)
 ```
 

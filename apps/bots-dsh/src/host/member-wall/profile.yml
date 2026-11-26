@@ -1,0 +1,32 @@
+# The member wall's profile rows. Nothing applies them yet: members stay off until the whole
+# wall, the three safeguards of RFC 0024 (f) and the isolation review hold. With `members` off
+# the entry is DSH's own sandboxed filesystem, unchanged.
+#
+# The read fence replaces DSH's `fs-sandbox` row with a subclass of it.
+- id: fs-sandbox
+  disabled: true
+- insert:
+    - id: member-wall-fs
+      name: '@automagik/bots-dsh/member-wall/fs'
+      config:
+        members: false
+        # Absolute paths, required once members are on. With Bots on, set principalsFile
+        # to the absolute <DSH_HOME>/multiuser-dsh/principals.json path.
+        principalsFile: ''
+        membersRoot: ''
+        sharedReadRoots: []
+        # DSH's own data folder belongs here: no member reads it, even inside a shared root.
+        denyReadRoots: []
+        # Bots need members and AUTOMAGIK_MULTIUSER on. Bots never read DSH's home,
+        # Automagik's home, the team home, the principal record's folder, /data/gate-view
+        # or /data/secrets. botsRoot must be a real 0700-style folder outside all of them.
+        # bots: false
+        # botsRoot: ''
+        # botReadRoots: {}
+        # botDenyRoots: []
+        # Empty uses AUTOMAGIK_INSTANCE_ID. An explicit value must match that environment id.
+        # Bot mode requires the active multiuser-dsh writer to agree on the record's path,
+        # instance and directory identity. A missing writer or mismatch denies scoped access.
+        # instanceId: ''
+        # To release the rollback hold as owner, stop DSH and remove multiuser-mode.json
+        # from the team home. Turning multiuser mode back on also releases the hold.

@@ -67,7 +67,7 @@ The Automagik desktop app passes the product it was opened for (`omni desktop` �
 `unfold` is none). That card comes first and starts chosen: Omni's powers on by itself, through the
 same box and steps as a press, and Remove still sends it back to sleep; Genie's starts on
 the team. The other card stays to add, then or later. Without a preload Omni comes first
-and nothing is chosen.
+and nothing is chosen. Opening the team step on purpose skips the preload power-on.
 
 Unfold's card is shown only in Unfold's own Automagik instance. Anywhere else the team step has
 no Unfold card and `unfold-plugin-install` is refused, so the welcome installs no `unfold-*`
@@ -79,31 +79,40 @@ and no other Bot is made. `state` reports it as `host`, and Omni and Genie come 
 instance: Omni's card offers no new Omni of its own, and Genie's names the command line the
 instance brought instead of the line that installs one.
 
-### The power shortcut in the Bot team's sidebar
+When **Install Omni here** finds that npm cannot install the Omni this Automagik pins
+(npm has an older version, the version is unpublished, the install failed, or systemd is
+unavailable), the card says why and falls back to GitHub when needed. Without systemd,
+the installer can also use npm when the version is available there. The card shows
+Check, Download, Build, Install and Connect alongside the installer output, then connects
+to Omni. Powering Omni off requests cancellation. If the install step is already underway,
+it finishes that step. Reloading the team step picks up a running install and connects
+on success. Apps shows the same install progress and offers **Power Omni on** to connect
+after a successful install. See
+[Installing Omni from GitHub](#installing-omni-from-github) for the host's checks.
 
-Where the Bot team runs, the welcome puts a power button in its sidebar, between the update
-cloud and Search (and in the collapsed rail), through the Bot team's `sidebarTools`
-registry: `@automagik/bots-dsh/client` is in `dsh.client.external` and in the build's
-`external`, and is looked up only when the plugin applies, so a DSH without the Bot team
-gets no button and no error. Its card has a row per product, in the team step's order
-(Unfold only in its own instance, read-only), each led by the Bot team's own mark for that
-product (its `BotMark`) and offering the one thing to do next: power it on or off, install
-it (with a line on what that does, then its step and place, "Installing Genie · 2 of 3 ·
-Bot team", from the host's install job), try again with the reason, add the Omni Bot back,
-open Plugins, or choose where Omni lives (the Bot itself sits in the sidebar, so a row does
-not open it). Powering off is the
-team step's own (`powerOff`): it stops a run and puts the box to sleep, and undoes nothing
-on the host (a linked Omni stays linked, no Bot is removed); Genie, once on the team, stays,
-as on its box. Powering on runs the team step's own steps in a shared store
-(`src/client/power-store.js`), so it keeps going when the card or the step closes. That store
-lives in the page, so the button reads the host's `omni-plugins` and `genie-plugin` when it
-mounts and each time the card opens: an install the host is running (its `install.phase` is
-`installing`) that this window does not follow, after a reload or from another window, is
-picked up where it is, without asking for a second install, and polled every `POLL_MS`
-(900 ms) as the team step polls it, to On or to the reason with Try again. Choosing where Omni
-lives, or "Open team setup", opens the team step on purpose: there Continue only closes it and
-saves nothing, so the Main Bot keeps its name. Both show only when the Bot team passes the
-shell's onboarding opener (`actions.openHarnessOnboarding`).
+### Power in each Bot's settings
+
+Where the Bot team runs, the welcome puts each built-in Bot's power in that Bot's own
+settings, through the Bot team's `botSettings` registry: `@automagik/bots-dsh/client` is in
+`dsh.client.external` and in the build's `external`, and is looked up only when the plugin
+applies, so a DSH without the Bot team gets no card and no error. A card titled Power shows
+that Bot's state and one switch: Omni powers on or off, and Genie and Unfold stay on once
+their Bot joins the team, as their boxes in the team step hold them. The card uses the Bot
+team's own `Card`, `Row` and `SwitchRow`, the team step's state words (`On · Connected`,
+`Powered off`, `Installing Genie · 2 of 3 · Bot team`), and the shared power store
+(`src/client/power-store.js`), so a power-on keeps going when the settings page closes. A read-only
+team gets the state line only. The card is registered for the Bot kinds `omni`, `genie` and
+`unfold`; a Bot of any other kind gets no card.
+
+A built-in Bot that is not installed has no settings page, so install does not move with
+the power. The Bot team's Apps page (Settings → Apps, Automagik official) installs it in
+one click: the Omni and Genie rows' Install runs the team step's own power-on
+(`omni-plugins-install`, `genie-plugin-install`) in place, through the Bot team's
+`officialInstall` registry, and the row shows the install's step and place. Opening the
+page reads `omni-plugins` and `genie-plugin` once and picks up an install the host is
+already running (a reload, another window); it never starts one. Nothing installs
+without a click. The team step (`omni-team`) keeps Omni's and Genie's cards, and a DSH's
+Plugins page installs the plugin directly. The old sidebar button is gone.
 
 The team step follows the DSH language. Its copy is the `welcome.team` namespace
 (`src/client/i18n.js`): the keys are the English text, registered in English and in Brazilian
@@ -123,10 +132,19 @@ release without a signed lane, stops the install before anything is installed; t
 tarballs are kept, 0600, under `<AUTOMAGIK_HOME>/welcome/tarballs`, where the profile
 installs them from. A DSH that has the team under its former name,
 `@automagik/omni-dsh`, has the team: it is switched on, not installed over. Omni's channels
-and canvases (`@automagik/omni-channels-dsh`, `@automagik/omni-canvas-dsh`) are Omni's, at
-Omni's version: they install as a git source from Omni's repository at the release
-`package.json` pins under `automagik.omni`, the same one the desktop app carries
-(`apps/desktop/omni.json`; `follow-omni.yml` moves both).
+and canvases (`@automagik/omni-channels-dsh`, `@automagik/omni-canvas-dsh`) install from one
+commit in Omni's repository. `follow-omni.yml` keeps `automagik.omni` and the desktop app's
+pin at the newest Omni release on GitHub; when npm lacks that release's Omni server, the welcome
+builds it from GitHub (below, "Installing Omni from GitHub").
+On a fresh install the welcome compares that pin with Omni's signed plugin lane. It picks
+the newest candidate that works with this DSH, the Bot team, and an Omni server it can install:
+the latest on npm, or the pinned release built from GitHub.
+If no candidate pairs with the server, it picks the newest one compatible with DSH and the Bot
+team. With one Omni plugin already installed, it looks for a candidate with that exact plugin
+version. The shared pin is the fallback.
+Genie installs from its signed lane when the plugin is compatible and at least as new as
+`automagik.genie`, its fallback pin. Both lanes are checked with their publishers' public keys,
+and the welcome records their installed sequences in `<AUTOMAGIK_HOME>/welcome/lanes.json`.
 
 ### One way to each AI
 
@@ -152,8 +170,9 @@ endpoints) refuse `anthropic` and `openai-codex`: nothing here starts DSH's own 
 ChatGPT plan sign-in. Images and the companion's drawing on a ChatGPT plan go through Codex's
 own sign-in (acp-dsh's `generateImage`); an `openai-codex` record an earlier version stored is
 read as a last resort only when acp-dsh answers normally and declares a shared auth scope.
-An OpenAI API key draws as before. dsh-subscriptions no
-longer ships `claude` or `codex` (0.7.21-omni.1), so nothing stands for them.
+An OpenAI API key given to the app draws as before; one only inherited from the environment
+does not (#869). dsh-subscriptions no longer ships `claude` or `codex` (0.7.21-omni.1), so
+nothing stands for them.
 
 The route earlier versions added for DSH's Claude sign-in did not retry a 429 (`retryPolicy`
 without `RATE_LIMIT`). A route on an API key keeps DSH's default retries, also one such a
@@ -178,14 +197,17 @@ while its CLI is missing, installing or failed, or signed in but not answering y
 - for Hermes, Antigravity and omp (acp-dsh's native-ACP agents, off until switched on): the
   same row without a connector line, with what switching it on means while it is off, and with
   the terminal command that signs in instead of a Bot's chat (`hermes acp --setup`,
-  `agy acp --login`, `omp login`); Automagik never installs these CLIs;
+  `omp login`); Automagik never installs these CLIs but Antigravity's, on the person's click.
+  Antigravity runs in its own home and signs in here only: signed out, its row says *Not signed
+  in to Antigravity.* with **Sign in**, and never shows a terminal command or a path;
 - whether the agent's CLI (`claude`, `codex`) is on this computer, as acp-dsh's own store has
   it: installing or updating it by itself, failed with its error and **Retry**, or found with
   its version; with its install link and **Check again** when it is missing;
 - whether the CLI is signed in, as the CLI itself says (`claude auth status`, `codex login
-  status`; only yes or no is read). Signed out, the row has **Sign in**, and the command to run
-  in a terminal as the other way (`claude auth login`, `codex login`); not checked yet, it says
-  so, with **Check again**;
+  status`; only yes or no is read). Signed out, the row has **Sign in**. When the app shares
+  the CLI's sign-in, it also shows the terminal command (`claude auth login`, `codex login`).
+  When the app uses an isolated sign-in, use **Sign in** in a Bot's chat. Not checked yet, it
+  says so; a check that timed out or could not tell says that instead; both with **Check again**;
 - the connector acp-dsh installs in the background: installing, failed with its last error and
   **Retry**, or ready with its version;
 - once ready and signed in, *Ready: pick Claude Code in the model picker*. The model appears
@@ -197,8 +219,9 @@ The row in the chat runs the CLI's own sign-in: a link to open on any device, th
 to type there or Claude's code to paste back in that row. This page only opens the chat: it starts
 no sign-in, picks no model and never sees a link, a code or a credential. In Connect AI the step
 steps aside while the chat is in front (a small **Back to setup** brings it back) and is not
-completed by it; Settings closes its panel. Without the Bot team or a Bot the row says to run the
-command in a terminal instead. While a sign-in waits, the busy file (`src/host/busy.js`, `AUTOMAGIK_BUSY_FILE`) counts it, so an
+completed by it; Settings closes its panel. If no Bot chat is available, isolated sign-in asks
+you to set up a Bot first. With a shared sign-in, the row gives the terminal command. While a
+sign-in waits, the busy file (`src/host/busy.js`, `AUTOMAGIK_BUSY_FILE`) counts it, so an
 automatic plugin update does not restart DSH in the middle of it.
 
 The switch is acp-dsh's own `claude` or `codex` setting, written through DSH's settings service,
@@ -279,16 +302,37 @@ The shape was read from DSH 0.2.1-rc.2:
 | `ai-dedupe` | `{ id }` | Stops the other ways that row's AI is connected. |
 | `ai-subscription` | `{ provider, on }` | Shows or hides a dsh-subscriptions vendor's models. |
 | `provider-key`, `signin-*` | see `src/host/providers.js` | A key, or a sign-in run through DSH's authorization service. |
-| `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, and the install in progress. |
-| `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager (`installBundle`: the Bot team from this plugin's own source pointed at its sibling, else this release's tarball; Omni's from Omni's repository at the pinned release), switching on any that are off. Pressing Omni's power button in the team step calls it. |
-| `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, listed, restartNeeded }] }`. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
+| `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, the plugin install in progress, and the local Omni installer job in `server`. |
+| `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager. The Bot team comes from this plugin's sibling source or checked release tarball. Omni's plugins come from the release chosen above. Switches on installed plugins that are off. |
+| `genie-plugin-install` | none | Installs the Bot team if needed, then installs Genie from its signed lane or its pin. Switches on installed plugins that are off. |
+| `omni-server-check` | `{ version, fallback?: true }` | Checks the version named by the card's installer command on its npm registry. With `fallback: true`, reports whether the local installer can take over and the pinned GitHub release it can use. |
+| `omni-github-install` | `{ version, reason, exitCode? }` | Starts the local Omni install or returns the running job. The host checks which source is usable. |
+| `omni-github-status`, `omni-github-cancel` | `{ id? }` | Reads the current or named job, or requests cancellation. Once Omni's installer starts, it runs to completion. |
+| `omni-github-ack` | `{ id }` | Claims a completed job once so a single card connects to the new Omni. |
+| `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, signInCheck?, listed, restartNeeded }] }`. `signInCheck` is `timeout` or `unreadable`: why the last check could not tell, only while `signedIn` is absent. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
 | `acp-switch` | `{ id, on }` | Writes acp-dsh's `claude` or `codex` setting in the entry its service names (`settingsEntry`, else `acp-dsh`) at the revision `describe()` gave. |
 | `acp-retry` | `{ id }` | Starts a failed connector install again. |
+| `acp-install` | `{ id }` | Installs a CLI acp-dsh installs only on the person's click (Antigravity, `cli.install: 'manual'`) through its `installCli`, while the agent is on; answers at once with the install under way. Refused while off, or by an acp-dsh without `installCli`. Needs the owner viewer like `acp-switch`. |
+| `acp-sign-in` | `{ id }` | Signs in to an agent with its own home in this installation (Antigravity, `appSignIn: true`) through acp-dsh's `signInNative`: agy hands its sign-in link to the app instead of opening a browser. Answers at once with `signingIn: true`, and that link as `signInUrl` (only Google's own OAuth entry points with a loopback return address on port 1024 or above and a state); the row shows it as a link with a Copy button; nothing opens it by itself: a person's click opens it. While the link waits, `signInAttempt` (the attempt's id), `signInPaste: true` (the row offers a field for the address the browser ends on, so the sign-in can finish on any computer) and `signInExpiresAt` (epoch ms, about 4 minutes after the sign-in starts) pass; `signInChecking: true` once a pasted address was delivered. A failure leaves `signInError` (`unsupported`, `timeout`, `failed`, `expired`, or `no-browser` when agy handed no link). `signInEnd`, `signOutOverAcp` (`yes`/`no`) and `lastSignOut` (`done`/`none`/`failed`) pass as those words only, for acceptance; the page draws none of them. Refused while off or without the CLI. Needs the owner viewer. |
+| `acp-sign-in-callback` | `{ id, attempt, url }` | The address the browser ended on after signing in (`http://localhost:<port>/…?code=…&state=…`), for the attempt `attempt` (#2048, paste-back), through acp-dsh's `signInCallback`: accepted only with that attempt's port, path and state, and delivered once to agy's own listener on this computer. Never logged or answered. Refused with "This link is not from this sign-in." (the attempt goes on) or "This sign-in expired. Start again." (no such attempt waiting, a stale page, or the address did not reach agy). Answers the status. Needs the owner viewer. |
+| `acp-sign-out` | `{ id }` | Signs out of that agent by retiring its home (acp-dsh's `accountSignOutNative`, as Reset does). Refused for a row without `appSignIn` and where the account is shared (`sharedAccount: true`, Windows). Needs the owner viewer. |
 | `bot-type` | `{ type: 'omni' }` | What the Omni Bot starts with, as groups: model and thinking (DSH's default), plugins with versions, tool groups with their switches, skills, folder and permissions. |
 
 The host declares `inject: ['settings', 'credentials', 'connection']`; `connection` serves
 the route. It reads DSH's `llm`, `authorization`, `pluginManager`, `agentDefaultModel`, `tools`, `skills`
 and `permissionPresets` services when they are there, and acp-dsh's `acpAgents`.
+
+### Installing Omni from GitHub
+
+Omni's own Connect card uses the welcome's install check for **Set it up** and **Update and connect**. When it uses the GitHub install job, the terminal shows the install source and progress, then connects to the sandbox when it is ready.
+
+The welcome can build the Omni release pinned in its package manifest when the version offered by npm is behind, unpublished, or the npm terminal install fails. Without a usable service session, the welcome runs the installer itself. It uses npm when the requested version is published and at least as new as the pin. The GitHub route requires the pin to be at least as new as the requested version. An image with the Omni supervisor installs into a fresh sandbox and lets the supervisor start it. An interrupted image install can resume in the same sandbox at the same version. An existing supervised sandbox stays in place.
+
+The welcome checks that the GitHub tag resolves to the pinned commit and that its commit API names the pinned Git tree. It streams and verifies the commit archive against that tree before extraction. It verifies the Bun zip and executable against pinned SHA-256 hashes. The build installs dependencies with lifecycle scripts disabled, then runs Omni's pinned build and pack scripts with an allowlisted environment and scratch home.
+
+The Omni root is `OMNI_HOME` or `~/.omni`. It holds the sandbox in `sandbox/`, Bun in `automagik-bun/`, and the packaged CLI in `packages/`. The installer removes its temporary checkout under `automagik-build/` after the build and install processes stop. The image publishes `sandbox/automagik-supervised.json` after a successful install so the supervisor can start the sandbox. On desktop, Omni can adopt an existing sandbox once its process has stopped. Omni starts at login when the desktop has a usable login service and starts its own detached supervisor on Linux without one. Omni manages cleanup inside the sandbox home.
+
+DSH, Bots and Omni share the workspace identity. Omni's build scripts can read files accessible to that user. The local installer is unavailable in multiuser mode and in Unfold's instance. The channels plugin runs its own Bun probe when it prepares a terminal install. Omni's inner runtime install drops proxy settings, so a proxy-only network can block that step. The build and embedded runtime were exercised on Linux x64 with glibc.
 
 ## Develop
 

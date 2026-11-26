@@ -20,31 +20,76 @@ function host(t, injected = false) {
   const bots = new Map([
     ['ada', { name: 'Ada', role: 'Reviewer', instructions: 'Check files.', main: true }],
     ['someone', { name: 'Someone', role: 'Writer', instructions: 'Write notes.' }],
+    ['genie', {
+      name: 'Genie', role: 'Grants your wishes', instructions: 'Grant wishes.', kind: 'genie',
+    }],
   ])
   const owners = new Map([
     ['private', 'ada'], ['group-member', 'ada'], ['task', 'ada'], ['other', 'someone'],
+    ['archived-part', 'ada'],
+    ['wish-chat', 'genie'], ['wish-task', 'genie'], ['wish-group', 'genie'],
   ])
-  install({ ctx, selfOf: id => owners.get(id), botOf: id => bots.get(id) })
+  const taskOwners = new Map([['wish-task', { botId: 'genie' }]])
+  const botSessions = new Set(['private', 'group-member', 'other', 'wish-chat', 'wish-group'])
+  const isBotSession = id => botSessions.has(id) || taskOwners.has(id)
+  const rt = {
+    ctx, taskOwners, isBotSession, selfOf: id => owners.get(id), botOf: id => bots.get(id),
+  }
+  install(rt)
   t.after(() => ctx.dispose())
-  return { ctx, bots, read: id => reader?.(id), disposed: () => disposed }
+  return { ctx, rt, bots, read: id => reader?.(id), disposed: () => disposed }
 }
 
 test('identity reader returns only the owning Bot identity and a fresh copy', t => {
   const h = host(t, true)
   const identity = { name: 'Ada', role: 'Reviewer', instructions: 'Check files.' }
-  for (const id of ['private', 'group-member', 'task']) assert.deepEqual(h.read(id), identity)
+  const bridged = { ...identity, needsDshTools: true }
+  for (const id of ['private', 'group-member']) assert.deepEqual(h.read(id), bridged)
+  assert.deepEqual(h.read('task'), identity)
   assert.deepEqual(h.read('other'), {
-    name: 'Someone', role: 'Writer', instructions: 'Write notes.',
+    name: 'Someone', role: 'Writer', instructions: 'Write notes.', needsDshTools: true,
   })
   h.read('private').instructions = 'Changed copy.'
-  assert.deepEqual(h.read('private'), identity)
+  assert.deepEqual(h.read('private'), bridged)
   h.bots.get('ada').instructions = 'Read the diff.'
   assert.equal(h.read('private').instructions, 'Read the diff.')
+})
+
+test('an archived part keeps its Bot identity without asking for DSH tools', t => {
+  const h = host(t)
+  assert.deepEqual(h.read('archived-part'), { name: 'Ada', role: 'Reviewer', instructions: 'Check files.' })
+})
+
+test('a Genie says its role tools live in DSH, and a wish task does not (#1639)', t => {
+  const h = host(t)
+  const genie = { name: 'Genie', role: 'Grants your wishes', instructions: 'Grant wishes.' }
+  assert.deepEqual(h.read('wish-chat'), { ...genie, needsDshTools: true })
+  assert.deepEqual(h.read('wish-group'), { ...genie, needsDshTools: true })
+  // A task is a wish: it must not grant another, so it keeps its agent's own tools.
+  assert.deepEqual(h.read('wish-task'), genie)
 })
 
 test('unowned sessions receive no identity', t => {
   const h = host(t)
   for (const id of ['relay', 'unowned', undefined]) assert.equal(h.read(id), undefined)
+})
+
+test('the identity includes a role part only for its owning Bot chat or group member', t => {
+  const h = host(t)
+  const part = '<role-prompt id="voice-mouth">\nSpeak.\n</role-prompt>'
+  const roleOwners = new Map([
+    ['private', 'ada'], ['group-member', 'ada'], ['wish-group', 'ada'],
+  ])
+  h.rt.roleRuntime = {
+    acpPrompt(sessionId, botId) {
+      if (roleOwners.get(sessionId) === botId) return part
+    },
+  }
+  for (const id of ['private', 'group-member']) assert.equal(h.read(id).rolePrompt, part)
+  for (const id of ['task', 'archived-part', 'wish-task', 'other', 'wish-group']) {
+    assert.equal(Object.hasOwn(h.read(id), 'rolePrompt'), false, id)
+  }
+  for (const id of ['unowned', 'relay']) assert.equal(h.read(id), undefined)
 })
 
 test('registration is disposed on unload for injected and direct services', async t => {

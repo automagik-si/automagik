@@ -201,6 +201,37 @@ function cliSetup(id) {
   return findAll(tree, node => node.type === 'button' && node.props.role !== 'switch').map(textOf)
 }
 
+test('not-ready tool cards show their names and Em breve in pt-BR', () => {
+  locale.setLocale('pt-BR')
+  try {
+    const tree = render(flow.MigrateView({ phase: 'choosing' }))
+    const soon = findAll(tree, byClass('oai-mig-is-soon'))
+    const expected = [
+      ['OpenClaw', 'OpenClaw'],
+      ['Grok bot', 'Grok botxAI'],
+      ['Muse', 'MuseMeta'],
+    ]
+    assert.equal(soon.length, expected.length)
+    for (const [index, [name, label]] of expected.entries()) {
+      const card = soon[index]
+      const who = findAll(card, byClass('oai-mig-who'))
+      assert.equal(who.length, 1)
+      assert.equal(textOf(who[0]), label)
+      const pills = findAll(card, byClass('oai-soon'))
+      assert.equal(pills.length, 1)
+      assert.equal(textOf(pills[0]), 'Em breve')
+      assert.doesNotMatch(textOf(card), /Bot do Telegram|mapeando/)
+      assert.equal(card.props['aria-label'], `${name}: em breve`)
+    }
+    const ready = findAll(tree, byClass('oai-mig-is-ready'))
+    assert.equal(ready.length, 1)
+    const who = findAll(ready[0], byClass('oai-mig-who'))[0]
+    assert.equal(textOf(findAll(who, node => node.type === 'span')[0]), 'Bot do Telegram')
+  } finally {
+    locale.setLocale('en')
+  }
+})
+
 test('the move from another tool renders in pt-BR, restart and all', () => {
   locale.setLocale('pt-BR')
   try {
@@ -245,7 +276,7 @@ const ENGLISH_ON_PURPOSE = new Set([
   'GLM coding plan', 'Qwen', 'Alibaba Bailian', 'Sourcegraph Cody', 'Cody Pro', 'Replit', 'Replit Core',
   '{} · dsh-subscriptions',
   // The companion's name ideas: names, not words.
-  'Pip', 'Nova', 'Mochi', 'Echo', 'Biscuit',
+  'Pirlim', 'Mestrik', 'Maguito', 'Guizo', 'Trunfo',
   // The tools a person can come from, and their card tags.
   'Hermes', 'OpenClaw', 'Grok bot', 'Muse', 'Meta', 'Telegram', 'TG', 'OC',
   // Code, not copy: a key name, an HTTP method, a status line the subscriptions plugin never words.
@@ -294,6 +325,33 @@ test('a found row with a value in it reads in pt-BR around the value', () => {
     assert.equal(flow.aiText('Kiro token'), 'Token do Kiro')
     assert.equal(flow.aiText('AWS Kiro · dsh-subscriptions'), 'AWS Kiro · dsh-subscriptions')
     assert.equal(flow.aiText(null), null)
+  } finally {
+    locale.setLocale('en')
+  }
+})
+
+// Antigravity's Connect AI row (#2048, r6): its own lines read in Chinese; the shared buttons
+// stay English (Connect AI choice F).
+test('in Chinese, the Antigravity row\'s own lines read in Chinese and Install stays English', () => {
+  const agent = state => ({
+    id: 'acp-antigravity', key: 'antigravity', name: 'Antigravity', on: true, appSignIn: true, signedIn: false,
+    cli: { found: false, state: 'missing', install: 'manual', ...state }, connector: { state: 'ready', native: true }, restartNeeded: false,
+  })
+  const acpOf = a => ({ view: { available: true, agents: [a] }, busy: null, problems: {}, isOn: x => x.on })
+  const row = { id: 'antigravity', name: 'Antigravity', via: 'Your Google account, through Antigravity', kind: 'signin', ready: false, on: false, found: null }
+  const draw = a => textOf(render(flow.Row({ row, acp: acpOf(a), open: true, busy: false, onFlip() {}, onSaved() {}, onClose() {}, onDedupe() {} })))
+  locale.setLocale('zh')
+  try {
+    const missing = draw(agent())
+    assert.match(missing, /你的 Google 账号，通过 Antigravity/)
+    assert.match(missing, /这台电脑上没有 agy CLI。Automagik 可以为你安装。/)
+    assert.match(missing, /Install/)
+    assert.match(draw(agent({ state: 'installing' })), /正在安装 Antigravity…/)
+    assert.match(draw(agent({ found: true, state: 'ready', managed: true, version: '1.5.15' })), /已找到 agy CLI（由 Automagik 安装，版本 1\.5\.15；它会自行更新）。/)
+    assert.match(draw({ ...agent(), on: false }), /这台电脑上没有 agy CLI。开启 Antigravity 即可安装。/)
+    const signing = draw({ ...agent({ found: true, state: 'ready' }), signingIn: true, signInExpiresAt: 1_800_000_000_000,
+      signInUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fcb&response_type=code&state=s1-state-0001' })
+    assert.match(signing, /过期/)
   } finally {
     locale.setLocale('en')
   }

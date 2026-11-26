@@ -288,3 +288,84 @@ test('merged cards have sibling action buttons, use native exact-call answers an
   const openOnly = draw().children.find(node => node?.props?.className === 'bt-q-foot')
   assert.deepEqual(openOnly.children.filter(Boolean).map(node => node.children[0]), ['Open'])
 })
+
+test('rfc0039 [P] L1 withdrawn rows show stored names with no Open', () => {
+  const now = Date.now()
+  const team = { byId: { e: { id: 'e', name: 'Other' } }, roomsById: { r: { id: 'r', name: 'Renamed' } } }
+  const row = (id, age, extra) => ({ id, botId: 'e', botName: 'Echo', why: 'task', tool: 'bash', at: now - age, ...extra })
+  const work = { withdrawn: [
+    row('x4', 4), row('x2', 2, { label: 'Fix' }), row('x3', 3), row('x1', 1), row('bot', 0, { why: 'bot' }),
+  ] }
+  const body = LiveRail({ roster: team, actions: {}, useWork: select => select(work) })
+  const section = body.children.find(node => node?.props?.label === 'Just finished')
+  assert.ok(section, 'Just finished should contain the withdrawal notes')
+  assert.equal(section.children.length, 3)
+  const descendants = node => [node, ...(node?.children ?? []).flatMap(descendants)]
+  for (const child of section.children) {
+    const card = child.type(child.props)
+    assert.equal(card.type, 'div')
+    assert.equal(card.props.role, 'note')
+    const nodes = descendants(card)
+    const text = nodes.filter(node => typeof node === 'string').join(' ')
+    assert.match(text, /Echo/)
+    assert.match(text, /This step was withdrawn: its task ended · bash/)
+    assert.doesNotMatch(text, /Other|Renamed|Open/)
+    assert.equal(nodes.some(node => node?.props?.onClick || node?.props?.className === 'bt-live-face'), false)
+  }
+  const items = module.exports.withdrawnOf?.(work, now)
+  assert.deepEqual(plain(items?.map(({ key, name, place }) => [key, name, place])), [
+    ['gone:x1', 'Echo', ''], ['gone:x2', 'Echo', 'Fix'], ['gone:x3', 'Echo', ''],
+  ])
+  for (const item of items) {
+    assert.equal(Object.hasOwn(item, 'open'), false)
+    assert.equal(Object.hasOwn(item, 'bot'), false)
+  }
+})
+
+test('rfc0039 [P] L2 Just finished merges tasks and rows by time', () => {
+  const now = Date.now()
+  const ended = (title, hours) => ({ from: 'genie', status: 'stopped', title, endedAt: now - hours * HOUR })
+  const tasks = {
+    a: ended('First', 1), b: ended('Second', 2), c: ended('Third', 3),
+    fourth: ended('Fourth', 4), stale: ended('Old', 7), running: { from: 'genie', status: 'working' },
+  }
+  const team = { ...roster, tasks }
+  const taskRow = { kind: 'tasks', sessions: [...Object.keys(tasks), 'forgotten'] }
+  const work = { withdrawn: [{ id: 'x1', botName: 'Echo', why: 'task', tool: 'bash', at: now - 1 }] }
+  const body = LiveRail({ roster: team, actions: {}, useWork: select => select(work) })
+  const section = body.children.find(node => node?.props?.label === 'Just finished')
+  assert.equal(section.children.length, 4)
+  assert.deepEqual(plain(section.children.map(node => node.props.item.key)), ['gone:x1', 'end:a', 'end:b', 'end:c'])
+  assert.deepEqual(plain(agentRowSessions(taskRow, team, now)), ['fourth', 'stale', 'forgotten'])
+})
+
+test('rfc0039 [C] L3 withdrawn rows are never counted', () => {
+  const now = Date.now()
+  const work = { approvals: [{ id: 'ask', botId: 'genie', tool: 'bash' }], bots: { writer: { tool: 'read' } } }
+  const withdrawn = [{ id: 'gone', botName: 'Genie', why: 'task', tool: 'bash', at: now }]
+  assert.equal(liveSummary(liveOf({ ...work, withdrawn }, roster, now)), liveSummary(liveOf(work, roster, now)))
+})
+
+test('rfc0039 D3b [P] L4 a group row shows its Bot and group names as a note', () => {
+  const now = Date.now()
+  const team = { byId: { e: { id: 'e', name: 'Other' } }, roomsById: { r: { id: 'r', name: 'Renamed' } } }
+  const work = { withdrawn: [{
+    id: 'g1', botId: 'e', botName: 'Echo', roomId: 'r', roomName: 'Ops', sessionId: 'gs', why: 'group', tool: 'bash', at: now - 1,
+  }] }
+  const body = LiveRail({ roster: team, actions: {}, useWork: select => select(work) })
+  const section = body.children.find(node => node?.props?.label === 'Just finished')
+  assert.ok(section, 'D3B-L4')
+  assert.equal(section.children.length, 1)
+  const [row] = section.children
+  const card = row.type(row.props)
+  assert.equal(card.props.role, 'note')
+  const descendants = node => [node, ...(node?.children ?? []).flatMap(descendants)]
+  const nodes = descendants(card)
+  const text = nodes.filter(node => typeof node === 'string').join(' ')
+  assert.match(text, /Echo/)
+  assert.match(text, / · Ops/)
+  assert.match(text, /This step was withdrawn: its group Session ended · bash/)
+  assert.doesNotMatch(text, /Other|Renamed|Open/)
+  assert.equal(nodes.some(node => node?.props?.onClick || node?.props?.className === 'bt-live-face'), false)
+  assert.deepEqual(plain(module.exports.withdrawnOf?.(work, now).map(({ key, name, place }) => [key, name, place])), [['gone:g1', 'Echo', 'Ops']])
+})

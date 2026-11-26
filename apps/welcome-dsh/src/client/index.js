@@ -12,7 +12,7 @@ import { PRODUCT_LOCKUP_CSS } from './product-lockup.js'
 import { installVeil } from './veil.js'
 import { installLocale } from './i18n.js'
 import { ACP_CSS, installAcpSection } from './acp-agents.js'
-import { installPowerShortcut } from './power-shortcut.js'
+import { installOfficialInstall, installPowerSettings } from './power-shortcut.js'
 
 // Automagik's onboarding on DSH's settings.onboarding slot. The shell mounts one step at a
 // time, in order; these come ahead of DSH's own welcome-notice (-100) and deepseek-official
@@ -51,6 +51,7 @@ export function apply(ctx) {
     ctx.slots.inject('settings.onboarding', () => ctx.slots.register({ name: 'settings.onboarding', id: step.id, order: step.order }, step.component))
   }
   ctx.effect(() => installAcpSection(ctx), 'omni-ai: Claude Code and Codex in Settings')
-  // Omni's and Genie's power in the Bot team's sidebar, when the Bot team runs here.
-  ctx.effect(() => installPowerShortcut(), 'omni-ai: power shortcut in the Bot team sidebar')
+  // Each built-in Bot's power in its own settings, when the Bot team runs here.
+  ctx.effect(() => installPowerSettings(), "omni-ai: power in each Bot's settings")
+  ctx.effect(() => installOfficialInstall(), 'omni-ai: Omni and Genie install on the Apps page')
 }

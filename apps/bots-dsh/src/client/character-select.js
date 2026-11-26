@@ -1,21 +1,23 @@
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CHARACTER_COLORS, MAIN_LOOK, PICKER_SHAPES, shapeOf } from './characters.js'
+import { CHARACTER_COLORS, hasShape, MAIN_LOOK, PICKER_SHAPES, SOLVER_SHAPES, shapeOf } from './characters.js'
 import { paintCss } from './inks.js'
-import { BotMark, GENIE_PET, lookOf, petOf, servedPet, UNFOLD_PET, useBaked } from './mark.js'
+import { BotMark, catalogueLookOf, GENIE_PET, lookOf, petOf, servedPet, UNFOLD_PET, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
 import { bakeBlobs, canBake } from './pet-bake.js'
 import { CloseIcon } from './icons.js'
 import { t } from './i18n.js'
 import { importPhotos, loadLibrary } from './avatar-library.js'
+import { checkViewer, requestViewer, viewerChanged, viewerRefused, viewerResponse } from './viewer.js'
+import { isSolverLooks, solverDefaultShape } from './solver-looks.js'
 
 // -------------------------------------------------------------------------
 // The character select: where a Bot's look is chosen, as a fighting game's select screen. The
 // stage on the left plays the highlighted character big, under a spotlight, with its name; the
-// roster on the right lists Automagik's own first (Genie, Omni and every character, in the
-// color picked on the stage), then the person's (pets the team keeps and Codex's own), then
-// codex-pets.net, which is asked only once that section is opened. Arrow keys move the cursor,
-// Enter picks, Escape leaves. The pick plays a jump before the select closes.
+// roster on the right lists the twelve Solver characters for Solvers. Other Bots can choose
+// photos, Automagik characters, local pets and pets from codex-pets.net. The market is asked
+// only once its section is opened. Arrow keys move the cursor, Enter picks, Escape leaves.
+// The pick plays a jump before the select closes.
 
 const SORTS = [['popular', 'Most liked'], ['new', 'Newest'], ['views', 'Most viewed'], ['random', 'Surprise me']]
 const sourceLine = { builtin: 'Automagik', team: 'Kept by this team', codex: 'From Codex' }
@@ -23,8 +25,11 @@ const capitalize = word => word[0].toUpperCase() + word.slice(1)
 const slug = text => String(text ?? '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'bot'
 const PICK_MS = 900
 
+const shapeEntry = shape => ({ key: `shape:${shape}`, kind: 'shape', shape, name: shapeOf(shape).label, line: 'Automagik character' })
+
 /**
- * The roster's Automagik section: Genie, Omni, the logo pet, Unfold, Wisp, then the characters.
+ * The roster's Automagik section: Genie, Omni, the logo pet, Unfold, Wisp, then the characters
+ * any Bot may pick (the Solvers have their own section: solversFor).
  * Unfold is there only where the host lists its pet (Unfold's own instance).
  */
 export function automagikRoster({ unfold = false } = {}) {
@@ -34,8 +39,29 @@ export function automagikRoster({ unfold = false } = {}) {
     { key: 'pet:builtin:automagik', kind: 'pet', pet: { source: 'builtin', id: 'automagik', name: 'Automagik', version: 2, sleep: true }, name: 'Automagik', line: 'Automagik' },
     ...(unfold ? [{ key: 'pet:builtin:unfold', kind: 'pet', pet: { ...UNFOLD_PET, name: 'Unfold' }, name: 'Unfold', line: 'Automagik' }] : []),
     { key: 'pet:builtin:wisp', kind: 'pet', pet: { source: 'builtin', id: 'wisp', name: 'Wisp', version: 2, sleep: false }, name: 'Wisp', line: 'Automagik' },
-    ...PICKER_SHAPES.filter(shape => shape !== 'octopus').map(shape => ({ key: `shape:${shape}`, kind: 'shape', shape, name: shapeOf(shape).label, line: 'Automagik character' })),
+    ...PICKER_SHAPES.filter(shape => shape !== 'octopus').map(shapeEntry),
   ]
+}
+
+/** The roster's Solvers section: the twelve, in the catalogue's order. */
+export const solverRoster = () => SOLVER_SHAPES.map(shapeEntry)
+/** The Solvers a Bot's chooser offers: all of them to a Solver Bot, none to any other. */
+export const solversFor = bot => (isSolverLooks(bot) ? solverRoster() : [])
+
+/**
+ * The tile an Arrow Down (`down` 1) or Arrow Up (-1) reaches from tile `at`, given every tile's
+ * { top, left } in roster order: in the nearest row beyond, whatever section it is in, the tile
+ * nearest this one's column. A section's last row may be short and the next section starts a
+ * row, so counting tiles would drift. -1 when there is no row beyond.
+ */
+export function tileBeyond(boxes, at, down) {
+  const here = boxes[at]
+  if (!here) return -1
+  const beyond = boxes.map((box, index) => ({ box, index })).filter(({ box }) => (box.top - here.top) * down > 1)
+  if (beyond.length === 0) return -1
+  const rowTop = beyond.reduce((best, { box }) => ((box.top - best) * down < 0 ? box.top : best), beyond[0].box.top)
+  const row = beyond.filter(({ box }) => Math.abs(box.top - rowTop) <= 1)
+  return row.reduce((best, entry) => (Math.abs(entry.box.left - here.left) < Math.abs(best.box.left - here.left) ? entry : best), row[0]).index
 }
 
 /** Which roster entry a Bot wears now, by its key. */
@@ -48,14 +74,30 @@ export function currentKey(bot, look) {
   return `shape:${look.shape}`
 }
 
-async function put(url, blob) {
-  const response = await fetch(url, { method: 'PUT', body: blob, headers: { 'content-type': 'image/webp' } })
-  const answer = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(answer.error ?? t('Codex\'s pets folder could not be written'))
+async function put(url, blob, active) {
+  checkViewer(active)
+  const viewer = active?.viewer?.id
+  const headers = { 'content-type': 'image/webp', ...(viewer ? { 'x-automagik-viewer': viewer } : {}) }
+  const response = await fetch(url, { method: 'PUT', body: blob, headers })
+  checkViewer(active)
+  const refusal = active && !response.ok ? await viewerResponse(active, response) : undefined
+  const answer = refusal ? refusal.answer : await response.json().catch(() => ({}))
+  const changed = refusal?.changed ?? (active && viewerChanged(answer))
+  if (!refusal) {
+    checkViewer(active)
+    if (changed) viewerRefused(active, 'bot/viewer-changed')
+  }
+  if (!response.ok || changed) {
+    const message = changed ? answer.error?.message ?? answer.error : answer?.error
+    const error = new Error(message ?? t('Codex\'s pets folder could not be written'))
+    if (changed) error.code = 'bot/viewer-changed'
+    throw error
+  }
   return answer
 }
 /** Writes the Bot's look to ~/.codex/pets as a Codex pet: its own pet's sheet, else its character baked. */
 export async function toCodex(bot, look) {
+  const active = requestViewer('pet-codex')
   const id = `automagik-${slug(bot.name)}`
   const query = part => `api/omni-ui/pet-codex?${new URLSearchParams({ id, name: bot.name, description: bot.role ?? '', ...(part ? { part } : {}) })}`
   const wants = petOf(bot, look, { live: true, size: 64 })
@@ -70,8 +112,8 @@ export async function toCodex(bot, look) {
   } else {
     throw new Error(t('A photo is not a pet: pick a character or a pet first.'))
   }
-  await put(query(), sheet)
-  if (sleep) await put(query('sleep'), sleep)
+  await put(query(), sheet, active)
+  if (sleep) await put(query('sleep'), sleep, active)
   return id
 }
 
@@ -122,13 +164,17 @@ function useMarket(actions, open) {
 }
 
 export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
+  const solver = isSolverLooks(bot)
   const look = lookOf(bot)
-  const [color, setColor] = useState(look.color)
+  const stored = catalogueLookOf(bot)
+  const [swatch, setSwatch] = useState(null)
+  const color = swatch ?? look.color
   const [local, setLocal] = useState([])
   const [unfold, setUnfold] = useState(false)
   const [browse, setBrowse] = useState(false)
-  const market = useMarket(actions, browse)
-  const [focus, setFocus] = useState(() => currentKey(bot, look))
+  const market = useMarket(actions, browse && !solver)
+  const [focus, setFocus] = useState(null)
+  const [chosen, setChosen] = useState(null)
   const [stage, setStage] = useState('idle')
   const [picking, setPicking] = useState(false)
   const [note, setNote] = useState('')
@@ -136,29 +182,57 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   const [library, setLibrary] = useState([])
   const fileRef = useRef(null)
   const gridRef = useRef(null)
+  const colorsRef = useRef(null)
+  const ordinaryChooser = useRef(null)
+  // An upload belongs to this opening for this ordinary Bot. Keep the avatar fresh
+  // without carrying an upload across unmounts, Bot changes or identity changes.
+  useLayoutEffect(() => {
+    if (solver) return undefined
+    ordinaryChooser.current = {}
+    return () => { ordinaryChooser.current = null }
+  }, [bot.id, solver])
+  useLayoutEffect(() => {
+    if (ordinaryChooser.current) ordinaryChooser.current.avatar = bot.avatar
+  })
   useEffect(() => {
+    if (solver) return
     void actions.pets().then((list) => {
       setLocal(list.filter(pet => pet.source !== 'builtin'))
       setUnfold(list.some(pet => pet.source === 'builtin' && pet.id === 'unfold'))
     }, () => setLocal([]))
-  }, [])
+  }, [solver])
   const loadPhotos = () => loadLibrary(actions).then(page => setLibrary(page.items), () => setLibrary([]))
-  useEffect(() => { void loadPhotos() }, [])
+  useEffect(() => { if (!solver) void loadPhotos() }, [solver])
 
   const ours = useMemo(() => automagikRoster({ unfold }), [unfold])
+  const solvers = solver ? solverRoster() : []
   const yours = local.map(pet => ({ key: `pet:${pet.source}:${pet.id}`, kind: 'pet', pet, name: pet.name, line: sourceLine[pet.source] ?? pet.source }))
   const theirs = market.market.pets.map(pet => ({ key: `market:${pet.id}`, kind: 'market', pet, name: pet.name, line: pet.by ? t('by {name}', { name: pet.by }) : 'codex-pets.net' }))
   const photo = look.image ? [{ key: 'photo', kind: 'photo', image: look.image, name: t('Photo'), line: t('Uploaded') }] : []
   const photos = library.filter(entry => entry.image !== look.image).map(entry => ({ key: `library:${entry.id}`, kind: 'library', image: entry.image, name: entry.name || t('Photo'), line: t('Your photos') }))
-  const all = [...photo, ...photos, ...ours, ...yours, ...theirs]
-  const item = all.find(entry => entry.key === focus) ?? ours[0]
+  const all = solver ? solvers : [...photo, ...photos, ...ours, ...yours, ...theirs]
+  const pressed = currentKey(bot, stored)
   const worn = currentKey(bot, look)
+  // An eligible worn character can still preview without a tile, such as a recolored octopus.
+  const wornShape = worn === `shape:${look.shape}` && hasShape(look.shape)
+    && SOLVER_SHAPES.includes(look.shape) === solver ? shapeEntry(look.shape) : null
+  const defaultKey = solver ? `shape:${solverDefaultShape(bot.id)}` : currentKey(bot, catalogueLookOf({ ...bot, avatar: undefined }))
+  const item = all.find(entry => entry.key === focus) ?? all.find(entry => entry.key === worn) ?? wornShape
+    ?? all.find(entry => entry.key === defaultKey) ?? ours[0]
+  const focused = item.key
+  const selected = chosen?.solver === solver ? all.find(entry => entry.key === chosen.key) : undefined
+  if (chosen !== null && !selected) setChosen(null)
 
   // A new highlight greets: the fighter waves once, then stands.
-  const move = (key) => { if (key !== focus) { setFocus(key); setStage('poked') } }
-  const pick = (entry = item) => {
+  const move = (key) => { if (key !== focused) { setFocus(key); setStage('poked') } }
+  const choose = (key) => {
+    setFocus(key)
+    if (key !== focused) setStage('poked')
+    setChosen({ key, solver })
+  }
+  const pick = (entry) => {
     if (picking || !entry) return
-    setFocus(entry.key)
+    choose(entry.key)
     setPicking(true)
     setStage('done')
     const save = entry.kind === 'shape' ? actions.updateBot(bot.id, { avatar: { shape: entry.shape }, color })
@@ -170,17 +244,26 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
     const wait = new Promise(resolve => setTimeout(resolve, PICK_MS))
     void run(Promise.all([save, wait]).then(() => onClose(), (error) => { setPicking(false); setStage('idle'); throw error }))
   }
+  const commit = () => {
+    if (picking) return
+    if (selected) { pick(selected); return }
+    if (item.kind !== 'shape' || color === look.color) { onClose(); return }
+    setPicking(true)
+    void run(actions.updateBot(bot.id, { color }).then(() => onClose(), (error) => { setPicking(false); throw error }))
+  }
   // One photo is worn at once, as before; every photo also goes into the library, so a
   // later character does not lose it, and several at once only fill the library.
   const upload = async (files) => {
-    if (files.length === 0) return
+    const chooser = ordinaryChooser.current
+    if (!chooser || files.length === 0) return
     const read = await Promise.all(files.map(file => avatarImage(file).then(image => ({ name: file.name, image }), failure => ({ name: file.name, failure }))))
     const unread = read.filter(photo => photo.failure)
     const result = await importPhotos(read.filter(photo => !photo.failure), actions)
+    if (ordinaryChooser.current !== chooser) return
     const failed = [...unread.map(photo => photo.name), ...result.failed.map(photo => photo.name)]
     if (files.length === 1 && unread.length === 0) {
-      await actions.updateBot(bot.id, { avatar: { ...(bot.avatar ?? {}), image: read[0].image } })
-      onClose()
+      await actions.updateBot(bot.id, { avatar: { ...chooser.avatar, image: read[0].image } })
+      if (ordinaryChooser.current === chooser) onClose()
       return
     }
     await loadPhotos()
@@ -193,31 +276,50 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
   // The cursor moves through the tiles in their grid: across a row, and a row up or down.
   const onKeyDown = (event) => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return }
+    // Ordinary rosters start with pets. Go directly back to the colors so those
+    // tiles do not take over the stage and remove the swatches along the way.
+    if (!solver && event.key === 'Tab' && event.shiftKey && event.target?.dataset?.key === focused) {
+      const lastSwatch = colorsRef.current?.lastElementChild
+      if (lastSwatch) { event.preventDefault(); lastSwatch.focus(); return }
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      const entry = all.find(item => item.key === event.target?.dataset?.key)
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        if (entry) pick(entry)
+        else commit()
+      } else if (entry) {
+        event.preventDefault()
+        choose(entry.key)
+      }
+      return
+    }
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return
     const tiles = [...(gridRef.current?.querySelectorAll('.bt-cs-tile') ?? [])]
-    const at = tiles.findIndex(tile => tile.dataset.key === focus)
-    if (event.key === 'Enter') { event.preventDefault(); pick(); return }
-    const top = tiles[at]?.offsetTop
-    const columns = Math.max(1, tiles.filter(tile => tile.offsetTop === tiles[0]?.offsetTop).length)
-    const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: columns, ArrowUp: -columns }[event.key]
-    if (step === undefined || at < 0) return
+    const at = tiles.findIndex(tile => tile.dataset.key === focused)
+    const across = { ArrowRight: 1, ArrowLeft: -1 }[event.key]
+    const down = { ArrowDown: 1, ArrowUp: -1 }[event.key]
+    if ((across === undefined && down === undefined) || at < 0) return
     event.preventDefault()
-    const next = tiles[Math.max(0, Math.min(tiles.length - 1, at + step))]
-    if (next && (step === 1 || step === -1 || next.offsetTop !== top)) { move(next.dataset.key); next.focus() }
+    const next = across !== undefined
+      ? tiles[Math.max(0, Math.min(tiles.length - 1, at + across))]
+      // Layout offsets, not the drawn box: the tile under the cursor is drawn lifted.
+      : tiles[tileBeyond(tiles.map(tile => ({ top: tile.offsetTop, left: tile.offsetLeft })), at, down)]
+    if (next && next !== tiles[at]) { choose(next.dataset.key); next.focus() }
   }
-  useLayoutEffect(() => { gridRef.current?.querySelector(`[data-key="${CSS.escape(focus)}"]`)?.focus({ preventScroll: false }) }, [])
+  useLayoutEffect(() => { gridRef.current?.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: false }) }, [])
 
   const tile = entry => h('button', {
     key: entry.key, type: 'button', className: 'bt-cs-tile', 'data-key': entry.key,
-    'aria-pressed': entry.key === worn, 'data-focus': entry.key === focus || undefined,
-    title: entry.name, onClick: () => { if (entry.key === focus) pick(entry); else move(entry.key) },
+    'aria-pressed': entry.key === pressed, 'data-focus': entry.key === focused || undefined,
+    title: entry.name, onClick: () => { if (entry.key === focused) pick(entry); else choose(entry.key) },
     // Tabbing to a tile moves the cursor there; a click's own focus does not, or its click would pick.
     onFocus: (event) => { if (event.currentTarget.matches(':focus-visible')) move(entry.key) },
     onDoubleClick: () => pick(entry),
   },
   h('span', { className: 'bt-cs-face' }, h(Portrait, { item: entry, color })),
   h('span', { className: 'bt-cs-tile-name' }, entry.name),
-  entry.key === focus ? h('span', { className: 'bt-cs-p1', 'aria-hidden': true }, 'P1') : null)
+  entry.key === focused ? h('span', { className: 'bt-cs-p1', 'aria-hidden': true }, 'P1') : null)
   const section = (label, entries, extra) => h('section', { className: 'bt-cs-sec' },
     h('h3', { className: 'bt-cs-label' }, label, extra ?? null),
     entries.length > 0 ? h('div', { className: 'bt-cs-grid' }, entries.map(tile)) : null)
@@ -233,17 +335,19 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
         h('div', { className: 'bt-cs-plate' },
           h('div', { className: 'bt-cs-name' }, item?.name ?? ''),
           h('div', { className: 'bt-cs-line' }, t(item?.line ?? ''))),
-        showsColor ? h('div', { className: 'bt-cs-colors', role: 'group', 'aria-label': t('Character color') }, CHARACTER_COLORS.map(ink => h('button', {
+        showsColor ? h('div', { ref: colorsRef, className: 'bt-cs-colors', role: 'group', 'aria-label': t('Character color') }, CHARACTER_COLORS.map(ink => h('button', {
           key: ink, type: 'button', className: 'bt-cs-color', 'aria-label': t(capitalize(ink)), title: t(capitalize(ink)), 'aria-pressed': color === ink,
-          onClick: () => setColor(ink),
+          onClick: () => setSwatch(ink),
         }, h('span', { style: { background: paintCss(ink) } })))) : null,
-        h('button', { type: 'button', className: 'bt-cs-go', disabled: picking || item?.kind === 'photo', onClick: () => pick() }, picking ? t('Chosen!') : t('Choose')),
+        h('button', { type: 'button', className: 'bt-cs-go', disabled: picking, onClick: commit }, picking ? t('Chosen!') : t('Choose')),
         h('div', { className: 'bt-cs-links' },
-          h('button', { type: 'button', className: 'bt-cs-link', onClick: () => fileRef.current?.click() }, t('Add photos')),
+          solver ? null : h('button', { type: 'button', className: 'bt-cs-link', onClick: () => fileRef.current?.click() }, t('Add photos')),
           canBake() ? h('button', { type: 'button', className: 'bt-cs-link', onClick: () => { setNote('…'); toCodex(bot, look).then(id => setNote(t('In Codex as {id}. Pick it in Codex\'s pet menu.', { id })), error => setNote(error?.message ?? String(error))) } }, t('Use in Codex')) : null,
-          h('button', { type: 'button', className: 'bt-cs-link', onClick: () => run(actions.updateBot(bot.id, { avatar: null, color: null }).then(() => onClose())) }, t('Default look'))),
+          h('button', { type: 'button', className: 'bt-cs-link', onClick: () => run(actions.updateBot(bot.id, solver
+            ? { avatar: { shape: solverDefaultShape(bot.id) } }
+            : { avatar: null, color: null }).then(() => onClose())) }, t('Default look'))),
         note ? h('p', { className: 'bt-cs-note', role: 'status' }, note) : null,
-        h('input', { ref: fileRef, type: 'file', multiple: true, accept: 'image/png,image/jpeg,image/webp,image/gif', hidden: true, onChange: (event) => { const files = [...(event.target.files ?? [])]; event.target.value = ''; void run(upload(files)) } })),
+        solver ? null : h('input', { ref: fileRef, type: 'file', multiple: true, accept: 'image/png,image/jpeg,image/webp,image/gif', hidden: true, onChange: (event) => { const files = [...(event.target.files ?? [])]; event.target.value = ''; void run(upload(files)) } })),
       h('div', { className: 'bt-cs-roster' },
         h('div', { className: 'bt-cs-head' },
           h('div', null,
@@ -251,10 +355,10 @@ export function CharacterSelect({ bot, actions, run, onClose, avatarImage }) {
             h('p', { className: 'bt-cs-sub' }, t('For {name}. Arrow keys move, Enter picks.', { name: bot.name }))),
           h('button', { type: 'button', className: 'bt-icon-btn', 'aria-label': t('Close'), onClick: onClose }, h(CloseIcon))),
         h('div', { ref: gridRef, className: 'bt-cs-scroll' },
-          photo.length + photos.length > 0 ? section(t('Yours'), [...photo, ...photos]) : null,
-          section('Automagik', ours),
-          yours.length > 0 ? section(t('Your pets'), yours) : null,
-          h('section', { className: 'bt-cs-sec' },
+          !solver && photo.length + photos.length > 0 ? section(t('Yours'), [...photo, ...photos]) : null,
+          solver ? section(t('Solvers'), solvers) : section('Automagik', ours),
+          !solver && yours.length > 0 ? section(t('Your pets'), yours) : null,
+          solver ? null : h('section', { className: 'bt-cs-sec' },
             h('h3', { className: 'bt-cs-label' }, 'codex-pets.net',
               browse ? h('select', { className: 'bt-input bt-cs-sort', value: market.sort, 'aria-label': t('Order'), onChange: event => market.setSort(event.target.value) },
                 SORTS.map(([id, label]) => h('option', { key: id, value: id }, t(label)))) : null),

@@ -1,17 +1,46 @@
 import { createElement as h, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { OmniMark, Wordmark } from './logo.js'
+import { OmniMark } from './logo.js'
 import { currentPart } from './text.js'
 import { PlusIcon, SearchIcon, TasksIcon } from './icons.js'
-import { BotMark } from './mark.js'
+import { BotMark, catalogueLookOf } from './mark.js'
 import { DSH_LOOK } from './characters.js'
 import { t } from './i18n.js'
 import { openStops } from './stops.js'
 import { isMainOf } from './sources.js'
+import { botChannels, botChannelSource, useEntries } from './extend.js'
 import { agentRowSessions } from './task-card.js'
 import { ProjectRail } from './left-bar-rail.js'
 import { TeamRows, drawBot } from './left-bar-team.js'
 import { LEFT_BAR_SKIN } from './left-bar-css.js'
+import { roleTagOf } from '../shared/roles.js'
+
+// A channel's glyph in its kind's shape, in one colour: colour in the bar only ever means a
+// status, so the glyph says what kind of channel a row is. Anything unknown wears a chat bubble.
+const CHANNEL_GLYPHS = {
+  whatsapp: () => [
+    h('path', { key: 'bubble', d: 'M12 3.8a8.2 8.2 0 0 0-7 12.5L3.8 20.2l4-1.1A8.2 8.2 0 1 0 12 3.8z' }),
+    h('path', { key: 'phone', d: 'M9.3 8.4c-.3 0-.6.1-.8.4-.3.5-.5 1.1-.2 1.9.5 1.7 2.1 3.2 3.8 3.8.8.2 1.5.1 1.9-.2.3-.2.4-.5.4-.8l-.1-.4-1.4-.7-.8.9c-.9-.4-1.7-1.1-2.1-2l.9-.8-.7-1.5z' }),
+  ],
+  telegram: () => [
+    h('path', { key: 'plane', d: 'M20.5 4.5 3.5 11.2l5.2 1.9 2 6.1 3-3.3 4.4 3.3z' }),
+    h('path', { key: 'fold', d: 'M8.7 13.1 16.8 8' }),
+  ],
+  slack: () => [h('path', { key: 'hash', d: 'M9 4.5 7.5 19.5M16.5 4.5 15 19.5M4.5 9h15M3.5 15h15' })],
+  discord: () => [
+    h('path', { key: 'face', d: 'M5 6.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 16V8A1.5 1.5 0 0 1 5 6.5z' }),
+    h('path', { key: 'eyes', d: 'M9.5 10.5v1.5M14.5 10.5v1.5' }),
+    h('path', { key: 'smile', d: 'M9.5 14.5c1.5 1 3.5 1 5 0' }),
+  ],
+  chat: () => [h('path', { key: 'bubble', d: 'M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8.5A1.5 1.5 0 0 1 19 17h-9l-4.5 3.5V17H5A1.5 1.5 0 0 1 3.5 15.5V7A1.5 1.5 0 0 1 5 5.5z' })],
+}
+
+/** A channel's glyph: its kind's shape, the chat bubble for any other kind. */
+export function channelGlyph(channel) {
+  const kind = String(channel?.kind ?? '')
+  const shape = kind.startsWith('whatsapp') ? 'whatsapp' : Object.hasOwn(CHANNEL_GLYPHS, kind) ? kind : 'chat'
+  return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, CHANNEL_GLYPHS[shape]())
+}
 
 // -------------------------------------------------------------------------
 // The new left bar in the Bot team's sidebar (RFC 0022 (i), direction C on the themed ground):
@@ -22,7 +51,7 @@ import { LEFT_BAR_SKIN } from './left-bar-css.js'
 // Read, never run: every row comes from what the team already has (the roster, the Sessions'
 // status, the work the host reports), and a press only opens what today's rows open. The "+"
 // makes nothing yet: creating or joining a space comes with Automagik Cloud, and the "+" says
-// so in a note. The Code side, sign-in and Cloud's own tiles are not part of this bar yet.
+// so in a note. Sign-in and Cloud's own tiles are separate.
 
 /** The one tile the rail has today: this computer, the local team. */
 export const LOCAL_SPACE = 'local'
@@ -32,11 +61,28 @@ const pack = value => JSON.stringify(value)
 // One status per Bot, as left-bar-status.js names them: what asks for the person first, then
 // what failed, then what runs. Each source is picked as text, so the bar redraws only when a
 // status changes.
-export function botStatus({ question, pending, approval, failed, running, away }) {
+export function botStatus({ question, pending, approval, failed, running, away, notInstalled = false }) {
+  if (notInstalled) return 'not-installed'
   if (question || pending || approval) return 'needs'
   if (failed) return 'error'
   if (running || away) return 'working'
   return 'idle'
+}
+
+// The bar is narrow in the phone's drawer (DSH keeps it at 280): a status keeps its mark there,
+// with its word in the tooltip and the accessible name, so the name on the row keeps the room.
+const NARROW = 620
+const NO_WORDS = Object.freeze([])
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => typeof window !== 'undefined' && window.innerWidth < NARROW)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+    const read = () => setNarrow(window.innerWidth < NARROW)
+    read()
+    window.addEventListener('resize', read)
+    return () => window.removeEventListener('resize', read)
+  }, [])
+  return narrow
 }
 
 function useTeamStatus({ roster, useSessionStatus, useWork }) {
@@ -62,10 +108,12 @@ function useTeamStatus({ roster, useSessionStatus, useWork }) {
     Object.values(value.rooms ?? {}).some(entries => entries.some(entry => entry.botId === id)),
   ]))) : '[]')
   const byWork = new Map(work.map(([id, approval, failed, away]) => [id, { approval, failed, away }]))
+  // A crew Bot whose plugin is missing, switched off or did not load cannot run at all.
+  const notInstalled = new Map(roster.bots.map(bot => [bot.id, bot.installed === false]))
   const bots = new Map(sessions.bots.map(([id, running, pending, unread]) => {
     const part = parts.find(([bot]) => bot === id)?.[1]
     const { approval = false, failed = false, away = false } = byWork.get(id) ?? {}
-    return [id, { status: botStatus({ question: roster.questions?.[part] !== undefined, pending, approval, failed, running, away: away && !running }), unread }]
+    return [id, { status: botStatus({ question: roster.questions?.[part] !== undefined, pending, approval, failed, running, away: away && !running, notInstalled: notInstalled.get(id) === true }), unread }]
   }))
   const dsh = new Map(sessions.agents.map(([id, running, unread]) => [id, { status: running ? 'working' : 'idle', unread }]))
   const asked = new Map(roomWork.map(([id, approval, working]) => [id, approval ? 'needs' : working ? 'working' : 'idle']))
@@ -89,7 +137,7 @@ function currentKey(roster, shownId) {
  * the DSH bots in today's order, then the group chats. `order` is the sidebar's own order of
  * everything but the Main Bot ({ kind: 'bot' | 'room' | 'agent', item }).
  */
-export function teamOf({ roster, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
+export function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.now(), seats = [], front = null }) {
   const main = roster.byId?.[roster.mainBotId]
   const shown = key => key === current
   const unread = (id, key, own) => !shown(key) && (own || marked[id] === true)
@@ -97,8 +145,11 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
     const key = `bot:${item.id}`
     if (item.hidden && !shown(key) && !isMainOf(roster, item.id)) return null
     const seen = status.bots.get(item.id) ?? { status: 'idle', unread: false }
-    // Channels hang under a Bot through other plugins (renderAfter), not as the bar's rows.
-    return { ...item, channels: [], status: seen.status, unread: unread(item.id, key, seen.unread) }
+    // A Bot's channels come from the one plugin that serves it (extend.js's botChannels): with
+    // a source the bar draws them under its row, and while there is none the team's own
+    // botChildren rows stay exactly as today. Never both.
+    const roleTag = roleTagOf(roster.byId?.[item.id] ?? item, roster.prefs, roster, t)
+    return { ...item, ...(roleTag ? { roleTag } : {}), channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) }
   }
   const agent = (item) => {
     const tasks = item.kind === 'tasks'
@@ -106,27 +157,51 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
     const seen = status.dsh.get(item.id) ?? { status: 'idle', unread: false }
     return { id: item.id, name: tasks ? t('Tasks') : item.name, dsh: tasks ? 'tasks' : 'agent', channels: [], status: seen.status, unread: unread(item.id, `bot:${item.id}`, seen.unread) }
   }
-  // The seats on this computer are Team rows too (RFC 0022 (i)): each orchestrator as a chat.
-  // They sit under the Main Bot, before the DSH Bots, and no row starts or stops anything.
-  // `artId` is the registry Bot's own id, so the seat wears the same character and colour a
-  // Bot row would (the row's id keeps the `seat:` prefix so a seat and a DSH Bot never collide).
   const seating = seats.map(seat => ({
-    id: `seat:${seat.id}`, seat: true, artId: seat.id, name: seat.name, project: seat.project,
-    terminal: seat.terminal, agent: seat.agent, chat: seat.chat, status: seat.status,
-    channels: [], unread: false,
+    id: `seat:${seat.key ?? seat.id}`, key: seat.key ?? seat.id, seat: true, artId: seat.id,
+    name: seat.name, project: seat.project, folder: seat.folder ?? null, machine: seat.machine,
+    kind: seat.kind, main: seat.main, terminal: seat.terminal, agent: seat.agent, chat: seat.chat, status: seat.status,
+    projectTag: seat.project, remote: seat.machine != null, channels: [], unread: false,
   }))
-  const bots = [
-    ...(main ? [bot(main)] : []),
-    ...seating,
+  const globals = seating.filter(seat => (seat.kind ?? (seat.project ? 'main' : 'global')) === 'global')
+  const globalMains = globals.filter(seat => seat.main === true)
+  const go = globals.length === 1 ? globals[0] : globalMains.length === 1 ? globalMains[0] : null
+  const projectMains = seating.filter(seat => (seat.kind ?? (seat.project ? 'main' : 'global')) === 'main')
+    .sort((a, b) => String(a.project ?? '').localeCompare(String(b.project ?? '')))
+  const orchestrators = [go, ...globals.filter(seat => seat !== go), ...projectMains].filter(Boolean)
+  const dsh = [
+    main ? bot(main) : null,
     ...order.filter(entry => entry.kind === 'bot').map(entry => bot(entry.item)),
     ...order.filter(entry => entry.kind === 'agent').map(entry => agent(entry.item)),
   ].filter(Boolean)
+  const frontSeat = front && seating.find(seat =>
+    seat.artId === front.bot && seat.folder === front.project && (seat.machine ?? null) === (front.machine ?? null))
+  const frontBot = front && front.machine === undefined && roster.byId?.[front.bot]
+  const frontRow = frontSeat || (frontBot && sameFolder(front.project, frontBot.workDir) ? dsh.find(row => row.id === frontBot.id) : null)
+  const sequence = frontRow ? [frontRow, ...orchestrators, ...dsh] : [dsh.find(row => row.id === main?.id), ...orchestrators, ...dsh]
+  const bots = [...new Map(sequence.filter(Boolean).map(row => [row.id, row])).values()]
   const groups = order.filter(entry => entry.kind === 'room' && (!entry.item.hidden || shown(`group:${entry.item.id}`)))
     .map((entry) => {
       const seen = status.groups?.get(entry.item.id) ?? { status: 'idle', unread: false }
       return { id: entry.item.id, name: entry.item.name, members: entry.item.members ?? [], status: seen.status, unread: unread(entry.item.id, `group:${entry.item.id}`, seen.unread) }
     })
-  return { frontId: main?.id, bots, groups }
+  return { frontId: frontRow?.id ?? main?.id, bots, groups }
+}
+
+function sameFolder(project, workDir) {
+  if (!workDir) return project === null
+  // The browser has no cwd. Both values name absolute folders on the host.
+  const normalized = (folder) => {
+    const drive = /^[A-Za-z]:[\\/]/.exec(folder)
+    const parts = drive ? folder.slice(3).split(/[\\/]/) : folder.split('/')
+    const path = []
+    for (const part of parts) {
+      if (part === '..') path.pop()
+      else if (part && part !== '.') path.push(part)
+    }
+    return `${drive ? drive[0].slice(0, 2) : ''}/${path.join('/')}`
+  }
+  return typeof project === 'string' && /^(?:\/|[A-Za-z]:[\\/])/.test(workDir) && normalized(project) === normalized(workDir)
 }
 
 // A seat with no registry Bot behind it has no character of its own: a plain pane glyph.
@@ -140,7 +215,11 @@ function SeatGlyph({ size }) {
 // humanized Bot: it wears the registry Bot's own character and colour; the pane glyph is only
 // for a seat with no Bot behind it.
 export const renderArt = (bot, size, state) => {
-  if (bot.seat) return bot.artId ? drawBot({ id: bot.artId, name: bot.name }, size, state) : h(SeatGlyph, { size: Math.round(size * 0.8) })
+  if (bot.seat) {
+    if (!bot.artId) return h(SeatGlyph, { size: Math.round(size * 0.8) })
+    const seat = { id: bot.artId, name: bot.name }
+    return drawBot(seat, size, state, catalogueLookOf(seat))
+  }
   if (bot.dsh === 'tasks') return h(TasksIcon, { size: Math.round(size * 0.72) })
   if (bot.dsh === 'agent') return h(BotMark, { bot: { id: bot.id }, look: DSH_LOOK, size })
   return drawBot(bot, size, state)
@@ -177,22 +256,43 @@ function SpaceNote({ anchor, onClose }) {
 /**
  * The bar. `order` and the stores are the sidebar's (sidebar.js TeamSidebar); `tools` are the
  * head's other buttons (the update button, other plugins' tools); `notice` is a line above
- * the list (a read-only team, the Main Bot being set up); `foot` sits under the list (the Work
- * and Code switch, where the app has Herdr). `open(row)` opens a row as today's rows do,
+ * the list for a read-only team or while the Main Bot is being set up. `open(row)` opens a row,
  * `menu(row, event)` its context menu, `renderAfter(row)` draws what hangs under a row and
  * `renderEnd(row)` what other plugins add at the end of a Bot's row.
+ *
+ * Search and New are in the head; the sidebar tools and update controls sit at the foot.
  */
-export function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown }) {
+export function LeftBar({ roster, order, marked, seats = [], front, useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, empty, collapse, onKeyDown, sideSwitch, codeList }) {
   const shownId = useSessions(list => list.ids.find(id => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? '')
   const current = currentKey(roster, shownId)
   const status = useTeamStatus({ roster, useSessionStatus, useWork })
-  const team = teamOf({ roster, order, status, marked, current, seats })
+  const team = teamOf({ roster, order, status, marked, current, seats, front })
   const currentId = current?.slice(current.indexOf(':') + 1)
   // A row marked unread clears once it is open, as today's rows do.
   useEffect(() => {
     if (currentId && marked?.[currentId] === true) actions.clearUnread(currentId)
   }, [currentId, marked?.[currentId]])
+  const narrow = useNarrow()
   const [note, setNote] = useState(null)
+  // Sources may load after the bar is up (a plugin's shell installer); draw their rows then.
+  useEntries(botChannels)
+  // A channel is unfolded by default once its chats are known; a person's fold is kept here. A
+  // person unfolding one asks its Bot's chats to load, as opening the Bot's Session does.
+  const [folded, setFolded] = useState(() => new Set())
+  const [wanted, setWanted] = useState(() => new Set())
+  const loads = id => current === `bot:${id}` || wanted.has(id)
+  const fold = (row, next) => {
+    const key = `${row.botId}/${row.id}`
+    setFolded((before) => {
+      const after = new Set(before)
+      if (next) after.add(key)
+      else after.delete(key)
+      return after
+    })
+    if (!next) setWanted(before => (before.has(row.botId) ? before : new Set(before).add(row.botId)))
+  }
+  // A channel folds and unfolds here; every other row opens as today.
+  const press = row => (row.kind === 'channel' ? fold(row, !row.folded) : open(row))
   const spaces = [{ id: LOCAL_SPACE, name: t('This computer'), icon: h(OmniMark, { size: 26 }) }]
   return h('div', { className: 'bt-side lb-host', onKeyDown },
     h('div', { className: 'lb-bar', 'data-lb-host': '', 'data-lb-skin': LEFT_BAR_SKIN },
@@ -206,13 +306,12 @@ export function LeftBar({ roster, order, marked, seats = [], useSessions, useSes
         collapse ?? null),
       h('div', { className: 'lb-list' },
         h('div', { className: 'lb-head' },
-          h('span', { className: 'lb-brand' }, h(Wordmark, { height: 22 })),
-          tools,
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('Search'), title: t('Search'), onClick: () => actions.openPalette() }, h(SearchIcon)),
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
+        sideSwitch ?? null,
         notice,
-        team.bots.length === 0 && empty ? empty
-          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, renderEnd, label: t('Bot list') }),
-        foot ? h('div', { className: 'lb-foot' }, foot) : null)),
+        codeList ?? (team.bots.length === 0 && empty ? empty
+          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : undefined, label: t('Bot list') })),
+        h('div', { className: 'lb-foot' }, tools))),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }

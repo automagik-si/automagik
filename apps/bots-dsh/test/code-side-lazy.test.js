@@ -69,10 +69,49 @@ test('installing the flip while the face is Chat registers no body and fetches n
   }
 })
 
+test('a seat Terminal draws its own body; only a conversation takes the slot body', async () => {
+  const { exports } = await flipModule()
+  const injected = []
+  const ctx = { sessions: {}, slots: { inject: (...args) => { injected.push(args); return () => {} } } }
+  const off = exports.installCodeSide(ctx)
+  const BOT = 'b-aaaaaaaaaa'
+  try {
+    await exports.openTerminal(BOT, { seat: true })
+    assert.equal(exports.codeStore.snapshot().face, 'terminal')
+    assert.equal(exports.codeStore.snapshot().seat, true)
+    assert.equal(exports.codeStore.snapshot().botId, BOT)
+    assert.deepEqual(injected, [], 'a seat panel renders the body itself, not the conversation slot')
+    assert.equal(exports.useCodeFace(BOT, { seat: true }).face, 'terminal')
+    assert.equal(exports.useCodeFace(BOT, { seat: false }).face, 'chat', 'a conversation never wears the seat face')
+    await exports.openTerminal(BOT)
+    assert.equal(injected.length, 1, 'a conversation Terminal still registers the conversation body')
+    exports.closeTerminal()
+    assert.equal(exports.codeStore.snapshot().face, 'chat')
+    assert.equal(injected.length, 1, 'closing leaves the registration to its own unsubscribe')
+  } finally {
+    off()
+    exports.codeStore.reset()
+  }
+})
+
 test('the main bundle stays free of xterm and of the pane module', () => {
   const main = readFileSync(new URL('../src/client/code-side.js', import.meta.url), 'utf8')
   assert.doesNotMatch(main, /@xterm/, 'xterm.js is in the chunk, not in client.js')
   assert.doesNotMatch(main, /from '\.\/code-side-pane\.js'/, 'the pane is fetched, never imported by the main bundle')
   const pane = readFileSync(new URL('../src/client/code-side-pane.js', import.meta.url), 'utf8')
   assert.match(pane, /@xterm\/xterm/, 'the chunk is where the renderer and xterm live')
+})
+
+test('the pane chunk does not bundle the shared Herdr control', async () => {
+  const pane = fileURLToPath(new URL('../src/client/code-side-pane.js', import.meta.url))
+  const bundle = await build({
+    entryPoints: [pane], bundle: true, format: 'cjs', platform: 'browser', write: false,
+    metafile: true, logLevel: 'silent', loader: { '.css': 'text' },
+    external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+  })
+  assert.equal(
+    Object.keys(bundle.metafile.inputs).some(input => input.endsWith('/work-code-switch.js')),
+    false,
+    'only the main bundle owns the Herdr control',
+  )
 })

@@ -1,6 +1,7 @@
 import {
   automagikLockupThreeColoursCreamHeader, automagikLockupThreeColoursInkHeader, automagikWordmarkCream, automagikWordmarkInk,
-  genieExpressions, lamp, omniExpressions, triskleThreeColours, triskleThreeColours16, triskleThreeColours32, triskleThreeColours64, unfoldExpressions,
+  genieExpressions, genieLampCream, genieLampInk, lamp, omniExpressions, omniMarkCream32, omniMarkInk32,
+  triskleThreeColours, triskleThreeColours16, triskleThreeColours32, triskleThreeColours64, unfoldExpressions,
 } from './art/inline.js'
 
 // -------------------------------------------------------------------------
@@ -15,6 +16,14 @@ export const GENIE_ATLAS = genieExpressions
 export const OMNI_ATLAS = omniExpressions
 export const UNFOLD_ATLAS = unfoldExpressions
 export const LAMP = lamp
+// Each product's own mark alone, from the brand's logo set (art/brand): the flat lamp for
+// Genie and the tentacle vortex for Omni, one colour, ink on a light ground and cream on a
+// dark one. Omni takes the drawing made for about 32px; the lamp has one drawing. Neither is
+// Automagik's triskle and neither is the clay pet (docs/brand, rules 1, 3 and 9).
+export const PRODUCT_MARK_ART = Object.freeze({
+  omni: Object.freeze({ ink: omniMarkInk32, cream: omniMarkCream32 }),
+  genie: Object.freeze({ ink: genieLampInk, cream: genieLampCream }),
+})
 // The Automagik logo is the approved set's own files (art/brand, byte for byte; SOURCE.json
 // beside them names each one's place in the set and its SHA-256).
 // The mark is the triskle in its three colours, always. Its seam line is drawn to stay about a

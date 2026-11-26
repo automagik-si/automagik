@@ -9,7 +9,7 @@
 // does not ask (its mode lets it through) has run whatever the guard says, in the wide mode the
 // Session's unset level gave the agent; a DSH tool over the bridge is refused.
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -20,6 +20,8 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { ToolsService } from '@deepseek-ai/dsh-tools'
 import * as native from '@deepseek-ai/dsh-tool-executor-native'
 import { AcpAdapter } from '../src/host/adapter.js'
+import { KILL_AFTER_MS } from '../src/host/acp.js'
+import { fileIdentity } from '../src/host/session-files.js'
 import { AGENTS, CLAUDE_HARD_ASK } from '../src/host/agents.js'
 import { PermissionDiagnostics } from '../src/host/permission-diagnostics.js'
 import { apply, SERVICE } from '../index.js'
@@ -88,6 +90,8 @@ async function world(t, { level: startLevel = FULL, modes, modeFor, bridge = fal
   ctx.provide('permissionPresets', { current: () => level, set() {}, registerAuto: () => () => {} })
   ctx.provide('sandboxPolicy', { resolve: () => ({ mode: level }) })
   ctx.provide('sessions', { list: () => [] })
+  const workspaceRegistry = { archivedSessionIds: [] }
+  ctx.provide('workspaceRegistry', workspaceRegistry)
   ctx.provide('workingDirectory', { ensure: async () => dir })
   ctx.provide('agentPresets', { presetForSession: () => 'standard' })
   const agents = new Map()
@@ -144,10 +148,10 @@ async function world(t, { level: startLevel = FULL, modes, modeFor, bridge = fal
     session.append('request/header', { header: { config: { provider: PROVIDER, model: 'default' }, tools: [{ name, description, parameters }] } })
     const messages = []
     // One model step, as DSH's loop streams it.
-    const step = () => within((async () => {
+    const step = ({ signal, input = messages } = {}) => within((async () => {
       const chunks = []
-      for await (const chunk of adapter.stream(markAgentLoopRequest({ provider: PROVIDER, model: 'default', sessionId: id, messages }))) chunks.push(chunk)
-      messages.push({ role: 'assistant', source: { kind: 'model', provider: PROVIDER, model: 'default' }, content: chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block) })
+      for await (const chunk of adapter.stream(markAgentLoopRequest({ provider: PROVIDER, model: 'default', sessionId: id, messages: input, signal }))) chunks.push(chunk)
+      input.push({ role: 'assistant', source: { kind: 'model', provider: PROVIDER, model: 'default' }, content: chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block) })
       return chunks
     })(), 'the step')
     // The step's mirror call through the pipeline, as the loop runs it: the assistant row, the
@@ -175,7 +179,13 @@ async function world(t, { level: startLevel = FULL, modes, modeFor, bridge = fal
   const events = name => trace().filter(entry => entry.event === name)
   // The fake writes its trace beside its updates: a line is waited for, never assumed there.
   const seen = async (name, count = 1) => { await waitFor(() => events(name).length >= count); return events(name) }
-  return { ctx, adapter, backchannel, runs, chat, marked, guarded, executed, asked, trace, events, seen, gates, setLevel: (next) => { level = next } }
+  const markArchived = id => { workspaceRegistry.archivedSessionIds.push(id) }
+  const archive = async id => {
+    markArchived(id)
+    await ctx.parallel('workspace/session-archived', { sessionId: id })
+  }
+  const undo = id => { workspaceRegistry.archivedSessionIds = workspaceRegistry.archivedSessionIds.filter(archived => archived !== id) }
+  return { ctx, adapter, backchannel, runs, chat, marked, guarded, executed, asked, trace, events, seen, gates, markArchived, archive, undo, setLevel: (next) => { level = next } }
 }
 
 const MODES = ['workspace-write', 'read-only', 'agent', 'agent-full-access']
@@ -429,6 +439,15 @@ test('own mode: ownModeOf reports a bridged Codex', () => {
   assert.equal(h.services[SERVICE].ownModeOf('acp-codex').bridged, true)
 })
 
+test('own mode: ownModeOf uses the Session identity for the Codex bridge default', () => {
+  const h = harness({ clis: { codex: '/fake/codex' }, bins: { [AGENTS['acp-codex'].adapter]: '/fake/adapter' } })
+  apply(h.ctx, { claude: false, codex: true }, h.deps)
+  const service = h.services[SERVICE]
+  service.botIdentity(id => id === 's1' ? { name: 'Bot', needsDshTools: true } : undefined)
+  assert.deepEqual(service.ownModeOf('acp-codex', 's1'), { mode: 'agent', bridged: true, answerer: false })
+  assert.deepEqual(service.ownModeOf('acp-codex'), { mode: 'agent', bridged: false, answerer: false })
+})
+
 test('own mode service disposers are scoped and competing registrations disable it permanently', () => {
   const h = harness({ clis: { codex: '/fake/codex' }, bins: { [AGENTS['acp-codex'].adapter]: '/fake/adapter' } })
   apply(h.ctx, { claude: false, codex: true }, h.deps)
@@ -494,7 +513,7 @@ test('one reviewer refusal followed by text does not claim a refusal stop', asyn
   assert.equal(chunks.findLast(chunk => chunk.type === 'finish').reason.kind, 'aborted', JSON.stringify(chunks))
   assert.equal(c.session.snapshotEvents().some(e => e.data?.source?.stop === 'refusals'), false)
 })
-for (const always of [false, true]) test(`mirror asks carry current input and one-shot availability: ${always}`, async t => {
+for (const always of [false]) test(`mirror asks carry current input and one-shot availability: ${always}`, async t => {
   const w = await world(t, { level: WRITE, modes: MODES, modeFor: AGENTS['acp-codex'].modeFor, env: { FAKE_ACP_ALWAYS_ONLY: always ? '1' : '0' } })
   const c = w.chat('ada'); c.say('ask edited'); const chunks = await c.step()
   const block = chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call').block
@@ -505,6 +524,20 @@ for (const always of [false, true]) test(`mirror asks carry current input and on
   assert.equal(Object.hasOwn(w.asked[0].mirrorCall, 'locations'), false)
   await c.step()
   assert.match(JSON.stringify(c.messages), /It printed/)
+})
+
+test('a mirror question with only a lasting allow lets the fake agent report the refusal', async t => {
+  const w = await world(t, { level: WRITE, modes: MODES, modeFor: AGENTS['acp-codex'].modeFor, env: { FAKE_ACP_ALWAYS_ONLY: '1' } })
+  const c = w.chat('ada'); c.say('ask edited'); const chunks = await c.step()
+  const block = chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call').block
+  await c.run(block)
+  assert.equal(w.asked.length, 0)
+  const tool = c.messages.find(message => message.role === 'tool' && message.toolCallId === block.id)
+  assert.deepEqual(tool.content, [{ type: 'text', text: 'Fake agent offered to allow Run echo first only from now on ("Allow"), not just once, so Automagik did not approve it.' }])
+  const next = await c.step()
+  assert.equal(next.findLast(chunk => chunk.type === 'finish').reason.kind, 'stop')
+  assert.match(c.messages.at(-1).content.map(part => part.text).join(''), /I was not allowed to run it/)
+  assert.doesNotMatch(JSON.stringify(c.messages), /It printed/)
 })
 
 for (const [answer, text] of [['rejected', 'The person rejected bash.'], ['unavailable', 'DSH could not approve bash: nobody could answer its approval request.']]) test(`plain bridge ${answer} keeps its existing text`, async t => {
@@ -622,4 +655,362 @@ test('#1092 narrowed Claude ask rules preserve ordinary environment and branch c
   for (const command of ['printenv', 'printenv GITHUB_TOKEN', 'printenv APP_SECRET', 'printenv PASSWORD', 'printenv API_KEY', 'git push origin main', 'git push origin master', 'git push origin develop']) assert.equal(matches(command), true, command)
   assert.equal(CLAUDE_HARD_ASK.includes('Read(~/.ssh/**)'), false)
   for (const rule of ['Read(~/.ssh/id_*)', 'Read(~/.ssh/*.pem)', 'Read(~/.ssh/*.key)']) assert.equal(CLAUDE_HARD_ASK.includes(rule), true, rule)
+})
+
+test('RFC 0034 Claude asks about password-manager reads', () => {
+  const reads = [
+    'bw get password x', 'bw list items', 'bw export', 'bw unlock', 'bw serve',
+    'bws secret get id', 'bws secret list', 'bws run -- env',
+    'op read op://vault/item/field', 'op run -- env', 'op inject -i a.tpl', 'op item get x',
+    'pass-cli item view pass://v/i/f', 'pass-cli item get pass://v/i/f', 'pass-cli item run -- env', 'pass-cli run -- env',
+    'keepassxc-cli show db e', 'keepassxc-cli export db', 'secret-tool lookup a b',
+    'vault kv get x', 'vault read x',
+  ]
+  for (const shell of process.platform === 'win32' ? ['Bash', 'PowerShell'] : ['Bash']) {
+    const matches = command => CLAUDE_HARD_ASK.filter(rule => rule.startsWith(shell + '(')).some(rule => {
+      const pattern = rule.slice(shell.length + 1, -1).split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')
+      return new RegExp(`^${pattern}$`).test(command)
+    })
+    for (const command of reads) assert.equal(matches(command), true, command)
+    for (const command of ['bw status', 'op whoami', 'secret-tool store x']) assert.equal(matches(command), false, command)
+  }
+})
+
+const archiveBarrier = () => {
+  const { promise: entered, resolve: enter } = Promise.withResolvers()
+  const { promise: released, resolve: release } = Promise.withResolvers()
+  return { entered, enter, released, release }
+}
+
+const archiveReply = async (chat, text) => {
+  chat.say(text)
+  const rows = await chat.step()
+  assert.equal(rows.at(-1).reason.kind, 'stop', JSON.stringify(rows))
+  assert.ok(rows.some(row => row.type === 'block-end' && row.block.type === 'text' && row.block.text.includes(text)), JSON.stringify(rows))
+}
+
+const archiveChild = (w, chat) => {
+  const live = w.adapter.live.get(chat.id)
+  assert.equal(live?.own, false)
+  assert.equal(live.run.busy, false)
+  const child = live.run.child
+  assert.ok(child.pid > 1)
+  assert.equal(child.exitCode, null)
+  assert.equal(child.signalCode, null)
+  w.runs.add(live.run)
+  return child
+}
+
+const archiveExited = child => {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+  return new Promise(resolve => {
+    const exited = () => {
+      clearTimeout(timer)
+      resolve(true)
+    }
+    const timer = setTimeout(() => {
+      child.off('exit', exited)
+      resolve(false)
+    }, KILL_AFTER_MS + 3000)
+    child.once('exit', exited)
+  })
+}
+const quietArchive = rows => assert.deepEqual(rows, [{ type: 'finish', reason: { kind: 'stop' } }])
+
+test('acp archive 1 ends an idle ordinary run', async t => {
+  const w = await world(t)
+  const a = w.chat('archive-a')
+  await archiveReply(a, 'plain first answer')
+  const child = archiveChild(w, a)
+  await w.archive(a.id)
+  assert.ok(await archiveExited(child), `Archived child PID ${child.pid} survived the exit deadline`)
+  assert.equal(w.adapter.live.has(a.id), false)
+})
+
+test('acp archive 2 leaves the other run on its original child', async t => {
+  const w = await world(t)
+  const a = w.chat('archive-a')
+  const b = w.chat('archive-b')
+  await archiveReply(a, 'plain target')
+  const target = archiveChild(w, a)
+  await archiveReply(b, 'plain control')
+  const control = archiveChild(w, b)
+  await w.archive(a.id)
+  assert.ok(await archiveExited(target), `Archived child PID ${target.pid} survived the exit deadline`)
+  await archiveReply(b, 'plain control again')
+  assert.equal(archiveChild(w, b), control)
+  assert.equal(w.events('prompt').at(-1).pid, control.pid)
+})
+
+test('acp archive 3 ignores an unknown id and ends the known run', async t => {
+  const w = await world(t)
+  const a = w.chat('archive-a')
+  await archiveReply(a, 'plain first answer')
+  const child = archiveChild(w, a)
+  // The real registry only emits for known ids. Deliver an unexpected event directly.
+  await w.ctx.parallel('workspace/session-archived', { sessionId: 'absent' })
+  await archiveReply(a, 'plain after unknown id')
+  assert.equal(archiveChild(w, a), child)
+  await w.archive(a.id)
+  assert.ok(await archiveExited(child), `Archived child PID ${child.pid} survived the exit deadline`)
+})
+
+test('acp archive 4 suppresses a late start and connector recovery', async t => {
+  for (const [name, emit, reject] of [
+    ['archive during preparation', true, false],
+    ['preparation rejects after archive', true, true],
+    ['durable archive before the event', false, false],
+  ]) await t.test(name, async t => {
+    const barrier = archiveBarrier()
+    let rollbacks = 0
+    let repairs = 0
+    const w = await world(t, { spec: {
+      rollback: () => { rollbacks++; return false },
+      repair: () => { repairs++; return true },
+    } })
+    const spec = w.adapter.agents.get(PROVIDER)
+    const spawn = spec.spawn
+    const prepare = t.mock.method(spec, 'spawn', async context => {
+      barrier.enter()
+      await barrier.released
+      if (reject) throw new Error('launch preparation failed')
+      return spawn(context)
+    })
+    const a = w.chat('archive-a')
+    a.say('plain held start')
+    const pending = a.step()
+    await within(barrier.entered, 'launch preparation')
+    if (emit) {
+      await w.archive(a.id)
+      w.undo(a.id)
+    } else {
+      w.markArchived(a.id)
+    }
+    barrier.release()
+    const rows = await pending
+    assert.equal(rollbacks, 0)
+    assert.equal(repairs, 0)
+    assert.equal(prepare.mock.callCount(), 1)
+    assert.deepEqual(w.events('start'), [])
+    assert.deepEqual(w.events('prompt'), [])
+    assert.equal(w.adapter.live.has(a.id), false)
+    quietArchive(rows)
+  })
+
+  await t.test('durable archive at admission survives Undo', async t => {
+    const barrier = archiveBarrier()
+    let hold = true
+    const w = await world(t, { holdWaitMs: 15_000, gates: [() => {
+      if (!hold) return
+      hold = false
+      barrier.enter()
+      return barrier.released
+    }] })
+    const prepare = t.mock.method(w.adapter.agents.get(PROVIDER), 'spawn')
+    const a = w.chat('archive-a')
+    w.markArchived(a.id)
+    const pending = a.step({ input: [said('plain archived admission')] })
+    await within(barrier.entered, 'archived admission')
+    w.undo(a.id)
+    barrier.release()
+    const rows = await pending
+    assert.equal(prepare.mock.callCount(), 0)
+    assert.deepEqual(w.events('start'), [])
+    assert.deepEqual(w.events('prompt'), [])
+    quietArchive(rows)
+    await archiveReply(a, 'plain fresh admission')
+    assert.equal(prepare.mock.callCount(), 1)
+    assert.equal(w.events('new-session').at(-1).pid, archiveChild(w, a).pid)
+  })
+})
+
+test('acp archive 5 keeps an undone replacement through old cleanup', async t => {
+  const oldFork = archiveBarrier()
+  const oldAdmission = archiveBarrier()
+  let holdAdmission = false
+  const oldStop = new AbortController()
+  const w = await world(t, { bridge: true, level: WRITE, holdWaitMs: 15_000,
+    spec: { sessionFiles: true, refresh: 'fork' },
+    gates: [() => {
+      if (!holdAdmission) return
+      holdAdmission = false
+      oldAdmission.enter()
+      return oldAdmission.released
+    }],
+  })
+  const spec = w.adapter.agents.get(PROVIDER)
+  const spawn = spec.spawn
+  const prepare = t.mock.method(spec, 'spawn', context => ({ ...spawn(context), sessionFileEnabled: true }))
+  const a = w.chat('archive-a')
+  await archiveReply(a, 'plain original')
+  const original = archiveChild(w, a)
+  const live = w.adapter.live.get(a.id)
+  const originalOwner = live.fileOwner
+  assert.ok(originalOwner)
+  let refreshOld = true
+  t.mock.method(w.backchannel, 'refresh', () => {
+    const changed = refreshOld
+    refreshOld = false
+    return changed
+  })
+  // Hold only the refork's completion, even if the archive closes its process first.
+  const held = live.run.held.bind(live.run)
+  t.mock.method(live.run, 'held', (work, options) => options?.ms === 0 ? work() : held(work, options))
+  t.mock.method(live.run, 'fork', async () => {
+    oldFork.enter()
+    await oldFork.released
+    throw new Error('old fork failed')
+  })
+  const assertQuietStep = async (settled, name) => {
+    const [result] = await settled
+    assert.equal(result.status, 'fulfilled', `${name} did not complete: ${result.reason?.message}`)
+    quietArchive(result.value)
+  }
+  // Observe both bounded steps from launch so an early assertion can still drain them.
+  const forking = Promise.allSettled([a.step({ signal: oldStop.signal, input: [said('plain old fork')] })])
+  let admitted
+  try {
+    await within(oldFork.entered, 'old refork')
+    await w.archive(a.id)
+    holdAdmission = true
+    admitted = Promise.allSettled([a.step({ input: [said('plain admitted while archived')] })])
+    await within(oldAdmission.entered, 'old archived admission')
+    w.undo(a.id)
+    await archiveReply(a, 'plain fresh after Undo')
+    const replacement = w.adapter.live.get(a.id)
+    const child = archiveChild(w, a)
+    assert.ok(child !== original, 'Undo reused the original child')
+    assert.ok(replacement.fileOwner !== originalOwner, 'Undo reused the original file owner')
+    assert.ok(replacement.fileOwner, 'Undo did not create a replacement file owner')
+    assert.equal(w.events('new-session').at(-1).pid, child.pid)
+    assert.ok(await archiveExited(original), `Archived child PID ${original.pid} survived the exit deadline`)
+
+    // Keep Cordis objects out of the assertion diagnostics.
+    const assertReplacement = after => {
+      const current = w.adapter.live.get(a.id)
+      assert.ok(w.adapter.sessionFiles.owners.get(a.id) === replacement.fileOwner, `${after} lost the replacement file owner`)
+      assert.equal(current?.run?.child?.pid, child.pid, `${after} lost the replacement child`)
+      assert.ok(current === replacement, `${after} changed the replacement live entry`)
+    }
+    oldStop.abort()
+    assertReplacement('Old Stop')
+    oldFork.release()
+    oldAdmission.release()
+    await assertQuietStep(forking, 'Old refork')
+    await assertQuietStep(admitted, 'Old archived admission')
+    assert.equal(prepare.mock.callCount(), 2)
+    assertReplacement('Old refork cleanup')
+    assert.equal(w.events('prompt').length, 2)
+
+    await new Promise(resolve => setTimeout(resolve, KILL_AFTER_MS))
+    await archiveReply(a, 'plain after old cleanup')
+    assert.ok(w.adapter.live.get(a.id) === replacement, 'The next reply changed the replacement live entry')
+    assert.ok(archiveChild(w, a) === child, 'The next reply changed the replacement child')
+    assert.equal(w.events('prompt').at(-1).pid, child.pid)
+  } finally {
+    oldFork.release()
+    oldAdmission.release()
+    await Promise.all([forking, admitted])
+  }
+})
+
+test('acp archive 6 revokes a staged image grant without a run', async t => {
+  const w = await world(t, { level: WRITE, modes: [WRITE], spec: { sessionFiles: true } })
+  const a = w.chat('archive-a')
+  const image = join(a.session.header.cwd, 'staged.png')
+  writeFileSync(image, 'test image')
+  const owner = w.adapter.sessionFiles.owner(a.agent, PROVIDER)
+  owner.grant = { staged: true, ready: Promise.resolve(), files: [fileIdentity(image)] }
+  owner.pending = {}
+  assert.equal(w.adapter.live.has(a.id), false)
+  await w.archive(a.id)
+  assert.equal(w.adapter.sessionFiles.owners.has(a.id), false)
+  assert.equal(owner.lifetime.signal.aborted, true)
+  assert.equal(owner.grant, undefined)
+  assert.equal(owner.pending, undefined)
+
+  const spec = w.adapter.agents.get(PROVIDER)
+  const spawn = spec.spawn
+  const prepare = t.mock.method(spec, 'spawn', context => ({ ...spawn(context), sessionFileEnabled: true, sessionFileMode: WRITE }))
+  w.undo(a.id)
+  await archiveReply(a, 'plain after grant was revoked')
+  assert.deepEqual(prepare.mock.calls[0].arguments[0].sessionFiles.files, [])
+  assert.notEqual(w.adapter.live.get(a.id).fileOwner, owner)
+  assert.ok(w.adapter.live.get(a.id).fileOwner)
+})
+
+test('acp archive 7 ignores a late tool update from the archived run', async t => {
+  const bridge = archiveBarrier()
+  const w = await world(t, {
+    bridge: true,
+    spec: { drift: true },
+    bash: () => {
+      bridge.enter()
+      return bridge.released
+    },
+  })
+  const a = w.chat('archive-a')
+  await archiveReply(a, 'plain original')
+  const original = archiveChild(w, a)
+  const oldRun = w.adapter.live.get(a.id).run
+  const oldSessionId = oldRun.sessionId
+
+  await w.archive(a.id)
+  w.undo(a.id)
+  await archiveReply(a, 'plain fresh after Undo')
+  const child = archiveChild(w, a)
+  const replacement = w.adapter.live.get(a.id).run
+  assert.ok(child !== original, 'Undo reused the original child')
+
+  const answering = a.step({ input: [said('bridge bash')] })
+  const settled = Promise.allSettled([answering])
+  try {
+    await within(bridge.entered, 'the replacement bridge call')
+    assert.equal(replacement.busy, true)
+    // Deliver the buffered update at the same entry point as the old child's stdout.
+    await oldRun.onUpdate({
+      sessionUpdate: 'tool_call_update', toolCallId: 'late-archived-call',
+      name: 'Bash', title: 'Run echo archived', kind: 'execute', status: 'in_progress',
+    }, oldSessionId)
+    assert.equal(replacement.cancelled, false, 'Late tool update cancelled the replacement')
+  } finally {
+    bridge.release()
+    await settled
+  }
+
+  const rows = await answering
+  assert.equal(rows.at(-1)?.reason?.kind, 'stop', JSON.stringify(rows))
+  assert.ok(rows.some(row =>
+    row.type === 'block-end' && row.block.type === 'text' && row.block.text.includes('The bridge said: ran bash'),
+  ), JSON.stringify(rows))
+  assert.ok(archiveChild(w, a) === child, 'The replacement reply changed its child')
+  assert.equal(w.events('prompt').at(-1).pid, child.pid)
+})
+
+test('acp Stop clears the active image grant before the next turn', async t => {
+  const w = await world(t, { level: WRITE, modes: [WRITE], spec: { sessionFiles: true } })
+  const spec = w.adapter.agents.get(PROVIDER)
+  const spawn = spec.spawn
+  const prepare = t.mock.method(spec, 'spawn', context => ({ ...spawn(context), sessionFileEnabled: true, sessionFileMode: WRITE }))
+  const a = w.chat('stop-image')
+  const image = join(a.session.header.cwd, 'approved.png')
+  writeFileSync(image, 'test image')
+  const file = fileIdentity(image)
+  const owner = w.adapter.sessionFiles.owner(a.agent, PROVIDER)
+  owner.grant = { staged: true, ready: Promise.resolve(), files: [file] }
+
+  const stop = new AbortController()
+  const turn = a.step({ signal: stop.signal, input: [said('hang after opening the approved image')] })
+  try {
+    await w.seen('prompt')
+    assert.deepEqual(prepare.mock.calls[0].arguments[0].sessionFiles.files, [file])
+    assert.equal(w.adapter.starting.has(a.id), false)
+  } finally {
+    stop.abort()
+    await turn
+  }
+
+  assert.equal(w.adapter.sessionFiles.owners.has(a.id), false, 'Stop must remove the active file owner')
+  await archiveReply(a, 'plain next turn after Stop')
+  assert.deepEqual(prepare.mock.calls[1].arguments[0].sessionFiles.files, [])
 })

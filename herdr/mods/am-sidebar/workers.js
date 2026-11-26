@@ -5,10 +5,11 @@
 // usagemeter reads. Pure: no `herdr`, `gpui-*` or `fs`, so `node --test`, the CLI and the
 // briefing hook share it. Apache-2.0.
 
-import { AGENTS, AGY_MODE_DEFAULT, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
+import { AGENTS, AGY_MODE_DEFAULT, CODEX_LOGIN_SHELL, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
   hasEffortFlag, launchRun, modelArgs, modelRefusal, promptArgs, resolveAgent } from "./models.js";
-import { TEMPLATE_SHAPE } from "./model.js";
+import { TEMPLATE_SHAPE, agentHomeAgent, agentHomePathProblem } from "./model.js";
 import { envWords } from "./logins.js";
+import { loginPolicyWords } from "./loginWords.js";
 
 export { TEMPLATE_SHAPE };
 
@@ -362,7 +363,8 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
   const labels = target.labels ?? {};
   if (bound || labels.bot) return `${address} is a bot's pane, not a worker; worker kill ends only a worker you started`;
   const owner = labels[WORKER_OF_LABEL] ?? null;
-  if (!owner) return `${address} isn't a worker (it has no ${WORKER_OF_LABEL} label); worker kill ends only a worker you started`;
+  if (!owner) return `${address} isn't a worker (it has no ${WORKER_OF_LABEL} label). `
+    + "Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started";
   if (!botId || owner !== botId) return `${address} is another bot's worker; worker kill ends only a worker you started`;
   // A worker mid-turn is not ended from here: its work would be lost. The project's main bot can.
   if (target.state !== "finished" && target.status?.state === "working") {
@@ -381,8 +383,8 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
  * not herdr-core's (a bun script like omp needs ~/.bun/bin). A
  * `template` runs in hc's documented template form, `<template> <task>` after the options,
  * with no `--` (neither starts with a dash: both are refused before): it sets its own command.
- * `login`: a Claude worker's login words (logins.js chooseLogin), after PATH. A Claude template
- * can't take them through hc's template form, so it runs its own command instead
+ * `login`: a worker's login options and assignments (logins.js). A template that needs
+ * login words runs its own command instead
  * (`templateArgv`, `sh -c '<command> "$@"' sh <task>`, as Restart re-runs a template) under
  * `/usr/bin/env <login words>`, its template label kept. `agyMode`: an Antigravity worker's
  * execution mode (auto by default), written in the `worker.agyMode` label only when it isn't
@@ -396,10 +398,12 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
  * argv starts it on (`--session-id`), set as its agent.session label too. Any other agent gets
  * the `hc kill` shim's folder first instead (KILL_GUARD_DIR, #955); `killGuard` names another
  * copy of it (the stable folder's, for a worker the hc proxy approves), null for none.
+ * `outliveParent`: a worker on a chosen agent home (#1208) runs with `--outlive-parent`, so it
+ * never ends with its lead, and no restart of the lead runs it again.
  */
 export function workerArgs({ botId, branch, role, name, cwd, parent, agent, model, effort, agyMode, argv, task, template, path,
   taskId, project, lead, space, login = [], templateArgv = null, sandbox = false, stableRoot = null, session = null,
-  agySettingsPath = null, killGuard = undefined }) {
+  agySettingsPath = null, killGuard = undefined, outliveParent = false, loginEnv = {} }) {
   const args = ["run", "--bg", "--json"];
   if (name) args.push("--name", name);
   args.push("--cwd", cwd, "--label", `${WORKER_OF_LABEL}=${botId}`);
@@ -423,12 +427,15 @@ export function workerArgs({ botId, branch, role, name, cwd, parent, agent, mode
   const sandboxRoot = sandbox === true && agent === "dsh-tui" ? (stableRoot ?? stableRootOf()) : null;
   const guard = sandboxRoot ? stableGuardDir(sandboxRoot)
     : agent === "dsh-tui" ? GUARD_DIR : agent ? (killGuard === undefined ? KILL_GUARD_DIR : killGuard) : null;
-  const vars = envWords(path ? [`PATH=${guardPathWith(path, guard)}`] : [], login);
+  const vars = envWords([
+    ...(path ? [`PATH=${guardPathWith(path, guard)}`] : []),
+    ...(agent === "dsh-tui" ? loginPolicyWords(loginEnv) : []),
+  ], login);
   const env = vars.length ? [ENV, ...vars] : [];
   // #955: an Antigravity worker with no permission file never runs on skip-permissions.
   const taskArgv = [...agyGuarded(agent, [...argv, ...agySettingsArgs(agent, agySettingsPath)]), ...promptArgs(agent, task)];
   const launchArgv = sandboxRoot ? paneArgs(taskArgv, { botId, project: project ?? null, worker: true, stableRoot: sandboxRoot }) : taskArgv;
-  return [...args, "--parent", parent, "--", ...env, ...launchArgv];
+  return [...args, "--parent", parent, ...(outliveParent ? ["--outlive-parent"] : []), "--", ...env, ...launchArgv];
 }
 
 /** A program path's own name (`/bin/sh` is `sh`). */
@@ -642,12 +649,36 @@ export function codexCommandCheck(command, agents = AGENTS, where = null) {
   const options = runs.map((r) => split(r.args)[0]);
   const all = (test) => options.length > 0 && options.every((a) => test(a));
   const pair = (args, flag, value) => args.some((w, i) => (w === flag && args[i + 1] === value) || w === `${flag}=${value}`);
-  const config = (args, value) => pair(args, "-c", value) || pair(args, "--config", value) || args.includes(`-c${value}`);
+  // A config word's text as Codex reads it: `-c key=value`, `-c=key=value`,
+  // `--config key=value`, `--config=key=value` (or joined `-ckey=value`). The key and value
+  // are trimmed around `=`, so a valid TOML spelling (`-c 'allow_login_shell = false'`) reads
+  // as the same word, not as a missing one or a different key.
+  const configWords = (args) => {
+    const texts = [];
+    for (let i = 0; i < args.length; i += 1) {
+      const w = args[i];
+      if ((w === "-c" || w === "--config") && typeof args[i + 1] === "string") { texts.push(args[i + 1]); i += 1; }
+      else if (typeof w === "string" && w.startsWith("--config=")) texts.push(w.slice("--config=".length));
+      else if (typeof w === "string" && w.startsWith("-c") && w.length > 2) texts.push(w.slice(2));
+    }
+    return texts;
+  };
+  const config = (args, entry) => {
+    const want = /^([^=]+?)\s*=\s*(.*)$/.exec(String(entry).trim());
+    if (!want) return false;
+    return configWords(args).some((text) => {
+      const got = /^([^=]+?)\s*=\s*(.*)$/.exec(text.trim());
+      return Boolean(got) && got[1].trim() === want[1].trim() && got[2].trim() === want[2].trim();
+    });
+  };
   const missing = [];
   if (!all((a) => a.includes("--approve-for-me"))) missing.push("--approve-for-me");
   if (!all((a) => pair(a, "--disable", "hooks") || config(a, "features.hooks=false"))) missing.push("--disable", "hooks");
   if (!all((a) => a.includes("--no-daemon"))) missing.push("--no-daemon");
   if (!all((a) => config(a, CODEX_NETWORK))) missing.push("-c", CODEX_NETWORK);
+  // #1133: a command the pack builds must keep the pane PATH's hc kill shim first at command
+  // time, so its shell never runs as a login shell that can prepend another `hc`.
+  if (!all((a) => config(a, CODEX_LOGIN_SHELL))) missing.push("-c", CODEX_LOGIN_SHELL);
   const inexact = options.some((a) => !codexDirsExact(a, where)) ? ["--add-dir"] : [];
   const conflicts = [...new Set([...options.flatMap((a) => codexClean(["codex", ...a], where).dropped), ...inexact])];
   const lost = [...new Set(runs.flatMap((r) => split(r.args)[1].map(optionName).filter((n) => CODEX_LOST_OPTIONS.has(n))))];
@@ -674,15 +705,91 @@ export function codexTemplateRefusal(template, command, agents = AGENTS) {
 
 /**
  * The warning for a worker template whose command runs Codex without --no-daemon among its
- * options (#1125): hc says Codex must run with it, or its commands run outside hc. The owner's
- * template exception keeps the command as it is (never rewritten, rerouted or refused): this
- * names the fix.
+ * options (#1125), or in a login shell (#1133): hc says Codex must run with --no-daemon, and a
+ * login startup can prepend another `hc` ahead of the pane's kill shim. The owner's template
+ * exception keeps the command as it is (never rewritten, rerouted or refused): this names the
+ * fix.
  */
 export function codexTemplateWarning(template, command, agents = AGENTS) {
   const check = codexCommandCheck(command, agents);
-  if (!check || !check.missing.includes("--no-daemon")) return null;
-  return `Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
-    + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`;
+  if (!check) return null;
+  const lines = [];
+  if (check.missing.includes("--no-daemon")) {
+    lines.push(`Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
+      + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`);
+  }
+  if (check.missing.includes(CODEX_LOGIN_SHELL)) {
+    lines.push(`Template ${template} runs Codex in a login shell, so a profile that prepends a directory can put another hc ahead of `
+      + `the pane's hc kill shim (#1133). Add \`-c ${CODEX_LOGIN_SHELL}\` to the codex command in that template's file (hc templates lists it).`);
+  }
+  return lines.length ? lines.join(" ") : null;
+}
+
+/** The label key the sidebar reads for a pane's Question chip (rows.js `ownerQuestionOf`). */
+const NEEDS_OWNER_KEY = "automagik-herdr.needs-owner";
+
+/**
+ * The bot's needs-owner rule (#2057; briefingText.mjs `OWNER_QUESTION_LINE`) for workers, who get
+ * no briefing: when only the person can unblock it, a worker asks in its reply and marks its own
+ * pane so the sidebar shows a Question. Two sentences beyond the bot line: set it again for each
+ * new question, and a question the lead bot can answer is asked without the label. One line.
+ */
+export const WORKER_OWNER_QUESTION_LINE = "Waiting on the person: when you end your turn because only the person can unblock you "
+  + "(a question or a choice, not a permission prompt), ask it in your reply and also mark your own pane so the Herdr "
+  + "sidebar shows a Question, with a short paraphrase in single quotes and no apostrophe, e.g. "
+  + `\`hc label "$HC_TERMINAL_ID" '${NEEDS_OWNER_KEY}=Which release should ship?'\`. For each new question, `
+  + "set it again with the new paraphrase. Clear it "
+  + `with \`hc label "$HC_TERMINAL_ID" ${NEEDS_OWNER_KEY}=\` as soon as you work again or the `
+  + "question is withdrawn. A question your lead bot can answer: ask it in your reply, without the label. "
+  + "If HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
+
+/**
+ * The agents whose workers are not taught the owner line (#2057): Hermes is left out on purpose
+ * (#1747, the standing rule), as for the bot line in briefingText.mjs. They keep the done line.
+ */
+export const WORKER_OWNER_QUESTION_SKIP = Object.freeze(["hermes"]);
+
+/**
+ * The instruction every worker task ends with (#1278 cause 5): before it reports done it commits
+ * or discards everything it changed, so the sweep never finds an uncommitted worktree to keep.
+ * A writer's work is preserved once committed; a reviewer's own scratch files are discarded. One
+ * line, so it adds one argument to the agent's argv.
+ */
+export const WORKER_DONE_LINE = "Before you report done: commit or discard every change you made "
+  + "and leave the worktree clean (`git status --porcelain` prints nothing).";
+
+/**
+ * A worker's task text: the task as given, then the needs-owner rule (#2057; not for an agent in
+ * WORKER_OWNER_QUESTION_SKIP, #1747), then the worktree-clean instruction last (#1278 cause 5).
+ */
+export function workerTaskText(task, agentKey = null) {
+  const owner = WORKER_OWNER_QUESTION_SKIP.includes(agentKey) ? "" : `\n\n${WORKER_OWNER_QUESTION_LINE}`;
+  return `${task}${owner}\n\n${WORKER_DONE_LINE}`;
+}
+
+/**
+ * The host a git remote names, of both forms git writes (`https://host/…`, `git@host:…`), or
+ * null for a local path. Only host discovery; the forge itself is `forgeOf`.
+ */
+export function forgeHost(remote) {
+  const text = String(remote ?? "").trim();
+  if (!text) return null;
+  try { return new URL(text).hostname || null; } catch { /* a scp-like remote, below */ }
+  const m = /^(?:[^@/]+@)?([^:/]+):/.exec(text);
+  return m && !/^[A-Za-z]$/.test(m[1]) ? m[1] : null;
+}
+
+/**
+ * The forge a git remote names (#1278 cause 3): "glab" for a GitLab host, "gh" for GitHub, else
+ * null. A local path names no forge. An unknown host is left to the caller (it may try the forge
+ * tool it has).
+ */
+export function forgeOf(remote) {
+  const host = forgeHost(remote);
+  if (!host) return null;
+  if (/gitlab/i.test(host)) return "glab";
+  if (/github/i.test(host)) return "gh";
+  return null;
 }
 
 /** The env program agent workers start under, by its full path (macOS and Linux both have it). */
@@ -742,6 +849,9 @@ const stamp = (at) => new Date(at ?? Date.now()).toISOString();
 const orNull = (x) => (x === undefined || x === "" ? null : x);
 const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
 
+/** A launch id: a v4 UUID. */
+const GENERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 /**
  * A start row: a worker (`kind: "worker"`, `worktree` its cwd as a real path) or a bot seat
  * (`kind: "seat"`, from start, restart, attach and --tree; `worktree` its folder). `task`:
@@ -752,22 +862,34 @@ const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
  * made the worktree. `swap`: the task ran the bot's other arm (planned swaps); `override`: the
  * bot picked the agent, model, effort or template itself; `override_requested`: on a swap task,
  * the { agent?, model?, effort? } it asked for and didn't get, else null. `pid` is the
- * terminal's foreground pid when hc gave one. `template`: the hc template a worker runs (its
- * agent, model and effort are then null), else null. `role`: a worker's role (ROLES), a seat's
- * pane role at launch (launchArgs.js roleOf: main, captain or a rank), else null.
+ * terminal's foreground pid when hc gave one. `template`: the hc template a worker or seat runs
+ * (#1418), else null. A template worker's agent, model and effort are null. `role`: a worker's
+ * role (ROLES), a seat's pane role at launch (launchArgs.js roleOf: main, captain or a rank), else null.
  * RFC 0021: `core` (this computer's hc core id) and `created_ms` (the terminal's, from hc get)
  * key the launch with `terminal`, since hc reuses terminal ids; `squad` (model.js squadOf, frozen
  * here at launch); `session`: the Claude session the launch runs (the id Herdr chose with
- * --session-id, or the one it resumed), else null. A seat's worker fields are null or false.
+ * --session-id, or the one it resumed), else null. `env`: #1490's launch home, the absolute
+ * HOME/DSH_HOME/CODEX_HOME/KIMI_CODE_HOME the seat was started with, so a search for the
+ * conversation it left on disk uses its own root and never the reviving process's; null when the
+ * launch named none (the search then fails closed). `generation` and `sequence`: the Bot login
+ * generation and record sequence the reader resolved for this launch's spawn (#1532), both null
+ * when the launch had no Bot login resolution (policy off, a legacy login, an unusable sequence,
+ * or `am attach`). A seat's
+ * worker-only fields are null or false. `agentHome` and `launch`: a worker on a chosen agent home
+ * (#1208), its real home and launch id; a row with none has neither key.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
-  template, role, swap, override, overrideRequested, core, createdMs, squad, session, at }) {
+  template, role, swap, override, overrideRequested, core, createdMs, squad, session, env, generation, sequence, agentHome, launch, at }) {
   const requested = overrideRequested && Object.keys(overrideRequested).length ? { ...overrideRequested } : null;
+  const home = env && typeof env === "object" && !Array.isArray(env)
+    ? Object.fromEntries(Object.entries(env).filter(([, v]) => typeof v === "string" && v)) : null;
   return { event: "start", kind, terminal, pid: Number.isInteger(pid) ? pid : null, botId, task: orNull(task),
     worktree: orNull(worktree), agent: orNull(agent), model: orNull(model), effort: orNull(effort), template: orNull(template),
     role: orNull(role), branch: orNull(branch), project: orNull(project), lead: orNull(lead), base: orNull(base),
     created: created === true, swap: swap === true, override: override === true, override_requested: requested,
-    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session), at: stamp(at) };
+    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session),
+    ...(home && Object.keys(home).length ? { env: home } : {}),
+    generation: orNull(generation), sequence: msOrNull(sequence), ...(agentHome ? { agentHome, launch: orNull(launch) } : {}), at: stamp(at) };
 }
 
 /**
@@ -1028,12 +1150,45 @@ export function prChecksText(checked, watched) {
 /** One ledger line. */
 export const ledgerLine = (row) => `${JSON.stringify(row)}\n`;
 
-/** A ledger's rows; a line that isn't a JSON object (a torn write) is skipped. */
+/**
+ * The reservation a chosen-home worker (#1208) writes before it is sent to hc: its launch id
+ * (the AUTOMAGIK_AGENT_HOME_LAUNCH its argv carries), the hc name it asks for, its project,
+ * worktree, agent and real home, and when (`at`, ms). Its start row later carries the same
+ * `launch`. Until then a pane under that name with no argv to read is unresolved, never ordinary
+ * (the CLI's chosenProof). Every other reader skips the event, as it skips any it doesn't know.
+ */
+export function workerIntent({ launch, name, project, worktree, agent, agentHome, at = Date.now() }) {
+  return { event: "intent", kind: "worker", launch, name, project, worktree, agent, agentHome, at };
+}
+
+/** The pane seen on a failed chosen-home verification, keyed to its instance. */
+export function unresolvedWorker({ terminal, core, created_ms, launch }) {
+  return { event: "unresolved", terminal, core, created_ms: Number.isSafeInteger(created_ms) ? created_ms : null, launch };
+}
+
+/** An intent row as workerIntent writes one; any other is skipped by readLedger, as a torn line is. */
+function validWorkerIntent(row) {
+  return row.kind === "worker" && typeof row.launch === "string" && GENERATION_ID.test(row.launch)
+    && typeof row.name === "string" && row.name.length > 0 && row.name.length <= 64 && !/[\u0000-\u001f\u007f]/.test(row.name)
+    && [row.project, row.worktree].every((path) => typeof path === "string" && path.startsWith("/"))
+    && agentHomeAgent(row.agent) && !agentHomePathProblem(row.agentHome)
+    && Number.isSafeInteger(row.at) && row.at >= 0;
+}
+
+/** A ledger's rows, skipping torn lines and malformed chosen launch reservations or observations. */
 export function readLedger(text) {
   const rows = [];
   for (const line of String(text ?? "").split("\n")) {
     if (!line.trim()) continue;
-    try { const row = JSON.parse(line); if (row && typeof row === "object" && !Array.isArray(row)) rows.push(row); } catch { /* skipped */ }
+    try {
+      const row = JSON.parse(line);
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      if (row.event === "intent" && !validWorkerIntent(row)) continue;
+      if (row.event === "unresolved" && !(typeof row.terminal === "string" && row.terminal
+        && typeof row.core === "string" && row.core && (row.created_ms === null || Number.isSafeInteger(row.created_ms))
+        && typeof row.launch === "string" && GENERATION_ID.test(row.launch))) continue;
+      rows.push(row);
+    } catch { /* skipped */ }
   }
   return rows;
 }
@@ -1097,10 +1252,11 @@ export function reapCandidates(rows, reaps = [], ownerOf = (project) => orNull(p
  * detached HEAD with commits on no remote is kept whatever its branch's pull requests say. Commits
  * on no remote keep it unless a MERGED pull request names that exact head (a squash merge
  * leaves its commits on no remote once the branch is deleted). CLOSED or an older merge is
- * no proof that the current work is preserved.
+ * no proof that the current work is preserved. `forge` names the tool the proof came from
+ * ("gh" or "glab") for the reason said (#1278 cause 3).
  */
 export function workLeft({ changes, unpushed, prs = null, head = null,
-  branch = null, expected = null }) {
+  branch = null, expected = null, forge = "gh" }) {
   if (changes > 0) return "uncommitted changes";
   if (!branch) {
     return unpushed > 0 ? `HEAD is detached with ${unpushed} ${unpushed === 1 ? "commit" : "commits"} on no remote`
@@ -1115,7 +1271,7 @@ export function workLeft({ changes, unpushed, prs = null, head = null,
     if (/^[0-9a-f]{40,64}$/.test(head ?? "") && Array.isArray(prs)
       && prs.some((p) => p?.state === "MERGED" && p.headRefOid === head)) return null;
     const commits = `${unpushed} ${unpushed === 1 ? "commit" : "commits"} on no remote`;
-    if (prs === null) return `${commits}; gh couldn't prove ${branch}'s current HEAD is merged`;
+    if (prs === null) return `${commits}; ${forge} couldn't prove ${branch}'s current HEAD is merged`;
     if (!prs.length) return `${commits}; ${branch} has no pull request`;
     return `${commits}; no merged pull request proves ${branch}'s current HEAD is preserved`;
   }

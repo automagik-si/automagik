@@ -158,4 +158,30 @@ class ChatRenderTest {
         assertEquals(28f, ChatStyle.COMPOSER_RADIUS.value)
         assertEquals(17f, ChatStyle.COMPOSER_TEXT.value)
     }
+
+    /**
+     * The token stays at the 48dp minimum (#1040). This pins the number only; [ChatSwitchTargetTest] measures the
+     * rendered switch's node, so removing the size from the screen turns that test red.
+     */
+    @Test fun theModeSwitchIsAtLeast48Dp() {
+        assertTrue(ChatStyle.SWITCH_HEIGHT.value >= 48f)
+    }
+
+    @Test fun everyGroupCardIsPinnedAndTheBarCountsThem() {
+        val open = listOf(Chat.Row("a1", "approval", open = true), Chat.Row("a2", "approval", open = true))
+        val s = Chat.State("dsh:room:r1", approvals = open, rows = open)
+        assertEquals(open, chatPending(s))
+        assertTrue(chatListRows(s).isEmpty())
+        assertEquals("2 approvals need you", chatStateLine(s))
+        assertEquals(Teams.NEEDS_YOU, chatPose(s, null))
+    }
+
+    @Test fun aGroupIsNoRegistryMember() {
+        val room = chat(terminal = "dsh:room:r1", title = "Launch")
+        val members = listOf(member("room:r1", "Imposter", "wisp"))
+        val identity = chatIdentity(room, null, members, Teams.NEEDS_YOU)
+        assertEquals("Launch", identity.name)
+        assertNull(identity.pet)
+        assertNull(chatIdentity(room.copy(registryId = "room:r1"), null, members, Teams.IDLE).pet)
+    }
 }

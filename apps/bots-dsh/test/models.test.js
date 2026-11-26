@@ -1,19 +1,22 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { configured, install } from '../src/host/models.js'
+import { CLAUDE_PINS } from '../../acp-dsh/src/host/model-identity.js'
+import { chosenIdentity, chosenIdentityOf } from '../src/shared/solver-model.js'
 
 const PROVIDERS = {
   deepseek: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }, { id: 'deepseek-v4-pro' }],
   ollama: [{ id: 'kimi-k3' }, { id: 'deepseek-v4-pro' }],
 }
 
-function runtime(defaultSelection) {
+function runtime(defaultSelection, on) {
   const ctx = {
     llm: {
       listProviders: () => Object.keys(PROVIDERS).map(id => ({ id })),
       listModels: async id => PROVIDERS[id],
     },
     get: name => (name === 'agentDefaultModel' && defaultSelection ? { currentSelection: () => defaultSelection } : undefined),
+    on,
   }
   const rt = { ctx, state: { bots: {} } }
   install(rt)
@@ -259,14 +262,14 @@ test('a carried-over chat that is not loaded still keeps its Hermes route', asyn
         read: async () => ({ events: [{ type: 'request/header', data: { header: { config: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } } }] }),
         release: async () => {},
       }
-      : undefined,
+      : { read: async () => ({ events: [{ type: 'model/selection', data: { provider: 'deepseek', model: 'v4-flash' } }] }) },
   }
   const get = rt.ctx.get
   rt.ctx.get = name => name === 'sessionPersistence' ? persistence : get(name)
   const carried = { id: 'b1', model: 'hermes-remote/attach', appliedModel: 'hermes-remote/attach', previousModel: 'hermes-remote/attach' }
   assert.equal(await rt.applyModel(carried, { force: true }), 'hermes-remote/attach')
   assert.deepEqual(selected, [], 'no in-place switch while the carried chat is not loaded')
-  // A new chat has no stored route: it takes attach.
+  // A fresh chat with a known selection and no request history takes attach.
   const fresh = { id: 'b2', model: 'hermes-remote/attach' }
   assert.equal(await rt.applyModel(fresh, { force: true }), 'hermes-remote/attach')
   assert.deepEqual(selected, ['b2:hermes-remote/attach'])
@@ -457,6 +460,56 @@ test('a route refused for not being a model endpoint is chosen nowhere again', a
   assert.deepEqual(rt.cachedCatalog().map(entry => entry.ref), ['deepseek/v4-flash'])
   assert.equal(await rt.defaultModel(), 'deepseek/v4-flash')
   await assert.rejects(rt.resolveModel('external/default'), /Model external\/default is not available/)
+})
+
+const antigravity = 'acp-antigravity/default'
+const solverSetup = { waitingRole: { id: 'solver' } }
+
+test('round 2 catalog loss recovers a Solver on a supported model and keeps ordinary and grandfathered routes', async () => {
+  const lost = 'deepseek/v4-lost'
+  const supported = 'deepseek/v4-flash'
+  const { rt, providers, selected } = bench({
+    providers: { deepseek: ['v4-lost', 'v4-flash'], 'acp-antigravity': ['default'] },
+    fallback: { provider: 'acp-antigravity', model: 'default' },
+  })
+  const solver = { id: 'solver', ...solverSetup, model: lost, appliedModel: lost }
+  const ordinary = { id: 'ordinary', model: lost, appliedModel: lost }
+  const grandfathered = { id: 'grandfathered', ...solverSetup, model: antigravity, appliedModel: antigravity }
+  const bots = [solver, ordinary, grandfathered]
+  rt.state.bots = Object.fromEntries(bots.map(bot => [bot.id, bot]))
+  assert.equal(await rt.desiredModel(solver), lost)
+  providers.deepseek = ['v4-flash']
+  await rt.catalog({ fresh: true })
+  for (const bot of bots) await rt.applyModel(bot, { force: true })
+  assert.deepEqual(bots.map(bot => [bot.model, bot.appliedModel]), [
+    [lost, supported], [lost, antigravity], [antigravity, antigravity],
+  ])
+  assert.deepEqual(selected, [`solver:${supported}`, `ordinary:${antigravity}`, `grandfathered:${antigravity}`])
+  // An applied model is another fallback. A stale Antigravity value cannot win even
+  // when it is the only model still offered.
+  solver.appliedModel = antigravity
+  delete providers.deepseek
+  await rt.catalog({ fresh: true })
+  assert.equal(await rt.applyModel(solver, { force: true }), undefined)
+  assert.equal(selected.length, 3)
+})
+
+test('round 2 a hosted route refusal repins Solvers and ordinary Bots to their eligible defaults', async () => {
+  const refused = 'external/default'
+  const supported = 'deepseek/v4-flash'
+  const { rt, selected } = bench({
+    providers: { external: ['default'], deepseek: ['v4-flash'], 'acp-antigravity': ['default'] },
+    fallback: { provider: 'acp-antigravity', model: 'default' },
+  })
+  const solver = { id: 'solver', ...solverSetup, model: refused, appliedModel: refused }
+  const ordinary = { id: 'ordinary', model: refused, appliedModel: refused }
+  rt.state.bots = { solver, ordinary }
+  assert.equal(await rt.desiredModel(solver), refused)
+  await rt.routeRefused(refused, solver)
+  assert.deepEqual([solver.model, solver.appliedModel, ordinary.model, ordinary.appliedModel], [
+    supported, supported, antigravity, antigravity,
+  ])
+  assert.deepEqual(selected, [`ordinary:${antigravity}`, `solver:${supported}`])
 })
 
 test('a Bot on a clean record but a poisoned Session re-selects its own model', async () => {
@@ -1002,4 +1055,137 @@ test('an adapter event during the first status read leaves the next catalog dirt
   h.rt.ctx.get = get
   assert.equal((await h.rt.catalog())[0].needsSignIn, true)
   assert.equal(h.reads(), 1)
+})
+
+
+test('validating a model pick leaves blocked Bots alone; a remembered catalog still lifts them', async () => {
+  const { rt } = bench()
+  const lifted = []
+  rt.unblockBots = fix => lifted.push([...fix.keyed])
+  assert.equal(await rt.resolveModel('deepseek/v4-flash', { remember: false }), 'deepseek/v4-flash')
+  assert.deepEqual(lifted, [])
+  await rt.catalog({ fresh: true })
+  assert.equal(lifted.length, 1)
+  assert.ok(lifted[0].includes('deepseek'))
+})
+
+test('a passive catalog miss leaves enumeration, saves and unblocking to the desktop', async t => {
+  const rt = runtime(undefined)
+  const list = t.mock.method(rt.ctx.llm, 'listModels')
+  rt.save = t.mock.fn(async () => {})
+  rt.unblockBots = t.mock.fn()
+  assert.deepEqual(await rt.quietCatalog(() => rt.catalog({ fresh: true })), [])
+  assert.deepEqual(rt.cachedCatalog(), [])
+  assert.equal(list.mock.callCount(), 0)
+  assert.equal(rt.save.mock.callCount(), 0)
+  assert.equal(rt.unblockBots.mock.callCount(), 0)
+  assert.ok((await rt.catalog()).length > 0)
+  assert.equal(list.mock.callCount(), Object.keys(PROVIDERS).length)
+  assert.equal(rt.save.mock.callCount(), 1)
+  assert.equal(rt.unblockBots.mock.callCount(), 1)
+})
+
+// G6-18 (#2048): with only Antigravity's models running and DSH's default needing a key nobody
+// set, the first model that can run is Antigravity's named one, never its `default` alias, as
+// a Claude-only or Codex-only setup gives theirs (parity).
+test('with only Antigravity on, the default model is its first named model', async () => {
+  const providers = { deepseek: [{ id: 'deepseek-v4-pro' }], 'acp-antigravity': [{ id: 'default', name: 'Default' }, { id: 'gemini-3-pro', name: 'Gemini 3 Pro' }] }
+  const acp = { status: async () => ({ agents: [{ id: 'acp-antigravity', signedIn: true, on: true, cli: { found: true }, connector: { state: 'ready' } }] }) }
+  const ctx = {
+    llm: { listProviders: () => Object.keys(providers).map(id => ({ id })), listModels: async id => providers[id] },
+    get: name => (name === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-v4-pro' }) } : name === 'acpAgents' ? acp : undefined),
+  }
+  const rt = { ctx, state: { bots: {} }, missingKeys: async () => new Set(['deepseek']) }
+  install(rt)
+  assert.equal(await rt.defaultModel(), 'acp-antigravity/gemini-3-pro')
+})
+
+// T12 (#2061, MW-3): a group conversation whose history ran on another harness keeps its route
+// when the Bot's model moves: no in-place selection, and the fallback's way back refuses it too.
+test('a group Session with history on another harness is not moved across in place', async () => {
+  const { rt, selected } = bench()
+  const bot = { id: 'b1', name: 'Ops', model: 'deepseek/v4-flash' }
+  rt.state.bots.b1 = bot
+  rt.groupSessionsOf = () => ['g-history', 'g-empty']
+  rt.crossingHistory = async (sessionId, ref) => sessionId === 'g-history' && ref === 'deepseek/v4-flash'
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, ['b1:deepseek/v4-flash', 'g-empty:deepseek/v4-flash'])
+  Object.assign(rt, {
+    load: async () => {}, isBotSession: () => true, selfOf: () => 'b1', botOf: () => bot,
+    groupOwners: new Map([['g-history', { botId: 'b1', roomId: 'r1' }], ['g-empty', { botId: 'b1', roomId: 'r1' }]]),
+  })
+  const picks = []
+  const agent = id => ({ session: { id, requestHeader: () => undefined }, model: { select: route => picks.push([id, route]) } })
+  assert.equal(await rt.reselectOwnRoute(agent('g-history'), () => true), false)
+  assert.equal(await rt.reselectOwnRoute(agent('g-empty'), () => true), true)
+  assert.deepEqual(picks.map(([id]) => id), ['g-empty'])
+})
+
+test('Claude Code pin proofs populate Solver rows and a saved pin survives a catalog outage', async () => {
+  const pins = [['opus', 'Opus 5.5', 'claude-opus-5-5'], ['fable', 'Fable 5.2', 'claude-fable-5-2'], ['haiku', 'Haiku 5.5', 'claude-haiku-5-5']]
+  const identities = new Map(pins.map(([alias, , id]) => [alias, id]))
+  const acpAgents = {
+    modelIdentityOf(_provider, model) { return { status: 'offered', model: identities.get(model) } },
+  }
+  const rt = runtime(undefined)
+  rt.ctx.get = key => key === 'acpAgents' ? acpAgents : undefined
+  const previous = rt.ctx.llm.listModels
+  let online = true
+  rt.ctx.llm.listProviders = () => [{ id: 'acp-claude' }, { id: 'deepseek' }]
+  rt.ctx.llm.listModels = async provider => provider !== 'acp-claude' ? previous(provider)
+    : online ? pins.map(([id, name]) => ({ id, name })) : []
+  const rows = await rt.catalog({ fresh: true })
+  for (const [alias, , id] of pins) {
+    const row = rows.find(row => row.ref === `acp-claude/${alias}`)
+    assert.equal(row?.solverIdentity, `acp-claude/${id}`)
+    assert.equal(row?.solverRef, `acp-claude/${id}`)
+  }
+  online = false
+  await rt.catalog({ fresh: true })
+  assert.equal(await rt.desiredModel({ model: 'acp-claude/claude-opus-5-5' }), 'acp-claude/claude-opus-5-5')
+})
+
+test('Solver chosen identity matches the four ACP pins and keeps provider, full ID and default', () => {
+  assert.equal(CLAUDE_PINS.length, 4)
+  for (const { alias, id } of CLAUDE_PINS) {
+    assert.equal(chosenIdentity(' ACP-CLAUDE ', alias.toUpperCase() + '[1m] '), `acp-claude/${id}`)
+    assert.equal(chosenIdentity('acp-hermes', alias), `acp-hermes/${alias}`)
+  }
+  assert.equal(chosenIdentityOf(' ACP-HERMES / VENDOR/Model[1m] '), 'acp-hermes/vendor/model')
+  assert.equal(chosenIdentityOf('acp-claude/default'), 'acp-claude/default')
+  assert.equal(chosenIdentityOf('anthropic/v-20261001'), 'anthropic/v-20261001')
+  assert.equal(chosenIdentityOf('model'), undefined)
+})
+
+test('Solver host accepts distinct choices without ACP proofs and refuses only equal choices', async () => {
+  const rt = runtime(undefined)
+  const reviewer = { id: 'reviewer', model: 'acp-claude/sonnet' }
+  rt.botOf = id => id === reviewer.id ? reviewer : undefined
+  rt.ctx.get = () => ({ resolveModelIdentity: () => assert.fail('creation must use the chosen identity') })
+  for (const ref of ['acp-claude/opus', 'acp-antigravity/default', 'acp-omp/default',
+    'acp-hermes/route/vendor/model', 'anthropic/claude-sonnet-5-5']) await rt.checkSolverModel(ref, reviewer)
+  for (const ref of ['acp-claude/sonnet', 'acp-claude/claude-sonnet-5-5', 'acp-claude/sonnet[1m]']) {
+    await assert.rejects(rt.checkSolverModel(ref, reviewer), /Choose a different model/)
+  }
+  await assert.rejects(rt.checkSolverModel('acp-claude/opus', { ...reviewer }), /Choose a specific model/)
+  assert.equal(rt.upgradeReviewerModels, undefined)
+})
+
+test('T1 background quota holds skip a provider, expire, and lift on a saved key', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const listeners = new Map()
+  const rt = runtime({ provider: 'deepseek', model: 'deepseek-v4.1-flash' },
+    (name, listener) => listeners.set(name, listener))
+  rt.state.prefs = { backgroundModel: 'deepseek/deepseek-v4.1-flash' }
+  assert.equal(await rt.backgroundModel(), 'deepseek/deepseek-v4.1-flash')
+  rt.noteAsideQuota('deepseek')
+  assert.equal(rt.cachedBackground(), 'ollama/kimi-k3')
+  rt.noteAsideQuota('ollama')
+  assert.equal(rt.cachedBackground(), undefined)
+  t.mock.timers.tick(60 * 60_000)
+  assert.equal(rt.cachedBackground(), 'deepseek/deepseek-v4.1-flash')
+  rt.noteAsideQuota('deepseek')
+  assert.equal(rt.cachedBackground(), 'ollama/kimi-k3')
+  await listeners.get('credentials/reference-updated')('fixture-ref')
+  assert.equal(rt.cachedBackground(), 'deepseek/deepseek-v4.1-flash')
 })

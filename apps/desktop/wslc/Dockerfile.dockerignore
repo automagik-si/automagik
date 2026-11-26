@@ -4,7 +4,10 @@
 !build/runtime
 !build/profile
 !build/versions.json
+!build/dsh-launch
 !src/dsh.js
+!src/owner-record.js
+!src/profile-patch.mjs
 !src/child-paths.js
 !src/close-inherited.cjs
 !src/close-inherited-preload.cjs
@@ -13,5 +16,8 @@
 !src/privacy.js
 !src/tar.js
 !src/update.js
+!src/relaunch-args.js
+!src/deeplink.js
+!src/bot-views.js
 !wslc/bin
 !wslc/lib

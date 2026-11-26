@@ -17,6 +17,7 @@ import { ownHook, withoutHooks } from "../mods/am-sidebar/migrateHooks.mjs";
 import { directHookCommand, hookCommand, amPartHookCommand } from "../mods/am-sidebar/briefingText.mjs";
 import { OFF_BY_DEFAULT, PACK_MODS } from "../mods/am-sidebar/release.js";
 import { placeLayout, readMarker, readVersion, writeMarker } from "../mods/am-sidebar/update.mjs";
+import { pathWithout } from "./system-path.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const VERSION = readVersion(join(ROOT, "mods", "am-sidebar"));
@@ -30,7 +31,7 @@ function machine(t) {
   mkdirSync(home);
   mkdirSync(app);
   const binDir = join(home, ".local", "bin");
-  const env = { HOME: home, HERDR_APP_HOME: app, PATH: `${binDir}:${dirname(process.execPath)}:/usr/bin:/bin`, AM_PART_DIR: join(ROOT, "mods", "am-footer") };
+  const env = { HOME: home, HERDR_APP_HOME: app, PATH: `${binDir}:${pathWithout([dirname(process.execPath), "/usr/bin", "/bin"])}`, AM_PART_DIR: join(ROOT, "mods", "am-footer") };
   const logs = [];
   const calls = [];
   const exec = (cmd, args, opts) => { calls.push([cmd, ...args]); return runCommand(cmd, args, opts); };
@@ -636,15 +637,29 @@ test("uninstall of the pack with no shown layout to read goes on, naming the per
   const m = machine(t);
   install(m.ctx(), P("herdr.pack"), packSource);
   writeFileSync(join(m.app, "layouts", "main-agents.json"), JSON.stringify({ id: "root", children: [{ id: "s", content: { mod: "am-sidebar" } }] }));
+  writeFileSync(join(m.app, "layouts", "broken.json"), '{"id":"root","children":[{"id":"s","content":{"mod":"am-sidebar"}}]');
   // A name with a path: the real reason, never "is Herdr running".
   showing(m, "../elsewhere");
-  assert.equal(uninstall(m.ctx(), P("herdr.pack")).changed, true);
+  const out = [];
+  assert.equal(main(["uninstall", "herdr.pack"], { ctx: m.ctx({ AM_JSON: "1" }), out: (l) => out.push(l) }), 0, out.concat(m.logs).join("\n"));
+  assert.equal(out.length, 1);
+  const { part, ok, changed, notes } = JSON.parse(out[0]);
+  assert.equal(part, "herdr.pack");
+  assert.equal(ok, true);
+  assert.equal(changed, true);
   const said = m.logs.find((l) => l.startsWith("uninstalling the pack without knowing the layout Herdr shows"));
   assert.ok(said, m.logs.join("\n"));
   assert.match(said, /\(Herdr shows the layout "\.\.\/elsewhere", a name with a path, so no file in .*layouts was read\): main-agents \(am-sidebar\) shows the pack's mods/);
   assert.doesNotMatch(said, /automagik \(/, "the pack's own layout, removed with it, is not listed");
   assert.ok(!m.logs.some((l) => /is Herdr running/.test(l)));
   assert.ok(!existsSync(join(m.mods, "am-sidebar")));
+  assert.equal(notes.length, 2);
+  assert.equal(notes[0], said);
+  assert.ok(m.logs.includes(notes[1]));
+  assert.match(notes[1], /layouts\/broken\.json \(am-sidebar\)/);
+  assert.match(notes[1], /not read/);
+  assert.match(notes[1], /Switch layouts \(ctrl-shift-l\)/);
+  assert.match(notes[1], /am install herdr\.pack/);
 });
 
 test("one mod's uninstall with a shown layout name holding a path gives that reason", (t) => {

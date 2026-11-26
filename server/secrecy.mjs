@@ -137,6 +137,11 @@ export const BILLING_RULES = new Set([
   'stripe-sdk', 'stripe-client', 'stripe-key', 'stripe-id', 'billing-import', 'billing-route',
   'gateway-address', 'gateway-credential', 'billing-config',
 ])
+const IMAGE_SOURCE_HELPERS = new Set([
+  'opt/apps/desktop/src/profile-patch.mjs',
+  'opt/am/runner/locks.mjs',
+  'opt/am/runner/proto.mjs',
+])
 
 /**
  * This repository's own code in the image: the image's scripts and versions file, the seed
@@ -144,7 +149,7 @@ export const BILLING_RULES = new Set([
  * under any other `node_modules` folder is third-party.
  */
 export function ownCode(file) {
-  if (file === 'image-config') return true
+  if (file === 'image-config' || IMAGE_SOURCE_HELPERS.has(file)) return true
   if (!file.startsWith('opt/automagik/')) return false
   const at = file.lastIndexOf('node_modules/')
   return at === -1 || file.startsWith('@automagik/', at + 'node_modules/'.length)
@@ -158,6 +163,7 @@ const NEVER_ALLOW_PATH = /^(?:data\/|opt\/automagik\/(?:[^/]+\.mjs|versions\.jso
 const PRIVATE_KEY_ALLOW = /^usr\/lib\/x86_64-linux-gnu\/libgnutls\.so\.30$/
 const allowable = (entry) => !NEVER_ALLOW_RULE.has(entry.rule)
   && !NEVER_ALLOW_PATH.test(entry.file)
+  && !IMAGE_SOURCE_HELPERS.has(entry.file)
   && !(BILLING_RULES.has(entry.rule) && ownCode(entry.file))
   && (entry.rule !== 'private-key' || PRIVATE_KEY_ALLOW.test(entry.file))
 

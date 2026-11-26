@@ -18,9 +18,15 @@ const fail = (message, kind = 'connection') => refusal(message, { code: `bot/her
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const extraHomes = value => (Array.isArray(value) ? value : []).slice(0, 20).filter(path => typeof path === 'string' && path.startsWith('/') && path.length <= 4096 && !/[\x00-]/.test(path) && !path.split('/').includes('..'))
 const sshFields = ssh => Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir'].filter(key => ssh?.[key] !== undefined).map(key => [key, ssh[key]]))
+const shq = value => /^[A-Za-z0-9_@%+=:,.\/-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\"'\"'")}'`
+function startLine(config) {
+  const home = config.ssh?.hermesHome
+  return typeof home === 'string' && home.startsWith('/') ? `HERMES_HOME=${shq(home)} hermes serve` : 'hermes serve'
+}
 const CONNECTION_ERRORS = Object.freeze({
   'bot/hermes-busy': CHAT_BUSY,
   'bot/hermes-pairing': 'The Hermes Bot pairing could not be verified. Check the selected profile and its existing Bot Chat.',
+  'bot/hermes-shell': 'That Bot has no shell, so it cannot be paired with Remote Hermes, whose own tools can run commands. Turn its shell on first.',
   'bot/hermes-auth': 'Hermes did not accept the saved sign-in. Check the token or sign in again.',
   'bot/hermes-connection': 'Remote Hermes could not connect. Check the connection details and try again.',
   'bot/hermes-profiles': 'Hermes could not open the selected profile. Check its available profiles and try again.',
@@ -42,6 +48,7 @@ const CONNECTION_ERRORS = Object.freeze({
   'bot/hermes-ssh-unreachable': 'SSH could not reach the other computer. Check the host and connection.',
   'bot/hermes-ssh-cleanup': 'The SSH connection could not confirm remote cleanup. Check the remote Hermes before reconnecting.',
   'bot/hermes-attach-not-running': 'Hermes is not running on the other computer. Start it there with “hermes serve”, then try again.',
+  'bot/hermes-attach-gateway-running': 'Hermes is running on the other computer as a gateway, but no “hermes serve” is running. Start “hermes serve” there, then try again.',
   'bot/hermes-attach-gateway': 'Hermes is running there as a gateway that owns its sessions. Start “hermes serve” there, then try again.',
   'bot/hermes-attach-record': 'Hermes is not running there: its connection record or private token is stale. Start “hermes serve” there, then try again.',
   'bot/hermes-attach-profiles': 'Hermes is running there, but its profiles could not be read. Run “hermes profile list” there, then try again.',
@@ -57,6 +64,21 @@ const CONNECTION_ERRORS = Object.freeze({
 })
 const FAILURE_LIFETIME = 10 * 60_000
 const text = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value) ? value : undefined
+const profileText = value => text(value, 100) && value.trim() === value && !/[\/\\]/.test(value) ? value : undefined
+function profileOf(value) {
+  const id = profileText(value?.id), name = profileText(value?.name)
+  return id ? { id, ...(name && name !== id ? { name } : {}) } : undefined
+}
+function savedProfileOf(config) {
+  const id = profileText(config?.profile)
+  const row = id && Array.isArray(config?.profiles) ? config.profiles.find(row => row?.id === id) : undefined
+  return profileOf({ id, name: row?.name })
+}
+function attachProfileRefusal(profile) {
+  if (!profile) return fail(CONNECTION_ERRORS['bot/hermes-attach-profile'], 'attach-profile')
+  const label = profile.name ? `${profile.name} (${profile.id})` : profile.id
+  return Object.assign(fail(`This connection’s saved Hermes profile “${label}” is not served there. Choose a profile again before connecting.`, 'attach-profile'), { hermesProfile: profile })
+}
 const NO_ALIAS = '(none)'
 const strings = value => Array.isArray(value) ? value.filter(name => typeof name === 'string' && name.length > 0 && name.length <= 255).slice(0, 16) : []
 const lines = value => Array.isArray(value) ? value.filter(line => typeof line === 'string').slice(-8).map(line => line.slice(0, 240)) : []
@@ -65,6 +87,8 @@ const lines = value => Array.isArray(value) ? value.filter(line => typeof line =
 function failureView(error, alias, elapsedMs, stage) {
   const detail = error?.sshDetail ?? {}, code = typeof error?.code === 'string' ? error.code : 'bot/refused'
   const view = { code, kind: text(error?.sshError, 40) ?? (code.replace(/^bot\/(?:hermes-?)?/, '') || 'unknown'), stage, alias, elapsedMs }
+  const profile = profileOf(error?.hermesProfile)
+  if (profile) { view.profile = profile.id; if (profile.name) view.profileName = profile.name }
   if (Number.isSafeInteger(detail.exit)) view.exit = detail.exit
   for (const key of ['ssh', 'hermes']) if (lines(detail[key]).length) view[key] = lines(detail[key])
   for (const key of ['keyType', 'fingerprint', 'fault']) if (text(detail[key], 100)) view[key] = detail[key]
@@ -87,11 +111,15 @@ const failureLine = view => [`Remote Hermes SSH failed: alias=${view.alias} stag
 function storedView(view, ssh, origin) {
   const names = { alias: view.alias === NO_ALIAS ? undefined : view.alias, hosts: strings(origin?.sshNames?.hosts), users: [...strings(origin?.sshNames?.users), ...strings([ssh?.user])] }
   const stored = { ...view, alias: names.alias ? '<alias>' : NO_ALIAS }
+  // Profile labels belong on the person's screen, never in the SSH report.
+  delete stored.profile; delete stored.profileName
   for (const key of ['ssh', 'hermes']) if (view[key]) stored[key] = view[key].map(line => redactSshNames(line, names))
   return stored
 }
 const connectionFailure = (error, native = false) => error?.cleanupUnknown === true
   ? refusal(CONNECTION_ERRORS['bot/hermes-ssh-cleanup'], { code: 'bot/hermes-ssh-cleanup' })
+  : error?.code === 'bot/hermes-attach-profile'
+  ? attachProfileRefusal(profileOf(error.hermesProfile))
   : Object.hasOwn(CONNECTION_ERRORS, error?.code)
   ? refusal(CONNECTION_ERRORS[error.code], { code: error.code })
   : refusal(native && error?.code === 'bot/hermes' ? error.message : 'Remote Hermes could not connect.')
@@ -258,7 +286,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     const row = profiles.find(profile => profile.id === config.profile)
     // A saved profile the serve no longer offers is a refusal, not a silent move to the
     // first profile: that could join a different Bot's forever-chat.
-    if (!row) return Promise.reject(fail('This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.', 'attach-profile'))
+    if (!row) return Promise.reject(attachProfileRefusal(savedProfileOf(config)))
     const models = [attachedModelOf(row)]
     const bots = Object.values(state.bots ?? {})
     const botsStale = bots.some(bot => ['model', 'appliedModel'].some(key => typeof bot?.[key] === 'string'
@@ -270,14 +298,21 @@ export function install(rt, { transport = options => new HermesTransport(options
     const stale = config.mode !== 'ssh' || migration || config.setupVersion !== 1
       || config.profile !== row.id || JSON.stringify(config.profiles ?? []) !== JSON.stringify(profiles)
       || JSON.stringify(config.models ?? []) !== JSON.stringify(models) || !config.credentialRef || botsStale
+      // A carried-over connection kept its legacy credential ref: move it to the stable one.
+      || config.credentialRef !== ATTACH_CREDENTIAL_REF
     if (!stale) return Promise.resolve()
     return attachNormalization ??= mutate(async () => {
       if (disposed) return
       const current = record()
       if (current !== config) return
       const selected = profiles.find(profile => profile.id === current.profile) ?? row
-      // The secret first: if the store refuses it, no half-migrated record is left behind.
-      if (!current.credentialRef && connection.credential) {
+      // A carried-over connection keeps the credential ref it had before the attach. Its
+      // onAuthUpdate has already rewritten that name with the serve's attach token, so the
+      // first open does not re-ask; now the token moves to the stable attach ref and the
+      // legacy name is removed. The secret first: a refused write leaves no half-moved record.
+      const carried = current.credentialRef === undefined || current.credentialRef === ''
+        || current.credentialRef === ATTACH_CREDENTIAL_REF ? undefined : current.credentialRef
+      if ((!current.credentialRef || carried !== undefined) && connection.credential) {
         await rt.secretEndpoint('secret-set', { name: ATTACH_CREDENTIAL_REF, value: JSON.stringify({ kind: 'attach', credential: connection.credential }), purpose: 'Remote Hermes attached serve token', scope: [] })
         current.credentialRef = ATTACH_CREDENTIAL_REF
       }
@@ -299,6 +334,7 @@ export function install(rt, { transport = options => new HermesTransport(options
         }
       }
       await saveState()
+      if (carried !== undefined) await deleteUnreferenced(carried)
       publish()
     }, true).finally(() => { if (attachNormalization) attachNormalization = undefined })
   }
@@ -404,7 +440,7 @@ export function install(rt, { transport = options => new HermesTransport(options
         : savedSecret(config)
       const pending = { controller, waiters: 0 }
       pendingConnection = pending
-      pending.task = prepareHermesConnection({ mode: config.mode, address: config.address, authMode: config.authMode, ssh: config.ssh }, {
+      pending.task = prepareHermesConnection({ mode: config.mode, address: config.address, authMode: config.authMode, ssh: config.ssh, extraHomes: config.extraHomes }, {
         fetch: fetcher, startSsh, signal: controller.signal, deadlines: remaining(until), secret, discover: false,
         onAuthUpdate: updated => mutate(async () => {
           if (!config.credentialRef) return
@@ -574,14 +610,18 @@ export function install(rt, { transport = options => new HermesTransport(options
       sessions: Object.entries(state.hermesSessions ?? {}).map(([sessionId, info]) => ({ sessionId, ...info })),
     }
   }
-  const publish = () => {
+  const publish = ({ startup = false } = {}) => {
     if (disposed) return
     adapter.registerAll()
-    registration?.(); registration = undefined
     // Keep the provider registered for an attached connection even before its first
     // connect: the model menu then lists no row (never the retired list), while an old
     // chat can still open and let the first attach normalization fill the one real row.
-    if (enabled() && (attachedRecord(record()) || servedModels().length > 0)) registration = ctx.llm.registerAdapter([HERMES_PROVIDER], adapter)
+    const shouldRegister = enabled() && (attachedRecord(record()) || servedModels().length > 0)
+    // When startup leaves the adapter list alone, a desktop catalog already building
+    // can still publish.
+    if (startup && registration === undefined && !shouldRegister) return
+    registration?.(); registration = undefined
+    if (shouldRegister) registration = ctx.llm.registerAdapter([HERMES_PROVIDER], adapter)
     rt.dropCatalog?.()
   }
   async function stopLive() {
@@ -911,6 +951,8 @@ export function install(rt, { transport = options => new HermesTransport(options
       return savePair('', signal)
     }
     if (typeof botId !== 'string' || !Object.hasOwn(state.bots ?? {}, botId)) throw fail('Choose an existing Automagik Bot.', 'pairing')
+    // Remote Hermes runs its own tools on the other computer, outside this plugin's guard.
+    if (state.bots[botId].shell === false) throw fail(CONNECTION_ERRORS['bot/hermes-shell'], 'shell')
     if (!state.bots[botId].model?.startsWith(`${HERMES_PROVIDER}/`)) throw fail('Choose Remote Hermes in this Bot’s chat before pairing it.', 'pairing')
     if (record().pairedBotId && record().pairedBotId !== botId) throw fail('This Hermes profile is already paired. Unpair it before choosing another Bot.', 'pairing')
     requireReplaceable()
@@ -993,7 +1035,17 @@ export function install(rt, { transport = options => new HermesTransport(options
         || (expectedIdentity && !Object.values(state.hermesSessions ?? {}).includes(expectedIdentity))) throw fail(CHAT_BUSY, 'busy')
       return open({ ...options, startup, finishOnPrepare: true })
     })
-    return waiting(task, startup, false).catch(error => { startup.finish(); throw error })
+    return waiting(task, startup, false).catch(error => {
+      startup.finish()
+      const config = record()
+      if (config?.mode === 'ssh') {
+        const line = startLine(config)
+        if (error?.code === 'bot/hermes-attach-not-running' || error?.code === 'bot/hermes-attach-record') throw refusal(`Hermes is not running on the other computer. Start it there with “${line}”, then try again.`, { code: 'bot/hermes' })
+        if (error?.code === 'bot/hermes-attach-gateway-running') throw refusal(`Hermes is running on the other computer as a gateway, but no “hermes serve” is running. Start “${line}” there, then try again.`, { code: 'bot/hermes' })
+        if (error?.code === 'bot/hermes-attach-gateway') throw refusal(`Hermes is running there as a gateway that owns its sessions. Start “${line}” there, then try again.`, { code: 'bot/hermes' })
+      }
+      throw error
+    })
   }
   adapter = new RemoteChatAdapter(rt, { open: openChat, models: servedModels, identity, save: saveState, enabled, attached: () => attachedRecord(record()) })
   api.adapter = adapter
@@ -1035,7 +1087,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     } finally { await run.close().catch(() => {}); await drain() }
   }, signal))
   ctx.effect(() => {
-    void rt.load().then(() => mutate(publish)).catch(() => {})
+    void rt.load().then(() => mutate(() => publish({ startup: true }))).catch(() => {})
     return async () => {
       interruptTests()
       for (const intent of intents) intent.controller.abort()

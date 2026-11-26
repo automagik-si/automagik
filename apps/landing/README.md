@@ -267,6 +267,7 @@ Regenerate and commit the HTML and CSS:
 ```sh
 node apps/landing/scripts/sync-theme.mjs
 node apps/landing/scripts/build-art.mjs   # only after an art or capture change; needs ffmpeg with libwebp
+node apps/landing/scripts/build-art.mjs --check   # committed crops re-derive from their sources; needs ffmpeg
 node apps/landing/scripts/build-pages.mjs
 node scripts/brand-bundle.mjs              # after a change to styles.css
 bun install --frozen-lockfile --ignore-scripts
@@ -275,11 +276,16 @@ LANDING_CHROME=/path/to/chrome node apps/landing/verify-browser.mjs
 node herdr/scripts/privacy-check.mjs
 ```
 
+The page test re-derives every committed WebP from its recorded source rectangle and fails
+when a crop is stale, even if its manifest digest was updated to match. `build-art.mjs
+--check` runs the same check on its own.
+
 The browser gate checks all pages at 1440, 1024, 390 and 320 px, light and dark. It checks
 that no heading word breaks across lines, every image is sized, the film still stays smaller
 than the page's main picture and keyboard focus shows. It checks that a dark page shows
-the dark captures (and a light page the light ones), that the home's speech bubble stays
-off the app window, and that the hero's app capture is shown near its real size. It checks
+the dark captures (and a light page the light ones), checking capture lightness as well as
+the filename. It checks that the home's speech bubble stays off the app window and that
+the hero's app capture is shown near its real size. It checks
 images/fonts, overflow, failed/external loads and native form 503/200 responses against an
 isolated SQLite fixture. It drives the menus with real clicks and keys in both themes: open
 and close by click, Enter and Space, Escape with the focus returning to the button, the

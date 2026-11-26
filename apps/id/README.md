@@ -4,12 +4,46 @@ One identity for Automagik products, implemented with Better Auth 1.7.21 (MIT),
 its matching passkey and OAuth provider plugins, and a Cloudflare Worker with D1.
 This service deploys independently; repository releases never package it.
 
-Passkey registration creates an account without a prior session. The authenticator
+Sign-up is invite only (RFC 0032, Decided 9). Passkey registration creates an
+account without a prior session, but only for a request carrying an admission
+ticket in the `X-Automagik-Admission` header: a short-lived Ed25519 JWS that
+Automagik Cloud signs after it redeems an invitation, checked against the public
+keys in `ADMISSION_KEYS` and the issuer in `ADMISSION_ISSUER`. Invitations stay
+Cloud records; this service keeps only each ticket's `jti`, in D1. Without a
+valid, unused ticket, `generate-register-options` answers 403 before any row is
+written; with no admission key configured, no account can be created, while
+sign-in and OIDC keep working. One ticket reserves one user row: a retry after a
+cancelled prompt reuses it (at most ten ceremonies per ticket), and only the
+first ceremony to finish takes the ticket; the others are refused. The
+credential insert checks the ticket's expiry with the same 30-second clock skew
+as the admission check. D1 commits the credential and the ticket claim
+together. A failed insert leaves the live ticket available for a fresh ceremony.
+When a signed-in owner adds a passkey, the verified credential is instead bound
+to the owner's fresh passkey session. That insert consumes its own short-lived
+authorization and leaves invitations alone, including for accounts created before admission. `src/admission.ts` checks tickets; `src/gate.ts` applies them. See
+[DEPLOY.md](DEPLOY.md) for the keys and the operator's stand-in signer
+(`scripts/admission.ts`), and [PAGES-CONTRACT.md](PAGES-CONTRACT.md) for the
+header and the refusals.
+
+Passkey registration needs no prior session. The authenticator
 must support a discoverable credential and user verification. Authentication uses
 discoverable credential options without requiring a username. The pages start the
 authenticator from an explicit passkey action. No email, password, social login
 or public OAuth client registration is exposed. There is no account management or recovery UI in
 this delivery. The service does not provide a passkey recovery mechanism.
+
+A signed-in person can add a second passkey to their account, list, rename and
+delete their passkeys (routes in PAGES-CONTRACT.md). These
+routes never create an account; the account-creation routes keep stripping the
+session. Adding and deleting need a fresh sign-in: a session created by a passkey
+ceremony less than five minutes ago. Each session records the ceremony that made
+it (`session.signInMethod`, migration `0004`) and `src/passkeys.ts` checks that and
+`session.createdAt` itself. Better Auth's `session.freshAge` is not used: it is one
+global setting, also behind `/list-sessions`, and cannot tell a passkey sign-in
+from a WhatsApp one. An account can delete its last passkey only when WhatsApp
+sign-in is enabled and it has a verified phone number usable for that sign-in.
+Another person's passkey ID answers exactly like a missing one.
+No page offers these yet; the account page is later work.
 
 Better Auth's user schema requires a unique email. Accounts receive a random
 address under the reserved `.invalid` domain solely for that database field.
@@ -36,11 +70,27 @@ messages receive no reply.
 One D1 batch deduplicates both event IDs, enforces ten events per sender per
 minute and three per challenge per five minutes, and consumes the challenge.
 The browser can claim the verified proof once. Better Auth creates the session
-for the account owning the verified number, or creates a separate phone account.
+for the account owning the verified number, or creates a separate phone account,
+but only when the start request carried an unused admission ticket that remains
+valid when D1 inserts the account. The insert also spends the ticket. Without
+one, the proof ends with `invitation_required` and nothing is created.
 The browser's existing passkey account is never selected or modified. The
 receiving number, sender, code and secret are never logged.
 
-Sessions, WebAuthn and WhatsApp challenges, OAuth codes, grants, signing keys,
+A signed-in person can list their own sessions and sign out of one or all of them
+(`/api/auth/list-sessions`, `/revoke-session`, `/revoke-sessions`; see
+PAGES-CONTRACT.md). The list never carries a session token; one session is named
+by its id. The Worker authenticates the caller before it looks an id up and only
+within that caller's sessions, so a signed-out request reads no session row at
+all, and Better Auth refuses to touch a session of another person.
+
+Requesting passkey registration options creates the user row before a passkey
+exists. A scheduled run (hourly cron in `wrangler.toml`, `src/cleanup.ts`) removes
+up to 100 such users per run once they are a day old and still have no passkey,
+phone number, OAuth client or live session, with their sessions, accounts and
+challenges.
+
+Sessions, WebAuthn and WhatsApp challenges, admission ticket ids, OAuth codes, grants, signing keys,
 and rate limits live in D1. There is no secondary storage or session cookie cache.
 Only Cloudflare's replaced `cf-connecting-ip` header supplies the limiter's IP.
 The default limit is 60 requests per rolling minute per IP and path; Better Auth
@@ -56,6 +106,27 @@ IP loopback URI while preserving its scheme, host, path and query. No origin
 wildcard is configured. Consent is skipped only on the two first-party entries;
 future third-party entries must keep `skipConsent: false`.
 
+## Token lifetimes
+
+These are the contract Desktop and Cloud sessions build on, set as named constants in
+`src/auth.ts`:
+
+| Token | Lifetime | Why |
+| --- | --- | --- |
+| Access token | 15 minutes | Bearer-usable until it expires; a JWT cannot be recalled |
+| ID token | 15 minutes | Proves one sign-in to the client, not a standing credential |
+| Refresh token | 30 days | Keeps Desktop and Cloud signed in through a month of inactivity |
+
+A refresh token is issued only when the authorization asked for `offline_access`.
+It is bound to the client it was issued to, and a confidential client must
+authenticate to use it. Every use rotates it: the response carries a new refresh
+token and the old one fails. There is no reuse grace window. Presenting a rotated
+refresh token again is treated as replay: the provider deletes every refresh token
+that person holds for that client, with the access tokens issued from them, so every
+sign-in of that client must start over. Tokens of other clients survive. Revoking a
+refresh token at `/oauth2/revoke` ends it; another client's revocation request has
+no effect. Each refresh starts a fresh 30-day lifetime for the new token.
+
 The sign-in and consent pages live in `pages/` and follow [PAGES-CONTRACT.md](PAGES-CONTRACT.md):
 `sign-in.html`, `consent.html`, one stylesheet (`id.css`), one script (`id.js`) and
 `assets/` (fonts, wordmark, Genie and Omni face artwork, the app icon and licences).
@@ -65,11 +136,14 @@ main action. When enabled, WhatsApp lets the person send the prefilled message
 from a link or QR code; the page has no phone-number or code-entry fields. Copy
 is English only, in one table in `id.js`.
 
-The Worker serves a page only at `/sign-in` and `/consent`, where it adds
-`referrer-policy`, `cache-control: no-store` and `x-frame-options`. Any direct
-`.html` path answers 404, so a page never arrives without those headers. Other
-files in `pages/` are served as they are. A Worker running without the `PAGES`
-binding answers plain text `501 page not built yet` on both routes.
+The Worker serves a page only at `/sign-in` and `/consent`, with
+`cache-control: no-store`. Any direct `.html` path answers 404, so there is one
+address per page. Every answer the Worker gives, pages, files, API, well-known
+metadata and errors alike, carries the security headers `PAGES-CONTRACT.md`
+lists: a strict Content-Security-Policy, `x-content-type-options: nosniff`,
+`strict-transport-security`, `referrer-policy: no-referrer` and
+`x-frame-options: DENY`. A Worker running without the `PAGES` binding answers
+plain text `501 page not built yet` on both routes.
 
 From this directory:
 
@@ -86,6 +160,11 @@ denied except for local dispatch of the provider's own
 JWKS lookup for logout verification. No Cloudflare credentials are needed.
 The cross-runtime limiter test uses two independent workerd runtimes sharing D1.
 
+`test/service.test.ts` follows an account owner adding a second passkey,
+signing in with it, listing both passkeys, renaming one and deleting it.
+It checks the fields returned to the owner and the responses for a missing or
+stale session, another account's passkey and deletion of the last sign-in method.
+
 `test/pages.test.ts` covers the pages in three layers. The files: only the
 contract's endpoints, nothing stored or logged, no inline code. A real Chromium
 on the real Worker with a virtual authenticator: create a passkey, sign in,
@@ -101,14 +180,35 @@ with an `INDEX.md`.
 Mutation checks drop inbound authentication or timestamp checks, permit proof
 reuse, select the current session account, restore the session JWT header, disable
 PKCE, relax redirects, enable public registration, move rate limits to memory,
-serve a page file directly as `.html` and let CI skip the page browser tests,
-one at a time. Each must fail its targeted test; source files are restored
-afterward. Announcements and results are printed to stdout.
+serve a page file directly as `.html`, take the passkey site name from the host,
+start on (or configure) a host outside it, accept a look-alike host, drop the
+generated Custom Domain, accept an origin with a port, let CI skip the page
+browser tests, return tokens in the session list, let the cleanup
+ignore the passkey, age, phone-number, live-session or batch-size condition, drop the
+Content-Security-Policy or nosniff, let inline script run, send files and API
+answers without the security headers, let a direct `.html` path through, rebuild
+the headers losing Better Auth's cookies, lengthen a token lifetime and allow
+rotated refresh-token replay, one at a time. The admission tests also cover the
+invite requirement, ticket verification, one-time use and public-key configuration. Further checks edit the pinned OAuth
+provider's own bundle in `node_modules` (replaced, never rewritten in place, since
+it may be a hard link into the package cache) so a version bump that drops one of
+its refresh checks fails a test: issuing a refresh token without `offline_access`,
+keeping a rotated token alive, accepting an expired one, dropping its client
+binding and ignoring its revocation. Each must fail its targeted test; source
+files are restored afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;
 never replace an already applied migration when upgrading a deployed database.
 
-See [DEPLOY.md](DEPLOY.md) for the owner's first workers.dev deployment. This
-delivery does not deploy, provision infrastructure, or choose a public domain.
+The passkey site name comes from the `PASSKEY_RP_ID` setting, `automagik.si` for
+real use, shared by every Automagik and Arca sign-in. The service refuses to start
+when its own host (`BETTER_AUTH_URL`) is not that name or a subdomain of it, so it
+never runs on workers.dev. Its public name is `id.automagik.si` (RFC 0032,
+Decided 4): set `ID_WORKER_ORIGIN=https://id.automagik.si` for real use, and
+`scripts/configure.ts` writes that host as the Worker's one Custom Domain route,
+with no zone or account ID. Discovery's issuer, which products store with the
+subject, is `https://id.automagik.si/api/auth`. See [DEPLOY.md](DEPLOY.md) for the
+owner's first deployment, straight to that name. This delivery does not deploy or
+provision infrastructure.
 
 Pinned API references: [passkeys](https://www.better-auth.com/docs/plugins/passkey),
 [OAuth provider](https://www.better-auth.com/docs/plugins/oauth-provider).

@@ -12,6 +12,7 @@ import { promisify } from 'node:util'
 import sharp from 'sharp'
 import { createPets, sheetVersion, webpSize } from '../../bots-dsh/src/host/pets.js'
 import { ROWS, SLEEP } from '../../bots-dsh/src/client/pet-poses.js'
+import { CHARACTERS } from '../../bots-dsh/src/client/characters.js'
 import { CHARACTER_IDS, COLOUR_IDS, allLookIds, cellPlan, lookParts, mixSrgb, parseLookId, resolveInks } from '../src/art.js'
 import { VERSION, bakePet, botsHomeOf, isCompletePet, moveIntoPlace, renderCell, sweepStale } from '../src/bake.js'
 
@@ -40,11 +41,13 @@ const lastLine = text => JSON.parse(text.trim().split('\n').at(-1))
 const FRAME_COUNT = Object.values(ROWS).reduce((sum, { ms }) => sum + ms.length, 0) + 1 + 16 + SLEEP.ms.length
 
 describe('looks', () => {
-  test('21 characters in 19 inks, 399 look ids, each [a-z0-9-]', () => {
-    assert.equal(CHARACTER_IDS.length, 21)
+  test('33 characters in 19 inks, 627 look ids, each [a-z0-9-]', () => {
+    assert.equal(CHARACTER_IDS.length, 33)
+    // The twelve Solvers close the catalogue.
+    assert.deepEqual(CHARACTER_IDS.slice(21), ['puff', 'sprout', 'cap', 'bell', 'cloud', 'spike', 'floppy', 'antenna', 'cactus', 'bulb', 'chick', 'frog'])
     assert.equal(COLOUR_IDS.length, 19)
     const ids = allLookIds()
-    assert.equal(new Set(ids).size, 399)
+    assert.equal(new Set(ids).size, 627)
     for (const id of ids) {
       assert.match(id, /^[a-z0-9-]+$/)
       assert.deepEqual(parseLookId(id) && `${parseLookId(id).character}-${parseLookId(id).colour}`, id)
@@ -110,6 +113,28 @@ describe('bake', () => {
     assert.equal(listed.length, FRAME_COUNT)
     assert.deepEqual((await readdir(join(dir, 'frames'))).map(name => `frames/${name}`).sort(), listed)
     assert.deepEqual((await readdir(dir)).sort(), ['frames', 'pet.json', 'sleep.webp', 'spritesheet.webp'])
+  })
+
+  test('a Solver\'s headless pet is drawn from its fur: the body and the lock layer', () => {
+    const { body } = lookParts({ character: 'cap', colour: 'red' })
+    assert.ok(body.includes(CHARACTERS.cap.body))
+    const lock = CHARACTERS.cap.paints.at(-1)
+    assert.deepEqual(lock.slice(1), ['#000', 0.15])
+    assert.ok(body.includes(lock[0]))
+  })
+
+  test('a Solver bakes into the same v2 pet folder as any other character', async () => {
+    const home = await tempHome()
+    const { dir } = await bakePet('cap-red', { home })
+    assert.equal(dir, join(home, 'pets', 'cap-red'))
+    const manifest = JSON.parse(await readFile(join(dir, 'pet.json'), 'utf8'))
+    assert.equal(manifest.displayName, 'Cap (red)')
+    assert.deepEqual(manifest.look, { character: 'cap', colour: 'red' })
+    assert.equal(manifest.spriteVersionNumber, 2)
+    assert.deepEqual(webpSize(await readFile(join(dir, 'spritesheet.webp'))), [1536, 2288])
+    assert.deepEqual(webpSize(await readFile(join(dir, 'sleep.webp'))), [1152, 208])
+    assert.equal((await readdir(join(dir, 'frames'))).length, FRAME_COUNT)
+    assert.ok(await isCompletePet(dir, 'cap-red'))
   })
 
   test('each frame PNG is its atlas cell, pixel for pixel', async () => {

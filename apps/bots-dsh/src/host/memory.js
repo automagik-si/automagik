@@ -24,9 +24,10 @@
 // memory section the first time it renders, so its prompt stays byte-stable and the
 // provider's prefix cache holds; a fresh part, or a checkpoint (which breaks the cache
 // anyway), freezes it anew.
-import { assembleLlmStream } from './models.js'
+import { NO_BOT_RUNNER } from './bot-runner.js'
+import { assembleLlmStream, QUOTA_CODES } from './models.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { appendFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { HarnessError, createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -62,6 +63,10 @@ const RECENT_TAIL_CHARS = 512 * 1024
 const QUERY_TERMS_MAX = 6
 const SOURCE_READ_MS = 5_000
 const MODEL_TIMEOUT_MS = 120_000
+const NO_MODEL = 'memory/no-model'
+const staleShot = () => Object.assign(new Error('The memory request changed'), { code: 'bot/stale' })
+const terminalShot = error => error?.cancelled === true
+  || [NO_BOT_RUNNER, 'bot/stale', 'bot/shell'].includes(error?.code)
 // A thinking model spends several thousand output tokens before its answer starts. On a
 // 13k-token context one spent a 2,048-token budget on reasoning alone and wrote nothing;
 // given 16,384 it wrote the answer. The first try gets that room, the retry gets more,
@@ -69,8 +74,11 @@ const MODEL_TIMEOUT_MS = 120_000
 const SUMMARY_MAX_TOKENS = 16_384
 const SUMMARY_RETRY_MAX_TOKENS = 32_768
 function providerFailure(failure) {
-  const label = [failure?.code, failure?.status].filter(part => part !== undefined && part !== '').join(' ')
-  return modelFailure(`The provider returned an error${label === '' ? '' : ` (${label})`}`)
+  const code = failureCode(failure, '')
+  const status = Number.isInteger(failure?.status) ? failure.status : ''
+  const label = [code, status].filter(Boolean).join(' ')
+  return Object.assign(modelFailure(`The provider returned an error${label ? ` (${label})` : ''}`),
+    { providerCode: code })
 }
 // What a failure may say. A log line and a foreign failure (the file system, a provider) give
 // a code only: their own words can quote a path, an entry or a provider's reply. Memory's own
@@ -95,6 +103,29 @@ const FAILED = 'memory/failed'
 const EMPTY = 'memory/empty'
 const NEWS_TEXT_MAX = 160
 
+const POCKET_SCOPE_BYTES = 2 * 1024 * 1024
+const POCKET_SCOPE_FILES = 64
+const POCKET_REPLY_BYTES = 1024 * 1024
+const POCKET_REPLY_ENTRIES = 4000
+const POCKET_ENTRY_ID = /^[A-Za-z0-9_-]{1,32}$/
+const shortHash = text => createHash('sha256').update(text).digest('hex').slice(0, 16)
+const pocketId = id => POCKET_ENTRY_ID.test(id) ? id : `x${shortHash(id)}`
+const pocketRev = (file, raw) => shortHash(JSON.stringify([file, raw]))
+const pocketRefusal = (reason, extra) => ({ ok: false, state: 'refused', reason, ...extra })
+const pocketPending = () => ({ ok: false, state: 'unknown', reason: 'pending' })
+
+class PocketMemoryError extends Error {
+  constructor(reason) {
+    super(reason)
+    this.reason = reason
+  }
+}
+
+function checkPocketSize(sizes) {
+  if (sizes.size > POCKET_SCOPE_FILES || [...sizes.values()].reduce((total, size) => total + size, 0) > POCKET_SCOPE_BYTES) {
+    throw new PocketMemoryError('too-large')
+  }
+}
 
 export function install(rt) {
   const { ctx, config, home, state } = rt
@@ -108,9 +139,16 @@ export function install(rt) {
       memoryEndpoint: async () => { throw Object.assign(new Error('Memory is turned off on this host'), { code: REFUSED }) },
       memoryEdit: async () => { throw Object.assign(new Error('Memory is turned off on this host'), { code: REFUSED }) },
       memoryAdd: async () => { throw Object.assign(new Error('Memory is turned off on this host'), { code: REFUSED }) },
+      pocketMemory: {
+        read: async () => pocketRefusal('unavailable'),
+        edit: async () => pocketRefusal('unavailable'),
+        add: async () => pocketRefusal('unavailable'),
+      },
       memoryNews: () => ({}),
       memoryReviews: () => 0,
-      memoryReviewStatus: () => ({ enabled: false, allowed: false, pending: false, running: false }),
+      memoryReviewStatus: () => ({
+        enabled: false, allowed: false, pending: false, running: false, failure: null,
+      }),
       memoryTidyStatus: () => ({ enabled: false, allowed: false, always: false }),
     })
     return
@@ -178,17 +216,78 @@ export function install(rt) {
       return { topic, file, path: join(dir, file), content, ...parseMemory(content) }
     })
   }
+  function loadPocketScope(scope) {
+    const dir = dirOf(scope)
+    const realHome = realpathSync(home)
+    let names = []
+    // Check the parents too, even if the Bot does not have a memory folder yet.
+    for (const path of [root, dirname(dir), dir]) {
+      const stat = lstatSync(path, { throwIfNoEntry: false })
+      if (stat === undefined) break
+      if (!stat.isDirectory() || realpathSync(path) !== join(realHome, relativePath(home, path))) {
+        throw new PocketMemoryError('unavailable')
+      }
+      if (path === dir) names = readdirSync(dir).filter(name => name.endsWith('.md')).sort()
+    }
+    if (names.length > POCKET_SCOPE_FILES) throw new PocketMemoryError('too-large')
+    const stats = new Map()
+    for (const name of names) {
+      const path = join(dir, name)
+      const stat = lstatSync(path)
+      if (!stat.isFile() || stat.nlink !== 1) throw new PocketMemoryError('unavailable')
+      stats.set(path, stat)
+    }
+    checkPocketSize(new Map([...stats].map(([path, stat]) => [path, stat.size])))
+    return [MAIN, ...names.filter(name => name !== MAIN)].map((file) => {
+      const path = join(dir, file)
+      const stat = stats.get(path)
+      let content = ''
+      if (stat !== undefined) {
+        const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+        try {
+          const current = fstatSync(fd)
+          if (!current.isFile() || current.nlink !== 1 || current.dev !== stat.dev || current.ino !== stat.ino || current.size !== stat.size) {
+            throw new PocketMemoryError('unavailable')
+          }
+          const data = Buffer.alloc(stat.size)
+          for (let at = 0; at < data.length;) {
+            const count = readSync(fd, data, at, data.length - at, null)
+            if (count === 0) throw new PocketMemoryError('unavailable')
+            at += count
+          }
+          content = data.toString('utf8')
+        } finally {
+          closeSync(fd)
+        }
+      }
+      return { file, path, topic: file === MAIN ? undefined : file.slice(0, -3), content, bytes: stat?.size, ...parseMemory(content) }
+    })
+  }
   const mainLimit = scope => state.prefs.memoryLimits?.[scope.kind] ?? MEMORY_LIMITS[scope.kind]
   const fileName = file => (file.topic === undefined ? MAIN : `topic [[${file.topic}]]`)
 
+  // The temporary name sits next to the file and stays short even for a long file name.
+  const tempFor = path => join(dirname(path), `.${basename(path).slice(0, 32)}.${process.pid}.${randomUUID()}.tmp`)
+
   async function writeText(path, text) {
     await mkdir(dirname(path), { recursive: true })
-    // The temporary name sits next to the file and stays short however long the
-    // file's own name is: a legal name near the system's per-name limit must
-    // still write, and one made of the whole path would not.
-    const temp = join(dirname(path), `.${basename(path).slice(0, 32)}.${process.pid}.${randomUUID()}.tmp`)
+    const temp = tempFor(path)
     await writeFile(temp, text, 'utf8')
     await replaceFile(temp, path)
+  }
+
+  async function acceptPocketChange(path, text, allowed) {
+    await mkdir(dirname(path), { recursive: true })
+    const temp = tempFor(path)
+    try {
+      await writeFile(temp, text, 'utf8')
+      const reason = allowed()
+      if (reason !== undefined) throw new PocketMemoryError(reason)
+      renameSync(temp, path)
+    } catch (error) {
+      try { unlinkSync(temp) } catch (failure) { if (failure?.code !== 'ENOENT') throw failure }
+      throw error
+    }
   }
   let writing = Promise.resolve()
   const queued = (job) => {
@@ -319,7 +418,7 @@ export function install(rt) {
   // behind, and the change is finished before memory is read or written again.
   // A move or tidy can change the resident entries even when its journal row
   // describes a topic or an entire batch. Record the actual change once here.
-  function mainChanges(scope, steps, row) {
+  function mainChanges(scope, steps, row, files) {
     const path = join(dirOf(journalScope(scope)), MAIN)
     const step = steps.findLast(item => item.path === relativePath(root, path))
     if (step === undefined) return undefined
@@ -327,7 +426,7 @@ export function install(rt) {
       const { lines, entries } = parseMemory(content)
       return Map.groupBy(entries.map(entry => ({ ...entry, raw: lines[entry.line] })), entryId)
     }
-    const before = byId(readText(path))
+    const before = byId(files === undefined ? readText(path) : files[0].content)
     const after = byId(step.text)
     const changes = [...new Set([...before.keys(), ...after.keys()])].flatMap((id) => {
       // Older entries derive a short id from their text, so several can share one.
@@ -345,19 +444,29 @@ export function install(rt) {
     return changes
   }
 
-  async function publish({ op, scope, steps, row }) {
+  async function publish({ op, scope, steps, row, pocket }) {
+    if (pocket !== undefined) {
+      const sizes = new Map(pocket.files.filter(file => file.bytes !== undefined).map(file => [file.path, file.bytes]))
+      for (const step of steps) sizes.set(inside(root, step.path), Buffer.byteLength(step.text))
+      checkPocketSize(sizes)
+    }
     const id = randomUUID()
     const time = new Date().toISOString()
-    const record = pendingRecord({ id, time, op, scope, steps, row: { ...row, mainChanges: mainChanges(scope, steps, row) } })
+    const record = pendingRecord({ id, time, op, scope, steps, row: { ...row, mainChanges: mainChanges(scope, steps, row, pocket?.files) } })
     // The record has to be readable back, so its size is checked before the change
     // is accepted: a record that cannot be read would stop the memory for good.
     const text = serializePending(record)
-    await writeText(pendingPath(root), text)
+    if (pocket === undefined) await writeText(pendingPath(root), text)
+    else await acceptPocketChange(pendingPath(root), text, pocket.allowed)
     try {
       await applySteps(steps)
       await journalRow(record.row)
       await unlink(pendingPath(root)).catch(error => { if (error?.code !== 'ENOENT') throw error })
     } catch (error) {
+      if (pocket !== undefined) {
+        rt.warn('omni-ui: Pocket memory: pending')
+        throw new PocketMemoryError('pending')
+      }
       rt.warn('omni-ui: memory change %s is pending: %s', id, failureCode(error))
       throw error
     }
@@ -534,11 +643,12 @@ export function install(rt) {
     })
   }
 
-  async function addEntryNow({ scope, topic, text, meta, actor, label, moving = false }) {
+  async function addEntryNow({ scope, topic, text, meta, actor, label, moving = false, files, pocket }) {
     writable(scope, actor)
-    const files = loadScope(scope)
+    files ??= loadScope(scope)
     const entries = allEntries(files)
     const same = entries.find(entry => squash(entry.text) === squash(text))
+    if (same !== undefined && pocket !== undefined) return { changed: false, entry: same }
     const line = formatEntry(text, { id: meta.id ?? newEntryId(entries), ...meta })
     if (same !== undefined) {
       // An exact copy lets a move finish after its destination was saved before a restart.
@@ -562,7 +672,8 @@ export function install(rt) {
     const steps = target === main
       ? [writeStep(main.path, joinLines(room.lines))]
       : [writeStep(target.path, joinLines(written)), ...(room.lines === mainLines ? [] : [writeStep(main.path, joinLines(room.lines))])]
-    await publish({ op: 'add', scope: scopeKey(scope), steps: [...steps, ...room.steps], row: { op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line, ...movedRow(room) } })
+    await publish({ op: 'add', scope: scopeKey(scope), steps: [...steps, ...room.steps], row: { op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line, ...movedRow(room) }, pocket })
+    if (pocket !== undefined) return { changed: true, file: target.file, line }
     noteNews(scope, actor, 'add', line)
     const where = target === main ? MAIN : fresh ? `the new topic [[${name}]], linked from MEMORY.md` : `topic [[${name}]]`
     const after = target === main ? room.lines : written
@@ -602,27 +713,34 @@ export function install(rt) {
   }
 
   // The entry keeps its place; `topic` only narrows where to look.
-  function replaceEntry({ scope, topic, match, expect, text, meta, actor, label, topicOnly = false }) {
+  function replaceEntry(change) {
     return queued(async () => {
       await recoverPending()
-      writable(scope, actor)
-      const files = loadScope(scope)
-      const old = findExpected(files, topic, match, expect, label)
-      if (topicOnly && old.file.topic === undefined) throw Object.assign(new Error('Changing a team entry that every conversation reads requires always: true.'), { code: DENIED })
-      const line = formatEntry(text, { id: entryId(old), ...meta, ...(old.meta.pinned === undefined ? {} : { pinned: old.meta.pinned }) })
-      const lines = [...old.file.lines]
-      const before = lines[old.line]
-      lines[old.line] = line
-      const room = old.file.topic === undefined ? makeRoom(files, scope, lines, line) : { lines, moved: [], steps: [], topics: [] }
-      await publish({
-        op: 'replace',
-        scope: scopeKey(scope),
-        steps: [writeStep(old.file.path, joinLines(room.lines)), ...room.steps],
-        row: { op: 'replace', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, after: line, ...movedRow(room) },
-      })
-      noteNews(scope, actor, 'replace', line)
-      return { changed: true, file: old.file, message: `Updated in ${label} (${fileName(old.file)}): "${old.text}" is now "${text}".${movedNote(room)}` }
+      writable(change.scope, change.actor)
+      return replaceEntryNow(change)
     })
+  }
+
+  async function replaceEntryNow({ scope, files = loadScope(scope), topic, match, expect, text, meta, actor, label, topicOnly = false, old = findExpected(files, topic, match, expect, label), pocket }) {
+    if (topicOnly && old.file.topic === undefined) throw Object.assign(new Error('Changing a team entry that every conversation reads requires always: true.'), { code: DENIED })
+    const details = { id: entryId(old), ...meta, ...(old.meta.pinned === undefined ? {} : { pinned: old.meta.pinned }) }
+    // Pocket keeps the parsed metadata verbatim, including ids from hand-written legacy lines.
+    const line = pocket === undefined ? formatEntry(text, details)
+      : `- ${text} [${Object.entries(details).map(([key, value]) => `${key}: ${value}`).join('; ')}]`
+    const lines = [...old.file.lines]
+    const before = lines[old.line]
+    lines[old.line] = line
+    const room = old.file.topic === undefined ? makeRoom(files, scope, lines, line) : { lines, moved: [], steps: [], topics: [] }
+    await publish({
+      op: 'replace',
+      scope: scopeKey(scope),
+      steps: [writeStep(old.file.path, joinLines(room.lines)), ...room.steps],
+      row: { op: 'replace', scope: scopeKey(scope), file: old.file.file, ...actorOf(actor), before, after: line, ...movedRow(room) },
+      pocket,
+    })
+    if (pocket !== undefined) return { changed: true, file: old.file.file, line }
+    noteNews(scope, actor, 'replace', line)
+    return { changed: true, file: old.file, message: `Updated in ${label} (${fileName(old.file)}): "${old.text}" is now "${text}".${movedNote(room)}` }
   }
 
   function removeEntry({ scope, topic, match, expect, actor, label }) {
@@ -664,7 +782,12 @@ export function install(rt) {
     for (const sessionId of [botId, rt.chatOf(botId), ...(bot?.segments ?? []).map(segment => segment.sessionId), ...rt.groupSessionsOf(botId)]) renewMemory(sessionId)
     summaries.delete(botId)
     news.delete(botId)
+    // The memory review's place in each part of its own chat goes with it; its group
+    // Sessions' places are their groups'. Saved before the archive answers.
+    const parts = new Set([botId, rt.chatOf(botId), ...(bot?.segments ?? []).map(segment => segment.sessionId)])
+    const forgetting = forgetCursors([...parts].map(id => `chat:${id}`), `bot:${botId}`)
     return queued(async () => {
+      await forgetting
       if (rt.readOnly() !== undefined) return
       // A change that was interrupted is finished first, so the archive holds it.
       await recoverPending()
@@ -689,7 +812,9 @@ export function install(rt) {
     summaries.delete(room.id)
     summaryFailures.delete(room.id)
     news.delete(room.id)
+    const forgetting = forgetCursors([`group:${room.id}`], `group:${room.id}`)
     return queued(async () => {
+      await forgetting
       if (rt.readOnly() !== undefined) return
       // A change that was interrupted is finished first, so the archive holds it.
       await recoverPending()
@@ -715,10 +840,13 @@ export function install(rt) {
     if (route === undefined) throw new Error('no chat model')
     return route
   }
-  async function noteWindow(bot) {
+  async function noteWindow(bot, { agent, modelSelection }) {
     if (Date.now() - (windowAsked.get(bot.id) ?? 0) < WINDOW_ASK_MS) return
     windowAsked.set(bot.id, Date.now())
-    const info = await chatRoute(bot).then(route => ctx.llm.resolveModelInfo(route.provider, route.model)).catch(() => undefined)
+    const route = rt.botRunnerRequired?.(agent.id, agent) ? modelSelection : await chatRoute(bot).catch(() => undefined)
+    if (!route?.provider || !route?.model) return
+    rt.assertBotRunnerProvider?.(route.provider, agent.id, agent)
+    const info = await ctx.llm.resolveModelInfo(route.provider, route.model).catch(() => undefined)
     const size = info?.context?.contextWindow
     if (typeof size === 'number' && size > 0) windows.set(bot.id, size - (info.defaultMaxTokens ?? 0))
   }
@@ -904,14 +1032,14 @@ export function install(rt) {
   // stays frozen with the conversation and the prompt stays the Bot's own. A Session
   // frozen with the group's memory in its prompt keeps it there.
   const isGroupMemory = message => message?.source?.kind === GROUP_MEMORY_SOURCE
-  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+  ctx.on('agent/pre-step', async ({ agent, signal, modelSelection }, next) => {
     const decision = await next()
     if (decision.kind === 'reject' || signal?.aborted || !Array.isArray(decision.messages)) return decision
     await rt.load()
     const roomId = roomIdOf(agent.id)
     const bot = rt.botOf(rt.selfOf(agent.id))
     if (bot === undefined) return decision
-    await noteWindow(bot)
+    await noteWindow(bot, { agent, modelSelection })
     const member = roomId !== undefined && rt.roomOf(roomId)?.members.includes(bot.id) === true
     const front = []
     const snapshot = member ? groupSnapshot(agent, roomId, bot, decision) : undefined
@@ -1267,6 +1395,79 @@ export function install(rt) {
   // call whose changes go through the same path as the tools.
 
   const USER = { id: 'user', name: 'user' }
+  const pocketEntryId = entry => pocketId(entryId(entry))
+  const pocketEntryRev = entry => pocketRev(entry.file.file, entry.file.lines[entry.line])
+
+  function projectPocket(scope, files, result, affected, overhead) {
+    const day = today()
+    const entryOf = entry => ({
+      id: pocketEntryId(entry), rev: pocketEntryRev(entry), text: entry.text, topic: entry.file.topic ?? null,
+      added: entry.meta.added ?? null, until: entry.meta.until ?? null, pinned: isPinned(entry), expired: isExpired(entry, day),
+    })
+    const entries = allEntries(files)
+    const memory = { terminal: `dsh:${scope.botId}`, entries: [], size: bodySize(files[0]), limit: mainLimit(scope), truncated: entries.length !== 0 }
+    const reply = { ...result, ...(affected === undefined ? {} : { entry: entryOf(affected) }), memory }
+    let size = overhead + Buffer.byteLength(JSON.stringify(reply))
+    if (size > POCKET_REPLY_BYTES) throw new PocketMemoryError('too-large')
+    for (const entry of entries) {
+      if (memory.entries.length === POCKET_REPLY_ENTRIES) break
+      const next = entryOf(entry)
+      const last = memory.entries.length + 1 === entries.length
+      size += Buffer.byteLength(JSON.stringify(next)) + Number(memory.entries.length > 0) + Number(last)
+      if (size > POCKET_REPLY_BYTES) break
+      memory.entries.push(next)
+      if (last) memory.truncated = false
+    }
+    return reply
+  }
+
+  const pocketCall = (method, { botId, id, rev, text: raw, allowed, refresh, overhead = 0 }) => queued(async () => {
+    try {
+      await refresh()
+      let reason = allowed()
+      if (reason !== undefined) return pocketRefusal(reason)
+      await recoverPending()
+      reason = allowed()
+      if (reason !== undefined) return pocketRefusal(reason)
+      const scope = ownScope(botId)
+      const files = loadPocketScope(scope)
+      if (method === 'read') return projectPocket(scope, files, { ok: true, state: 'read' }, undefined, overhead)
+      const entries = allEntries(files)
+      let old
+      if (method === 'edit') {
+        const named = entries.filter(entry => pocketEntryId(entry) === id)
+        const matching = named.filter(entry => pocketEntryRev(entry) === rev)
+        if (matching.length !== 1) {
+          const why = named.length === 0 ? 'gone' : matching.length === 0 ? 'stale' : 'ambiguous'
+          return projectPocket(scope, files, pocketRefusal(why), undefined, overhead)
+        }
+        old = matching[0]
+      }
+      const text = cleanEntry(raw)
+      const message = entryProblem(text)
+      if (message !== undefined) return pocketRefusal('invalid', { message })
+      const unchanged = { ok: true, state: 'unchanged' }
+      if (old !== undefined && cleanEntry(old.text) === text) return projectPocket(scope, files, unchanged, old, overhead)
+      const meta = { ...(old?.meta ?? { added: today() }), by: 'user', source: 'pocket' }
+      const change = { scope, files, text, meta, actor: USER, pocket: { files, allowed } }
+      const written = old === undefined ? await addEntryNow(change) : await replaceEntryNow({ ...change, old })
+      if (!written.changed) return projectPocket(scope, files, unchanged, written.entry, overhead)
+      try {
+        const after = loadPocketScope(scope)
+        const affected = allEntries(after).find(entry => entry.file.file === written.file && entry.file.lines[entry.line] === written.line)
+        if (affected !== undefined) return projectPocket(scope, after, { ok: true, state: 'saved' }, affected, overhead)
+      } catch { /* The change has already been saved. */ }
+      return { ok: true, state: 'saved', entry: null, memory: null }
+    } catch (error) {
+      if (error instanceof PocketMemoryError) return error.reason === 'pending' ? pocketPending() : pocketRefusal(error.reason)
+      return pocketRefusal(error?.code === 'memory/too-large' ? 'too-large' : 'unavailable')
+    }
+  })
+  const pocketMemory = {
+    read: args => pocketCall('read', args),
+    edit: args => pocketCall('edit', args),
+    add: args => pocketCall('add', args),
+  }
   const languageNow = () => rt.uiLanguage?.() ?? 'the language most entries are written in'
   const panelEntries = (files, scope) => allEntries(files).map(entry => ({
     scope, topic: entry.file.topic ?? null, text: entry.text, id: entryId(entry),
@@ -1274,16 +1475,14 @@ export function install(rt) {
     until: entry.meta.until ?? null, pinned: isPinned(entry), expired: isExpired(entry, today()),
   }))
 
-  // Memory runs beside the chats, on the team's background model (models.js), never on an
-  // agent over ACP, which answers only in its own chat.
-  async function modelFor() {
-    const route = splitRef(await rt.backgroundModel())
-    if (route === undefined) throw Object.assign(new Error('No model can run memory review. Pick a background model in Settings, or add a model in Harness settings.'), { code: 'memory/no-model' })
-    return route
-  }
+  const noModel = () => Object.assign(
+    new Error('No model can run memory review. Pick a background model in Settings, or add a model in Harness settings.'),
+    { code: NO_MODEL },
+  )
   // The panel's model calls belong to the Bot or group whose memory they serve;
   // without the tag the meter would file them under "other".
-  async function oneShot(route, system, text, tag) {
+  async function oneShot(route, system, text, tag, sessionId, dispatch) {
+    rt.assertBotRunnerProvider?.(route.provider, sessionId)
     const info = await ctx.llm.resolveModelInfo(route.provider, route.model).catch(() => undefined)
     const efforts = info?.reasoning?.efforts ?? []
     // Thinking counts against the same output budget as the answer, so ask for
@@ -1296,32 +1495,58 @@ export function install(rt) {
     const budgets = [first, retry]
     const messages = [{ role: 'user', content: [{ type: 'text', text }] }]
     if (tag !== undefined) rt.tagUsage?.(messages, tag)
+    const timedOut = () => modelFailure('The model call timed out.')
     let lastKind = 'stop'
     for (let attempt = 0; attempt < budgets.length; attempt += 1) {
       const maxTokens = budgets[attempt]
+      const timeout = AbortSignal.timeout(MODEL_TIMEOUT_MS)
+      const signal = AbortSignal.any([dispatch.signal, timeout])
       const callOptions = {
         provider: route.provider,
         model: route.model,
-        ...(tag?.sessionId === undefined ? {} : { sessionId: tag.sessionId }),
+        ...(sessionId === undefined ? {} : { sessionId }),
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         purpose: 'compaction',
         tools: [],
         system,
         messages,
         maxTokens,
-        signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+        signal,
       }
-      const assembler = await (rt.assembleLlm ? rt.assembleLlm(callOptions) : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff }))
+      const attemptDispatch = {
+        ...dispatch,
+        check: () => {
+          dispatch.check()
+          signal.throwIfAborted()
+        },
+      }
+      let assembler
+      try {
+        assembler = await (rt.assembleLlm
+          ? rt.assembleLlm(callOptions, { dispatch: attemptDispatch })
+          : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff, dispatch: attemptDispatch }))
+      } catch (error) {
+        dispatch.signal.throwIfAborted()
+        if (timeout.aborted && (error === signal.reason || error?.cancelled === true)) throw timedOut()
+        const failure = error?.failure ?? error
+        if (terminalShot(error) || !QUOTA_CODES.has(failure?.code)) throw error
+        throw providerFailure(failure)
+      }
+      dispatch.signal.throwIfAborted()
       const finish = assembler.finish
-      // A cancelled call is the caller's decision, not a route that may answer again.
-      if (finish.kind === 'aborted') throw modelFailure('The model call was aborted.')
+      if (timeout.aborted && !QUOTA_CODES.has(finish.failure?.code)) throw timedOut()
+      if (finish.kind === 'aborted') {
+        throw Object.assign(modelFailure('The model call was aborted.'), { cancelled: true })
+      }
       if (finish.kind === 'error') {
         const failure = finish.failure
         // A gateway can report empty output as 502. The pi-ai adapter
         // classifies 5xx as SERVER without preserving the HTTP status.
         const mayBeEmpty = failure?.code === 'EMPTY_RESPONSE' || failure?.status === 502
           || (failure?.code === 'SERVER' && failure.status === undefined)
-        if (attempt !== 0 || !mayBeEmpty) throw providerFailure(failure)
+        if (QUOTA_CODES.has(failure?.code) || attempt !== 0 || !mayBeEmpty) {
+          throw providerFailure(failure)
+        }
         continue
       }
       const reply = assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('\n').trim()
@@ -1335,25 +1560,200 @@ export function install(rt) {
       : `The model wrote nothing within ${where}; no complete answer was written`)
   }
 
-  // A served model can still refuse the call (a key without access, say), so a failed call
-  // is tried once more on the Bot's own model, when that one answers beside its chat.
-  // The provider's own error is not passed on: its message may quote the request.
-  const answerFailure = error => (ownFailure(error) ? error : modelFailure(`The model could not answer (${failureCode(error, 'provider error')}).`))
-  async function botShot(bot, system, text, tag) {
-    const first = await modelFor()
+  const asideRuns = new Map()
+  const asideAborts = new Map()
+  const foreground = new Set()
+  const lifetime = new AbortController()
+  ctx.on('agent/status', ({ agent, status }) => {
+    const chat = agent?.id
+    if (status === 'idle') foreground.delete(chat)
+    else if (asideAborts.has(chat) || rt.chatOwners.has(chat)) {
+      foreground.add(chat)
+      asideAborts.get(chat)?.abort()
+    }
+  })
+  ctx.effect(() => () => lifetime.abort(), 'omni-ui: memory answers')
+
+  const busy = chat => foreground.has(chat) || rt.live?.get?.(chat)?.turn !== undefined
+  const stopped = () => Object.assign(new Error('The memory session stopped.'), {
+    code: 'acp/aside-stopped',
+  })
+  const reserved = () => Object.assign(new Error('The account is reserved.'), {
+    code: 'acp/aside-unavailable',
+  })
+  async function acpShot(acp, bot, ref, route, chat, sessionId, system, text, dispatch, onAdmitted) {
+    if (chat === undefined || busy(chat)) return undefined
+    const effort = bot.effort
+    const accountGeneration = acp.asideAccountGeneration?.(route.provider)
+    const previous = asideRuns.get(bot.id) ?? Promise.resolve()
+    const slot = Promise.withResolvers()
+    const tail = previous.then(() => slot.promise)
+    asideRuns.set(bot.id, tail)
+    const controller = new AbortController()
+    const signal = AbortSignal.any([controller.signal, lifetime.signal,
+      AbortSignal.timeout(MODEL_TIMEOUT_MS), ...(dispatch?.signal ? [dispatch.signal] : [])])
+    let releaseWork
+    let onAbort
     try {
-      return await oneShot(first, system, text, tag)
-    } catch (error) {
-      const mine = await rt.desiredModel(bot, { aside: true })
-      const fallback = rt.answersAside(mine) ? splitRef(mine) : undefined
-      if (fallback === undefined || (fallback.provider === first.provider && fallback.model === first.model)) throw answerFailure(error)
+      await Promise.race([previous, new Promise((_, reject) => {
+        onAbort = () => reject(stopped())
+        signal.addEventListener('abort', onAbort, { once: true })
+        if (signal.aborted) onAbort()
+      })])
+      asideAborts.set(chat, controller)
+      const reservations = rt.machineReservations
+      let prepared = false
+      const check = () => {
+        if (lifetime.signal.aborted || dispatch?.signal?.aborted) throw staleShot()
+        if (acp.asideAccountGeneration?.(route.provider) !== accountGeneration) {
+          throw Object.assign(new Error('The Bot account changed.'), { code: 'acp/aside-signed-out' })
+        }
+        const current = rt.botOf(bot.id)
+        if (!current || current.model !== ref || current.effort !== effort || rt.chatOf(bot.id) !== chat
+          || rt.switchingChat?.(bot.id) || rt.hostOwned(current)) throw staleShot()
+        rt.assertShellChoice?.(chat, bot.id)
+        if (current.shell === false) throw Object.assign(staleShot(), { code: 'bot/shell' })
+        rt.assertBotRunnerProvider?.(route.provider, chat)
+        rt.assertBotRunnerProvider?.(route.provider, sessionId)
+        if (prepared) dispatch?.check?.()
+        if (signal.aborted || busy(chat)) throw stopped()
+        if (rt.quotaHeld?.(route.provider) || reservations?.held?.(route.provider)) throw reserved()
+      }
+      const prepare = async () => {
+        check()
+        await dispatch?.prepare?.()
+        prepared = true
+        check()
+      }
+      check()
+      releaseWork = reservations?.workStarted?.(route.provider)
+      const answer = await acp.answerAside({
+        ...route, effort, signal, accountGeneration, timeoutMs: MODEL_TIMEOUT_MS,
+        check, prepare,
+        admit: async () => {
+          await prepare()
+          if (await reservations?.imageGate?.(route.provider)) throw reserved()
+          check()
+        },
+        readPrompt: () => {
+          check()
+          onAdmitted()
+          const fields = { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }] }
+          const masked = rt.redactModelFields?.(fields) ?? fields
+          return { system: masked.system, text: masked.messages[0].content[0].text }
+        },
+      })
+      check()
+      if (typeof answer?.text !== 'string' || answer.text.trim() === '') {
+        throw modelFailure('The memory session wrote nothing.')
+      }
+      return answer
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+      if (asideAborts.get(chat) === controller) asideAborts.delete(chat)
+      releaseWork?.()
+      slot.resolve()
+      if (asideRuns.get(bot.id) === tail) void tail.then(() => {
+        if (asideRuns.get(bot.id) === tail) asideRuns.delete(bot.id)
+      })
+    }
+  }
+
+  // Provider diagnostics can quote the request. Keep only the structured code.
+  const answerFailure = error => (ownFailure(error) ? error : modelFailure(`The model could not answer (${failureCode(error, 'provider error')}).`))
+  const shotSession = (bot, tag) => rt.botRunnerRequired === undefined ? tag?.sessionId : rt.chatOf(bot.id)
+  async function botShot(bot, system, text, tag, dispatch, backgroundOnly = false) {
+    const sessionId = shotSession(bot, tag)
+    const chat = rt.chatOf(bot.id)
+    const signal = dispatch?.signal ? AbortSignal.any([lifetime.signal, dispatch.signal]) : lifetime.signal
+    const checkActive = () => { if (signal.aborted) throw staleShot() }
+    checkActive()
+    rt.assertShellChoice?.(sessionId ?? chat, bot.id)
+    const mine = backgroundOnly ? undefined : await rt.memoryModel(bot)
+    const own = splitRef(mine)
+    let acp
+    if (own?.provider.startsWith('acp-')) {
+      try { acp = ctx.get?.('acpAgents') } catch {}
+    }
+    const hidden = typeof acp?.answerAside === 'function' && acp.supportsAside?.(own.provider) !== false
+    const eligible = own !== undefined && (hidden || rt.answersAside(mine))
+    let ownAdmitted = eligible && !hidden
+    const failures = []
+    let quota = false
+    let ownFailureCode
+    const record = (ref, provider, error, isOwn = false) => {
+      checkActive()
+      if (terminalShot(error)) throw error
+      if (error?.code === 'acp/aside-stopped') return
+      if (QUOTA_CODES.has(error?.providerCode ?? error?.code)) {
+        rt.noteAsideQuota(provider)
+        quota = true
+      } else if (isOwn) {
+        ownFailureCode = failureCode({ code: error?.providerCode || error?.code })
+      }
+      failures.push({ ref, error })
+    }
+    const answered = (route, reply, via) => {
+      rt.clearAsideQuota(route.provider)
+      dispatch?.onAnswer?.(route, via)
+      return reply
+    }
+    const dispatchNative = {
+      signal,
+      prepare: dispatch?.prepare,
+      check: () => {
+        checkActive()
+        rt.assertShellChoice?.(sessionId ?? chat, bot.id)
+        dispatch?.check?.()
+      },
+    }
+    const native = (route, via) => oneShot(route, system, text, tag, sessionId, {
+      ...dispatchNative,
+      check: () => {
+        dispatchNative.check()
+        if (rt.quotaHeld(route.provider)) {
+          throw modelFailure('The model account is out of quota.')
+        }
+      },
+    }).then(reply => answered(route, reply, via))
+    if (eligible && !rt.quotaHeld(own.provider)) {
       try {
-        return await oneShot(fallback, system, text, tag)
-      } catch (again) {
-        const said = failure => failureText(failure, 'provider error')
-        throw modelFailure(`${first.provider}/${first.model}: ${said(error)}; ${fallback.provider}/${fallback.model}: ${said(again)}`)
+        if (!hidden) return await native(own, 'own')
+        const reply = await acpShot(acp, bot, mine, own, chat, sessionId, system, text, dispatch,
+          () => { ownAdmitted = true })
+        if (reply !== undefined) {
+          return answered({ ...own, model: reply.model ?? own.model }, reply.text.trim(), 'own-acp')
+        }
+      } catch (error) {
+        record(mine, own.provider, error, true)
       }
     }
+    const background = await rt.memoryBackground(sessionId)
+    const fallback = splitRef(background.ref)
+    if (fallback !== undefined && !failures.some(failure => failure.ref === background.ref)) {
+      try { return await native(fallback, 'background') } catch (error) {
+        record(background.ref, fallback.provider, error)
+      }
+    }
+    const next = failures.length ? await rt.memoryBackground(sessionId) : background
+    const ownHold = eligible ? rt.quotaUntil(own.provider) : undefined
+    // A supported ACP route can still refuse admission for this account or executable.
+    const ownMayRun = ownAdmitted && !ownHold
+    // The review can retry when either eligible route comes back, after its holder delay.
+    const holds = [ownHold, next.retryAt].filter(Boolean)
+    const retryAt = next.ref === undefined && !ownMayRun && holds.length
+      ? Math.min(...holds) : undefined
+    const error = failures.length > 1
+      ? modelFailure(failures.map(({ ref, error }) => `${ref}: ${failureText(error, 'provider error')}`).join('; '))
+      : failures.length === 1 ? answerFailure(failures[0].error)
+        : retryAt ? modelFailure('The available model accounts are out of quota.') : noModel()
+    throw Object.assign(error, { quota, retryAt, ownFailureCode })
+  }
+
+  function memoryShot(bot, system, text, tag, dispatch) {
+    const provider = splitRef(bot.model)?.provider
+    const backgroundOnly = provider === 'acp-omp' || provider === 'acp-antigravity'
+    return botShot(bot, system, text, tag, dispatch, backgroundOnly)
   }
 
   /** @type {Map<string, {hash:string, text:string, at:number}>} */
@@ -1390,9 +1790,11 @@ export function install(rt) {
   const panelBody = panel => (panel.group ? { roomId: panel.id } : { botId: panel.id })
   const panelLabel = (panel, scope) => (scope.kind === 'team' ? 'the team memory' : panel.group ? 'the group memory' : `${panel.name}'s memory`)
 
-  // The models a summary runs on, the background model first and the keeper's after it: a
-  // failure stands until one of them changes.
-  const summaryModels = async keeper => `${await rt.backgroundModel() ?? ''}|${keeper?.model ?? ''}`
+  // The keeper's model and its background fallback. A failure stands until one changes.
+  const summaryModels = async (keeper, sessionId) => {
+    const ref = await rt.backgroundModel(sessionId, { noCommands: true })
+    return `${keeper?.model ?? ''}|${ref ?? ''}`
+  }
 
   function startSummary(panel, loaded, language, hash, models) {
     const { keeper } = panel
@@ -1400,7 +1802,7 @@ export function install(rt) {
       ? groupSummaryRequest({ name: panel.name, lines: linesFor(loaded.group), language })
       : summaryRequest({ name: panel.name, own: linesFor(loaded.own), team: linesFor(loaded.team), language })
     const job = (async () => {
-      const text = await botShot(keeper, SUMMARY_SYSTEM, request, panel.tag)
+      const text = await memoryShot(keeper, SUMMARY_SYSTEM, request, panel.tag)
       const value = { hash, text: text.slice(0, SUMMARY_TEXT_MAX), at: Date.now() }
       summaries.set(panel.id, value)
       summaryFailures.delete(panel.id)
@@ -1423,7 +1825,11 @@ export function install(rt) {
     const hash = createHash('sha256').update(JSON.stringify([language, ...Object.values(loaded).map(linesFor)])).digest('hex')
     const saved = savedSummary(panel.id)
     const prior = summaryFailures.get(panel.id)
-    const models = await summaryModels(panel.keeper)
+    const models = await summaryModels(panel.keeper, panel.keeper === undefined ? panel.tag.sessionId : shotSession(panel.keeper, panel.tag))
+      .catch(error => {
+        if (error?.code === NO_BOT_RUNNER) return NO_BOT_RUNNER
+        throw error
+      })
     const failed = prior?.hash === hash && prior.models === models ? prior : undefined
     const wanted = body.regenerate === true || (body.summarize === true && saved?.hash !== hash && failed === undefined)
     if (wanted && entries.length > 0 && panel.keeper !== undefined && !summarizing.has(panel.id)) startSummary(panel, loaded, language, hash, models)
@@ -1451,7 +1857,7 @@ export function install(rt) {
     const text = String(body.text ?? '').trim().slice(0, ASK_TEXT_MAX)
     if (text === '') throw new Error('Type a question or a change first')
     const numbered = await settled(() => Object.entries(panel.scopes).flatMap(([tag, scope]) => allEntries(loadScope(scope)).map(entry => ({ ...entry, scope: tag }))))
-    const answer = parseAsk(await botShot(panel.keeper, askSystem(panel.group), askRequest({ name: panel.name, group: panel.group, numbered, language: languageNow(), text }), panel.tag))
+    const answer = parseAsk(await memoryShot(panel.keeper, askSystem(panel.group), askRequest({ name: panel.name, group: panel.group, numbered, language: languageNow(), text }), panel.tag))
     const meta = { source: 'memory panel', by: 'user', added: today() }
     const home = panel.group ? 'group' : 'own'
     const changes = []
@@ -1812,9 +2218,12 @@ export function install(rt) {
     return await memoryView(panelBody(panel))
   }
 
-  const { memoryReviews, memoryReviewStatus } = installReview(rt, { root, reviewOn, mainLimit, TEAM, ownScope, groupScope, keeperOf, writesTeam, labelOf, today, writeText, settled, loadScope, addEntry, replaceEntry, removeEntry, entryProblem, secretEntry, botShot, languageNow })
+  const { memoryReviews, memoryReviewStatus, forgetCursors, liftMemoryHolds } =
+    installReview(rt, { root, reviewOn, mainLimit, TEAM, ownScope, groupScope, keeperOf, writesTeam,
+      labelOf, today, writeText, settled, loadScope, addEntry, replaceEntry, removeEntry,
+      entryProblem, secretEntry, botShot: memoryShot, languageNow })
 
-  const { tidyView, undoTidy, tidyNow, memoryTidyStatus } = installTidy(rt, { TEAM, ownScope, groupScope, keeperOf, scopeKey, dirOf, today, queued, recoverPending, writable, settled, loadScope, publish, writeStep, removeStep, writeText, botShot, languageNow, allEntries, entryProblem, USER, changedSince })
+  const { tidyView, undoTidy, tidyNow, memoryTidyStatus } = installTidy(rt, { TEAM, ownScope, groupScope, keeperOf, scopeKey, dirOf, today, queued, recoverPending, writable, settled, loadScope, publish, writeStep, removeStep, writeText, botShot: memoryShot, languageNow, allEntries, entryProblem, USER, changedSince })
 
   async function memoryTidyUndo(body) {
     const panel = panelOf(body)
@@ -1850,8 +2259,8 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    memoryEnabled: true, renewMemory, archiveBotMemory, archiveGroupMemory, memoryReviews, memoryReviewStatus, memoryTidyStatus,
+    memoryEnabled: true, renewMemory, archiveBotMemory, archiveGroupMemory, memoryReviews, memoryReviewStatus, memoryTidyStatus, pocketMemory,
     memoryEndpoint: panelCall(memoryEndpoint), memoryEdit: panelCall(memoryEdit), memoryAdd: panelCall(memoryAdd),
-    memoryNews: () => Object.fromEntries(news), botShot, tidyMemoryNow: tidyNow,
+    memoryNews: () => Object.fromEntries(news), botShot, tidyMemoryNow: tidyNow, liftMemoryHolds,
   })
 }

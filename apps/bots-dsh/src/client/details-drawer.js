@@ -1,3 +1,4 @@
+import { BotSkills } from './bot-skills.js'
 import { createElement as h, Fragment, useEffect, useRef, useState } from 'react'
 import { isMainOf } from './sources.js'
 import { HEADER, currentPart, runStatsOf, stripHeader, usageOf } from './text.js'
@@ -8,7 +9,7 @@ import { call } from './api.js'
 import { GlobeIcon, Favicon, PanelMenu, menuItemFor } from './browser-pane.js'
 import { drawerMenuKeys } from './side-model.js'
 import { useEscape } from './overlay-hooks.js'
-import { BotSettingsForm } from './bot-settings.js'
+import { BotSettingsForm, SwitchRow } from './bot-settings.js'
 import { GroupSettingsForm, ROOM_MODES, roomSubtitle, shownMode } from './group-settings.js'
 import { ModelMenu, needsModelPick } from './model-menu.js'
 import { FolderMenu } from './folder-menu.js'
@@ -21,8 +22,49 @@ import { AutoMissingNote, remoteOfBot, savedLevelOf, levelsOf, pickLevel, cliOfB
 import { reopenPermissionChoice } from './permission-card.js'
 import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
-import { t } from './i18n.js'
+import { addStrings, hostText, t } from './i18n.js'
+import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import { BotPills } from './capability-pills.js'
+import { GrantList } from './grants.js'
+import { effectiveMarkOf } from '../shared/native-tools.js'
+import { OWN_TOOLS_NOTICE, ownToolsNotice } from '../shared/own-tools.js'
+import { guardLevelOf, reviewGuardView, reviewMarkText, solverAutoView } from './solver-draft.js'
+import { REVIEW_GUARD_COPY } from '../shared/review-guard.js'
+
+addStrings(nativeToolsZh)
+
+export function NativeToolsRow({ bot, roster, run, actions }) {
+  const view = nativeSwitchView(bot, roster)
+  if (view === null) return null
+  const notes = (view.notes ?? []).map(note => t(note.key, note.values))
+  return h(SwitchRow, {
+    details: true, label: t(nativeToolsCopy.label), hint: view.hint.map(key => t(key)).join(' '), on: view.on, disabled: view.disabled,
+    ...(notes.length === 0 ? {} : { notes }),
+    onChange: value => void run(actions.updateBot(bot.id, { nativeTools: value })),
+  })
+}
+
+// The Solver's review guard (RFC 0048 delivery 1.5): the person's own switch, sent on its own,
+// with the line that says how far it holds on this Bot's route.
+export function ReviewGuardRow({ bot, roster, run, actions }) {
+  const saved = savedLevelOf(bot, roster.permissions ?? {})
+  const view = reviewGuardView(bot, roster, guardLevelOf(saved, presetDanger(saved)))
+  if (view === null) return null
+  return h('div', { 'data-review-guard': view.on ? 'on' : 'off' }, h(SwitchRow, {
+    details: true, label: t(REVIEW_GUARD_COPY.label), hint: view.lines.join(' '), on: view.on, disabled: view.disabled,
+    onChange: value => void run(actions.updateBot(bot.id, { reviewGuard: value })),
+  }))
+}
+
+export function SolverAutoRow({ bot, roster, run, actions }) {
+  const saved = savedLevelOf(bot, roster.permissions ?? {})
+  const view = solverAutoView(bot, roster, guardLevelOf(saved, presetDanger(saved)))
+  if (view === null) return null
+  return h(SwitchRow, {
+    details: true, label: t('Auto: work until delivered'), hint: view.lines.join(' '), on: view.on, disabled: view.disabled,
+    onChange: value => void run(actions.updateBot(bot.id, { solverAuto: value })),
+  })
+}
 
 function transcriptOf(list, id, name, hiddenTurns = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline
@@ -161,7 +203,7 @@ function MemberRow({ member, entry, room, roster, actions }) {
             room.admin === member.id ? h('span', { className: 'bt-tag' }, t('Admin')) : null),
           h(MemberState, { entry, bot: member, room, roster }))),
       h(StopMemberWork, { entry, bot: member, room, actions })),
-    h(MemberApprovals, { entry, bot: member, actions }))
+    h(MemberApprovals, { entry, bot: member, room, actions, readOnly: roster.readOnly }))
 }
 
 // A group's overview: what members read, who is in it, who answers, and what it
@@ -272,6 +314,9 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
   const running = useSessionStatus(map => map.get(part)?.running === true)
   const doing = useActivity(map => map[bot?.id ?? sessionId])
   const failed = useWork ? useWork(work => work.failed?.[bot?.id ?? ''] !== undefined) : false
+  // The plugin that runs a crew Bot is missing, switched off or did not load (installed.js).
+  const notInstalled = bot?.installed === false
+  const notInstalledText = notInstalled ? [t('Not installed'), bot.reason ? hostText(bot.reason) : ''].filter(Boolean).join(' · ') : ''
   const approval = useApproval(useWork, entry => entry.botId !== undefined && entry.botId === bot?.id)
   const transcript = useSessions(list => transcriptOf(list, part, bot?.name ?? room?.name ?? t('Bot'), roster.exchangeTurns[part]))
   const usage = useSessions(list => usageOf(list, [part, ...(bot?.parts ?? room?.parts ?? [])]))
@@ -327,7 +372,7 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
   const tabs = bot ? (roster.computer?.enabled === true ? ['details', 'browser', 'computer'] : ['details', 'browser']) : ['details']
   return [h(Fragment, { key: 'top' }, top),
     h('div', { key: 'id', className: 'bt-drawer-id', 'data-move': side },
-      bot ? h(BotAvatar, { bot, size: 64, state: botState(running, doing, roster.questions?.[part] !== undefined || approval, { failed }), main: isMainBot, badge: false, gaze: true, pokeable: true })
+      bot ? h(BotAvatar, { bot, size: 64, state: botState(running, doing, roster.questions?.[part] !== undefined || approval, { failed, notInstalled }), main: isMainBot, badge: false, gaze: true, pokeable: true })
         : h(MemberPile, { room, roster }),
       editing
         ? h('input', {
@@ -350,17 +395,31 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
       room && tab === 'details' ? h(GroupOverview, { room, roster, actions, usage, useWork, openSettings: () => setView('settings') }) : null,
       bot && tab === 'computer' ? h(ComputerView, { bot, actions, hooks: { useComputer } }) : null,
       bot && tab === 'details' ? [
+        notInstalledText ? h('div', { key: 'missing', className: 'bt-note bt-note-missing', role: 'status' }, notInstalledText) : null,
         h(RunStats, { key: 'stats', bot, part, running, actions }),
         h('div', { key: 'model', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Model')),
           h(ModelMenu, { bot, roster, actions, run, wide: true }),
-          needsModelPick(bot, roster) ? h('div', { className: 'bt-note' }, t('Pick a model and {name} can start.', { name: bot.name })) : null),
+          needsModelPick(bot, roster) ? h('div', { className: 'bt-note' }, t('Pick a model and {name} can start.', { name: bot.name })) : null,
+          // A Bot already denying acp_tool on a model that runs its own tools keeps running (#2026).
+          // Not on Antigravity with its switch: denied tools lock it OFF, so nothing runs there.
+          ownToolsNotice(bot) && !(effectiveMarkOf(bot) === 'acp-antigravity' && bot.nativeToolsBlock !== 'unoffered')
+            ? h('div', { className: 'bt-note', 'data-own-tools': '' }, t(OWN_TOOLS_NOTICE)) : null),
         bot.engine ? h(AgentSessions, { key: 'sessions', bot, part, run, useSessions }) : null,
         h(PermissionRow, { key: 'permission', bot, roster, actions, run }),
+        h(GrantList, { key: 'grants', bot, roster, actions, useWork }),
         h(BotConnectors, { key: 'connectors', bot, roster, actions, run }),
+        h(BotSkills, { key: 'skills', bot, roster, actions }),
         h('div', { key: 'folder', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Working folder')),
           h(FolderMenu, { value: bot.workDir, actions, run, wide: true, onPick: workDir => run(actions.updateBot(bot.id, { workDir })) })),
+        h(NativeToolsRow, { key: 'native-tools', bot, roster, actions, run }),
+        h(ReviewGuardRow, { key: 'review-guard', bot, roster, actions, run }),
+        h(SolverAutoRow, { key: 'solver-auto', bot, roster, actions, run }),
+        // A Solver's last delivery: which review the host saw (#2056).
+        reviewMarkText(bot, roster) ? h('div', { key: 'review-mark', className: 'bt-drawer-model', 'data-review-mark': bot.reviewMark.review },
+          h('div', { className: 'bt-section-title' }, t('Last delivery')),
+          reviewMarkText(bot, roster).split('\n').map(line => h('div', { key: line, className: 'bt-note' }, line))) : null,
         bot.instructions
           ? h(About, { key: 'about', text: bot.instructions })
           : h('button', { key: 'about', type: 'button', className: 'bt-more', onClick: () => setView('settings') }, t('Add instructions in Bot settings')),

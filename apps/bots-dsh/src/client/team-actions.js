@@ -1,23 +1,108 @@
-import { countCards, detailsSubject, heldCardKey } from './sources.js'
+import { countCards, createSource, detailsSubject, heldCardKey } from './sources.js'
 import { noteClientError } from './diagnostics.js'
-import { CLI_NAMES, cliLoginBotOf, cliProviderOf } from './cli-login-model.js'
+import { CROSSING_DEADLINE_MS, crossesHarness, routeOfRef } from '../shared/routes.js'
+import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-model.js'
 
 // The actions every window that draws the Bot views shares: dialogs and panels (the `ui`
 // source), requests to the host, and the notes the transcript keeps. The shell around the
 // views adds navigation and its own panels. `after` reads the team again once a request
 // is done; `partFor` maps a Bot id, or any part of its chat, to its current part.
-export function teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession, loginState, panelFolded }) {
+export function teamActions({ call, after, partFor, roster, ui, live, cards, heldCards, turnClock, openSession, loginState, panelFolded, work,
+  storage = (() => { try { return globalThis.localStorage } catch { return null } })() }) {
+  // A deleted Bot's composer state (DSH's `dsh.conversation.<part>`), removed once the
+  // host answered that it is deleted. The host's sweep list (draft-sweep.js) also covers
+  // a key DSH writes again while the chat is still open.
+  const forgetDrafts = (ids) => {
+    if (!Array.isArray(ids)) return
+    for (const id of ids) {
+      if (typeof id !== 'string' || id === '') continue
+      try { storage?.removeItem(`dsh.conversation.${id}`) } catch { /* storage unavailable */ }
+    }
+  }
+  // The person's own agent switch in this window (F4): from the host's answer on, the part it
+  // leaves draws no activity row for the outgoing agent's note turn, before the state poll
+  // brings the host's `noting`. Only an outgoing agent over ACP writes its note in the chat.
+  // Every refusal is a rejection, so a refused pick never marks.
+  const picks = createSource({})
+  const pickEntries = new Map()
+  let unwatchPicks
+  const dropPick = (part, entry) => {
+    if (pickEntries.get(part) !== entry) return
+    clearTimeout(entry.timer)
+    pickEntries.delete(part)
+    picks.set((state) => {
+      const next = { ...state }
+      delete next[part]
+      return next
+    })
+    if (pickEntries.size === 0 && unwatchPicks !== undefined) {
+      const stop = unwatchPicks
+      unwatchPicks = undefined
+      stop()
+    }
+  }
+  // The host's `noting` takes over; an answered call whose switch is not (or no longer) under
+  // way ends the mark too (a commit, a failure, a go-back, an answer that crossed nothing).
+  const syncPicks = () => {
+    const snapshot = work?.getSnapshot?.()
+    for (const [part, entry] of pickEntries) {
+      const noting = snapshot?.noting?.[part] === true
+      if (noting || (entry.settled && snapshot?.models?.[entry.botId]?.switching === undefined)) dropPick(part, entry)
+    }
+  }
+  const noPick = { mark: () => {}, end: () => {} }
+  // Read at the pick (the Bot the person crosses from); `mark` runs when the host answers,
+  // before the pull, and `end` once the pull is done.
+  const pickFor = (id, ref) => {
+    if (typeof ref !== 'string') return noPick
+    const bot = roster?.getSnapshot?.()?.byId?.[id]
+    const current = bot?.model ?? bot?.appliedModel
+    if (typeof current !== 'string' || ref === current || !crossesHarness(current, ref)) return noPick
+    if (routeOfRef(current).route !== 'acp') return noPick
+    const part = partFor(id)
+    let entry
+    return {
+      mark: () => {
+        const older = pickEntries.get(part)
+        if (older !== undefined) clearTimeout(older.timer)
+        const own = { botId: bot.id, settled: false, timer: undefined }
+        entry = own
+        // The client timer starts at the answer, after the host's `job.since` (parts.js:1630),
+        // so it can outlive the host's deadline by the answer's latency; the poll that shows
+        // `switching` gone drops the mark first.
+        own.timer = setTimeout(() => dropPick(part, own), CROSSING_DEADLINE_MS)
+        own.timer?.unref?.()
+        pickEntries.set(part, own)
+        if (older === undefined && pickEntries.size === 1 && typeof work?.subscribe === 'function') unwatchPicks = work.subscribe(syncPicks)
+        picks.set(state => (state[part] === true ? state : { ...state, [part]: true }))
+      },
+      end: (ok) => {
+        if (entry === undefined) return
+        if (ok === true) {
+          entry.settled = true
+          syncPicks()
+        } else dropPick(part, entry)
+      },
+    }
+  }
+  // A call that crosses nothing goes as it always did.
+  const picked = (pick, request) => (pick === noPick ? after(request)
+    : after(request.then((value) => { pick.mark(); return value }))
+      .then((value) => { pick.end(true); return value }, (error) => { pick.end(false); throw error }))
   // The sign-in row of a Bot's chat (cli-login.js): an explicit entry opens that Bot's chat and
   // its row; `ref` is the model the person chose, applied by the host once signed in.
-  const openCliLogin = (botId, provider, ref) => {
+  // `attemptId` is a Switch account's own attempt (#2064): the row reads that one.
+  const openCliLogin = (botId, provider, ref, attemptId) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId)
     const manager = loginState?.()
-    if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false
+    if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false
     openSession?.(bot.id)
-    void manager.open({ botId: bot.id, provider, ref: cliProviderOf(ref) === provider ? ref : undefined })
+    void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : undefined,
+      ...(typeof attemptId === 'string' ? { attemptId } : {}) })
     return true
   }
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra })
+  const stopping = options => (options?.stopReply === true ? { stopReply: true } : {})
   // A memory is a Bot's or a group chat's; both are opened by id.
   const memoryOf = id => (roster.getSnapshot().roomsById[id] ? { roomId: id } : { botId: id })
   // An action that shows the panel lands the yield with it: when a folded
@@ -25,21 +110,41 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
   // `view` is the next view, since its minimum decides what fits; a yield already
   // given stays.
   const yieldTo = (state, view) => state.panelYield === true || panelFolded?.(view) === true
+  // Give each new panel scope its own identity before the UI source notifies listeners.
+  let panelInstance
+  const openPanel = update => ui.set(state => {
+    const next = update(state)
+    if (next !== state) panelInstance = {}
+    return next
+  })
   // The panel on a side chat's view, on the chat the strip tab or menu named.
   const openSideChat = (sessionId, chatId) => {
-    ui.set(state => ({ ...state, details: sessionId, view: 'side', side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state, 'side') }))
+    openPanel(state => ({ ...state, details: sessionId, view: 'side', side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state, 'side') }))
   }
   // `id` opens one Bot (page 'bots') or one group chat (page 'groups').
   const openSettings = (page = 'general', id = null) => { ui.set(state => ({ ...state, settings: { page, id }, menu: null, palette: null, newChat: null })) }
   return {
     // The pane starts at the rail's edge, so a floating drawer would stick out from under it.
-    openNewChat: (mode, sectionId = null) => { ui.set(state => ({ ...state, newChat: mode, newChatSection: sectionId ?? null, menu: null, palette: null })) },
+    // The instance distinguishes two opens on the same mode and section.
+    openNewChat: (mode, sectionId = null) => { ui.set(state => ({ ...state, newChat: mode, newChatInstance: {}, newChatSection: sectionId ?? null, menu: null, palette: null })) },
+    closeNewChat: (mode, sectionId, instance) => {
+      ui.set(state => (state.newChat === mode && (state.newChatSection ?? null) === sectionId && state.newChatInstance === instance
+        ? { ...state, newChat: null, newChatSection: null } : state))
+    },
     openPalette: (query = '') => { ui.set(state => ({ ...state, palette: { query, token: Date.now() }, newChat: null, menu: null })) },
     // The token keeps a late exit timer from closing a palette opened again since.
-    closePalette: (token) => { ui.set(state => (state.palette && (token === undefined || state.palette.token === token) ? { ...state, palette: null } : state)) },
+    closePalette: (token, palette) => {
+      ui.set(state => (state.palette && (token === undefined || state.palette.token === token)
+        && (palette === undefined || state.palette === palette) ? { ...state, palette: null } : state))
+    },
     openExchange: (a, b) => { if (a && b) ui.set(state => ({ ...state, exchange: [a, b] })) },
-    openVoice: (id) => { if (id) ui.set(state => ({ ...state, voice: id, menu: null })) },
-    closeVoice: () => { ui.set(state => (state.voice ? { ...state, voice: null } : state)) },
+    closeExchange: (pair) => { ui.set(state => (state.exchange === pair ? { ...state, exchange: null } : state)) },
+    openVoice: (id) => { if (id) ui.set(state => ({ ...state, voice: id, voiceInstance: {}, menu: null })) },
+    closeVoice: (id, instance) => {
+      ui.set(state => (state.voice && (id === undefined || (state.voice === id && state.voiceInstance === instance))
+        ? { ...state, voice: null } : state))
+    },
+    getPanelInstance: () => panelInstance,
     toggleDetails: (id, force) => {
       ui.set((state) => {
         // Any part of the open Bot closes it, as its header shows it expanded.
@@ -48,7 +153,11 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
         const details = force || !same || state.view !== 'details' ? id : null
         // A folded panel is open but not shown: its opener then means "show it"
         // (it takes the room it needs), not "close it".
-        if (details === null && panelFolded?.('details') === true) return { ...state, renaming: false, tab: null, details: id, view: 'details', panelYield: true }
+        if (details === null && panelFolded?.('details') === true) {
+          panelInstance = {}
+          return { ...state, renaming: false, tab: null, details: id, view: 'details', panelYield: true }
+        }
+        panelInstance = details ? {} : null
         return { ...state, renaming: false, tab: null, details, view: 'details' }
       })
     },
@@ -56,7 +165,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     // chat, an outside Session) settles on the details view. So does one that
     // does not own the open side chat.
     followPanel: (id) => {
-      ui.set((state) => {
+      openPanel((state) => {
         if (!state.details || state.details === id) return state
         const snap = roster.getSnapshot()
         const view = state.view === 'browser' && snap.byId[id] === undefined ? 'details'
@@ -65,15 +174,28 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
         return { ...state, details: id, view, renaming: false, tab: null }
       })
     },
-    showDetails: (id, tab = null) => { ui.set(state => ({ ...state, details: id, view: 'details', renaming: false, tab, panelYield: yieldTo(state, 'details') })) },
+    showDetails: (id, tab = null) => { openPanel(state => ({ ...state, details: id, view: 'details', renaming: false, tab, panelYield: yieldTo(state, 'details') })) },
     // Opening the conversation would move focus to its composer and blur the name field.
-    renameBot: (id) => { ui.set(state => ({ ...state, details: id, view: 'details', renaming: true, tab: null, panelYield: yieldTo(state, 'details') })) },
+    renameBot: (id) => { openPanel(state => ({ ...state, details: id, view: 'details', renaming: true, tab: null, panelYield: yieldTo(state, 'details') })) },
+    showBrowserPanel: (id, { resetDetails = false } = {}) => {
+      ui.set(state => {
+        const next = { ...state, details: id, view: 'browser', panelYield: yieldTo(state, 'browser') }
+        if (resetDetails) { next.renaming = false; next.tab = null }
+        panelInstance = state.details === id && state.view === 'browser' ? panelInstance ?? {} : {}
+        return next
+      })
+    },
     openSettings,
     // Omni's own Models page: the providers DSH serves, their keys and models.
     openModels: () => openSettings('models'),
-    closeSettings: () => { ui.set(state => (state.settings ? { ...state, settings: null } : state)) },
-    openMemory: (id) => { ui.set(state => ({ ...state, memory: id, menu: null, palette: null })) },
-    closeMemory: () => { ui.set(state => (state.memory ? { ...state, memory: null } : state)) },
+    closeSettings: (settings) => {
+      ui.set(state => (state.settings && (settings === undefined || state.settings === settings) ? { ...state, settings: null } : state))
+    },
+    openMemory: (id) => { ui.set(state => ({ ...state, memory: id, memoryInstance: {}, menu: null, palette: null })) },
+    closeMemory: (id, instance) => {
+      ui.set(state => (state.memory && (id === undefined || (state.memory === id && state.memoryInstance === instance))
+        ? { ...state, memory: null } : state))
+    },
     openConnectors: () => { ui.set(state => ({ ...state, settings: { page: 'connectors', id: null }, menu: null, palette: null, newChat: null })) },
     setPanelView: (view) => {
       if (view !== 'details' && view !== 'browser' && view !== 'side') return
@@ -96,7 +218,15 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       ui.set(state => (state.details && state.view === 'side' && state.side === chatId ? { ...state, view: 'details', side: null } : state))
       return after(call('side-close', { chatId }))
     },
-    closePanel: () => { ui.set(state => (state.details ? { ...state, details: null, view: 'details', renaming: false, tab: null, side: null } : state)) },
+    closePanel: (pane) => {
+      ui.set(state => {
+        if (!state.details) return state
+        if (pane !== undefined && (panelInstance !== pane.instance || state.details !== pane.id
+          || (state.view ?? 'details') !== pane.view || state.renaming !== pane.renaming
+          || state.tab !== pane.tab || state.side !== pane.side)) return state
+        return { ...state, details: null, view: 'details', renaming: false, tab: null, side: null }
+      })
+    },
     quote: (sessionId, text) => ui.set(state => ({ ...state, quote: { sessionId, text, token: Date.now() } })),
     clearQuote: token => ui.set(state => (state.quote?.token === token ? { ...state, quote: null } : state)),
     setFlags: (id, flags) => after(call('set-flags', { id, ...flags })),
@@ -107,9 +237,14 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     endSectionRename: () => ui.set(state => (state.renameSection ? { ...state, renameSection: null } : state)),
     deleteRoom: id => after(call('delete-room', { id })),
     openMenu: (menu) => { ui.set(state => ({ ...state, menu, palette: null })) },
-    closeMenu: () => { ui.set(state => (state.menu ? { ...state, menu: null } : state)) },
+    closeMenu: (menu) => {
+      ui.set(state => (state.menu && (menu === undefined || state.menu === menu) ? { ...state, menu: null } : state))
+    },
     closeOverlay: () => { ui.set(state => ({ ...state, newChat: null, newChatSection: null, exchange: null, details: state.newChat || state.exchange ? state.details : null })) },
     createBot: payload => after(call('create-bot', payload)),
+    // The team's full view, read once with no pull after it (the New Solver dialog's check of what a
+    // failed create left behind).
+    teamState: () => call('state', {}),
     // genie-dsh's: the folder's repository's Genie, made in a free color when it has none.
     createGenie: folder => after(call('genie-create', { folder })),
     // welcome-dsh's: the Omni Bot again, after it was deleted (the team view's omniAddable).
@@ -120,14 +255,28 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     deleteAvatar: id => call('avatar-delete', { id }),
     createRoom: (members, options = {}) => after(call('create-room', { members, ...options })),
     setBotAuto: (id, rev) => after(call('set-bot-auto', { id, rev })),
-    updateBot: (id, patch) => after(call('update-bot', { id, ...patch })),
-    // A model on another route: the host starts a new conversation with a handoff note
-    // (parts.js). `patch` carries the thinking level picked with it.
-    switchRoute: (id, ref, patch = {}) => after(call('switch-route', { id, ...patch, model: ref })),
-    switchRouteInChat: async (id, ref, patch = {}) => {
-      try { return await after(call('switch-route', { id, ...patch, model: ref })) } catch (error) {
+    updateBot: (id, patch) => picked(pickFor(id, patch?.model), call('update-bot', { id, ...patch })),
+    attachRole: (id, role) => after(call('role-attach', { id, role })),
+    detachRole: id => after(call('role-detach', { id })),
+    roleCatalog: () => after(call('role-catalog')),
+    installRole: id => after(call('role-install', { id })),
+    uninstallRole: id => after(call('role-uninstall', { id })),
+    grantRole: (id, role, capability, on) => after(call('role-grant', { id, role, capability, on })),
+    roleSettings: (id, role) => call('role-settings', { id, role }),
+    setRoleSettings: (id, role, values) => call('role-settings-set', { id, role, values }),
+    voicePane: (sessionId, paneId, open, active) => call('voice-pane', { sessionId, paneId, open, active }),
+    voiceWait: (sessionId, paneId, callId, signal) => call('voice-wait', { sessionId, paneId, callId }, signal),
+    voiceSpoken: (sessionId, paneId, callId, outcome) => call('voice-spoken', { sessionId, paneId, callId, outcome }),
+    // A model on another route: the host changes it in place on a chat with nothing said, else
+    // in a new part with a handoff (RFC 0030, Handoff note). `patch` carries the thinking level
+    // picked with it. `options.stopReply`: the person's Switch on "This stops the current reply",
+    // the only consent that lets the host stop a running reply; without it the host answers
+    // reason reply-running while one runs.
+    switchRoute: (id, ref, patch = {}, options) => picked(pickFor(id, ref), call('switch-route', { id, ...patch, model: ref, ...stopping(options) })),
+    switchRouteInChat: async (id, ref, patch = {}, options) => {
+      try { return await picked(pickFor(id, ref), call('switch-route', { id, ...patch, model: ref, ...stopping(options) })) } catch (error) {
         // A signed-out agent opens its sign-in row; the pick is made again after it.
-        const provider = cliProviderOf(ref)
+        const provider = signInProviderOf(ref)
         if (error?.code === 'bot/sign-in-required' && provider && openCliLogin(id, provider)) return undefined
         if (error?.code === 'bot/account-confirm-required' && provider && openCliLogin(id, provider)) return undefined
         throw error
@@ -135,10 +284,11 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     },
     // A model chosen in a Bot's chat (rule 2): an agent that is signed out opens the sign-in row
     // in that chat instead of failing; the Bot keeps its model until the sign-in is done.
-    // `patch` goes with the model in the same update (its thinking level).
-    chooseModelInChat: async (id, ref, patch = {}) => {
-      try { return await after(call('update-bot', { id, ...patch, model: ref })) } catch (error) {
-        const provider = cliProviderOf(ref)
+    // `patch` goes with the model in the same update (its thinking level); `options.stopReply`
+    // as for switchRoute.
+    chooseModelInChat: async (id, ref, patch = {}, options) => {
+      try { return await picked(pickFor(id, ref), call('update-bot', { id, ...patch, model: ref, ...stopping(options) })) } catch (error) {
+        const provider = signInProviderOf(ref)
         if (error?.code === 'bot/sign-in-required' && provider && openCliLogin(id, provider, ref)) return undefined
         // An agent already signed in on this computer, to an account the person has not
         // confirmed for Bots (#869): the same row, at its account step.
@@ -146,11 +296,14 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
         throw error
       }
     },
+    // The activity row reads the mark like the host's `noting`.
+    subscribePicks: listener => picks.subscribe(listener),
+    picking: part => picks.getSnapshot()[part] === true,
     openCliLogin,
     async recoverCliLogin(botId, provider) {
       const bot = cliLoginBotOf(roster.getSnapshot(), botId)
       const manager = loginState?.()
-      if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false
+      if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false
       const recovered = await manager.recover({ botId: bot.id, provider })
       if (recovered && cliLoginBotOf(roster.getSnapshot(), bot.id)) openSession?.(bot.id)
       return recovered
@@ -162,7 +315,13 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     cliLoginCancel: (botId, provider, attemptId) => call('cli-login-cancel', loginPayload(botId, provider, { attemptId })),
     cliLoginConnections: () => call('cli-login-connections', {}),
     cliLoginConfirm: (botId, provider, ref, model) => call('cli-login-confirm', loginPayload(botId, provider, { ...(ref === undefined ? {} : { ref }), ...(model === undefined ? {} : { model }) })),
-    cliLoginAccounts: () => call('cli-login-accounts', {}),
+    cliLoginAccounts: options => call('cli-login-accounts', options?.reservations === true ? { reservations: true } : {}),
+    cliLoginReserve: (offerId, label, claim) => call('cli-login-reserve', {
+      offerId, label, ...(claim?.machineId ? { machineId: claim.machineId }
+        : claim === undefined ? {} : { claimId: claim.claimId, rev: claim.rev }),
+    }),
+    cliLoginRelease: (claimId, rev) => call('cli-login-release', { claimId, rev }),
+    cliLoginReleaseMachine: machineId => call('cli-login-release', { machineId }),
     cliLoginSwitch: (botId, provider) => call('cli-login-switch', loginPayload(botId, provider)),
     cliLoginReset: (botId, provider) => call('cli-login-reset', loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call('cli-login-signout',
@@ -192,20 +351,22 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     folderPick: () => call('folder-pick'),
     folderList: path => call('folder-list', { path: path ?? '' }),
     setTeamWorkspace: path => after(call('team-workspace', { path })),
-    deleteBot: id => after(call('delete-bot', { id })),
+    deleteBot: id => after(call('delete-bot', { id })).then((value) => { forgetDrafts(value?.deletedParts); return value }),
     rollbackAdoption: agentId => after(call('agent-bot-rollback', { agentId })),
     releasePrivate: id => after(call('private-release', { id })),
     duplicateBot: id => after(call('duplicate-bot', { id })),
     setPrefs: prefs => after(call('set-prefs', prefs)),
     setMain: (id, main = true, options = {}) => after(call('set-main', { id, main, ...options })),
     updateRoom: (id, patch) => after(call('update-room', { id, ...patch })),
-    send: (sessionId, text) => after(call('send', { sessionId: partFor(sessionId), text })),
+    send: (sessionId, text, voicePane) => after(call('send', { sessionId: partFor(sessionId), text, ...(voicePane ? { voicePane } : {}) })),
     answerQuestion: (sessionId, questionId, answer) => after(call('answer-question', { sessionId: partFor(sessionId), questionId, answer })),
     dismissQuestion: sessionId => after(call('dismiss-question', { sessionId })),
     answerView: (sessionId, viewId, action, values) => after(call('view-reply', { sessionId: partFor(sessionId), viewId, action, values })),
     dismissView: sessionId => after(call('dismiss-view', { sessionId: partFor(sessionId) })),
     deleteBtw: (sessionId, cardId) => after(call('btw-delete', { sessionId, cardId })),
-    answerApproval: (id, choice) => after(call('approval-answer', { id, choice })),
+    grantApproval: (id, offer) => after(call('grant-approval', { id, offer })),
+    revokeGrant: id => after(call('grant-revoke', { id })),
+    answerApproval: (id, choice) => after(call('approval-answer', { id, choice, client: 'web' })),
     computerSetEnabled: enabled => after(call('computer-set-enabled', { enabled })),
     computerSetLevel: (botId, level) => after(call('computer-set-level', { botId, level })),
     computerRevokeApp: (botId, appKey) => after(call('computer-revoke-app', { botId, appKey })),
@@ -232,10 +393,29 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     closeGoal: () => ui.set(state => (state.goalOpen ? { ...state, goalOpen: null } : state)),
     // Values go out in these requests and never come back in a response.
     secretSet: payload => after(call('secret-set', payload)),
-    secretAllow: requestId => after(call('secret-allow', { requestId })),
+    secretAllow: (requestId, approval) => after(call('secret-allow', { ...approval, requestId })),
+    secretSourceDetail: requestId => call('secret-source-detail', { requestId }),
+    vaultStatus: (signal, provider) => call('vault-status', provider === undefined ? undefined : { provider }, signal),
+    vaultUnlock: (password, connection, provider = 'bitwarden') => call('vault-unlock',
+      (provider === 'macos-keychain' || provider === 'windows-credential') ? { provider } : { provider, password, connection }),
+    vaultUnlockSecretService: () => call('vault-unlock', { provider: 'secret-service' }),
+    vaultUnlockSaved: (provider, connection, credentialRevision) => call('vault-unlock', { provider, connection,
+      ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
+    vaultLock: provider => provider === undefined ? call('vault-lock') : call('vault-lock', { provider }),
+    vaultItems: (search, provider, project) => call('vault-items', provider === 'hashicorp-vault' || provider === 'macos-keychain' || provider === 'windows-credential'
+      ? { provider, ...search } : { search, ...(provider === undefined ? {} : { provider }),
+        ...(project === undefined ? {} : { project }) }),
+    vaultFields: (provider, mount, path) => call('vault-fields', { provider, mount, path }),
+    vaultTokenSet: (provider, token, connection, server, credentialRevision) => call('vault-token-set', provider === 'hashicorp-vault'
+      ? { provider, token, ...connection } : { provider, token, connection, ...(server === undefined ? {} : { server }),
+        ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
+    vaultTokenClear: (provider, connection, credentialRevision) => call('vault-token-clear', { provider,
+      ...(connection === undefined ? {} : { connection }), ...(credentialRevision === undefined ? {} : { credentialRevision }) }),
+    secretSourceSet: mapping => after(call('secret-source-set', mapping)),
     secretCancel: requestId => after(call('secret-cancel', { requestId })),
     secretUpdate: (name, { scope, purpose } = {}) => after(call('secret-update', { name, scope, purpose })),
     secretDelete: name => after(call('secret-delete', { name })),
+    secretSourceClear: name => after(call('secret-source-clear', { name })),
     connectorConnect: (id, payload = {}) => after(call('connector-connect', { id, ...payload })),
     connectorDisconnect: id => after(call('connector-disconnect', { id })),
     connectorRetry: id => after(call('connector-retry', { id })),
@@ -262,6 +442,12 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     imRetry: id => after(call('im-retry', { id })),
     imLoginStart: payload => call('im-login-start', payload),
     imLoginWait: payload => call('im-login-wait', payload),
+    skillLibrary: signal => call('skill-library', {}, signal),
+    getSkill: name => call('skill-library-get', { name }),
+    saveSkill: skill => after(call('skill-library-save', skill)),
+    deleteSkill: name => after(call('skill-library-delete', { name })),
+    setBotSkill: (id, name, attached, mode) => after(call(attached ? 'bot-skill-add' : 'bot-skill-remove', { id, name, mode })),
+    setBotSkillMode: (id, name, mode) => after(call('bot-skill-mode', { id, name, mode })),
     saveCapability: capability => after(call('capability-save', capability)),
     deleteCapability: name => after(call('capability-delete', { name })),
     approveCapability: name => after(call('capability-approve', { name })),
@@ -301,6 +487,10 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     diagnosticsClear: () => call('diagnostics-clear'),
     diagnosticsPermissions: () => call('diagnostics-permissions'),
     repoStars: () => call('repo-stars'),
+    checkSelfUpdate: body => call('self-update-check', body),
+    selfUpdateResult: runId => call('self-update-check-result', { runId }),
+    selfUpdateStatus: signal => call('self-update-status', undefined, signal),
+    startSelfUpdate: body => call('self-update-start', body),
     // A failed action away from any form (a menu, the palette) shows as a toast.
     reportError: (error, where = 'action') => {
       noteClientError(where, error)

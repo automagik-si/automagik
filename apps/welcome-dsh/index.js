@@ -7,6 +7,7 @@ import z from '@deepseek-ai/schemastery'
 import { watchRestart } from './src/host/restart.js'
 import { watchBusy } from './src/host/busy.js'
 import { install } from './src/host/endpoint.js'
+import { createReleases } from './src/host/release-resolve.js'
 
 export const name = 'omni-ai'
 // `connection` serves the plugin's /api/omni-ai route to the browser.
@@ -34,7 +35,7 @@ export const Config = z.object({
 })
 
 export function apply(ctx) {
-  install(ctx)
+  install(ctx, { releases: createReleases({ ctx }) })
   // For the desktop app's update while the person is away (src/host/busy.js).
   watchBusy(ctx)
   watchRestart(ctx)

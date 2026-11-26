@@ -2,6 +2,7 @@ package ai.namastex.automagik
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -697,6 +698,39 @@ class TeamsTest {
         }
     }
 
+    /** A card scope cancelled mid-motion is not a finished motion: no return, no finish, and the failed answer is not counted. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun aCancelledCardScopeDoesNotCountTheMotionAsFinished() = runTest {
+        var returns = 0
+        var recorded = false
+        var finished: Boolean? = null
+        var done: ((Boolean) -> Unit)? = null
+        val scope = CoroutineScope(Job() + StandardTestDispatcher(testScheduler))
+        DeckSend(scope, record = { recorded = true }, finish = { finished = it }, returnMotion = { returns++ })
+            .send("k", dispatch = { done = it }, exit = { awaitCancellation() })
+        runCurrent()
+        done!!.invoke(false)
+        runCurrent()
+        assertNull("not finished while the exit runs", finished)
+        scope.cancel()
+        runCurrent()
+        assertFalse("a failed answer is not recorded", recorded)
+        assertEquals("a cancelled scope plays no return motion", 0, returns)
+        assertNull("a cancelled motion is not counted as finished", finished)
+    }
+
+    /** A failed answer re-enables Yes and No only after the card has returned, not while it flies back (#1068). */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun aFailedAnswerFinishesOnlyAfterItsReturnMotion() = runTest {
+        val events = mutableListOf<String>()
+        val scope = CoroutineScope(Job() + StandardTestDispatcher(testScheduler))
+        DeckSend(scope, record = {}, finish = { events += "finish:$it" }, returnMotion = { events += "return" })
+            .send("k", dispatch = { done -> done(false) }, exit = {})
+        runCurrent()
+        assertEquals(listOf("return", "finish:false"), events)
+        scope.cancel()
+    }
+
     @Test fun theSampleDeckDoesNotShowAllClearWhileChatsWait() {
         fun chat(id: String, message: String) = Teams.DeckCard(TerminalRef("h", "dsh:$id"), id, "herdr", "Automagik Bot",
             message, "question", 1, 2, TerminalRef("h", "dsh:$id"))
@@ -755,5 +789,16 @@ class TeamsTest {
         assertEquals(Teams.Swipe.NO, Teams.swipe(dx = -150f, dy = 0f, t, canYes = true, canNo = true))
         assertEquals(Teams.Swipe.NONE, Teams.swipe(dx = 150f, dy = 0f, t, canYes = false, canNo = true))   // no Yes to send
         assertEquals(Teams.Swipe.NONE, Teams.swipe(dx = 60f, dy = -80f, t, canYes = true, canNo = true))    // too short
+    }
+
+    @Test fun aGroupIsNeverABubblesChat() {
+        val teams = Teams.build(mapOf("h1" to machine()), 10_000L)
+        val noRooms = Teams.bubbles(teams, emptyMap())
+        val main = "b-aaaaaaaaaa"
+        val groups = listOf(dshRow("room:$main"), dshRow("room:r1", registryId = main))
+        assertEquals(noRooms.map { it.opens }, Teams.bubbles(teams, mapOf("h1" to groups)).map { it.opens })
+        val roomNamedBot = Teams.Bot("room:$main", "Lead", true, null, Teams.IDLE, "", 0L, null, "")
+        val team = Teams.Team("h1|x", "h1", "", "/w", "W", Teams.Icon.Letter, null, listOf(roomNamedBot))
+        assertNull(Teams.bubbles(listOf(team), mapOf("h1" to groups)).single().opens)
     }
 }

@@ -290,7 +290,10 @@ test('delayed agent launches cannot inherit auth added after the isolated env wa
     t.after(() => run.dispose())
     let found
     for (let i = 0; i < 100; i++) {
-      try { found = readFileSync(output, 'utf8'); break } catch {}
+      try {
+        found = readFileSync(output, 'utf8')
+        if (found) break
+      } catch {}
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     assert.equal(found, 'unset')

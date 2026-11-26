@@ -15,6 +15,7 @@ import { GITHUB_FIELDS, githubPermissions, githubTokenUrl } from '../shared/gith
 
 const MIN_VALUE = 4
 const NONE = {}
+const typedKeyName = /^[A-Za-z][\w-]{0,63}$/
 
 export const KeyIcon = () => h('svg', { width: 15, height: 15, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
   h('path', { d: 'M7 9.5a3.5 3.5 0 1 1 0 .01z' }), h('path', { d: 'M10.4 10.6L17 10.6M14.5 10.6v2.4M16.6 10.6v1.8' }))
@@ -27,7 +28,8 @@ const WarnIcon = () => h('svg', { width: 14, height: 14, viewBox: '0 0 20 20', f
 // key; browsers without that CSS fall back to a new-password field.
 const MASK_BY_CSS = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('-webkit-text-security', 'disc')
 
-const insecure = () => typeof location !== 'undefined' && location.protocol === 'http:'
+// RFC 0034 Q10: only a page on this computer unlocks; Pocket and remote pages may approve only.
+const insecure = () => typeof location !== 'undefined'
   && !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/.test(location.hostname)
 
 const scopeLabel = (scope, roster) => {
@@ -37,15 +39,17 @@ const scopeLabel = (scope, roster) => {
 }
 const when = time => (Number.isFinite(time) ? new Date(time).toLocaleString(dateLocale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '')
 
-export function MaskedInput({ value, onChange, onEnter, label, autoFocus = false, disabled = false }) {
+export function MaskedInput({ value, onChange, onEnter, label, inputRef, autoFocus = false, disabled = false, passwordType = false }) {
+  const maskByCss = MASK_BY_CSS && !passwordType
   return h('input', {
     className: 'bt-secret-input',
-    type: MASK_BY_CSS ? 'text' : 'password',
+    type: maskByCss ? 'text' : 'password',
     disabled,
-    'data-masked': MASK_BY_CSS ? '' : undefined,
+    'data-masked': maskByCss ? '' : undefined,
     value,
+    ref: inputRef,
     autoFocus,
-    autoComplete: MASK_BY_CSS ? 'off' : 'new-password',
+    autoComplete: maskByCss ? 'off' : 'new-password',
     autoCorrect: 'off',
     autoCapitalize: 'off',
     spellCheck: false,
@@ -55,7 +59,7 @@ export function MaskedInput({ value, onChange, onEnter, label, autoFocus = false
     'data-form-type': 'other',
     'aria-label': label,
     placeholder: label ?? t('Paste or type the key'),
-    onChange: event => onChange(event.target.value),
+    onChange: onChange === undefined ? undefined : event => onChange(event.target.value),
     onKeyDown: (event) => {
       if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
       event.preventDefault()
@@ -96,15 +100,80 @@ export function GitHubSteps({ bot, work }) {
       h('li', null, t('Click “{button}”, copy it and paste it below.', { button: GITHUB_FIELDS.generate }))))
 }
 
+const vaultLocked = 'The vault is locked. Unlock it in Settings › Vault and ask again; nothing was read.'
+const vaultDetailUnavailable = 'The vault item details could not be loaded.'
+const macosKeychain = 'macos-keychain'
+const windowsCredential = 'windows-credential'
+const windowsLabel = 'Windows Credential Manager'
+const windowsHint = 'Find a generic credential by its exact target in the current Windows logon session.'
+const keychainHint = 'macOS may ask on this Mac. Choose “Allow”, not “Always Allow”.'
+
+const GNOME_PROVIDER_ID = 'secret-service'
+const GNOME_PROVIDER_LABEL = 'Secret Service (GNOME Keyring)'
+const createdLabel = created => {
+  const time = new Date(Number(created) * 1000)
+  return t('Created: {time}', { time: Number.isFinite(time.getTime()) ? time.toISOString() : created })
+}
+
+function VaultRequestContext({ request }) {
+  return h('div', { className: 'bt-secret-body' },
+    h('div', { className: 'bt-secret-saved' }, h(KeyIcon), t('From a vault')),
+    h('div', { className: 'bt-secret-note' }, t('Shell: {shell}', { shell: request.shell })),
+    h('div', { className: 'bt-secret-note' }, t('Folder: {folder}', { folder: request.workdir })),
+    h('pre', { className: 'bt-aa-pre', tabIndex: 0, 'aria-label': t('Command') }, h('code', null, request.command)))
+}
+
 export function SecretCard({ sessionId, bot, request, roster, actions, inline = false }) {
   const [value, setValue] = useState('')
   const [scope, setScope] = useState('all')
   const [replacing, setReplacing] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [vaultDetail, setVaultDetail] = useState(null)
   const busyRef = useRef(false)
   const hold = useDockHold(sessionId, 'secret', request.id, actions, inline)
   const noteId = useId()
+  const vault = request.source === 'vault'
+  const detailKey = vault ? JSON.stringify([request.id, request.name, request.sessionId, request.commandDigest, request.shell, request.workdir, request.command]) : null
+  const detail = vaultDetail?.key === detailKey ? vaultDetail : null
+  const displayed = useRef({ id: request.id, key: detailKey, digest: request.commandDigest })
+  const fetchDetail = actions.secretSourceDetail
+  useEffect(() => {
+    const { id, key, digest } = displayed.current
+    if (key === null) return
+    let active = true
+    Promise.resolve().then(() => fetchDetail(id)).then(value => {
+      if (!active) return
+      const { commandDigest, snapshot, provider, item, field, name, collection, created } = value ?? {}
+      let verified = commandDigest === digest && [commandDigest, snapshot, provider, field].every(part => typeof part === 'string')
+      let displayItem = item
+      let keychainDetails
+      if (provider === GNOME_PROVIDER_ID) {
+        verified &&= field === 'secret' && [name, collection, created].every(part => typeof part === 'string')
+        displayItem = name
+      } else verified &&= typeof item === 'string'
+      if (verified && provider === macosKeychain) {
+        try {
+          const parts = JSON.parse(item)
+          verified = field === 'password' && Array.isArray(parts) && parts.length === 3
+            && parts.every(part => typeof part === 'string' && part !== '')
+          if (verified) keychainDetails = { service: parts[1], account: parts[2] }
+        } catch { verified = false }
+      } else if (verified && provider === windowsCredential) {
+        verified = field === 'password' && item.length >= 4
+      } else if (verified && provider === 'hashicorp-vault') {
+        try {
+          const parts = JSON.parse(item)
+          verified = Array.isArray(parts) && parts.length === 2 && parts.every(part => typeof part === 'string' && part !== '')
+          if (verified) displayItem = parts.join('/')
+        } catch { verified = false }
+      }
+      setVaultDetail(verified ? { key, value: { commandDigest, snapshot, provider, item: displayItem, field, collection, created, keychainDetails } } : { key, error: vaultDetailUnavailable })
+    }, () => {
+      if (active) setVaultDetail({ key, error: vaultDetailUnavailable })
+    })
+    return () => { active = false }
+  }, [fetchDetail])
   const secret = (roster.secrets ?? []).find(entry => entry.name === request.name)
   const run = (make) => {
     if (busyRef.current) return undefined
@@ -118,6 +187,38 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
     })
   }
   const cancel = () => run(() => actions.secretCancel(request.id))
+  if (vault) {
+    const item = detail?.value
+    const hashicorp = item?.provider === 'hashicorp-vault'
+    const keyring = item?.provider === GNOME_PROVIDER_ID
+    const proton = item?.provider === 'proton-pass'
+    const keychain = item?.provider === macosKeychain
+    const windows = item?.provider === windowsCredential
+    const allow = () => {
+      if (item && !busy) void run(() => actions.secretAllow(request.id, { commandDigest: item.commandDigest, snapshot: item.snapshot }))
+    }
+    return h('div', { className: 'bt-q bt-secret', role: 'group', onFocusCapture: hold, onPointerDownCapture: hold },
+      h(SecretHead, {
+        bot, title: t('Let {bot} use {name}?', { bot: bot.name, name: request.name }),
+        name: request.name, detail: request.purpose, onClose: busy ? undefined : cancel,
+      }),
+      h(VaultRequestContext, { request }),
+      item ? h('div', { className: 'bt-secret-note' },
+        h('div', null, t('Provider: {provider}', { provider: keyring ? t(GNOME_PROVIDER_LABEL) : keychain ? t('macOS Keychain') : windows ? t(windowsLabel) : hashicorp ? t('HashiCorp Vault') : proton ? t('Proton Pass') : item.provider })),
+        keychain ? ['Service', 'Account'].map(label => h('div', { key: label }, t(label),
+          h('pre', { className: 'bt-aa-pre', 'aria-label': t(label) },
+            h('code', null, item.keychainDetails[label.toLowerCase()]))))
+          : windows ? h('div', null, t('Target'),
+            h('pre', { className: 'bt-aa-pre', 'aria-label': t('Target') }, h('code', null, item.item)))
+            : h('div', null, t('Item: {item}', { item: item.item })),
+        keyring ? h('div', null, t('Collection: {collection}', { collection: item.collection })) : null,
+        keyring ? h('div', null, createdLabel(item.created)) : null,
+        h('div', null, t('Field: {field}', { field: keyring ? t('Secret') : (keychain || windows) ? t('Password') : item.field }))) : null,
+      error || detail?.error ? h('div', { className: 'bt-secret-error', role: 'alert' }, error || t(detail.error)) : null,
+      h('div', { className: 'bt-q-actions' },
+        h('button', { type: 'button', className: 'bt-q-btn', disabled: busy, onClick: cancel }, t('Cancel')),
+        h('button', { type: 'button', className: 'bt-q-submit', disabled: busy || !item, onClick: allow }, busy ? t('Allowing…') : t('Allow'))))
+  }
   const long = value.trim().length >= MIN_VALUE
   const save = () => { if (long && !busy) void run(() => actions.secretSet({ requestId: request.id, value, scope })) }
   const allow = () => { if (!busy) void run(() => actions.secretAllow(request.id)) }
@@ -150,6 +251,13 @@ export function SecretCard({ sessionId, bot, request, roster, actions, inline = 
 }
 
 function SettledSecret({ bot, request, roster }) {
+  if (request.source === 'vault') {
+    const title = request.status === 'allowed' ? t('Allowed once')
+      : request.status === 'locked' ? t(vaultLocked) : t('Canceled')
+    return h('div', { className: 'bt-q bt-q-settled bt-secret bt-secret-done', role: 'group', 'data-status': request.status },
+      h(SecretHead, { bot, title, name: request.name, detail: request.purpose }),
+      h(VaultRequestContext, { request }))
+  }
   const canceled = request.status === 'canceled'
   const text = canceled ? t('{bot} asked for {name}', { bot: bot.name, name: request.name })
     : request.status === 'allowed' ? t('Allowed {bot} to use {name}', { bot: bot.name, name: request.name })
@@ -205,21 +313,31 @@ export function SecretDock({ sessionId, useRoster, useCards, useHeldCards, actio
 // -------------------------------------------------------------------------
 // Settings page
 
-function ScopeEditor({ secret, roster, onSave }) {
+function ScopeEditor({ secret, roster, onSave, onChange }) {
   const [mode, setMode] = useState(secret.scope === 'all' ? 'all' : 'some')
   const [picked, setPicked] = useState(secret.scope === 'all' ? [] : secret.scope)
-  const toggle = id => setPicked(list => (list.includes(id) ? list.filter(item => item !== id) : [...list, id]))
+  const id = useId()
+  const toggle = botId => {
+    const next = picked.includes(botId) ? picked.filter(item => item !== botId) : [...picked, botId]
+    setPicked(next)
+    onChange?.(next)
+  }
+  const choose = next => {
+    setMode(next)
+    onChange?.(next === 'all' ? 'all' : picked)
+  }
   const same = mode === 'all' ? secret.scope === 'all' : secret.scope !== 'all' && [...picked].sort().join() === [...secret.scope].sort().join()
+  const label = onChange ? t('Who may ask') : t('Who may use it')
   return h('div', { className: 'bt-secret-edit-block' },
-    h('div', { className: 'bt-secret-edit-label' }, t('Who may use it')),
-    h('div', { className: 'bt-secret-radios', role: 'radiogroup', 'aria-label': t('Who may use {name}', { name: secret.name }) },
-      [['all', t('All Bots')], ['some', t('Chosen Bots')]].map(([id, text]) => h('label', { key: id, className: 'bt-secret-radio' },
-        h('input', { type: 'radio', name: `scope-${secret.name}`, checked: mode === id, onChange: () => setMode(id) }), text))),
+    h('div', { className: 'bt-secret-edit-label' }, label),
+    h('div', { className: 'bt-secret-radios', role: 'radiogroup', 'aria-label': onChange ? label : t('Who may use {name}', { name: secret.name }) },
+      [['all', t('All Bots')], ['some', t('Chosen Bots')]].map(([choice, text]) => h('label', { key: choice, className: 'bt-secret-radio' },
+        h('input', { type: 'radio', name: `scope-${id}`, checked: mode === choice, onChange: () => choose(choice) }), text))),
     mode === 'some' ? h('div', { className: 'bt-secret-bots' }, roster.bots.map(bot => h('button', {
       key: bot.id, type: 'button', className: 'bt-secret-bot', 'aria-pressed': picked.includes(bot.id), onClick: () => toggle(bot.id),
     }, h(BotAvatar, { bot, size: 20, badge: false, live: false }), bot.name, picked.includes(bot.id) ? h(CheckIcon) : null))) : null,
-    h('div', { className: 'bt-secret-row-actions' },
-      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: same, onClick: () => onSave(mode === 'all' ? 'all' : picked) }, t('Save access'))))
+    onSave ? h('div', { className: 'bt-secret-row-actions' },
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: same, onClick: () => onSave(mode === 'all' ? 'all' : picked) }, t('Save access'))) : null)
 }
 
 function PurposeEditor({ secret, onSave }) {
@@ -291,11 +409,43 @@ export function SecretRow({ secret, roster, actions, run, open, onToggle }) {
           : h('button', { type: 'button', className: 'bt-soft bt-soft-sm bt-secret-danger', onClick: () => setConfirm(true) }, h(TrashIcon), t('Delete')))) : null)
 }
 
+function VaultSourceRow({ source, present, actions, run, open, onToggle }) {
+  const [confirm, setConfirm] = useState(null)
+  const { name, purpose, definedTwice } = source
+  useEffect(() => { setConfirm(null) }, [open, definedTwice])
+  const remove = () => run(confirm === 'clear' ? actions.secretSourceClear(name) : actions.secretDelete(name))
+    .then(ok => { if (ok) setConfirm(null) })
+  return h('div', { className: 'bt-secret-item', 'data-open': open ? '' : undefined },
+    h('button', { type: 'button', className: 'bt-set-row bt-secret-summary', 'aria-expanded': open, onClick: onToggle },
+      h('span', { className: 'bt-set-copy' },
+        h('span', { className: 'bt-secret-title' }, h(KeyIcon), h('code', { className: 'bt-secret-name' }, name),
+          purpose ? h('span', { className: 'bt-secret-purpose' }, purpose) : null),
+        h('span', { className: 'bt-set-hint' }, definedTwice ? t('Defined twice') : present
+          ? t("Each use asks you first, in the Bot's chat.") : t('Unavailable: the vault plugin cannot serve it yet'))),
+      h('span', { className: 'bt-set-control' }, h('span', { className: 'bt-tag' }, t('From a vault')))),
+    open ? h('div', { className: 'bt-secret-edit' },
+      definedTwice ? h('div', { className: 'bt-secret-warn', role: 'note' }, h(WarnIcon),
+        t('Defined twice: this name is also mapped to a vault item, so no Bot can use it. Delete one of them.')) : null,
+      h('div', { className: 'bt-secret-row-actions' },
+        confirm === null ? [
+          h('button', { key: 'clear', type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setConfirm('clear') },
+            definedTwice ? t('Remove the vault mapping') : t('Remove the mapping')),
+          definedTwice ? h('button', { key: 'delete', type: 'button', className: 'bt-soft bt-soft-sm bt-secret-danger', onClick: () => setConfirm('delete') },
+            h(TrashIcon), t('Delete the typed key')) : null,
+        ] : [
+          h('span', { key: 'q', className: 'bt-set-hint' }, confirm === 'clear'
+            ? t('Remove the mapping for {name}?', { name }) : t('Delete {name}? Bots lose it at once.', { name })),
+          h('button', { key: 'no', type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setConfirm(null) }, t('Keep')),
+          h('button', { key: 'yes', type: 'button', className: 'bt-soft bt-soft-sm bt-secret-danger', onClick: remove },
+            confirm === 'clear' ? t('Remove the mapping') : t('Delete')),
+        ])) : null)
+}
+
 function AddSecret({ actions, run, onDone }) {
   const [name, setName] = useState('')
   const [purpose, setPurpose] = useState('')
   const [value, setValue] = useState('')
-  const ready = /^[A-Za-z][\w-]{0,63}$/.test(name.trim()) && value.trim().length >= MIN_VALUE
+  const ready = typedKeyName.test(name.trim()) && value.trim().length >= MIN_VALUE
   const save = () => {
     if (!ready) return
     void run(actions.secretSet({ name, purpose, value, scope: 'all' })).then(ok => { if (ok) { setValue(''); onDone() } })
@@ -310,19 +460,354 @@ function AddSecret({ actions, run, onDone }) {
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: !ready, onClick: save }, t('Save key'))))
 }
 
+const protonFieldLabels = {
+  username: 'Username', email: 'Email', password: 'Password', note: 'Note', cardholder_name: 'Cardholder name',
+  number: 'Card number', verification_number: 'Security code', expiration_date: 'Expiration date',
+  pin: 'PIN', ssid: 'Wi-Fi name', private_key: 'Private key',
+}
+
+function AddVaultKey({ actions, provider, connection, credentialRevision, roster, run, onDone }) {
+  const [name, setName] = useState('')
+  const [purpose, setPurpose] = useState('')
+  const [search, setSearch] = useState('')
+  const [items, setItems] = useState(null)
+  const [itemId, setItemId] = useState('')
+  const [field, setField] = useState('')
+  const [scope, setScope] = useState('all')
+  const [busy, setBusy] = useState(false)
+  const [mount, setMount] = useState('')
+  const [folder, setFolder] = useState('')
+  const [fields, setFields] = useState([])
+  const [projects, setProjects] = useState(null)
+  const [project, setProject] = useState('')
+  const [service, setService] = useState('')
+  const [account, setAccount] = useState('')
+  const [target, setTarget] = useState('')
+  const keyring = provider === GNOME_PROVIDER_ID
+  const item = items?.find(row => itemId !== '' && (keyring ? row.handle : row.id) === itemId && !row.folder)
+  const onePassword = provider === 'onepassword'
+  const proton = provider === 'proton-pass'
+  const hashicorp = provider === 'hashicorp-vault'
+  const machineAccount = provider === 'bitwarden-secrets'
+  const keychain = provider === macosKeychain
+  const windows = provider === windowsCredential
+  // Providers whose picker search names the provider explicitly (Bitwarden keeps the legacy call).
+  const namedSearch = provider === 'onepassword' || provider === GNOME_PROVIDER_ID
+  const optionId = row => hashicorp && row.folder ? row.id + '/' : row.id
+  const itemOption = (row, index) => {
+    if (!keyring) return h('option', { key: optionId(row), value: optionId(row) }, row.name)
+    if (row.locked) return h('option', { key: index, disabled: true, value: '' },
+      t('{collection} (locked)', { collection: row.collection }))
+    const label = t('{item} · {collection}', { item: row.name, collection: row.collection })
+    return h('option', { key: row.handle, value: row.handle },
+      row.created === undefined ? label : label + ' · ' + createdLabel(row.created))
+  }
+  const vaults = new Map()
+  if (onePassword || proton) for (const row of items ?? []) {
+    const id = row.id.split('/')[0]
+    if (!vaults.has(id)) vaults.set(id, { name: row.vault, options: [] })
+    vaults.get(id).options.push(itemOption(row))
+  }
+  const fieldLabel = row => {
+    if (proton) return t(protonFieldLabels[row.selector])
+    if (!onePassword) return row.selector.startsWith('field:') ? row.label : t(row.label)
+    if (!item.fields.some(other => other !== row && other.label === row.label)) return row.label
+    const section = row.section ?? row.selector
+    const suffix = item.fields.some(other => other !== row && other.label === row.label && other.section === section)
+      ? row.selector : section
+    return t('{label} ({section})', { label: row.label, section: suffix })
+  }
+  const ready = !busy && typedKeyName.test(name.trim()) && (keyring ? item?.field === 'secret' : hashicorp ? fields.includes(field) : item?.fields.some(row => row.selector === field))
+  const resetItems = () => {
+    setItems(null)
+    setItemId('')
+    setField('')
+    setFields([])
+  }
+  const find = async (next = hashicorp ? folder : project) => {
+    if (busy || (keychain && (!service || !account)) || (windows && target.length < 4)) return
+    setBusy(true)
+    resetItems()
+    try {
+      // A HashiCorp folder or a Secrets Manager project ('' lists the projects).
+      const listed = windows ? actions.vaultItems({ target }, provider)
+        : keychain ? actions.vaultItems({ service, account }, provider)
+        : hashicorp ? actions.vaultItems({ mount, folder: next }, provider)
+        : machineAccount ? actions.vaultItems(search, provider, next || undefined)
+        : (namedSearch || proton) ? actions.vaultItems(search, provider) : actions.vaultItems(search)
+      await run(listed.then(answer => {
+        if (machineAccount && !next) setProjects(answer.projects)
+        else setItems(answer.items)
+        if ((keychain || windows) && answer.items.length === 1) {
+          setItemId(answer.items[0].id)
+          setField('password')
+        }
+      }))
+    } finally { setBusy(false) }
+  }
+  const selectItem = async event => {
+    const id = event.target.value
+    setItemId(id)
+    setField('')
+    if (!hashicorp) return
+    setFields([])
+    const row = items.find(item => optionId(item) === id)
+    if (!row) return
+    if (row.folder) {
+      setFolder(row.id)
+      await find(row.id)
+      return
+    }
+    setBusy(true)
+    try { await run(actions.vaultFields(provider, mount, id).then(answer => setFields(answer.fields))) }
+    finally { setBusy(false) }
+  }
+  const save = async () => {
+    if (!ready) return
+    setBusy(true)
+    try {
+      const key = name.trim().replace(/-/g, '_')
+      const mapping = keyring ? { name: key, purpose, scope, provider, handle: itemId }
+        : { name: key, purpose, connection, item: hashicorp ? JSON.stringify([mount, itemId]) : itemId, field, scope }
+      if (onePassword || hashicorp || proton || machineAccount || keychain || windows) mapping.provider = provider
+      if (machineAccount) mapping.credentialRevision = credentialRevision
+      if (await run(actions.secretSourceSet(mapping))) onDone()
+    } finally { setBusy(false) }
+  }
+  return h('div', { className: 'bt-set-row bt-set-paste bt-secret-add' },
+    h('input', { className: 'bt-input', 'aria-label': t('Key name'), placeholder: t('NAME, e.g. GITHUB_TOKEN'), value: name, spellCheck: false, autoComplete: 'off', autoFocus: true, onChange: event => setName(event.target.value.toUpperCase()) }),
+    h('input', { className: 'bt-input', 'aria-label': t('What it is for'), placeholder: t('What it is for'), value: purpose, autoComplete: 'off', onChange: event => setPurpose(event.target.value) }),
+    machineAccount && projects === null ? h('button', {
+      type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: () => find(''),
+    }, t('List projects')) : null,
+    machineAccount && projects !== null ? h('select', {
+      className: 'bt-input', 'aria-label': t('Vault project'), value: project, disabled: busy,
+      onChange: event => { const selected = event.target.value; setProject(selected); void find(selected) },
+    }, h('option', { value: '' }, t('Choose a project')), projects.map(row => h('option', { key: row.id, value: row.id }, row.name))) : null,
+    (!machineAccount || project) ? h('form', { className: 'bt-secret-inline', onSubmit: event => { event.preventDefault(); return find() } },
+      keychain || windows ? (windows ? [['Target', target, setTarget, 256]]
+        : [['Service', service, setService, 128], ['Account', account, setAccount, 128]]).map(([label, value, setValue, maxLength]) =>
+        h('label', { key: label, className: 'bt-q-field' }, t(label),
+          h('input', { className: 'bt-input', 'aria-label': t(label), value, maxLength, disabled: busy,
+            spellCheck: false, autoComplete: 'off', onChange: event => { setValue(event.target.value); resetItems() } })))
+        : hashicorp ? [
+        h('input', { key: 'mount', className: 'bt-input', 'aria-label': t('Vault mount'), placeholder: t('Vault mount'), value: mount,
+          disabled: busy, spellCheck: false, autoComplete: 'off', onChange: event => { setMount(event.target.value); setFolder(''); resetItems() } }),
+        h('input', { key: 'folder', className: 'bt-input', 'aria-label': t('Vault folder (optional)'), placeholder: t('Vault folder (optional)'), value: folder,
+          disabled: busy, spellCheck: false, autoComplete: 'off', onChange: event => { setFolder(event.target.value); resetItems() } }),
+      ] : h('input', { className: 'bt-input', type: 'search', 'aria-label': t('Search the vault'), placeholder: t('Search the vault'), value: search, autoComplete: 'off', onChange: event => setSearch(event.target.value) }),
+      h('button', { type: 'submit', className: 'bt-soft bt-soft-sm', disabled: busy || (hashicorp && !mount) || (keychain && (!service || !account)) || (windows && target.length < 4) },
+        t(keychain || windows ? 'Find' : hashicorp ? 'Browse' : 'Search'))) : null,
+    items?.length === 0 ? h('span', { className: 'bt-set-hint', role: 'status' }, t('No matching vault items.')) : null,
+    windows && item ? h('div', { className: 'bt-set-hint' }, t('User name: {name}', { name: item.userName ?? t('not shown') })) : null,
+    !keychain && !windows && items?.length > 0 ? h('select', {
+      className: 'bt-input', 'aria-label': t('Vault item'), value: itemId,
+      disabled: hashicorp ? busy : undefined, onChange: selectItem,
+    }, h('option', { value: '' }, t('Choose an item')),
+    (onePassword || proton) ? [...vaults].map(([id, { name, options }]) => h('optgroup', { key: id, label: name }, options))
+      : items.map(itemOption)) : null,
+    item && !keyring ? h('select', {
+      className: 'bt-input', 'aria-label': t('Vault field'), value: field, onChange: event => setField(event.target.value),
+    }, h('option', { value: '' }, t('Choose a field')),
+    hashicorp ? fields.map(id => h('option', { key: id, value: id },
+      /^\s|\s$|[\t\r\n]| {2}/.test(id) ? JSON.stringify(id).replace(/ /g, '\u00a0') : id))
+      : item.fields.map(row => h('option', { key: row.selector, value: row.selector }, fieldLabel(row)))) : null,
+    h(ScopeEditor, { secret: { scope: 'all' }, roster, onChange: setScope }),
+    h('div', { className: 'bt-secret-row-actions' },
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onDone }, t('Cancel')),
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: !ready, onClick: save }, t('Save key'))))
+}
+
+const vaultStates = {
+  unlocked: 'Unlocked',
+  locked: 'Locked',
+  unauthenticated: 'Not signed in to Bitwarden CLI',
+  unavailable: 'The vault did not answer.',
+}
+// Built from [id, label] pairs so no provider id reads as a credential key in the bundle.
+const vaultProviders = Object.fromEntries([
+  ['bitwarden', 'Bitwarden'], ['onepassword', '1Password'], ['hashicorp-vault', 'HashiCorp Vault'],
+  [GNOME_PROVIDER_ID, GNOME_PROVIDER_LABEL], ['proton-pass', 'Proton Pass'], ['bitwarden-secrets', 'Bitwarden Secrets Manager'],
+  [macosKeychain, 'macOS Keychain'], [windowsCredential, windowsLabel],
+])
+
+function VaultSection({ roster, actions, run, Section }) {
+  const [status, setStatus] = useState(null)
+  const [choice, setChoice] = useState(undefined)
+  const [busy, setBusy] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [server, setServer] = useState('us')
+  const [connectionLabel, setConnectionLabel] = useState(undefined)
+  const password = useRef(null)
+  const address = useRef(null)
+  const namespace = useRef(null)
+  const readOnly = roster.readOnly != null
+  const state = readOnly ? 'unavailable' : status?.state
+  const connection = status?.connection
+  const provider = status?.provider ?? choice ?? 'bitwarden'
+  const keyring = provider === GNOME_PROVIDER_ID
+  const onePassword = provider === 'onepassword'
+  const proton = provider === 'proton-pass'
+  const hashicorp = provider === 'hashicorp-vault'
+  const keychain = provider === macosKeychain
+  const windows = provider === windowsCredential
+  const machineAccount = provider === 'bitwarden-secrets'
+  const connectionKnown = status?.connectionKnown === true
+  const target = connectionKnown ? connection : connectionLabel ?? connection
+  const credentialRevision = status?.credentialRevision
+  const managerStatusKey = machineAccount ? JSON.stringify([state, provider, connection, credentialRevision]) : undefined
+  const credentialKey = JSON.stringify(machineAccount ? [managerStatusKey, target, server] : [provider, connection])
+  const local = !insecure()
+  useEffect(() => {
+    if (readOnly || busy || typeof actions.vaultStatus !== 'function') return
+    const control = new AbortController()
+    let timer
+    const refresh = async () => {
+      try {
+        const answer = await actions.vaultStatus(control.signal, choice)
+        if (!control.signal.aborted) setStatus(answer)
+      } catch {
+        if (!control.signal.aborted) setStatus(previous => ({ ...previous, state: 'unavailable', reason: undefined }))
+      }
+      if (!control.signal.aborted) timer = setTimeout(refresh, 5000)
+    }
+    void refresh()
+    return () => { control.abort(); clearTimeout(timer) }
+  }, [actions, busy, readOnly, refreshKey, choice])
+  useEffect(() => { if (state !== 'unlocked' || status?.mismatch) setAdding(false) }, [state, status?.mismatch])
+  useEffect(() => {
+    if (machineAccount) setAdding(false)
+  }, [managerStatusKey, machineAccount])
+  useEffect(() => { setServer('us') }, [provider, connection, credentialRevision])
+  const changed = () => {
+    setStatus(previous => ({ ...previous, state: undefined }))
+    setBusy(false)
+    setRefreshKey(key => key + 1)
+  }
+  const clearCredential = () => { if (password.current) password.current.value = '' }
+  const choose = event => {
+    const next = event.target.value
+    clearCredential()
+    setAdding(false)
+    setConnectionLabel(undefined)
+    setStatus(previous => ({ ...previous, provider: next, state: undefined, reason: undefined }))
+    setChoice(next)
+  }
+  const unlock = async () => {
+    const input = password.current
+    if (busy || (!keyring && !keychain && !windows && !input?.value) || (hashicorp && !address.current?.value) || (machineAccount && !target)) return
+    setBusy(true)
+    const credential = input?.value
+    if (input) input.value = ''
+    try {
+      if (keyring) await run(actions.vaultUnlockSecretService())
+      else if (keychain || windows) await run(actions.vaultUnlock(undefined, undefined, provider))
+      else if (hashicorp) {
+        const endpoint = { address: address.current.value, namespace: namespace.current.value }
+        address.current.value = ''
+        namespace.current.value = ''
+        await run(actions.vaultTokenSet(provider, credential, endpoint))
+      } else {
+        await run(machineAccount ? actions.vaultTokenSet(provider, credential, target, server, credentialRevision)
+          : (onePassword || proton) ? actions.vaultTokenSet(provider, credential, connection) : actions.vaultUnlock(credential, connection))
+      }
+    } finally { changed() }
+  }
+  const savedToken = async clear => {
+    if (busy || !target) return
+    clearCredential()
+    setBusy(true)
+    setAdding(false)
+    try {
+      await run(clear ? actions.vaultTokenClear(provider, target, credentialRevision)
+        : actions.vaultUnlockSaved(provider, target, credentialRevision))
+    } finally { changed() }
+  }
+  const credentialControls = !readOnly && (state === 'locked' || ((onePassword || hashicorp || proton || machineAccount) && state === 'unlocked')
+    || (windows && state === 'unavailable' && status?.retry === true)
+    || (machineAccount && state === 'unavailable' && status?.reason !== 'Bitwarden Secrets Manager is unavailable in Automagik Cloud.'))
+  const lock = async () => {
+    if (busy) return
+    setBusy(true)
+    setAdding(false)
+    try { await run(onePassword ? actions.vaultTokenClear(provider) : hashicorp || keyring || proton || machineAccount || keychain || windows ? actions.vaultLock(provider) : actions.vaultLock()) }
+    finally { changed() }
+  }
+  return h(Section, { title: t('Vault') },
+    status?.providers?.length > 1 ? h('div', { className: 'bt-set-row' },
+      h('select', { className: 'bt-input', 'aria-label': t('Vault provider'), value: provider,
+        disabled: readOnly || busy || (roster.secretSources?.rows?.length ?? 0) > 0, onChange: choose },
+      status.providers.map(id => h('option', { key: id, value: id }, t(vaultProviders[id]))))) : null,
+    h('div', { className: 'bt-set-row', role: 'status' },
+      h('span', { className: 'bt-tag' }, t((keychain || windows) && status?.reason ? 'Unavailable' : status?.reason ?? vaultStates[state] ?? 'Checking vault status…')),
+      h('span', { className: 'bt-set-hint' }, t(keyring
+        ? 'Locking here closes Automagik’s access. Manage the keyring lock in GNOME.'
+        : keychain ? status?.reason ?? keychainHint
+        : windows ? status?.reason ?? windowsHint
+        : hashicorp ? 'The address, namespace and token are cleared when the vault locks or the app quits.'
+        : proton ? 'The token is used once to sign in and needs read access to a vault; items shared on their own are not listed. The session ends when the vault locks, after at most 110 minutes, or when the app quits.'
+        : onePassword ? 'The token is cleared when the vault locks or the app quits.' : 'The vault locks after the idle time set in the plugin’s settings.')),
+      state === 'unlocked' && (!onePassword || local)
+        ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: lock }, t(onePassword ? 'Clear token' : 'Lock')) : null),
+    credentialControls && !local ? h('div', { className: 'bt-secret-warn', role: 'note' },
+      h(WarnIcon), t('Unlock the vault in Settings on this computer.')) : null,
+    machineAccount && credentialControls && local ? h('div', { className: 'bt-set-row' },
+      connectionKnown ? h('span', { className: 'bt-set-hint' }, t('Vault connection · {connection}', { connection }))
+        : h('input', { className: 'bt-input', 'aria-label': t('Vault connection label'),
+          placeholder: t('Vault connection label'), value: target ?? '', disabled: busy, maxLength: 512,
+          spellCheck: false, autoComplete: 'off',
+          onChange: event => { clearCredential(); setConnectionLabel(event.target.value) } }),
+      state !== 'unlocked' && !roster.secretSources?.broken
+        ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy || !target, onClick: () => savedToken(false) }, t('Unlock')) : null,
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy || !target, onClick: () => savedToken(true) }, t('Clear token'))) : null,
+    credentialControls && local && !roster.secretSources?.broken
+      ? h('div', { className: 'bt-set-row bt-set-paste', key: hashicorp ? JSON.stringify([provider, connection]) : undefined },
+        hashicorp ? [
+          h('input', { key: 'address', ref: address, className: 'bt-input', 'aria-label': t('Vault address'), placeholder: t('Vault address'),
+            disabled: busy, autoComplete: 'off', spellCheck: false }),
+          h('input', { key: 'namespace', ref: namespace, className: 'bt-input', 'aria-label': t('Vault namespace (optional)'),
+            placeholder: t('Vault namespace (optional)'), disabled: busy, autoComplete: 'off', spellCheck: false }),
+        ] : null,
+        machineAccount ? h('input', {
+          className: 'bt-input', 'aria-label': t('Server (us, eu, or HTTPS URL)'), placeholder: t('Server (us, eu, or HTTPS URL)'),
+          value: server, disabled: busy, spellCheck: false, autoComplete: 'off',
+          onChange: event => { clearCredential(); setServer(event.target.value) },
+        }) : null,
+        keyring || keychain || windows ? null : h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, {
+          key: credentialKey,
+          inputRef: password, disabled: busy, onEnter: unlock, passwordType: hashicorp || proton,
+          label: t(hashicorp ? 'Vault token' : proton ? 'Proton Pass personal access token' : machineAccount ? 'Bitwarden Secrets Manager access token'
+            : onePassword ? '1Password service account token' : 'Bitwarden master password') })),
+        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy || (machineAccount && !target), onClick: unlock },
+          t(hashicorp ? 'Connect' : (onePassword || proton || machineAccount) ? (state === 'unlocked' ? 'Replace token' : 'Set token') : windows && status?.retry ? 'Retry' : 'Unlock'))) : null,
+    state === 'unlocked' && !status?.mismatch && !roster.secretSources?.broken
+      ? adding ? h(AddVaultKey, { key: managerStatusKey ?? provider + '/' + connection, actions, provider, connection, credentialRevision, roster, run, onDone: () => setAdding(false) })
+        : h('div', { className: 'bt-set-row' }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: () => setAdding(true) }, t('Add a vault key')))
+      : null)
+}
+
 export function SecretsPage({ roster, actions, run, Section }) {
   const [open, setOpen] = useState(null)
   const [adding, setAdding] = useState(false)
-  const secrets = roster.secrets ?? []
+  const sources = roster.secretSources?.rows ?? []
+  const mapped = new Set(sources.map(source => source.name))
+  const secrets = (roster.secrets ?? []).filter(secret => !mapped.has(secret.name))
+  const count = secrets.length + sources.length
+  const toggle = name => () => setOpen(open === name ? null : name)
   return [
     h('p', { key: 'about', className: 'bt-secret-about' },
       t('Keys your Bots asked for. Bots never see the values: they use them as '), h('code', null, '$DSH_SECRET_NAME'),
       t(' in their shell, and every value is replaced by '), h('code', null, '[secret:NAME]'), t(' before anything goes to a model.')),
-    h(Section, { key: 'list', title: t('Secrets · {count}', { count: secrets.length }) },
-      secrets.length === 0 && !adding ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No keys yet. When a Bot needs one, it shows a card in its chat.'))) : null,
-      secrets.map(secret => h(SecretRow, { key: secret.name, secret, roster, actions, run, open: open === secret.name, onToggle: () => setOpen(open === secret.name ? null : secret.name) })),
+    h(Section, { key: 'list', title: t('Secrets · {count}', { count }) },
+      roster.secretSources?.broken ? h('div', { className: 'bt-secret-warn', role: 'note' }, h(WarnIcon),
+        t('The vault mapping file could not be read; no secret can be used until it is fixed.')) : null,
+      count === 0 && !adding ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No keys yet. When a Bot needs one, it shows a card in its chat.'))) : null,
+      secrets.map(secret => h(SecretRow, { key: secret.name, secret, roster, actions, run, open: open === secret.name, onToggle: toggle(secret.name) })),
+      sources.map(source => h(VaultSourceRow, { key: source.name, source, present: roster.secretSourcesPresent, actions, run, open: open === source.name, onToggle: toggle(source.name) })),
       adding ? h(AddSecret, { actions, run, onDone: () => setAdding(false) }) : null),
     adding ? null : h('div', { key: 'add', className: 'bt-actions' }, h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setAdding(true) }, t('Add a key'))),
+    roster.secretSourcesPresent ? h(VaultSection, { key: 'vault', roster, actions, run, Section }) : null,
   ]
 }
 

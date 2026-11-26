@@ -4,6 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RULES, checkCopy, omniKeys } from '../scripts/copy-check.mjs'
+import { loadDictionaries } from '../scripts/dictionaries.mjs'
+import { hostText, installLocale } from '../../bots-dsh/src/client/i18n.js'
 
 test('the copy check is green', async () => {
   assert.deepEqual(await checkCopy(), [])
@@ -50,4 +52,39 @@ test('the copy check tells European from Brazilian Portuguese', () => {
     'Matéria-prima']) {
     assert.ok(!refused(text), `"${text}" is Brazilian Portuguese`)
   }
+})
+
+test('the Solver look refusals pass the copy check and hostText words them in pt-BR', async () => {
+  const pack = loadDictionaries()['omni-ui']
+  const findings = await checkCopy()
+  const off = installLocale({
+    register: () => () => {},
+    bind: () => key => pack[key] ?? key,
+    getLocale: () => ({ active: 'pt' }),
+  })
+  try {
+    for (const key of [
+      'Only a Solver wears the Solver characters. Choose another character.',
+      'A Solver wears one of the Solver characters. Choose one of those characters.',
+      'Only the person can make a Bot a Solver.',
+      'That look is not valid. Choose another character.',
+    ]) {
+      assert.ok(pack[key], key)
+      assert.ok(!findings.some(finding => finding.includes(key)), key)
+      assert.equal(hostText(key), pack[key])
+    }
+  } finally { off() }
+})
+
+test('AN-6 hostText words the Solver agent refusal in pt-BR', () => {
+  const pack = loadDictionaries()['omni-ui']
+  const off = installLocale({
+    register: () => () => {},
+    bind: () => key => pack[key] ?? key,
+    getLocale: () => ({ active: 'pt' }),
+  })
+  try {
+    assert.equal(hostText('Antigravity cannot be a Solver yet. Choose another agent for the Solver.'),
+      'O Antigravity ainda não pode ser um Solver. Escolha outro agente para o Solver.')
+  } finally { off() }
 })

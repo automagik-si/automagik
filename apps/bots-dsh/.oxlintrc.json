@@ -1,5 +1,5 @@
 {
-  "ignorePatterns": ["src/host/browser/script-child.js"],
+  "ignorePatterns": ["src/host/browser/script-child.js", "test/fixtures/supervisor-5b/**"],
   "env": { "browser": true, "node": true, "es2024": true },
   "rules": {
     "no-undef": "error",

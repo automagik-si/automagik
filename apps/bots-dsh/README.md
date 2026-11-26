@@ -35,10 +35,16 @@ How they fit:
 
 - **Long-lived Bots**: each Bot is a dsh Session in the "DS Bot" workspace, with its own name, role, instructions and model.
 - **Working folders**: a Bot can work in a folder you choose instead of the team workspace, and a group chat can set one folder for all its members there. Pick it in the Bot's settings or details panel or in the group's settings, or ask a Bot (`update_bot`, `update_group`). After a change, the chat goes on in a fresh part that starts in the new folder. When a Bot sets a folder outside the team workspace, or adds a Bot to a group that works in one, it asks for your approval if those Bots can only write in their folder. Folders that hold dsh data (`$DSH_HOME`, the team's data) are refused. The team workspace itself moves in Settings > General > Locations; Bots and groups that work there go on in a fresh part in the new folder, and the old folder keeps its files.
+- **Folder for these four file tools**: open **File-tool folder** by the composer of a root Session to set or clear its folder for `read`, `read_image`, `glob` and `grep`. The owner’s choice is saved for that Session, takes effect on the next call and survives reopening it. A fresh conversation you start has its own setting. A continuation, a delegated task and a native subagent use their initiating root’s setting. A scoped call needs an explicit existing absolute path whose real path stays inside the folder. The tools refuse `..`, dangling links and links that resolve outside. Scoped searches skip links encountered during traversal and ignore ripgrep configuration and ignore files. Shell, ACP readers and file previews have their own permissions.
+
+  The desktop and server profiles bind the four DSH `0.2.2-rc.2` tool definitions to their local filesystem or subprocess provider. A scoped call refuses a tool or provider the profile cannot verify. DSH’s `FileSystem` and `SubprocessRuntime.spawn` APIs carry no per-Session read root. Enforcement across providers or against concurrent filesystem changes during an OS open requires provider-side support. DSH’s `appendPluginRecord` is reserved for its own experimental packages, so Automagik stores the choice and delegated bindings in `session-read-scopes/` in its team home.
+
+  DSH’s scheduler exposes a reserved `new_once` Session ID in `ScheduleService.catalog()`. Its `schedule/resolve-agent` hook takes a destination Session ID, and the catalog omits the pending destination of a recurring `new` task. A fresh delivery whose initiating root could be scoped is held when that root cannot be identified. A scheduled Session created from ambiguous candidates also refuses the four tools if any of those roots later takes a folder.
+
 - **Permission presets**: each Bot runs with its own dsh permission preset (Read only, Workspace or Full access), set in its details panel. A group chat can run all its members with one preset there, in place of their own: turn on **Same for every member** under Permissions in the group's settings. A new Bot starts with the team default, set under Permissions in Settings > Bots. Work a Bot opens never runs wider than the conversation that opens it. A task (`start_task`, a Genie wish) runs at the narrower of its own level and the level that conversation runs at when it starts it, such as a chat lowered with `/permission` or a read-only automation run. A Bot made with `create_bot` starts at the narrowest of its creator's level, that conversation's and its group's, and never gets a tool its creator does not have. A fresh Session a Bot's scheduled task opens starts no wider than that Bot. While a task you scheduled yourself also opens fresh Sessions, DeepSeek Harness does not say which task a fresh Session is for, so those keep the level they start with. A level that cannot be read or compared gives the narrowest one offered. What you start yourself is as before. While DSH's experimental Auto review plugin is on, **Auto review** is a preset too, marked Experimental and confirmed once when picked. Where Auto cannot hold (the plugin is off, or DSH refuses it), the Bot or group runs as Workspace and says so; a chat whose Session was left on Auto opens again once Auto review is back on. When DSH stops offering a saved level (an upgrade renames or drops it), the level stays saved and is not rewritten: a conversation that already runs is lowered to the narrowest level DSH still offers when that is known to allow less than what it has, and is otherwise left as it is; nothing new starts (a task, a greeting, a first turn in a group) until a level is picked or DSH offers the saved one again. Details and Settings → Feedback say which of these happened. Only you set permissions; Bots cannot change them.
 
-  Auto works as Workspace on every supported route. Codex uses its own reviewer and Claude Code uses its `auto` mode. API Bots use their own model in a separate request for sandbox escalations; a granted step can leave the sandbox. Hermes, Antigravity and omp use the team's background model and are offered Auto only while one is available. Their own tools run outside DSH's sandbox.
-  For bridged Codex and Claude Code, the team's background model decides DSH tool calls. If the CLI asks for permission, the rest of that prompt's bridge calls reach the person. Without a background model, bridge calls reach the person. Hard-to-undo steps and the rest of a turn after three consecutive refusals or ten total refusals always reach the person when Automagik judges. Plugin, folder and website approvals remain with the person. A request the judge decides never shows as a card, on the computer or on Pocket; only one it passes on does. A model failure asks; it never allows. Only the person turns Auto on. API marks bind the exact model; native agent marks bind their route. Bots outside Auto keep their existing behavior.
+  Auto works as Workspace on every supported route. Codex uses its own reviewer. Claude Code is withheld from Auto until its `auto` mode is captured; a saved Claude Code Auto mark is cleared and the Bot runs as Workspace. API Bots use their own model in a separate request for sandbox escalations; a granted step can leave the sandbox. Hermes, Antigravity and omp use the team's background model and are offered Auto only while one is available. Their own tools run outside DSH's sandbox.
+  For bridged Codex in Auto, the team's background model decides DSH tool calls. If the CLI asks for permission, the rest of that prompt's bridge calls reach the person. Without a background model, bridge calls reach the person. Hard-to-undo steps and the rest of a turn after three consecutive refusals or ten total refusals always reach the person when Automagik judges. Plugin, folder and website approvals remain with the person. A request the judge decides never shows as a card, on the computer or on Pocket; only one it passes on does. A model failure asks; it never allows. Only the person turns Auto on. API marks bind the exact model; native agent marks bind their route. Bots outside Auto keep their existing behavior.
 
   **Auto** is Workspace plus a saved mark, chosen only by you after a confirmation in Details,
   the composer menu or the chat's permission card; the question names who decides for that Bot.
@@ -62,7 +68,8 @@ How they fit:
   outside the Bot’s folder ask the person when the existing tool gate allows them. Children follow the same check.
   Read-only team lookups such as `recall` do not ask just because their arguments mention a hard step.
   Auto also asks about these steps inside its Workspace boundary; its judge keeps its own counts.
-  Plugins classify external senders through `rt.stepHooks.sendsOutside(fn)`; a failed hook asks.
+  Plugins classify external senders through `rt.stepHooks.sendsOutside(fn)`, with the classifier
+  receiving `{ tool, args, sessionId }`. A failed hook asks.
   Ordinary example env files, public SSH keys, feature-branch pushes with an explicit
   destination and local file deletes stay out of the added list; a bare `git push` or a
   destination of `HEAD` asks. Exact boundaries are in RFC 0031’s #1092 amendment.
@@ -74,8 +81,9 @@ How they fit:
   task can show the question, work stops with a reason and an automatic-stop notification
   when that host hook is available. Full access is unchanged.
   Unbridged Claude Code gets session-only ask rules for expressible hard steps at every
-  asking level, removed by restarting its session across Full access. Bridged Claude has no
-  Bash of its own: its DSH calls use the checks above. Codex's own tools are excluded:
+  asking level, removed by restarting its session across Full access. These rules include
+  password-manager reads. Bridged Claude has no Bash of its own: its DSH calls use the checks
+  above. Codex's own tools are excluded:
   prompt rules under its Full access `never` policy refuse instead of asking, rules have no
   per-session path, and its `agent` mode sends prompt rules to its reviewer, not the person.
   This is an unmet dependency: Codex built-ins run without `session/request_permission`.
@@ -94,8 +102,33 @@ How they fit:
   | Group admin | Manage its own group only (name, notice, members, reply mode) |
   | Member | Speak in the group, `@` another member, and post into its groups from outside them |
 
-- **Scheduled tasks and restricted Bots**: a Bot with a deny list cannot create or
-  edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
+- **Shell access**: each Bot either has a shell or does not. Every new Bot states its
+  capability; a new private-folder Bot states off, and a Bot saved before it existed has
+  no field and reads as a shell, with no migration. Only the user changes the switch in
+  its settings. A Bot without a shell gets no `bash`, `pwsh` or terminal tool,
+  and no tool that runs a command or starts one for it: a DSH task (`start_task`), an ACP
+  agent's execute call (`acp_tool`; its reads and edits stay), a local CLI's command
+  approval (`approve_agent_action`), an MCP server that would start a command
+  (`save_capability`, `attach_capability`) and the computer-use tools (`cua`,
+  `cua_driver_native__*`). The rule holds on the Bot's own chat, a group Session, a task, a
+  subagent (delegation stays, its child is bound to the parent's fence), a renamed or
+  aliased tool, and a skill. It is enforced where DSH grants tools — the tools are removed,
+  not forbidden by an instruction — and not with an operating-system sandbox. A Bot with
+  shell access can read what the operating-system user can read: that is the honest limit
+  of the folder fence for shell commands.
+
+  A shell-less Bot cannot be paired with a model whose agent runs its own tools: the Bot
+  team refuses it at creation, at the model pick, at a route switch and at the Remote
+  Hermes pairing, both when the shell is switched off and when the agent is set. The
+  automatic move of a Bot off a retired plan route to its coding CLI skips a shell-less
+  Bot, keeps it where it is and says once why (the CLI brings its own shell); if that plan
+  route no longer answers, the Bot asks for a model instead of looking like it works. An
+  MCP server mounted before the shell was turned off keeps running, but a command tool it
+  exposes is refused; a server mounted after the switch is refused too. The settings card
+  says what this capability does not fence: another Bot with a shell, or the
+  operating-system user, can still read files this Bot can read.
+- **Scheduled tasks and restricted Bots**: a Bot with a deny list or no shell cannot create
+  or edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
   layer binds; the tasks it already armed are paused and their record stays. A
   delivery no team lineage can bind is refused while such a task cannot be paused;
   when the pause lands, dsh is asked to drive again and the refused delivery goes
@@ -116,7 +149,171 @@ How they fit:
 - **DSH bots**: New… → New DSH bot creates a native DSH identity with a name, project folder and preset, and immediately adds team membership: the native DSH conversation UI and tooling stay available alongside roster, messages, groups and browser access. It has the same final shape as adopting an existing DSH bot, with one sidebar row and a retained original registration. Membership failure fails creation and cleans up the new registration and Session. If archival or required persistence is unavailable, a durable pending-creation registration retains ownership and tool restrictions, stays hidden from both rosters, and retries cleanup on the next load (including restart). The error reports pending cleanup; it never reports successful standalone creation. Cleanup waits for an operation-bound terminal receipt in `agent-creations/<UUID>.json`, published atomically by the allocation's producer only after native creation settles—even if that producer lost the team lock or was disposed. This receipt contains only operation and Session IDs plus outcome, grants no team-write or archival authority, and is removed after durable membership or cleanup. Missing/invalid receipts (including a hard kill before publication or receipt persistence failure) retain hidden pending ownership rather than guessing that an absent Session cannot appear later; back up `agent-creations/` with the team file while creation is pending. Cleanup is claimed durably before archival so an old producer cannot re-adopt an archived Session. DSH archival and the team file are not atomic: a failed post-archive save can temporarily retain a pending reference to an archived Session, which idempotent retry removes. For compatibility, legacy `add-agent` callers without `teamMember: true` and `rt.dshBots` keep the standalone DSH registration/session contract (no team tools); the UI explicitly opts into membership. A Bot's one-off work (`start_task`) runs under that Bot and reports back when its first turn ends.
 - **Adopting a DSH bot**: **Adopt as Bot** adds team membership without replacing the DSH identity, native conversation surface, preset, avatar or capabilities. The newest Session becomes its team chat and earlier Sessions remain readable parts; nothing is renamed or recreated. `list_bots`, messages, groups, capabilities and tasks become available. Fresh parts, group member Sessions and tasks inherit its preset. The original DSH registration stays saved with an `adoptedBotId` reference, but is hidden from the standalone roster to avoid duplicate rows.
   - **Rollback**: the local `POST /api/omni-ui` endpoint `agent-bot-rollback`, payload `{ "agentId": "<original DSH id>" }`, removes only the added membership and restores the original registration and team-tool restrictions. It does not archive Sessions. Remove Main Bot/group roles first; rollback refuses new parts or tasks rather than discarding new team history. Ordinary Bot deletion refuses adopted registrations; roll back first. A failed adoption/rollback save restores the pre-operation records. This cannot reconstruct identities already removed by the older destructive implementation: those require the original registration from a backup and verified preset/avatar information; no identity is inferred from a Bot's name.
-- **Make it yours**: name, role, instructions, model and look (20 characters and 12 colors, or a photo from the ones you added) for each Bot. An adopted DSH identity wears DSH's blue whale until it has a look of its own; ordinary Bots retain their identity-derived defaults and a Genie keeps its genie-clay pet; a theme, an accent color and an avatar animation level (quiet, normal or lively) for the team. A pinned Bot or group chat shows a small pushpin in the sidebar. Settings has these pages: General (look), Bots (Main Bots and each Bot's settings), Group chats (each group's settings), Connectors, Capabilities, Scheduled tasks, Usage, Secrets, Feedback and About DS Bot (versions, updates and links).
+- **Make it yours**: name, role, instructions, model and look (20 characters and 12 colors, or a photo from the ones you added; a Solver Bot also gets the twelve Solver characters) for each Bot. An adopted DSH identity wears DSH's blue whale until it has a look of its own; ordinary Bots retain their identity-derived defaults and a Genie keeps its genie-clay pet. The built-in character ids are reserved: a shape another plugin registers under one of them shadows that character while the plugin is loaded. Also a theme, an accent color and an avatar animation level (quiet, normal or lively) for the team. A pinned Bot or group chat shows a small pushpin in the sidebar. Settings has these pages: General (look), Bots (Main Bots and each Bot's settings), Group chats (each group's settings), Connectors, Capabilities, Scheduled tasks, Usage, Secrets, Feedback and About DS Bot (versions, updates and links).
+
+## The shared gen-UI kit (`omni.genui`)
+
+Every Omni plugin that loads this client bundle (through `dsh.client.external`) shares one
+module instance, so it also shares the gen-UI kit: live rows a plugin fills while a job runs,
+and the person card. The kit's host half lives here too: one live slice every state answer
+carries, and a media route. Issue #1326 builds it in slices; this is delivery 1, G0, G1 and G5.
+
+```js
+// A plugin's own tool card, drawn by the shared kit.
+omni.toolCards.register('read_history', p => omni.genui.PersonCard({
+  chatId: p.arg('chat'),                 // the Omni chat id
+  revision: omni.genui.revisionOf(p.roster), // refetch while the bot reads
+}))
+// ...and one line per chat for a running batch, published by the plugin's host half.
+omni.genui.ProgressRows({ rows: omni.genui.rows(p.roster, 'run-1') })
+```
+
+### The live slice (host)
+
+A plugin's host half publishes one chat's row through `rt.hooks.genui`:
+
+| Call | What it does |
+|---|---|
+| `publish(batchId, row)` | merges one row by `chatId`, newest field wins; returns whether it took the row |
+| `read(batchId)` | a copy of one batch's rows, or `undefined` |
+| `clear(batchId)` | takes a batch out (a proposal no longer open) |
+
+The slice rides every `/api/omni-ui` state answer as `genui: { revision, batches }` (the
+1.5 s live hook), so a card reads it from its roster: `roster.genui.batches[batchId].rows`.
+`revision` goes up on every change. A batch keeps at most 20 rows (a finished row leaves
+first) and the slice at most 8 batches (the least recently changed leaves first).
+
+A row holds **labels and counts only, never message text**: `publish` rebuilds it from the
+fields it knows, so a `text` a caller happens to pass never reaches a window. The fields:
+
+| Field | Shape |
+|---|---|
+| `chatId` | the chat id (a row without one is refused) |
+| `chat` | the label the line shows (cut at 120 characters) |
+| `channelId` | the channel the chat is on |
+| `state` | `queued`, `reading`, `fetching`, `done`, `phone-did-not-answer`, `cancelled`, `failed` |
+| `outcome` | `done`, `phone-did-not-answer`, `stopped`, `failed`, `not-started`; `null` while running |
+| `page`, `pages` | a reading's page and the window's pages ("page 3 of about 12") |
+| `round`, `oldestReached` | how far a backfill has gone |
+| `counts` | `fetched`, `total`, `stored`, `duplicates`, `mediaDownloaded`, `mediaMissing`, `reactions`, `edits`, `deletions`, `unmatched` (flat counts are accepted too; `totalEstimated` reads as `total`) |
+| `coverage` | `oldest`, `newest`, `count`, `countInWindow`, `mediaMissing`, `deletedCount`, `lastInbound`, `lastOutbound` (ISO times) |
+| `startedAt`, `updatedAt` | ISO times |
+
+The rows are a report: the plugin's job store stays the record, and this slice holds no file.
+
+### The media route (host)
+
+`rt.hooks.media.register(name, fn)` makes a source of bytes a kit card shows; the route is
+`GET /api/omni-ui/genui-media?source=<name>&id=<id>`. `fn(id, request)` returns
+`{ type, body }` (a `Uint8Array`, an `ArrayBuffer`, a string or a stream) or `null` when it
+holds nothing. Only image and audio types are served (`image/jpeg`, `image/png`,
+`image/webp`, `image/gif`, `audio/ogg`, `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/wav`,
+`audio/webm`); anything else, an unknown source and an unknown id are a 404, and a source's
+own failure is an empty 500. The answer is `private` and `nosniff`, never inline data.
+
+### The person card (G5)
+
+`omni.genui.PersonCard({ chatId, load?, revision? })` reads one chat's reading note, and
+only reads it: the kit has no call that writes a note, and the note is never
+`set_child_notes`. The default `load` calls the host endpoint **`omni-reading-note`**, which
+Omni's channels plugin serves as a read:
+
+```text
+request:  { chat: "<Omni chat id>" }
+response: {
+  chat: { id, name?, channelId? },
+  note: { text, readThrough, updatedAt } | null,
+  coverage: { oldest, newest, count, mediaMissing, deletedCount, lastInbound, lastOutbound } | null
+}
+```
+
+`note` is `null` until the bot saves one, and the card says the chat is not read yet;
+`coverage` is `null` when Omni cannot give it, and the card leaves it out. A chat Omni can
+only name by id draws as "This chat", never the raw id. The note holds the bot's four parts
+("Who:", "Open:", "Last contact:", "Tone:"); the card draws each one, with the host's last
+contact each way under the note's own line, and `Read through <date>` under them. A note
+written as prose is drawn whole, in one part, rather than forced into a part it may not be.
+`revision` refetches it while the bot reads (pass the live slice's revision); `load` replaces
+the endpoint for a plugin with a read of its own.
+
+### The backfill card (K2)
+
+`omni.genui.BackfillCard({ roster, proposalId?, runId?, start?, cancel? })` draws the interactive per-chat history
+backfill: a Bot proposes reading a chat's history over a date range, the person ticks the
+chats and sets the dates, and presses **Start** once. Nothing starts on its own, and the card
+never sends a message. A tool card passes its `roster` and the ID from that call's successful
+result. With React's `createElement` as `h`, a proposal renderer can return:
+
+```js
+return h(omni.genui.BackfillCard, { roster: p.roster, proposalId })
+```
+
+`proposalId` shows that proposal while it is open and follows the run that shares its ID.
+When both disappear, the card says the request is no longer open. `runId` selects a single
+run and takes precedence for the rows when both IDs are passed. If the requested run is
+absent, the card says so. With neither ID, the card shows all open proposals and the first
+three runs. When `roster.readOnly` is set, the foot explains where to act and **Start** and
+**Stop** are disabled.
+
+It reads the two fields Omni's channels plugin publishes (`omni-channels-dsh`, #1772):
+
+| Field | Where | Shape |
+|---|---|---|
+| `omniBackfillProposals` | the team view | `[{ id, botId, from, to, createdAt, chats: [{ id, name, kind, channelId, channel, ticked }] }]` |
+| `omniBackfills` | every state answer (the 1.5 s live hook) | `[{ id, botId, from, to, startedAt, summary: { total, running, done, phoneDidNotAnswer, stopped, failed }, rows: [{ chatId, chat, channelId, jobId, state, outcome, counts, round, oldestReached, coverage, startedAt, updatedAt }] }]` |
+
+`from`, `to` and the coverage times are ISO strings or `null`; `createdAt`, `startedAt` and
+`updatedAt` are milliseconds; a row's `outcome` is `null` while it runs and one of `done`,
+`phone-did-not-answer`, `stopped`, `failed`, `not-started` after. Those two fields are
+**rebuilt by the host** from the labels, dates, states and counts above (as
+`rt.hooks.genui.publish` rebuilds a row): a chat preview, a message text or a field the card
+does not know never reaches a window. Every other field a `view` or `live` hook returns passes
+through as it was.
+
+The card's one approval and its stop are the host endpoints **`start_backfill`** and
+**`cancel_backfill`**, served by Omni's channels plugin:
+
+```text
+start_backfill  { proposalId, chats: [chat id, 1-200, all on the proposal], from, to }
+                → { runId, jobs: [{ chatId, jobId | null, state }] }
+cancel_backfill { jobId } → { jobId, state, outcome }
+```
+
+The card sends `start_backfill` once, for the chats the person actually ticked and the dates
+they set (a date is `YYYY-MM-DD`; the host reads it as that whole UTC day). A proposal is
+single use: the host takes it at Start, and the card says the approval is on its way until the
+run appears in `omniBackfills`. A row offers **Stop** only while it has a `jobId` and its
+`outcome` is `null`; `cancel_backfill` stops that one job. A refusal is shown in the card, as
+the host worded it, and the proposal stays for another try.
+
+An ended backfill row with coverage says when Omni holds no messages in the selected
+window. Otherwise, if the oldest message Omni holds falls after the start day, the row
+names that oldest day. Both comparisons and dates use UTC. The line describes the history
+Omni holds.
+
+`start` and `cancel` replace the two actions for a plugin or a test (`(payload) => Promise`).
+The words and formats live in `genui-model.js`: `proposalView`, `runView`, `backfillView`,
+`backfillRange`, `backfillDay`, `backfillSummaryText`, `canCancel`. `BACKFILL_RUNS_SHOWN` (3)
+and `BACKFILL_ROWS_SHOWN` (20) cap the displayed runs and rows. A run says how many chats it
+leaves out.
+
+### What the rest of the kit gives a card
+
+| Export | What it is |
+|---|---|
+| `ProgressRows({ rows, label? })` | one line per chat: name, state, page or counts, media and marks |
+| `ProgressRow({ row })`, `CoverageRow({ coverage })` | the same, one row or one coverage line at a time |
+| `rows(roster, batchId)` | the slice's rows for one batch |
+| `revisionOf(roster)` | the slice's revision, for a card that refreshes while the bot works |
+| `loadReadingNote(chatId)`, `READING_NOTE` | the person card's default read and its endpoint name |
+| `model` | the words and number formats the cards use (`rowView`, `personView`, `parseReadingNote`, `coverageLine`, `spanOf`, `countText`, …) for a card of a plugin's own shape |
+| `BackfillCard({ roster, start?, cancel? })` | the interactive backfill proposal and run card (K2) |
+| `startBackfill(payload)`, `cancelBackfill(payload)`; `START_BACKFILL`, `CANCEL_BACKFILL` | one approval through `start_backfill`, and one job's stop through `cancel_backfill` |
+| `backfillView(roster)` | the card's proposals and newest runs, rebuilt from labels and counts |
+
+Its styles are installed with this plugin's other sheets (`.bt-genui-*`, the same card
+surface and brand variables as the team's own cards); a plugin draws the components and
+needs no stylesheet of its own.
 
 ## Install
 
@@ -125,6 +322,8 @@ The [project page](../../README.md#install) has the full steps for dsh Desktop a
 - dsh Desktop: Settings → Plugins → add a `.tgz` of this package (`npm pack` in this folder).
 - Command line: `dsh plugin --profile web add /path/to/automagik-bots-dsh-<version>.tgz`.
 - Or skip dsh setup entirely: the Automagik desktop app ([`apps/desktop`](../desktop/README.md), `omni desktop` from Omni's CLI) ships dsh with this plugin on a home of its own.
+
+The desktop app selects `@automagik/bots-dsh/sandbox-local` when its DSH runtime supplies both sandbox peers. On Linux, the provider gives bwrap a read-only copy of trusted system SSH drop-ins that OpenSSH can read in its user namespace. To opt in on your own DSH profile, add an `insert` row containing `id: automagik-sandbox` and `name: '@automagik/bots-dsh/sandbox-local'`, followed by an override with `id: sandbox`, `name: '@deepseek-ai/dsh-sandbox-local'` and `disabled: true`.
 
 To work on the plugins from a checkout, add them to a dsh profile as linked dependencies and bundles (the channels and canvas plugins are optional):
 
@@ -196,7 +395,17 @@ The same card can carry DSH itself: a DS Bot release may name the DSH release it
 
 Model providers are set up with dsh's `llm-pi-ai` plugin in `cordis.patch.yml`. Every Bot runs on one model of its own, from the models DSH serves. A new team's first Main Bot has none, and holds its greeting until it has one. With `@automagik/welcome-dsh`, finishing Connect AI with an AI on gives it (and the Omni Bot) the team's default model, and the greeting goes out then. Otherwise its chat offers that model with one press to start and a "change" link to the model menu; with no model that can run, the card offers ways to set one up. The team's default model is DSH's default model when it is served and its provider has its key, else the first model that can run (a provider's `default` alias after the models it names). While a chat holds only the greeting, one line under it names the model and its provider, with "change". Of the Claude models pi-ai serves on `anthropic`, the menus offer each family's newest (Opus, Sonnet, Haiku, Fable); the older versions and dated snapshots stay served, so a Bot already on one keeps it and its menu still shows it. The Create Bot form starts on the DSH default model. The Bot's details panel and settings (or a Main Bot's `update_bot`) change it; a Bot whose model is no longer served shows the card again. A team saved by an older version keeps the model each Bot last ran on.
 
-**Background model**: the jobs that run beside the chats use one model of the team's, never the Bot's agent: memory review and the memory panel, and, for a chat on an agent over ACP (`acp-claude`, `acp-codex`), the steward's call and the part's note and checkpoint. An agent answers only in its own chat, so it cannot take those. Other chats keep their own model for these, so the provider serves their prefix from cache. The model is the team's pick in Settings → Bots → Background jobs (`prefs.backgroundModel`, any model DSH serves that is not an agent), else DSH's default model (DeepSeek, unless the person chose another there) when it can run, else the first account connected here. A memory call that fails on it is tried once more on the Bot's own model, when that one is not an agent. DSH's own session titles and compaction summaries pick their model in DSH's config (`session-title-llm`'s `provider` and `model`, `compaction-basic`'s `summarizationProvider` and `summarizationModel`); those fields are not live settings, so this setting does not reach them.
+**Background model.** Memory jobs try the Bot's eligible DSH-native model or an admitted
+Codex model in a hidden, tools-denied session first. They use the team's background model
+when the own route is unavailable or fails. Claude Code, omp, Antigravity, ACP Hermes and
+custom ACP agents use the configured background model for memory. A provider that returned
+quota is skipped for up to an hour. Automatic review also backs off on quota and reports
+the last failure in Advanced.
+
+The steward, part note and checkpoint of an ACP chat continue to use the background model.
+Choose it in Settings → Bots → Background jobs. The selection falls through to DSH's
+runnable default or the first connected account when necessary. DSH's session titles
+and compaction summaries keep their own config in `session-title-llm` and `compaction-basic`.
 
 **Claude on ACP**: Claude Code came back through `@automagik/acp-dsh`. Once per team, a Bot that ran
 on the retired Claude Code plugin and is still on the pi-ai Claude model it was moved to takes
@@ -245,7 +454,7 @@ No credential is read or copied between programs. The background model is not mo
 
 **The model menu** lists only what is set up, as connection, then model, then thinking level: a provider whose key is stored, an agent whose CLI is signed in, and a DSH sign-in other than Claude's or ChatGPT's that is stored. A connection is named by its brand and how it connects: "DeepSeek", "Anthropic · API key", "OpenAI · API key", "Claude Code", "Codex"; two connections that would read the same also show their route id. DSH's own Claude Pro/Max or ChatGPT sign-in route is never offered (the catalog marks it `covered`), nor is a model whose key or sign-in is missing (`needsKey`, `needsSignIn`). The model a Bot is on stays shown even when it cannot run, marked unavailable, and a new Bot never starts on one: the team's default skips them, and DSH's default on a covered plan route is read as the same model on that plan's CLI. The jobs beside the chats keep their own rule (the background model above).
 
-**Images**: `generate_image` draws with an OpenAI API key (the Images API) exactly as before; without one, through the Codex CLI on its own ChatGPT sign-in (acp-dsh's `generateImage`, a one-off Codex session with a per-draw permission profile using Codex's image tool), so a ChatGPT plan draws with no DSH sign-in. A ChatGPT grant an earlier version stored through DSH's `openai-codex` sign-in is read last, only so a person who signed in that way keeps drawing; Automagik no longer offers that sign-in. Nothing reads or copies the CLI's sign-in. A Bot on an agent (Codex) can also make an image with the agent's own tool: acp-dsh hands its PNG, from the call's own update, to the Bot team's keeper (`acpAgents.keepImages`), the chat shows it in the same image card, it is saved in the same images folder, and the agent's link to its own local copy leaves the reply. While any image is made (either path), the card is Omni painting: Omni's clay art with no card behind it, swaying, its face changing every 0.9 s, four dabs of the theme's colours around it, and "Painting your image…" with the seconds so far; a partial image, then the finished one, fades in where Omni was. With reduced motion Omni stands still and the dabs are gone. A call that fails or is stopped says the image was not made, and why.
+**Images**: `generate_image` draws through the Images API with an OpenAI API key the person gave the app: the key saved in the app, or `OPENAI_API_KEY` from DSH's credential file or the app's own `.env` files. A key inherited from the environment Automagik was started in is skipped (#869). An exported variable hides the app's `.env` keys. When no image source is ready, Settings → Bots → Images explains why the inherited key was skipped and points to Settings → Models, where saving that key gives it priority. Without an eligible key, it draws through the Codex CLI on its own ChatGPT sign-in (acp-dsh's `generateImage`, a one-off Codex session with a per-draw permission profile using Codex's image tool), so a ChatGPT plan draws with no DSH sign-in. A ChatGPT grant an earlier version stored through DSH's `openai-codex` sign-in is read last, only so a person who signed in that way keeps drawing; Automagik no longer offers that sign-in. Nothing reads or copies the CLI's sign-in. A Bot on an agent (Codex) can also make an image with the agent's own tool: acp-dsh hands its PNG, from the call's own update, to the Bot team's keeper (`acpAgents.keepImages`), the chat shows it in the same image card, it is saved in the same images folder, and the agent's link to its own local copy leaves the reply. While any image is made (either path), the card is Omni painting: Omni's clay art with no card behind it, swaying, its face changing every 0.9 s, four dabs of the theme's colours around it, and "Painting your image…" with the seconds so far; a partial image, then the finished one, fades in where Omni was. With reduced motion Omni stands still and the dabs are gone. A call that fails or is stopped says the image was not made, and why.
 
 `generate_image` also edits a picture the person uploaded in that Bot's own chat: pass its
 shown name, sha256 (full or a prefix), or upload path as `image`, and the change as `prompt`.
@@ -255,10 +464,11 @@ other chats, group chats and team-generated images are not edit inputs in this p
 verified PNG, JPEG and WebP uploads up to 12 MiB are accepted. The original stays unchanged;
 the result is a new image in the same chat card and team images folder.
 
-Edits use the person's OpenAI key through the Images edits API, or Codex on their ChatGPT
-plan through `acpAgents.editImage`. An older ACP plugin asks for an update;
+Edits use the OpenAI key the person gave the app (an inherited environment key is not used)
+through the Images edits API, or Codex on their ChatGPT plan through `acpAgents.editImage`.
+An older ACP plugin asks for an update;
 a legacy ChatGPT grant cannot edit. Codex edits require acknowledgement of the per-draw
-profile and refuse the read-only fallback. A Codex Bot keeps its own image tool unchanged.
+profile before sending the edit prompt. A Codex Bot's own chat image tool is a separate route.
 
 Each picture is saved only for the Bots it was sent to: the person's uploads, group lines
 shown to a member, and explicit forwards through `message_bot`'s `images` array (up to four
@@ -283,33 +493,50 @@ The DSH tool guard refuses another Bot's region and refuses per-chat ACP copies 
 objects unless the caller holds a verified copy or the picture is already in its own history.
 Tool-result images, channel pictures and handoff rows stay readable from that Bot's own
 history; this does not grant another Bot access or authorise an edit. Like private Bots, this is a tool-level
-check: Codex's own tools and indirect shell paths are not seen. Parent-folder walks are not
-blocked; `.gitignore` hides copies only from ignore-aware walks and is not a filesystem fence.
-No permission, Codex profile or read root is widened. If the operating system refuses the
-folder, the picture's text asks the person to allow Automagik access (Files and Folders or
-Full Disk Access on macOS, or a folder writable by their user elsewhere).
+check: Codex's own tools are not seen. Shell commands get only a best-effort check: each word
+that looks like a path is resolved from the command's working folder, and a word that leads to
+another Bot's own folder is refused. A path a command builds, a variable or glob it expands, a
+folder it changes into, or a file a script opens is still not seen.
 
-When Codex refuses an edit with `edit-not-isolated`, the image card stays failed and the Bot
-gets its read-only copy's path. At Workspace it may use its own tools to make and check a new
+A Bot with shell access can read what the operating-system user can read; the folder fence covers file tools, and shell commands get only a best-effort check. The per-Bot shell
+capability that can take the shell away from a Bot that must stay fenced is
+[#1471](https://github.com/automagik-si/automagik/issues/1471).
+
+Parent-folder walks are not blocked; `.gitignore` hides copies only from ignore-aware walks
+and is not a filesystem fence. No permission, Codex profile or read root is widened. If the
+operating system refuses the folder, the picture's text asks the person to allow Automagik
+access (Files and Folders or Full Disk Access on macOS, or a folder writable by their user
+elsewhere).
+
+When the locked run cannot be set up — Codex is not signed in, its account is unconfirmed,
+its configuration or switch check fails, its connector or session cannot start, the ACP plugin
+is older, or the adapter does not acknowledge the image profile — the refusal carries
+`edit-not-isolated`, the image card stays failed and the Bot gets its read-only copy's path. At
+Workspace it may use its own tools to make and check a new
 file, and must only claim an edit when that file exists; otherwise it says it could not edit.
 At Read only it tells the person that Workspace in Details allows editing as a file. A copy
 failure gives the OS guidance or says that the picture could not be edited here.
 
-**Codex image security (#870).** Each one-off draw requests scratch-only reads through a fresh
-permission profile. Codex's filesystem helper adds runtime read grants, so this is containment,
-not a scratch-only read boundary: images in permitted runtime directories remain readable.
+**Codex image security (#870).** Each one-off draw selects the Bot home's image permission
+profile and uses a fresh scratch folder. Codex's filesystem helper adds runtime read grants,
+so images in permitted runtime directories remain readable.
 Automagik sends prompt text and has no pre-read hook for Codex's image-input paths. The
 [ACP image security notes](../acp-dsh/README.md#images-through-codex) list the platform grants,
 pinned sources and test limits; native macOS/Windows and signed-in per-turn enforcement remain
-untested here. #870 remains open. The scratch folder and config are removed afterwards.
-An adapter that lacks the mode or rejects it falls back to `read-only`, logs one warning and
-marks the result internally as not isolated. The owner keeps this fallback enabled with the
-file disclosure risk accepted: an injected request could use a readable local image as input
-and return its contents in a picture shown in chat. A Codex Bot's own image tool in ordinary
-chat is outside the per-draw profile and retains that risk under its chat permissions.
+untested here. #870 remains open. Scratch cleanup is best effort.
 
-An OpenAI API key routes `generate_image` through the Images API instead of its one-off
-Codex session. Prompt text still reaches the model; keep secrets out of it. A Bot running on
+2026-11-19: the draft branch for #870 proposes failing closed (the draw or edit is refused when
+the per-draw profile cannot be used); owner decision pending.
+
+If the per-draw profile checks fail under the proposed default, the draw or edit is refused
+before any prompt and legacy `read-only` is never selected as a fallback. One warning records
+the reason. Windows has no profile modes, so preliminary readiness can pass even though the
+one-off Codex draw is refused with “Update Automagik and try again.” A Codex Bot's ordinary
+chat image tool uses its chat permissions, which govern whether an injected request can use
+a readable local image as input and return its contents in chat.
+
+An OpenAI API key given to the app routes `generate_image` through the Images API instead of
+its one-off Codex session. Prompt text still reaches the model; keep secrets out of it. A Bot running on
 Codex can still use its own image tool despite that key. Use a different Bot model or turn
 Codex off to avoid that route. Avoid sending untrusted outside text to Codex drawing; prompt
 review is not a file access control. See the
@@ -329,13 +556,33 @@ or draws with an old ChatGPT grant while its Bot account is signed out. Explicit
 keep their own path. Bot settings show Bot and terminal identities (read-only, when reported),
 label their separation, and offer Sign in, Switch account and Sign out. The latter two stop
 running work before changing only Bot credentials. A failed logout stays paused for retry;
-another app instance sharing that vendor home must be closed before an account change.
+another app instance sharing that vendor home must be closed before an account change. Bot settings
+also name the installation they are in and say that another installation using the same home may
+use that same Bot sign-in; a refused account change keeps the host's plain sentence instead of one
+generic line (#1399).
 The owner-only endpoints add `cli-login-switch` and `cli-login-signout`; account details never
 enter team state, messages, tools, model calls or logs. The earlier confirm step still covers an
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's
 isolation amendment records the settings migration.
 
-**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, both get the chat's history as a redacted replay, Claude Code gets the team's tools over the bridge, and Codex keeps only its own tools; the team's tools on Codex need an explicit `dshTools: true`.
+**Account reservations (RFC 0024 R4)**: Accounts are shared by default. In Bot settings the owner
+can reserve a signed-in Claude Code or Codex account for a project, rename it, or make it shared.
+The machine folder is `/var/lib/automagik/reservations` on Linux and
+`/Users/Shared/Automagik/reservations` on macOS. Set `AUTOMAGIK_RESERVATIONS_DIR` to override it.
+See the [administrator setup](../../docs/cloud/0024-reservations-setup.md). With a missing or
+unreadable folder, reservations hold only in this installation and the card says so.
+
+The check runs at sign-in, startup, a card read, and a new Bot Session or its first turn on that
+provider. An admitted turn can finish. When the check refuses an isolated Bot account, the app
+signs that account out once its work is idle. The terminal's sign-in stays untouched.
+
+A Codex workspace reservation covers every ChatGPT workspace of that email. The record identifies
+accounts by keyed digests. Group members can test a guessed email. Instances running as the same
+OS user can modify each other's files, and a group member can reserve an account they can name.
+The card shows the file owner. A copied home shares its instance id. Reservations cover one
+machine, and Windows support awaits an ACL design.
+
+**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table). With it absent, both get the chat's history as a redacted replay. Claude Code gets the team's tools over the bridge. A team Bot on Codex gets DSH's extras in its current own chat and in group Sessions, including `message_bot` and the Bot Browser tools. Codex keeps its own tools in place of DSH's twins. Task Sessions on Codex keep only its own tools by default. An explicit `dshTools: true` gives Codex the whole DSH preset, including on a Genie.
 
 - Give every model a `contextWindow`. DS Bot takes its lines from it: the usable window is the window minus the reply reserve (`maxTokens`), the hard line is 95% of that, and the check line is `checkRatio` of it. A model without `contextWindow` gets the adapter's default (262,144 tokens for `llm-pi-ai`), which may be wrong for that model; a model that reports no window at all counts as 500,000.
 - To send images, the provider needs `defaultInput: [ text, image ]`.
@@ -416,11 +663,27 @@ targets too. The lists are shared with the Bot browser, so changing them cannot 
 With both lists empty, prompt-injected channel text can still reach localhost services
 (#521); add a deny entry or disable that row.
 
+## Member wall (off)
+
+The package carries the first piece of the wall between people who share one DSH (RFC 0024
+(f)): `@automagik/bots-dsh/member-wall/fs`, a read fence on DSH's file access. Members stay
+off: no profile applies it yet, and with `members: false` (the default) it is DSH's own
+sandboxed filesystem, unchanged. Its rows are in `src/host/member-wall/profile.yml`.
+
+With members on, a session recorded as a member's may read, list, search and load skills only
+in its own area and in the shared roots, never in a denied root; a link out of the area is
+refused too, and a listing leaves out each child that reaches or walks through one, name and
+metadata included, even when the child's final target is allowed.
+Only a session recorded as the owner's acts as the owner; any other session, and
+every session while the record cannot be trusted, is held to a member's rules. The owner's own
+sessions and the owner's interface read as before. A member's commands are not fenced by this
+piece.
+
 ## Bot browser
 
 Every Bot has a browser of its own, on by default (`browserPlugin: false` turns it off). It is the Chrome, Edge, Chromium or Brave already on this computer, driven through `playwright-core`: nothing is downloaded. Without one, a Bot that needs a browser says so and asks you to install Chrome.
 
-- **A profile per Bot**, in `browser-profiles/<id>/`: its sign-ins and cookies stay between runs and belong to that Bot only. Deleting a Bot deletes its profile.
+- **A profile per Bot**, in `browser-profiles/<id>/`. With launched Chrome, sign-ins live in that profile. Persistent sign-ins survive a browser restart. The old `cookies.json` is removed at plugin startup or when the browser opens. Sites that rely on session cookies may ask you to sign in again. Deleting a Bot deletes its profile.
 - **Tabs come back**: the Bot's open tabs (address and title) are saved there as they change and reopen at its next browser call after a crash or a restart. A browser that went away (closed, crashed) opens again at that call.
 - **What a Bot does**: `browser_open`, `browser_snapshot` (the page as an accessibility tree, each element with a ref), `browser_click`, `browser_type`, `browser_select`, `browser_press`, `browser_upload`, `browser_tabs`, `browser_back` and `browser_screenshot`. Page content is treated as data, never as instructions.
 - **What asks you first**: posting, uploading, downloading and deleting, each through dsh's approval. A delete needs a second, confirmed click. Settings → Browser lets a Bot do some of these on a site for an hour, until the end of the day, for 7 days or for good. Card fields are never typed, and a payment always goes back to you.
@@ -440,7 +703,7 @@ Every Bot has a browser of its own, on by default (`browserPlugin: false` turns 
 - **Files**: downloads go to the Bot's working folder or the team folder; uploads come only from those.
 - **Handing over**: for a sign-in, a payment or a check, the Bot calls `browser_handoff` and a card in its chat asks you to take over, skip, or say you are done. While you hold the browser, its tools refuse; the window is a normal browser window on your screen.
 - **The window**: on macOS and Windows, and on Linux with a display, the browser opens as a window you can watch. On Linux without a display it runs headless (`browserHeadless`).
-- **In the Automagik app** the Bot's browser is inside the app instead: the globe button in its chat header opens the same tabs the Bot drives, in a panel you can watch and take over. Its sign-ins stay in the app's own storage for that Bot; `read_browser` is not offered there, since the Bot reads its pages with its own browser tools.
+- **In the Automagik desktop app** the globe button in the Bot's chat header opens the same tabs the Bot drives, in a panel you can watch and take over. Sign-ins live in the Bot's persistent partition. The Bot reads its pages with its own browser tools, and the app omits `read_browser`.
 
 ### Browser panel (dsh Desktop)
 
@@ -457,7 +720,7 @@ In dsh Desktop, a Bot's chat header also has a globe button. It opens that Bot's
 - **Addresses**: http and https only. localhost and LAN addresses are allowed; cloud metadata addresses (such as `169.254.x.x`) and dsh's own ports are not.
 - The browser panel and the details drawer share the right column; opening one closes the other. Switching chats switches the panel to that Bot.
 
-The Automagik desktop app and dsh Web have no browser panel and no `read_browser`; their Bots use the browser above.
+dsh Web has no browser panel or `read_browser`. Its Bots use the browser above.
 
 ## Secrets
 
@@ -466,14 +729,33 @@ When a Bot needs an API key, token or password, it calls `request_secret`, and a
 - **Fill in**: the field hides what you type, is not part of a form and is not autofilled. Choose "All Bots" or "Only this Bot" and select Save. A value must have at least 4 characters (a 4-digit PIN works). A value of 8 characters or more is hidden wherever it appears; a shorter one only where no letter or digit touches it, so ordinary words stay intact.
 - **Allow**: if the secret is already saved but this Bot is not allowed to use it, the card only asks whether to allow it. You can also replace the value there.
 - **Use**: the value goes into the Bot's shell environment as `DSH_SECRET_<NAME>` (`$DSH_SECRET_NAME` in bash, `$env:DSH_SECRET_NAME` in PowerShell). `list_secrets` lists the names a Bot can use. An MCP capability can also take `$DSH_SECRET_<NAME>` in its env, its headers and its URL (path or query); in the URL the value is URL-encoded. Use headers when the server accepts them.
-- **Masking**: before a tool result is saved and before each request goes to the model, every copy of a secret value is replaced with `[secret:<NAME>]`.
+- **Masking**: before a tool result is saved and before each request goes to the model, every copy of a secret value that the redactor recognizes is replaced with `[secret:<NAME>]`.
 - **Manage**: Settings → Secrets lists every secret by name, purpose, the Bot that asked and the last use. You can change who may use it, replace the value, delete it or add one. Deleting a Bot removes it from every secret.
 - **Storage**: `<DSH_HOME>/bot/secrets.json`, file mode 600, written atomically. Values are never in `state.json` or logs.
+
+HashiCorp Vault uses a supported Vault CLI to browse KV v1 and v2 mounts. In local Settings › Secrets › Vault, connect with the server address, token and optional namespace. Enter them again after restarting. The mapping binds to the address and namespace through a hash, and replacement cancels pending approvals and grants. Reads assume a direct Vault server or a non-caching Vault Proxy that forwards the supplied token. Caching cannot be detected. The CLI uses OS TLS trust with no forward proxy, custom CA or redirect support. Before rolling back to a Bot team version that predates this provider, remove the HashiCorp Vault mappings.
+
+On a local Linux desktop, select **Secret Service (GNOME Keyring)** in Settings › Secrets › Vault.
+**Unlock** opens Automagik’s access without asking for a password. Unlock the actual keyring in
+GNOME when needed. Search the picker and select an item from an unlocked collection. Settings
+and the approval card show the item and collection labels for your selection. The mapping stores
+the item reference, which can include the collection name as part of the object path. Remove
+Secret Service mappings before rolling back to a Bot team version that predates this provider.
+Auto asks before recognized Secret Service reads, monitors and captures.
+
+Remove Proton Pass mappings before rolling back to a Bot team version that predates this provider.
+
+macOS Keychain uses `/usr/bin/security` for generic passwords in the login keychain. Unlock the plugin gate in local Settings › Secrets › Vault and find a single item by its exact service and account. macOS may ask on this Mac. Choose **Allow**, not **Always Allow**. The provider is unavailable on Linux, Windows and Automagik Cloud. Locking the gate invalidates its pending approvals and grants.
+
+Windows Credential Manager opens a local Settings gate and finds one generic credential by its exact target. The user's private card shows the saved target. Settings can show its user name during Find. A lock invalidates pending approvals and grants for this provider. Auto asks before recognized credential commands, including Windows PowerShell credential API calls or opaque invocations, vaultcmd and cmdkey listings or writes. Auto omits recognized credential command details from its diagnostics, audit and subsequent judge requests. A tool-call event emitted by an agent can still contain text the agent supplied. Same-user shell code can access the Windows credential store outside Automagik's gate, and Windows credential-access auditing can record the target name.
+
+Vault mappings live in a separate `vault-sources.json` in the team home, written atomically with file mode 600. Mapped names stay reserved even when the vault plugin is off. When the vault is unlocked, a Bot in scope can ask for approval in its own chat. Each approval covers one attempt at the exact command, in the shell and folder shown on the card. Vault values cannot reach a shell in this version. If a name appears in both files, remove one definition in Settings → Secrets to resolve the conflict. You can remove a mapping there with the vault plugin off. If the mapping file cannot be read, secret use stops until the file is fixed.
 
 Limits:
 
 - On Windows, the file mode has no effect; the file is protected by your user folder only.
-- Only exact copies of a value are masked. A Bot that encodes, splits or reverses a value can still print it. Do not give important secrets to a Bot you do not trust.
+- When the Bot team loads, it removes inherited password-manager unlock variables such as `BW_SESSION`, `BWS_ACCESS_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`, `OP_SESSION` and `OP_SESSION_*`, `VAULT_TOKEN` and Proton Pass's unlock variables. This includes values from DSH's `.env` layers and affects new Bot shells, ACP agents, MCP servers and your DSH terminal panel. Processes already running when you update keep their environment until the app restarts. Reverting also takes an app restart to restore the launch environment. If you explicitly set an unlock variable in an MCP server's environment or DSH's terminal settings, that server or terminal still gets it. Vault-backed grants for MCP servers are planned for delivery 5 of RFC 0034. Auto asks you before password-manager reads such as `bw get` or `op read`.
+- Masking covers a value and its JSON-escaped and URL-encoded forms (`src/host/secrets.js`, the redactor). Base64, hex, split and reversed forms are not covered; a Bot that prints one can still leak it. Do not give important secrets to a Bot you do not trust.
 - On a page that is not HTTPS (for example dsh Web opened over http on a LAN), the value crosses the network in clear text. The card warns you.
 - Group chats show no cards; a Bot asks in its own chat.
 
@@ -512,7 +794,7 @@ Files in `ui/`:
 | `side/` | Side chats, one file per Bot; `btw/` keeps the asides of earlier versions, read only |
 | `avatars/` | The photos added for Bots to wear (up to 500), with `index.json` |
 | `handoff-results/` | Whole results of delegated work longer than `state.json` keeps, until the work is answered |
-| `browser-profiles/` | Each Bot's browser profile: its sign-ins and cookies. Treat backups of it like passwords. |
+| `browser-profiles/` | Each Bot's saved tabs and, with launched Chrome, its sign-ins and cookies. Treat backups of it like passwords. |
 | `browser-downloads/` | A folder per Bot that its browser may also upload from |
 | `update.json` | Left by an update that reinstalled the plugin, for the start that follows it |
 | `workspace` | The team workspace: the working folder of every Bot without one of its own (`config.workspace` changes it) |
@@ -531,6 +813,94 @@ The chats themselves are dsh Sessions and are not in `bot/`: they are in `~/.dsh
 **Move to another computer**: `state.json` has no absolute paths except the working folders you set for Bots and groups, but dsh's `storages/workspace.json` and the Session folder names contain the workspace's absolute path. If the path is the same on the new computer, copy the folder. If it is different (another user name or system), it is not yet tested whether dsh finds the old Sessions.
 
 **dsh Web and Desktop at the same time**: by default both use the same `~/.dsh`. The dsh that loads the team first takes `bot/state.lock` and can change the team. The other one is read-only: it shows the team and follows changes to the file, but refuses changes (`bot/read-only`, "open in another dsh"), and its Bots cannot start new Sessions. When the first one exits, the other one takes over on its next request. To change the team from both at once, give one of them a different `DSH_HOME` (two separate teams).
+
+## Seed the shared Bot registry (RFC 0014)
+
+The Code side and the left bar's seats read the shared Bot registry, version 2: `$AUTOMAGIK_HOME/bots/bots.json` (the home file: `projects[]` and the project's main Bot as its seat) and `<project>/.automagik/bots/bots.json` (the repo file: that project's Bots). Herdr keeps a project's roster in `.herdr/bots.json`, version 1; the plugin ships the readers but does not convert it by itself. This seed writes both version 2 files from a roster that already exists:
+
+```sh
+node apps/bots-dsh/scripts/seed-registry.mjs --project <project> --home <automagik-home>
+```
+
+`--project` defaults to the current folder; `--home` defaults to `$AUTOMAGIK_HOME`, else `~/.automagik`. The second is the Automagik home, not the team's `AUTOMAGIK_BOTS_HOME`: it is where `bots/bots.json` lives (`~/.automagik/bots/bots.json` by default). The image ships the same script inside the installed plugin:
+
+```sh
+node /opt/automagik/profile/node_modules/@automagik/bots-dsh/scripts/seed-registry.mjs --project /data/workspace --home /data
+```
+
+It creates a missing file and leaves an identical one untouched, so re-running is safe. A repo file that differs is refused rather than overwritten; an existing home file is merged, keeping its other projects, picks and unknown fields, and a conflicting project entry or main Bot in it is refused. It never mints Bot ids: a project with no `.herdr/bots.json` is refused, because creating a team and its ids is Herdr's job. It keeps unknown fields, checks that the roster has exactly one main Bot, and removes `sessionId`, `sessions` and `segments` at every depth (including under `dsh`) before writing. The report it prints is the read-back: both files' Bot counts, any parser warnings and each file's `sha256`.
+
+## Role packages
+
+Bot settings discover the role catalog on first open. A host holding the team lock fetches
+`roles.json` and `roles.json.sig` from the GitHub release for the running bots-dsh version.
+If the index returns 404, the Roles card stays hidden on a team with no installed records.
+The catalog is bound to that release. Versioned releases are immutable and the consumer does
+not support replacing a catalog on the same tag.
+
+The release producer signs the exact `roles.json` bytes with the plugin lane's Ed25519 key
+and attaches the detached signature as base64 in `roles.json.sig`. The catalog schema is:
+
+```json
+{
+  "schemaVersion": 1,
+  "publisher": "automagik",
+  "keyId": "<plugin lane key ID>",
+  "version": "3.159.1",
+  "repository": "https://github.com/automagik-si/automagik",
+  "roles": [
+    {
+      "id": "example",
+      "version": "1.0.0",
+      "name": "Example role",
+      "publisher": "automagik",
+      "official": true,
+      "sha256": "<64 hexadecimal digits>",
+      "size": 1024,
+      "capabilities": [],
+      "source": "https://github.com/automagik-si/automagik/releases/download/v3.159.1/automagik-role-example-1.0.0.tgz"
+    }
+  ]
+}
+```
+
+`roles` allows up to 200 entries. IDs are lowercase ASCII letters, digits and hyphens,
+start with a letter or digit, and have at most 41 characters. `data` is reserved for
+per-Bot role data. Windows device names are reserved as well. Each of the three version
+components has 1–9 decimal digits. Name and publisher have 1–60 characters. `size` is the
+exact compressed byte count (1 byte to 16 MiB) and `sha256` covers those bytes. The consumer drops
+malformed entries and all entries sharing a duplicate ID. Only entries with `official: true`
+and publisher `automagik` are installable. Downloads follow GitHub release redirects only
+to `https://release-assets.githubusercontent.com`.
+
+Each `automagik-role-<id>-<version>.tgz` is a gzip-compressed POSIX ustar archive rooted
+at `package/`. Attach each archive and its `.sha256` beside the signed catalog.
+The archive contains regular files and directories, with at most 512 entries, 8 MiB per
+file and 32 MiB expanded. Paths are at most 200 bytes including the root. Components match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, exclude Windows device names and trailing dots, and
+use one spelling per case-folded path, including implied directories. The archive ends with
+two zero blocks and may pad with additional complete zero blocks.
+
+The required `package/role.json` (up to 64 KiB) contains `id`, `version`, `name` (1–60
+characters), `publisher`, `entry` (a relative `.js` or `.mjs` file), `prompt` (a relative
+`.md` or `.txt` file up to 16 KiB), `tools`, `capabilities`, `settings` and `ui`. IDs,
+versions and publishers match the catalog entry. Tools have a unique `name` matching
+`[a-z][a-z0-9_]{0,63}`, a 1–1024 character `description` and a JSON object
+`parameters`. At most 16 tools are allowed. The capability set matches the catalog and
+comes from `audio-out`, `task-start`, `route-policy` and `history-read`. P2 requires empty
+`settings` and `ui` arrays. Optional `description` is a string and optional `requires` is
+an array of feature names, which must be empty in P2. Unknown manifest fields produce
+warnings. Installation copies package files and records them without running package code.
+
+The team home is private and owner-controlled. The consumer refuses symlinked or
+non-directory package ancestors and linked or special entries within a package version
+directory. Its checks assume the team lock and owner control of concurrent filesystem writes.
+A missing version folder shows as broken. The host checks files against verified digests
+while it has them in memory and checks the local package structure after a restart. An
+explicit reinstall compares exact file contents against the verified archive. An
+orphan folder can be adopted only when those bytes match. To replace a damaged install,
+uninstall and install again. Uninstall works offline once the role has been detached from
+every Bot, and leaves `roles/data/` in place.
 
 ## Development
 
@@ -552,6 +922,7 @@ dev/check.sh                             # all checks (see below)
 - **Desktop test bench** `dev/desktop-linux/desktop.sh <name> [start|stop|reset|status]`: dsh does not run Desktop on Linux; `launch.mts` runs the unpackaged Desktop in Xvfb. The first start downloads Electron and a Linux runtime (a few minutes). `start` returns when the team shows in a 1400×860 window.
 - **All checks** `dev/check.sh [--skip steps] [--only steps] [--out dir]`: `unit`, `build`, `lint` (each in this plugin and in the channels and canvas plugins), `smoke`, `web` (screenshots of the sidebar, a chat, a group, Bot settings, the Bots page and group settings) and `desktop` (the same screenshots, then the Bot browser checks). It stops everything it started. On failure it names the step and its log and exits non-zero. A full run takes about 3 minutes after the first download.
 - **Ports**: every script takes `SLOT=n` (0-9, default 0) so that several people or sessions on one machine do not collide: Web bench `31n0` and mock `88n0`, smoke `31n1` and `88n1`, Desktop mock `88n2`, and so on. A Desktop uses about 1 GB of memory; stop it when you are done.
+- **Card mocks** `dev/mock/<name>/`: a static page wearing the team's own sheets and sample data only, so a screen can be settled before it ships. Each has its own README and a `?mock=<name>` gate, off by default; none is a product route. `dev/mock/genui-backfill` shows the backfill card's three states (`?mock=backfill`).
 - **Real models** (these cost tokens): `dev/steward-eval.mjs` sends hand-written conversation endings through the context steward's own prompt to an OpenAI-compatible route (or, with `--api messages`, an Anthropic Messages route such as DeepSeek's official one) and checks each decision. `dev/llm-tap.mjs <port> <upstream base URL> <log.jsonl> [body dir]` is a logging pass-through for either format: point a provider's `baseURL` at it, and it writes one JSON line per call (steward, checkpoint, handoff note or main turn, the Bot's name, token usage, the answer, and where the request first differs from the same Bot's previous one, which is what a provider's cache can reuse; never headers). With a body dir it also saves every request body. Each file explains its use at the top.
 - **Screenshots**: `dev/ui-shots.mjs` works for both apps (`desktop <dsh repo> <dir> <renderer port>` or `web <dsh repo> <dir> <bench name> <web port>`).
 - `bun run test` (Node runs the tests, as it runs DSH) loads the `@deepseek-ai/*` packages from the deepseek-harness checkout, else from `dev/harness` (`bun run harness`). The channels and canvas plugins' tests also load this plugin's `index.js`, `test/fake-ctx.js` and committed `client.js` from this folder, to compose the team with their own runtimes.
@@ -567,6 +938,7 @@ dev/check.sh                             # all checks (see below)
 | `src/script-child/` | Source of the process a `browser_exec` script runs in: a QuickJS interpreter (WebAssembly) and the two functions it is given; `pins.json` holds the interpreter's version and the sha256 of each of its files |
 | `src/host/browser/script-child.js` | Built from `src/script-child/` and the pinned interpreter by `scripts/build-script-child.mjs` (esbuild) as one file; committed |
 | `web-search.js` | The `auto` search provider; independent of the team code |
+| `src/host/member-wall/` | The member wall (off): the read fence (`fs`), the principal record (`principals`), its profile rows |
 | `test/` | Unit tests and fixtures |
 | `dev/characters.mjs` | Builds the characters (small 3D models traced to outlines) into the `CHARACTERS` table in `src/client/characters.js` |
 | `dev/` | Mock model, test benches, smoke test, Desktop scripts, real-model tools (steward evaluation, logging pass-through) |

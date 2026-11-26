@@ -220,3 +220,34 @@ test('an Anthropic API key is saved the Models page\'s way, on the same anthropi
   assert.equal(fake.secrets.get('ANTHROPIC_API_KEY'), 'sk-ant-0123')
   assert.deepEqual(fake.valueOf('llm-pi-ai').providers.anthropic, { apiKeyEnv: 'ANTHROPIC_API_KEY' })
 })
+
+test('the gated sign-in status route serves the notice only to its mounted owner', async () => {
+  const provider = 'kimi-coding'
+  const authorization = fakeAuthorization()
+  const { ctx, routes } = fakeContext({ services: {
+    authorization,
+    omniTeam: { ownerViewer: request => ({ id: request.headers.get('x-automagik-principal') }) },
+  } })
+  const { handle } = install(ctx, { env: { AUTOMAGIK_MULTIUSER: '1' }, fetch: offline })
+  const route = routes[0]
+  await handle('signin-start', { provider })
+  const [attempt] = authorization.begun
+  const poll = async (person, viewer) => {
+    const response = await route.fetch(new Request('https://workspace.invalid' + route.path, {
+      method: 'POST',
+      headers: { 'x-automagik-principal': person },
+      body: JSON.stringify({ endpoint: 'signin-status', payload: { provider }, viewer }),
+    }))
+    return response.json()
+  }
+  try {
+    attempt.interaction.notify({ code: 'A-FIRST' })
+    assert.equal((await poll('owner-a', 'owner-a')).value.notice.code, 'A-FIRST')
+    attempt.interaction.notify({ code: 'B-NEXT' })
+    assert.equal((await poll('owner-b', 'owner-a')).error?.code, 'bot/viewer-changed')
+    assert.equal((await poll('owner-b')).error?.code, 'bot/viewer-changed')
+    assert.equal((await poll('owner-b', 'owner-b')).value.notice.code, 'B-NEXT')
+  } finally {
+    attempt.settle({ status: 'cancelled' })
+  }
+})

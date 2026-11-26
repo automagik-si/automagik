@@ -22,6 +22,7 @@
 import { routeOf } from '../shared/routes.js'
 import { MODEL_ACCESS_REQUIRED } from './model-state.js'
 import { ACCOUNT_CONFIRM_REQUIRED } from './models.js'
+import { createReservationCheck } from './reservation-check.js'
 
 // The context DSH adds to every call of a turn is not what opens one.
 const opensTurn = message => message?.role === 'user' && message.source?.kind !== 'runtime-context'
@@ -37,24 +38,69 @@ export function continuesTurn(messages) {
   return false
 }
 
-export function install(rt) {
-  rt.ctx.on('llm/stream', (options, next) => {
+const finish = message => ({
+  type: 'finish', reason: { kind: 'error', failure: { code: MODEL_ACCESS_REQUIRED, message } },
+})
+
+export function install(rt, reservationDeps) {
+  const { ctx } = rt
+  const check = reservationDeps && createReservationCheck(rt, reservationDeps)
+  if (check) rt.machineReservations = check
+  ctx.on('llm/stream', (options, next) => {
     // Let DSH validate malformed calls; this guard only knows complete model routes.
     if (typeof options?.provider !== 'string' || typeof options?.model !== 'string') return next()
-    if (routeOf(options.provider).connectedBy !== 'acp' || !rt.isBotSession?.(options.sessionId)) return next()
-    if (continuesTurn(options.messages)) return next()
+    const { provider, sessionId } = options
+    if (routeOf(provider).connectedBy !== 'acp') return next()
+    if (!rt.isBotSession?.(sessionId) || continuesTurn(options.messages)
+      || check?.isAdmitted(sessionId)) {
+      check?.admitted(sessionId, provider)
+      return next()
+    }
     return (async function* authenticateAgentStream() {
-      let access
+      const release = check?.starting(provider)
       try {
-        access = await rt.modelAccess(`${options.provider}/${options.model}`)
-      } catch {
-        access = undefined
+        const held = check && await check.gate(provider, sessionId)
+        if (held) {
+          yield finish(held)
+          return
+        }
+        let access
+        try {
+          access = await rt.modelAccess(`${provider}/${options.model}`)
+        } catch {
+          access = undefined
+        }
+        const late = check?.held(provider)
+        if (late) {
+          yield finish(late)
+          return
+        }
+        if (access?.ready === false && (access.code === 'bot/sign-in-required'
+          || access.code === ACCOUNT_CONFIRM_REQUIRED)) {
+          yield finish(access.message)
+          return
+        }
+        check?.admitted(sessionId, provider)
+        release?.()
+        yield* next()
+      } finally {
+        release?.()
       }
-      if (access?.ready === false && (access.code === 'bot/sign-in-required' || access.code === ACCOUNT_CONFIRM_REQUIRED)) {
-        yield { type: 'finish', reason: { kind: 'error', failure: { code: MODEL_ACCESS_REQUIRED, message: access.message } } }
-        return
-      }
-      yield* next()
     })()
   })
+  if (!check) return
+  ctx.on('acp-dsh/login-ready', payload => check.loginReady(payload?.id))
+  ctx.on('session/event', (session, event) => {
+    if (event?.type === 'turn/end') check.turnEnded(session?.id)
+  })
+  ctx.on('session/disposed', session => check.sessionDisposed(session?.id))
+  ctx.on('session/created', session => check.sessionOpened(session))
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['acpAgents'], sub => {
+      const off = check.started()
+      sub.effect(() => off, 'ds-bot: reservation check')
+    })
+  } else {
+    try { if (ctx.get?.('acpAgents') !== undefined) check.started() } catch {}
+  }
 }

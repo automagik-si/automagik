@@ -37,6 +37,8 @@ Every mod brings its own `RECIPE.md`, `LICENSE` and keys.
   `modCount`, `repositoryCount`, `mods[]` with `owner/repo/fullName/url/stars/pushedAt/headCommit/
   path/name/blurb/modNames/hasKeys/hasPreview/recipeBytes/previewUrl`). One mod has one owner: the
   first entry to claim a name keeps it (the pack is first), and a repo left with nothing drops out.
+  `generatedAt` and our own `pushedAt` are kept when what the index describes is unchanged, so a
+  release commit never rewrites it and an open catalog pull request stays mergeable (#215).
 - **At run time** the manager reads that index: `data/am-mods/catalog.json` (else the one from
   before the rename) → `{ url }`, a
   local path in a checkout or the published raw URL after a push. From it, each installed mod gets
@@ -68,11 +70,11 @@ Every mod brings its own `RECIPE.md`, `LICENSE` and keys.
 
 ## Done when
 
-- `herdr-app check mods/am-mods` passes.
+- `herdr-app check mods/am-mods` passes, run as the contributor gate in a scratch `HERDR_APP_HOME` on a machine with no live Herdr (the check runs the mod's `init()` for real: `AGENTS.md`).
 - `node scripts/catalog.mjs` writes an index whose first entry is this pack, whose `modNames` is
   exactly the folders under `mods/`, and with no mod name claimed twice; `--check` exits 0 on that
   index and 1 when any entry drifted (never for its age or head commit).
 - `HERDR_APP_HOME=<temp> sh install.sh --yes` installs every mod, adds only free keys, writes the
-  catalog config and prints `check passed` for each mod.
+  catalog config and prints `check passed` for each mod. Run it, too, only on a machine with no live Herdr: the installer runs `herdr-app check` on each mod.
 - In the app: `⌘⇧M` opens the table; a mod installed from our catalog shows its repo and stars;
   `d` reports equal or differing file counts; a switch moves the folder to `mods-disabled/`.

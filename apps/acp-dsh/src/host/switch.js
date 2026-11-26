@@ -3,7 +3,7 @@
 // what the agent streamed in DSH's log. The redactor runs at each crossing only — the replay out
 // to an agent, and the transcript handed back to a native provider — never at ingest. Each
 // crossing writes a visible provider-boundary row, so the chat says where it is moving.
-import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { boundContextSummary, createUserMessage, isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { SYNTHETIC_KIND } from './names.js'
 
 /** The source kind of the row that names the provider a turn came from or went to. */
@@ -12,6 +12,7 @@ const REPLAY_LIMIT = 120_000
 const PART_LIMIT = 8_000
 // A handoff package is sized by the Bot team for the part's model; it still fits the replay cap.
 const HANDOFF_LIMIT = 60_000
+const CROSSING_REDACTED = Symbol('ACP crossing redacted')
 
 /** Where this turn's user messages start: the transcript before it is replay material. */
 export function turnStart(messages) {
@@ -196,21 +197,32 @@ export function fromAgent(messages, providers) {
  * The `llm/stream` listener for the crossing back to DSH's own providers: a transcript that
  * carries an agent's turn is redacted before a native model sees it, so a secret the agent read
  * with its own tools never reaches that provider. `next` takes no request, so the redacted call
- * is a nested `ctx.llm.stream`; a WeakSet keeps that call from re-entering this listener.
+ * is a nested `ctx.llm.stream`. The request mark survives other projections' copies.
  * @param {Map<string, unknown>} providers the agents' routes
  * @param {{ llm?: { stream(options: object): AsyncIterable<object> } }} [ctx]
  * @param {(text: string) => string} redact
  * @param {() => boolean} [on] whether live switching is on (the setting); off is the old path
  */
 export function crossed(providers, ctx, redact, on = () => true) {
-  const rewritten = new WeakSet()
   return (options, next) => {
     if (on() !== true) return next()
     if (agentRoute(providers, options.provider) || options.sessionId === undefined) return next()
-    if (rewritten.has(options) || ctx?.llm?.stream === undefined) return next()
+    if (options[CROSSING_REDACTED] || ctx?.llm?.stream === undefined) return next()
     if (!fromAgent(options.messages, providers)) return next()
-    const request = { ...options, messages: redactTranscript(options.messages, redact) }
-    rewritten.add(request)
+    const messages = redactTranscript(options.messages, redact)
+    const request = { ...options, messages, [CROSSING_REDACTED]: true }
+    ctx.get?.('omniTeam')?.carryUsageTag?.(options.messages, messages)
+    if (isAgentLoopRequest(options)) {
+      for (const row of messages) {
+        if (Array.isArray(row?.content)) {
+          for (const part of row.content) Object.freeze(part)
+          Object.freeze(row.content)
+        }
+        Object.freeze(row)
+      }
+      Object.freeze(messages)
+      markAgentLoopRequest(Object.freeze(request))
+    }
     return ctx.llm.stream(request)
   }
 }
@@ -230,6 +242,31 @@ const clip = text => clipTo(text, PART_LIMIT)
  */
 export function isHandoff(message) {
   return message?.role === 'user' && message?.source?.handoff === true
+}
+
+export const CONTEXT_KINDS = new Set(['runtime-context', 'skill-catalog', 'time-context'])
+
+/** The source kind of the row that says a new agent session does not see the chat before it. */
+export const NOTICE_KIND = 'acp-session'
+
+/**
+ * A Bot part's opening package the agent has not read: the last handoff in `history` when the Bot team
+ * answered it as a turn of its own (not `resume`: a resumed one was the prompt of its own turn) and that
+ * answer is the only one since it. Undefined otherwise. Any user row between the handoff and that answer
+ * other than DSH's context notes and this plugin's notices (the person, a retry, another Bot's relay)
+ * means the answer was a turn of its own, not the Bot team's acknowledgement.
+ * @param {any[]} history the transcript before this turn
+ */
+export function unreadHandoff(history) {
+  const at = history.findLastIndex(isHandoff)
+  if (at < 0 || history[at].source?.resume === true) return undefined
+  const after = history.slice(at + 1)
+  const answers = after.filter(message => (message?.role === 'assistant' && message.source?.synthetic !== SYNTHETIC_KIND) || message?.role === 'tool')
+  if (answers.length !== 1 || answers[0].role !== 'assistant') return undefined
+  const person = after.slice(0, after.indexOf(answers[0]))
+    .some(message => message?.role === 'user' && !isHandoff(message)
+      && !CONTEXT_KINDS.has(message.source?.kind) && message.source?.kind !== NOTICE_KIND)
+  return person ? undefined : history[at]
 }
 
 /** Whether `messages` hold an answer: an assistant turn that is not a bridge's synthetic block. */
@@ -281,6 +318,10 @@ export function renderMessage(message) {
     if (isHandoff(message)) {
       const text = textOf(message.content)
       return text === '' ? undefined : `Handoff (not from the user): ${clipTo(text, HANDOFF_LIMIT)}`
+    }
+    if (kind === 'automagik-skill') {
+      const body = textOf(message.content)
+      return body === '' ? undefined : `Tool result: ${clip(body)}`
     }
     if (kind !== 'user' && kind !== undefined) return undefined
     const text = textOf(message.content)

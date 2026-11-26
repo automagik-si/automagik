@@ -12,6 +12,9 @@ const CLAUDE = 'acp-claude'
 const CODEX = 'acp-codex'
 const STATE = 'expected_state_0123456789'
 const CLAUDE_URL = `https://claude.com/cai/oauth/authorize?code=true&client_id=public&state=${STATE}&code_challenge=public-challenge`
+const SHORT_CLAUDE_QUERY = `A${'b'.repeat(43)}`
+const SHORT_CLAUDE_ENDPOINT = 'https://claude.ai/oauth/authorize'
+const SHORT_CLAUDE_URL = `${SHORT_CLAUDE_ENDPOINT}?${SHORT_CLAUDE_QUERY}`
 const CODEX_URL = 'https://auth.openai.com/codex/device'
 const settle = () => new Promise(resolve => setImmediate(resolve))
 const deferred = () => {
@@ -119,7 +122,7 @@ test('sign-in URLs reject lookalikes, userinfo, controls, ports, schemes and a C
     'https://auth.openai.com/codex/device?code=private',
     'https://auth.openai.com/codex/device\n',
     'https://auth.openai.com/another-path',
-  ]) assert.equal(isLoginUrl(CODEX, bad), false, bad)
+  ]) assert.equal(isLoginUrl(CODEX, bad), false, 'invalid Codex sign-in link')
   // H5: without code=true the page sends the code to a local callback no other device reaches.
   for (const bad of [
     `https://claude.com/cai/oauth/authorize?state=${STATE}`,
@@ -127,7 +130,8 @@ test('sign-in URLs reject lookalikes, userinfo, controls, ports, schemes and a C
     'https://claude.com/cai/oauth/authorize?code=true',
     'https://claude.com/cai/oauth/authorize?code=true&state=short',
     `https://claude.com/cai/oauth/authorize?code=true&state=${STATE}#x`,
-  ]) assert.equal(isLoginUrl(CLAUDE, bad), false, bad)
+  ]) assert.equal(isLoginUrl(CLAUDE, bad), false, 'invalid Claude sign-in link')
+  assert.equal(isLoginUrl(CLAUDE, SHORT_CLAUDE_URL), false, 'compact Claude sign-in link')
   assert.equal(isLoginUrl(CLAUDE, CODEX_URL), false)
   assert.equal(isLoginUrl(CODEX, CLAUDE_URL), false)
 })
@@ -225,6 +229,9 @@ test('H4: a CLI that stays silent after the code fails at the absolute confirmat
     await settle()
     const view = h.logins.status(CLAUDE, started.attemptId)
     assert.equal(view.status, 'failed')
+    // The fixed cause travels on the ended attempt, so the surface above can say why without
+    // ever moving what the CLI printed.
+    assert.equal(view.cause, 'the CLI did not confirm the sign-in')
     assert.ok(child.kills.includes('SIGTERM'))
     assert.equal(h.ready.length, 0)
   }
@@ -385,10 +392,30 @@ test('device login errors and unsupported results never fall back to local brows
   }
 })
 
-test('Claude and Codex run at the same time, independently; the browser block is scoped and cleaned up', async t => {
+test('an ended attempt carries its fixed cause; a live one carries none', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  const started = h.logins.start(CLAUDE)
+  await settle()
+  // Still live: nothing to explain.
+  assert.equal(h.logins.status(CLAUDE, started.attemptId).cause, undefined)
+  // The CLI exits before it prints a link: the cause names that, and never the CLI's output.
+  const child = h.children.at(-1).child
+  child.stdout.write('private-account-name failed to authenticate\n')
+  child.exitCode = 1
+  child.emit('close', 1)
+  await settle()
+  const view = h.logins.status(CLAUDE, started.attemptId)
+  assert.equal(view.status, 'failed')
+  assert.equal(view.cause, 'the CLI exited')
+  assert.doesNotMatch(JSON.stringify(view), /private-account-name/)
+})
+
+test('Claude and Codex run independently with Claude-only sign-in options', async t => {
   const h = harness()
   t.after(() => h.logins.dispose())
   const browserBefore = process.env.BROWSER
+  const fullLinkBefore = process.env.CLAUDE_CODE_FULL_SIGN_IN_LINK
   h.selected.env.BROWSER = '/user/normal-browser'
   const original = { ...h.selected.env }
   const claude = h.logins.start(CLAUDE, { label: 'first-bot' })
@@ -400,7 +427,10 @@ test('Claude and Codex run at the same time, independently; the browser block is
   const nativeCodex = h.children.find(row => row.args[0] === 'app-server')
   const directory = dirname(nativeClaude.opts.env.BROWSER)
   assert.equal(nativeCodex.opts.env.BROWSER, original.BROWSER)
+  assert.equal(nativeClaude.opts.env.CLAUDE_CODE_FULL_SIGN_IN_LINK, '1')
+  assert.equal(Object.hasOwn(nativeCodex.opts.env, 'CLAUDE_CODE_FULL_SIGN_IN_LINK'), false)
   assert.deepEqual(h.selected.env, original)
+  assert.deepEqual(h.checks.map(({ env }) => env), [original, original])
   assert.notEqual(claude.attemptId, codex.attemptId)
   showClaudeLink(nativeClaude.child)
   h.logins.cancel(CLAUDE, claude.attemptId)
@@ -410,6 +440,7 @@ test('Claude and Codex run at the same time, independently; the browser block is
   assert.equal(h.logins.activeAttempts(), 1)
   h.logins.dispose()
   assert.equal(process.env.BROWSER, browserBefore)
+  assert.equal(process.env.CLAUDE_CODE_FULL_SIGN_IN_LINK, fullLinkBefore)
   assert.equal(h.logins.activeAttempts(), 0)
   assert.deepEqual(h.counts, [1, 2, 1, 0])
 })
@@ -535,6 +566,58 @@ test('unsupported OAuth links and oversized process output never echo account di
   }
 })
 
+test('only compact Claude links get the short-link failure and no link is retained', async t => {
+  const shortCause = 'short sign-in link unsupported'
+  const unsupportedCause = 'unsupported sign-in link'
+  const cases = [
+    ['compact query', SHORT_CLAUDE_URL, shortCause],
+    ['compact query with a suffix', `${SHORT_CLAUDE_URL}&x=1`, shortCause],
+    ['bare endpoint', SHORT_CLAUDE_ENDPOINT, unsupportedCause],
+    ['manual code without state', `${SHORT_CLAUDE_ENDPOINT}?code=true`, unsupportedCause],
+    ['ordinary query parameter', `${SHORT_CLAUDE_ENDPOINT}?x=1`, unsupportedCause],
+    ['compact query with a state parameter', `${SHORT_CLAUDE_URL}&state=`, unsupportedCause],
+    ['compact query after another component', `${SHORT_CLAUDE_ENDPOINT}?x=1&${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    ['different host', `https://evil.test/oauth/authorize?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    ['different path', `https://claude.ai/other?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    ['explicit default port', `https://claude.ai:443/oauth/authorize?${SHORT_CLAUDE_QUERY}`, unsupportedCause],
+    // Built through URL so the source holds no address-shaped text (the privacy scan).
+    ['userinfo', Object.assign(new URL(SHORT_CLAUDE_URL), { username: 'user' }).href, unsupportedCause],
+    ['fragment', `${SHORT_CLAUDE_URL}#x`, unsupportedCause],
+  ]
+  for (const [label, url, cause] of cases) {
+    const h = harness()
+    t.after(() => h.logins.dispose())
+    const started = h.logins.start(CLAUDE)
+    await settle()
+    showClaudeLink(h.children[0].child, url)
+    const result = h.logins.status(CLAUDE, started.attemptId)
+    assert.equal(result.status, 'failed', label)
+    assert.equal(result.cause, cause, label)
+    assert.equal(result.message, cause === shortCause
+      ? 'The CLI returned a short sign-in link this app cannot use yet. Update Automagik and try again.'
+      : 'The CLI returned an unsupported sign-in link. Update it and try again.', label)
+    assert.equal(Object.hasOwn(result, 'url'), false, label)
+    assert.equal(Object.hasOwn(result, 'state'), false, label)
+    assert.equal(Object.hasOwn(result, 'prompt'), false, label)
+    assert.equal(h.logins.states.size, 0, label)
+  }
+})
+
+test('a full Claude sign-in link takes precedence over a short link in the same output', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  const started = h.logins.start(CLAUDE)
+  await settle()
+  const { child } = h.children[0]
+  child.stdout.write(`visit: ${SHORT_CLAUDE_URL}\n`)
+  showClaudeLink(child)
+  const result = h.logins.status(CLAUDE, started.attemptId)
+  assert.equal(result.status, 'waiting')
+  assert.equal(result.url === CLAUDE_URL, true, 'the full Claude sign-in link is shown')
+  assert.equal(result.prompt?.id, 'claude-code')
+  assert.equal(h.logins.textMatches(`x#${STATE}`), true)
+})
+
 // F5: a sign-in never updates the CLI on its own, whoever installed it (clis.js asks --version
 // the same way); Automagik's own install keeps a managed CLI current.
 test('the sign-in process runs with the CLI\'s own updates off', async () => {
@@ -643,3 +726,484 @@ for (const late of ['signedIn', 'onReady']) {
     assert.equal(h.logins.current(CLAUDE).status, 'starting')
   })
 }
+
+// ---- #2048 paste-back: an Antigravity link's state, refused in a chat message (L1) ----------
+
+const AGY_STATE = 'Ab-_.~xyz12345'
+const AGY_CALLBACK = `http://localhost:41234/auth/callback?code=4%2F0Abc&state=${AGY_STATE}`
+const AGY_LINK = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+  + `&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${AGY_STATE}`
+
+test('L1: a remembered Antigravity state is recognised after state= for a day; Claude\'s #state is unchanged', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  assert.equal(h.logins.textMatches(AGY_CALLBACK), false, 'nothing remembered yet')
+  h.logins.rememberCallbackState(AGY_STATE)
+  // Only its keyed hash and length are kept.
+  assert.equal(JSON.stringify([...h.logins.callbackStates.keys()]).includes(AGY_STATE), false)
+  assert.deepEqual([...h.logins.callbackLengths], [[AGY_STATE.length, 1]])
+  for (const text of [
+    AGY_CALLBACK,
+    `It ended on (${AGY_CALLBACK}).`,
+    `"${AGY_CALLBACK}",`,
+    `${AGY_CALLBACK.slice(0, -4)}\n${AGY_CALLBACK.slice(-4)}`,
+    AGY_CALLBACK.replace('state=', 'STATE='),
+    encodeURIComponent(AGY_CALLBACK),
+    AGY_CALLBACK.replace('~', '%7E'),
+    `${AGY_LINK} then ${AGY_CALLBACK}`,
+    // G8-3: a stray % later in the text does not stop the decoded test.
+    `${AGY_CALLBACK.replace('~', '%7E')} worked 100% done`,
+  ]) assert.equal(h.logins.textMatches(text), true, text)
+  for (const text of [
+    AGY_LINK,
+    // Google's link with its return address first (G7-1): still its own state, still allowed.
+    'https://accounts.google.com/o/oauth2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback'
+      + `&access_type=offline&state=${AGY_STATE}&client_id=c`,
+    AGY_CALLBACK.replace(AGY_STATE, 'Zz-_.~xyz12345'),
+    AGY_CALLBACK.replace(AGY_STATE, AGY_STATE.slice(0, -1)),
+    'http://localhost:3000/?state=something-else',
+    // G8-3: a malformed escape is left raw, and nothing throws.
+    'state=%E0%A4%A',
+    `${AGY_STATE} alone`,
+  ]) assert.equal(h.logins.textMatches(text), false, text)
+  // G8-4: only the authority accounts.google.com itself is skipped (a port or userinfo is not).
+  assert.equal(h.logins.textMatches(`https://accounts.google.com:443/o/oauth2/auth?state=${AGY_STATE}`), true)
+  assert.equal(h.logins.textMatches(`https://u!@accounts.google.com/o/oauth2/auth?state=${AGY_STATE}`), true)
+  assert.equal(h.logins.textMatches(`https://ACCOUNTS.GOOGLE.COM/o/oauth2/auth?state=${AGY_STATE}`), false)
+  // Claude's #state path is unchanged beside it.
+  assert.equal(h.logins.textMatches(`code#${STATE}`), false)
+  h.clock.advance(STATE_TTL_MS - 1)
+  assert.equal(h.logins.textMatches(AGY_CALLBACK), true)
+  h.clock.advance(1)
+  assert.equal(h.logins.textMatches(AGY_CALLBACK), false)
+  assert.equal(h.logins.callbackStates.size, 0)
+  assert.equal(h.logins.callbackLengths.size, 0, 'the lengths are pruned with the states')
+  // A refused state (too short, a space) is not remembered.
+  h.logins.rememberCallbackState('short')
+  h.logins.rememberCallbackState('has a space in it')
+  assert.equal(h.logins.callbackStates.size, 0)
+})
+
+test('L1: at most 64 state= / state%3d occurrences per reading, and a token cut at 3 x 512 characters', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  h.logins.rememberCallbackState(AGY_STATE)
+  // Both spellings count together: the 65th occurrence is not read, the 64th is.
+  const filler = n => Array.from({ length: n }, (_, i) => (i % 2 ? 'state=x ' : 'state%3dx ')).join('')
+  assert.equal(h.logins.textMatches(`${filler(63)}state=${AGY_STATE}`), true)
+  assert.equal(h.logins.textMatches(`${filler(64)}state=${AGY_STATE}`), false)
+  // A remembered 512-character state, fully percent-encoded once, still fits in the token.
+  const long = 'a'.repeat(511) + '~'
+  h.logins.rememberCallbackState(long)
+  const encoded = [...long].map(c => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`).join('')
+  assert.equal(encoded.length, 3 * 512)
+  assert.equal(h.logins.textMatches(`http://localhost:41234/auth/callback?code=a&state=${encoded}`), true)
+  assert.equal(h.logins.textMatches(`http://localhost:41234/auth/callback?code=a&state=x${encoded}`), false)
+})
+
+// Switch account (#2064): a fresh attempt always runs its sign-in and shows its link.
+const until = async (done, rounds = 30) => { for (let i = 0; i < rounds && !done(); i++) await settle() }
+const UNCHANGED = 'The account did not change. Try again.'
+const NOT_FINISHED = 'Sign-in did not finish. Try again.'
+
+async function codexFreshWaiting(h, options = { fresh: true }) {
+  const started = h.logins.start(CODEX, options)
+  await settle()
+  const child = h.children.at(-1).child
+  sendJson(child, { id: jsonRequests(child)[0].id, result: {} })
+  await settle()
+  const login = jsonRequests(child).find(row => row.method === 'account/login/start')
+  sendJson(child, { id: login.id, result: { type: 'chatgptDeviceCode', loginId: 'login-123', verificationUrl: CODEX_URL, userCode: 'ABCD-1234' } })
+  await settle()
+  return { started, child }
+}
+
+test('L1: a fresh attempt never takes "already signed in": its sign-in runs and shows its link', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  h.authenticated(true)
+  const started = h.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  assert.equal(h.children.length, 1)
+  assert.deepEqual(h.children[0].args, ['auth', 'login', '--claudeai'])
+  assert.equal(h.checks.length, 1, 'one status read, recorded and never the result')
+  assert.equal(h.logins.status(CLAUDE, started.attemptId).status, 'starting')
+  showClaudeLink(h.children[0].child)
+  const waiting = h.logins.status(CLAUDE, started.attemptId)
+  assert.equal(waiting.status, 'waiting')
+  assert.equal(waiting.url, CLAUDE_URL)
+  assert.deepEqual(h.ready, [])
+
+  const codex = harness()
+  t.after(() => codex.logins.dispose())
+  codex.authenticated(true)
+  const { started: device } = await codexFreshWaiting(codex)
+  assert.equal(codex.children.length, 1)
+  assert.equal(codex.children[0].args[0], 'app-server')
+  const view = codex.logins.status(CODEX, device.attemptId)
+  assert.equal(view.status, 'waiting')
+  assert.equal(view.userCode, 'ABCD-1234')
+  assert.deepEqual(codex.ready, [])
+})
+
+for (const [name, signedIn, message, cause] of [
+  ['L2', true, UNCHANGED, 'the account did not change'],
+  ['L2b', false, NOT_FINISHED, 'the CLI exited'],
+]) {
+  test(`${name}: a fresh Claude that exits 0 before its link is failed; one status read says why (signed in: ${signedIn})`, async t => {
+    const failures = []
+    const h = harness({ onFail: value => failures.push(value) })
+    t.after(() => h.logins.dispose())
+    h.authenticated(signedIn)
+    const started = h.logins.start(CLAUDE, { fresh: true })
+    await settle()
+    h.children[0].child.close(0)
+    await until(() => h.logins.status(CLAUDE, started.attemptId).settling !== true && h.logins.status(CLAUDE, started.attemptId).status !== 'starting')
+    const view = h.logins.status(CLAUDE, started.attemptId)
+    assert.equal(view.status, 'failed')
+    assert.equal(view.message, message)
+    assert.equal(view.cause, cause)
+    assert.deepEqual(failures.map(row => row.cause), [cause])
+    assert.deepEqual(h.ready, [])
+    assert.equal(h.checks.length, 2, 'the start read and one read after the exit')
+  })
+}
+
+for (const [name, signedIn, message] of [['L3', false, NOT_FINISHED], ['L3b', true, UNCHANGED]]) {
+  test(`${name}: a fresh Codex that exits 0 before its device link is failed (signed in: ${signedIn})`, async t => {
+    const h = harness()
+    t.after(() => h.logins.dispose())
+    h.authenticated(signedIn)
+    const started = h.logins.start(CODEX, { fresh: true })
+    await settle()
+    h.children[0].child.close(0)
+    await until(() => !['starting', 'waiting'].includes(h.logins.status(CODEX, started.attemptId).status)
+      && h.logins.status(CODEX, started.attemptId).settling !== true)
+    const view = h.logins.status(CODEX, started.attemptId)
+    assert.equal(view.status, 'failed')
+    assert.equal(view.message, message)
+    assert.deepEqual(h.ready, [])
+  })
+}
+
+test('L4: a fresh Claude that shows its link and confirms is ready, told it was a Switch', async t => {
+  const options = []
+  const h = harness({ onReady: async (id, snapshot, value) => { options.push(value) } })
+  t.after(() => h.logins.dispose())
+  const started = h.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  const child = h.children[0].child
+  showClaudeLink(child)
+  h.logins.answer(CLAUDE, started.attemptId, `code#${STATE}`)
+  h.authenticated(true)
+  child.close(0)
+  await until(() => h.logins.status(CLAUDE, started.attemptId).status === 'ready')
+  assert.equal(h.logins.status(CLAUDE, started.attemptId).status, 'ready')
+  assert.equal(options.length, 1)
+  assert.equal(options[0].existing, false)
+  assert.equal(options[0].fresh, true)
+})
+
+test('L5b: a fresh attempt whose start read answers "signed in" late still runs its sign-in', async t => {
+  const read = deferred()
+  const h = harness({ signedIn: () => read.promise })
+  t.after(() => h.logins.dispose())
+  const started = h.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  assert.equal(h.children.length, 0)
+  read.resolve(true)
+  await settle()
+  assert.equal(h.children.length, 1, 'a login child is spawned')
+  assert.equal(h.logins.status(CLAUDE, started.attemptId).status, 'starting')
+  assert.deepEqual(h.ready, [])
+})
+
+test('L5c: a fresh start never joins a live plain attempt; it is refused and the plain one goes on', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  const plain = h.logins.start(CLAUDE)
+  await settle()
+  assert.throws(() => h.logins.start(CLAUDE, { fresh: true }), { code: 'acp-login/busy', message: 'The Bot account is changing.' })
+  assert.equal(h.logins.current(CLAUDE).attemptId, plain.attemptId)
+  assert.equal(h.logins.status(CLAUDE, plain.attemptId).fresh, undefined)
+  assert.deepEqual(h.children[0].child.kills, [])
+})
+
+test('L6: only a ready view whose onReady marked it says sameAccount', async t => {
+  for (const mark of [true, false]) {
+    const h = harness({ onReady: async (id, snapshot, { same }) => { if (mark) same() } })
+    t.after(() => h.logins.dispose())
+    const started = h.logins.start(CLAUDE, { fresh: true, compare: true })
+    await settle()
+    const child = h.children[0].child
+    showClaudeLink(child)
+    assert.equal(h.logins.status(CLAUDE, started.attemptId).sameAccount, undefined, 'never while waiting')
+    h.authenticated(true)
+    child.close(0)
+    await until(() => h.logins.status(CLAUDE, started.attemptId).status === 'ready')
+    const view = h.logins.status(CLAUDE, started.attemptId)
+    assert.equal(view.status, 'ready')
+    assert.equal(view.sameAccount, mark ? true : undefined)
+  }
+  const failed = harness({ onReady: async (id, snapshot, { same }) => same() })
+  t.after(() => failed.logins.dispose())
+  const started = failed.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  failed.children[0].child.close(1)
+  await until(() => failed.logins.status(CLAUDE, started.attemptId).settling !== true)
+  assert.equal(failed.logins.status(CLAUDE, started.attemptId).sameAccount, undefined)
+})
+
+test('L7: a fresh attempt says so in every view, the retained failed one too; a plain one never', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  const claude = h.logins.start(CLAUDE, { fresh: true })
+  assert.equal(claude.fresh, true)
+  await settle()
+  showClaudeLink(h.children[0].child)
+  assert.equal(h.logins.status(CLAUDE, claude.attemptId).fresh, true)
+  h.logins.cancel(CLAUDE, claude.attemptId)
+  const fast = harness()
+  t.after(() => fast.logins.dispose())
+  const early = fast.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  fast.children[0].child.close(0)
+  await until(() => fast.logins.status(CLAUDE, early.attemptId).status === 'failed')
+  assert.equal(fast.logins.status(CLAUDE, early.attemptId).fresh, true)
+
+  const codex = harness()
+  t.after(() => codex.logins.dispose())
+  const { started } = await codexFreshWaiting(codex)
+  assert.equal(started.fresh, true)
+  assert.equal(codex.logins.status(CODEX, started.attemptId).fresh, true)
+  codex.children[0].child.close(1)
+  await until(() => codex.logins.status(CODEX, started.attemptId).status === 'failed')
+  assert.equal(codex.logins.status(CODEX, started.attemptId).fresh, true)
+
+  const plain = harness()
+  t.after(() => plain.logins.dispose())
+  const attempt = plain.logins.start(CLAUDE)
+  assert.equal(attempt.fresh, undefined)
+  await settle()
+  showClaudeLink(plain.children[0].child)
+  assert.equal(plain.logins.status(CLAUDE, attempt.attemptId).fresh, undefined)
+  plain.children[0].child.close(1)
+  await settle()
+  assert.equal(plain.logins.status(CLAUDE, attempt.attemptId).fresh, undefined)
+})
+
+test('L8: a fresh attempt tells onSwitch its start and its end in fixed values; a plain one never', async t => {
+  const notes = []
+  const h = harness({ onSwitch: value => notes.push(value) })
+  t.after(() => h.logins.dispose())
+  h.authenticated(true)
+  const started = h.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  showClaudeLink(h.children[0].child)
+  h.authenticated(false)
+  h.children[0].child.close(1)
+  await until(() => notes.length === 2)
+  assert.deepEqual(notes, [
+    { id: CLAUDE, step: 'start', signedIn: true },
+    { id: CLAUDE, step: 'end', status: 'failed', linkShown: true, exit: 'exit 1', signedInAfter: false },
+  ])
+  assert.equal(h.logins.status(CLAUDE, started.attemptId).status, 'failed')
+
+  const ready = []
+  const r = harness({ onSwitch: value => ready.push(value) })
+  t.after(() => r.logins.dispose())
+  const attempt = r.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  showClaudeLink(r.children[0].child)
+  r.authenticated(true)
+  r.children[0].child.close(0)
+  await until(() => ready.length === 2)
+  assert.deepEqual(ready.at(-1), { id: CLAUDE, step: 'end', status: 'ready', linkShown: true, exit: 'exit 0', same: false })
+  assert.equal(r.logins.status(CLAUDE, attempt.attemptId).status, 'ready')
+
+  const plainNotes = []
+  const plain = harness({ onSwitch: value => plainNotes.push(value) })
+  t.after(() => plain.logins.dispose())
+  plain.logins.start(CLAUDE)
+  await settle()
+  plain.children[0].child.close(1)
+  await settle()
+  assert.deepEqual(plainNotes, [])
+})
+
+test('L9: a plain Claude that exits 0 before any link still confirms by status, as before', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  const started = h.logins.start(CLAUDE)
+  await settle()
+  h.authenticated(true)
+  h.children[0].child.close(0)
+  await until(() => h.logins.status(CLAUDE, started.attemptId).status === 'ready')
+  assert.equal(h.logins.status(CLAUDE, started.attemptId).status, 'ready')
+  assert.equal(h.ready.length, 1)
+})
+
+test('L10: a fresh attempt that ends without a sign-in settles: its tree, one read, then onSettled once', async t => {
+  for (const [end, signedIn] of [['failed', true], ['failed', false], ['expired', true], ['cancelled', false]]) {
+    const settled = []
+    const h = harness({ onSettled: value => settled.push(value) })
+    t.after(() => h.logins.dispose())
+    const started = h.logins.start(CLAUDE, { fresh: true })
+    await settle()
+    const child = h.children[0].child
+    showClaudeLink(child)
+    if (end === 'failed') { h.authenticated(signedIn); child.close(1) }
+    if (end === 'expired') h.clock.advance(LINK_TTL_MS)
+    if (end === 'cancelled') h.logins.cancel(CLAUDE, started.attemptId)
+    const ending = h.logins.status(CLAUDE, started.attemptId)
+    assert.equal(ending.status, end)
+    if (end !== 'failed') {
+      // The tree is still alive: the read waits for it.
+      assert.equal(ending.settling, true)
+      await settle()
+      assert.equal(h.logins.status(CLAUDE, started.attemptId).settling, true)
+      assert.deepEqual(settled, [])
+      h.authenticated(signedIn)
+      child.close(0)
+    }
+    await until(() => settled.length > 0)
+    const view = h.logins.status(CLAUDE, started.attemptId)
+    assert.equal(view.settling, undefined)
+    assert.equal(view.signedInAfter, signedIn)
+    assert.equal(settled.length, 1)
+    assert.deepEqual({ ...settled[0], valid: undefined }, { id: CLAUDE, attemptId: started.attemptId, signedIn, valid: undefined })
+  }
+
+  // A read that throws tells nothing.
+  const thrown = []
+  let reads = 0
+  const broken = harness({ onSettled: value => thrown.push(value), signedIn: async () => { if (++reads > 1) throw new Error('read failed'); return false } })
+  t.after(() => broken.logins.dispose())
+  const failing = broken.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  broken.children[0].child.close(1)
+  await until(() => thrown.length > 0)
+  assert.equal(thrown[0].signedIn, undefined)
+  assert.equal(Object.hasOwn(broken.logins.status(CLAUDE, failing.attemptId), 'signedInAfter'), false)
+
+  // SA2-2's read is reused: no third status read.
+  const reuse = []
+  const again = harness({ onSettled: value => reuse.push(value) })
+  t.after(() => again.logins.dispose())
+  again.authenticated(true)
+  again.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  again.children[0].child.close(0)
+  await until(() => reuse.length > 0)
+  assert.equal(again.checks.length, 2)
+  assert.equal(reuse[0].signedIn, true)
+
+  // A plain failure and a fresh ready never settle.
+  const none = []
+  const plain = harness({ onSettled: value => none.push(value) })
+  t.after(() => plain.logins.dispose())
+  const attempt = plain.logins.start(CLAUDE)
+  await settle()
+  plain.children[0].child.close(1)
+  await settle()
+  await settle()
+  assert.equal(plain.logins.status(CLAUDE, attempt.attemptId).settling, undefined)
+  const fresh = plain.logins.start(CODEX, { fresh: true })
+  await settle()
+  const codexChild = plain.children.at(-1).child
+  sendJson(codexChild, { id: jsonRequests(codexChild)[0].id, result: {} })
+  await settle()
+  const login = jsonRequests(codexChild).find(row => row.method === 'account/login/start')
+  sendJson(codexChild, { id: login.id, result: { type: 'chatgptDeviceCode', loginId: 'login-123', verificationUrl: CODEX_URL, userCode: 'ABCD-1234' } })
+  await settle()
+  plain.authenticated(true)
+  sendJson(codexChild, { method: 'account/login/completed', params: { loginId: 'login-123', success: true } })
+  await until(() => plain.logins.status(CODEX, fresh.attemptId).status === 'ready')
+  assert.equal(plain.logins.status(CODEX, fresh.attemptId).status, 'ready')
+  await settle()
+  assert.deepEqual(none, [])
+})
+
+test('L10: a fresh attempt that fails or is cancelled before resolve still settles once', async t => {
+  // `resolve` throws: the attempt fails in `begin`, and the settle's own resolve throws too.
+  const settled = []
+  const h = harness({ onSettled: value => settled.push(value), resolve: async () => { throw new Error('busy') } })
+  t.after(() => h.logins.dispose())
+  const failed = h.logins.start(CLAUDE, { fresh: true })
+  await until(() => settled.length > 0)
+  assert.equal(h.logins.status(CLAUDE, failed.attemptId).status, 'failed')
+  assert.equal(settled.length, 1)
+  assert.equal(settled[0].signedIn, undefined)
+
+  // Cancelled before resolve answers: the settle resolves for itself, and the CLI is signed in.
+  const late = []
+  const resolving = deferred()
+  let calls = 0
+  const next = harness({ onSettled: value => late.push(value), resolve: () => (++calls === 1 ? resolving.promise : next.selected) })
+  t.after(() => next.logins.dispose())
+  next.authenticated(true)
+  const started = next.logins.start(CLAUDE, { fresh: true })
+  next.logins.cancel(CLAUDE, started.attemptId)
+  resolving.resolve(next.selected)
+  await until(() => late.length > 0)
+  assert.equal(late.length, 1)
+  assert.equal(late[0].signedIn, true)
+  assert.equal(next.logins.status(CLAUDE, started.attemptId).signedInAfter, true)
+  assert.equal(next.children.length, 0)
+})
+
+test('L10: a settling attempt holds the busy signal, confirming included, until onSettled decided', async t => {
+  const order = []
+  const activities = []
+  const read = deferred()
+  let reads = 0
+  const h = harness({
+    answerMs: 30_000,
+    signedIn: () => (++reads === 1 ? Promise.resolve(false) : read.promise),
+    onSettled: () => { order.push('settled') },
+    onChange: count => order.push(`change ${count}`),
+    onActivity: activity => activities.push(activity),
+  })
+  t.after(() => h.logins.dispose())
+  const started = h.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  h.children[0].child.close(1)
+  const at = h.clock.now
+  await settle()
+  assert.equal(h.logins.activeAttempts(), 1)
+  assert.deepEqual(h.logins.activity(), { active: 1, confirming: 1, confirmingUntil: at + 30_000 })
+  assert.equal(h.logins.status(CLAUDE, started.attemptId).settling, true)
+  read.resolve(true)
+  await until(() => order.includes('settled'))
+  await settle()
+  assert.equal(h.logins.activeAttempts(), 0)
+  assert.deepEqual(h.logins.activity(), { active: 0, confirming: 0 })
+  assert.deepEqual(order, ['change 1', 'settled', 'change 0'])
+  // onActivity saw both: the settling activity, then the idle one (SC2-1.4).
+  const same = value => activity => JSON.stringify(activity) === JSON.stringify(value)
+  const busy = activities.findIndex(same({ active: 1, confirming: 1, confirmingUntil: at + 30_000 }))
+  assert.ok(busy >= 0, 'onActivity saw the settling activity')
+  assert.deepEqual(activities[busy], { active: 1, confirming: 1, confirmingUntil: at + 30_000 })
+  assert.ok(activities.slice(busy + 1).some(same({ active: 0, confirming: 0 })), 'then the idle one')
+  assert.deepEqual(activities.at(-1), { active: 0, confirming: 0 })
+
+  // Disposal during a settle: never told, and nothing counts.
+  const told = []
+  const notes = []
+  const held = deferred()
+  let count = 0
+  const d = harness({ signedIn: () => (++count === 1 ? Promise.resolve(false) : held.promise), onSettled: value => told.push(value), onSwitch: value => notes.push(value) })
+  const attempt = d.logins.start(CLAUDE, { fresh: true })
+  await settle()
+  d.children[0].child.close(1)
+  await settle()
+  assert.equal(d.logins.activeAttempts(), 1)
+  d.logins.dispose()
+  held.resolve(true)
+  await settle()
+  await settle()
+  assert.deepEqual(told, [])
+  assert.equal(d.logins.activeAttempts(), 0)
+  assert.deepEqual(notes.filter(note => note.step === 'end').length, 1)
+  assert.ok(attempt.attemptId)
+})

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued |
+| Status | In delivery (accepted by the owner's delegate on 2026-11-19, issue #1092; questions 1-6 answered with this RFC's own recommendations, see Answers; merged: delivery 1 (#1085), delivery 2 (#1106), the 2026-11-13 amendment (#1264), and Auto on every route (#1110), which went past this RFC's "Not scheduled" list; question 5 answered by the owner's delegate on 2026-11-21 (Claude Code stays off Auto until a signed-in capture, see Answers); the amendment's Omni senders registered (automagik-si/omni#1813) and its Codex dependency requested upstream (agentclientprotocol/codex-acp#790, 2026-11-21; enforcement outstanding); the 2026-11-19 amendment (#870, Auto on Codex under the Workspace profile) approved by the owner's delegate on 2026-11-20, A1 and A2 answered with its recommendations, owes delivery 3 (the wording) and delivery 4 (waits for codex-acp); amends RFC 0003 with its delivery 2) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-11 |
@@ -197,7 +197,7 @@ remain. Four categories are added:
   `kubectl get secret`, and bare `env` / `printenv`, or those commands with a name matching
   `TOKEN|SECRET|PASSWORD|API_KEY|KEY$`. Ordinary `printenv PATH` and public SSH keys stay out.
 - **External messages:** `rt.stepHooks.sendsOutside(fn)` registers a disposer-backed classifier
-  receiving `{ tool, args }`; true means the step sends to people outside the team. A
+  receiving `{ tool, args, sessionId }`; true means the step sends to people outside the team. A
   throwing hook also asks. The Bot team ships no Omni sender names; Omni registers its own.
   Shell cases are `mail`, `mailx`, `sendmail`, `msmtp`,
   `gh (issue|pr) (comment|create|review|close|edit|merge|reopen|delete|ready|lock)` and
@@ -256,6 +256,26 @@ Codex/codex-acp needs a per-session mandatory ask policy evaluated before its re
 blocking pre-execution request carrying tool, arguments and cwd. Until then Auto on Codex
 keeps Codex's reviewer as the only check for built-ins. The confirmation text is in the
 client, so this amendment records the gap without changing the client.
+
+Status of the dependency (2026-11-21): requested upstream in
+[agentclientprotocol/codex-acp#790](https://github.com/agentclientprotocol/codex-acp/issues/790):
+in codex-acp's `agent` mode, a per-session list of actions that always reach the
+client as `session/request_permission` before Codex's reviewer, or a blocking pre-execution
+request. Its acceptance case is a matching built-in that waits for the client's answer even when
+the reviewer would approve it. Codex's app-server picks the reviewer, so Codex itself may need
+the matching setting. Enforcement stays outstanding until upstream ships it. The per-mode
+reviewer of the 2026-11-19 amendment (#870) is a separate request.
+
+**Omni's senders (2026-11-21, decided by the owner's delegate, recommended option):** Omni
+registers the outside messages that leave with no confirmation card of its own and that the call
+alone shows (automagik-si/omni#1813): an `omni_call` post into a group or channel, and a presence
+update that shows text. Its classifier uses the Session the team now passes
+(`{ tool, args, sessionId }`) and flags nothing in Omni's automation event runs and chat threads,
+which confirm or refuse every outside act by Omni's own rules. Sends to a person and deletes are
+left off because Omni's `omniPermit` already confirms them on its card when the tool executes,
+where no judge answers; flagging them would add a second question. Also left off: `omni_send`
+(its destination is only known after a lookup at execute, so a group send through it keeps Omni's
+grant rules, given by the person or by a Main or Omni Bot's role) and reactions.
 
 Delivery acceptance: the total judge deadline includes background-model lookup and model
 information lookup, and ignores a late stream even if it ignores abort. Own-model grants
@@ -368,6 +388,159 @@ groups, tasks, the team default.
    mode is captured from a signed-in CLI and the bridge's part is designed.
 6. **Two names, "Auto" and DSH's "Auto review",** in one list when that plugin is on.
    Recommended: keep both; they are different levels and the second is marked Experimental.
+
+## Answers (2026-11-19)
+
+The owner's delegate accepted this RFC on 2026-11-19 (issue #1092) and answered every open
+question with this RFC's own recommendation. Each answer is that recommendation, restated; the
+questions above stay as they were asked. Deliveries 1 and 2 had already merged (#1085, #1106), as
+had the amendment (#1264) and Auto on every route (#1110); where what merged differs from an
+answer, the answer says so.
+
+1. **Question 1:** the mark. Auto is stored as Workspace plus `permissionAuto`, so nothing that
+   already reasons about levels can read it as wider than Workspace. As merged in #1106.
+2. **Question 2:** (b), every turn of the Bot's own chat, said in plain words in the question
+   before saving: any message that reaches the chat can lead to a step the judge allows.
+3. **Question 3:** yes. Ending Auto ends the agent session, as merged in #1106.
+4. **Question 4:** decide after delivery 2; until then Auto is not offered on a provider's model.
+   Delivery 2 merged first (#1106); #1110 then offered Auto there, with (a), a judge of the Bot
+   team's own: the Bot's own model decides sandbox escalations in a separate request, and an
+   unsure, failed or late answer reaches the person. That merge is the decision this answer
+   deferred.
+5. **Question 5:** not offered on Claude Code until its `auto` mode is captured from a signed-in
+   CLI and the bridge's part is designed. #1110 already offers Auto on Claude Code, and the
+   capture is still missing (`apps/acp-dsh/test/fixtures/permission-payloads/README.md`: "Claude
+   Code is not captured yet"). Owed: that capture, or the owner's decision to keep Claude Code on
+   Auto without it. Until then Auto is withheld on Claude Code again: acp-dsh no longer asks it
+   for its own mode, and a saved Claude Code Auto runs as Workspace and is cleared (#1092).
+   Decided by the owner's delegate on 2026-11-21 (recommended option): Claude Code stays off Auto
+   until a signed-in capture and the bridge's design exist; that answers this question for now.
+   A scripted local model cannot stand in for the capture: it cannot show whether a given CLI,
+   adapter and model really enter `auto`, because the adapter can fall back to `acceptEdits` and the
+   CLI's review can happen inside the main model exchange. The capture is the owner's step, because
+   it needs a signed-in account. It should pin the CLI, adapter, model and tool surface, run in an
+   isolated environment with synthetic files, and record per turn: requested and effective mode,
+   fallback notices, tool and permission ids, offered and chosen options, final status and effect.
+   Leave out headers and raw transcripts.
+
+   **Note (2026-11-22, #1564).** In PR A, after the owner saves ON, Claude Code can use its own
+   tools from the owner's next message in an eligible Bot's direct chat. At either switch
+   setting, Claude Code Auto stays withheld until the signed-in capture and bridge design above
+   are complete.
+   [RFC 0003, Amendment on native tools per Bot](0003-model-routes-and-acp.md#amendment-native-tools-per-bot-2026-11-22-1564)
+
+6. **Question 6:** keep both names, "Auto" and DSH's "Auto review"; they are different levels and
+   the second is marked Experimental.
+
+## Amendment (2026-11-19, #870): Auto under Codex's profile modes
+
+Proposed for #870 on 2026-11-19 and approved by the owner's delegate on 2026-11-20, with the
+recommended answer to each of its questions (see its Answers). It replaces delivery 2's "a Codex
+Bot at Auto sends its prompt in `agent`" and the Summary's "Automagik asks Codex for its `agent`
+mode": Auto on Codex runs under the same narrow permission profile as Workspace, with Codex's
+reviewer deciding at the steps that leave it, once delivery 4 lands. Until then Auto on Codex
+keeps `agent`, and delivery 3 says so in the question before saving. It does not touch the unmet dependency above (a list of ours
+before Codex's reviewer): that stays owed either way.
+
+### The gap
+
+Since #1234, a Codex Bot's own chat at Read only and at Workspace runs under a permission profile
+Automagik writes into the Bot's isolated Codex home
+(`apps/acp-dsh/src/host/codex-chat-profiles.js`, `automagik-read-<hex>` and
+`automagik-workspace-<hex>`): the whole disk is denied, and only the
+chat's workspace and project roots, Codex's own runtime, its skills and a minimal system set are
+readable. Auto does not get that profile. It asks codex-acp for `agent`, which in codex-acp 2.8.0
+(the version `apps/acp-dsh/dev/acp-compat.json` records) is the plain `workspaceWrite` sandbox
+with Codex's reviewer and no profile: Codex reads any file on the computer, and since a read is not a sandbox
+escalation there, neither the reviewer nor the person ever sees it. So picking Auto widens a
+Workspace Bot's reads to the whole disk, though the level is meant to be Workspace with a model
+deciding where Workspace would ask (Summary, D4). A message that reaches the chat (question 2,
+answer b) can lead to a read of any file the person's account can read, and that file's content
+then reaches the model.
+
+It cannot be closed in this repository without trading something away. In codex-acp 2.8.0 every
+permission-profile mode of a session shares one reviewer, fixed when the session opens from
+Codex's `approvals_reviewer` setting; only the four built-in modes carry their own. Automagik
+decides between Auto and the strict mode per turn (`adapter.js`, the `ownAnswer` and `setMode`
+calls), and the strict mode is the Workspace profile with the person as reviewer. Giving that
+profile Codex's reviewer for the whole session would make a strict turn of the same session either
+run auto-reviewed (wider than the person chose for that turn) or fall back to plain
+`workspace-write` (full-disk reads again). The fix belongs in codex-acp: a reviewer per mode.
+
+### Recommended: a reviewer per mode, from codex-acp
+
+codex-acp offers, beside each allowed permission-profile mode, a second mode with the same profile
+and Codex's reviewer (`auto_review`, with the on-request approval policy, as `agent` has). Then:
+
+- **An Auto turn** asks Codex for the auto-reviewed mode of the Automagik Workspace profile instead
+  of `agent`. Reads and writes outside the chat's workspace become sandbox escalations, and Codex's
+  reviewer decides each one: run it, refuse it with its reason, or ask the person. D2 and D4 then
+  cover reads as they already cover writes.
+- **A strict turn** is unchanged: the Workspace profile with the person as reviewer, set and
+  confirmed before the prompt, as today.
+- **Everything else in delivery 2 stays:** the mark, `ownMode` and its two asks, the confirmed
+  strict mode, ending the agent session after an Auto turn, the question before saving, the
+  in-force line. The own mode acp-dsh asks for becomes a list, most wanted first, as `modeFor`
+  already returns: the auto-reviewed Workspace profile mode, then whatever question A2 answers.
+- **The question before saving** keeps saying that Codex may change files outside the Bot's
+  folder without asking, and adds that reading a file outside it is one of the steps its reviewer
+  decides. The diagnostics page names the mode asked and the one taken, as now.
+
+Alternatives:
+
+- **B. Accept full-disk reads under Auto.** Keep `agent`; the question before saving and
+  `apps/acp-dsh/README.md` say that Codex reads any file under Auto without asking. No change
+  anywhere else; the gap stays and is stated.
+- **C. One agent session per reviewer, in this repository.** Open an Auto turn's agent session
+  with Codex's reviewer set for the session (`approvals_reviewer` through `CODEX_CONFIG`, as the
+  image-file flow already sets a session's config in `session-files.js`), and end it before any
+  strict turn, so strict turns always open a session with the person as reviewer. It needs no
+  codex-acp change, but the own-mode answer must be known before the session opens, every switch
+  between Auto and a strict turn reopens the agent session, and a misrouted strict turn in an
+  Auto session is auto-reviewed, which fails open. Not recommended while A is a small upstream
+  change.
+
+### Questions for the owner
+
+- **A1. Which route.** Recommended: A, with B's wording shipped now so the question before saving
+  states today's gap until A lands.
+- **A2. Where the auto-reviewed profile mode is not offered** (an older codex-acp, Windows, where
+  Codex's unelevated sandbox refuses deny-read profiles and chats stay on the legacy modes, or a
+  Bot home whose profile check failed): (a) keep `agent` there, with the question and the
+  diagnostics saying reads are not narrowed on that computer; (b) Auto runs as Workspace there,
+  with the existing "Runs as Workspace here" line. Recommended: (a). It changes nothing that runs
+  today on those computers, removes no level anyone has, and says the gap plainly; (b) is safer
+  but turns Auto off for every Windows Bot.
+
+### Answers (2026-11-20)
+
+The owner's delegate approved this amendment on 2026-11-20 and answered both questions with its
+recommendations; the questions above stay as they were asked.
+
+- **A1:** A, a reviewer per mode from codex-acp, with B's wording shipped now (delivery 3) so the
+  question before saving states today's gap until delivery 4 lands.
+- **A2:** (a). Where the auto-reviewed profile mode is not offered, Auto keeps `agent`, and the
+  question and the diagnostics say reads are not narrowed on that computer.
+
+### Deliveries
+
+3. **The wording now (B's part of A1).** Lane: plugin. The question before saving and the acp-dsh
+   README say that under Auto, Codex reads files outside the Bot's folder without asking, until
+   delivery 4. Acceptance: the question's text names reads; the client's existing tests updated.
+   Rollback: the previous text.
+4. **Auto under the Workspace profile.** Waits for a codex-acp release with the per-mode reviewer
+   asked for above. Lane: plugin. acp-dsh asks for the auto-reviewed Workspace profile mode as
+   Codex's own mode for an Auto turn and falls back as A2 answers; `dev/acp-compat.json` records
+   that release; the question before saving, the diagnostics lines, `apps/acp-dsh/README.md` and
+   RFC 0003's mode table follow; a new capture goes in
+   `apps/acp-dsh/test/fixtures/permission-payloads/`. Acceptance: on Linux, a Codex Bot at Auto
+   sends its prompt in the auto-reviewed mode of `automagik-workspace-<hex>`; a read of a file
+   outside the workspace (a canary in another folder of the same home) is not returned without a
+   reviewer decision, and the capture shows the reviewer's step for it; a strict turn of the same
+   Bot is still sent in the Workspace profile with the person as reviewer, and that read is not
+   returned without the person's answer; every strict-mode case of delivery 2's acceptance still
+   holds; with an adapter that does not offer the mode, the turn behaves as A2 answers. Rollback:
+   the previous plugin sends `agent` again; nothing stored changes.
 
 ## Links
 

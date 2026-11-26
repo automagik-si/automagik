@@ -9,6 +9,7 @@
 // `hello` carries the team's revision and, for the mobile API, its version and the
 // latest notice, so a client that reconnects knows what it missed.
 import { ROUTE } from './constants.js'
+import { callerService, matchesFeedViewer, multiuserMode } from './multiuser.js'
 
 export const FEED_ROUTE = `${ROUTE}/feed`
 // A comment line now and then keeps an idle connection open.
@@ -25,11 +26,13 @@ export function install(rt) {
   /** @type {Set<ReadableStreamDefaultController<Uint8Array>>} */
   const clients = new Set()
   const send = (controller, chunk) => {
-    if ((controller.desiredSize ?? 0) < -MAX_QUEUED) {
+    const { request, service } = requests.get(controller)
+    if (request.signal.aborted || (service && (callerService(ctx) !== service ||
+        !matchesFeedViewer(request, rt.ownerViewer(request)))) || (controller.desiredSize ?? 0) < -MAX_QUEUED) {
       leave(controller)
       return
     }
-    try { controller.enqueue(chunk) } catch { clients.delete(controller) }
+    try { controller.enqueue(chunk) } catch { leave(controller) }
   }
   const publish = (event, data) => {
     for (const tap of taps) {
@@ -65,12 +68,16 @@ export function install(rt) {
   })
 
   ctx.on('session/event', (session, event) => {
-    if (!listening()) return
-    const botId = rt.chatOwners.get(session.id)
-    if (botId === undefined) return
-    for (const item of rt.displayItems(session.id, [event])) publish('message', { botId, sessionId: session.id, item })
-    if (event.type === 'tool/call') live()
+    if (event.type === 'tool/call' && rt.chatOwners.has(session?.id)) live()
   })
+
+  // The channel publishes chat entries after its role runtime observes the event.
+  rt.publishChatEvent = (sessionId, event) => {
+    if (!listening()) return
+    const botId = rt.chatOwners.get(sessionId)
+    if (botId === undefined) return
+    for (const item of rt.displayItems(sessionId, [event])) publish('message', { botId, sessionId, item })
+  }
 
   // Attempts being streamed, by id. A turn that answers another Bot is hidden from the
   // chat (turns.js marks it before the model is called), so its text is not streamed.
@@ -108,17 +115,23 @@ export function install(rt) {
     methods: ['GET'],
     requestBody: 'buffered',
     fetch: async (request) => {
+      const service = callerService(ctx)
+      if (multiuserMode() || service) {
+        const headers = { 'cache-control': 'no-store' }
+        if (!service) return new Response(null, { status: 503, headers })
+        if (!matchesFeedViewer(request, rt.ownerViewer?.(request))) return new Response(null, { status: 403, headers })
+      }
       let controller
       const body = new ReadableStream({
         start(own) {
           controller = own
+          requests.set(own, { request, service })
           clients.add(own)
           const hello = { revision: state.revision, ...(rt.noticeCursor ? { api: rt.apiVersion, ...rt.noticeCursor() } : {}) }
           send(own, encoder.encode(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`))
         },
         cancel() { leave(controller) },
       })
-      requests.set(controller, request)
       request.signal.addEventListener('abort', () => leave(controller), { once: true })
       return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store' } })
     },

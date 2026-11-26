@@ -191,7 +191,7 @@ test('the redaction regex in the image code is not mistaken for a token', () => 
 // CACHE_HOME_UNPINNED: an example-path exception must not cover changed cache bytes.
 test('ACP offline-cache examples require the exact cache path, match and complete file digest', () => {
   const entries = loadAllowlist().filter(entry => entry.file.startsWith('opt/automagik/offline-store/') && /ACP SDK/.test(entry.reason))
-  assert.equal(entries.length, 6)
+  assert.equal(entries.length, 18) // 2.8.0 and 2.9.0 add six each, 2.9.1 adds two, and 2.12.0 adds four.
   const examples = [['', 'home', 'user'].join('/'), ['C:', 'Users', 'user'].join('\\')]
   for (const entry of entries) {
     const raw = examples.find(value => sha256(value) === entry.sha256)
@@ -243,6 +243,8 @@ const rulesAt = (path, content, allowlist = []) => {
 test('own code is the image scripts, the profile and @automagik packages; a dependency is not', () => {
   assert.equal(ownCode('opt/automagik/entrypoint.mjs'), true)
   assert.equal(ownCode('opt/automagik/profile/package.json'), true)
+  assert.equal(ownCode('opt/am/runner/locks.mjs'), true)
+  assert.equal(ownCode('opt/am/runner/proto.mjs'), true)
   assert.equal(ownCode(`${PLUGIN}/index.js`), true)
   assert.equal(ownCode('opt/automagik/profile/node_modules/.pnpm/@automagik+bots-dsh@3.0.0/node_modules/@automagik/bots-dsh/index.js'), true)
   assert.equal(ownCode('image-config'), true)

@@ -1,30 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { runInNewContext } from 'node:vm'
-import { dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { build } from 'esbuild'
+import { characterMarkup, defaultShape, MASK_ID } from '../src/client/characters.js'
+import { browser, bundle, load, nodes } from './viewer-fixture.js'
 
-// voice.js imports react; the client tests bundle it and stub react, as the
-// other client tests do.
-const bundle = await build({
-  stdin: { contents: "export { watchReply } from './src/client/voice.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
-  bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
-  external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
-})
-const module = { exports: {} }
-const platform = {
-  react: {
-    createElement: () => null, Fragment: 'fragment',
-    useState: initial => [initial, () => {}], useEffect: () => {}, useMemo: make => make(), useCallback: fn => fn,
-    useRef: current => ({ current }), useId: () => 'id', useSyncExternalStore: (sub, get) => get(),
-    createContext: initial => ({ value: initial, Provider: () => null }), useContext: ctx => ctx.value,
-  },
-  'react-dom': { createPortal: node => node },
-  '@deepseek-ai/dsh-client-ui-primitives': { MarkdownText: () => null },
-}
-runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, require: name => platform[name] ?? {} })
-const { watchReply } = module.exports
+const code = await bundle("export { VoiceMode, watchReply } from './src/client/voice.js'")
+const { VoiceMode, watchReply } = load(code, browser().globals)
 
 test('a reply published synchronously during subscribe is spoken once', () => {
   const consumed = []
@@ -54,4 +34,23 @@ test('watchReply waits for the reply, speaks it once, then stops', () => {
   assert.deepEqual(consumed, ['first'])
   assert.equal(calls.length, 1)
   off()
+})
+
+test('the voice overlay draws the Solver character and the ordinary default in the stored color', () => {
+  for (const reviewerId of ['r', undefined]) {
+    const bot = { id: 'b', name: 'Fixture', role: 'Solver', reviewerId, avatar: { shape: 'frog' }, color: 'aurora' }
+    const tree = VoiceMode({
+      sessionId: bot.id, roster: { byId: { b: bot }, roomsById: {} },
+      actions: { speech: () => null },
+      useSessions: select => select({ byId: {} }),
+      useSessionStatus: select => select(new Map()),
+    })
+    const orb = nodes(tree).find(node => node.props.className === 'bt-voice-orb')
+    const mark = orb.props.children.find(node => node?.type?.name === 'BotMark')
+    const drawn = mark.type(mark.props)
+    const face = drawn.type(drawn.props)
+    const shape = reviewerId ? 'frog' : defaultShape(bot.id)
+    assert.equal(face.props['data-shape'], shape)
+    assert.equal(face.props.children[0].props.dangerouslySetInnerHTML.__html.replace(/bt-mark-\d+/g, MASK_ID), characterMarkup(shape, bot.color))
+  }
 })

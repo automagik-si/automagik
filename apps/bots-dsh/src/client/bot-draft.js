@@ -13,17 +13,18 @@ export function freshBotName(roster, base = 'New Bot') {
 // The form starts on the team default model from settings when it is served and set up, then
 // the DSH default, else the first one that is set up (a key, a sign-in or a signed-in agent;
 // never a route a CLI covers). With none set up the form starts on no model.
-const setUp = model => !model.needsKey && !model.needsSignIn && !model.covered && !model.needsAccount
+export const setUp = model => !model.needsKey && !model.needsSignIn && !model.covered && !model.needsAccount
 export function startModel(roster) {
   const models = modelsFor(roster.models).filter(setUp)
   return (models.find(model => model.ref === roster.prefs?.defaultBotModel) ?? models.find(model => model.ref === roster.defaultModel) ?? models.find(model => model.superseded !== true) ?? models[0])?.ref ?? ''
 }
 
-// A chosen model is always sent: the host fixes it on the Bot at creation.
-export function createPayload({ name, look, image, model, effort, brief, role, instructions, ownLook = false, sectionId }) {
+// A chosen model is always sent: the host fixes it on the Bot at creation. `avatar`, when given,
+// is sent as it is (the New Solver's character slot).
+export function createPayload({ name, look, image, model, effort, brief, role, instructions, ownLook = false, sectionId, avatar }) {
   // An abot with no character of its own starts with its engine's badge.
   const badge = !image && !ownLook && isLocalRoute(model) ? agentAvatar(String(model).split('/')[0]) : undefined
-  const payload = { name, color: look.color, avatar: image ? { shape: look.shape, image } : badge !== undefined ? { shape: look.shape, image: badge.image } : { shape: look.shape } }
+  const payload = { name, color: look.color, avatar: avatar !== undefined ? avatar : image ? { shape: look.shape, image } : badge !== undefined ? { shape: look.shape, image: badge.image } : { shape: look.shape } }
   if (model) payload.model = model
   if (effort !== undefined) payload.effort = effort
   if (brief) payload.brief = brief

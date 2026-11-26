@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { setImmediate } from 'node:timers/promises'
 import { build } from 'esbuild'
+import { defaultShape } from '../src/client/characters.js'
 
 const bundle = await build({
   entryPoints: [fileURLToPath(new URL('../src/client/exchange.js', import.meta.url))],
@@ -17,7 +18,7 @@ const find = (node, match) => {
 }
 const messages = count => Array.from({ length: count }, (_, i) => ({ id: String(i), from: 'a', time: i + 1, text: `Message ${i + 1}` }))
 
-function rig(initial) {
+function rig(initial, byId = {}) {
   const slots = []
   const timers = new Map()
   let at = 0
@@ -74,7 +75,7 @@ function rig(initial) {
     setTimeout: (run) => { timers.set(++timer, run); return timer },
     clearTimeout: id => timers.delete(id),
   })
-  const props = { pair: ['a', 'b'], roster: { byId: {} }, actions: { exchange: () => next, closeOverlay() {} } }
+  const props = { pair: ['a', 'b'], roster: { byId }, actions: { exchange: () => next, closeOverlay() {} } }
   const render = () => {
     while (dirty) {
       dirty = false
@@ -93,6 +94,7 @@ function rig(initial) {
   render()
   return {
     scroller, settle,
+    transcriptMarks: () => find(tree, node => node.type?.name === 'Bubbles').map(node => find(node.props.lead, child => child.type?.name === 'BotMark')[0]),
     scroll: (value) => {
       scroller.scrollTop = value
       find(tree, node => node.props.role === 'log')[0].props.onScroll?.({ currentTarget: scroller })
@@ -107,6 +109,21 @@ function rig(initial) {
     changePair: (pair, value) => { props.pair = pair; next = value; dirty = true; render() },
   }
 }
+
+test('the exchange transcript resolves an owner record and uses the catalogue for a missing record', async () => {
+  const bot = { id: 'a', name: 'Fixture', role: 'Solver', avatar: { shape: 'frog' } }
+  const r = rig([...messages(1), { id: 'missing', from: 'b', time: 2, text: 'Reply' }], { a: bot })
+  await r.settle()
+  const [current, historical] = r.transcriptMarks()
+  const drawn = mark => {
+    const face = mark.type(mark.props)
+    return face.type(face.props).props['data-shape']
+  }
+  assert.equal(drawn(current), defaultShape('a'))
+  assert.equal(current.props.look, undefined)
+  assert.equal(historical.props.look.shape, defaultShape('b'))
+  assert.equal(drawn(historical), defaultShape('b'))
+})
 
 test('opening an exchange shows its latest message after the transcript loads', async () => {
   let resolve

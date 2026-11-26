@@ -22,8 +22,8 @@ function host({ providers = {}, entries = {}, fetch = offline, services = {}, ..
 
 // acp-dsh's acpAgents service: each agent's switch is acp-dsh's own setting in the fake's
 // settings, so turning a row on or off shows in the next status. `over` sets an agent's fields.
-const ACP_KEY = { 'acp-claude': 'claude', 'acp-codex': 'codex' }
-const ACP_NAME = { 'acp-claude': 'Claude Code', 'acp-codex': 'Codex' }
+const ACP_KEY = { 'acp-claude': 'claude', 'acp-codex': 'codex', 'acp-antigravity': 'antigravity' }
+const ACP_NAME = { 'acp-claude': 'Claude Code', 'acp-codex': 'Codex', 'acp-antigravity': 'Antigravity' }
 function cliHost({ agents = {}, acpEntry = {}, entries = {}, services = {}, ...rest } = {}) {
   const calls = []
   let fake
@@ -45,7 +45,8 @@ function cliHost({ agents = {}, acpEntry = {}, entries = {}, services = {}, ...r
 
 test('one row per AI, and no row reaches a vendor another row already covers', () => {
   const ids = VENDORS.map(vendor => vendor.id)
-  assert.deepEqual(ids, ['claude', 'chatgpt', 'deepseek', 'kimi', 'copilot', 'grok', 'openai', 'openrouter', 'zai', 'moonshot', 'opencode', 'cliproxy', 'ollama'])
+  // Antigravity third, with the other CLI rows (#2048, Connect AI choice D).
+  assert.deepEqual(ids, ['claude', 'chatgpt', 'antigravity', 'deepseek', 'kimi', 'copilot', 'grok', 'openai', 'openrouter', 'zai', 'moonshot', 'opencode', 'cliproxy', 'ollama'])
   // Claude is Claude Code's sign-in, or an Anthropic API key on pi-ai's anthropic route: one row,
   // no Anthropic API row beside it. ChatGPT is Codex's sign-in only.
   assert.deepEqual(VENDORS.find(vendor => vendor.id === 'claude'), { id: 'claude', name: 'Claude', via: 'Your Claude Pro or Max plan through Claude Code, or an Anthropic API key', kind: 'signin', cli: 'acp-claude', provider: 'anthropic', envRefs: ['ANTHROPIC_API_KEY'], keyUrl: 'https://console.anthropic.com/settings/keys' })
@@ -435,4 +436,80 @@ test('Claude off then on, with a key and a signed-in Claude Code, puts the key\'
   const bare = cliHost({ agents: { 'acp-claude': {} }, providers: {} })
   await bare.handle('ai-switch', { id: 'claude', on: true })
   assert.equal(Object.hasOwn(bare.valueOf('llm-pi-ai').providers, 'anthropic'), false)
+})
+
+// ---- Antigravity's Connect AI row (#2048, r6) -------------------------------------------------
+
+const AGY_LINK = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+  + '&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=s1-state-0001'
+const agyAgent = (over = {}) => ({
+  cli: { found: true, state: 'ready', version: '1.5.15', install: 'manual', managed: true },
+  connector: { state: 'ready', native: true }, appSignIn: true, signedIn: false, ...over,
+})
+
+test('X1: the Antigravity row: a CLI row with no route and no key, listed only with acp-dsh\'s app sign-in', () => {
+  assert.deepEqual(VENDORS.find(vendor => vendor.id === 'antigravity'), { id: 'antigravity', name: 'Antigravity', via: 'Your Google account, through Antigravity', kind: 'signin', cli: 'acp-antigravity', appOnly: true })
+})
+
+test('X2: no acp-dsh, an agent without the app sign-in, or no such agent: no Antigravity row', async () => {
+  for (const fake of [host(), cliHost({ agents: { 'acp-claude': {} } }), cliHost({ agents: { 'acp-antigravity': agyAgent({ appSignIn: undefined }) } })]) {
+    assert.equal(await fake.row('antigravity'), undefined)
+  }
+  const fake = cliHost({ agents: { 'acp-antigravity': agyAgent() } })
+  const row = await fake.row('antigravity')
+  assert.deepEqual([row.ready, row.on, row.found, row.signIn, row.cli.appSignIn], [false, false, null, true, true])
+  assert.equal(row.keyUrl, undefined)
+  // Third, with the other CLI rows.
+  assert.deepEqual((await fake.rows()).rows.slice(0, 3).map(item => item.id), ['claude', 'chatgpt', 'antigravity'])
+})
+
+test('X3: signed in and running is on; the ais row never carries the sign-in link or the paste-back values', async () => {
+  const running = cliHost({ agents: { 'acp-antigravity': agyAgent({ signedIn: true }) }, acpEntry: { antigravity: true } })
+  const on = await running.row('antigravity')
+  assert.deepEqual([on.ready, on.on, on.found], [true, true, 'Signed in to Antigravity'])
+  const restart = cliHost({ agents: { 'acp-antigravity': agyAgent({ signedIn: true, restartNeeded: true }) }, acpEntry: { antigravity: true } })
+  assert.equal((await restart.row('antigravity')).on, false)
+  // `ais` needs no viewer (G6-15): the link and the attempt stay in `acp`.
+  const signing = cliHost({ agents: { 'acp-antigravity': agyAgent({ signingIn: true, signInUrl: AGY_LINK, signInAttempt: '0a1b2c3d-1111-2222-3333-444455556666',
+    signInPaste: true, signInChecking: true, signInExpiresAt: 1_800_000_000_000, signInEnd: 'window', signInError: 'expired' }) }, acpEntry: { antigravity: true } })
+  const row = await signing.row('antigravity')
+  for (const field of ['signInUrl', 'signInAttempt', 'signInPaste', 'signInChecking', 'signInExpiresAt', 'signInEnd']) assert.equal(Object.hasOwn(row.cli, field), false, field)
+  assert.equal(row.cli.appSignIn, true)
+  assert.equal(row.cli.signingIn, true)
+  assert.equal(row.cli.signInError, 'expired')
+  assert.doesNotMatch(JSON.stringify(await signing.rows()), /accounts\.google\.com|s1-state-0001|0a1b2c3d/)
+})
+
+test('X4: on is refused until it is signed in; then only acp-dsh\'s switch moves, never a pi-ai route', async () => {
+  const out = cliHost({ agents: { 'acp-antigravity': agyAgent() }, acpEntry: { antigravity: false } })
+  assert.deepEqual((await out.handle('ai-switch', { id: 'antigravity', on: true })).error, { code: 'omni-ai/refused', message: 'Antigravity is not set up yet.' })
+  assert.deepEqual(out.updates, [])
+  // A pi-ai route literally named `undefined` is never touched.
+  const fake = cliHost({ agents: { 'acp-antigravity': agyAgent({ signedIn: true }) }, acpEntry: { antigravity: false }, providers: { undefined: { apiKeyEnv: 'X' } } })
+  assert.equal((await fake.handle('ai-switch', { id: 'antigravity', on: true })).value.on, true)
+  assert.deepEqual(fake.updates.filter(update => update.ns === 'acp-dsh').map(update => update.patch), [{ antigravity: true }])
+  assert.equal((await fake.handle('ai-switch', { id: 'antigravity', on: false })).value.on, false)
+  assert.deepEqual(fake.updates.filter(update => update.ns === 'acp-dsh').map(update => update.patch), [{ antigravity: true }, { antigravity: false }])
+  assert.deepEqual(fake.updates.filter(update => update.ns === 'llm-pi-ai'), [])
+  assert.deepEqual(fake.valueOf('llm-pi-ai').providers, { undefined: { apiKeyEnv: 'X' } })
+})
+
+test('X5: dedupe for Antigravity hides nothing, and a dsh-subscriptions Antigravity keeps its models', async () => {
+  const fake = cliHost({
+    agents: { 'acp-antigravity': agyAgent({ signedIn: true }) }, acpEntry: { antigravity: true },
+    entries: subsEntry([{ provider: 'antigravity', index: 1 }]),
+    credentials: { ANTIGRAVITY_OAUTH_1: SECRET },
+    services: { llm: llmWith({ antigravity: [{ id: 'gemini-3-pro' }] }) },
+  })
+  assert.deepEqual((await fake.handle('ai-dedupe', { id: 'antigravity' })).value, { hidden: [] })
+  await fake.handle('ai-switch', { id: 'antigravity', on: true })
+  assert.deepEqual(fake.updates.filter(update => update.ns === 'dsh-subscriptions'), [])
+  assert.deepEqual(fake.valueOf('dsh-subscriptions').hiddenModels, [])
+})
+
+test('X6: a running Antigravity alone connects the step', async () => {
+  const fake = cliHost({ agents: { 'acp-antigravity': agyAgent({ signedIn: true }) }, acpEntry: { antigravity: true } })
+  assert.equal((await fake.handle('state')).value.aiConnected, true)
+  const off = cliHost({ agents: { 'acp-antigravity': agyAgent({ signedIn: true }) }, acpEntry: { antigravity: false } })
+  assert.equal((await off.handle('state')).value.aiConnected, false)
 })

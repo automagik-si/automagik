@@ -7,15 +7,174 @@
 // can say which task waits, and the task's thread waits in amber. A subagent child's
 // ask is held under its Bot, where the person can answer it.
 import { createHash, randomUUID } from 'node:crypto'
+import { symbols } from '@deepseek-ai/cordis'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
+import { bindTicketDesk } from './grant-ticket.js'
+import { bindGrantDecisions, grantInternals } from './grants.js'
+import { refusal } from './refusal.js'
+import { isTrustedToolRegistration } from './tool-registrations.js'
+
+const claimers = new WeakMap()
+const grantRefusal = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
+
+export async function claimGrant(rt, ticket) {
+  const claim = claimers.get(rt)
+  if (!claim) throw grantRefusal('Allow this step from the Automagik window.')
+  return claim(ticket)
+}
 
 const OUTCOMES = { allow: 'allowed-once', reject: 'rejected' }
+// The kinds of client that can decide an approval here. A request body's kind is trusted
+// only when it is one of these; anything else is the ordinary web client.
+const CLIENT_KINDS = new Set(['web', 'desktop', 'im', 'pocket', 'relay', 'sdk', 'dsh', 'system'])
+
+// RFC 0039 delivery 3: the Live rail's "Just finished" window (task-card.js), and the bounds of what is kept.
+const ENDED_FOR_MS = 6 * 60 * 60 * 1000
+const ENDED_MAX = 50
+const UNANSWERED_MAX = 500
+const TOLD_MAX = 1000
 
 // The team's own lookups only read the team: who is on it, their models and capabilities, a
 // chat's or a group's transcript, a memory. A Claude Code session reaches them through its MCP
 // bridge (`mcp__dsh__<name>`), which asks for every call; those asks are answered here, so the
 // person is asked only about what changes something.
-export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall'])
+export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall', 'show_settings', 'propose_bot_change'])
 export const teamToolOf = name => String(name ?? '').replace(/^mcp__dsh__/, '')
+
+const SOLVER_PROGRESS = 'solver_progress'
+// A live ACP call can span a Bots reinstall. Keep its receipt on DSH's Session,
+// which owns the call, so a fresh runtime can still require a fresh decision.
+const solverProgressReceipts = Symbol.for('@automagik/bots-dsh/solver-progress-receipts')
+
+export const hasRoutineSolverApproval = (session, callId) => session?.[solverProgressReceipts]?.get(callId) != null
+
+const sameBinding = (current, prior) => current !== undefined && current.service === prior.service
+  && current.registration === prior.registration && current.definition === prior.definition
+
+function bindSolverProgressApproval(rt) {
+  const { ctx } = rt
+  const shipped = rt.teamTools?.find(tool => tool.name === SOLVER_PROGRESS)
+  const recorded = new WeakMap()
+  const lifetime = {}
+  const agentOf = id => ctx.get?.('agents')?.get(id)
+  const callOf = (session, id) => rt.live?.get(session?.id)?.calls?.get(id)
+  const toolsOf = () => ctx.get?.('tools') ?? ctx.tools
+  function bindingOf(agent, name, toolSet) {
+    const tools = toolsOf()
+    const registration = tools?.view?.(agent).registrations?.get(name)
+    if (registration === undefined) return undefined
+    const definition = tools.executable(name, agent, toolSet)
+    if (definition === undefined || definition !== registration.definition) return undefined
+    return { service: tools[symbols.original] ?? tools, registration, definition }
+  }
+
+  function shippedBindingOf(agent, name, toolSet) {
+    const binding = bindingOf(agent, name, toolSet)
+    if (binding !== undefined && binding.definition === shipped && isTrustedToolRegistration(binding.registration)
+      && scopeOf(agent.ctx) === agent
+      && binding.service.layers.peek(agent)?.tools.get(SOLVER_PROGRESS) === binding.registration) return binding
+  }
+
+  function ownSolver(agent, session) {
+    const id = session?.id
+    if (typeof id !== 'string' || agent?.session !== session || agent.id !== id || agentOf(id) !== agent
+      || session.header?.origin === 'subagent' || rt.groupOwners.has(id)
+      || rt.state?.tasks?.[id] !== undefined || rt.taskOwners?.has(id)) return undefined
+    const bot = rt.botOfSession(id, agent, { followParents: false })
+    if (bot === undefined || rt.chatOwners.get(id) !== bot.id || rt.chatOf(bot.id) !== id) return undefined
+    const track = bot.reviewTrack
+    if (bot.reviewGuard === true || (track?.requested === true && typeof track.solver?.request === 'string'
+      && track.solver.request !== '')) return bot
+  }
+
+  function recordSolverProgressCall(session, call) {
+    if (teamToolOf(call.name) !== SOLVER_PROGRESS) return
+    try {
+      const agent = agentOf(session.id)
+      if (agent?.session !== session) return
+      const binding = shippedBindingOf(agent, call.name)
+      if (binding !== undefined) recorded.set(call, { ...binding, agent, session })
+    } catch {}
+  }
+
+  // One answer, between the review guard and Auto. The live call, its Agent's
+  // exact registration and the current direct Solver owner must all agree.
+  function answerSolverProgress(request) {
+    try {
+      const { agent, callId, signal, toolName } = request
+      if (typeof toolName !== 'string' || teamToolOf(toolName) !== SOLVER_PROGRESS || typeof callId !== 'string'
+        || request.bridgeCall?.agentAsked !== false || request.mirrorCall !== undefined || !signal || signal.aborted) return undefined
+      const session = agent?.session
+      const call = callOf(session, callId)
+      const binding = recorded.get(call)
+      if (binding?.agent !== agent || binding?.session !== session || call?.name !== toolName
+        || !sameBinding(shippedBindingOf(agent, toolName), binding)) return undefined
+      const bot = ownSolver(agent, session)
+      if (bot === undefined || session[solverProgressReceipts]?.has(callId)) return undefined
+      const args = JSON.stringify(JSON.parse(call.args))
+      if (session[solverProgressReceipts] === undefined) {
+        Object.defineProperty(session, solverProgressReceipts, { value: new Map() })
+      }
+      session[solverProgressReceipts].set(callId, { ...binding, lifetime, bot, call, signal, args })
+      recorded.delete(call)
+      return 'allowed-once'
+    } catch { return undefined }
+  }
+
+  function stillOpen(session, callId, receipt) {
+    if (receipt.lifetime === lifetime) return callOf(session, callId) === receipt.call
+    // A reinstall has a new live-call map. The Session can show whether the
+    // original call is still open for ordinary approval, even across that gap.
+    if (!Number.isInteger(receipt.call.seq)) return false
+    const tail = session.snapshotEvents?.(receipt.call.seq + 1)
+    return tail !== undefined && !tail.some(({ type, data }) =>
+      ['turn/start', 'turn/end', 'step/start', 'step/end'].includes(type)
+      || (type === 'tool/call' && data?.callId === callId)
+      || (type === 'tool/result' && (data?.message?.toolCallId ?? data?.callId) === callId))
+  }
+
+  function dispatchSolverProgress(exec, next) {
+    const session = exec.agent?.session
+    const { callId } = exec
+    const receipts = session?.[solverProgressReceipts]
+    const receipt = receipts?.get(callId)
+    if (receipt === undefined) return undefined
+    if (receipt === null && teamToolOf(exec.name) !== SOLVER_PROGRESS) return undefined
+    const changed = () => refusal('The Solver progress call changed before it ran. Make the call again.')
+    if (receipt === null || receipt.claimed) throw changed()
+    const { agent, bot, call, signal, args } = receipt
+    const matches = () => exec.agent === agent && agent.session === session && agentOf(session.id) === agent
+      && exec.callId === callId && exec.parent === undefined && exec.name === call.name && JSON.stringify(exec.arguments) === args
+      && !exec.signal.aborted && !signal.aborted && receipts.get(callId) === receipt && stillOpen(session, callId, receipt)
+    if (!matches()) throw changed()
+    receipt.claimed = true
+    if (receipt.lifetime === lifetime && ownSolver(agent, session) === bot
+      && sameBinding(shippedBindingOf(agent, exec.name, exec.toolSet), receipt)) return Promise.resolve(next())
+
+    // Ask through DSH as an ordinary request. A policy or a person may decline
+    // it, and the body must still be the one that was offered when DSH asked.
+    const current = bindingOf(agent, exec.name, exec.toolSet)
+    if (current === undefined) throw refusal('The changed Solver progress call is no longer available.')
+    const approval = ctx.get?.('approval')
+    return Promise.resolve(approval?.request({ agent, callId, toolName: exec.name,
+      reason: 'The Solver progress binding changed. Allow this call once?', signal: exec.signal })).then(outcome => {
+      if (outcome !== 'allowed-once' || !matches() || !sameBinding(bindingOf(agent, exec.name, exec.toolSet), current)) {
+        throw refusal('The changed Solver progress call did not receive approval.')
+      }
+      return next()
+    })
+  }
+
+  // A closed receipt carries no proof. Keep only the ID until the next turn
+  // to block delayed dispatch of the closed progress call.
+  const endSolverProgressCall = (session, callId) => {
+    const receipts = session[solverProgressReceipts]
+    if (receipts?.has(callId)) receipts.set(callId, null)
+  }
+  const resetSolverProgressApprovals = session => session[solverProgressReceipts]?.clear()
+  Object.assign(rt, { recordSolverProgressCall, answerSolverProgress, dispatchSolverProgress,
+    endSolverProgressCall, resetSolverProgressApprovals })
+}
 
 export function answerableOwner(rt, owner) {
   return owner?.child === true && rt.botOf?.(owner.botId) !== undefined
@@ -24,8 +183,67 @@ export function answerableOwner(rt, owner) {
 
 export function install(rt) {
   const { ctx } = rt
-  /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string)=>void}>} */
+  bindSolverProgressApproval(rt)
+  /** @type {Map<string, {id:string, sessionId:string, botId:string, child?:boolean, ownerSessionId?:string, roomId?:string, taskId?:string, label?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string, decidedBy?:string, why?:string)=>boolean}>} */
   const pending = new Map()
+  const grantContext = new WeakMap()
+  const folderIds = new Set()
+  // Approvals whose command is credential-sensitive are answered only on the local card.
+  const localOnly = new WeakSet()
+  let pendingRevision = 0
+  const admit = (id, entry) => {
+    pending.set(id, entry)
+    pendingRevision += 1
+  }
+  const take = id => {
+    if (!pending.delete(id)) return false
+    pendingRevision += 1
+    return true
+  }
+  // RFC 0039 delivery 3: withdrawals live in memory for the team they happened in. Owners bind each ask
+  // to its admission epoch and owner records by identity. A child inherits its parent's owner.
+  const withdrawn = []
+  const unanswered = new Map()
+  const told = new Set()
+  const runs = new WeakSet()
+  const owners = new WeakMap()
+  const teamEpoch = () => rt.teamGeneration?.().epoch
+  const ownerRecord = (kind, botId, { roomId, task } = {}) => ({
+    epoch: teamEpoch(), kind, bot: rt.botOf?.(botId),
+    ...(roomId !== undefined ? { room: rt.roomOf?.(roomId) } : {}),
+    ...(task !== undefined ? { task } : {}),
+  })
+  const current = entry => !runs.has(entry) && owners.has(entry) && owners.get(entry).epoch === teamEpoch()
+  const ownedBy = (owner, why, { task } = {}) => owner !== undefined && why === 'task'
+    && task !== undefined && owner.kind === 'task' && owner.task === task
+  const prune = (now = Date.now()) => {
+    const epoch = teamEpoch()
+    for (let at = withdrawn.length - 1; at >= 0; at -= 1) if (withdrawn[at].epoch !== epoch) withdrawn.splice(at, 1)
+    while (withdrawn.length > 0 && (now - withdrawn[0].at >= ENDED_FOR_MS || withdrawn.length > ENDED_MAX)) withdrawn.shift()
+  }
+  // Names are stored with the row. The request's reason, detail and arguments stay out of the view.
+  const record = (entry, why, botName) => {
+    const owner = owners.get(entry)
+    const epoch = teamEpoch()
+    if (owner === undefined || owner.epoch !== epoch || told.has(entry.id)) return false
+    told.add(entry.id)
+    while (told.size > TOLD_MAX) told.delete(told.values().next().value)
+    withdrawn.push({
+      id: entry.id, botId: entry.botId, botName: String(botName ?? owner.bot?.name ?? '').slice(0, 80), sessionId: entry.sessionId,
+      ...(entry.ownerSessionId !== undefined ? { ownerSessionId: entry.ownerSessionId } : {}),
+      ...(entry.roomId !== undefined ? { roomId: entry.roomId, roomName: String(owner.room?.name ?? '').slice(0, 80) } : {}),
+      ...(entry.taskId !== undefined ? { taskId: entry.taskId, label: entry.label ?? '' } : {}),
+      ...(entry.child ? { child: true } : {}),
+      tool: entry.tool, why, at: Date.now(), epoch,
+    })
+    prune()
+    if (why === 'task' && entry.taskId !== undefined) {
+      unanswered.delete(entry.taskId)
+      unanswered.set(entry.taskId, epoch)
+      while (unanswered.size > UNANSWERED_MAX) unanswered.delete(unanswered.keys().next().value)
+    }
+    return true
+  }
   // A task a Bot of the team started that still runs, by its Session.
   const runningTask = (sessionId) => {
     const task = rt.state?.tasks?.[sessionId]
@@ -55,6 +273,7 @@ export function install(rt) {
     const botId = owner?.botId ?? chat ?? task?.from ?? runOwner?.botId
     if (botId === undefined) return next()
     const id = randomUUID()
+    if (rt.isFolderAsk?.(request) === true) folderIds.add(id)
     const entry = {
       id,
       sessionId,
@@ -75,17 +294,43 @@ export function install(rt) {
     const target = entry.tool === 'keep_working' || !whole ? undefined : rt.callCapability?.(sessionId, request.callId, entry.tool)
     const folder = target === undefined ? undefined : rt.sessionFolder?.(request.agent?.session ?? request.agent)
     if (typeof folder === 'string' && folder !== '') {
-      entry.capabilityKey = createHash('sha256').update(JSON.stringify(['v1', entry.botId, folder, entry.tool, entry.reason, target])).digest('hex')
+      const keyTarget = entry.tool === 'acp_tool' ? target
+        : createHash('sha256').update(target).digest('hex')
+      entry.capabilityKey = createHash('sha256').update(JSON.stringify(
+        ['v1', entry.botId, folder, entry.tool, entry.reason, keyTarget],
+      )).digest('hex')
     }
-    pending.set(id, entry)
-    rt.noteApproval?.(sessionId, { tool: entry.tool, reason: entry.reason.slice(0, 200) })
+    if (owner === undefined && chat === undefined && task !== undefined
+      && runOwner === undefined && entry.capabilityKey === undefined
+      && whole && entry.tool !== 'keep_working') {
+      const projection = grantInternals(rt)?.projection(sessionId, request.callId,
+        entry.tool, request)
+      if (projection) Object.assign(entry, projection)
+    }
+    admit(id, entry)
+    // Hook owners also arrive as run: true (stops.js).
+    if (runOwner !== undefined) runs.add(entry)
+    owners.set(entry, owner !== undefined ? ownerRecord('group', owner.botId, { roomId: owner.roomId })
+      : chat !== undefined ? ownerRecord('chat', chat)
+        : task !== undefined ? ownerRecord('task', task.from, { task }) : ownerRecord('run', runOwner?.botId))
+    const privateNote = rt.privateApprovalNote?.(request)
+    if (privateNote !== undefined) localOnly.add(entry)
+    let offer
+    // A credential step is reviewed on the computer only: it is never offered as a grant.
+    if (privateNote === undefined && runOwner === undefined && bindTicketDesk(rt)?.available() === true) {
+      const kind = owner !== undefined ? 'group' : chat !== undefined ? 'chat' : 'task'
+      const grantEntry = { ...entry, kind }
+      grantContext.set(entry, { grantEntry, request })
+      offer = grantInternals(rt)?.offer(grantEntry, request, { signal: request.signal })
+    }
+    rt.noteApproval?.(sessionId, privateNote ?? { tool: entry.tool, reason: entry.reason.slice(0, 200) })
     rt.approvalWaiting?.(entry)
-    emit('open', { ...entry, answerable: true })
-    const settle = (outcome) => {
-      if (!pending.has(id)) return false
-      pending.delete(id)
+    emit('open', { ...entry, ...(privateNote && { ...privateNote, detail: {}, localReview: true }), answerable: true, ...offer })
+    const settle = (outcome, decidedBy = 'dsh', why) => {
+      if (!take(id)) return false
+      folderIds.delete(id)
       rt.noteApproval?.(sessionId, undefined)
-      emit('settled', { id, outcome })
+      emit('settled', { id, outcome, decidedBy, at: Date.now(), ...(why !== undefined ? { why } : {}) })
       return true
     }
     if (owner === undefined) {
@@ -97,11 +342,12 @@ export function install(rt) {
       const linked = new AbortController()
       request.signal = linked.signal
       return new Promise((resolve, reject) => {
-        const complete = (outcome) => {
-          if (!settle(outcome)) return
+        const complete = (outcome, decidedBy = 'dsh', why) => {
+          if (!settle(outcome, decidedBy, why)) return false
           resolve(outcome)
           linked.abort()
           if (request.signal === linked.signal) request.signal = original
+          return true
         }
         entry.answer = complete
         if (original?.aborted) entry.answer('cancelled')
@@ -124,9 +370,10 @@ export function install(rt) {
     }
     rt.yieldRoomTurn?.(sessionId)
     return new Promise((resolve) => {
-      entry.answer = (outcome) => {
-        if (!settle(outcome)) return
+      entry.answer = (outcome, decidedBy, why) => {
+        if (!settle(outcome, decidedBy, why)) return false
         resolve(outcome)
+        return true
       }
       if (request.signal?.aborted) entry.answer('cancelled')
       request.signal?.addEventListener('abort', () => entry.answer('cancelled'), { once: true })
@@ -134,7 +381,10 @@ export function install(rt) {
   }, { prepend: true })
 
   ctx.effect(() => () => {
-    for (const entry of pending.values()) if (entry.child) entry.answer?.('cancelled')
+    for (const entry of pending.values()) if (entry.child) entry.answer?.('cancelled', 'system')
+    withdrawn.length = 0
+    unanswered.clear()
+    told.clear()
   }, 'ds-bot: cancel held subagent asks')
 
   function childAsk(request, sessionId, owner) {
@@ -145,6 +395,7 @@ export function install(rt) {
       return 'cancelled'
     }
     const id = randomUUID()
+    if (rt.isFolderAsk?.(request) === true) folderIds.add(id)
     const entry = {
       id, sessionId, botId: owner.botId, child: true, ownerSessionId: owner.sessionId,
       ...(owner.kind === 'group' ? { roomId: owner.roomId } : {}),
@@ -155,37 +406,132 @@ export function install(rt) {
       detail: rt.callDetail?.(sessionId, request.callId) ?? {},
       at: Date.now(),
     }
-    pending.set(id, entry)
+    admit(id, entry)
+    owners.set(entry, ownerRecord(owner.kind, owner.botId, {
+      ...(owner.kind === 'group' ? { roomId: owner.roomId } : {}),
+      ...(owner.kind === 'task' ? { task: rt.state?.tasks?.[owner.taskId] } : {}),
+    }))
     if (owner.kind === 'group') rt.yieldRoomTurn?.(owner.sessionId)
     return new Promise(resolve => {
       const aborted = () => entry.answer('cancelled')
       entry.answer = outcome => {
-        if (!pending.delete(id)) return
+        if (!take(id)) return false
+        folderIds.delete(id)
         request.signal?.removeEventListener('abort', aborted)
         resolve(outcome)
+        return true
       }
-      if (request.signal?.aborted) entry.answer('cancelled')
+      if (request.signal?.aborted) aborted()
       else request.signal?.addEventListener('abort', aborted, { once: true })
     })
   }
 
-  const approvalsView = () => [...pending.values()].map(({ answer, ...entry }) => ({ ...entry, answerable: answer !== undefined }))
+  const approvalsView = () => [...pending.values()].map(pendingEntry => {
+    const context = grantContext.get(pendingEntry)
+    const { answer, ...entry } = pendingEntry
+    const offer = context && grantInternals(rt)?.offerView(context.grantEntry, context.request)
+    return { ...entry, answerable: answer !== undefined, ...offer }
+  })
+  function groupAskCurrent(id, room) {
+    const entry = pending.get(id)
+    if (entry === undefined) return false
+    const owner = owners.get(entry)
+    return owner?.kind === 'group' && owner.epoch === teamEpoch() && owner.room === room && owner.bot === rt.botOf(entry.botId)
+  }
   const waitsForApproval = sessionId => [...pending.values()].some(entry => entry.sessionId === sessionId || entry.ownerSessionId === sessionId)
 
-  function answerApproval(id, choice) {
+  function answerApproval(id, choice, client = 'web') {
     const entry = pending.get(String(id ?? ''))
     if (entry?.answer === undefined) throw Object.assign(new Error('This approval is no longer open'), { code: 'bot/stale' })
+    if (client === 'im' && localOnly.has(entry)) {
+      throw Object.assign(new Error('Review this approval on your computer.'), { code: 'bot/local-approval' })
+    }
     const outcome = OUTCOMES[choice]
     if (outcome === undefined) throw Object.assign(new Error('Choose allow or reject'), { code: 'bot/invalid' })
-    entry.answer(outcome)
+    // The record of the decision names the kind of client that made it, and `settle` adds
+    // the moment. The harness's own approval/decided event still carries only id and outcome.
+    entry.answer(outcome, CLIENT_KINDS.has(client) ? client : 'web')
   }
 
-  // A group Session that leaves its group has no card left to answer from.
-  const cancelApprovals = (sessionId) => {
+  const matches = (entry, sessionId) => entry.sessionId === sessionId || entry.ownerSessionId === sessionId
+  const readGroupEvidence = read => {
+    try { return read() } catch (error) { rt.warn('ds-bot: labelling a withdrawn ask failed: %s', error) }
+    return undefined
+  }
+  // Take the ask snapshot before scanning the pre-drop parts and markers. Finish the
+  // read after clearing the group owner index. A hook can settle or admit asks; any
+  // change to the pending list during the read withholds labels for this drop.
+  const prepareGroupApprovalCancel = (sessionId, readSeat) => {
+    const revision = pendingRevision
+    const snapshot = [...pending.values()].filter(entry => matches(entry, sessionId) && current(entry))
+    if (snapshot.length === 0) return undefined
+    const readLabel = readGroupEvidence(readSeat)
+    if (readLabel === undefined) return undefined
+    return () => readGroupEvidence(() => {
+      if (revision !== pendingRevision) return undefined
+      const labelOf = readLabel()
+      if (labelOf === undefined || revision !== pendingRevision) return undefined
+      return new Set(snapshot.filter(entry => current(entry) && labelOf(owners.get(entry), entry) === 'group'))
+    })
+  }
+  // Walk the live list as before, including asks admitted during the drop or by a settlement listener.
+  const cancelApprovals = (sessionId, readLabels) => {
+    const labels = readLabels?.()
     for (const entry of pending.values()) {
-      if (entry.sessionId === sessionId || entry.ownerSessionId === sessionId) entry.answer?.('cancelled')
+      if (!matches(entry, sessionId)) continue
+      if (!labels?.has(entry)) {
+        entry.answer?.('cancelled', 'system')
+        continue
+      }
+      if (entry.answer?.('cancelled', 'system', 'group') !== true) continue
+      try { record(entry, 'group') } catch (error) { rt.warn('ds-bot: recording a withdrawn ask failed: %s', error) }
     }
   }
 
-  Object.assign(rt, { approvalsView, waitsForApproval, answerApproval, cancelApprovals, onApproval })
+  // Check the ending operation before each cancellation and row. Only the call that settled the ask gets a row.
+  const endApprovals = async (sessionIds, why, by = {}, valid = () => false) => {
+    const ids = new Set([sessionIds].flat().filter(id => typeof id === 'string'))
+    let count = 0
+    for (const entry of pending.values()) {
+      if (!current(entry) || !ownedBy(owners.get(entry), why, by)) continue
+      if (!ids.has(entry.sessionId) && !ids.has(entry.ownerSessionId)) continue
+      // Yield so DSH answers already given are adopted before cancellation.
+      await new Promise(resolve => setImmediate(resolve))
+      if (pending.get(entry.id) !== entry) continue
+      if (valid() !== true) break
+      let won = false
+      try { won = entry.answer?.('cancelled', 'system', why) === true } catch (error) { rt.warn('ds-bot: withdrawing an ask failed: %s', error) }
+      if (valid() !== true) break
+      if (won && record(entry, why, by.botName)) count += 1
+    }
+    return count
+  }
+  const answerIfPending = (id, outcome, by = 'web') => {
+    const entry = pending.get(String(id ?? ''))
+    if (entry?.answer === undefined || entry.child === true
+      || !Object.values(OUTCOMES).includes(outcome)) return false
+    try { return entry.answer(outcome, CLIENT_KINDS.has(by) ? by : 'web') === true }
+    catch { return false }
+  }
+  if (!claimers.has(rt)) claimers.set(rt, ticket => {
+    if (rt.holdsLock?.() !== true) {
+      throw grantRefusal(rt.readOnly?.() ?? 'This host cannot save the Bot team.', 'bot/read-only')
+    }
+    const result = grantInternals(rt)?.claim(ticket, id => {
+      const entry = pending.get(id)
+      return entry?.answer === undefined ? undefined : grantContext.get(entry) ?? {}
+    }, answerIfPending)
+    if (result === undefined) throw grantRefusal('Allow this step from the Automagik window.')
+    if (result.stale) throw grantRefusal('This approval is no longer open', 'bot/stale')
+    if (result.changed) throw grantRefusal('This step changed. Look again.')
+    return result.receipt
+  })
+  bindGrantDecisions(rt, row => emit('grant', {
+    id: row.approvalId ?? `dsh:${row.requestId}`, ...row, at: Date.now(),
+  }))
+
+  const withdrawnView = () => { prune(); return withdrawn.map(({ epoch, ...row }) => row) }
+  const unansweredView = () => { const epoch = teamEpoch(); return [...unanswered].filter(([, at]) => at === epoch).map(([id]) => id) }
+
+  Object.assign(rt, { approvalsView, groupAskCurrent, isFolderApproval: id => folderIds.has(id), waitsForApproval, answerApproval, cancelApprovals, prepareGroupApprovalCancel, onApproval, endApprovals, withdrawnView, unansweredView })
 }

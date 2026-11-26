@@ -11,6 +11,10 @@ import { CODEX_IMAGES, CODEX_RECORD, OPENAI_IMAGES, OPENAI_RECORD, createImageGe
 
 const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64')
 const PARTIAL = Buffer.from('partial-image').toString('base64')
+const ENV_KEY = 'sk-inherited-0123456789abcdef'
+const GIVEN_KEY = 'sk-given-0123456789abcdef'
+const ENV_SENTINEL = new RegExp(ENV_KEY)
+const ENV_HINT = "An OPENAI_API_KEY from the environment is not used for images. Sign in to Codex from a Bot's chat, or save that key in Settings → Models."
 // A token whose payload names the ChatGPT account, as the sign-in's tokens do.
 const tokenFor = account => `x.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: account } })).toString('base64url')}.sig`
 
@@ -20,11 +24,11 @@ const folderOf = (t) => {
   return dir
 }
 // A credential store holding `records`, whose modifyRecord runs its callback like DSH's.
-const storeOf = (records) => ({
+const storeOf = (records, resolved) => ({
   records,
   readRecord: async key => records[key],
   modifyRecord: async (key, mutate) => { records[key] = await mutate(records[key]); return records[key] },
-  resolve: async () => undefined,
+  resolve: async ref => ref === 'OPENAI_API_KEY' ? resolved : undefined,
 })
 const sse = events => new Response(events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } })
 // Legacy compatibility tests require a host positively declaring consented shared scope.
@@ -189,6 +193,126 @@ const codexOf = ({ ready = true, unsupported, reason = unsupported ? 'unsupporte
   }
 }
 
+test('an OPENAI_API_KEY inherited from the environment is not used: a signed-in Codex draws', async t => {
+  const dir = folderOf(t)
+  const codex = codexOf()
+  const images = createImageGen({
+    credentials: () => storeOf({}, { value: ENV_KEY, source: 'env' }),
+    codex: () => codex, folder: () => dir, fetch: async () => assert.fail('no image request'),
+  })
+  const access = await images.access()
+  const detail = await images.accessDetail()
+  assert.deepEqual(access, { kind: 'codex' })
+  assert.deepEqual(detail, { access: { kind: 'codex' } })
+  const made = await images.generate({ prompt: 'A fox', callId: 'codex' })
+  assert.equal(made.via, 'codex')
+  assert.equal(codex.calls.length, 1)
+  assert.doesNotMatch(JSON.stringify([access, detail, made, images.progress('codex'), codex.calls]), ENV_SENTINEL)
+})
+
+test('with only an inherited key, nothing draws and the refusal and settings say why, never the key', async () => {
+  for (const codex of [undefined, codexOf({ ready: false }),
+    { ...codexOf(), imageAccess: async () => ({ ready: false, signedIn: false }) }]) {
+    const images = createImageGen({ credentials: () => storeOf({}, { value: ENV_KEY, source: 'env' }),
+      codex: () => codex, folder: () => assert.fail('no image file'), fetch: async () => assert.fail('no image request') })
+    const access = await images.access()
+    const detail = await images.accessDetail()
+    assert.equal(access, null)
+    assert.deepEqual(detail, { access: null, environmentKey: 'ignored' })
+    await assert.rejects(images.generate({ prompt: 'A fox', callId: 'refused' }), error => {
+      assert.equal(error.code, 'bot/unavailable')
+      assert.match(error.message, /^No image service is connected: an OPENAI_API_KEY inherited from the environment.*not used for images.*sign in to Codex.*save that key in Settings → Models/)
+      assert.doesNotMatch(error.message, /OpenAI\s+(?:API\s+)?key/i)
+      assert.doesNotMatch(JSON.stringify([error, error.message]), ENV_SENTINEL)
+      return true
+    })
+    const progress = images.progress('refused')
+    assert.notEqual(progress?.phase, 'generating')
+    assert.deepEqual(codex?.calls ?? [], [])
+    assert.doesNotMatch(JSON.stringify([access, detail, progress]), ENV_SENTINEL)
+  }
+})
+
+const CONFIG_REFUSAL = 'Codex is signed in, but it could not load its own configuration, so it cannot draw. Ask the user to fix Codex\'s config file; then generate_image can draw.'
+
+test('a Codex-specific cause comes first and the inherited key is still named', async () => {
+  for (const [options, wording] of [
+    [{ reason: 'account' }, 'Codex is signed in on this computer, but the user has not confirmed its account for Bots. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there); then generate_image can draw.'],
+    [{ reason: 'config' }, CONFIG_REFUSAL],
+    [{ reason: 'unreadable' }, 'Codex is signed in, but it could not be checked for safe drawing, so it cannot draw now. Ask the user to try again later.'],
+    [{ unsupported: true }, 'Codex is signed in, but this Codex version is not supported for drawing yet. Ask the user to update Automagik; then generate_image can draw.'],
+  ]) {
+    const codex = codexOf({ ready: false, ...options })
+    for (const resolved of [{ value: ENV_KEY, source: 'env' }, undefined]) {
+      const images = createImageGen({ credentials: () => storeOf({}, resolved), codex: () => codex,
+        folder: () => assert.fail('no image file'), fetch: async () => assert.fail('no image request') })
+      const detail = await images.accessDetail()
+      assert.deepEqual(detail, resolved ? { access: null, environmentKey: 'ignored' } : { access: null })
+      await assert.rejects(images.generate({ prompt: 'A fox', callId: 'cause' }), error => {
+        if (resolved) {
+          assert.ok(error.message.startsWith(wording))
+          assert.match(error.message.slice(wording.length), /^ Also, an OPENAI_API_KEY inherited from the environment Automagik was started in is not used for images; to use that key, save it in Settings → Models\.$/)
+        } else {
+          assert.equal(error.message, wording)
+          assert.doesNotMatch(error.message, /OPENAI_API_KEY|Settings → Models/)
+        }
+        assert.doesNotMatch(error.message, /OpenAI\s+(?:API\s+)?key/i)
+        assert.doesNotMatch(JSON.stringify([error, error.message, detail, images.progress('cause')]), ENV_SENTINEL)
+        return true
+      })
+    }
+    assert.deepEqual(codex.calls, [])
+  }
+})
+
+test('a key of unnamed source is skipped and reported like nothing connected', async () => {
+  const disconnected = 'No image service is connected. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI); then generate_image can draw.'
+  for (const [resolved, codex, wording] of [
+    [{ value: ENV_KEY }, undefined, disconnected],
+    [{ value: ENV_KEY, source: '' }, undefined, disconnected],
+    [{ value: ENV_KEY, source: 7 }, undefined, disconnected],
+    [{ value: ENV_KEY }, codexOf({ ready: false, reason: 'config' }), CONFIG_REFUSAL],
+  ]) {
+    const images = createImageGen({ credentials: () => storeOf({}, resolved), codex: () => codex,
+      folder: () => assert.fail('no image file'), fetch: async () => assert.fail('no image request') })
+    const access = await images.access()
+    const detail = await images.accessDetail()
+    assert.equal(access, null)
+    assert.deepEqual(detail, { access: null })
+    await assert.rejects(images.generate({ prompt: 'A fox', callId: 'unnamed' }), error => {
+      assert.equal(error.message, wording)
+      assert.doesNotMatch(error.message, /OPENAI_API_KEY/)
+      assert.doesNotMatch(JSON.stringify([access, detail, error, error.message, images.progress('unnamed')]), ENV_SENTINEL)
+      return true
+    })
+  }
+})
+
+test('a key the person gave the app still draws through the Images API', async t => {
+  const dir = folderOf(t)
+  for (const [records, resolved] of [
+    ...['file', 'user-env', 'project-env', 'keychain'].map(source => [{}, { value: GIVEN_KEY, source }]),
+    [{ [OPENAI_RECORD]: { kind: 'api-key', key: GIVEN_KEY } }, { value: ENV_KEY, source: 'env' }],
+  ]) {
+    const requests = []
+    const fetch = async (url, init) => {
+      requests.push({ url, init })
+      return Response.json({ data: [{ b64_json: PNG }] })
+    }
+    const images = createImageGen({ credentials: () => storeOf(records, resolved), folder: () => dir, fetch })
+    const access = await images.access()
+    const detail = await images.accessDetail()
+    assert.deepEqual(access, { kind: 'openai', model: 'gpt-image-1' })
+    assert.deepEqual(detail, { access })
+    const made = await images.generate({ prompt: 'A fox', callId: 'given' })
+    assert.equal(made.via, 'openai')
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].url, OPENAI_IMAGES)
+    assert.equal(requests[0].init.headers.authorization, `Bearer ${GIVEN_KEY}`)
+    assert.doesNotMatch(JSON.stringify([access, detail, made, images.progress('given'), requests]), ENV_SENTINEL)
+  }
+})
+
 test('with no OpenAI key, a signed-in Codex draws: in one piece, kept by its id, nothing stored read', async (t) => {
   const dir = folderOf(t)
   const codex = codexOf()
@@ -251,11 +375,39 @@ test('a Codex refusal is the tool\'s answer and the card shows it failed', async
 
 // The card's own helpers, bundled with a stand-in React.
 const bundle = await build({
-  stdin: { contents: "export { imageIdOf, ratioOf, PAINT_FACES } from './src/client/image-cell.js'; export { FACES } from './src/client/clay-art.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
+  stdin: { contents: "export { imageIdOf, ratioOf, PAINT_FACES, imagesRowOf } from './src/client/image-cell.js'; export { FACES } from './src/client/clay-art.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
   bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent', external: ['react', 'react-dom'],
 })
 const cell = { exports: {} }
 runInNewContext(bundle.outputFiles[0].text, { module: cell, exports: cell.exports, require: () => ({ createElement: () => null, useEffect: () => {}, useRef: () => ({}), useState: v => [v, () => {}] }) })
+
+test('the Images row says why an inherited key is not used', () => {
+  const { imagesRowOf } = cell.exports
+  const ignored = imagesRowOf({ access: null, environmentKey: 'ignored' })
+  const codexHint = "Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats."
+  assert.equal(ignored.hint, ENV_HINT)
+  assert.equal(ignored.value, 'Not connected')
+  assert.equal(imagesRowOf({ access: null }).hint, codexHint)
+  assert.equal(imagesRowOf(null).hint, codexHint)
+  assert.equal(imagesRowOf({ access: { kind: 'codex' } }).value, 'Codex, on your ChatGPT plan')
+  assert.equal(imagesRowOf({ kind: 'openai', model: 'gpt-image-1' }).value, 'Your OpenAI key · gpt-image-1')
+  assert.equal(imagesRowOf(undefined).value, 'Loading…')
+  assert.doesNotMatch(JSON.stringify(ignored), ENV_SENTINEL)
+  const client = readFileSync(new URL('../src/client/image-cell.js', import.meta.url), 'utf8')
+  assert.ok(client.includes("call('image-access', { detail: true })"))
+})
+
+test('the inherited-key hint has its Chinese and pt-BR entries', () => {
+  const locales = readFileSync(new URL('../src/client/i18n.js', import.meta.url), 'utf8')
+  const prefix = `  '${ENV_HINT.replaceAll("'", "\\'")}': '`
+  const line = locales.split('\n').find(line => line.startsWith(prefix))
+  assert.ok(line, 'Chinese entry is present')
+  const zh = line.slice(prefix.length, -2)
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))[ENV_HINT]
+  assert.match(zh, /Codex.*设置 → 模型/)
+  assert.match(pt, /Codex.*Configurações → Modelos/)
+  for (const text of [ENV_HINT, zh, pt]) assert.doesNotMatch(text, /sk-|OpenAI\s+(?:API\s+)?key/i)
+})
 
 test('the card finds the image the tool kept, frames it in the asked shape, and paints with Omni\'s own faces', () => {
   const { imageIdOf, ratioOf, PAINT_FACES, FACES } = cell.exports

@@ -1229,13 +1229,14 @@ test('a paused group parks every member an @all called, in a new round', async (
   const post = sent.find(entry => entry.sessionId === room.id && entry.message.source.role === 'post')
   await emit(room.id, { type: 'user/message', data: { source: post.message.source, content: post.message.content } })
   const held = relay(room.id, 'relay-1')
-  await settle()
+  // The paused relay opens no round and ends after parking; check its final state.
+  // Awaiting it is bounded by the package's 120 s per-test timeout.
+  await held
   assert.equal(sent.filter(entry => entry.message.source.role === 'room').length, 0, 'a paused room opens no round')
   assert.deepEqual((state().paused ?? []).map(entry => [entry.name, entry.note, entry.idle]), [
     ['Writer', 'Omni called everyone', true],
     ['Tester', 'Omni called everyone', true],
   ], 'every member @all called waits for the user')
-  await held
 
   // The user's message brings them back.
   sent.length = 0
@@ -1347,7 +1348,10 @@ test('the idle pause survives a restart and the user lifts it', async (t) => {
   const post = sent.find(entry => entry.sessionId === room.id && entry.message.source.role === 'post')
   await emit(room.id, { type: 'user/message', data: { source: post.message.source, content: post.message.content } })
   const quiet = relay(room.id, 'relay-1')
-  await settle()
+  // Wait for the status post's round to finish (a real event, not a fixed window): a relay
+  // that lands while that round is still starting joins a round that then ends with nothing
+  // to do, and the user's message never opens the next one.
+  await quiet
   assert.equal(sent.filter(entry => entry.message.source.role === 'room').length, 0, 'no round starts on its own after a restart')
 
   await emit(room.id, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '@Writer 继续' }] } })
@@ -1356,7 +1360,62 @@ test('the idle pause survives a restart and the user lifts it', async (t) => {
   assert.ok(turn, "the user's message opens a round again")
   await answer(turn.sessionId, turn.message.source.exchangeId, '继续核对', 1)
   await resumed
-  await quiet
+  assert.equal(state().idlePaused, undefined)
+})
+
+// #1603: a user's line can arrive while the round the admin's status post opened is
+// still starting. That round can end with nothing to do; the line it joined must open
+// the group's next round instead of waiting in a round that is over.
+test('a user line that joins a round while it is starting opens the next round', async (t) => {
+  const { call, emit, userMessage, relay, answer, stop, sent, rt } = start()
+  t.after(stop)
+  const room = await team(call, sent)
+  const chief = rt.state.mainBotIds[0]
+  const state = () => rt.state.rooms[room.id]
+  state().idleRelays = ROOM_IDLE_RELAY_LIMIT
+  state().idlePaused = { from: chief, count: ROOM_IDLE_RELAY_LIMIT, noticed: true }
+  // The status post opens a round the pause holds: it has no speakers and ends at once.
+  await rt.teamTools.find(d => d.name === 'post_to_group').execute({ group: 'R1', message: '暂无待办' }, { agent: { id: rt.chatOf(chief) } })
+  const post = sent.find(entry => entry.sessionId === room.id && entry.message.source.role === 'post')
+  await emit(room.id, { type: 'user/message', data: { source: post.message.source, content: post.message.content } })
+
+  // Hold the status round at its first save, and start the user's relay while the round
+  // is still starting: it waits on the round's `ready`, as a line the Session delivers
+  // mid-setup does. Release only once the relay has taken that line, which it does in
+  // the same step that joins the round, so the join is never early.
+  const realSave = rt.save
+  let release
+  let saveHeld
+  const held = new Promise(resolve => { saveHeld = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  let holding = false
+  rt.save = (...args) => {
+    const starting = [...rt.roomProgress.values()].find(round => round.roomId === room.id && round.starting === true)
+    if (!holding && starting !== undefined) {
+      holding = true
+      saveHeld()
+      return gate.then(() => realSave(...args))
+    }
+    return realSave(...args)
+  }
+  const status = relay(room.id, 'status')
+  await held
+  sent.length = 0
+  await emit(room.id, userMessage('@Writer 继续'))
+  const joined = relay(room.id, 'joined')
+  for (let at = 0; at < 100 && (rt.roomInbox.get(room.id) ?? []).length > 0; at += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal((rt.roomInbox.get(room.id) ?? []).length, 0, 'the joined relay takes the user line')
+  release()
+
+  const turn = await turnFor(sent)
+  assert.ok(turn, "the user's line opens a round after the status round ends")
+  assert.match(turn.message.content[0].text, /继续/)
+  await answer(turn.sessionId, turn.message.source.exchangeId, '继续核对', 1)
+  const result = JSON.parse(await joined)
+  assert.ok(result.replies.some(row => row.text === '继续核对'), 'the answer is delivered in the group')
+  await status
   assert.equal(state().idlePaused, undefined)
 })
 

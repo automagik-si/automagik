@@ -1,4 +1,5 @@
 // Space reads and administration over stateless MCP Streamable HTTP. No browser cookies.
+import { isSkillEndpoint } from './skill-library.js'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import ipaddr from 'ipaddr.js'
 import { createServer } from 'node:http'
@@ -6,6 +7,8 @@ import { appendFile, mkdir, open, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { replaceFile } from './files.js'
 import { createAgentRedactor } from './agent-redaction.js'
+import { multiuserMode } from './multiuser.js'
+import { isGuardGroupRefusal } from './refusal.js'
 
 export const MCP_PATH = '/api/omni-mcp'
 const VERSION = '2025-11-25'
@@ -114,7 +117,7 @@ export function agentBindAddress(value = '127.0.0.1') {
   } catch { throw invalid() }
 }
 
-export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn => fn() } = {}) {
+export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn => fn(), multiuser = () => multiuserMode(), enterRequestOwnership } = {}) {
   const tokenPath = () => join(rt.home, 'agent-tokens.json')
   const auditPath = () => join(rt.home, 'agent-audit.jsonl')
   let records
@@ -314,11 +317,21 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
       await audit({ ...entry, outcome: 'allowed' })
       return reply(result)
     }
+    const operation = body.params?.name
+    if (isSkillEndpoint(operation) ||
+        ((operation === 'update-bot' || operation === 'update_bot') && Object.hasOwn(body.params?.arguments ?? {}, 'skills'))) {
+      entry.action = operation
+      const args = body.params?.arguments
+      await rt.skillLibrary?.refuse(operation, args, 'agent')
+      return error(-32602, 'Invalid tool arguments')
+    }
     if (!definition) return error(-32602, 'Unknown tool')
     entry.action = definition.name
     const args = body.params?.arguments ?? {}
     entry.target = typeof args?.id === 'string' ? args.id : null
-    if (!validArgs(args, definition.inputSchema)) return error(-32602, 'Invalid tool arguments')
+    const botAuto = ['create-bot', 'update-bot'].includes(definition.endpoint) && Object.hasOwn(args, 'solverAuto')
+    const { solverAuto: _solverAuto, ...otherArgs } = botAuto ? args : {}
+    if (!validArgs(botAuto ? otherArgs : args, definition.inputSchema)) return error(-32602, 'Invalid tool arguments')
     if (definition.read) {
       const current = await authenticate(candidate)
       if (!current || current.revokedAt !== undefined) return refuse(401, 'Invalid agent token')
@@ -330,36 +343,48 @@ export function createAgentAccess(rt, handle, { now = Date.now, transaction = fn
         { type: 'text', text: JSON.stringify(value) },
       ] })
     }
-    return transaction(async () => {
-      const current = await authenticate(candidate)
-      if (!current || current.revokedAt !== undefined) return refuse(401, 'Invalid agent token')
-      await rt.refresh()
-      const before = snapshot()
-      // An intent persists before side effects. Audit failure therefore fails closed.
-      await audit({ ...entry, outcome: 'started' })
-      const result = await handle(definition.endpoint, clean(args), request.signal)
-      const after = snapshot()
-      const delta = changes(before, after)
-      if (args.id === undefined && definition.endpoint === 'create-bot') {
-        entry.target = result.ok ? result.value.id : null
-      }
-      if (args.id === undefined && definition.endpoint === 'create-room') {
-        entry.target = result.ok ? result.value.id : null
-      }
-      await audit({ ...entry, outcome: result.ok ? 'allowed' : 'refused', changes: delta })
-      // Mutation handlers may answer a full UI view. Never send that view over MCP.
-      const target = args.id ?? entry.target
-      const value = clean(result.ok
-        ? definition.endpoint.endsWith('bot') || definition.endpoint === 'set-main'
-          ? after.bots.find(bot => bot.id === target) ?? null
-          : after.groups.find(group => group.id === target) ?? null
-        : { error: 'Action refused', code: result.error.code })
-      return reply({ isError: !result.ok, content: [
-        { type: 'text', text: JSON.stringify(value) },
-      ] })
-    })
+    const leave = enterRequestOwnership?.(definition.endpoint, args)
+    try {
+      return await transaction(async () => {
+        const current = await authenticate(candidate)
+        if (!current || current.revokedAt !== undefined) return refuse(401, 'Invalid agent token')
+        await rt.refresh()
+        // While a Bot's review guard is on, only the person moves it to another model (H5-1),
+        // read after the refresh, inside this transaction (H6-9).
+        if (botAuto || (definition.endpoint === 'update-bot' && Object.hasOwn(args, 'model') && rt.botOf(args.id)?.reviewGuard === true)) {
+          await audit({ ...entry, outcome: 'refused' })
+          return reply({ isError: true, content: [
+            { type: 'text', text: JSON.stringify(clean({ error: 'Action refused', code: botAuto ? 'bot/solver-auto' : 'bot/review-guard' })) },
+          ] })
+        }
+        const before = snapshot()
+        // An intent persists before side effects. Audit failure therefore fails closed.
+        await audit({ ...entry, outcome: 'started' })
+        const result = await handle(definition.endpoint, clean(args), request.signal)
+        const after = snapshot()
+        const delta = changes(before, after)
+        if (args.id === undefined && definition.endpoint === 'create-bot') {
+          entry.target = result.ok ? result.value.id : null
+        }
+        if (args.id === undefined && definition.endpoint === 'create-room') {
+          entry.target = result.ok ? result.value.id : null
+        }
+        await audit({ ...entry, outcome: result.ok ? 'allowed' : 'refused', changes: delta })
+        // Mutation handlers may answer a full UI view. Never send that view over MCP.
+        const target = args.id ?? entry.target
+        const value = clean(result.ok
+          ? definition.endpoint.endsWith('bot') || definition.endpoint === 'set-main'
+            ? after.bots.find(bot => bot.id === target) ?? null
+            : after.groups.find(group => group.id === target) ?? null
+          : { error: isGuardGroupRefusal(result.error) ? result.error.message : 'Action refused', code: result.error.code })
+        return reply({ isError: !result.ok, content: [
+          { type: 'text', text: JSON.stringify(value) },
+        ] })
+      })
+    } finally { leave?.() }
   }
   const fetch = async request => {
+    if (multiuser()) return json(403, { error: 'Agent access is off in multiuser mode' })
     const context = {}
     try { return await processRequest(request, context) }
     catch {

@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // The briefing: the pure text (briefingText.mjs) for a main bot, a captain and a member, and
 // the launch text a bot's agent starts with; the 10,000-character cap; planned bots skipped; the hook and exclude merges; then
 // briefing.mjs itself under node with a fake `hc` on PATH and a scratch git project, for the
@@ -15,10 +16,13 @@ import { promisify } from "node:util";
 
 import { state } from "./use-stubs.mjs";
 import { parseBots } from "../mods/am-sidebar/model.js";
+import { briefingLaunch } from "../mods/am-sidebar/models.js";
+import { NEEDS_OWNER_LABEL } from "../mods/am-sidebar/tidy.js";
 import {
   briefingText, directMembers, mergeHook, hookCommand, legacyHookCommand, directHookCommand, briefingPath, stableBriefingPath, withExclude, EXCLUDE_LINE, BRIEFING_LIMIT,
-  botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE,
+  botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE, MESSAGE_LINE,
   amPartEntryPath, amPartHookCommand, amPartRunnerPath, hookTargetOf, installHook, isAmPartEntry, scriptOf, statusWord, PERMISSION_WORD,
+  OWNER_QUESTION_LINE,
 } from "../mods/am-sidebar/briefingText.mjs";
 import { BUDGET_MS, CALL_MS, GUARD_MS, COMPACT_MARK, compactedSince, timeScale, gatherBriefing } from "../mods/am-sidebar/briefing.mjs";
 import { assertSafeTmpdir, scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -57,6 +61,88 @@ const team = () => ({
 const byId = (f, id) => f.bots.find((b) => b.id === id);
 
 // ---- pure ----
+
+const SET_OWNER_QUESTION = `hc label "$HC_TERMINAL_ID" 'automagik-herdr.needs-owner=Which release should ship?'`;
+const CLEAR_OWNER_QUESTION = 'hc label "$HC_TERMINAL_ID" automagik-herdr.needs-owner=';
+
+test("#540 launch briefings put owner question guidance after the messaging line for supported agents", () => {
+  const file = team();
+  for (const [id, agent] of [
+    [ID.main, "claude"], [ID.cap, "claude"], [ID.dev, "codex"],
+    [ID.dev, "omp"], [ID.dev, "pi"], [ID.dev, "grok"],
+  ]) {
+    const self = { ...byId(file, id), agent };
+    const lines = launchBriefingText({ self, file }).split("\n");
+    const message = lines.indexOf(MESSAGE_LINE);
+    assert.ok(message >= 0, `${agent} ${self.kind}`);
+    assert.equal(lines[message + 1], OWNER_QUESTION_LINE, `${agent} ${self.kind}`);
+  }
+});
+
+test("#540 dsh-tui, Hermes and unknown agents launch without owner question guidance", () => {
+  const file = team();
+  for (const agent of ["dsh-tui", "hermes", "custom-agent"]) {
+    const self = { ...byId(file, ID.main), agent };
+    assert.ok(!launchBriefingText({ self, file }).includes(NEEDS_OWNER_LABEL), agent);
+  }
+});
+
+test("#540 launch guidance follows the effective agent when a restart swaps agents", () => {
+  const file = team();
+  const self = byId(file, ID.main);
+  assert.ok(!launchBriefingText({ self, file, agent: "dsh-tui" }).includes(NEEDS_OWNER_LABEL));
+  assert.ok(launchBriefingText({ self: { ...self, agent: "dsh-tui" }, file, agent: "claude" }).includes(OWNER_QUESTION_LINE));
+});
+
+test("#540 the hook and am brief text omit owner question guidance for every agent", () => {
+  const file = team();
+  for (const agent of ["claude", "codex", "omp", "pi", "grok", "dsh-tui", "hermes", "custom-agent"]) {
+    const self = { ...byId(file, ID.main), agent };
+    assert.ok(!briefingText({ self, file }).includes(NEEDS_OWNER_LABEL), agent);
+  }
+});
+
+test("#540 both owner question commands use tidy's label key", () => {
+  const keys = Array.from(OWNER_QUESTION_LINE.matchAll(/hc label "\$HC_TERMINAL_ID" '?([^=]+)=/g), (match) => match[1]);
+  assert.deepEqual(keys, [NEEDS_OWNER_LABEL, NEEDS_OWNER_LABEL]);
+});
+
+test("#540 both owner question commands fit in a launch briefing with 4,000-character instructions and twelve members", () => {
+  const self = bot(ID.main, "main", { instructions: "i".repeat(4000) });
+  const members = Array.from({ length: 12 }, (_, i) => bot(`b-${String(i).padStart(10, "k")}`, "member", {
+    lead: self.id, name: `Member ${i}`, role: "x".repeat(80),
+  }));
+  const text = launchBriefingText({ self, file: { ...team(), bots: [self, ...members] } });
+  assert.ok(text.length <= BRIEFING_LIMIT);
+  assert.ok(text.includes(SET_OWNER_QUESTION));
+  assert.ok(text.includes(CLEAR_OWNER_QUESTION));
+});
+
+test("#540 a launch briefing that would cut through the owner question line drops it whole", () => {
+  const file = team();
+  const self = byId(file, ID.main);
+  const normal = launchBriefingText({ self, file });
+  const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
+  // Lengthen the role so the cut would fall just after the complete set command.
+  const setEnd = normal.indexOf(SET_OWNER_QUESTION) + SET_OWNER_QUESTION.length;
+  const longRole = { ...self, role: self.role + "x".repeat(BRIEFING_LIMIT - mark.length - setEnd) };
+  const text = launchBriefingText({ self: longRole, file });
+  assert.ok(text.length <= BRIEFING_LIMIT);
+  assert.ok(!text.includes(NEEDS_OWNER_LABEL));
+  assert.equal(text, launchBriefingText({ self: longRole, file, agent: "hermes" }));
+});
+
+test("#540 the Codex developer instructions preserve the two shell commands", () => {
+  const file = team();
+  const self = { ...byId(file, ID.main), agent: "codex" };
+  const text = launchBriefingText({ self, file });
+  const { args } = briefingLaunch("codex", { text });
+  assert.equal(args[0], "-c");
+  assert.match(args[1], /^developer_instructions="/);
+  const instructions = JSON.parse(args[1].slice("developer_instructions=".length));
+  assert.ok(instructions.includes(SET_OWNER_QUESTION));
+  assert.ok(instructions.includes(CLEAR_OWNER_QUESTION));
+});
 
 test("statusWord: a pane blocked on a permission says so; nothing else changes", () => {
   assert.equal(PERMISSION_WORD, "stuck (needs a person to answer a permission)");
@@ -383,12 +469,15 @@ async function scratch(t) {
   // What the hook printed per terminal is forgotten before each call, so each is a first turn,
   // unless `keep` (the once-only tests below).
   // `feed(child)`, in place of `input`: the test writes stdin itself (in parts, or never closed).
+  const core = startFakeCore(t, { HOME: root, PATH: `${bin}:${NODE_DIR}:/usr/bin:/bin`, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   const brief = async (env, input, { keep = false, feed = null, timeout = 0 } = {}) => {
     const options = {
       env: { PATH: `${bin}:${NODE_DIR}:/usr/bin:/bin`, FAKE_HC: fixture, FAKE_HC_HANG_MS: String(HANG_MS), HOME: root,
         HERDR_BRIEFING_TIME_SCALE: String(SCALE), HERDR_APP_HOME: join(root, "app"), GIT_CEILING_DIRECTORIES: root, ...env },
       timeout,
     };
+    Object.assign(options.env, { ...core.env });
+    core.control(options.env);
     if (!keep) try { rmSync(join(options.env.HERDR_APP_HOME, "automagik-herdr", "briefed"), { recursive: true, force: true }); } catch {}
     if (input === undefined && !feed) return run(RUNTIME, [SCRIPT], options);
     return new Promise((resolve, reject) => {
@@ -1070,6 +1159,7 @@ test("worker instruction: launch and full briefings agree on code and git scope"
       for (const render of [launchBriefingText, briefingText]) {
         const text = render({ self, file, isGit });
         assert.equal(text.includes(WORKER_LINE), expected);
+        assert.ok(text.includes(MESSAGE_LINE));
         if (!expected) assert.doesNotMatch(text, /worker/i);
         assert.match(text, /Keep the board green/);
       }
@@ -1485,4 +1575,82 @@ test("#805 briefing gives the Herdr restart path and explains Claude's /restart 
   assert.match(text, /am restart b-main/);
   assert.match(text, /Update installed · \/restart to apply/);
   assert.match(text, /never works.*--append-system-prompt-file.*--settings/);
+});
+
+test("#1556 a seat with a context threshold is told how to hand off; one with none is not", () => {
+  const { file } = parseBots(JSON.stringify(team()));
+  const main = byId(file, ID.main);
+  const member = byId(file, ID.dev);
+  const everyone = { file };
+  assert.match(launchBriefingText({ self: main, ...everyone }), /When `am` asks for your handoff, write it to the path its message names/);
+  assert.match(briefingText({ self: main, ...everyone }), /When `am` asks for your handoff/);
+  assert.doesNotMatch(launchBriefingText({ self: member, ...everyone }), /asks for your handoff/);
+  // A member with its own threshold is told too.
+  const told = { ...member, restartAt: 1000 };
+  assert.match(launchBriefingText({ self: told, ...everyone }), /asks for your handoff/);
+});
+
+test("#540 a dsh-tui launch gives owner question guidance only when the guard is confirmed", () => {
+  const file = team();
+  const self = { ...byId(file, ID.main), agent: "dsh-tui" };
+  const lines = launchBriefingText({ self, file, agent: "dsh-tui", guard: true }).split("\n");
+  const guardIndex = lines.indexOf(GUARD_LINE);
+  assert.ok(guardIndex >= 0);
+  assert.deepEqual(lines.slice(guardIndex, guardIndex + 3), [GUARD_LINE, MESSAGE_LINE, OWNER_QUESTION_LINE]);
+  for (const guard of [false, null]) {
+    assert.ok(!launchBriefingText({ self, file, agent: "dsh-tui", guard }).includes(NEEDS_OWNER_LABEL));
+  }
+  assert.ok(!launchBriefingText({ self, file, agent: "hermes", guard: true }).includes(NEEDS_OWNER_LABEL));
+  assert.ok(launchBriefingText({ self: byId(file, ID.main), file, agent: "dsh-tui", guard: true })
+    .includes(OWNER_QUESTION_LINE), "guidance follows the effective launch agent");
+});
+
+test("#540 own-pane briefings give Claude mains and members the owner question after the messaging line", () => {
+  const file = team();
+  for (const id of [ID.main, ID.dev]) {
+    const self = byId(file, id);
+    const lines = briefingText({ self, file, ownPane: true }).split("\n");
+    const messageIndex = lines.indexOf(MESSAGE_LINE);
+    assert.ok(messageIndex >= 0);
+    assert.equal(lines[messageIndex + 1], OWNER_QUESTION_LINE);
+  }
+});
+
+test("#540 the hook briefing drops the whole owner question if the cut would split set and clear", () => {
+  const file = team();
+  const self = byId(file, ID.main);
+  const normal = briefingText({ self, file, ownPane: true });
+  const mark = `\n[briefing cut at ${BRIEFING_LIMIT} characters]\n</herdr-bot>`;
+  const setStart = normal.indexOf(SET_OWNER_QUESTION);
+  assert.ok(setStart >= 0);
+  const padding = BRIEFING_LIMIT - mark.length - setStart - SET_OWNER_QUESTION.length;
+  const longRole = { ...self, role: self.role + "x".repeat(padding) };
+  const text = briefingText({ self: longRole, file, ownPane: true });
+  assert.ok(text.length <= BRIEFING_LIMIT);
+  assert.equal(text, briefingText({ self: longRole, file }));
+});
+
+test("#540 the printed Claude hook includes the owner question and plain gathering omits it", async (t) => {
+  const file = team();
+  const plain = await gatherBriefing({
+    file, bot: byId(file, ID.main), address: "t1", ask: async () => null,
+    locate: async () => ({ get: null }),
+  });
+  assert.ok(plain.includes(MESSAGE_LINE));
+  assert.ok(!plain.includes(NEEDS_OWNER_LABEL));
+  const sc = await turns(t, () => ["claude"]);
+  const { stdout } = await sc.turn(1);
+  assert.ok(stdout.includes(`${MESSAGE_LINE}\n${OWNER_QUESTION_LINE}`));
+});
+
+test("#540 the hook keeps both owner question commands with twelve members and long instructions", () => {
+  const file = team();
+  const self = { ...byId(file, ID.main), instructions: "i".repeat(4000) };
+  const members = Array.from({ length: 12 }, (_, i) => ({
+    bot: bot(`b-${String(i).padStart(10, "k")}`, "member", { name: `Member ${i}`, role: "x".repeat(80) }),
+    terminal: `t${i}`, status: "working", report: `${"old ".repeat(800)}newest line ${i}`,
+  }));
+  const text = briefingText({ self, file, members, ownPane: true });
+  assert.ok(text.length <= BRIEFING_LIMIT);
+  assert.ok(text.includes(OWNER_QUESTION_LINE));
 });

@@ -92,9 +92,9 @@ export const DE = {
   'The Bot team could not start. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'Das Bot-Team konnte nicht starten. Die Ursache steht in der Startausgabe der Engine – in ihrer Konsole oder im Startfehlerfenster der App.',
   'The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'Das Bot-Team konnte nicht starten. {error}. Die Ursache steht in der Startausgabe der Engine – in ihrer Konsole oder im Startfehlerfenster der App.',
   'Automation tasks': 'Automatisierungsaufgaben',
-  Connectors: 'Konnektoren',
-  'Search connectors': 'Konnektoren suchen',
-  'No connectors': 'Keine Konnektoren',
+  Apps: 'Apps',
+  'Search apps': 'Apps suchen',
+  'No apps': 'Keine Apps',
   IM: 'IM',
   'via {platform}': 'über {platform}',
   'Your IM bots': 'Deine IM-Bots',
@@ -613,7 +613,8 @@ export const DE = {
   Whale: 'Wal', Star: 'Stern', Moon: 'Mond', Wave: 'Welle', Squircle: 'Squircle', Bull: 'Stier', Blossom: 'Blüte',
   Gumdrop: 'Fruchtgummi', Peanut: 'Erdnuss', Bubbles: 'Blasen', Saucer: 'Untertasse', Sprout: 'Keimling', Bunny: 'Hase',
   Kitty: 'Kätzchen', Beacon: 'Leuchtfeuer', Plus: 'Plus', Magnet: 'Magnet', Acorn: 'Eichel', Pebbles: 'Kiesel', Cushion: 'Kissen',
-  Ring: 'Ring', Gem: 'Edelstein',
+  Ring: 'Ring', Gem: 'Edelstein', Puff: 'Puschel', Cap: 'Pilz', Bell: 'Glocke', Cloud: 'Wolke', Spike: 'Stachel', Floppy: 'Schlappohr',
+  Antenna: 'Antenne', Cactus: 'Kaktus', Bulb: 'Glühbirne', Chick: 'Küken', Frog: 'Frosch',
 
   // Colors
   Black: 'Schwarz', Brown: 'Braun', Red: 'Rot', Orange: 'Orange', Yellow: 'Gelb', Green: 'Grün', Cyan: 'Cyan', Blue: 'Blau',
@@ -1203,9 +1204,9 @@ export const DE = {
   // About
   'About Omni': 'Über Omni',
   'Version {version}': 'Version {version}',
-  'Star Omni on GitHub': 'Omni auf GitHub mit einem Stern markieren',
+  'Star Automagik on GitHub': 'Automagik auf GitHub mit einem Stern markieren',
   '{count} stars': '{count} Sterne',
-  'If Omni helps you, a star on GitHub helps more people find it.': 'Wenn dir Omni weiterhilft, hilft ein Stern auf GitHub dabei, dass noch mehr Menschen es entdecken.',
+  'If Automagik helps you, a star on GitHub helps more people find it.': 'Wenn dir Automagik weiterhilft, hilft ein Stern auf GitHub dabei, dass noch mehr Menschen es entdecken.',
   Updates: 'Updates',
   'Check for updates': 'Nach Updates suchen',
   'Checking…': 'Wird geprüft…',
@@ -1286,7 +1287,7 @@ export const DE = {
   'Who to chat with…': 'Mit wem möchtest du chatten…',
   'Add at least one more Bot': 'Füge mindestens einen weiteren Bot hinzu',
   Members: 'Mitglieder',
-  // Connectors and scheduled tasks
+  // Apps and scheduled tasks
   'Scheduled tasks': 'Geplante Aufgaben',
   'Every day': 'Jeden Tag',
   'Every {count} days': 'Alle {count} Tage',
@@ -1489,7 +1490,7 @@ export const DE = {
   'Design': 'Design',
   'Data': 'Daten',
   'Commerce': 'E-Commerce',
-  'No connectors connected': 'Keine Konnektoren verbunden',
+  'No apps connected': 'Keine Apps verbunden',
   '{bot} needs {name}': '{bot} benötigt {name}',
   '{bot} wants to send an email': '{bot} möchte eine E-Mail senden',
   'Mail': 'E-Mail',

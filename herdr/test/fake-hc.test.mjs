@@ -3,7 +3,7 @@
 // file. A reader must never see a file part-way through a save.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -65,4 +65,23 @@ test("fake logs: a read leaves out a last line not yet ended by its newline; the
   assert.deepEqual(readJsonLines(log), [["get", "t0"]]);
   appendFileSync(log, 't","t9"]\n');
   assert.deepEqual(readJsonLines(log), [["get", "t0"], ["get", "t9"]]);
+});
+
+// CI run 44589606763: state.execTimedOut ["-lc"] is meant for the login-shell probe, yet it matched
+// the whole argv, so a `test -d` of a scratch path drawn as hb-panes-lc… "timed out" (1 run in 961).
+// The word matches the program (its sh -c script, else its command), never its data arguments.
+test("fake hc: execTimedOut matches the program's own words, never a data path that holds them", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "hb-fakehc-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const state = join(root, "hc.json");
+  writeFileSync(state, JSON.stringify({ execTimedOut: ["-lc"], terminals: [],
+    machines: [{ name: "vm", state: "connected", uname: "Linux x86_64", home: root }] }));
+  const env = { ...process.env, HC_FAKE_STATE: state, HC_FAKE_LOG: join(root, "hc.log") };
+  const exec = (...argv) => {
+    const r = spawnSync(process.execPath, [FAKE_HC, "exec", "--json", "--on", "vm", "--", ...argv], { env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout).timed_out;
+  };
+  assert.equal(exec("test", "-d", join(root, "hb-panes-lcAbC1")), false, "a data path holding -lc is no login shell");
+  assert.equal(exec("sh", "-c", 'exec "$0" -lc "$1"', "sh", "true"), true, "the login shell's script still times out");
 });

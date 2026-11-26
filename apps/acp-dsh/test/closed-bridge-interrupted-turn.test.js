@@ -5,25 +5,32 @@
 //   middle, another result came last). The adapter then says the agent "was interrupted" and
 //   ends the step, but the agent's prompt went on, unseen, until the person's next message.
 //   It is now asked to stop then and there, and ended if it will not.
-// - A bridge that closed. When the bridge process ends it says so and its credential is
-//   revoked; the agent on that session has lost DSH's tools for good. The next turn used to go
-//   on with it, without them. It now ends that session and starts a new one.
+// - A bridge that closed or whose process detached. A respawn can re-attach with the same
+//   credential. If the bridge is still gone on the next turn, the adapter starts a new
+//   session with the chat replayed. The agent process exiting revokes the credential.
 //
 // The real adapter and Backchannel, and the fake agent over stdio, as adapter.test.js.
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { Session } from '@deepseek-ai/dsh-session'
+import { AgentRun } from '../src/host/acp.js'
 import { AcpAdapter } from '../src/host/adapter.js'
 import { Backchannel } from '../src/host/backchannel.js'
 import { TOOL_NAME } from '../src/host/tool.js'
 
 const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-agent.mjs')
 const user = text => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
-const traceEvents = path => (existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
+function traceEvents(path, { live = false } = {}) {
+  if (!existsSync(path)) return []
+  const lines = readFileSync(path, 'utf8').split('\n')
+  // Only a newline commits a live frame. Final reads also validate a nonempty tail.
+  if (live || lines.at(-1) === '') lines.pop()
+  return lines.map(line => JSON.parse(line))
+}
 const textIn = chunks => chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
 
 // Wait for a condition, looked at until it holds, for at most 20 s (another process is on the
@@ -51,7 +58,7 @@ function clock() {
 const CANCEL_WAIT_MS = 5000
 
 // One Session on the fake agent. `bridge`: DSH's tools over the bridge (else the mirror tool).
-function host(t, { bridge = false, env = {} } = {}) {
+function host(t, { bridge = false, env = {}, hostStopping = () => false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-969-'))
   const trace = join(dir, 'trace.ndjson')
   const session = Session.create('s1')
@@ -89,14 +96,13 @@ function host(t, { bridge = false, env = {} } = {}) {
   }
   const timers = clock()
   const backchannel = new Backchannel({ ctx })
-  const adapter = new AcpAdapter(ctx, new Map([['acp-fake', spec]]), { dshTools: () => bridge, backchannel, cancelWaitMs: CANCEL_WAIT_MS, timers })
+  const adapter = new AcpAdapter(ctx, new Map([['acp-fake', spec]]), { dshTools: () => bridge, backchannel, cancelWaitMs: CANCEL_WAIT_MS, timers, hostStopping })
   let closed = false
   const close = () => { if (closed) return; closed = true; try { adapter.dispose() } finally { backchannel.dispose() } }
   t.after(() => { close(); rmSync(dir, { recursive: true, force: true }) })
   // One step, read to its end; a step that has not ended after 30 s fails the row and ends the
   // agent, so a regression is a failure and never a hung file.
-  const step = async (messages) => {
-    const chunks = []
+  const step = async (messages, chunks = []) => {
     let giveUp
     const late = new Promise((_, fail) => { giveUp = setTimeout(() => { close(); fail(new Error('the step did not end within 30 s')) }, 30_000) })
     const reading = (async () => {
@@ -105,7 +111,7 @@ function host(t, { bridge = false, env = {} } = {}) {
     })()
     try { return await Promise.race([reading, late]) } finally { clearTimeout(giveUp) }
   }
-  return { adapter, backchannel, executed, warned, step, tick: ms => timers.tick(ms), live: () => adapter.live.get('s1'), events: () => traceEvents(trace) }
+  return { adapter, backchannel, executed, warned, step, close, tick: ms => timers.tick(ms), live: () => adapter.live.get('s1'), events: options => traceEvents(trace, options) }
 }
 
 const said = text => ({ role: 'assistant', source: { kind: 'model', provider: 'acp-fake', model: 'default' }, content: [{ type: 'text', text }] })
@@ -163,7 +169,7 @@ test('#969: a turn that finds its bridge closed starts a new session, with DSH\'
   assert.equal(first.at(-1).reason.kind, 'stop')
   assert.deepEqual(h.executed, ['bash'])
   const before = h.live()
-  // The bridge process ended and said so: its credential is revoked (the `bye` of bridge.js).
+  // The host revoked the bridge credential while the agent was idle.
   h.backchannel.revoke(before.bridge)
   assert.equal(before.bridge.closed, true)
   const second = await h.step([user(opening), said('done'), user('bridge bash')])
@@ -187,6 +193,107 @@ test('#969: a turn that finds its bridge closed starts a new session, with DSH\'
   assert.equal(h.warned.filter(line => /lost its dsh bridge/i.test(line)).length, 1)
 })
 
+test('#969 8b: a bridge respawn runs a tool in the same ACP session', async (t) => {
+  const h = host(t, { bridge: true })
+  const initial = (await h.step([user('plain words')])).at(-1).reason
+  assert.equal(initial.kind, 'stop', initial.failure?.message)
+  const live = h.live()
+  const { bridge, run } = live
+  const { sessionId } = run
+  const first = bridge.attachment
+  assert.match(first, /^[0-9a-f]{32}$/)
+
+  const chunks = await h.step([user('bridge-respawn bash')])
+  assert.equal(chunks.at(-1).reason.kind, 'stop', chunks.at(-1).reason.failure?.message)
+  assert.match(textIn(chunks), /The bridge said: ran bash/)
+  assert.deepEqual(h.executed, ['bash'])
+  assert.equal(h.live(), live)
+  assert.equal(run.sessionId, sessionId)
+  assert.equal(live.bridge, bridge)
+  assert.match(bridge.attachment, /^[0-9a-f]{32}$/)
+  assert.notEqual(bridge.attachment, first)
+  assert.ok(bridge.retired.has(first))
+  assert.deepEqual(h.events().filter(e => e.event === 'mcp-list').map(e => e.sessionId), [sessionId, sessionId])
+  assert.equal(h.events().filter(e => e.event === 'new-session').length, 1)
+})
+
+test('#969 8b: a bridge child exit rejects its pending MCP call', async t => {
+  const h = host(t, { bridge: true })
+  const get = h.backchannel.ctx.get
+  const started = Promise.withResolvers()
+  const body = Promise.withResolvers()
+  t.mock.method(h.backchannel.ctx, 'get', name => {
+    const service = get(name)
+    if (name !== 'tools') return service
+    return { ...service, execute: () => { started.resolve(); return body.promise } }
+  })
+  const reading = h.step([user('bridge bash')])
+  try {
+    await Promise.race([started.promise, reading.then(() => assert.fail('the bridge call never started'))])
+    const { run } = h.live()
+    await run.conn.prompt({ sessionId: run.sessionId, prompt: [{ type: 'text', text: 'bridge-drop' }] })
+    const chunks = await reading
+    assert.match(textIn(chunks), /bridge failed: dsh exited/)
+  } finally {
+    body.resolve({ results: [] })
+  }
+})
+
+test('#969 8b: a bridge left detached is replaced on the next turn with replay', async (t) => {
+  const h = host(t, { bridge: true })
+  const opening = 'Remember walnut. bridge-drop'
+  const first = await h.step([user(opening)])
+  assert.equal(first.at(-1).reason.kind, 'stop', first.at(-1).reason.failure?.message)
+  const before = h.live()
+  assert.equal(before.bridge.disconnected, true)
+  assert.equal(before.bridge.closed, false)
+  assert.equal(h.warned.filter(line => /lost its dsh bridge/i.test(line)).length, 0)
+
+  const second = await h.step([user(opening), said('done'), user('bridge bash')])
+  assert.equal(second.at(-1).reason.kind, 'stop', second.at(-1).reason.failure?.message)
+  assert.match(textIn(second), /The bridge said: ran bash/)
+  assert.deepEqual(h.executed, ['bash'])
+  assert.notEqual(h.live(), before)
+  assert.equal(before.bridge.closed, true)
+  assert.equal(h.events().filter(e => e.event === 'new-session').length, 2)
+  const prompts = h.events().filter(e => e.event === 'prompt')
+  assert.match(prompts[1].text, /walnut/)
+  assert.equal(h.warned.filter(line => /lost its dsh bridge/i.test(line)).length, 1)
+})
+
+test('#969 8b: an idle agent process exit revokes its bridge without another turn', async (t) => {
+  const h = host(t, { bridge: true })
+  const initial = (await h.step([user('plain words')])).at(-1).reason
+  assert.equal(initial.kind, 'stop', initial.failure?.message)
+  const { run, bridge } = h.live()
+  const list = async () => await fetch(h.backchannel.urlFor(bridge), {
+    method: 'POST',
+    headers: { authorization: `Bearer ${bridge.credential}` },
+    body: JSON.stringify({ op: 'list' }),
+  })
+  assert.equal((await list()).status, 200)
+  assert.equal(run.busy, false)
+  assert.equal(run.child.kill('SIGKILL'), true)
+  await until(() => !run.alive, 'the idle agent exited')
+  assert.equal(bridge.closed, true)
+  assert.equal(h.backchannel.records.has(bridge.credential), false)
+  assert.equal((await list()).status, 401)
+})
+
+test('#969 8b: agent exit revokes its current bridge even after its live entry changes', async t => {
+  const h = host(t, { bridge: true })
+  const initial = (await h.step([user('plain words')])).at(-1).reason
+  assert.equal(initial.kind, 'stop', initial.failure?.message)
+  const state = h.live()
+  const { run } = state
+  const replacement = h.backchannel.mint({ sessionId: 's1', agent: state.bridge.agent, name: 'Fake agent' })
+  state.bridge = replacement
+  h.adapter.live.delete('s1')
+  assert.equal(run.child.kill('SIGKILL'), true)
+  await until(() => replacement.closed, 'the exited run revoked its current bridge')
+  assert.equal(h.backchannel.records.has(replacement.credential), false)
+})
+
 test('#969: a bridge that is open leaves the session as it is', async (t) => {
   const h = host(t, { bridge: true })
   await h.step([user('bridge bash')])
@@ -198,4 +305,108 @@ test('#969: a bridge that is open leaves the session as it is', async (t) => {
   const prompts = h.events().filter(event => event.event === 'prompt')
   assert.doesNotMatch(prompts[1].text, /Fake agent, turn|done/, 'nothing is replayed to a session that has the chat')
   assert.deepEqual(h.warned.filter(line => /lost its/.test(line)), [])
+})
+
+test('the cancel fixture waits for a complete prompt trace record', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-cancel-trace-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const path = join(dir, 'trace.ndjson')
+  const prompt = { event: 'prompt' }
+  writeFileSync(path, JSON.stringify(prompt))
+  assert.deepEqual(traceEvents(path, { live: true }), [])
+  writeFileSync(path, `${JSON.stringify(prompt)}\n{"event":`)
+  assert.deepEqual(traceEvents(path, { live: true }), [prompt])
+  assert.throws(() => traceEvents(path), SyntaxError)
+  writeFileSync(path, 'broken\n{"event":')
+  assert.throws(() => traceEvents(path, { live: true }), SyntaxError)
+})
+
+// Hold only the SDK prompt send. AgentRun still marks the request in flight, and
+// both prompt and cancel travel over the real connection to the same fake.
+async function heldHang(t) {
+  const h = host(t, { hostStopping: () => true })
+  const gate = Promise.withResolvers()
+  const prompt = AgentRun.prototype.prompt
+  let run
+  t.mock.method(AgentRun.prototype, 'prompt', function (blocks) {
+    const send = this.conn.prompt
+    t.mock.method(this.conn, 'prompt', async params => {
+      run = this
+      if (!await gate.promise) throw new Error('fixture closed before prompt send')
+      return send(params)
+    })
+    return prompt.call(this, blocks)
+  })
+
+  const chunks = []
+  const reading = h.step([user('hang')], chunks)
+  const settled = Promise.allSettled([reading])
+  t.after(async () => {
+    gate.resolve(false)
+    h.close()
+    await settled
+  })
+  await until(() => run !== undefined, 'the request to reach the prompt gate')
+  const events = options => h.events(options).filter(e => e.pid === run.child.pid && e.sessionId === run.sessionId
+    && (e.event === 'prompt' || e.event === 'cancel'))
+  return { run, release: () => gate.resolve(true), events, chunks, reading }
+}
+
+test('#1575 control: a cancel sent on local readiness is lost when the fake enters its prompt', async t => {
+  const { run, release, events, chunks, reading } = await heldHang(t)
+  assert.ok(run.prompting !== undefined, 'the original readiness predicate passes')
+  assert.deepEqual(events({ live: true }), [])
+  const cancel = () => run.conn.cancel({ sessionId: run.sessionId })
+  await cancel()
+  await until(() => events({ live: true }).some(e => e.event === 'cancel'), 'the fake to handle the early cancel')
+  release()
+
+  // The last update before the fake waits for cancellation. Have the same fake
+  // answer another request after that update, while its prompt and step remain open.
+  await until(() => textIn(chunks).includes('you said "hang".'), 'the fake to stream its post-reset reply')
+  const { protocolVersion } = run.init
+  const reply = await Promise.race([
+    run.conn.initialize({ protocolVersion, clientCapabilities: {} }),
+    reading.then(() => assert.fail('the step ended before the second cancel')),
+  ])
+  assert.equal(reply.protocolVersion, protocolVersion)
+  assert.ok(run.prompting !== undefined)
+  assert.ok(!chunks.some(chunk => chunk.type === 'finish'))
+  assert.deepEqual(events({ live: true }).map(e => e.event), ['cancel', 'prompt'])
+  t.diagnostic(`After the fake echoed hang and answered initialize, prompt pending: ${run.prompting !== undefined}`)
+  await cancel()
+  const reason = (await reading).at(-1).reason
+  assert.equal(reason.failure.code, 'AGENT_INTERRUPTED')
+  assert.deepEqual(events().map(e => e.event), ['cancel', 'prompt', 'cancel'])
+  t.diagnostic(JSON.stringify({ events: events(), reason }))
+})
+
+// #1575: a prompt the host stopped from outside the app (its process got SIGTERM with the
+// host) ends as an interruption, not as the person's Stop. bots-dsh reads the code by name to
+// resume the task instead of marking it failed, so the exact code is the contract.
+test('#1575: a prompt cancelled from outside the app ends as interrupted, not as a Stop', async (t) => {
+  const { run, release, events, reading } = await heldHang(t)
+  const cancel = t.mock.method(run.conn, 'cancel')
+  // Check readiness with the wire still closed. A locally ready sender will have
+  // called cancel before the next event-loop turn, even if the fake has yet to see it.
+  const cancelsBeforeRelease = new Promise(resolve => setImmediate(() => {
+    resolve(cancel.mock.callCount())
+    release()
+  }))
+  await until(() => events({ live: true }).some(e => e.event === 'prompt' && e.turns === 1 && e.text === 'hang'),
+    'the fake to receive this prompt')
+  await run.conn.cancel({ sessionId: run.sessionId })
+  const earlyCancels = await cancelsBeforeRelease
+  assert.equal(earlyCancels, 0, 'no cancel may be issued before the prompt gate opens')
+  const chunks = await reading
+  assert.equal(cancel.mock.callCount(), 1)
+  assert.deepEqual(events().map(e => e.event), ['prompt', 'cancel'])
+  assert.deepEqual(chunks.at(-1).reason, {
+    kind: 'error',
+    failure: {
+      message: 'Fake agent was interrupted before it finished.',
+      code: 'AGENT_INTERRUPTED',
+    },
+  })
+  t.diagnostic(JSON.stringify({ earlyCancels, events: events(), reason: chunks.at(-1).reason }))
 })

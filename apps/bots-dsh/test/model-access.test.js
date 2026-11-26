@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
 import { install as installModels, ACCESS_MESSAGES } from '../src/host/models.js'
+import { Session } from '@deepseek-ai/dsh-session'
 import { fakeContext } from './fake-ctx.js'
 
 const TEAM = {
@@ -24,7 +25,7 @@ const TEAM = {
 }
 
 // The roster over a fake DSH with DeepSeek and the Codex agent, and acp-dsh's service.
-function start({ team = TEAM, agent = { name: 'Codex', on: true, cli: { found: true }, connector: { state: 'ready' }, signedIn: false }, selectModel, services = {} } = {}) {
+function start({ team = TEAM, agent = { name: 'Codex', on: true, cli: { found: true }, connector: { state: 'ready' }, signedIn: false }, selectModel, services = {}, historySession } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-access-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify(team))
   const inspected = []
@@ -34,13 +35,13 @@ function start({ team = TEAM, agent = { name: 'Codex', on: true, cli: { found: t
   let creates = 0
   Object.assign(ctx, {
     llm: {
-      listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }, { id: 'acp-codex', name: 'Codex' }],
+      listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }, { id: 'api', name: 'API' }, { id: 'acp-codex', name: 'Codex' }],
       listModels: async provider => [{ id: provider === 'deepseek' ? 'v4' : 'default' }],
       resolveModelInfo: async () => ({}),
     },
     sessionController: {
       create: async () => { creates++; return { sessionId: `s${creates}` } },
-      resolveAgent: async sessionId => ({ agent: { session: { id: sessionId, seq: 1 }, followup: () => {} } }),
+      resolveAgent: async sessionId => ({ agent: { session: historySession?.id === sessionId ? historySession : { id: sessionId, seq: 1 }, followup: () => {} } }),
       selectModel: async (request) => { if (selectModel) await selectModel(request); selected.push(request) },
     },
     sessionTitle: { rename: async () => {} },
@@ -124,20 +125,24 @@ test('the other refusals: off, installing; an unknown sign-in and a failed check
 })
 
 test('an accepted change is applied before it is saved, and keeps the model that answered as previousModel', async (t) => {
+  // Same-harness selection is synchronous even with a real, answered history.
+  const historySession = new Session('chief')
   const order = []
-  const h = start({ agent: { name: 'Codex', on: true, cli: { found: true }, connector: { state: 'ready' }, signedIn: true }, selectModel: async () => { order.push(['select', JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots.chief.model]) } })
+  const h = start({ historySession, agent: { name: 'Codex', on: true, cli: { found: true }, connector: { state: 'ready' }, signedIn: true }, selectModel: async () => { order.push(['select', JSON.parse(readFileSync(join(h.home, 'state.json'), 'utf8')).bots.chief.model]) } })
   t.after(h.stop)
   await h.call('state', {})
   // The model it leaves answered in the Bot's chat: the one to go back to (a model that never
   // answered is never recorded).
-  for (const listener of h.ctx.listeners.get('session/event') ?? []) listener({ id: 'chief' }, { type: 'assistant/message', data: { message: { role: 'assistant', source: { provider: 'deepseek', model: 'v4' }, content: [] } } })
-  const response = await h.call('update-bot', { id: 'chief', model: 'acp-codex/default' })
+  const answer = historySession.append('assistant/message', { turn: 1, message: { role: 'assistant', source: { provider: 'deepseek', model: 'v4' }, content: [{ type: 'text', text: 'Observed answer' }] } }, { surfaceOp: 'append' })
+  for (const listener of h.ctx.listeners.get('session/event') ?? []) listener(historySession, answer)
+  assert.equal(historySession.deriveMessages().length, 1)
+  const response = await h.call('update-bot', { id: 'chief', model: 'api/default' })
   assert.equal(response.ok, true)
   // When DSH selected the model, the saved record still named the old one.
   assert.deepEqual(order[0], ['select', 'deepseek/v4'])
   const saved = JSON.parse(h.disk()).bots.chief
-  assert.equal(saved.model, 'acp-codex/default')
-  assert.equal(saved.appliedModel, 'acp-codex/default')
+  assert.equal(saved.model, 'api/default')
+  assert.equal(saved.appliedModel, 'api/default')
   assert.equal(saved.previousModel, 'deepseek/v4', 'the model it leaves, to go back to if the switch fails')
   // A second change before the first answered keeps the first model to go back to.
   assert.equal((await h.call('update-bot', { id: 'chief', model: 'deepseek/v4' })).ok, true)
@@ -148,10 +153,15 @@ test('an accepted change is applied before it is saved, and keeps the model that
   assert.equal(state.pending, false)
   assert.equal(state.answered, true, 'its answer was seen: "answered" again once back on it')
   assert.deepEqual(state.access, { ready: true, provider: 'deepseek' })
+  assert.deepEqual(historySession.deriveMessages(), [answer.data.message], 'the observed answer stays in history')
 })
 
 test('a selection DSH turns down refuses the update with a readable message and writes nothing', async (t) => {
+  // A choice within Codex is an in-place transaction; it keeps the Auto route mark.
+  const team = structuredClone(TEAM)
+  team.bots.chief.model = team.bots.chief.appliedModel = 'acp-codex/old'
   const h = start({
+    team,
     agent: { name: 'Codex', on: true, cli: { found: true }, connector: { state: 'ready' }, signedIn: true },
     selectModel: async (request) => { if (request.provider === 'acp-codex') throw Object.assign(new Error('internal: /home/x/secret path'), { code: 'session/model-unavailable' }) },
   })
@@ -163,10 +173,33 @@ test('a selection DSH turns down refuses the update with a readable message and 
   const response = await h.call('update-bot', { id: 'chief', model: 'acp-codex/default', role: 'Changed' })
   assert.equal(response.ok, false)
   assert.equal(response.error.code, 'bot/refused')
-  assert.equal(response.error.message, 'Omni could not switch to acp-codex/default. It stays on deepseek/v4.')
+  assert.equal(response.error.message, 'Omni could not switch to acp-codex/default. It stays on acp-codex/old.')
   assert.doesNotMatch(response.error.message, /secret path/)
   assert.deepEqual(rt.state.bots.chief, before, 'model, previousModel and the rest of the patch as they were')
   assert.equal(h.disk(), diskBefore)
+})
+
+// Mixed harness crossings are deliberately a separate transaction: neither selection nor
+// any companion field may run, even when DSH could accept that model and permission.
+test('mixed route crossings refuse atomically before selection or permission application', async (t) => {
+  for (const patch of [{ role: 'Changed' }, { permission: 'danger-full-access' }]) {
+    let applied = 0
+    const h = start({ agent: READY, services: { permissionPresets: { ...permissionPresets, set: () => { applied++ } } } })
+    t.after(h.stop)
+    await h.call('state', {})
+    const before = structuredClone(h.rt().state.bots.chief)
+    const diskBefore = h.disk()
+    const selectedBefore = [...h.selected]
+    const appliedBefore = applied
+    const response = await h.call('update-bot', { id: 'chief', model: 'acp-codex/default', ...patch })
+    assert.equal(response.ok, false)
+    assert.equal(response.error.code, 'bot/refused')
+    assert.equal(response.error.message, 'Omni changes agent in a step of its own, so change only its model in this step.')
+    assert.deepEqual(h.rt().state.bots.chief, before)
+    assert.equal(h.disk(), diskBefore)
+    assert.deepEqual(h.selected, selectedBefore)
+    assert.equal(applied, appliedBefore)
+  }
 })
 
 // A permission catalog of two levels; `danger-full-access` resolves but DSH will not set it.
@@ -203,20 +236,26 @@ test('a model change whose level DSH then refuses goes back to the old model, se
   t.after(h.stop)
   await h.call('state', {})
   const rt = h.rt()
+  const before = structuredClone(rt.state.bots.chief)
   const selectedBefore = h.selected.length
-  const response = await h.call('update-bot', { id: 'chief', model: 'acp-codex/default', permission: 'danger-full-access' })
+  const response = await h.call('update-bot', { id: 'chief', model: 'api/default', permission: 'danger-full-access' })
   assert.equal(response.ok, false)
+  // Invalidating an old Auto confirmation is monotonic, even on a refused level.
+  assert.equal(rt.state.bots.chief.permissionRev, (before.permissionRev ?? 0) + 2)
+  assert.deepEqual(rt.state.bots.chief, { ...before, permissionRev: rt.state.bots.chief.permissionRev }, 'all patch fields are rolled back; Auto consent stays invalidated')
   const chief = rt.state.bots.chief
   assert.equal(chief.model, 'deepseek/v4')
   assert.equal(chief.appliedModel, 'deepseek/v4')
   assert.equal(Object.hasOwn(chief, 'previousModel'), false)
   assert.equal(Object.hasOwn(chief, 'permission'), false)
   const saved = JSON.parse(h.disk()).bots.chief
+  assert.deepEqual(saved, { ...before, permissionRev: chief.permissionRev }, 'the saved patch fields are rolled back too')
   assert.equal(saved.model, 'deepseek/v4')
   assert.equal(saved.appliedModel, 'deepseek/v4')
   assert.equal(Object.hasOwn(saved, 'previousModel'), false)
   // The switch was selected, then the old model selected again.
-  assert.deepEqual(h.selected.slice(selectedBefore).map(request => request.provider), ['acp-codex', 'deepseek'])
+  assert.deepEqual(h.selected.slice(selectedBefore).map(request => request.provider), ['api', 'deepseek'])
+  assert.deepEqual(h.selected.slice(selectedBefore).map(({ sessionId, provider, model }) => [sessionId, provider, model]), [['chief', 'api', 'default'], ['chief', 'deepseek', 'v4']])
 })
 
 test('the state answer carries each Bot\'s model state, without a sign-in check', async (t) => {

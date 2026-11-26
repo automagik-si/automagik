@@ -8,6 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { stageVerdictOf } from '../shared/review-mark.js'
 import { LATE_ANSWER, TEXT_KEPT } from './constants.js'
 import { headOf } from './text.js'
 
@@ -21,7 +22,7 @@ export function install(rt) {
   const works = () => (state.works ??= {})
   // What came back, whole; state.json keeps the start of each.
   const whole = new Map()
-  const save = () => void rt.save().catch(() => {})
+  const save = (durable = false) => void rt.save(durable ? { durable } : undefined).catch(() => {})
   const nameOf = id => rt.botOf(id)?.name
 
   // The whole result of a work, in a file of its own: state.json is written whole on
@@ -72,6 +73,14 @@ export function install(rt) {
     } catch {}
   }
 
+  const saveBeforeDroppingResults = (results) => {
+    const generation = rt.teamGeneration?.()
+    void rt.save({ durable: true }).then(written => {
+      if (written !== true || rt.sameTeam?.(generation) === false) return
+      for (const result of results) dropResult(result.file)
+    }).catch(() => {})
+  }
+
   // What came back for a work: the whole result if it is still to be found, else the
   // start of it. A result that a restart cut, or whose file is gone, is reported as
   // such and not passed on as if it were whole.
@@ -102,7 +111,7 @@ export function install(rt) {
     const above = parent === undefined ? undefined : works()[parent]
     works()[id] = { ...(from ? { from } : {}), ...(to ? { to } : {}), ...(room ? { room } : {}), ...(above ? { parent } : {}), ...(fromRoom ? { fromRoom } : {}), ...(name ? { name } : {}), ...(child ? { child } : {}), open: [], results: [], at: Date.now() }
     if (above !== undefined) above.open.push(id)
-    save()
+    save(true)
   }
 
   // The answer to work `id` is on its way, with `result` from `name`. Returns the work
@@ -123,9 +132,7 @@ export function install(rt) {
     for (const result of work.results ?? []) whole.delete(result.id)
     // Old state can still name these files until the replacement state lands.
     // A failed save must leave them available to the next host.
-    void rt.save().then(() => {
-      for (const result of work.results ?? []) dropResult(result.file)
-    }).catch(() => {})
+    saveBeforeDroppingResults(work.results ?? [])
     return above === undefined ? undefined : work.parent
   }
   // The subagent run a settlement notice names. The notice carries only the
@@ -189,16 +196,14 @@ export function install(rt) {
     const above = works()[parent]
     if (above !== undefined) above.open = above.open.filter(other => other !== id)
     for (const result of work.results ?? []) whole.delete(result.id)
-    void rt.save().then(() => {
-      for (const result of work.results ?? []) dropResult(result.file)
-    }).catch(() => {})
+    saveBeforeDroppingResults(work.results ?? [])
   }
 
   function taken(workId, id) {
     const work = works()[workId]
     if (work === undefined || !work.open.includes(id)) return
     work.open = work.open.filter(other => other !== id)
-    save()
+    save(true)
   }
 
   // A delivery the restart delayed is marked, so the answer that comes back for
@@ -226,10 +231,20 @@ export function install(rt) {
 
   const owns = (botId, workId) => workId !== undefined && works()[workId]?.to === botId
   const waits = workId => (works()[workId]?.open.length ?? 0) > 0
-  function hold(workId, text) {
+  function hold(workId, { text, reviewText, firstLine, model }) {
     const work = works()[workId]
     if (work === undefined || text === '') return
     work.held = headOf(text, TEXT_KEPT)
+    // Keep full reviewer evidence beside the display copy in the same state write.
+    if (work.room === undefined && work.fromRoom === undefined && work.to === rt.botOf(work.from)?.reviewerId) {
+      work.heldReviewText = reviewText
+      work.heldFirstLine = firstLine
+      work.heldModel = model ?? null
+    } else {
+      delete work.heldReviewText
+      delete work.heldModel
+      work.heldFirstLine = firstLine.length <= TEXT_KEPT ? firstLine : ''
+    }
     save()
   }
   // Who asked for the work, as the turn that answers a request sees its trigger.
@@ -237,6 +252,26 @@ export function install(rt) {
     const work = works()[workId]
     return work === undefined ? undefined : { kind: 'bot', role: 'request', exchangeId: workId, senderSessionId: work.from, ...(work.fromRoom ? { senderRoomId: work.fromRoom } : {}) }
   }
+  // A silent continuation sends what the Bot held for this work, with its own evidence.
+  function workReply(workId, reply) {
+    if (reply.text !== '') return reply
+    const work = works()[workId]
+    const text = work?.held ?? ''
+    const firstLine = work?.heldFirstLine
+    const reviewText = work?.heldReviewText
+    const model = work?.heldModel ?? undefined
+    if (typeof reviewText === 'string' && typeof firstLine === 'string') {
+      const legacyHeld = work.name === 'solver-review-result' && !Object.hasOwn(work, 'heldModel')
+      return { text, reviewText, firstLine, model, ...(legacyHeld ? { legacyHeld } : {}) }
+    }
+    // Old display copies can drop a surrogate pair at the cap. Only a shorter
+    // copy is known to be complete, and a staged opening also needs its raw line.
+    if (text.length >= TEXT_KEPT - 1) return { text }
+    if (typeof firstLine === 'string') return { text, reviewText: text, firstLine, model }
+    if (stageVerdictOf(text.split(/\r?\n/, 1)[0])) return { text }
+    return { text, reviewText: text, firstLine: '' }
+  }
+
   // The answer that goes up: what the Bot said last for this work, then what came back.
   function answerText(workId, reply, botName) {
     const work = works()[workId]
@@ -336,7 +371,7 @@ export function install(rt) {
     closeWork(id, name, text, { abandoned: true, abandonedAt: Date.now(), abandonedReason: reason })
     // The wait is over now, not when the Bot next reads the result.
     parent.open = parent.open.filter(other => other !== id)
-    save()
+    save(true)
     // The Bot that waited goes on with its work now, the same way a reply brings it back.
     const waitingBot = parent.to
     if (waitingBot !== undefined && rt.botOf(waitingBot) !== undefined) {
@@ -387,6 +422,9 @@ export function install(rt) {
 
   // What a Bot is doing, in one line for the Bots that work with it.
   function statusOf(botId) {
+    // A Bot whose plugin is not installed is not idle: it cannot run at all (installed.js).
+    const installation = rt.installationOf?.(rt.botOf(botId))
+    if (installation?.installed === false) return `not installed (${installation.reason})`
     const chat = rt.chatOf(botId)
     const sessions = [...new Set([chat, ...(rt.groupSessionsOf?.(botId) ?? [])])]
     const place = sessionId => {
@@ -433,5 +471,5 @@ export function install(rt) {
     return lines.join('; ')
   }
 
-  Object.assign(rt, { workOf, openWork, closeWork, dropWork, takenWork: taken, lateWork, answerMissed, ownsWork: owns, waitsWork: waits, holdWork: hold, workAsker: askedBy, answerText, upstreamOf, sameWork, forgetBotWork: forgetBot, statusOf, waitingView, settleSubWork, subWorkRun, nameSubWork, abandonWork, abandonedWork: takeAbandoned })
+  Object.assign(rt, { workOf, openWork, closeWork, dropWork, takenWork: taken, lateWork, answerMissed, ownsWork: owns, waitsWork: waits, holdWork: hold, workAsker: askedBy, workReply, answerText, upstreamOf, sameWork, forgetBotWork: forgetBot, statusOf, waitingView, settleSubWork, subWorkRun, nameSubWork, abandonWork, abandonedWork: takeAbandoned })
 }

@@ -17,9 +17,9 @@ const require = (name) => {
   if (!(name in platform)) throw new Error(`no platform module ${name}`)
   return platform[name]
 }
-const bundled = async (entry) => {
+const bundled = async (entry, extra = '') => {
   const bundle = await build({
-    entryPoints: [fileURLToPath(new URL(`../src/client/${entry}`, import.meta.url))],
+    stdin: { contents: `export * from './${entry}'; ${extra}`, resolveDir: fileURLToPath(new URL('../src/client/', import.meta.url)) },
     bundle: true, format: 'cjs', platform: 'node', write: false,
     external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
   })
@@ -28,7 +28,7 @@ const bundled = async (entry) => {
   return module.exports
 }
 const goal = await bundled('goal.js')
-const header = await bundled('header.js')
+const header = await bundled('header.js', "export { rememberLinkState, forgetKnownStates } from './cli-login-model.js'")
 const cells = await bundled('cells.js')
 const { goalView, goalEventText, canSetGoal, hasGoalAdmin } = goal
 const { HeaderPill } = header
@@ -358,6 +358,62 @@ test('Enter during IME composition does not submit the goal brief', () => {
   assert.equal(prevented, false)
   input.props.onKeyDown({ key: 'Enter', nativeEvent: { isComposing: false }, preventDefault: () => { prevented = true } })
   assert.equal(prevented, true)
+})
+
+function checkGoalBrief(brief, exercise) {
+  const original = react.useState
+  const state = 'fixture_goal_state'
+  const code = `fake-code#${state}`
+  const drafts = []
+  const notices = []
+  const actions = {
+    goalDraft: (...args) => drafts.push(args), showNotice: notice => notices.push(notice),
+    closeGoalCompose: () => {}, closeGoal: () => {},
+  }
+  const compose = findComp(renderHeader(team(), { goalCompose: 'r1', goalOpen: 'r1' }, {}, actions), 'GoalCompose')
+  assert.equal(header.rememberLinkState(`https://example.test/?state=${state}`), true)
+  try {
+    react.useState = initial => [initial === '' ? brief(code) : initial, () => {}]
+    const form = compose.type(compose.props)
+    exercise({ input: find(form, 'bt-goal-input'), start: find(form, 'bt-send'), code, drafts, notices })
+  } finally {
+    react.useState = original
+    header.forgetKnownStates()
+  }
+}
+
+for (const [handler, source] of [['onPaste', 'clipboardData'], ['onDrop', 'dataTransfer']]) {
+  test(`the goal brief rejects a known sign-in state on ${handler}`, () => {
+    checkGoalBrief(() => '', ({ input, code, drafts, notices }) => {
+      let prevented = false
+      input.props[handler]({ [source]: { getData: type => type === 'text/plain' ? code : '' }, preventDefault: () => { prevented = true } })
+      assert.equal(prevented, true)
+      assert.deepEqual(drafts, [])
+      assert.match(notices[0], /sign-in code/)
+    })
+  })
+}
+
+for (const [control, submit] of [
+  ['Enter', ({ input }) => input.props.onKeyDown({ key: 'Enter', nativeEvent: {}, preventDefault: () => {} })],
+  ['Start', ({ start }) => start.props.onClick()],
+]) {
+  test(`the goal brief rejects a known sign-in state on ${control}`, () => {
+    checkGoalBrief(code => `Review the plan. ${code}`, form => {
+      assert.equal(text(form.start), 'Start')
+      assert.equal(form.start.props.disabled, false)
+      submit(form)
+      assert.deepEqual(form.drafts, [])
+      assert.match(form.notices[0], /sign-in code/)
+    })
+  })
+}
+
+test('Start submits an ordinary goal brief', () => {
+  checkGoalBrief(() => 'Review the plan.', ({ start, drafts }) => {
+    start.props.onClick()
+    assert.deepEqual(drafts, [['r1', 'Review the plan.']])
+  })
 })
 
 test('Escape and outside clicks while composing clear compose and open together', () => {

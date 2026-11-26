@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import childProcess from 'node:child_process'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join, win32 } from 'node:path'
 import { test } from 'node:test'
+import { CliHomes } from '../src/host/cli-homes.js'
 import { processBirth, processState, validBirth } from '../src/host/process-identity.js'
 
 const boot = '12345678-1234-1234-1234-123456789abc'
@@ -92,11 +97,18 @@ test('only fresh ESRCH or a strictly comparable birth mismatch is dead; errors a
   assert.equal(processBirth(42, { platform: 'win32', systemRoot: 'C:\\Windows', exec: () => { throw new Error('script timeout') } }), null)
 })
 
-test('available platform smoke reads this test process birth twice without auth or process command lines', t => {
+test('available platform smoke reads this test process birth natively once across repeats and CliHomes, without auth or process command lines', t => {
+  const nativeExec = childProcess.execFileSync
+  const nativeRead = fs.readFileSync
+  const ownPid = String(process.pid)
+  let ownReads = 0
   const exec = (...receivedArgs) => {
     const started = performance.now()
     try {
-      return execFileSync(...receivedArgs)
+      const output = nativeExec(...receivedArgs)
+      if (receivedArgs[1].some(arg => arg === ownPid
+        || String(arg).includes(`GetProcessById(${ownPid})`))) ownReads += 1
+      return output
     } catch (error) {
       try {
         const code = error?.code
@@ -117,9 +129,51 @@ test('available platform smoke reads this test process birth twice without auth 
       throw error
     }
   }
-  const identity = pid => processBirth(pid, { exec })
+  const read = (...receivedArgs) => {
+    const output = nativeRead(...receivedArgs)
+    if (String(receivedArgs[0]) === `/proc/${ownPid}/stat`) ownReads += 1
+    return output
+  }
+  t.after(() => {
+    fs.readFileSync = nativeRead
+    childProcess.execFileSync = nativeExec
+    syncBuiltinESMExports()
+  })
+  // Give cold PowerShell its own startup time before checking native birth reads and caching.
+  // The unit tests above cover the 10 s product bound and its timeout path.
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT
+  if (process.platform === 'win32' && typeof systemRoot === 'string' && win32.isAbsolute(systemRoot)) {
+    const started = performance.now()
+    let result = 'ok'
+    try {
+      nativeExec(win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'],
+        { stdio: 'ignore', windowsHide: true, timeout: 60_000 })
+    } catch { result = 'failed' }
+    t.diagnostic(`PowerShell warm-up ${result} in ms: ${Math.round(performance.now() - started)}`)
+  }
+  // The default provider must see the wrappers: only uninjected own-PID calls use the cache.
+  if (process.platform === 'linux') fs.readFileSync = read
+  else childProcess.execFileSync = exec
+  syncBuiltinESMExports()
+  const identity = pid => processBirth(pid)
   const first = identity(process.pid)
   assert.ok(first, `birth provider works on ${process.platform}`)
   assert.deepEqual(identity(process.pid), first)
   assert.equal(processState(process.pid, first, { identity }), 'live')
+  assert.equal(ownReads, 1)
+  const root = fs.mkdtempSync(join(tmpdir(), 'acp-dsh-birth-'))
+  const homes = new CliHomes(root)
+  try {
+    for (let round = 0; round < 2; round += 1) {
+      assert.ok(homes.environment('claude').HOME)
+      homes.begin('claude')
+      homes.end('claude')
+    }
+    assert.equal(ownReads, 1)
+    t.diagnostic(`native own-process birth reads after two CLI launch evaluations: ${ownReads}`)
+  } finally {
+    homes.dispose()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

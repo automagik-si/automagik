@@ -12,12 +12,22 @@ export function whyText(why) {
     case 'address': return t('the address list blocks that site')
     case 'review': return t('Auto review refused it')
     case 'sandbox': return t('the sandbox blocked it')
+    case 'guard': return t('the review guard waits for the reviewer\'s verdict on the plan; you can turn it off in Details')
+    case 'guard-request': return t('the review guard waits for the reviewer\'s verdict on a new plan, because another Bot sent a new request; you can turn it off in Details')
+    case 'guard-launch': return t('the review guard is on and prevents starting tasks; you can turn it off in Details')
+    case 'limit': return t('the Solver reached an attempt limit and is waiting for your answer')
+    case 'solver-run': return t('the Solver needs to start a check run with solver_progress')
+    case 'solver-progress': return t('the Solver needs to finish recording its current progress with solver_progress')
     default: return t('a rule here refused it')
   }
 }
 
 export function stopLine(entry) {
   const why = whyText(entry.why)
+  if (entry.mayHaveRun === true) {
+    return entry.count > 1 ? t('{count} steps may already have run ({why})', { count: entry.count, why })
+      : t('{tool} may already have run ({why})', { tool: entry.tool, why })
+  }
   return entry.count > 1 ? t('{count} steps did not run: {why}', { count: entry.count, why })
     : entry.child ? t('A subagent step did not run: {why}', { why })
       : entry.tool ? t('{tool} did not run: {why}', { tool: entry.tool, why }) : t('A step did not run: {why}', { why })

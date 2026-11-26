@@ -8,6 +8,7 @@ const { session } = methods.agent
 const REQUESTS = {
   initialize: methods.agent.initialize,
   authenticate: methods.agent.authenticate,
+  logout: methods.agent.logout,
   newSession: session.new,
   forkSession: session.fork,
   closeSession: session.close,

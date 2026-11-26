@@ -11,6 +11,10 @@ import { STEER_CUT } from './constants.js'
 const SHELL_TOOLS = ['pwsh', 'bash']
 const STEER_GRACE_MS = 1000
 
+// A shell shadow always delegates execution to the definition it captured.
+const shellDelegates = new WeakMap()
+export const shellDelegateOf = definition => shellDelegates.get(definition)
+
 export function install(rt) {
   const ctx = rt.ctx
   let jobs
@@ -136,7 +140,7 @@ export function install(rt) {
       return
     }
     shadowed.add(agent)
-    const lift = agent.ctx.tools.register({
+    const shadow = {
       ...def,
       execute: async (args, exec) => {
         const native = def.execute(args, exec)
@@ -196,10 +200,16 @@ export function install(rt) {
           : !isAbsolute(args.workdir) && base !== undefined ? resolve(base, args.workdir) : args.workdir
         return { kind: 'promoted', cwd, jobId, timeoutMs: Date.now() - startedAt, output: renderJobRead(read) }
       },
-    })
+    }
+    const lift = agent.ctx.tools.register(shadow)
+    shellDelegates.set(shadow, def)
     // tools.js keeps this with the Session's scope; unmarking lets a later
     // scope register the shadow again.
-    return () => { shadowed.delete(agent); lift?.() }
+    return () => {
+      shellDelegates.delete(shadow)
+      shadowed.delete(agent)
+      lift?.()
+    }
   }
   rt.shadowShells = (agent) => {
     if (agent === undefined || !rt.isBotSession(agent.session?.id)) return

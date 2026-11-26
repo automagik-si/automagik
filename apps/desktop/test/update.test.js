@@ -4,7 +4,8 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { channelOf, cleanStaleCache, compareVersions, feedFileOf, feedOverride, isReleasePage, isTransient, pickUpdate, QUICK_RETRIES, QUICK_RETRY_MS, RETRY_MS, startUpdates, updaterCacheDir, updateMode, updatesEnabled, versionFromArtifact } from '../src/update.js'
+import { format } from 'node:util'
+import { channelOf, cleanStaleCache, compareVersions, feedFileOf, feedOverride, fetchReleases, isReleasePage, isTransient, MAX_RELEASE_PAGES, nextPage, pickUpdate, QUICK_RETRIES, QUICK_RETRY_MS, RELEASES_URL, RETRY_MS, startUpdates, updaterCacheDir, updateMode, updatesEnabled, versionFromArtifact } from '../src/update.js'
 
 const release = (tag, assets = ['latest-mac.yml', 'latest-linux.yml'], extra = {}) => ({ tag_name: tag, draft: false, assets: assets.map(name => ({ name })), ...extra })
 
@@ -221,6 +222,180 @@ test('on Windows the update comes from the release with latest.yml and is ready 
   assert.deepEqual(updater.installs, [[false, true]])
 })
 
+const appImage = '/apps/Automagik.AppImage'
+const sentinel = '--token=SENTINEL-123'
+
+function readyUpdate(updater, options = {}) {
+  const updates = startUpdates({
+    updater, current: '3.95.0', platform: 'linux', env: {}, log: quiet, timers: noTimers, onState() {},
+    ...options,
+  })
+  updater.emit('update-downloaded', { version: '3.96.0' })
+  updater.nativeUpdater?.emit('update-downloaded')
+  assert.equal(updates.ready, '3.96.0')
+  return updates
+}
+
+function captureUpdateLog() {
+  const entries = []
+  const log = Object.fromEntries(Object.keys(quiet).map(level => [
+    level, (...args) => entries.push({ level, message: format(...args) }),
+  ]))
+  return { entries, log }
+}
+
+test('Linux restart relaunches the updated AppImage with filtered launch options and logs only their count', async () => {
+  const updater = fakeUpdater()
+  const { entries, log } = captureUpdateLog()
+  const relaunches = []
+  const processEnv = { HOME: '/h', AUTOMAGIK_PRELOAD: 'omni' }
+  updater.spawnLog = () => assert.fail('the original spawnLog was called')
+  let result
+  updater.quitAndInstall = function (...args) {
+    this.installs.push(args)
+    result = this.spawnLog(appImage, [], { ...processEnv }, 'inherit')
+  }
+  const updates = readyUpdate(updater, {
+    argv: ['automagik.bin', '--remote-debugging-port=19363', sentinel, '--no-sandbox', '--no-sandbox', '--preload', 'genie', 'omni://open'],
+    log,
+    processEnv,
+    relaunch: options => {
+      assert.equal(processEnv.AUTOMAGIK_PRELOAD, 'omni')
+      relaunches.push(options)
+    },
+  })
+  updates.install()
+  assert.deepEqual(updater.installs, [[false, true]])
+  assert.deepEqual(relaunches, [{
+    execPath: appImage, args: ['--remote-debugging-port=19363', sentinel, '--no-sandbox'],
+  }])
+  assert.deepEqual(processEnv, { HOME: '/h' })
+  assert.ok(result instanceof Promise)
+  assert.equal(await result, true)
+  assert.deepEqual(entries.at(-1), { level: 'info', message: 'update: reopening the app with 3 launch argument(s)' })
+  for (const { message } of entries) assert.doesNotMatch(message, /SENTINEL-123/)
+})
+
+for (const own of [false, true]) {
+  for (const throws of [false, true]) {
+    const method = own ? 'own' : 'inherited'
+    const result = throws ? 'quitAndInstall throws' : 'quitAndInstall returns'
+    test(`Linux restart restores an ${method} spawnLog when ${result}`, () => {
+      const updater = fakeUpdater()
+      const original = () => {}
+      const owner = own ? updater : Object.create(Object.getPrototypeOf(updater))
+      owner.spawnLog = original
+      if (!own) Object.setPrototypeOf(updater, owner)
+      const failure = new Error('install failed')
+      updater.quitAndInstall = function () {
+        assert.equal(Object.hasOwn(this, 'spawnLog'), true)
+        assert.notEqual(this.spawnLog, original)
+        if (throws) throw failure
+      }
+      const updates = readyUpdate(updater)
+      if (throws) assert.throws(() => updates.install(), error => error === failure)
+      else updates.install()
+      assert.equal(updater.spawnLog, original)
+      assert.equal(Object.hasOwn(updater, 'spawnLog'), own)
+    })
+  }
+}
+
+test('Linux restart delegates a spawnLog call with arguments unchanged', () => {
+  const updater = fakeUpdater()
+  const args = ['--existing-argument']
+  const env = { HOME: '/h', AUTOMAGIK_PRELOAD: 'omni' }
+  const stdio = 'inherit'
+  const delegated = Symbol('delegated')
+  updater.spawnLog = function (cmd, argsPassed, envPassed, stdioPassed) {
+    assert.equal(this, updater)
+    assert.equal(cmd, appImage)
+    assert.equal(argsPassed, args)
+    assert.equal(envPassed, env)
+    assert.equal(stdioPassed, stdio)
+    return delegated
+  }
+  updater.quitAndInstall = function () {
+    assert.equal(this.spawnLog(appImage, args, env, stdio), delegated)
+  }
+  const updates = readyUpdate(updater)
+  updates.install()
+})
+
+test('Linux restart warns and installs when spawnLog is missing', () => {
+  const updater = fakeUpdater()
+  const { entries, log } = captureUpdateLog()
+  const updates = readyUpdate(updater, { log })
+  updates.install()
+  assert.deepEqual(updater.installs, [[false, true]])
+  assert.deepEqual(entries.filter(({ level }) => level === 'warn'), [
+    { level: 'warn', message: 'update: cannot keep the launch arguments on this relaunch' },
+  ])
+})
+
+for (const [scenario, options] of [
+  ['relaunch throws', { relaunch: () => { throw new Error(`could not relaunch with ${sentinel}`) } }],
+  ['relaunch is omitted', {}],
+]) {
+  test(`Linux restart falls back to the original spawnLog when ${scenario}`, () => {
+    const updater = fakeUpdater()
+    const { entries, log } = captureUpdateLog()
+    const args = []
+    const processEnv = { HOME: '/h', AUTOMAGIK_PRELOAD: 'omni' }
+    const env = { ...processEnv }
+    const stdio = 'inherit'
+    const delegated = Promise.resolve(true)
+    let calls = 0
+    updater.spawnLog = function (cmd, argsPassed, envPassed, stdioPassed) {
+      calls++
+      assert.equal(this, updater)
+      assert.equal(cmd, appImage)
+      assert.equal(argsPassed, args)
+      assert.equal(envPassed, env)
+      assert.equal(stdioPassed, stdio)
+      return delegated
+    }
+    updater.quitAndInstall = function () {
+      assert.equal(this.spawnLog(appImage, args, env, stdio), delegated)
+    }
+    const updates = readyUpdate(updater, { argv: ['automagik.bin', sentinel], log, processEnv, ...options })
+    updates.install()
+    assert.equal(calls, 1)
+    assert.deepEqual(processEnv, { HOME: '/h', AUTOMAGIK_PRELOAD: 'omni' })
+    assert.deepEqual(entries.filter(({ level }) => level === 'warn'), [
+      { level: 'warn', message: 'update: the updated app reopens without its launch arguments' },
+    ])
+    for (const { message } of entries) assert.doesNotMatch(message, /SENTINEL-123/)
+  })
+}
+
+for (const platform of ['darwin', 'win32']) {
+  test(`${platform} restart calls quitAndInstall with the original spawnLog`, () => {
+    const updater = fakeUpdater()
+    if (platform === 'darwin') updater.nativeUpdater = new EventEmitter()
+    const original = () => {}
+    updater.spawnLog = original
+    updater.quitAndInstall = function (...args) {
+      assert.equal(this.spawnLog, original)
+      this.installs.push(args)
+    }
+    const updates = readyUpdate(updater, { platform })
+    updates.install()
+    assert.deepEqual(updater.installs, [[false, true]])
+    assert.equal(updater.spawnLog, original)
+  })
+}
+
+test('Linux install with no ready update does nothing', () => {
+  const updater = fakeUpdater()
+  const updates = startUpdates({
+    updater, current: '3.95.0', platform: 'linux', env: {}, log: quiet, timers: noTimers, onState() {},
+  })
+  assert.equal(updates.ready, null)
+  updates.install()
+  assert.deepEqual(updater.installs, [])
+})
+
 test('no newer release is logged as up to date; GitHub failing is a warning and an additional retry', async () => {
   const updater = fakeUpdater()
   const infos = []
@@ -362,6 +537,157 @@ test('a releases API 5xx or 429 is transient; other 4xx are not; the network pat
   }
   assert.equal(isTransient(new Error('sha512 checksum mismatch')), false)
   assert.equal(isTransient(undefined), false)
+})
+
+test("GitHub's Link header names the next page, and nothing when there is none or another host", () => {
+  assert.equal(nextPage(`<${RELEASES_URL}&page=2>; rel="next", <${RELEASES_URL}&page=9>; rel="last"`), `${RELEASES_URL}&page=2`)
+  assert.equal(nextPage(`<${RELEASES_URL}&page=1>; rel="prev"`), null)
+  assert.equal(nextPage('<https://evil.example/repos/x/releases?page=2>; rel="next"'), null)
+  assert.equal(nextPage('<http://api.github.com/repos/x/releases?page=2>; rel="next"'), null)
+  assert.equal(nextPage(''), null)
+  assert.equal(nextPage(undefined), null)
+})
+
+test('the release list is read past its first page, so an older feed is never hidden', async () => {
+  const first = Array.from({ length: 100 }, (_, i) => release(`v3.${900 - i}.0`, []))
+  const second = [release('v3.50.0', ['latest-mac.yml']), release('v3.49.0')]
+  const calls = []
+  const page = async url => {
+    calls.push(url)
+    if (calls.length === 1) {
+      return { ok: true, status: 200, headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` }, json: async () => first }
+    }
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => second }
+  }
+  const list = await fetchReleases(page)
+  assert.deepEqual(calls, [RELEASES_URL, `${RELEASES_URL}&page=2`])
+  assert.equal(list.length, 102)
+  // The first page is all patches without a feed; the older page still gives the update.
+  assert.equal(pickUpdate(list, { current: '3.1.0', platform: 'darwin' }).version, '3.50.0')
+})
+
+test('one page with no next is the whole list, and a failed later page fails the check', async () => {
+  const calls = []
+  const list = await fetchReleases(async url => {
+    calls.push(url)
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => [release('v3.1.0')] }
+  })
+  assert.deepEqual(calls, [RELEASES_URL])
+  assert.equal(list.length, 1)
+
+  const failed = []
+  await assert.rejects(
+    fetchReleases(async url => {
+      failed.push(url)
+      if (failed.length === 1) {
+        return { ok: true, status: 200, headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` }, json: async () => [release('v3.1.0')] }
+      }
+      return { ok: false, status: 503, headers: { get: () => null }, json: async () => [] }
+    }),
+    /GitHub answered 503 for the desktop releases/,
+  )
+})
+
+test('the list stops at MAX_RELEASE_PAGES, and says so instead of hiding the rest', async () => {
+  const original = console.warn
+  const warnings = []
+  console.warn = message => warnings.push(message)
+  try {
+    let calls = 0
+    const list = await fetchReleases(async () => {
+      calls += 1
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => `<${RELEASES_URL}&page=${calls + 1}>; rel="next"` },
+        json: async () => [release(`v3.${1000 - calls}.0`)],
+      }
+    })
+    assert.equal(calls, MAX_RELEASE_PAGES)
+    assert.equal(list.length, MAX_RELEASE_PAGES)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0], /older feed may be hidden/)
+  } finally {
+    console.warn = original
+  }
+})
+
+test('a later page that is not a release list fails the check, never hides the pages before it', async () => {
+  const calls = []
+  await assert.rejects(
+    fetchReleases(async url => {
+      calls.push(url)
+      if (calls.length === 1) {
+        return { ok: true, status: 200, headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` }, json: async () => [release('v3.1.0')] }
+      }
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ message: 'rate limited' }) }
+    }),
+    /other than a release list/,
+  )
+  assert.equal(calls.length, 2)
+})
+
+test('a next page on another host ends the list instead of being followed', async () => {
+  const calls = []
+  const list = await fetchReleases(async url => {
+    calls.push(url)
+    return { ok: true, status: 200, headers: { get: () => '<https://evil.example/releases?page=2>; rel="next"' }, json: async () => [release('v3.1.0')] }
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(list.length, 1)
+})
+
+test('paging stops once the running release and a usable feed are in hand', async () => {
+  const calls = []
+  const page = async url => {
+    calls.push(url)
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.102.0', ['latest-mac.yml']), release('v3.101.0')],
+    }
+  }
+  const enough = list => pickUpdate(list, { current: '3.101.0', platform: 'darwin', channel: channelOf(list, { current: '3.101.0' }) }) !== null
+  const list = await fetchReleases(page, enough)
+  assert.equal(calls.length, 1)
+  assert.equal(list.length, 2)
+})
+
+test('an up-to-date app reads one page, not the whole list', async (t) => {
+  let calls = 0
+  stubFetch(t, () => {
+    calls += 1
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.101.0'), release('v3.100.0')],
+    }
+  })
+  const { timers } = recordingTimers()
+  const updates = startUpdates({ updater: fakeUpdater(), current: '3.101.0', platform: 'darwin', env: {}, timers, log: quiet, onState() {} })
+  t.after(() => updates.stop())
+  assert.deepEqual(await updates.check(), { result: 'latest' })
+  assert.equal(calls, 1)
+})
+
+test('a check reads one page when that page already holds the update', async (t) => {
+  let calls = 0
+  stubFetch(t, () => {
+    calls += 1
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.102.0', ['latest-mac.yml']), release('v3.101.0')],
+    }
+  })
+  const { timers } = recordingTimers()
+  const updates = startUpdates({ updater: fakeUpdater(), current: '3.101.0', platform: 'darwin', env: {}, timers, log: quiet, onState() {} })
+  t.after(() => updates.stop())
+  assert.deepEqual(await updates.check(), { result: 'found', version: '3.102.0' })
+  assert.equal(calls, 1)
 })
 
 async function quickRetryEvidence(t, status) {

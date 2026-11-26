@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { heldText } from '../src/client/stops.js'
-import { HELD_LINES } from '../src/shared/held.js'
+import { HELD_LINES, NATIVE_TOOLS_CHANGED_TEXT } from '../src/shared/held.js'
 import { DICTIONARY, hostText, hostTemplateOf, installLocale, language, t } from '../src/client/i18n.js'
+import { ACCESS_MESSAGES } from '../src/host/models.js'
+import { toTraditional } from '../src/client/locales/zh-tw.js'
 
 function fakeLocale(active) {
   const dicts = new Map()
@@ -28,6 +30,45 @@ test('every literal the client translates has a Chinese entry', () => {
     }
   }
   assert.deepEqual(missing, [])
+})
+
+test('task model refusals use the specific retry templates in Chinese and Portuguese', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const examples = [
+    ['Models you may name: native-a/one and 4 more.', 'Models you may name: {models} and {n} more.'],
+    ['Models you may name: none; leave out model.', 'Models you may name: none; leave out model.'],
+    ['Models you may name: native-a/one.', 'Models you may name: {models}.'],
+    ['native-a/one could not be selected for the task.', '{model} could not be selected for the task.'],
+  ]
+  const undo = installLocale(fakeLocale('zh'))
+  try {
+    for (const [example, key] of examples) {
+      assert.equal(hostTemplateOf(example), key)
+      assert.ok(pt[key])
+      assert.notEqual(hostText(example), example)
+    }
+  } finally { undo() }
+})
+
+test('coding agent access messages name the renamed Settings section in all three languages', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(ACCESS_MESSAGES.off, 'Turn on {connection} in Settings → Coding agents before using this model.')
+  assert.equal(ACCESS_MESSAGES.installing, 'Wait for {connection} to finish installing, or retry it in Settings → Coding agents.')
+  for (const key of [ACCESS_MESSAGES.off, ACCESS_MESSAGES.installing]) {
+    assert.match(DICTIONARY.zh[key], /设置 → 编程助手/)
+    assert.match(pt[key], /Configurações → Agentes de código/)
+    assert.equal(hostTemplateOf(key.replace('{connection}', 'Codex')), key)
+  }
+  const notReady = 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
+  assert.match(DICTIONARY.zh[notReady], /设置 → 编程助手/)
+  assert.match(pt[notReady], /Configurações → Agentes de código/)
+})
+
+test('Codex Auto confirmation describes unreviewed reads in Chinese and Brazilian Portuguese', () => {
+  const key = "On Auto, Codex decides by itself, with its own reviewer, which steps it runs, refuses or asks you about. It may change files outside {name}'s folder without asking you, and Automagik does not review those steps. With its own tools, it may also read any file Automagik itself can open, including files outside that folder, without asking you, and neither its reviewer nor Automagik checks those reads."
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(DICTIONARY.zh[key], "在自动模式下，Codex 通过自己的审查器决定执行哪些步骤、拒绝哪些步骤或询问你。它可能不经询问就修改{name}文件夹之外的文件，Automagik 不会审查这些步骤。它还可能用自有工具不经询问就读取 Automagik 本身能打开的任何文件，包括该文件夹之外的文件，它的审查器和 Automagik 都不会检查这些读取。")
+  assert.equal(pt[key], "No Automático, o Codex decide por conta própria, com seu próprio revisor, quais etapas executa, recusa ou pergunta a você. Pode alterar arquivos fora da pasta de {name} sem perguntar, e o Automagik não revisa essas etapas. Com suas próprias ferramentas, também pode ler qualquer arquivo que o próprio Automagik consegue abrir, inclusive fora dessa pasta, sem perguntar, e nem o revisor do Codex nem o Automagik verificam essas leituras.")
 })
 
 test('copy follows the DSH language and stays English without a locale service', () => {
@@ -62,6 +103,51 @@ test('copy follows the DSH language and stays English without a locale service',
 })
 
 
+test('AN-6 the Solver agent refusal is worded by hostText in Chinese', () => {
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(hostText('Antigravity cannot be a Solver yet. Choose another agent for the Solver.'),
+      'Antigravity 暂时不能用作 Solver。请为 Solver 选择其他智能体。')
+  } finally { off() }
+})
+
+test('the four not-installed reasons are worded in Chinese and Portuguese', () => {
+  const GENIE = '@automagik/genie-dsh'
+  const reasons = [
+    `the ${GENIE} plugin is missing from this DSH`,
+    `the ${GENIE} plugin is switched off in this DSH`,
+    `the ${GENIE} plugin did not load in this DSH`,
+    `the ${GENIE} plugin did not load in this DSH (incompatible-version)`,
+  ]
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.deepEqual(reasons.map(hostText), [
+      `这个 DSH 里没有 ${GENIE} 插件`,
+      `这个 DSH 里已关闭 ${GENIE} 插件`,
+      `${GENIE} 插件在这个 DSH 里没有加载`,
+      `${GENIE} 插件在这个 DSH 里没有加载（incompatible-version）`,
+    ])
+  } finally { off() }
+  // The pt-BR pack words the same templates; hostText goes through its binding.
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const offPack = installLocale({
+    register: () => () => {},
+    bind: () => (key, params) => {
+      const text = pt[key] ?? key
+      return params ? text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match)) : text
+    },
+    getLocale: () => ({ active: 'pt' }),
+  })
+  try {
+    assert.deepEqual(reasons.map(hostText), [
+      `o plugin ${GENIE} não está instalado neste DSH`,
+      `o plugin ${GENIE} está desativado neste DSH`,
+      `o plugin ${GENIE} não carregou neste DSH`,
+      `o plugin ${GENIE} não carregou neste DSH (incompatible-version)`,
+    ])
+  } finally { offPack() }
+})
+
 test('D client: host ladder templates translate to Chinese', async () => {
   const { askText, questionText } = await import('../src/host/ladder.js')
   const off = installLocale(fakeLocale('zh'))
@@ -85,7 +171,118 @@ test('only whole held replies translate, with Chinese and Portuguese entries for
       assert.equal(heldText(key), DICTIONARY.zh[key])
       assert.equal(heldText(key + ' x'), key + ' x')
     }
+    assert.equal(heldText(NATIVE_TOOLS_CHANGED_TEXT), '工具设置已更改，请重新发送。')
+    assert.equal(pt[NATIVE_TOOLS_CHANGED_TEXT], 'A configuração de ferramentas mudou; envie de novo.')
     assert.equal(heldText('Model'), 'Model')
     assert.equal(heldText('x'), 'x')
   } finally { off() }
+})
+
+test('package role refusals localize the template and preserve the supplied name literally', () => {
+  const template = 'Detach {name} first.'
+  const name = '<Fixture>'
+  const message = template.replace('{name}', name)
+  assert.equal(hostTemplateOf(message), template)
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(hostText(message), `请先移除 ${name}。`)
+  } finally {
+    off()
+  }
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(pt[template].replace('{name}', name), `Remova ${name} primeiro.`)
+  for (const key of ['Choose None first.', "This role's source cannot be confirmed right now."]) {
+    assert.notEqual(DICTIONARY.zh[key], key)
+    assert.notEqual(pt[key], key)
+    assert.ok(DICTIONARY.zh[key] && pt[key])
+  }
+})
+
+test('Voice / Mouth card and recovery copy has Chinese and Brazilian Portuguese entries', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  for (const key of ['Active tools', 'Allow speech', 'Saved voice unavailable', 'ACP coding agents do not receive this role’s prompt.',
+    'The signed role install evidence is missing or unreadable.', 'The installed role files differ from the signed package.']) {
+    assert.ok(DICTIONARY.zh[key] && pt[key], key)
+    assert.notEqual(DICTIONARY.zh[key], key)
+    assert.notEqual(pt[key], key)
+  }
+})
+
+test('rfc0039 [P] I1 Chinese withdrawn and stale texts', async () => {
+  const clientApprovals = await import('../src/client/approvals.js')
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(clientApprovals.withdrawnText?.('task'), '这一步已撤回：它的任务结束了')
+    assert.equal(t('The task ended with an approval unanswered'), '任务结束时还有一个审批没有回答')
+    assert.equal(hostText('This approval is no longer open'), '这个审批已经关闭了')
+  } finally {
+    off()
+  }
+})
+
+test('rfc0039 D3b [P] I2 Chinese and Brazilian Portuguese group withdrawn text', async () => {
+  const { withdrawnText } = await import('../src/client/approvals.js')
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.equal(withdrawnText?.('group'), '这一步已撤回：它的群会话结束了', 'D3B-I2')
+    assert.equal(withdrawnText?.('bot'), '')
+    assert.equal(withdrawnText?.('part'), '')
+  } finally { off() }
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  assert.equal(pt['This step was withdrawn: its group Session ended'], 'Esta etapa foi retirada: a sessão do grupo terminou')
+})
+
+test('rollback messages and every failed check are translated with the same parameters', () => {
+  const about = readFileSync(new URL('../src/client/about.js', import.meta.url), 'utf8')
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  const rollback = about.slice(about.indexOf('function failedHealthCheck'), about.indexOf('const failedCheck'))
+  const params = text => [...text.matchAll(/\{\w+\}/g)].map(match => match[0]).sort()
+  const keys = [...rollback.matchAll(/\bt\('([^']+)'/g)].map(match => match[1]).concat('Failed check: {check}')
+  for (const key of keys) {
+    assert.notEqual(DICTIONARY.zh[key], key)
+    assert.notEqual(pt[key], key)
+    assert.deepEqual(params(DICTIONARY.zh[key]), params(key))
+    assert.deepEqual(params(pt[key]), params(key))
+  }
+})
+
+test('the Code row Herdr action has a Chinese and Brazilian Portuguese accessible label', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url)))
+  assert.equal(DICTIONARY.zh['Open in Herdr'], '在 Herdr 中打开')
+  assert.equal(pt['Open in Herdr'], 'Abrir no Herdr')
+})
+
+test('zh-TW shows every character label in Traditional Chinese', () => {
+  // The three Solver labels whose characters the conversion table did not have.
+  assert.equal(toTraditional(DICTIONARY.zh.Puff), '絨球')
+  assert.equal(toTraditional(DICTIONARY.zh.Bell), '鈴鐺')
+  assert.equal(toTraditional(DICTIONARY.zh.Chick), '小雞')
+  // All twelve Solvers, as zh-TW reads them.
+  const labels = ['Puff', 'Sprout', 'Cap', 'Bell', 'Cloud', 'Spike', 'Floppy', 'Antenna', 'Cactus', 'Bulb', 'Chick', 'Frog']
+  assert.deepEqual(labels.map(label => toTraditional(DICTIONARY.zh[label])), ['絨球', '嫩芽', '蘑菇', '鈴鐺', '雲朵', '刺球', '垂耳', '天線', '仙人掌', '燈泡', '小雞', '青蛙'])
+})
+
+// #2056 D1.5: every person-facing line of the review guard (K1-K14 and scope) in Chinese and Brazilian
+// Portuguese, each with the English text's placeholders.
+test('the review guard lines have Chinese and Brazilian Portuguese texts with the same placeholders', async () => {
+  const { REVIEW_GUARD_COPY } = await import('../src/shared/review-guard.js')
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const holes = text => [...String(text).matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort().join(',')
+  const keys = Object.values(REVIEW_GUARD_COPY)
+  assert.equal(keys.length, 15)
+  for (const key of keys) {
+    assert.equal(typeof DICTIONARY.zh[key], 'string', key)
+    assert.equal(typeof pt[key], 'string', key)
+    assert.equal(holes(DICTIONARY.zh[key]), holes(key), key)
+    assert.equal(holes(pt[key]), holes(key), key)
+  }
+})
+
+test('the Solver look refusals have their Chinese dictionary entries', () => {
+  for (const [key, text] of [
+    ['Only a Solver wears the Solver characters. Choose another character.', '只有 Solver 才能使用 Solver 角色。请选择其他角色。'],
+    ['A Solver wears one of the Solver characters. Choose one of those characters.', 'Solver 只能使用 Solver 角色。请从这些角色中选择一个。'],
+    ['Only the person can make a Bot a Solver.', '只有本人才能把 Bot 设为 Solver。'],
+    ['That look is not valid. Choose another character.', '这个形象无效。请选择其他角色。'],
+  ]) assert.equal(DICTIONARY.zh[key], text)
 })

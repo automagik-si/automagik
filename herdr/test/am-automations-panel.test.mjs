@@ -51,7 +51,7 @@ async function panel() {
 
 test("the repair command: our pinned release for this Mac's arch, hash-checked, into ~/.local/bin", () => {
   const arm = repairCommand("arm64");
-  assert.match(arm, /\/automagik-dev\/automagik\/releases\/download\/herdr-automations-v0\.12\.1-am\.1\/herdr-automations_darwin_arm64 /);
+  assert.match(arm, /\/automagik-si\/automagik\/releases\/download\/herdr-automations-v0\.12\.1-am\.3\/herdr-automations_darwin_arm64 /);
   assert.ok(arm.includes(`echo "${SCHEDULER.sha256.arm64}  herdr-automations" | shasum -a 256 -c`));
   assert.match(arm, /shasum -a 256 -c && chmod 755 herdr-automations && mv herdr-automations ~\/\.local\/bin\/; s=\$\?; /, "moved in only once the hash matches");
   // Its scratch folder goes whether it worked or not, and the subshell keeps the install's status.
@@ -63,7 +63,7 @@ test("the repair command: our pinned release for this Mac's arch, hash-checked, 
   assert.doesNotMatch(arm + intel, /service install|launchctl|LaunchAgents/, "it installs the program, never a login service");
   // A Linux Herdr gets the Linux build, checked with sha256sum (no shasum there).
   const linux = repairCommand("x86_64", "Linux"), linuxArm = repairCommand("aarch64", "Linux");
-  assert.match(linux, /herdr-automations-v0\.12\.1-am\.1\/herdr-automations_linux_amd64 /);
+  assert.match(linux, /herdr-automations-v0\.12\.1-am\.3\/herdr-automations_linux_amd64 /);
   assert.ok(linux.includes(`echo "${SCHEDULER.linux.amd64}  herdr-automations" | sha256sum -c && chmod 755`));
   assert.match(linuxArm, /herdr-automations_linux_arm64 /);
   assert.ok(linuxArm.includes(SCHEDULER.linux.arm64));
@@ -98,8 +98,8 @@ test("the repair command never removes a folder it did not make: a preset d surv
 // The release the Integrator cuts carries the checksums; until they are pasted in, this fails loudly
 // so nothing merges with the repair command pointing at placeholder hashes.
 test("the scheduler pin is a real release hash, never the PENDING-SHA256 placeholder", () => {
-  assert.equal(SCHEDULER.repo, "automagik-dev/automagik");
-  assert.equal(SCHEDULER.version, "0.12.1-am.1");
+  assert.equal(SCHEDULER.repo, "automagik-si/automagik");
+  assert.equal(SCHEDULER.version, "0.12.1-am.3");
   for (const arch of ["arm64", "amd64"]) {
     assert.notEqual(SCHEDULER.sha256[arch], "PENDING-SHA256", `${arch}: paste the release's checksums.txt sha256`);
     assert.match(SCHEDULER.sha256[arch], /^[0-9a-f]{64}$/, `${arch}: a sha256`);
@@ -155,7 +155,7 @@ test("Install runs the shown command once; the panel then finds the scheduler an
     if (command !== local || !installed) return { code: 127, stdout: "", stderr: `cannot run ${command}: no such file` };
     if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ automations: [], invalid: [], scheduler: 0, backend: "hc", paused: false }), stderr: "" };
     if (args[0] === "history") return { code: 0, stdout: "[]", stderr: "" };
-    return { code: 0, stdout: "0.12.1-am.1\n", stderr: "" };
+    return { code: 0, stdout: "0.12.1-am.3\n", stderr: "" };
   };
   const { view, cx, draw } = await panel();
   const n = draw();
@@ -199,7 +199,7 @@ test("backend herdr, or none named: the panel says runs open in the TUI and name
       if (command !== "herdr-automations") return { code: 127, stdout: "", stderr: "no such file" };
       if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ automations: [], invalid: [], scheduler: 7, backend, paused: false }), stderr: "" };
       if (args[0] === "history") return { code: 0, stdout: "[]", stderr: "" };
-      return { code: 0, stdout: "0.12.1-am.1\n", stderr: "" };
+      return { code: 0, stdout: "0.12.1-am.3\n", stderr: "" };
     };
   };
   serve("herdr");
@@ -318,6 +318,11 @@ if (OUR) FIELDS.push("close_workspace");
 // A build with the command kind (#938): its put writes command and notify, its ls names the kinds.
 const COMMANDS = process.env.STUB_COMMANDS === "1";
 if (COMMANDS) FIELDS.push("command", "notify");
+// A build with targets (#498): its put writes target and target_when_busy, its ls names the kinds.
+const TARGETS = process.env.STUB_TARGETS === "1";
+if (TARGETS) FIELDS.push("target", "target_when_busy");
+// A build that claims targets but drops the key anyway (#498 read-back).
+const DROP_TARGET = process.env.STUB_DROP_TARGET === "1";
 const yaml = path.join(home, ".config/herdr-automations/automations.yaml");
 const read = () => JSON.parse(fs.readFileSync(yaml, "utf8"));
 const out = (x) => process.stdout.write(JSON.stringify(x));
@@ -328,8 +333,11 @@ if (args[0] === "version") process.stdout.write(version + "\n");
 else if (args[0] === "ls") out({ automations: read().map(({ session, ...a }) => {
   if (OUR) a.close_workspace = a.close_workspace ?? "never";
   else delete a.close_workspace; // upstream's api.Automation has no field for it
+  // An older build has no Target field either: its ls cannot return the key.
+  if (!TARGETS) { delete a.target; delete a.target_when_busy; }
   return a;
-}), invalid: [], scheduler: { pid: 1 }, paused: false, ...(COMMANDS ? { kinds: ["prompt", "workflow", "command"] } : {}) });
+}), invalid: [], scheduler: { pid: 1 }, paused: false, ...(COMMANDS ? { kinds: ["prompt", "workflow", "command"] } : {}),
+  ...(TARGETS ? { targets: ["bot", "worker"] } : {}) });
 else if (args[0] === "history") out(JSON.parse(process.env.STUB_HISTORY || "[]"));
 else if (args[0] === "put") {
   const entry = JSON.parse(input), list = read();
@@ -340,6 +348,7 @@ else if (args[0] === "put") {
       && (v === undefined || v === null || v === "" || v === 0 || v === false || (Array.isArray(v) && !v.length));
     const into = at >= 0 ? list[at] : {};
     for (const [k, v] of Object.entries(entry)) if (!FIELDS.includes(k) || empty(k, v)) delete into[k]; else into[k] = v;
+    if (DROP_TARGET) { delete into.target; delete into.target_when_busy; }
     if (at < 0) list.push(into);
     fs.writeFileSync(yaml, JSON.stringify(list, null, 2));
   }
@@ -347,7 +356,7 @@ else if (args[0] === "put") {
 } else { process.stderr.write("stub: not offered: " + args.join(" ")); process.exit(2); }
 `;
 
-function stubScheduler(automations, { version = "0.12.1", commands = false, history = [] } = {}) {
+function stubScheduler(automations, { version = "0.12.1", commands = false, targets = false, dropTarget = false, bots = [], history = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "am-automations-"));
   mkdirSync(join(dir, ".local/bin"), { recursive: true });
   mkdirSync(join(dir, ".config/herdr-automations"), { recursive: true });
@@ -358,9 +367,19 @@ function stubScheduler(automations, { version = "0.12.1", commands = false, hist
   writeFileSync(yaml, JSON.stringify(automations, null, 2));
   state.home = dir;
   let running = version; // the installed build; useVersion() swaps it, like a repair does
+  // The pack's am CLI, for a target's project roster (#498): `am ls --json --project <folder>`.
+  const am = (command, args) => {
+    if (command !== "am" && command !== join(dir, ".local/bin/am")) return null;
+    if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ projects: [{ project: args[3], bots }] }), stderr: "" };
+    return { code: 2, stdout: "", stderr: "stub am: not offered" };
+  };
   state.exec = (command, args) => new Promise((resolve) => {
+    const answered = am(command, args);
+    if (answered) { resolve(answered); return; }
     if (command !== "sh" && command !== bin) { resolve({ code: 127, stdout: "", stderr: `cannot run ${command}: refused` }); return; }
-    execFile(command, args, { env: { PATH: "/usr/bin:/bin", STUB_HOME: dir, STUB_VERSION: running, STUB_COMMANDS: commands ? "1" : "0", STUB_HISTORY: JSON.stringify(history) } }, (err, stdout, stderr) =>
+    execFile(command, args, { env: { PATH: "/usr/bin:/bin", STUB_HOME: dir, STUB_VERSION: running, STUB_COMMANDS: commands ? "1" : "0",
+      STUB_TARGETS: targets ? "1" : "0", STUB_DROP_TARGET: dropTarget ? "1" : "0",
+      STUB_HISTORY: JSON.stringify(history) } }, (err, stdout, stderr) =>
       resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }));
   });
   const calls = () => readFileSync(join(dir, "argv.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -598,7 +617,7 @@ test("upstream: close_workspace is never sent, and one line says our build is ne
     await cx.settle();
     const n = draw();
     assert.ok(!n.has("f-close"), "no switch for an upstream binary");
-    assert.match(textOf(n.get("f-close-upstream")), /Our scheduler build \(0\.12\.1-am\.1\) is needed/);
+    assert.match(textOf(n.get("f-close-upstream")), /Our scheduler build \(0\.12\.1-am\.3\) is needed/);
     view.form.prompt.type("p, said again", cx);
     await saveIt(view, cx);
     assert.ok(!("close_workspace" in s.saves()[0].entry), "never sent");
@@ -1180,3 +1199,325 @@ for (const c of PARITY.cases) {
     } finally { s.done(); }
   });
 }
+
+// ---- targets (#498): a bot, or a worker of one, instead of a fresh session ----
+
+const housekeeper = { id: "b-6jrz4bmxml", name: "Housekeeper" };
+const targetEntry = { name: "housekeeping", cron: "0 9 * * *", repo: "/r", prompt: "tidy", target: "bot:b-6jrz4bmxml" };
+
+/** A new form on a target-aware stub, with the name, repo and prompt filled in. */
+async function fillTarget(view, cx, draw, { runs = "bot", bot = housekeeper.id, prompt = "tidy the house" } = {}) {
+  view.edit(null, cx);
+  await cx.settle();
+  view.form.name.type("housekeeping", cx);
+  view.form.repo.type("/r", cx);
+  view.form.prompt.type(prompt, cx);
+  draw().get(`f-runs-${runs}`).click({}, cx);
+  await cx.settle();
+  draw().get(`f-bot-${bot}`).click({}, cx);
+  await cx.settle();
+}
+
+test("a scheduler that names targets: a bot target saves the bot's id, no agent and no space (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { targets: true, bots: [housekeeper] });
+  try {
+    view.edit(null, cx);
+    await cx.settle();
+    assert.ok(draw().has("f-runs-none"), "New session stays the first choice");
+    assert.ok(draw().has("f-runs-bot"), "a bot is offered");
+    assert.ok(draw().has("f-runs-worker"), "a worker of a bot is offered");
+    view.form.name.type("housekeeping", cx);
+    view.form.repo.type("/r", cx);
+    view.form.prompt.type("tidy the house", cx);
+    draw().get("f-runs-bot").click({}, cx);
+    await cx.settle();
+    assert.equal(textOf(draw().get("f-bot-b-6jrz4bmxml")), "Housekeeper", "the roster names the bot");
+    assert.ok(draw().has("f-busy-queue") && draw().has("f-busy-skip"), "busy is configurable");
+    draw().get("f-bot-b-6jrz4bmxml").click({}, cx);
+    await cx.settle();
+    assert.equal(view.form.bot, housekeeper.id);
+    assert.match(textOf(draw().get("f-target-note")), /bot's own terminal with hc send/);
+    view.save(cx);
+    await cx.settle();
+    const saved = s.saves();
+    assert.equal(saved.length, 1);
+    const e = saved[0].entry;
+    assert.equal(e.target, "bot:b-6jrz4bmxml");
+    assert.equal(e.target_when_busy, "queue", "queue is the default");
+    assert.equal(e.workspace, "");
+    assert.equal(e.agent, "");
+    assert.deepEqual(e.agent_args, []);
+    assert.equal(s.yaml()[0].target, "bot:b-6jrz4bmxml");
+    assert.ok(!s.yaml()[0].agent, "a target writes no agent");
+    assert.ok(!s.yaml()[0].workspace, "a target opens no space");
+  } finally { s.done(); }
+});
+
+test("a bot target told to skip a busy bot saves target_when_busy: skip (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { targets: true, bots: [housekeeper] });
+  try {
+    await fillTarget(view, cx, draw);
+    draw().get("f-busy-skip").click({}, cx);
+    await cx.settle();
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves()[0].entry.target_when_busy, "skip");
+    assert.equal(s.yaml()[0].target_when_busy, "skip");
+  } finally { s.done(); }
+});
+
+test("a worker target saves no busy rule, and the row and detail name the bot (#498)", async () => {
+  const entry = { ...targetEntry, target: "worker:b-6jrz4bmxml" };
+  const { s, view, cx, draw } = await stubPanel([entry], { targets: true, bots: [housekeeper] });
+  try {
+    await cx.settle();
+    assert.match(textOf(draw().get("auto-kind-housekeeping")), /a worker of Housekeeper · its own launch/);
+    view.view = { kind: "detail", name: "housekeeping" };
+    const detail = textOf(view.render(cx));
+    assert.match(detail, /Target/);
+    assert.match(detail, /a worker of Housekeeper/);
+    assert.match(detail, /the bot's own/);
+    view.edit("housekeeping", cx);
+    await cx.settle();
+    assert.equal(view.form.target, "worker");
+    assert.equal(view.form.bot, housekeeper.id);
+    assert.ok(!draw().has("f-busy-queue"), "a worker runs alongside its bot and has no busy rule");
+    assert.match(textOf(draw().get("f-target-note")), /fresh worktree, and is ended when the run finishes/);
+    view.form.prompt.type(" again", cx);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves()[0].entry.target, "worker:b-6jrz4bmxml");
+    assert.equal(s.saves()[0].entry.target_when_busy, "");
+    assert.equal(s.yaml()[0].target, "worker:b-6jrz4bmxml");
+    assert.ok(!s.yaml()[0].target_when_busy, "no busy rule is written");
+  } finally { s.done(); }
+});
+
+test("a bot that left the roster is warned about, and Save refuses (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([targetEntry], { targets: true, bots: [] });
+  try {
+    view.edit("housekeeping", cx);
+    await cx.settle();
+    const warn = textOf(draw().get("f-target-warn"));
+    assert.match(warn, /no longer in this project's bots.json/);
+    view.form.prompt.type(" again", cx);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves().length, 0, "nothing was written for a bot this project no longer has");
+    assert.match(textOf(draw().get("f-result")), /no longer in this project's bots.json/);
+  } finally { s.done(); }
+});
+
+test("switching a target back to a new session removes it and restores the agent keys (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([targetEntry], { targets: true, bots: [housekeeper] });
+  try {
+    view.edit("housekeeping", cx);
+    await cx.settle();
+    draw().get("f-runs-none").click({}, cx);
+    await cx.settle();
+    assert.ok(draw().has("f-agent-claude"), "the agent picker is back");
+    assert.ok(draw().has("f-ws-worktree"), "the space picker is back");
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves()[0].entry.target, "");
+    assert.equal("target" in s.yaml()[0], false, "the key is removed");
+    assert.equal(s.yaml()[0].agent, "claude");
+    assert.equal(s.yaml()[0].workspace, "worktree");
+  } finally { s.done(); }
+});
+
+test("an older scheduler cannot see a hand-written target, and an edit keeps it (#498)", async () => {
+  // A real older build has no Target field: its ls --json cannot return the key. The panel
+  // shows an ordinary fresh-session entry, and the old build ignores the key when it runs.
+  const { s, view, cx, draw } = await stubPanel([targetEntry], { bots: [housekeeper] });
+  try {
+    view.edit("housekeeping", cx);
+    await cx.settle();
+    assert.ok(!draw().has("f-runs-bot"), "no target on a build that does not name the kind");
+    assert.ok(!draw().has("f-target-kept"), "an older ls has no target to show read-only");
+    assert.equal(view.form.target, "none");
+    view.form.prompt.type(" again", cx);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves().length, 1, "an older build still edits the entry");
+    assert.equal("target" in s.saves()[0].entry, false, "the panel cannot send a key it cannot see");
+    assert.equal(s.yaml()[0].target, "bot:b-6jrz4bmxml", "put keeps a key it was not given");
+  } finally { s.done(); }
+});
+
+test("a scheduler that claims targets but drops the key fails the save (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { targets: true, dropTarget: true, bots: [housekeeper] });
+  try {
+    await fillTarget(view, cx, draw);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves().length, 1);
+    assert.equal(s.yaml()[0].target, undefined, "the stub dropped the key");
+    assert.match(textOf(draw().get("f-result")), /does not keep bot Housekeeper/);
+    assert.ok(view.form, "the form stays open when the save did not take");
+  } finally { s.done(); }
+});
+
+test("a scheduler without targets: an agent save carries no target key (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([nightly("claude")], { bots: [housekeeper] });
+  try {
+    await fillNew(view, cx, draw, "claude");
+    view.form.name.set_value("plain");
+    view.save(cx);
+    await cx.settle();
+    assert.equal("target" in s.saves()[0].entry, false);
+    assert.equal("target" in s.yaml()[0], false);
+  } finally { s.done(); }
+});
+
+function historyRun(run_id, fields = {}) {
+  return { run_id, automation: targetEntry.name, status: "done", at: "2026-11-19T09:00:00Z", seconds: 3, ...fields };
+}
+
+function historyPanel(automations, history, project = { bots: [] }) {
+  const json = (data) => ({ code: 0, stdout: JSON.stringify(data), stderr: "" });
+  state.exec = async (bin, args) => {
+    if (bin === "am" && args[0] === "ls") return json({ projects: [project] });
+    if (bin === "herdr-automations") {
+      if (args[0] === "version") return { code: 0, stdout: "0.12.1-am.1\n", stderr: "" };
+      if (args[0] === "ls") return json({ automations, scheduler: 1, kinds: ["command"], targets: ["bot", "worker"] });
+      if (args[0] === "history") return json(history);
+      if (args[0] === "seen") {
+        history.find((r) => r.run_id === args[1]).seen = true;
+        return json({});
+      }
+    }
+    return { code: 127, stdout: "", stderr: "not offered" };
+  };
+  return panel();
+}
+
+test("history names bot and worker targets on a second line, including a busy skip (#498)", async () => {
+  const history = [
+    historyRun("bot", { target: targetEntry.target }),
+    historyRun("worker", { target: `worker:${housekeeper.id}` }),
+    historyRun("busy", { target: targetEntry.target, status: "skipped", error: "bot was busy" }),
+  ];
+  const { view, cx } = await historyPanel([targetEntry], history, { bots: [housekeeper] });
+  view.view = { kind: "detail", name: targetEntry.name };
+  const root = index(view.render(cx));
+  const row = nodes.get("h-bot"), target = nodes.get("h-target-bot");
+  assert.ok(row && target);
+  const parent = all(root).find((n) => n.kids.some((k) => k?.__node === row));
+  const at = parent.kids.findIndex((k) => k?.__node === row);
+  assert.equal(parent.kids[at + 1].__node, target);
+  assert.equal(textOf(target), "→ bot Housekeeper");
+  assert.equal(textOf(nodes.get("h-target-worker")), "→ a worker of Housekeeper");
+  assert.equal(textOf(nodes.get("h-busy").kids[0]), "skipped");
+  assert.equal(textOf(nodes.get("h-line-busy")), "bot was busy");
+  assert.equal(textOf(nodes.get("h-target-busy")), "→ bot Housekeeper");
+});
+
+test("history keeps the original run line when there is no valid target (#498)", async () => {
+  const history = [
+    historyRun("legacy"),
+    historyRun("early-failure", { status: "failed", error: "project folder missing" }),
+    historyRun("invalid", { target: "bot:t42" }),
+    historyRun("command", { automation: check.name, result: "3 checks passed" }),
+  ];
+  const { view, draw } = await historyPanel([targetEntry, check], history);
+  view.view = { kind: "detail", name: targetEntry.name };
+  const n = draw();
+  for (const [id, line] of [["legacy", "3s"], ["early-failure", "project folder missing"], ["invalid", "3s"]]) {
+    assert.equal(n.has(`h-target-${id}`), false);
+    assert.equal(textOf(n.get(`h-line-${id}`)), line);
+  }
+  view.view = { kind: "detail", name: check.name };
+  assert.equal(draw().has("h-target-command"), false);
+  assert.equal(textOf(n.get("h-line-command")), "3 checks passed");
+});
+
+test("history loads the current project's roster even after the entry's target is removed (#498)", async () => {
+  const entry = { ...targetEntry, target: undefined, repo: "/current" };
+  const history = [historyRun("old", { target: targetEntry.target })];
+  const { view, cx, draw } = await historyPanel([entry], history, { bots: [housekeeper] });
+  view.view = { kind: "detail", name: entry.name };
+  assert.equal(textOf(draw().get("h-target-old")), "→ bot Housekeeper");
+  await cx.ticks[0](cx);
+  await cx.settle();
+  assert.deepEqual(state.calls.filter(([bin]) => bin === "am"), [["am", "ls", "--json", "--project", entry.repo]]);
+});
+
+test("the history target reads the bot's current terminal and focuses or peeks it (#498)", async () => {
+  const bots = [{ ...housekeeper, terminal: "t1" }];
+  const history = [historyRun("worker", { seen: false, target: `worker:${housekeeper.id}`, terminal: "t2" })];
+  const { view, cx, draw } = await historyPanel([targetEntry], history, { bots });
+  try {
+    view.view = { kind: "detail", name: targetEntry.name };
+    const target = draw().get("h-target-worker");
+    assert.equal(textOf(target), "→ a worker of Housekeeper");
+    bots[0].terminal = "t3";
+    state.panes = [null, { terminal: "t3" }];
+    const callsAt = state.calls.length, runsAt = state.runs.length;
+    view.note = "previous note";
+    target.click({}, cx);
+    await cx.settle();
+    assert.equal(view.note, null);
+
+    state.panes = [{ terminal: "t2" }];
+    target.click({}, cx);
+    await cx.settle();
+    assert.deepEqual(state.runs.slice(runsAt), [["agent.focus", { terminal: "t3" }], ["terminal.peek", { terminal: "t3" }]]);
+    const roster = ["am", "ls", "--json", "--project", targetEntry.repo];
+    assert.deepEqual(state.calls.slice(callsAt), [roster, roster], "both clicks only read the roster");
+  } finally { delete state.panes; }
+});
+
+test("the history target explains unavailable bots and falls back to the id without a roster (#498)", async () => {
+  const bots = [{ ...housekeeper, status: "stopped", terminal: "" }];
+  const history = [historyRun("bot", { target: targetEntry.target })];
+  const project = { bots };
+  const { view, cx, draw } = await historyPanel([targetEntry], history, project);
+  view.view = { kind: "detail", name: targetEntry.name };
+  const target = draw().get("h-target-bot");
+  const runsAt = state.runs.length;
+  for (const [bot, note] of [
+    [bots[0], "Housekeeper is not running. Start it from the sidebar."],
+    [{ ...housekeeper, status: "planned", planned: true }, "Housekeeper is only planned and starts no runs."],
+    [{ ...housekeeper, status: "unreachable", terminal: 1 }, "Housekeeper: unreachable; its terminal is not known."],
+    [housekeeper, "Housekeeper: unknown; its terminal is not known."],
+  ]) {
+    bots[0] = bot;
+    target.click({}, cx);
+    await cx.settle();
+    assert.equal(view.note, note);
+  }
+  bots.length = 0;
+  target.click({}, cx);
+  await cx.settle();
+  assert.equal(view.note, "That bot is no longer in this project's bots.json.");
+
+  project.error = "project unavailable";
+  target.click({}, cx);
+  await cx.settle();
+  assert.equal(view.note, "The project's bots could not be read: project unavailable");
+  assert.equal(textOf(draw().get("h-target-bot")), `→ bot ${housekeeper.id}`);
+  assert.equal(state.runs.length, runsAt);
+});
+
+test("the history row still marks a finished run seen and opens its recorded terminal or detail (#498)", async () => {
+  const history = [historyRun("worker", { seen: false, target: `worker:${housekeeper.id}`, terminal: "t2" })];
+  const { view, cx, draw } = await historyPanel([targetEntry], history, { bots: [{ ...housekeeper, terminal: "t3" }] });
+  try {
+    view.view = { kind: "detail", name: targetEntry.name };
+    state.terminals = [{ address: "t2", state: "live" }];
+    const runsAt = state.runs.length;
+    draw().get("h-worker").click({}, cx);
+    await cx.settle();
+    assert.deepEqual(state.calls.filter(([, cmd]) => cmd === "seen"), [[view.bin, "seen", "worker"]]);
+    assert.deepEqual(state.runs.slice(runsAt), [["pane.focus", { terminal: "t2" }]]);
+
+    const row = draw().get("h-worker");
+    state.terminals = [];
+    view.view = { kind: "list" };
+    row.click({}, cx);
+    await cx.settle();
+    assert.deepEqual(view.view, { kind: "detail", name: targetEntry.name });
+    assert.equal(state.runs.length, runsAt + 1);
+  } finally { delete state.terminals; }
+});

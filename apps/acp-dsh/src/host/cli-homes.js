@@ -3,19 +3,27 @@ import { randomUUID } from 'node:crypto'
 import {
   closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
-  LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, unverifiedLogin, verifyLoginRecords,
+  LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, reclaimWindowsLogins, unverifiedLogin, verifyLoginRecords,
 } from './login-ownership.js'
 import {
   assertGeneration, CliGenerations, GENERATION_ENV, ownershipAt, ownershipState,
-  POINTER_ENV, removeDeadOwnership, sameOwnership,
+  POINTER_ENV, removeDeadOwnership,
 } from './cli-generations.js'
+import { NO_BUS_ADDRESS } from './agents.js'
+import { installationDigest, installationIdentity, publishSelectedRoot } from './installation.js'
 import { processState, validBirth } from './process-identity.js'
+import { retiredHomes, writeRetiredNote } from './retired-home.js'
+import { probeWindowsLogin } from './windows-job-probe.js'
 
 export const HOME_ENV = 'AUTOMAGIK_BOT_CLI_HOME'
 const VERSION_ENV = 'AUTOMAGIK_BOT_CLI_VERSION'
-const vendors = new Set(['claude', 'codex'])
+// Antigravity (#2048) has its own home like the other two: agy keeps everything under its
+// HOME's `.gemini` (its own folder name below), and the app's agy never sees the person's.
+const vendors = new Set(['claude', 'codex', 'antigravity'])
+// Each vendor's own config folder in its home, created 0700 with the home.
+const CONFIG = { claude: '.claude', codex: '.codex', antigravity: '.gemini' }
 const runs = new Map()
 // An allowlist, rather than a list of known tokens: future CLI auth overrides must not leak
 // in either. Undefined entries mask process.env where older spawn helpers merge environments.
@@ -28,12 +36,47 @@ const inherited = new RegExp([
 const failure = message => Object.assign(new Error(message), { code: 'acp-account/busy' })
 
 export class CliHomes {
-  constructor(root) {
+  constructor(root, {
+    acpHome = dirname(resolve(root)), identity = installationIdentity(),
+    onRecordError = () => console.warn('acp-dsh: the generation record could not be saved at startup'),
+    onSelectionError = action => console.warn(`acp-dsh: the selected Bot sign-in root could not be ${action}`),
+    onRetired = () => {}, probe = probeWindowsLogin,
+  } = {}) {
     this.root = resolve(root)
+    this.acpHome = resolve(acpHome)
+    this.identity = identity
+    this.onRecordError = onRecordError
+    this.onSelectionError = onSelectionError
+    this.onRetired = onRetired
     this.instance = `${process.pid}-${randomUUID()}`
     this.registered = new Map()
     this.changes = new Map()
-    this.generations = new CliGenerations(this.root, this.instance)
+    this.probe = probe
+    this.recovering = new Map()
+    this.started = new Set()
+    this.generations = new CliGenerations(this.root, this.instance, { reader: true })
+  }
+
+  publishSelection() {
+    this.selectionEnabled = true
+    this.refreshSelection()
+  }
+
+  refreshSelection() {
+    if (!this.selectionEnabled || !this.identity || this.started.size === 0 || this.withdrawn
+      || !['linux', 'darwin'].includes(this.generations.birth?.platform)) return
+    if (this.selection?.vendors === this.started.size) return
+    this.clearSelection()
+    if (this.selection) return
+    const directory = join(this.acpHome, 'selected')
+    const path = join(directory, installationDigest(this.identity), `${this.instance}.json`)
+    try {
+      const handle = publishSelectedRoot(directory, path, {
+        version: 1, identity: this.identity, root: this.root, instance: this.instance, pid: process.pid,
+        birth: this.generations.birth, vendors: [...this.started], startedAt: new Date().toISOString(),
+      })
+      this.selection = { path, handle, vendors: this.started.size }
+    } catch { try { this.onSelectionError('recorded') } catch {} }
   }
 
   home(vendor) {
@@ -43,6 +86,7 @@ export class CliHomes {
 
   environment(vendor, source = process.env) {
     if (!vendors.has(vendor)) throw new Error('No isolated home for this agent.')
+    if (this.withdrawn) throw failure('This Bot sign-in panel has closed.')
     const registered = this.generations.registered.has(vendor)
     this.generations.register(vendor)
     try { this.generations.check(vendor) } catch (error) {
@@ -71,13 +115,21 @@ export class CliHomes {
     const env = Object.fromEntries(Object.keys(source).map(key => [
       key, inherited.test(key) ? source[key] : undefined,
     ]))
-    const config = join(home, `.${vendor}`)
+    const config = join(home, CONFIG[vendor])
     for (const dir of [config, 'config', 'data', 'cache', 'state', 'roaming', 'local']) {
       mkdirSync(dir === config ? dir : join(home, dir), { recursive: true, mode: 0o700 })
     }
     const selected = {
       ...env,
+      // agy stores its sign-in in the desktop session's Secret Service when it reaches a D-Bus
+      // session bus, and that store belongs to the session, not to HOME. agy finds the session
+      // bus by the user id when the address is unset, so it gets one that can never connect
+      // (NO_BUS_ADDRESS) and keeps the sign-in in its file store, inside this home (agy's
+      // changelog; checked at acceptance). Claude Code and Codex keep the address.
+      ...(vendor === 'antigravity' ? { DBUS_SESSION_BUS_ADDRESS: NO_BUS_ADDRESS } : {}),
       HOME: home,
+      DSH_HOME: this.identity,
+      AUTOMAGIK_HOME: dirname(this.acpHome),
       USERPROFILE: home,
       APPDATA: join(home, 'roaming'),
       LOCALAPPDATA: join(home, 'local'),
@@ -124,6 +176,38 @@ export class CliHomes {
     } catch { return true }
   }
 
+  recoverLogins(vendor) {
+    if (this.disposed || this.recoveryClosed) return Promise.resolve(false)
+    const pending = this.recovering.get(vendor)
+    if (pending) return pending
+    let generation
+    try { generation = this.generations.current(vendor) } catch { return Promise.resolve(false) }
+    const home = this.generations.folder(vendor, generation)
+    if (!existsSync(join(home, 'login-trees'))) return Promise.resolve(false)
+    const commit = change => {
+      if (this.disposed || this.recoveryClosed) return false
+      try {
+        return this.generations.exclusive(vendor, () => (
+          !this.disposed && !this.recoveryClosed && this.generations.current(vendor) === generation
+            ? change() : false
+        ))
+      } catch { return false }
+    }
+    const recovery = reclaimWindowsLogins({
+      home, owner: this.instance, controlRoot: join(this.root, 'login-jobs'), probe: this.probe, commit,
+    }).then(removed => {
+      if (removed > 0 && !this.disposed && !this.recoveryClosed) {
+        commit(() => this.recoverChanging(home))
+        try { this.generations.ensureRecord() } catch {}
+      }
+      return removed > 0
+    }).finally(() => this.recovering.delete(vendor))
+    this.recovering.set(vendor, recovery)
+    return recovery
+  }
+
+  closeRecovery() { this.recoveryClosed = true }
+
   // Reset changes only the pointer. Never move the old physical path or reuse it: a vendor
   // that survived the app still has that absolute path in its environment and may write late.
   reset(vendor) {
@@ -159,6 +243,9 @@ export class CliHomes {
       const retired = join(this.root, 'retired', vendor)
       mkdirSync(retired, { recursive: true, mode: 0o700 })
       writeFileSync(join(retired, previous), '', { mode: 0o600 })
+      // #1529: the marker says the home is retired; the note in it says what stays and how to
+      // inspect or keep it. Neither removes anything, and a note failure never stops the reset.
+      writeRetiredNote({ root: this.root, vendor, generation: previous, home: this.generations.folder(vendor, previous) })
     }
     this.end(vendor)
     const registered = this.registered.get(vendor)
@@ -168,51 +255,27 @@ export class CliHomes {
     }
     this.generations.select(vendor, generation)
     this.environment(vendor)
+    this.started.add(vendor)
+    this.refreshSelection()
     return home
   }
 
-  // Unproved folders remain retained. Cleanup never discards pending, damaged or legacy
-  // ownership evidence; it only removes an abandoned home once every recorded owner exited.
+  // #1529: collection keeps every retired home. Removal needs four separately proved
+  // conditions - the recorded owners are dead, a complete measurement scan taken after the
+  // home's last write with the root frozen, the measurement retirement record, and the
+  // session-absorption receipt. The last three belong to the measurement side and to the
+  // skill's receipt, so none is available here yet and the default is keep. The report is for
+  // inspection and for that later gate; it never deletes, and a home whose marker, note or
+  // bound path cannot be proved to be its own is refused and left untouched.
   collect(vendor) {
-    return this.generations.exclusive(vendor, () => {
-      const directory = join(this.root, 'retired', vendor)
-      if (!existsSync(directory)) return
-      const current = this.generations.current(vendor)
-      for (const generation of readdirSync(directory)) {
-        if (generation === current) continue
-        if (generation !== 'legacy' && !/^[a-f0-9-]{36}$/.test(generation)) continue
-        const old = this.generations.folder(vendor, generation)
-        try {
-          const physical = lstatSync(old)
-          if (!physical.isDirectory() || physical.isSymbolicLink()) continue
-          const retired = join(directory, generation)
-          const marker = lstatSync(retired)
-          if (!marker.isFile() || marker.size !== 0) continue
-          verifyLoginRecords(old, '') // Even this instance's abandoned login needs exit proof.
-          this.verify(old)
-          this.generations.otherApps(vendor, old)
-          const instances = join(old, 'instances')
-          const names = existsSync(instances) ? readdirSync(instances).sort() : []
-          const owners = names.map(name => ownershipAt(join(instances, name), { legacy: 'home' }))
-          if (owners.some(owner => ownershipState(owner) !== 'dead')) continue
-          const lock = join(old, 'changing')
-          const changing = existsSync(lock) ? this.lockSnapshot(lock) : null
-          if (changing && this.lockState(lock, changing) !== 'dead') continue
-          verifyLoginRecords(old, '')
-          this.verify(old)
-          this.generations.otherApps(vendor, old)
-          if (owners.some(owner => !sameOwnership(owner) || ownershipState(owner) !== 'dead' || !sameOwnership(owner))) continue
-          if (JSON.stringify(existsSync(instances) ? readdirSync(instances).sort() : []) !== JSON.stringify(names)) continue
-          if (changing ? this.lockState(lock, changing) !== 'dead'
-            || JSON.stringify(this.lockSnapshot(lock)) !== JSON.stringify(changing) : existsSync(lock)) continue
-          const finalHome = lstatSync(old), finalMarker = lstatSync(retired)
-          if (finalHome.dev !== physical.dev || finalHome.ino !== physical.ino
-            || finalMarker.dev !== marker.dev || finalMarker.ino !== marker.ino || finalMarker.size !== 0) continue
-          rmSync(old, { recursive: true, force: true })
-          rmSync(retired, { force: true })
-        } catch { /* No exit proof: retain the original folder and try on a later app start. */ }
-      }
-    })
+    if (!vendors.has(vendor)) return []
+    return retiredHomes(this.root, vendor)
+  }
+
+  /** Every vendor's retired homes when no vendor is named, for inspection only. */
+  retired(vendor) {
+    if (vendor !== undefined) return this.collect(vendor)
+    return [...vendors].flatMap(key => this.collect(key))
   }
 
   verify(home) {
@@ -341,7 +404,17 @@ export class CliHomes {
         }
       }
     })
-    this.collect(vendor)
+    const retired = this.collect(vendor)
+    if (retired.length > 0) {
+      try { this.onRetired(vendor, retired) } catch {}
+    }
+    // The generation record follows both pointers. A matching record is left in place.
+    try { this.generations.ensureRecord() } catch {
+      try { this.onRecordError(vendor) } catch {}
+      return
+    }
+    this.started.add(vendor)
+    this.refreshSelection()
   }
 
   end(vendor) {
@@ -351,13 +424,48 @@ export class CliHomes {
     rmSync(join(home, 'changing'), { recursive: true, force: true })
   }
 
-  dispose() {
-    for (const [vendor, home] of this.registered) {
-      this.generations.release(join(home, 'instances', this.instance))
-      this.generations.unregister(vendor)
+  closeSelection() {
+    if (!this.selection) return
+    const { handle } = this.selection
+    if (!this.selection.closed && this.retryWithdrawal(() => handle.close())) this.selection.closed = true
+  }
+
+  clearSelection() {
+    if (!this.selection) return
+    const { handle, closed } = this.selection
+    const removed = this.retryWithdrawal(() => handle.unlink())
+    if (!closed) this.retryWithdrawal(() => handle.revoke())
+    this.closeSelection()
+    if (removed && this.selection.closed) this.selection = undefined
+  }
+
+  retryWithdrawal(remove) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { remove(); return true } catch {}
     }
-    this.registered.clear()
-    this.generations.dispose()
+    try { this.onSelectionError('withdrawn') } catch {}
+    return false
+  }
+
+  withdraw({ unregister = this.selection !== undefined } = {}) {
+    this.withdrawn = true
+    this.clearSelection()
+    if (!unregister) return
+    // Leave the physical-home ownership in place until detached runs have drained.
+    for (const vendor of this.generations.registered) {
+      this.retryWithdrawal(() => this.generations.unregister(vendor, { strict: true }))
+    }
+  }
+
+  dispose() {
+    this.disposed = true
+    this.closeRecovery()
+    this.withdraw({ unregister: true })
+    for (const [vendor, home] of this.registered) {
+      if (this.retryWithdrawal(() => this.generations.release(join(home, 'instances', this.instance), { strict: true }))) {
+        this.registered.delete(vendor)
+      }
+    }
   }
 }
 
@@ -389,6 +497,11 @@ export function releaseRun(run) {
     run.accountStopping.catch(() => { run.accountStopping = undefined })
   }
   return run.accountStopping
+}
+
+/** How many runs are tracked on a home now (#2064, a Switch's log line). */
+export function runCount(home) {
+  return runs.get(home)?.size ?? 0
 }
 
 export async function stopRuns(home) {

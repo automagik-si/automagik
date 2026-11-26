@@ -5,19 +5,29 @@ import { createHash } from 'node:crypto'
 import { constants, copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { mkdir, unlink, writeFile } from 'node:fs/promises'
 
+import { dirname, join } from 'node:path'
+import { piAiClaudeOf } from './claude-models.js'
+import { KEY_ERROR } from './connectors/credential-key.js'
+import { connectorState, ENCRYPTED_STATE_VERSION } from './connectors/credential-state.js'
+import { DRAFT_SWEEP_MAX, LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
+import { replaceFile, syncDirectory, syncFile } from './files.js'
+import { homeLock } from './home-lock.js'
+import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
+import { refusal } from './refusal.js'
+import { currentColor, headOf, normalize, unquote } from './text.js'
+import { markOf } from '../shared/permission-levels.js'
+import { effectiveMarkOf, nativeToolsOn, restrictedBot } from '../shared/native-tools.js'
+import { TASK_ROUTE_DEFAULT } from '../shared/route-policy.js'
+import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
+import { GUARD_OFF_NOTICE } from '../shared/guard-groups.js'
+import updateContract from './update-contract.json' with { type: 'json' }
+
 // The saved team's format. A file may carry an older version this build still reads and
 // migrates (the formats before the stamp count as LEGACY_VERSION); any other value means a
 // newer Omni wrote it, and this one must not touch it.
+const COMPATIBLE_VERSIONS = updateContract.stateFormats
 const STATE_VERSION = 2
 const LEGACY_VERSION = 0
-const COMPATIBLE_VERSIONS = [LEGACY_VERSION, 1, STATE_VERSION]
-import { join } from 'node:path'
-import { piAiClaudeOf } from './claude-models.js'
-import { LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
-import { replaceFile } from './files.js'
-import { homeLock } from './home-lock.js'
-import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
-import { currentColor, headOf, normalize, unquote } from './text.js'
 
 // A table read that sees only the keys the table holds itself. Ids that come from
 // outside (a request body, a tool argument, a name a model gives) go through this, so
@@ -25,16 +35,59 @@ import { currentColor, headOf, normalize, unquote } from './text.js'
 // Object.prototype.
 export const own = (table, key) => (table != null && Object.hasOwn(table, key) ? table[key] : undefined)
 
+// Compare only the recovery fields. In particular, annotating a work does not
+// open or close a request. A roster or copy save can also change a review track.
+const recoveryFields = ({ bots, works }) => JSON.stringify({
+  tracks: Object.keys(bots ?? {}).sort().filter(id => bots[id]?.reviewTrack !== undefined)
+    .map(id => [id, bots[id].reviewTrack]),
+  open: Object.keys(works ?? {}).sort().map(id => [id, works[id]?.at, works[id]?.open]),
+})
+
 export function install(rt) {
   const { ctx, home, statePath } = rt
+  const credentials = connectorState(home, () => rt.ownsLockForPendingWrite())
 
   /** @type {{version:2, workspaceId?:string, mainBotIds:string[], bots:Record<string,any>, privateArchives:any[], rooms:Record<string,any>, agents:Record<string,any>, sections:any[], capabilities:{items:Record<string,any>}, exchanges:any[], exchangeTurns:Record<string,number[]>, revision:number}} */
   const state = { version: STATE_VERSION, mainBotIds: [], bots: {}, privateArchives: [], rooms: {}, agents: {}, sections: [], capabilities: { items: {} }, exchanges: [], exchangeTurns: {}, works: {}, requests: {}, questions: {}, views: {}, closedCards: {}, prefs: {}, switching: {}, revision: 0 }
   let loaded = null
   // Whether `state` is the team as its file has it (teamLoaded).
   let teamRead = false
+  let teamPresentAtLoad = null
+  // Preserve ENOENT as evidence until the supervisor decides the trial.
+  const missingTeamHeld = () => teamPresentAtLoad === false && !!process.env.AUTOMAGIK_SUPERVISOR_RUN
+    && rt.updateHold?.awaitingBootVerdict !== false
   let writing = Promise.resolve()
+  let savedRecovery = recoveryFields(state)
+  // Failed attempts stay with their owner. A published replacement can survive a takeover.
+  let pendingDurability
+  let unconfirmedState
   const { warn } = rt
+
+  const diagnosticLabel = value => headOf(String(value).replace(/\s+/g, ' ').trim(), 120)
+  // Keep the on-disk marker and the admission checks on the same Bot record.
+  const refreshShellHolds = (bots, { log = true } = {}) => {
+    let changed = false
+    for (const bot of Object.values(bots)) {
+      const model = shellHoldModelOf(bot)
+      if (model === undefined) {
+        if (bot.shellHeld !== undefined) {
+          delete bot.shellHeld
+          changed = true
+          if (bots === state.bots) rt.dropGrantsForBot?.(bot.id)
+        }
+        continue
+      }
+      const cli = model.split('/')[0]
+      if (bot.shellHeld?.model === model && bot.shellHeld.cli === cli) continue
+      bot.shellHeld = { cli, model }
+      changed = true
+      if (bots === state.bots) rt.dropGrantsForBot?.(bot.id)
+      if (log) warn('ds-bot: %s loads with its shell off on %s, a coding CLI that brings its own shell: '
+        + 'it is held until the shell is turned on or it runs on a model that uses DeepSeek Harness\'s tools.',
+      diagnosticLabel(bot.name ?? 'This Bot'), diagnosticLabel(cli))
+    }
+    return changed
+  }
 
   const EMPTY = JSON.stringify(state)
   // The other dsh host that holds state.lock while this one only reads (see home-lock.js);
@@ -44,6 +97,9 @@ export function install(rt) {
   let stuck
   let warnedReadOnly = false
   let stopped = false
+  // Other notes kept beside the team (resume.js's inflight.json) end their last write before
+  // the lock is released at stop (rt.holdLockUntil).
+  const lockWaits = new Set()
   // mtime and size of the state.json this host last read or wrote.
   let seen = ''
   // Bumped each time the in-memory state is replaced from the file, so a queued
@@ -57,23 +113,51 @@ export function install(rt) {
       return ''
     }
   }
-  const lock = homeLock(join(home, 'state.lock'))
+  let lockTerm = 0
+  // A failed read ends the term even if the lock comes back before the next heartbeat. Before
+  // the first claim there is no term to end (an unusable lock keeps term 0 for resume's notes).
+  let observedLoss = false
+  const onLockLost = () => {
+    if (observedLoss || lockTerm === 0) return
+    observedLoss = true
+    lockTerm++
+    rt.solverSettle?.cancel()
+    rt.dropAllGrants?.()
+  }
+  const lock = homeLock(join(home, 'state.lock'), { onLost: onLockLost })
+  const gainedListeners = new Set()
+  const onLockGained = (fn) => {
+    gainedListeners.add(fn)
+    return () => gainedListeners.delete(fn)
+  }
+  const lockGained = () => {
+    for (const fn of gainedListeners) {
+      try { fn() } catch (error) { warn('ds-bot: a lock listener failed: %s', error) }
+    }
+  }
   const claimLock = () => {
     if (lockBroken) return
     try {
+      const held = holder === undefined && lock.owns()
       mkdirSync(home, { recursive: true })
       holder = lock.claim()
+      if (!held && holder === undefined && lock.owns()) {
+        lockTerm += 1
+        observedLoss = false
+      }
     } catch (error) {
       // An unusable lock (a read-only or odd file system) must not stop the team; a
       // save that then cannot write still rejects.
       lockBroken = true
+      rt.dropAllGrants?.()
       holder = undefined
       warn('omni-ui: cannot lock %s, so another dsh on the same data could undo changes: %s', home, error)
     }
   }
   const readOnly = () => {
     if (stuck !== undefined) return `The Bot team file ${statePath} could not be read (${stuck}). Omni does not change it; fix or move the file and reload.`
-    if (holder === undefined) return undefined
+    if (holder === undefined) return missingTeamHeld()
+      ? 'The Bot team is read-only while the update is being checked.' : undefined
     const where = holder.pid ? `pid ${holder.pid}${holder.host ? ` on ${holder.host}` : ''}` : 'unknown process'
     return `The Bot team in ${home} is open in another dsh (Web or Desktop, ${where}). This window shows the team but cannot change it; close the other one and reload.`
   }
@@ -133,6 +217,7 @@ export function install(rt) {
       seen = stamp()
       if (error?.code === 'ENOENT') {
         stuck = undefined
+        unconfirmedState = undefined
         return undefined
       }
       stuck = error?.code ?? error?.message ?? String(error)
@@ -140,9 +225,11 @@ export function install(rt) {
       return undefined
     }
     seen = stamp()
+    const bytes = contents.toString('utf8')
+    if (unconfirmedState !== bytes) unconfirmedState = undefined
     let parsed
     try {
-      parsed = JSON.parse(contents.toString('utf8'))
+      parsed = JSON.parse(bytes)
     } catch (error) {
       return setAside(error, contents)
     }
@@ -167,10 +254,66 @@ export function install(rt) {
       stuck = undefined
       return parsed
     }
-    stuck = version !== undefined && version > STATE_VERSION
+    stuck = version !== undefined && version > Math.max(...COMPATIBLE_VERSIONS)
       ? 'saved by a newer Omni; update Omni'
       : `saved by an Omni this version cannot read (format ${JSON.stringify(raw)?.slice(0, 24)})`
     return undefined
+  }
+
+  const ownPart = bot => typeof bot.sessionId === 'string' && bot.sessionId !== '' ? bot.sessionId : bot.id
+  function legacyGuard(bot, team) {
+    const on = bot.reviewGuardNotice
+    return team.guardGroupMigrated !== true && team.reviewGuardMigrated === true
+      && bot.guardOffNotice === undefined && typeof bot.reviewerId === 'string'
+      && bot.reviewerId !== '' && bot.reviewerId !== bot.id && Number.isFinite(on?.at)
+      && typeof on.sessionId === 'string'
+      && (on.sessionId === ownPart(bot) || on.sessionId === bot.id
+        || (Array.isArray(bot.segments) && bot.segments.some(part => part?.sessionId === on.sessionId)))
+  }
+
+  function guardImportProblem(team) {
+    const { bots = {}, rooms = {} } = team
+    if (!plain(bots) || Object.entries(bots).some(([id, bot]) => !plain(bot) || bot.id !== id)) {
+      return 'the saved Bot map is invalid. Restore a valid team backup'
+    }
+    if (!plain(rooms) || Object.entries(rooms).some(([id, room]) => !plain(room) || room.id !== id
+      || !Array.isArray(room.members) || room.members.some(id => typeof id !== 'string'))) {
+      return 'the saved group map is invalid. Restore a valid team backup'
+    }
+    for (const room of Object.values(rooms)) {
+      for (const id of room.members) {
+        const bot = own(bots, id)
+        if (bot?.reviewGuard !== true || legacyGuard(bot, team)) continue
+        return `${diagnosticLabel(bot.name ?? id)} has the review guard on in ${diagnosticLabel(room.name ?? room.id)}. `
+          + 'Restore a valid team backup or turn off that Bot\'s review guard in the saved file before reloading'
+      }
+    }
+  }
+
+  function migrateReviewGuard() {
+    const members = new Set(Object.values(state.rooms).flatMap(room => room.members))
+    const at = Date.now()
+    let turnedOn = false
+    let repaired = false
+    for (const bot of Object.values(state.bots)) {
+      const reviewer = bot.reviewerId
+      const turnsOn = state.reviewGuardMigrated !== true && bot.reviewGuard !== true
+        && typeof reviewer === 'string' && reviewer !== '' && reviewer !== bot.id
+        && plain(own(state.bots, reviewer))
+      if (members.has(bot.id) && (turnsOn || bot.reviewGuard === true)) {
+        delete bot.reviewGuard
+        bot.guardOffNotice = { id: GUARD_OFF_NOTICE, kind: GUARD_OFF_NOTICE, at, sessionId: ownPart(bot) }
+        // A Solver upgraded straight from D1 gets only OFF. An older stored ON remains.
+        repaired = true
+      } else if (turnsOn) {
+        bot.reviewGuard = true
+        bot.reviewGuardNotice = { at, sessionId: ownPart(bot) }
+        turnedOn = true
+      }
+    }
+    state.reviewGuardMigrated = true
+    state.guardGroupMigrated = true
+    return { repaired, turnedOn }
   }
 
   // Fill `state` from the saved file and bring an older team up to date. Returns the
@@ -179,19 +322,31 @@ export function install(rt) {
     lockEpoch += 1
     // Until the end of this: a file that could not be read, or was set aside as corrupt,
     // leaves an empty team in memory that is not the saved one.
+    rt.hostAuthority?.capture()
     teamRead = false
+    if (parsed !== undefined) {
+      const problem = guardImportProblem(parsed)
+      if (problem !== undefined) {
+        stuck = problem
+        warn('ds-bot: cannot activate the saved Bot team: %s', problem)
+        parsed = undefined
+      }
+    }
     const valid = parsed !== null && parsed !== undefined ? true : stuck === undefined && !aside
     const hadCapabilities = parsed !== null && parsed !== undefined && Object.hasOwn(parsed, 'capabilities')
+    credentials.decode(parsed)
     for (const key of Object.keys(state)) delete state[key]
     Object.assign(state, JSON.parse(EMPTY), parsed ?? {})
-    // Every read ends in the current format; the next save writes this stamp.
+    savedRecovery = recoveryFields(state)
+    pendingDurability = undefined
+    // The serializer stamps the format of the saved fields.
     state.version = STATE_VERSION
     state.prefs ??= {}
     // Teams saved before the DSH Agent existed carry no `agents`; corrupt values reset.
     if (state.agents === null || typeof state.agents !== 'object' || Array.isArray(state.agents)) state.agents = {}
     // `computer` is the computer-use switch; absent or corrupt means off.
     if (state.computer === null || typeof state.computer !== 'object' || Array.isArray(state.computer)) state.computer = {}
-    let migrated = !hadCapabilities || parsed?.version !== STATE_VERSION
+    let migrated = !hadCapabilities || (parsed?.version !== STATE_VERSION && parsed?.version !== ENCRYPTED_STATE_VERSION)
     if (state.autoStamp !== state.revision && rt.dropAutoMarks()) migrated = true
     if (holder !== undefined) rt.dropAutoMarks()
     // The single DSH Agent of older teams splits into a DSH bot and the tasks record (agents.js).
@@ -223,6 +378,7 @@ export function install(rt) {
         migrated = true
       }
     }
+    if (refreshShellHolds(state.bots)) migrated = true
     // A team from before several Main Bots were allowed names a single one.
     if (!Array.isArray(state.mainBotIds)) state.mainBotIds = []
     if ('mainBotId' in state) {
@@ -232,6 +388,12 @@ export function install(rt) {
     }
     state.mainBotIds = state.mainBotIds.filter(id => state.bots[id])
     if (!Array.isArray(state.privateArchives)) state.privateArchives = []
+    // Deleted Sessions whose composer state the owner's page still removes (roster.js).
+    if (Object.hasOwn(state, 'draftSweep')) {
+      const sweep = [...new Set(Array.isArray(state.draftSweep) ? state.draftSweep.filter(id => typeof id === 'string' && id !== '') : [])].slice(-DRAFT_SWEEP_MAX)
+      if (sweep.length > 0) state.draftSweep = sweep
+      else delete state.draftSweep
+    }
     if (!Array.isArray(state.sections)) state.sections = []
     else {
       const seen = new Set()
@@ -300,6 +462,87 @@ export function install(rt) {
       }
       state.claudeCodeMoved = true
       migrated = true
+    }
+    // Existing omp Bots keep their native tools in the owner's direct chat once.
+    // Nothing to keep writes nothing: the marker set here rides the next real save, which
+    // encodes the whole state, so an omp Bot made or switched later is saved with it and
+    // starts OFF.
+    if (state.nativeToolsOmpKept !== true) {
+      let restricted = 0
+      let kept = 0
+      for (const bot of Object.values(state.bots)) {
+        if (bot.nativeTools !== undefined || markOf(bot.model ?? bot.appliedModel) !== 'acp-omp') continue
+        if (bot.shell === false || (Array.isArray(bot.denyTools) && bot.denyTools.length > 0)) {
+          restricted += 1
+          continue
+        }
+        bot.nativeTools = true
+        bot.nativeToolsKept = 'acp-omp'
+        kept += 1
+      }
+      if (restricted > 0) warn('omni-ui: %d omp Bot(s) keep native tools off: shell access off or denied tools', restricted)
+      state.nativeToolsOmpKept = true
+      if (kept > 0) migrated = true
+    }
+    // #1564: Codex's own tools became the native-tools switch, off by default. A team saved
+    // before it ran its Codex Bots on Codex's own tools; once, each keeps them in the owner's
+    // direct chat (RFC 0003, Amendment: Codex native tools). A Bot with shell access off or
+    // denied tools stays off: Codex's own tools would bypass both. As for omp, the marker
+    // rides the next real save when nothing was kept. A Bot whose ON was saved for another agent
+    // (Claude's untagged ON, omp's migrated one) and now runs on Codex ran on Codex's own tools
+    // too: its ON is moved to Codex. The app stores an OFF as no value, so a Bot turned OFF is
+    // migrated like any other; only an explicit `nativeTools: false` is left as it is.
+    if (state.nativeToolsCodexKept !== true) {
+      let restricted = 0
+      let kept = 0
+      for (const bot of Object.values(state.bots)) {
+        if (bot === null || typeof bot !== 'object' || effectiveMarkOf(bot) !== 'acp-codex') continue
+        if (bot.nativeTools === false || nativeToolsOn(bot)) continue
+        if (restrictedBot(bot)) {
+          restricted += 1
+          continue
+        }
+        bot.nativeTools = true
+        bot.nativeToolsAgent = 'acp-codex'
+        delete bot.nativeToolsKept
+        kept += 1
+      }
+      if (restricted > 0) warn('omni-ui: %d Codex Bot(s) kept off native tools: shell access off or denied tools', restricted)
+      state.nativeToolsCodexKept = true
+      if (kept > 0) migrated = true
+    }
+    // RFC 0048 delivery 1.5: once, each Solver made by the D1 dialog whose reviewer Bot is still on
+    // the team gets the review guard (the owner's rule: always a counterpoint), with one line in its
+    // chat saying so (`reviewGuardNotice`, its part read from the record, H7-6). A Solver with no
+    // reviewer Bot stays off. The cosmetic Solver marker is not read. Nothing to change writes
+    // nothing: the flag rides the next real save, which encodes the whole state, so a Solver made
+    // or copied later keeps what its own create gave it, and an OFF the person chose stays off.
+    const { repaired, turnedOn } = migrateReviewGuard()
+    if (repaired || turnedOn) migrated = true
+    // #1564: Antigravity got the switch too, off by default. Before it, every Antigravity Bot ran
+    // agy's own tools: once, each keeps them (RFC 0003, Amendment: Antigravity native tools), with
+    // the Codex block's rule: an ON saved for another agent moves to Antigravity, a Bot with shell
+    // access off or denied tools stays off, an explicit `nativeTools: false` is left as it is, and
+    // the marker rides the next real save when nothing was kept. A Bot made or moved to
+    // Antigravity after this starts OFF.
+    if (state.nativeToolsAntigravityKept !== true) {
+      let restricted = 0
+      let kept = 0
+      for (const bot of Object.values(state.bots)) {
+        if (bot === null || typeof bot !== 'object' || effectiveMarkOf(bot) !== 'acp-antigravity') continue
+        if (bot.nativeTools === false || nativeToolsOn(bot)) continue
+        if (restrictedBot(bot)) {
+          restricted += 1
+          continue
+        }
+        bot.nativeTools = true
+        bot.nativeToolsAgent = 'acp-antigravity'
+        delete bot.nativeToolsKept
+        kept += 1
+      }
+      if (restricted > 0) warn('omni-ui: %d Antigravity Bot(s) kept off native tools: shell access off or denied tools', restricted)
+      state.nativeToolsAntigravityKept = true
+      if (kept > 0) migrated = true
     }
     // A builtin pet the plugin no longer ships would draw nothing: its Bot wears Genie instead.
     // Genie kept from before its approved figure names the old atlas's version: it reads as
@@ -372,6 +615,13 @@ export function install(rt) {
       room.admin = admin
       migrated = true
     }
+    for (const room of Object.values(state.rooms)) {
+      if (room.scoped === true) continue
+      if (room.workDir !== undefined || Object.keys(room.memberDirs ?? {}).length > 0 || room.permission !== undefined) {
+        room.scoped = true
+        migrated = true
+      }
+    }
     // Teams from before #206 kept every long message whole in this file, written whole on
     // every save. A message between Bots is whole in its recipient's Session; a group
     // line's whole text moves to a file of its own, which only the writing host makes.
@@ -392,26 +642,39 @@ export function install(rt) {
     // Unnamed groups from before names followed their members may still list old names.
     const stale = Object.values(state.rooms).filter(room => !room.named && room.name !== rt.autoRoomName(room.members))
     for (const room of stale) room.name = rt.autoRoomName(room.members)
+    // An explicit policy permanently supersedes a fresh team's install seed.
+    const retiredSeed = writer && !aside && rt.config?.routePolicy !== undefined && Object.hasOwn(state, 'taskRoutePolicySeed')
+    if (retiredSeed) delete state.taskRoutePolicySeed
     indexSessions()
+    rt.solverSettle?.adopted()
+    rt.hostAuthority?.restore()
     teamRead = valid
-    return { migrated: migrated || stale.length > 0, stale }
+    if (lockEpoch > 1) rt.connectorStateChanged?.()
+    return { migrated: migrated || stale.length > 0, stale, repaired, retiredSeed }
+  }
+
+  const saveMigration = async required => {
+    try {
+      await save({ required })
+    } catch (error) {
+      warn('omni-ui: saving the migrated Bot team failed: %s', error)
+    }
   }
 
   const load = () => loaded ??= (async () => {
     claimLock()
     if (holder !== undefined) warn('ds-bot: %s', readOnly())
-    const { migrated, stale } = adopt(readFileState())
+    const parsed = readFileState()
+    teamPresentAtLoad = parsed !== undefined ? true : stuck === undefined && !aside ? false : null
+    const { migrated, stale, repaired, retiredSeed } = adopt(parsed)
     if (holder !== undefined) return
+    if (teamPresentAtLoad === false && rt.config?.routePolicy === undefined) state.taskRoutePolicySeed = TASK_ROUTE_DEFAULT
     // A file set aside just now stays where it is: the person's bytes were copied, and the
     // fresh team reaches the disk on the next real save rather than within this read.
-    if (migrated && stuck === undefined && !aside) {
+    if ((migrated || retiredSeed) && stuck === undefined && !aside) {
       // A failed write must not poison `loaded`: the migrated state stays in
       // memory and the next save() writes it.
-      try {
-        await save()
-      } catch (error) {
-        warn('omni-ui: saving the migrated Bot team failed: %s', error)
-      }
+      await saveMigration(repaired || retiredSeed)
     }
     // Not awaited: renaming a session must not hold up the first roster read.
     for (const room of stale) void rt.retitleRoom(room)
@@ -423,21 +686,35 @@ export function install(rt) {
   // `writing` — and behind any adopt already queued — so no save or second
   // refresh slips between finding the change and the adopt.
   let adopting
+  let recoveryPending = false
+  const mayInitializeRecoveryKey = () => {
+    try { return JSON.parse(readFileSync(statePath))?.version !== ENCRYPTED_STATE_VERSION } catch { return false }
+  }
   const adoptAfterReclaim = () => {
     const run = (adopting ?? writing).then(async () => {
       if (stamp() !== seen) {
         const aside = `${statePath}.replaced-${Date.now()}`
+        const snapshot = credentials.encode(state, { initializeKey: mayInitializeRecoveryKey() })
         try {
-          await writeFile(aside, JSON.stringify(state))
+          if (snapshot.pending || snapshot.refused || !snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
+          await writeFile(aside, snapshot.bytes, { mode: 0o600, flag: 'wx' })
           warn('ds-bot: %s changed while no host held the team; it is adopted and this host\'s state is kept as %s', statePath, aside)
         } catch (error) {
+          if (snapshot.encrypted || snapshot.pending || snapshot.refused) {
+            recoveryPending = true
+            warn('ds-bot: keeping the current Bot team open until its recovery copy can be saved: %s', error)
+            throw error
+          }
           warn('ds-bot: %s changed while no host held the team; it is adopted, and this host\'s state is lost because it could not be kept aside: %s', statePath, error)
         }
       }
-      adopt(readFileState())
+      const { repaired, retiredSeed } = adopt(readFileState())
+      recoveryPending = false
+      return repaired || retiredSeed
     })
     writing = run.catch(() => {})
-    const tracked = run.finally(() => { if (adopting === tracked) adopting = undefined })
+    const tracked = run.then(required => required ? saveMigration(true) : undefined)
+      .finally(() => { if (adopting === tracked) adopting = undefined })
     adopting = tracked
     return tracked
   }
@@ -461,10 +738,13 @@ export function install(rt) {
       if (holder === undefined) {
         warn('omni-ui: the other dsh has closed; this one now saves the Bot team')
         warnedReadOnly = false
-        adopt(readFileState())
+        const { repaired, retiredSeed } = adopt(readFileState())
+        if (repaired || retiredSeed) await saveMigration(true)
+        lockGained()
         return
       }
     } else if (!lockBroken && !lock.owns()) {
+      rt.dropAllGrants?.()
       // A cached "writer" is stale once the lock file no longer names this host:
       // another dsh may have taken it over, or the file may just be gone. Re-claim
       // and re-check instead of trusting the flag.
@@ -472,12 +752,28 @@ export function install(rt) {
       if (lockBroken) return
       if (holder === undefined) {
         await reclaimHeld()
+        lockGained()
         return
       }
       warn('omni-ui: %s', readOnly())
     }
     if (adopting !== undefined) return adopting
-    if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) adopt(readFileState())
+    if (recoveryPending && rt.holdsLock()) {
+      await adoptAfterReclaim()
+      lockGained()
+      return
+    }
+    if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) {
+      const { repaired, retiredSeed } = adopt(readFileState())
+      if (retiredSeed) await save({ required: true })
+      else if (repaired && holder === undefined) await saveMigration(true)
+    }
+  }
+
+  // Admission reads the adopted team without refreshing an unchanged writer.
+  const refreshShellChoice = async () => {
+    await load()
+    if (adopting !== undefined || stamp() !== seen) await refresh()
   }
 
   const warnReadOnly = () => {
@@ -492,6 +788,7 @@ export function install(rt) {
     if (lockBroken) return true
     if (holder === undefined && lock.owns()) return true
     rt.dropAutoMarks()
+    rt.dropAllGrants?.()
     // Lost the lock: retake it when nobody else holds it (its file was deleted), else
     // another host took it over and this one stops writing.
     if (holder === undefined) {
@@ -499,14 +796,37 @@ export function install(rt) {
       if (holder === undefined) {
         // A changed file is adopted first; the save queues behind that adopt.
         const pending = reclaimHeld()
-        if (pending !== undefined) void pending.catch(() => {})
+        if (pending !== undefined) void pending.then(lockGained, () => {})
+        else queueMicrotask(lockGained)
         return true
       }
     }
     return warnReadOnly()
   }
 
-  rt.holdsLock = () => !stopped && !lockBroken && stuck === undefined && holder === undefined && lock.owns()
+  rt.canWriteTeam = () => stuck === undefined && (lockBroken || (holder === undefined && lock.owns()))
+  rt.lockBeating = () => lock.beating?.() !== false
+  rt.holdsLock = () => {
+    if (stopped || lockBroken || stuck !== undefined || holder !== undefined) return false
+    if (!lock.owns()) {
+      onLockLost()
+      return false
+    }
+    observedLoss = false
+    return true
+  }
+  // A write that was already on its way when the plugin stopped may still land: the lock is
+  // released only after the writes registered here end (holdLockUntil), so it is still ours.
+  rt.ownsLockForPendingWrite = () => !lockBroken && stuck === undefined && holder === undefined && lock.owns()
+  rt.holdLockUntil = (pending) => { lockWaits.add(pending) }
+  // RFC 0039 delivery 3: the team an ending operation began in. An adopt replaces the team in memory (`epoch`);
+  // a lost and re-claimed lock ends this host's term (`term`, claimLock). Only a host that holds the team now,
+  // in the same epoch and term, may publish an end.
+  rt.teamGeneration = () => ({ epoch: lockEpoch, term: lockTerm })
+  const sameGeneration = gen => gen?.epoch === lockEpoch && gen.term === lockTerm
+  rt.sameTeam = gen => sameGeneration(gen) && rt.holdsLock()
+  // A stopped host may undo its own unsaved edits in memory. Only a current writer can save them.
+  rt.canRestoreTeamInMemory = gen => sameGeneration(gen) && (stopped || rt.holdsLock())
   rt.dropAutoMarks = () => {
     let dropped = false
     for (const bot of Object.values(state.bots ?? {})) {
@@ -517,40 +837,101 @@ export function install(rt) {
     }
     return dropped
   }
-  rt.saveCopy = (change) => {
+  rt.saveCopy = (change, { beforeCommit, afterPublish, afterWrite, durable = false } = {}) => {
+    const admitted = rt.teamGeneration()
+    if (missingTeamHeld()) return Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`))
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
+    refreshShellHolds(state.bots)
     indexSessions()
     rt.sweepAuto?.()
+    if (afterWrite !== undefined || afterPublish !== undefined) {
+      let revision
+      const applyCopy = callback => {
+        state.revision = state.autoStamp = revision
+        state.version = STATE_VERSION
+        state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
+        callback()
+        refreshShellHolds(state.bots)
+      }
+      return writeSnapshot(() => {
+        const copy = credentials.clone(state)
+        change(copy)
+        refreshShellHolds(copy.bots, { log: false })
+        revision = state.revision + 1
+        copy.revision = copy.autoStamp = revision
+        copy.version = STATE_VERSION
+        copy.exchanges = copy.exchanges.slice(-MAX_EXCHANGES)
+        return copy
+      }, {
+        required: true,
+        durable,
+        admitted,
+        epoch: lockEpoch,
+        beforeCommit,
+        afterPublish: afterPublish && (current => {
+          if (current) applyCopy(() => afterPublish(true))
+          else afterPublish(false)
+        }),
+        afterWrite: afterWrite && (() => applyCopy(afterWrite)),
+      })
+    }
     state.revision += 1
     state.autoStamp = state.revision
     state.version = STATE_VERSION
     state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
-    const copy = JSON.parse(JSON.stringify(state))
+    const copy = credentials.clone(state)
     change(copy)
+    refreshShellHolds(copy.bots, { log: false })
     // Permission copies belong to the state the caller inspected. Never apply one
     // to a replacement team adopted while this write waited.
-    const snapshot = JSON.stringify(copy)
-    return writeSnapshot(() => snapshot, { required: true, epoch: lockEpoch })
+    const useLiveConnectors = JSON.stringify(copy.connectors) === JSON.stringify(state.connectors)
+    return writeSnapshot(() => {
+      // Permission copies take the current connector rows when their changes only touch other settings.
+      if (useLiveConnectors && state.connectors !== undefined) copy.connectors = state.connectors
+      else if (useLiveConnectors) delete copy.connectors
+      if (copy.revision < state.revision) copy.revision = copy.autoStamp = state.revision + 1
+      return copy
+    }, { required: true, durable, admitted, epoch: lockEpoch, afterWrite: () => {
+      if (copy.revision > state.revision) state.revision = state.autoStamp = copy.revision
+    } })
   }
 
-  const save = ({ required = false } = {}) => {
+  const save = ({ required = false, durable = false, copy, enableNativeTools, nativeToolsAgent } = {}) => {
+    if (copy !== undefined) return rt.saveCopy(copy.change, { durable, ...copy })
+    const admitted = durable ? rt.teamGeneration() : undefined
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
+    refreshShellHolds(state.bots)
     indexSessions()
     // A reading host keeps the file's revision, so its window does not skip the next change.
-    if (!writable()) return required ? Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`)) : writing
+    if (missingTeamHeld() || !writable()) return required ? Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`)) : writing
     return writeSnapshot(() => {
+      refreshShellHolds(state.bots)
       rt.sweepAuto?.()
       state.revision += 1
       state.autoStamp = state.revision
       state.version = STATE_VERSION
       state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
-      return JSON.stringify(state)
-    }, { required })
+      if (enableNativeTools === undefined) return state
+      // ON belongs to this write's encoding until the owner route receives its
+      // acknowledgement. Other saves continue to encode the live Bot record.
+      const bot = enableNativeTools
+      if (own(state.bots, bot.id) !== bot) throw refusal('The Bot team changed. Try again.')
+      // The commit point: ON is written for the agent the Bot runs on, or not at all.
+      if (nativeToolsAgent === undefined || effectiveMarkOf(bot) !== nativeToolsAgent) throw refusal('The Bot team changed. Try again.')
+      const enabled = { ...bot, nativeTools: true, nativeToolsAgent }
+      delete enabled.nativeToolsKept
+      return { ...state, bots: { ...state.bots, [bot.id]: enabled } }
+    }, { required, durable, admitted })
   }
 
-  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch } = {}) => {
+  let warnedCredentialSave = false
+  const writeSnapshot = (snapshotOf, { required = false, durable = false, admitted, epoch: copyEpoch, beforeCommit, afterPublish, afterWrite } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
+      if (missingTeamHeld()) {
+        if (required) throw new Error(`This host cannot save the Bot team: ${readOnly()}`)
+        return
+      }
       if (stuck !== undefined || holder !== undefined) {
         if (required) throw new Error(`This host cannot save the Bot team: ${readOnly()}`)
         warnReadOnly()
@@ -558,40 +939,85 @@ export function install(rt) {
       }
       const epoch = copyEpoch ?? lockEpoch
       // Ordinary saves use the adopted state, not a snapshot of the replaced team.
-      const snapshot = snapshotOf()
+      const generation = admitted ?? rt.teamGeneration()
       const temp = `${statePath}.${process.pid}.tmp`
+      let flush = durable
       try {
+        if (durable && sameGeneration(generation)) pendingDurability = generation
         await mkdir(home, { recursive: true })
         const ensureLock = () => {
-          if (lockBroken) return
-          const owned = lock.owns()
-          const current = stamp()
+          const owned = lockBroken || lock.owns()
+          const current = lockBroken ? '' : stamp()
           // An outside edit is adopted instead of overwritten; deletion can be saved again.
           const changed = owned && current !== '' && current !== seen
           if (changed) void adoptAfterReclaim().catch(() => {})
-          if (!owned || changed || lockEpoch !== epoch) {
+          if (!owned || changed || lockEpoch !== epoch || (flush && !sameGeneration(generation))) {
             const error = new Error(changed ? 'ds-bot: the Bot team file changed under this host\'s lock' : 'ds-bot lost the state lock to another dsh')
             error.code = 'ELOCKLOST'
+            rt.dropAllGrants?.()
             throw error
           }
         }
         ensureLock()
-        await writeFile(temp, snapshot, 'utf8')
-        ensureLock()
-        await replaceFile(temp, statePath, ensureLock)
+        const data = snapshotOf()
+        const recovery = recoveryFields(data)
+        flush ||= recovery !== savedRecovery || unconfirmedState !== undefined || sameGeneration(pendingDurability)
+        if (flush) {
+          ensureLock()
+          pendingDurability = generation
+        }
+        const snapshot = credentials.encode(data)
+        if (snapshot.refused) throw refusal(KEY_ERROR)
+        if (snapshot.pending && !warnedCredentialSave) {
+          warnedCredentialSave = true
+          warn('ds-bot: %s', KEY_ERROR)
+        }
+        await writeFile(temp, snapshot.bytes, 'utf8')
+        if (flush) await syncFile(temp)
+        const ensureKey = () => {
+          if (!snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
+        }
+        const ensureCommit = () => {
+          ensureLock()
+          const checked = beforeCommit?.()
+          if (typeof checked?.then === 'function') return checked.then(() => {
+            ensureLock()
+            ensureKey()
+          })
+          ensureKey()
+        }
+        const checked = ensureCommit()
+        if (checked !== undefined) await checked
+        await replaceFile(temp, statePath, ensureCommit)
+        // Even if the directory sync fails, this rename was ours. A later save
+        // can retry durability without mistaking the new stamp for an outside edit.
         seen = stamp()
+        savedRecovery = recovery
+        if (flush) {
+          pendingDurability = undefined
+          unconfirmedState = snapshot.bytes
+        }
+        afterPublish?.(lockEpoch === epoch)
+        if (flush) {
+          await syncDirectory(dirname(statePath))
+          unconfirmedState = undefined
+          ensureLock()
+        }
+        snapshot.commit()
+        afterWrite?.()
         // The file now holds this team, a fresh one after a corrupt file included.
         if (stuck === undefined) teamRead = true
         rt.capabilitiesStateSaved?.()
         for (const listener of savedListeners) {
           try { listener() } catch (error) { warn('omni-ui: saved listener failed: %s', error) }
         }
+        return true
       } catch (error) {
         await unlink(temp).catch(() => {})
         throw error
       }
     })
-    writing = run.catch(() => {})
+    writing = run.then(() => {}, () => {})
     return run.catch(error => {
       warn('omni-ui: state write failed: %s', error)
       throw error
@@ -600,7 +1026,7 @@ export function install(rt) {
 
   ctx.effect(() => () => {
     stopped = true
-    return writing.finally(() => lock.release())
+    return Promise.allSettled([writing, ...[...lockWaits].map(pending => pending())]).finally(() => lock.release())
   }, 'omni-ui: state lock')
 
   const botOf = id => (id === undefined ? undefined : own(state.bots, id))
@@ -643,21 +1069,22 @@ export function install(rt) {
   const restoreCurrent = () => {
     const registry = ctx.workspaceRegistry
     if (restoring !== undefined || readOnly() !== undefined || typeof registry?.unarchiveSession !== 'function') return
-    let archived
+    const leave = enterOwnership()
     try {
-      archived = new Set(registry.archivedSessionIds ?? [])
-    } catch {
-      return
+      let archived
+      try { archived = new Set(registry.archivedSessionIds ?? []) } catch { return }
+      const held = [...chatOwners.keys(), ...groupOwners.keys(), ...roomOwners.keys()].filter(id => archived.has(id) && botOf(selfOf(id))?.shellHeld === undefined)
+      if (held.length === 0) return
+      restoring = (async () => {
+        for (const sessionId of held) {
+          await registry.unarchiveSession(sessionId)
+            .then(() => warn('omni-ui: current Session %s was archived in DSH; taken back out', sessionId))
+            .catch(error => warn('omni-ui: current Session %s is archived in DSH and could not be taken out: %s', sessionId, error))
+        }
+      })().finally(() => { restoring = undefined; leave() })
+    } finally {
+      if (restoring === undefined) leave()
     }
-    const held = [...chatOwners.keys(), ...groupOwners.keys(), ...roomOwners.keys()].filter(id => archived.has(id))
-    if (held.length === 0) return
-    restoring = (async () => {
-      for (const sessionId of held) {
-        await registry.unarchiveSession(sessionId)
-          .then(() => warn('omni-ui: current Session %s was archived in DSH; taken back out', sessionId))
-          .catch(error => warn('omni-ui: current Session %s is archived in DSH and could not be taken out: %s', sessionId, error))
-      }
-    })().finally(() => { restoring = undefined })
   }
   const indexSessions = () => {
     chatOwners.clear()
@@ -665,9 +1092,9 @@ export function install(rt) {
     roomOwners.clear()
     pastOwners.clear()
     taskOwners.clear()
-    for (const run of state.subscriptionRuns ?? []) if (run.sessionId && run.botId && run.task) taskOwners.set(run.sessionId, { botId: run.botId })
+    for (const run of state.subscriptionRuns ?? []) if (run.sessionId && run.botId && run.task) taskOwners.set(run.sessionId, { botId: run.botId, ...(run.shellOffCli === true ? { shellOffCli: true } : {}) })
     for (const bot of Object.values(state.bots)) {
-      for (const segment of bot.segments ?? []) pastOwners.set(segment.sessionId, { botId: bot.id })
+      for (const segment of bot.segments ?? []) pastOwners.set(segment.sessionId, { botId: bot.id, ...(segment.shellOffCli === true ? { shellOffCli: true } : {}) })
       chatOwners.set(chatOf(bot.id), bot.id)
     }
     for (const room of Object.values(state.rooms)) {
@@ -675,7 +1102,7 @@ export function install(rt) {
       if (sessionId !== undefined) roomOwners.set(sessionId, room.id)
       for (const segment of room.parts ?? []) pastOwners.set(segment.sessionId, { roomId: room.id })
       for (const [botId, segments] of Object.entries(room.segments ?? {})) {
-        for (const segment of segments) pastOwners.set(segment.sessionId, { botId, roomId: room.id })
+        for (const segment of segments) pastOwners.set(segment.sessionId, { botId, roomId: room.id, ...(segment.shellOffCli === true ? { shellOffCli: true } : {}) })
       }
       for (const [botId, sessionId] of Object.entries(room.sessions ?? {})) groupOwners.set(sessionId, { botId, roomId: room.id })
     }
@@ -683,6 +1110,7 @@ export function install(rt) {
     // the scoped tools with this ownership (drops Sessions that left, scopes
     // live Agents that joined); both install after this.
     rt.indexAgents?.()
+    rt.roleRuntime?.reconcile?.()
     rt.syncScopedTools?.()
     restoreCurrent()
   }
@@ -691,30 +1119,101 @@ export function install(rt) {
   const selfOf = id => chatOwners.get(id) ?? groupOwners.get(id)?.botId ?? taskOwners.get(id)?.botId ?? pastOwners.get(id)?.botId
   // A Session where the Bot speaks now, as opposed to an archived segment.
   const isBotSession = id => chatOwners.has(id) || groupOwners.has(id) || taskOwners.has(id)
+  const assertShellChoice = (sessionId, botId) => {
+    const task = own(state.tasks, sessionId)
+    const owner = botOf(selfOf(sessionId) ?? task?.from)
+    const target = botOf(botId)
+    const held = owner?.shellHeld !== undefined ? owner : target?.shellHeld !== undefined ? target : undefined
+    if (held !== undefined) throw Object.assign(new Error(shellHoldText(held)), { code: 'bot/shell' })
+    if (owner?.shell === false && (pastOwners.get(sessionId)?.shellOffCli === true || task?.shellOffCli === true
+      || taskOwners.get(sessionId)?.shellOffCli === true)) {
+      throw Object.assign(new Error('This earlier Session was set aside when the Bot moved off its coding CLI.'), { code: 'bot/shell' })
+    }
+  }
   const groupSessionsOf = botId => Object.values(state.rooms).map(room => room.sessions?.[botId]).filter(Boolean)
-  const dropGroupSession = (room, botId) => {
+  // Ownership changes are counted from their first read until the last write.
+  let ownershipRuns = 0
+  const enterOwnership = () => {
+    ownershipRuns += 1
+    let left = false
+    return () => { if (!left) { left = true; ownershipRuns -= 1 } }
+  }
+  const plain = value => {
+    if (value === null || typeof value !== 'object') return false
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  }
+  // Scan raw ownership: the indexes may still describe the team before the drop.
+  // Per-Session records such as questions and views describe a Session without owning it.
+  const sessionNamed = (sessionId, room, botId) => {
+    const optionalId = value => value !== undefined && (typeof value !== 'string' || value === sessionId)
+    const listNames = (list, item) => {
+      if (list === undefined) return false
+      if (!Array.isArray(list)) return true
+      for (let i = 0; i < list.length; i += 1) {
+        if (!Object.hasOwn(list, i) || item(list[i])) return true
+      }
+      return false
+    }
+    const idNames = id => typeof id !== 'string' || id === sessionId
+    const parts = list => listNames(list, part => !plain(part) || idNames(part.sessionId))
+    const table = (value, item) => value !== undefined && (!plain(value) || Object.entries(value).some(([key, entry]) => key === sessionId || item(entry, key)))
+    if (!plain(state.bots) || !plain(state.rooms)) return true
+    if (table(state.bots, (bot, key) => !plain(bot) || bot.id !== key || optionalId(bot.sessionId) || parts(bot.segments))) return true
+    if (table(state.rooms, (other, key) => !plain(other) || other.id !== key || optionalId(other.sessionId) || parts(other.parts)
+      || table(other.sessions, entry => typeof entry !== 'string' || entry === sessionId) || table(other.segments, entry => parts(entry ?? null)))) return true
+    if (table(state.switching, owner => !plain(owner) || (owner.botId === undefined && owner.roomId === undefined)
+      || (owner.botId !== undefined && typeof owner.botId !== 'string') || (owner.roomId !== undefined && typeof owner.roomId !== 'string')
+      || (owner.botId === botId && owner.roomId === room.id))) return true
+    if (table(state.tasks, task => !plain(task)) || taskOwners.has(sessionId)) return true
+    if (listNames(state.subscriptionRuns, run => !plain(run) || optionalId(run.sessionId))) return true
+    return table(state.agents, agent => !plain(agent) || listNames(agent.sessions, idNames))
+  }
+  const seatAuthority = room => ownershipRuns === 0 && teamCurrent() && own(state.rooms, room.id) === room
+    && rt.holdsLock() === true && readOnly() === undefined
+  const seatEnded = (room, botId, options, sessionId) => {
+    if (!seatAuthority(room) || sessionNamed(sessionId, room, botId)) return undefined
+    const explicit = options !== undefined && Object.hasOwn(options, 'bot')
+    const member = explicit ? options.bot : botOf(botId)
+    if (member === undefined) return undefined
+    // Hooks can change the team synchronously, so validate ownership and authority again.
+    return () => {
+      const returns = rt.returnsTo?.(sessionId)
+      if (returns !== undefined && returns !== false) return undefined
+      const hooks = rt.extended?.sessionOwnerRead
+      if (hooks !== undefined && (typeof hooks !== 'function' || hooks(sessionId) !== 'free')) return undefined
+      if ((!explicit && botOf(botId) !== member) || sessionNamed(sessionId, room, botId) || !seatAuthority(room)) return undefined
+      return (owner, entry) => owner?.kind === 'group' && owner.room === room && owner.bot === member
+        && (entry.ownerSessionId ?? entry.sessionId) === sessionId ? 'group' : undefined
+    }
+  }
+  const dropGroupSession = (room, botId, options) => {
     if (room.memberDirs !== undefined) delete room.memberDirs[botId]
     const sessionId = room.sessions?.[botId]
     if (sessionId === undefined) return
     delete room.sessions[botId]
+    const readLabels = rt.prepareGroupApprovalCancel?.(sessionId, () => seatEnded(room, botId, options, sessionId))
     for (const segment of room.segments?.[botId] ?? []) delete state.switching[segment.sessionId]
     if (room.segments !== undefined) delete room.segments[botId]
     delete state.switching[sessionId]
     groupOwners.delete(sessionId)
-    rt.cancelApprovals?.(sessionId)
+    rt.cancelApprovals?.(sessionId, readLabels)
     // A plain archive refuses a running Session, which would go on working for a group
     // that no longer has it.
     void ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true }).catch(() => {})
+    rt.endGrants?.(sessionId, 'group')
   }
   // A group Session DSH can no longer open is set aside; the member's earlier parts in
   // the group stay, and its next turn there starts a new Session.
-  const retireGroupSession = (room, botId) => {
+  const retireGroupSession = (room, botId, options) => {
     const sessionId = room.sessions?.[botId]
     if (sessionId === undefined) return
     delete room.sessions[botId]
+    const readLabels = rt.prepareGroupApprovalCancel?.(sessionId, () => seatEnded(room, botId, options, sessionId))
     groupOwners.delete(sessionId)
-    rt.cancelApprovals?.(sessionId)
+    rt.cancelApprovals?.(sessionId, readLabels)
     void ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true }).catch(() => {})
+    rt.endGrants?.(sessionId, 'group')
   }
   const findBot = (ref) => {
     if (ref === undefined) return undefined
@@ -737,6 +1236,7 @@ export function install(rt) {
   // or was saved since: false before the first load, and after a file that could not be
   // read or was set aside as corrupt. It reads memory only.
   const teamLoaded = () => teamRead
+  const teamCurrent = () => adopting === undefined && stamp() === seen
 
   const savedListeners = new Set()
   const onSaved = (listener) => {
@@ -755,10 +1255,17 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    state, load, save, refresh, readOnly, teamLoaded, own, onSaved, closeCard,
+    state, load, save, refresh, readOnly, teamLoaded,
+    connectorCredentialsUnavailable: credentials.hasUnavailable,
+    retryConnectorCredentials: () => credentials.retry(state.connectors),
+    // The first read distinguishes an absent roster from a saved empty team.
+    teamHealth: () => teamPresentAtLoad !== null && teamRead && stuck === undefined && !aside
+      ? { present: teamPresentAtLoad, revision: state.revision, bots: Object.keys(state.bots).length } : null,
+    teamCurrent, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,
+    enterOwnership, ownershipBusy: () => ownershipRuns,
   })
 }
 

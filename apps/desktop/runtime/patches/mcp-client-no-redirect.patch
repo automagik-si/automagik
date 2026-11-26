@@ -1,0 +1,8 @@
+--- a/@deepseek-ai/dsh-mcp-client/lib/index.js
++++ b/@deepseek-ai/dsh-mcp-client/lib/index.js
+@@ -121 +121,4 @@
+-		case "streamable-http": return new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers } });
++		case "streamable-http": return new StreamableHTTPClientTransport(new URL(config.url), { requestInit: {
++			headers: config.headers,
++			redirect: "error"
++		} });

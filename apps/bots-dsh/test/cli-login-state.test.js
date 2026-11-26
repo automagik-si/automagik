@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createCliLogin } from '../src/client/cli-login-state.js'
-import { carriesKnownState, forgetKnownStates, rememberLinkState, DONE_MS, APPLY_FAILED_MS } from '../src/client/cli-login-model.js'
+import { carriesKnownState, forgetKnownStates, rememberCallbackState, rememberLinkState, DONE_MS, APPLY_FAILED_MS } from '../src/client/cli-login-model.js'
 import { teamActions } from '../src/client/team-actions.js'
 import { createSource, indexRoster } from '../src/client/sources.js'
 import { call } from '../src/client/api.js'
@@ -88,6 +88,36 @@ test('an explicit entry offers; Sign in starts; ready shows Done and leaves afte
   assert.deepEqual(login.getSnapshot().rows, {})
   assert.ok(!names().includes('cancel'))
   assert.ok(names().includes('refresh'), 'the model list is read again once signed in')
+})
+
+test('sign-in identity is stripped from the shared attempt view and copied onto finished rows', async () => {
+  const clock = manualTimers()
+  const { host, actions } = fakeHost()
+  const login = createCliLogin({ actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+  const provider = 'acp-codex'
+  const signedInAs = { ref: 'ref-work', kind: 'account', email: 'dev@example.test' }
+  await login.open({ botId: 'a', provider })
+  await login.start('a')
+  await login.open({ botId: 'b', provider })
+  host.attempt.signedInAs = signedInAs
+  await clock.advance(100)
+  const waiting = login.getSnapshot().rows
+  assert.equal(waiting.a.attempt, waiting.b.attempt)
+  assert.equal(Object.hasOwn(waiting.a.attempt, 'signedInAs'), false)
+
+  host.attempt.status = 'ready'
+  await clock.advance(100)
+  const done = login.getSnapshot().rows
+  for (const row of [done.a, done.b]) {
+    assert.equal(row.stage, 'done')
+    assert.equal(row.attempt, null)
+    assert.equal(row.account, undefined)
+    assert.deepEqual(row.signedInAs, signedInAs)
+    assert.notEqual(row.signedInAs, signedInAs)
+    assert.equal(Object.isFrozen(row.signedInAs), true)
+  }
+  await clock.advance(DONE_MS)
+  assert.deepEqual(login.getSnapshot().rows, {})
 })
 
 test('a model that could not be applied shows its reason and leaves after APPLY_FAILED_MS', async () => {
@@ -322,4 +352,336 @@ test('a sign-in row closes when its Bot\'s model moves to another provider, exce
   login.followModels()
   assert.equal(login.getSnapshot().rows.c.stage, 'attempt', 'the attempt is the CLI\'s, not the Bot\'s pick')
   login.dispose()
+})
+
+// ---- Antigravity in a Bot's chat (#2048, r6 parity) ------------------------------------------
+
+const AGY = 'acp-antigravity'
+const AGY_STATE = 'Ab-_.~xyz12345'
+const AGY_URL = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com'
+  + `&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${AGY_STATE}`
+const AGY_CALLBACK = `http://localhost:41234/auth/callback?code=4%2F0Abc&state=${AGY_STATE}`
+
+test('Antigravity: its row shows the link and the address field; the page learns its state; an expired attempt fails with the chat\'s sentence', async () => {
+  forgetKnownStates()
+  const clock = manualTimers()
+  const { actions, host, calls } = fakeHost()
+  actions.cliLoginStart = async (botId, provider) => {
+    calls.push(['start', botId, provider])
+    host.attempt = { id: provider, attemptId: 'attempt_000000000000000000000002', status: 'waiting', openedBy: botId, expiresAt: clock.now() + 240_000, expiresBy: 'app',
+      url: AGY_URL, prompt: { id: 'agy-callback', label: 'Sign-in address', secret: true } }
+    return { ...host.attempt }
+  }
+  actions.cliLoginAnswer = async (botId, provider, attemptId, value) => {
+    calls.push(['answer', provider, value])
+    host.attempt = { ...host.attempt, checking: true }
+    delete host.attempt.prompt
+    return { ...host.attempt }
+  }
+  const login = createCliLogin({ actions, timers: clock.timers, now: clock.now })
+  await login.open({ botId: 'a', provider: AGY })
+  assert.equal(login.getSnapshot().rows.a.stage, 'offer')
+  await login.start('a')
+  const row = login.getSnapshot().rows.a
+  assert.equal(row.stage, 'attempt')
+  assert.equal(row.attempt.url, AGY_URL)
+  assert.equal(row.attempt.prompt.id, 'agy-callback')
+  // The address it ends on is refused in a message from now on; the link itself is not.
+  assert.equal(carriesKnownState(`here: ${AGY_CALLBACK}`), true)
+  assert.equal(carriesKnownState(AGY_URL), false)
+  assert.equal(await login.answer('a', AGY_CALLBACK), true)
+  assert.deepEqual(calls.find(call => call[0] === 'answer'), ['answer', AGY, AGY_CALLBACK])
+  assert.equal(login.getSnapshot().rows.a.attempt.checking, true)
+  assert.ok(!JSON.stringify(login.getSnapshot()).includes('4%2F0Abc'), 'the address is never kept')
+  // acp-dsh ended it as expired: the chat's own sentence.
+  host.attempt = { ...host.attempt, status: 'expired', message: 'This sign-in expired. Start again.' }
+  delete host.attempt.checking
+  await clock.advance(1500)
+  assert.equal(login.getSnapshot().rows.a.stage, 'failed')
+  assert.equal(login.getSnapshot().rows.a.message, 'This sign-in expired. Start again.')
+  login.dispose()
+  assert.equal(rememberCallbackState('https://accounts.google.com/o/oauth2/v2/auth?state=short'), false)
+  assert.equal(rememberCallbackState(`${AGY_URL}&state=again-0001`), false, 'one state only')
+  forgetKnownStates()
+})
+
+test('restore asks for an Antigravity attempt too; none adds nothing, one this Bot opened comes back', async () => {
+  const clock = manualTimers()
+  const { actions, calls } = fakeHost()
+  const page = createCliLogin({ actions, timers: clock.timers, now: clock.now })
+  await page.restore('a')
+  assert.deepEqual(calls.filter(call => call[0] === 'current').map(call => call[2]), ['acp-codex', 'acp-claude', AGY])
+  assert.deepEqual(page.getSnapshot().rows, {})
+  page.dispose()
+  const live = fakeHost()
+  live.actions.cliLoginCurrent = async (botId, provider) => (provider === AGY
+    ? { id: provider, attempt: { id: provider, attemptId: 'attempt_000000000000000000000003', status: 'waiting', openedBy: 'b', url: AGY_URL } }
+    : { id: provider, attempt: null })
+  const other = createCliLogin({ actions: live.actions, timers: clock.timers, now: clock.now })
+  await other.restore('b')
+  assert.equal(other.getSnapshot().rows.b.provider, AGY)
+  assert.equal(other.getSnapshot().rows.b.stage, 'attempt')
+  other.dispose()
+  forgetKnownStates()
+})
+
+test('Antigravity guard, client copy: run-wise decode, authority end and the cap, as the host (G8-3, G8-4)', () => {
+  forgetKnownStates()
+  const S = 'Ab-_.~xyz12345'
+  assert.equal(rememberCallbackState('https://accounts.google.com/o/oauth2/v2/auth?client_id=c'
+    + `&redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback&response_type=code&state=${S}`), true)
+  const cb = `http://localhost:41234/auth/callback?code=x&state=${S}`
+  const first = 'https://accounts.google.com/o/oauth2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A41234%2Fauth%2Fcallback'
+    + `&access_type=offline&state=${S}&client_id=c`
+  for (const text of [
+    `${cb.replace('~', '%7E')} worked 100% done`,
+    first.replace('accounts.google.com', 'accounts.google.com:443'),
+    first.replace('accounts.google.com', 'x!@accounts.google.com'),
+    `${first} then ${cb}`,
+    `${'state=x '.repeat(63)}${cb}`,
+  ]) assert.equal(carriesKnownState(text), true, text)
+  for (const text of [
+    first,
+    first.replace('accounts.google.com', 'ACCOUNTS.GOOGLE.COM'),
+    `https://accounts.google.com\\x?state=${S}`,
+    `${'state=x '.repeat(64)}${cb}`,
+    'state=%E0%A4%A and %zz',
+  ]) assert.equal(carriesKnownState(text), false, text)
+  forgetKnownStates()
+})
+
+// #2064: Switch account. The host's switch hands back its own attempt; the row reads it by id.
+const SWITCH_ID = 'attempt_000000000000000000000002'
+const AGAIN_ID = 'attempt_000000000000000000000003'
+const UNCHANGED = 'The account did not change. Try again.'
+function switchHost(now = Date.now) {
+  const base = fakeHost(now)
+  const { host, calls } = base
+  host.byId = new Map()
+  host.switches = []
+  host.switchError = null
+  const keep = view => { host.byId.set(view.attemptId, view); return view }
+  const actions = {
+    ...base.actions,
+    cliLoginSwitch: async (botId, provider) => {
+      calls.push(['switch', botId, provider])
+      if (host.switchError) throw host.switchError
+      const view = host.switches.shift()
+      if (view === undefined) return { id: provider, signedIn: false }
+      keep(view)
+      if (['starting', 'waiting'].includes(view.status)) host.attempt = view
+      return { ...view, signedIn: false }
+    },
+    cliLoginStatus: async (botId, provider, attemptId) => {
+      calls.push(['status', botId, provider, attemptId])
+      if (host.endedError) throw host.endedError
+      const view = host.byId.get(attemptId) ?? (host.attempt?.attemptId === attemptId ? host.attempt : undefined)
+      if (view === undefined) throw Object.assign(new Error('This sign-in ended. Start again.'), { code: 'bot/login-ended' })
+      return { ...view }
+    },
+  }
+  return { ...base, actions, keep }
+}
+const freshFailed = (attemptId, extra = {}) => ({ id: 'acp-codex', attemptId, status: 'failed', fresh: true, signedInAfter: true, message: UNCHANGED, ...extra })
+async function switchedRow(extra = {}) {
+  const clock = manualTimers()
+  const h = switchHost(clock.now)
+  const login = createCliLogin({ actions: h.actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+  h.host.switches.push(freshFailed(SWITCH_ID, extra))
+  const switched = await h.actions.cliLoginSwitch('a', 'acp-codex')
+  await login.open({ botId: 'a', provider: 'acp-codex', attemptId: switched.attemptId })
+  h.calls.length = 0
+  return { clock, ...h, login, row: () => login.getSnapshot().rows.a }
+}
+
+test('a Switch that ends on the same account: done, saying so with its account, gone after DONE_MS (B2)', async () => {
+  const clock = manualTimers()
+  const { host, actions } = fakeHost(clock.now)
+  const login = createCliLogin({ actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+  const signedInAs = { ref: 'ref-work', kind: 'account', email: 'dev@example.test' }
+  await login.open({ botId: 'a', provider: 'acp-codex' })
+  await login.start('a')
+  Object.assign(host.attempt, { status: 'ready', fresh: true, sameAccount: true, signedInAs })
+  await clock.advance(100)
+  const row = login.getSnapshot().rows.a
+  assert.equal(row.stage, 'done')
+  assert.equal(row.sameAccount, true)
+  assert.deepEqual(row.signedInAs, signedInAs)
+  await clock.advance(DONE_MS)
+  assert.deepEqual(login.getSnapshot().rows, {})
+  // A plain ready never carries it.
+  await login.open({ botId: 'b', provider: 'acp-codex' })
+  host.attempt = null
+  await login.start('b')
+  host.attempt.status = 'ready'
+  await clock.advance(100)
+  assert.equal(login.getSnapshot().rows.b.stage, 'done')
+  assert.equal(login.getSnapshot().rows.b.sameAccount, undefined)
+})
+
+test('a switch that already failed is read by its id: failed and switched with its own words, never the offer (B12)', async () => {
+  const h = await switchedRow()
+  const row = h.row()
+  assert.equal(row.stage, 'failed')
+  assert.equal(row.switched, true)
+  assert.equal(row.stillSignedIn, true)
+  assert.equal(row.message, UNCHANGED)
+  assert.equal(h.calls.length, 0)
+  // Without an id (a host from before it), the current attempt is joined as before.
+  const plain = switchHost()
+  const login = createCliLogin({ actions: plain.actions, timers: manualTimers().timers })
+  await login.open({ botId: 'a', provider: 'acp-codex' })
+  assert.equal(login.getSnapshot().rows.a.stage, 'offer')
+  assert.deepEqual(plain.calls.map(call => call[0]), ['current'])
+})
+
+test('Try again after a failed switch asks first, then switches again and reads that attempt (B6)', async () => {
+  const h = await switchedRow()
+  h.login.askSwitch('a')
+  assert.equal(h.row().confirm, true)
+  assert.deepEqual(h.calls, [], 'asking calls nothing')
+  h.login.keepAttempt('a')
+  assert.equal(h.row().confirm, false)
+  h.login.askSwitch('a')
+  h.host.switches.push({ id: 'acp-codex', attemptId: AGAIN_ID, status: 'waiting', fresh: true, url: 'https://auth.openai.com/codex/device', userCode: 'ABCD-1234' })
+  assert.equal(await h.login.switchAgain('a'), true)
+  const row = h.row()
+  assert.equal(row.stage, 'attempt')
+  assert.equal(row.attempt.attemptId, AGAIN_ID)
+  assert.equal(row.switched, undefined)
+  assert.equal(row.stillSignedIn, undefined)
+  assert.equal(row.confirm, false)
+  assert.deepEqual(h.calls.filter(call => call[0] !== 'refresh'), [['switch', 'a', 'acp-codex'], ['status', 'a', 'acp-codex', AGAIN_ID]])
+})
+
+test('a plain failure keeps the plain Try again: a sign-in, never a switch (B7)', async () => {
+  const clock = manualTimers()
+  const h = switchHost(clock.now)
+  const login = createCliLogin({ actions: h.actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+  await login.open({ botId: 'a', provider: 'acp-codex' })
+  await login.start('a')
+  h.host.attempt.status = 'failed'
+  h.host.attempt.message = 'Sign-in did not finish. Try again.'
+  await clock.advance(100)
+  assert.equal(login.getSnapshot().rows.a.stage, 'failed')
+  h.calls.length = 0
+  await login.start('a')
+  assert.deepEqual(h.calls.map(call => call[0]), ['start'])
+})
+
+test('a refused repeat keeps the failed switched row with the host sentence (B8)', async () => {
+  const h = await switchedRow()
+  h.login.askSwitch('a')
+  const sentence = 'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.'
+  h.host.switchError = Object.assign(new Error(sentence), { code: 'bot/refused' })
+  assert.equal(await h.login.switchAgain('a'), false)
+  const row = h.row()
+  assert.equal(row.stage, 'failed')
+  assert.equal(row.switched, true)
+  assert.equal(row.stillSignedIn, true)
+  assert.equal(row.confirm, false)
+  assert.equal(row.busy, false)
+  assert.equal(row.error, sentence)
+  assert.ok(!h.calls.some(call => call[0] === 'start'))
+})
+
+test('a switch attempt gone from the host: expired fails switched, a restart interrupts with no switch (B9)', async () => {
+  for (const [expired, stage] of [[true, 'failed'], [false, 'interrupted']]) {
+    for (const fresh of [true, false]) {
+      const clock = manualTimers()
+      const h = switchHost(clock.now)
+      const login = createCliLogin({ actions: h.actions, timers: clock.timers, now: () => (expired ? clock.now() + 3_600_000 : clock.now()), pollMs: 100 })
+      const live = h.keep({ id: 'acp-codex', attemptId: SWITCH_ID, status: 'waiting', expiresAt: clock.now() + 600_000, url: 'https://auth.openai.com/codex/device', userCode: 'ABCD-1234', ...(fresh ? { fresh: true } : {}) })
+      h.host.attempt = live
+      await login.open({ botId: 'a', provider: 'acp-codex', attemptId: SWITCH_ID })
+      assert.equal(login.getSnapshot().rows.a.stage, 'attempt')
+      h.host.endedError = Object.assign(new Error('This sign-in ended. Start again.'), { code: 'bot/login-ended' })
+      await clock.advance(100)
+      await flush()
+      const row = login.getSnapshot().rows.a
+      assert.equal(row.stage, stage, `${expired} ${fresh}`)
+      assert.equal(row.switched, fresh && expired ? true : undefined, `${expired} ${fresh}`)
+      if (fresh && expired) assert.equal(row.stillSignedIn, false)
+    }
+  }
+})
+
+test('after a failed switch, a plain sign-in that fails is not a switch (B10)', async () => {
+  const h = await switchedRow({ signedInAfter: false })
+  assert.equal(h.row().stillSignedIn, false)
+  await h.login.start('a')
+  assert.equal(h.row().stage, 'attempt')
+  assert.equal(h.row().switched, undefined)
+  h.host.attempt.status = 'failed'
+  h.host.attempt.message = 'Sign-in did not finish. Try again.'
+  await h.clock.advance(100)
+  assert.equal(h.row().stage, 'failed')
+  assert.equal(h.row().switched, undefined)
+  assert.equal(h.row().stillSignedIn, undefined)
+  h.login.askSwitch('a')
+  assert.equal(h.row().confirm, false)
+  assert.equal(await h.login.switchAgain('a'), false)
+  assert.ok(!h.calls.some(call => call[0] === 'switch'))
+})
+
+test('a repeated switch that fails fast shows its own failure, not the earlier one (B13)', async () => {
+  const h = await switchedRow({ message: 'The CLI exited before the sign-in finished. Try again.' })
+  h.login.askSwitch('a')
+  h.host.switches.push(freshFailed(AGAIN_ID))
+  assert.equal(await h.login.switchAgain('a'), true)
+  const row = h.row()
+  assert.equal(row.stage, 'failed')
+  assert.equal(row.switched, true)
+  assert.equal(row.message, UNCHANGED)
+  assert.ok(!h.calls.some(call => call[0] === 'start' || call[0] === 'current'))
+  assert.deepEqual(h.calls.find(call => call[0] === 'status'), ['status', 'a', 'acp-codex', AGAIN_ID])
+})
+
+test('a settling switch stays an attempt, busy and polled, until its read says what to offer (B16)', async () => {
+  for (const after of [true, false]) {
+    const clock = manualTimers()
+    const h = switchHost(clock.now)
+    const login = createCliLogin({ actions: h.actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+    h.host.switches.push({ id: 'acp-codex', attemptId: SWITCH_ID, status: 'expired', fresh: true, settling: true, message: 'This sign-in expired. Start again.' })
+    await login.open({ botId: 'a', provider: 'acp-codex', attemptId: (await h.actions.cliLoginSwitch('a', 'acp-codex')).attemptId })
+    let row = login.getSnapshot().rows.a
+    assert.equal(row.stage, 'attempt')
+    assert.equal(row.busy, true)
+    assert.equal(row.attempt.url, undefined)
+    h.host.byId.set(SWITCH_ID, { id: 'acp-codex', attemptId: SWITCH_ID, status: 'expired', fresh: true, signedInAfter: after, message: 'This sign-in expired. Start again.' })
+    h.calls.length = 0
+    await clock.advance(100)
+    assert.deepEqual(h.calls[0], ['status', 'a', 'acp-codex', SWITCH_ID], 'it is polled by its id')
+    row = login.getSnapshot().rows.a
+    assert.equal(row.stage, 'failed')
+    assert.equal(row.busy, false)
+    assert.equal(row.switched, true)
+    assert.equal(row.stillSignedIn, after)
+    login.askSwitch('a')
+    assert.equal(login.getSnapshot().rows.a.confirm, after)
+    if (!after) {
+      h.calls.length = 0
+      await login.start('a')
+      assert.deepEqual(h.calls.map(call => call[0]), ['start'])
+    }
+  }
+  // A cancelled switch closes its row, settling or not.
+  const clock = manualTimers()
+  const h = switchHost(clock.now)
+  const login = createCliLogin({ actions: h.actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+  h.keep({ id: 'acp-codex', attemptId: SWITCH_ID, status: 'cancelled', fresh: true, settling: true })
+  await login.open({ botId: 'a', provider: 'acp-codex', attemptId: SWITCH_ID })
+  assert.deepEqual(login.getSnapshot().rows, {})
+})
+
+test('openCliLogin hands a switch\'s attempt to the row; without one the call is as before (B14)', () => {
+  const roster = createSource(indexRoster({ bots: [{ id: 'a', name: 'A', model: 'acp-codex/default' }], rooms: [], agents: [], models: [], prefs: {} }))
+  const opened = []
+  const manager = { open: (options) => { opened.push(options); return Promise.resolve(true) } }
+  const actions = teamActions({ call: async () => {}, after: value => value, partFor: id => id, roster, ui: createSource({}), openSession: () => {}, loginState: () => manager })
+  assert.equal(actions.openCliLogin('a', 'acp-codex', undefined, SWITCH_ID), true)
+  assert.equal(actions.openCliLogin('a', 'acp-codex'), true)
+  assert.equal(actions.openCliLogin('a', 'acp-codex', undefined, 7), true)
+  assert.deepEqual(opened, [{ botId: 'a', provider: 'acp-codex', ref: undefined, attemptId: SWITCH_ID },
+    { botId: 'a', provider: 'acp-codex', ref: undefined }, { botId: 'a', provider: 'acp-codex', ref: undefined }])
 })

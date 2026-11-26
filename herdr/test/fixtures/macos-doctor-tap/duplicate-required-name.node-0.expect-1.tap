@@ -1,0 +1,14 @@
+TAP version 13
+# Subtest: macOS doctor warns on approved on with working on or off, and names the inspected project
+ok 1 - macOS doctor warns on approved on with working on or off, and names the inspected project
+# Subtest: macOS doctor keeps existing observations for approval controls
+ok 2 - macOS doctor keeps existing observations for approval controls
+# Subtest: macOS doctor keeps the bound pane's proxy health and rollback warning
+ok 3 - macOS doctor keeps the bound pane's proxy health and rollback warning
+# Subtest: macOS doctor's project word escapes a newline and ESC
+ok 4 - macOS doctor's project word escapes a newline and ESC
+# Subtest: macOS doctor renders the warning in JSON and text with invariant exit codes
+ok 5 - macOS doctor renders the warning in JSON and text with invariant exit codes
+# Subtest: macOS doctor warns on approved on with working on or off, and names the inspected project
+ok 6 - macOS doctor warns on approved on with working on or off, and names the inspected project
+1..6

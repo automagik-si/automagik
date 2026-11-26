@@ -5,7 +5,8 @@
 // A fake ACP agent for tests. Each prompt: two text chunks, one shell-like tool call that asks
 // permission first, then a line saying whether it ran. A prompt that says "twice" makes two
 // calls; one that says "hang" waits until it is cancelled; one that says "bridge <tool>" calls
-// that tool on the `dsh` MCP server it was given and reports what it answered; one that says
+// that tool on the `dsh` MCP server it was given and reports what it answered. "bridge-respawn
+// <tool>" restarts that server first, and "bridge-drop" closes it. One that says
 // "drift" announces a built-in tool call (a call `tools: []` should have removed) and waits;
 // one that says "image-call" makes an image the way Codex's image tool reports it.
 //
@@ -26,6 +27,7 @@
 // list starts with a "default" row, as Claude Code's does; FAKE_ACP_NO_DEFAULT_EFFORT=1 leaves it
 // out, as Codex's does. FAKE_ACP_AUTH=session (or prompt) refuses `session/new` (or every
 // prompt) with ACP's auth_required, as an adapter whose CLI is signed out does.
+// FAKE_ACP_EXTRA_EFFORT adds an effort only to fake-small.
 //
 // As a native agent's CLI (a command started with `acp`, #959): FAKE_ACP_SESSION_MODELS=1 offers
 // its models only as the session's own list (`models` in the `session/new` answer, switched
@@ -43,23 +45,69 @@
 // traces `own-tool-ran` with the mode it ran in; "unasked twice" runs two.
 // FAKE_ACP_REFUSE_MODES=a,b refuses those session/set_mode requests with invalidParams.
 // FAKE_ACP_IGNORE_CANCEL=1 makes it ignore `session/cancel`, as a stuck agent would.
-import { spawn } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+//
+// As codex-acp (#1564 PR B): FAKE_ACP_MODELS=a,b,c offers those model slugs instead of the fake
+// ones (each with low/medium/high efforts) and FAKE_ACP_START_MODEL picks the one a session
+// starts on. "codex-bridge <tool> [<json arguments>]" calls a bridge tool the way codex-acp
+// reports one (kind execute, `rawInput.server`, `_meta.is_mcp_tool_call`, no name);
+// "codex-edit-ask" is its patch call (an edit `tool_call`, then a permission request; the patch
+// runs only when allowed); "codex-subagent" starts one of its own sub-agents (no permission);
+// "codex-reader <server> <tool>" is one of its MCP resource readers.
+//
+// As an agent with its own home that signs in over ACP (Antigravity, #2048):
+// FAKE_ACP_AUTH_METHODS=a,b offers those `authMethods` ids in `initialize`. FAKE_ACP_AUTH=file
+// refuses `session/new` with auth_required unless `$HOME/.gemini/fake-signed-in` exists, and
+// `authenticate` with an offered id writes that file (the sign-in lives in its HOME only);
+// FAKE_ACP_AUTH_FAIL=1 makes `authenticate` fail instead. FAKE_ACP_AUTH_STDERR is printed on
+// stderr when `authenticate` starts (a sign-in link, as agy may print one), and
+// FAKE_ACP_AUTH_HOLD=1 then keeps `authenticate` waiting, as for a person in the browser.
+// FAKE_ACP_ENV_FILE appends, at start, the names of the variables it was given and the values
+// of its home variables only (HOME, USERPROFILE, the XDG folders, CODEX_HOME and the Claude
+// folders), of the D-Bus address, and its PATH (`path`) with its first entry (`pathHead`).
+// FAKE_ACP_LOGOUT=1 advertises `agentCapabilities.auth.logout` and answers `logout`
+// (traced as `logout` with its HOME).
+// FAKE_ACP_AUTH_OPEN=<url> stands for agy's browser opener call during `authenticate`: it runs
+// the opener named FAKE_ACP_OPENER (default `xdg-open`) with that URL, only from the first PATH
+// entry and only when that entry is an attempt's stand-in folder (`/sign-in/<uuid>/bin`), so a
+// test never starts a real browser, and traces `opener` with whether it found one.
+// FAKE_ACP_AUTH_LISTEN=1 stands for agy's own sign-in listener (#2048, paste-back): during
+// `authenticate` it listens on 127.0.0.1 (a free port), builds Google's link with
+// `redirect_uri=http://localhost:<port>/auth/callback` and a random state, hands it to the
+// opener as FAKE_ACP_AUTH_OPEN does, and traces `listen` with the port. A GET of that path with
+// the right state and one code answers 200 and signs in; any other answers 400 and it keeps
+// waiting (FAKE_ACP_AUTH_ANSWER=400 answers 400 to every GET). Each GET is traced as `callback`
+// with whether it was right, never its code. The listener closes when `authenticate` ends.
+// FAKE_ACP_AUTH_WINDOW_MS=<n> rejects `authenticate` after n ms (agy ending its own wait), and
+// FAKE_ACP_AUTH_EXIT=1 exits with 1 right after printing FAKE_ACP_AUTH_STDERR.
+// As agy (#1564, native tools off): FAKE_ACP_AGENT_VERSION answers that `agentInfo.version` at
+// `initialize`. FAKE_ACP_AGY_LOG names a JSON file read at each `session/new`: `{ lines }` are
+// written, before the answer, to agy's own log for this process,
+// `$HOME/.gemini/antigravity-cli/<--cli_dir_name>/log/acp-server-<local YYYYMMDD_HHMMSS>-<pid>.log`;
+// `{ late: { ms, lines } }` appends more that long after the answer; no `lines` writes none;
+// `old`, `stampDaysBack`, `link` and `fifo` are described where it writes (agyLog).
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { createServer } from 'node:http'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from './serve-agent.mjs'
 
-const MODELS = [
+const EXTRA_EFFORT = process.env.FAKE_ACP_EXTRA_EFFORT
+const MODELS = process.env.FAKE_ACP_MODELS ? process.env.FAKE_ACP_MODELS.split(',').filter(Boolean).map(value => ({ value, name: value, efforts: ['low', 'medium', 'high'], effort: 'medium' })) : [
   { value: 'fake-large', name: 'Fake Large', efforts: ['low', 'medium', 'high'], effort: 'medium' },
-  { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high'], effort: 'low' },
+  { value: 'fake-small', name: 'Fake Small', description: 'Quick and cheap', efforts: ['low', 'high', ...(EXTRA_EFFORT ? [EXTRA_EFFORT] : [])], effort: 'low' },
   { value: 'fake-plain', name: 'Fake Plain', efforts: [], effort: undefined },
 ]
+const START_MODEL = MODELS.find(entry => entry.value === process.env.FAKE_ACP_START_MODEL) ?? MODELS[0]
 const OFFERS = process.env.FAKE_ACP_NO_OPTIONS !== '1'
 const DEFAULT_ROW = process.env.FAKE_ACP_NO_DEFAULT_EFFORT === '1' ? [] : [{ value: 'default', name: 'Default' }]
 const SKIP_MCP = process.env.FAKE_ACP_SKIP_MCP === '1'
 const AUTH = process.env.FAKE_ACP_AUTH
 // A test can read what the client asked for (its servers, a fork, a close) from this file.
 const TRACE = process.env.FAKE_ACP_TRACE
+const SKILLS_PROBE = JSON.parse(process.env.FAKE_ACP_SKILLS_PROBE ?? 'null')
 const trace = (entry) => {
   if (TRACE === undefined) return
   try { appendFileSync(TRACE, `${JSON.stringify({ pid: process.pid, ...entry })}\n`) } catch {}
@@ -67,6 +115,20 @@ const trace = (entry) => {
 const MODES = (process.env.FAKE_ACP_MODES ?? '').split(',').filter(Boolean)
 const SESSION_MODELS = process.env.FAKE_ACP_SESSION_MODELS === '1'
 trace({ event: 'start', args: process.argv.slice(2) })
+const AUTH_METHODS = (process.env.FAKE_ACP_AUTH_METHODS ?? '').split(',').filter(Boolean)
+const SIGNED_IN = () => join(process.env.HOME ?? '', '.gemini', 'fake-signed-in')
+if (process.env.FAKE_ACP_ENV_FILE !== undefined) {
+  const shown = ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME',
+    'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR', 'DBUS_SESSION_BUS_ADDRESS']
+  const names = Object.keys(process.env).filter(name => !name.startsWith('FAKE_ACP_') && name !== 'ACP_TRACE_FILE').sort()
+  try {
+    appendFileSync(process.env.FAKE_ACP_ENV_FILE, `${JSON.stringify({
+      pid: process.pid, cwd: process.cwd(), names,
+      path: process.env.PATH ?? null, pathHead: (process.env.PATH ?? '').split(delimiter)[0],
+      values: Object.fromEntries(shown.filter(name => name in process.env).map(name => [name, process.env[name]])),
+    })}\n`)
+  } catch {}
+}
 const modesOf = session => (MODES.length === 0 ? {} : { modes: { currentModeId: session.mode, availableModes: MODES.map(id => ({ id, name: id })) } })
 // What a `session/new` answer says of models and modes, in either shape.
 const offersOf = session => ({
@@ -94,6 +156,17 @@ function connect(server, sessionId) {
   child.stdin.on('error', () => {})
   let seq = 0
   const pending = new Map()
+  let failure
+  const exited = new Promise(resolve => {
+    const end = error => {
+      failure = error
+      for (const { reject } of pending.values()) reject(error)
+      pending.clear()
+      resolve()
+    }
+    child.once('error', end)
+    child.once('exit', (code, signal) => end(new Error(`${server.name} exited (${signal ?? code})`)))
+  })
   let buffer = ''
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', (chunk) => {
@@ -114,12 +187,14 @@ function connect(server, sessionId) {
       const waiter = pending.get(message.id)
       if (waiter === undefined) continue
       pending.delete(message.id)
-      waiter(message)
+      if (message.error === undefined) waiter.resolve(message.result)
+      else waiter.reject(new Error(message.error.message))
     }
   })
   const request = (method, params) => new Promise((resolve, reject) => {
+    if (failure !== undefined) return reject(failure)
     const id = ++seq
-    pending.set(id, (message) => (message.error === undefined ? resolve(message.result) : reject(new Error(message.error.message))))
+    pending.set(id, { resolve, reject })
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
   })
   const notify = (method, params) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`)
@@ -129,19 +204,34 @@ function connect(server, sessionId) {
     const listed = await request('tools/list', {})
     return Array.isArray(listed?.tools) ? listed.tools : []
   })()
-  return { name: server.name, child, request, tools: ready, close: () => { try { child.stdin.end() } catch {} ; try { child.kill('SIGTERM') } catch {} } }
+  const stop = () => {
+    child.stdin.end()
+    return exited
+  }
+  const close = () => {
+    try { child.stdin.end() } catch {}
+    try { child.kill('SIGTERM') } catch {}
+  }
+  return { request, tools: ready, stop, close }
+}
+
+async function attachServer(session, server, sessionId) {
+  const connection = connect(server, sessionId)
+  session.mcp.set(server.name, connection)
+  const tools = await connection.tools.catch(() => [])
+  session.listed?.set(server.name, tools.map(tool => tool?.name))
+  trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name),
+    ...(SKILLS_PROBE && { definitions: tools }) })
 }
 
 async function attach(session, servers, sessionId) {
   session.mcp = new Map()
   if (SKIP_MCP) return
   for (const server of servers ?? []) {
-    const connection = connect(server, sessionId)
-    session.mcp.set(server.name, connection)
-    const tools = await connection.tools.catch(() => [])
+    if (server.name === 'dsh') session.dshServer = server
     // The adapter's first `tools/list` for this session, before its `session/new` (or fork)
     // answer: the delivery 6 probes read this order from the trace.
-    trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name) })
+    await attachServer(session, server, sessionId)
   }
 }
 
@@ -174,8 +264,42 @@ const stream = hearing(ndJsonStream(Writable.toWeb(process.stdout), Readable.toW
 const sessions = new Map()
 let created = 0
 
+// agy's own per-process log (FAKE_ACP_AGY_LOG, above).
+function agyLog() {
+  const control = process.env.FAKE_ACP_AGY_LOG
+  if (control === undefined) return
+  let wanted
+  try { wanted = JSON.parse(readFileSync(control, 'utf8')) } catch { return }
+  const at = process.argv.indexOf('--cli_dir_name')
+  const dir = join(process.env.HOME ?? '', '.gemini', 'antigravity-cli', ...(at >= 0 ? [process.argv[at + 1]] : []), 'log')
+  const two = value => String(value).padStart(2, '0')
+  const stamp = date => `${date.getFullYear()}${two(date.getMonth() + 1)}${two(date.getDate())}_${two(date.getHours())}${two(date.getMinutes())}${two(date.getSeconds())}`
+  const day = 24 * 60 * 60 * 1000
+  const nameAt = daysBack => join(dir, `acp-server-${stamp(new Date(Date.now() - daysBack * day))}-${process.pid}.log`)
+  const text = lines => lines.map(line => `${line}\n`).join('')
+  mkdirSync(dir, { recursive: true })
+  // `{ old: { lines } }`: an older file of the same pid (another day's stamp and file time).
+  if (wanted?.old !== undefined) {
+    const file = nameAt(1)
+    appendFileSync(file, text(wanted.old.lines))
+    const then = new Date(Date.now() - day)
+    utimesSync(file, then, then)
+  }
+  // `{ stampDaysBack }`: this run's own file named with a stamp that many days back, as a clock in
+  // another zone would name it; its file time is now.
+  const file = nameAt(wanted?.stampDaysBack ?? 0)
+  // `{ link: target }` / `{ fifo: true }`: the process's file is a symlink, or a FIFO.
+  if (typeof wanted?.link === 'string') { symlinkSync(wanted.link, file); return }
+  if (wanted?.fifo === true) { execFileSync('mkfifo', [file]); return }
+  if (!Array.isArray(wanted?.lines)) return
+  appendFileSync(file, text(wanted.lines))
+  if (wanted.late !== undefined) {
+    setTimeout(() => { try { appendFileSync(file, text(wanted.late.lines)) } catch {} }, wanted.late.ms)
+  }
+}
+
 function newSession(sessionId, cwd) {
-  const session = { cwd, cancelled: false, turns: 0, model: MODELS[0].value, effort: MODELS[0].effort, mode: MODES[0], mcp: new Map() }
+  const session = { cwd, cancelled: false, turns: 0, model: START_MODEL.value, effort: START_MODEL.effort, mode: MODES[0], mcp: new Map() }
   sessions.set(sessionId, session)
   return session
 }
@@ -184,14 +308,96 @@ const implementation = {
   async initialize() {
     // FAKE_ACP_PROTOCOL answers another protocol version, as an adapter built for a later ACP does.
     const protocolVersion = process.env.FAKE_ACP_PROTOCOL === undefined ? PROTOCOL_VERSION : Number(process.env.FAKE_ACP_PROTOCOL)
-    return { protocolVersion, agentCapabilities: { loadSession: false }, authMethods: [] }
+    const agentCapabilities = {
+      loadSession: false,
+      ...(process.env.FAKE_ACP_SYSTEM_PROMPT === '1'
+        ? { sessionCapabilities: { systemPrompt: {} } } : {}),
+    }
+    if (process.env.FAKE_ACP_LOGOUT === '1') agentCapabilities.auth = { logout: {} }
+    return {
+      protocolVersion, agentCapabilities, authMethods: AUTH_METHODS.map(id => ({ id, name: id })),
+      ...(process.env.FAKE_ACP_AGENT_VERSION === undefined ? {} : { agentInfo: { name: 'Fake ACP Server', version: process.env.FAKE_ACP_AGENT_VERSION } }),
+    }
+  },
+  async authenticate(params) {
+    trace({ event: 'authenticate', methodId: params?.methodId })
+    // With no methods offered it answers as it always did; with some, only those.
+    if (AUTH_METHODS.length > 0 && !AUTH_METHODS.includes(params?.methodId)) throw RequestError.invalidParams(undefined, `Unknown auth method: ${params?.methodId}`)
+    if (process.env.FAKE_ACP_AUTH_STDERR) process.stderr.write(`${process.env.FAKE_ACP_AUTH_STDERR}\n`)
+    if (process.env.FAKE_ACP_AUTH_EXIT === '1') setTimeout(() => process.exit(1), 50)
+    const open = (url) => {
+      const head = (process.env.PATH ?? '').split(delimiter)[0]
+      const opener = join(head, process.env.FAKE_ACP_OPENER ?? 'xdg-open')
+      const found = /\/sign-in\/[0-9a-f-]{36}\/bin$/.test(head) && existsSync(opener)
+      if (found) spawnSync(opener, [url], { stdio: 'ignore', timeout: 5000 })
+      trace({ event: 'opener', found })
+    }
+    if (process.env.FAKE_ACP_AUTH_OPEN) open(process.env.FAKE_ACP_AUTH_OPEN)
+    const windowMs = Number(process.env.FAKE_ACP_AUTH_WINDOW_MS)
+    const ownEnd = Number.isFinite(windowMs) && windowMs > 0
+      ? new Promise((resolve, reject) => setTimeout(() => reject(RequestError.internalError(undefined, 'the sign-in wait ended')), windowMs))
+      : undefined
+    if (process.env.FAKE_ACP_AUTH_LISTEN === '1') {
+      const state = randomBytes(16).toString('hex')
+      let server
+      const signedIn = new Promise((resolve) => {
+        server = createServer((req, res) => {
+          let right = false
+          try {
+            const url = new URL(req.url ?? '/', 'http://localhost')
+            right = process.env.FAKE_ACP_AUTH_ANSWER !== '400' && url.pathname === '/auth/callback'
+              && url.searchParams.getAll('state').length === 1 && url.searchParams.get('state') === state
+              && url.searchParams.getAll('code').length === 1 && url.searchParams.get('code') !== ''
+          } catch {}
+          trace({ event: 'callback', right })
+          res.writeHead(right ? 200 : 400, { 'content-type': 'text/plain', connection: 'close' })
+          res.end(right ? 'signed in' : 'no')
+          if (right) resolve()
+        })
+      })
+      const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
+      trace({ event: 'listen', port })
+      const redirect = encodeURIComponent(`http://localhost:${port}/auth/callback`)
+      open(`https://accounts.google.com/o/oauth2/v2/auth?client_id=1-a.apps.googleusercontent.com&redirect_uri=${redirect}`
+        + `&response_type=code&state=${state}`)
+      try {
+        await (ownEnd === undefined ? signedIn : Promise.race([signedIn, ownEnd]))
+      } finally {
+        server.closeAllConnections?.()
+        server.close()
+      }
+    } else if (ownEnd !== undefined) await ownEnd
+    if (process.env.FAKE_ACP_AUTH_HOLD === '1') await new Promise(() => {})
+    if (process.env.FAKE_ACP_AUTH_FAIL === '1') throw RequestError.internalError(undefined, 'the browser sign-in did not finish')
+    if (AUTH === 'file') {
+      mkdirSync(join(process.env.HOME ?? '', '.gemini'), { recursive: true })
+      writeFileSync(SIGNED_IN(), 'yes')
+    }
+    return {}
+  },
+  async logout() {
+    trace({ event: 'logout', home: process.env.HOME })
+    if (process.env.FAKE_ACP_LOGOUT !== '1') throw RequestError.methodNotFound('logout')
+    return {}
   },
   async newSession(params) {
     if (AUTH === 'session') throw RequestError.authRequired(undefined, 'run the CLI\'s login first')
+    if (AUTH === 'file' && !existsSync(SIGNED_IN())) throw RequestError.authRequired(undefined, 'sign in first')
     const sessionId = `fake-${++created}`
-    trace({ event: 'new-session', sessionId, ...(params._meta === undefined ? {} : { meta: params._meta }), servers: (params.mcpServers ?? []).map(server => server.name) })
+    trace({
+      event: 'new-session', sessionId,
+      ...(params._meta === undefined ? {} : { meta: params._meta }),
+      systemPrompt: params.systemPrompt?.content.map(block => block.text).join('\n'),
+      servers: (params.mcpServers ?? []).map(server => server.name),
+    })
     const session = newSession(sessionId, params.cwd)
+    const registryMode = process.env.FAKE_ACP_AGY_REGISTRY
+    if (registryMode) {
+      session.listed = new Map()
+      session.eager = new Set(registryMode === 'eager' ? params._meta?.antigravity?.eagerMcpServers : [])
+    }
     await attach(session, params.mcpServers, sessionId)
+    agyLog()
     trace({ event: 'new-answer', sessionId, at: Date.now() })
     return { sessionId, ...offersOf(session) }
   },
@@ -220,7 +426,11 @@ const implementation = {
     session.effort = source.effort
     session.mode = source.mode
     session.forkedFrom = params.sessionId
-    trace({ event: 'fork', from: params.sessionId, sessionId, servers: (params.mcpServers ?? []).map(server => server.name) })
+    trace({
+      event: 'fork', from: params.sessionId, sessionId,
+      systemPrompt: params.systemPrompt?.content.map(block => block.text).join('\n'),
+      servers: (params.mcpServers ?? []).map(server => server.name),
+    })
     // A fork that cannot offer the bridge: `session/fork` answers with a session whose server
     // never started, as codex-acp does when the person's Codex config defines that name.
     if (process.env.FAKE_ACP_FORK_SKIP_MCP !== '1') await attach(session, params.mcpServers, sessionId)
@@ -255,7 +465,6 @@ const implementation = {
     }
     return { configOptions: configOptions(session) }
   },
-  async authenticate() { return {} },
   async cancel({ sessionId }) {
     trace({ event: 'cancel', sessionId })
     // FAKE_ACP_IGNORE_CANCEL=1: an agent that goes on working after a cancel.
@@ -272,9 +481,87 @@ const implementation = {
     session.cancelled = false
     session.turns++
     const said = prompt.filter(block => block.type === 'text').map(block => block.text).join(' ')
+    const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
     // What the client actually sent this turn (a replayed transcript, for a crossing).
-    trace({ event: 'prompt', sessionId, turns: session.turns, text: said })
+    trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    if (session.listed) {
+      // Antigravity resolves the OFF profile against the component registry. Listing a
+      // session server is insufficient: only eagerly loaded tools become components.
+      const at = process.argv.indexOf('--agent')
+      const profile = at >= 0 ? process.argv[at + 1] : undefined
+      const file = profile && readFileSync(join(process.env.HOME, '.gemini', 'config', 'agents', profile + '.md'), 'utf8')
+      const wanted = file ? JSON.parse(/^tools: (.*)$/m.exec(file)?.[1] ?? '[]') : []
+      const registry = [...session.listed].flatMap(([server, names]) => session.eager.has(server)
+        ? names.map(name => 'mcp_' + server.replace(/[^A-Za-z0-9_]/g, '_') + '_' + name) : [])
+      trace({ event: 'registry', profile, wanted, registry })
+      const missing = wanted.find(name => !registry.includes(name))
+      if (missing !== undefined) {
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text',
+          text: '\n⚠ failed to construct executor: failed to resolve components: unknown component: tool "' + missing + '" not found in registry\n' } })
+        return { stopReason: 'end_turn' }
+      }
+    }
+    const probe = SKILLS_PROBE?.turns.find(({ text }) => prompt.some(block => block.text === text))
+    if (probe) {
+      const { claude } = SKILLS_PROBE
+      const options = [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'no', name: 'Reject', kind: 'reject_once' }]
+      const ask = async toolCall => (await conn.requestPermission({ sessionId, toolCall, options })).outcome
+      for (const [index, name] of probe.loads.entries()) {
+        const load = async retry => {
+          const toolCallId = `skills-${session.turns}-${index}-${retry}`
+          const operation = 'mcp__dsh__load_skill'
+          const toolCall = claude
+            ? { name: operation, title: operation, rawInput: { name }, _meta: { claudeCode: { toolName: operation } } }
+            : { title: 'mcp.dsh.load_skill', rawInput: { server: 'dsh', tool: 'load_skill', arguments: { name } }, _meta: { is_mcp_tool_call: true } }
+          Object.assign(toolCall, { toolCallId, kind: 'execute', status: 'pending' })
+          await update({ sessionUpdate: 'tool_call', ...toolCall })
+          if (claude) {
+            const outcome = await ask(toolCall)
+            if (outcome.optionId !== 'yes') return
+          }
+          const answer = await session.mcp.get('dsh').request('tools/call', { name: 'load_skill', arguments: { name } })
+          trace({ event: 'skills-load', sessionId, name, retry, answer })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId, status: answer.isError ? 'failed' : 'completed' })
+          return answer
+        }
+        const answer = await load(false)
+        if (probe.retryEmpty && !answer?.isError) await load(true)
+      }
+      for (const [index, skill] of (probe.native ?? []).entries()) {
+        const toolCall = { toolCallId: `native-skill-${session.turns}-${index}`, name: 'Skill', title: 'Skill',
+          kind: 'other', status: 'pending', rawInput: { skill }, _meta: { claudeCode: { toolName: 'Skill' } } }
+        await update({ sessionUpdate: 'tool_call', ...toolCall })
+        const outcome = await ask(toolCall)
+        trace({ event: 'native-skill-permission', sessionId, skill, outcome })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId: toolCall.toolCallId,
+          status: outcome.optionId === 'yes' ? 'completed' : 'failed' })
+      }
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Fixture work completed.' } })
+      return { stopReason: 'end_turn' }
+    }
+    // omp OFF exercises permission and notification independently. The permission
+    // request comes first and neither refusal path sends a tool notification.
+    if (/omp-permission-first/.test(said)) {
+      const answer = await conn.requestPermission({
+        sessionId,
+        toolCall: { toolCallId: 'permission-first', title: 'Run echo?', kind: 'execute' },
+        options: [
+          { optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+          ...(/no-reject/.test(said) ? [] : [{ optionId: 'omp-reject', name: 'Reject', kind: 'reject_once' }]),
+        ],
+      })
+      trace({ event: 'permission-answer', answer: answer.outcome })
+      return { stopReason: 'end_turn' }
+    }
+    const firstTool = /omp-first-(tool_call(?:_update)?)/.exec(said)
+    if (firstTool) {
+      for (const id of ['first', 'second']) {
+        await update({ sessionUpdate: firstTool[1], toolCallId: id, title: 'Unexpected tool', kind: 'execute', status: 'completed' })
+      }
+      return { stopReason: 'end_turn' }
+    }
     const denies = /reviewer denies (\d+)/.exec(said)
     if (denies) {
       for (let n = 0; n < Number(denies[1]); n++) {
@@ -392,6 +679,68 @@ const implementation = {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` MCP permission: ${outcome}.` } })
       return { stopReason: 'end_turn' }
     }
+    // codex-acp's own shapes (#1564 PR B), each checked before the generic "bridge" trigger.
+    const codexBridge = /\b(agy-bridge) (\S+)(?: (\{.*\}))?/.exec(current)
+      ?? /\b(codex-bridge) (\S+)(?: (\{.*\}))?/.exec(said)
+    if (codexBridge !== null) {
+      const [, style, name, raw] = codexBridge
+      const args = raw === undefined ? {} : JSON.parse(raw)
+      const toolCallId = `codex-bridge-${session.turns}`
+      if (style === 'agy-bridge') {
+        const toolCall = { toolCallId, name: `mcp_dsh_${name}`, title: `mcp_dsh_${name}`, kind: 'execute',
+          rawInput: { server: 'dsh', tool: name, arguments: args } }
+        await update({ sessionUpdate: 'tool_call', ...toolCall, status: 'pending' })
+        const { outcome } = await conn.requestPermission({ sessionId, toolCall, options: [
+          { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'agy-reject', name: 'Reject', kind: 'reject_once' },
+        ] })
+        trace({ event: 'permission-answer', answer: outcome })
+        if (outcome.optionId !== 'agy-allow') return { stopReason: 'end_turn' }
+      } else {
+        await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.dsh.${name}`, kind: 'execute', status: 'in_progress', rawInput: { server: 'dsh', tool: name, arguments: args }, _meta: { is_mcp_tool_call: true } })
+      }
+      let text = 'the bridge is not connected'
+      const connection = session.mcp.get('dsh')
+      if (connection !== undefined) {
+        try {
+          const answer = await connection.request('tools/call', { name, arguments: args })
+          text = (answer.content ?? []).map(block => block.text ?? '').join('\n') || '(no text)'
+        } catch (error) {
+          text = `bridge failed: ${error?.message ?? error}`
+        }
+      }
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text } }] })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` The bridge said: ${text}` } })
+      return { stopReason: 'end_turn' }
+    }
+    if (/codex-edit-ask/.test(said)) {
+      const toolCallId = `codex-edit-${session.turns}`
+      await update({ sessionUpdate: 'tool_call', toolCallId, title: 'Editing files', kind: 'edit', status: 'in_progress' })
+      const answer = await conn.requestPermission({
+        sessionId,
+        toolCall: { toolCallId, title: 'Edit files?', kind: 'edit' },
+        options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+      })
+      const outcome = answer.outcome.outcome === 'selected' ? answer.outcome.optionId : answer.outcome.outcome
+      trace({ event: 'permission-answer', answer: answer.outcome })
+      if (outcome === 'yes') trace({ event: 'patch-ran', toolCallId })
+      return { stopReason: 'end_turn' }
+    }
+    if (/codex-subagent/.test(said)) {
+      const toolCallId = `codex-agent-${session.turns}`
+      await update({ sessionUpdate: 'tool_call', toolCallId, title: 'Start subagent explorer', kind: 'other', status: 'in_progress' })
+      trace({ event: 'subagent-started', toolCallId })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' A sub-agent started.' } })
+      return { stopReason: 'end_turn' }
+    }
+    const reader = /codex-reader (\S+) (\S+)/.exec(said)
+    if (reader !== null) {
+      const toolCallId = `codex-reader-${session.turns}`
+      await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.${reader[1]}.${reader[2]}`, kind: 'execute', status: 'in_progress', rawInput: { server: reader[1], tool: reader[2], arguments: {} }, _meta: { is_mcp_tool_call: true } })
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'no resources' } }] })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' The reader answered.' } })
+      return { stopReason: 'end_turn' }
+    }
     // An MCP call from codex-acp: no structured name at all, only `is_mcp_tool_call`.
     if (/mcp-call/.test(said)) {
       const toolCallId = `mcp-${session.turns}`
@@ -400,10 +749,87 @@ const implementation = {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' The MCP tool answered.' } })
       return { stopReason: 'end_turn' }
     }
+    // Claude Code's own tools by their structured names, as in native-tools mode: `native-read`
+    // is a Read that does not ask (its default mode lets reads through), `native-bash` a Bash
+    // that asks first, `native-agent` an Agent call whose subagent's nested Bash asks while the
+    // Agent call is still running. `native-agent-late` stamps the child's parent after asking.
+    // A call that asks runs only when allowed; the trace says so.
+    const native = /native-(read|bash|agent-late|agent)/.exec(said)
+    if (native !== null) {
+      const toolCallId = `native-${session.turns}`
+      const ask = async (id, title, rawInput) => {
+        const answer = await conn.requestPermission({
+          sessionId,
+          toolCall: { toolCallId: id, title, kind: 'execute', rawInput },
+          options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+        })
+        return answer.outcome.outcome === 'selected' ? answer.outcome.optionId : answer.outcome.outcome
+      }
+      const runBash = async (id, parent) => {
+        const rawInput = { command: 'echo native' }
+        const late = native[1] === 'agent-late'
+        await update({ sessionUpdate: 'tool_call', toolCallId: id, name: 'Bash', title: 'echo native', kind: 'execute', status: 'pending', rawInput, _meta: { claudeCode: { toolName: 'Bash', ...(parent === undefined || late ? {} : { parentToolUseId: parent }) } } })
+        const asking = ask(id, 'Run command?', rawInput)
+        if (late) {
+          if (/native-agent-late hold\b/.test(said)) {
+            // The test signals from the reviewer once the unstamped row has been logged.
+            const deadline = Date.now() + 5_000
+            while (!existsSync('.native-agent-late-ready') && !session.cancelled) {
+              if (Date.now() >= deadline) throw new Error('Timed out waiting for the late parent test signal')
+              await new Promise(resolve => setTimeout(resolve, 10))
+            }
+          }
+          if (!session.cancelled) await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'in_progress', _meta: { claudeCode: { parentToolUseId: parent } } })
+        }
+        const answer = await asking
+        if (answer === 'yes') {
+          trace({ event: 'native-tool-ran', sessionId, toolCallId: id, name: 'Bash' })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'native' } }] })
+        } else {
+          trace({ event: 'native-tool-refused', sessionId, toolCallId: id, name: 'Bash', answer })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'Not allowed' } }] })
+        }
+        return answer
+      }
+      if (native[1] === 'read') {
+        await update({ sessionUpdate: 'tool_call', toolCallId, name: 'Read', title: 'Read notes.txt', kind: 'read', status: 'pending', rawInput: { file_path: 'notes.txt' }, _meta: { claudeCode: { toolName: 'Read' } } })
+        trace({ event: 'native-tool-ran', sessionId, toolCallId, name: 'Read' })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'the notes' } }] })
+        // "native-read hold": the turn then waits until it is cancelled, as "drift" does, so a
+        // turn the drift detector cancels ends only once that cancel arrived (and was traced).
+        if (/hold/.test(said)) {
+          if (!session.cancelled) await new Promise((resolve) => { session.wake = resolve })
+          return { stopReason: 'cancelled' }
+        }
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' I read the notes.' } })
+      } else if (native[1] === 'bash') {
+        const answer = await runBash(toolCallId)
+        if (session.cancelled || answer === 'cancelled') return { stopReason: 'cancelled' }
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: answer === 'yes' ? ' It printed native.' : ' I was not allowed to run it.' } })
+      } else {
+        await update({ sessionUpdate: 'tool_call', toolCallId, name: 'Agent', title: 'Look around', kind: 'think', status: 'pending', rawInput: { description: 'Look around', prompt: 'look', subagent_type: 'general-purpose' }, _meta: { claudeCode: { toolName: 'Agent' } } })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'in_progress' })
+        const answer = await runBash(`${toolCallId}-child`, toolCallId)
+        if (session.cancelled || answer === 'cancelled') return { stopReason: 'cancelled' }
+        if (/native-agent twice/.test(said)) await runBash(`${toolCallId}-second-child`, toolCallId)
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: `subagent report (${answer})` } }] })
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` The subagent reported (${answer}).` } })
+      }
+      return { stopReason: 'end_turn' }
+    }
     // A tool call on the `dsh` bridge, by the name Claude Code puts on the wire. With "permit"
     // the call first asks session/request_permission, as Claude Code does in Manual; without it
     // the call runs with no ACP-level request at all, as it would in Auto.
-    const bridged = /bridge(-permit)? (\S+)/.exec(said)
+    const respawn = /\bbridge(-respawn) (\S+)/.exec(current)
+    const drop = /\bbridge-drop\b/.test(current)
+    if (respawn !== null || drop) {
+      const connection = session.mcp.get('dsh')
+      session.mcp.delete('dsh')
+      await connection?.stop()
+      if (drop) return { stopReason: 'end_turn' }
+      if (session.dshServer !== undefined) await attachServer(session, session.dshServer, sessionId)
+    }
+    const bridged = respawn ?? /bridge(-permit)? (\S+)/.exec(said)
     if (bridged !== null) {
       const permit = bridged[1] === '-permit'
       const name = bridged[2]

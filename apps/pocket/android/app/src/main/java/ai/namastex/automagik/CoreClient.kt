@@ -1,6 +1,8 @@
 package ai.namastex.automagik
 
 import kotlinx.coroutines.*
+import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.Closeable
 import java.io.DataInputStream
@@ -9,10 +11,15 @@ import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
+class CoreError(val kind: String, message: String) : IllegalStateException(message)
+
 class CoreClient(
     input: InputStream, private val output: OutputStream, private val transport: Closeable,
     private val scope: CoroutineScope, private val disconnected: (String) -> Unit
 ) : Closeable {
+    companion object { const val CALL_TIMEOUT_MS = 30_000L }
+    @Volatile internal var callTimeoutMs: Long = CALL_TIMEOUT_MS
+
     private val input = DataInputStream(input)
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<JSONObject>>()
     private val ids = AtomicInteger(1)
@@ -24,12 +31,16 @@ class CoreClient(
     private var earlyBytes = 0
     private val gate = Any()
     @Volatile private var closed = false
+    internal val isClosed get() = closed
     lateinit var hello: JSONObject
         private set
 
-    suspend fun start(): JSONObject = withContext(Dispatchers.IO) {
-        val request = JSONObject().put("jsonrpc", "2.0").put("id", 0).put("method", "hello")
-            .put("params", JSONObject().put("framed", true).put("generation", 1))
+    suspend fun start(manage: JSONArray? = null, attachments: Boolean = false, groups: Boolean = false): JSONObject = withContext(Dispatchers.IO) {
+        val params = JSONObject().put("framed", true).put("generation", 1)
+        if (manage != null && manage.length() > 0) params.put("manage", manage)
+        if (attachments) params.put("attachments", 1)
+        if (groups) params.put("groups", 1)
+        val request = JSONObject().put("jsonrpc", "2.0").put("id", 0).put("method", "hello").put("params", params)
         synchronized(output) { output.write((request.toString() + "\n").toByteArray()); output.flush() }
         val line = java.io.ByteArrayOutputStream()
         while (true) {
@@ -39,9 +50,11 @@ class CoreClient(
             check(line.size() < 1024 * 1024) { "Invalid core hello" }
             line.write(c)
         }
-        val reply = JSONObject(line.toString("UTF-8"))
-        check(!reply.has("error")) { reply.optJSONObject("error")?.optString("message") ?: "Core rejected hello" }
-        hello = reply.getJSONObject("result")
+        hello = try {
+            val reply = JSONObject(line.toString("UTF-8"))
+            check(!reply.has("error")) { reply.optJSONObject("error")?.optString("message") ?: "Core rejected hello" }
+            reply.getJSONObject("result")
+        } catch (_: JSONException) { error("Invalid hello from the computer") }
         check(hello.optInt("generation") == 1 && hello.optBoolean("framed")) { "This app needs herdr-core protocol generation 1" }
         scope.launch(Dispatchers.IO) {
             try {
@@ -53,8 +66,11 @@ class CoreClient(
                         val json = JSONObject(String(payload, Charsets.UTF_8))
                         val deferred = pending.remove(json.optInt("id")) ?: continue
                         val error = json.optJSONObject("error")
-                        if (error != null) deferred.completeExceptionally(IllegalStateException(error.optString("message", "Core request failed")))
-                        else deferred.complete(json.optJSONObject("result") ?: JSONObject())
+                        if (error != null) {
+                            val message = error.optString("message", "Core request failed")
+                            val errorKind = error.optJSONObject("data")?.opt("kind") as? String
+                            deferred.completeExceptionally(if (errorKind == null) IllegalStateException(message) else CoreError(errorKind, message))
+                        } else deferred.complete(json.optJSONObject("result") ?: JSONObject())
                     } else synchronized(gate) {
                         val frame = Frame(channel, kind, payload)
                         val handler = handlers[channel]
@@ -67,20 +83,24 @@ class CoreClient(
                     }
                 }
             } catch (e: Exception) {
-                if (!closed) { close(); disconnected(e.message ?: "Connection lost") }
+                if (!closed) {
+                    close()
+                    disconnected(if (generateSequence<Throwable>(e) { it.cause }.any { it is JSONException })
+                        "Invalid message from the computer" else e.message ?: "Connection lost")
+                }
             }
         }
         hello
     }
 
-    suspend fun call(method: String, params: JSONObject = JSONObject()): JSONObject {
+    suspend fun call(method: String, params: JSONObject = JSONObject(), timeoutMs: Long = callTimeoutMs): JSONObject {
         check(!closed) { "Disconnected" }
         val id = ids.getAndIncrement()
         val deferred = CompletableDeferred<JSONObject>()
         pending[id] = deferred
         return try {
             send(0, Wire.DATA, JSONObject().put("jsonrpc", "2.0").put("id", id).put("method", method).put("params", params).toString().toByteArray())
-            withTimeout(30_000) { deferred.await() }
+            withTimeout(timeoutMs) { deferred.await() }
         } finally { pending.remove(id) }
     }
 

@@ -16,6 +16,7 @@ import {
 } from "../mods/am-sidebar/update.mjs";
 import { CHECK_FILE, RESTORE_FILE, formatMarker, OFF_BY_DEFAULT, parseMarker } from "../mods/am-sidebar/release.js";
 import { cmdUpdate } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
+import { assertNoFixtureManifest, quietOuterManifestEnv } from "./outer-manifest.mjs";
 import { keys, pointerBytes, signatureOf } from "./pointer.mjs";
 
 /** The herdr-lane release serving the pointer to `version` (pointerBytes' options), signed with the test key. */
@@ -109,7 +110,7 @@ test("pickUpdate offers only a newer pack than the installed one", () => {
   assert.equal(up.version, "0.2.0");
   assert.equal(up.tarball.name, "automagik-herdr-pack-0.2.0.tgz");
   assert.match(up.sha256, /^[0-9a-f]{64}$/);
-  assert.equal(up.page, "https://github.com/automagik-dev/automagik/releases/tag/v0.2.0");
+  assert.equal(up.page, "https://github.com/automagik-si/automagik/releases/tag/v0.2.0");
   assert.equal(pickUpdate("0.2.0", packOf("0.2.0")), null, "same version");
   assert.equal(pickUpdate("0.3.0", packOf("0.2.0")), null, "older");
   assert.equal(pickUpdate("0.1.0", null), null, "no pointer");
@@ -132,8 +133,22 @@ test("packOfPointer refuses what is not this pack's pointer", () => {
   assert.equal(packOf("3.57.1").sequence, 570001);
 });
 
+test("packOfPointer refuses a pointer whose signed publisher, repository or tag is not this pack's", () => {
+  const bad = (extra, re) => assert.throws(() => packOfPointer({ ...JSON.parse(pointerBytes("3.57.1")), ...extra }), re);
+  bad({ publisher: "someone-else" }, /unexpected publisher: refusing it/);
+  bad({ publisher: undefined }, /unexpected publisher/);
+  bad({ repository: "https://github.com/someone/automagik" }, /unexpected repository: refusing it/);
+  bad({ repository: undefined }, /unexpected repository/);
+  bad({ tag: "v3.57.2" }, /must name tag v3\.57\.1: refusing it/);
+  bad({ tag: undefined }, /must name tag v3\.57\.1/);
+  // Both signers' repositories are accepted: the current one and the historical one.
+  for (const repository of ["https://github.com/automagik-si/automagik", "https://github.com/automagik-dev/automagik"]) {
+    assert.equal(packOf("3.57.1", { repository }).version, "3.57.1", repository);
+  }
+});
+
 test("fetchPointer: a good signature names the pack; a bad one, an untrusted key or no signature is refused", async () => {
-  assert.equal(POINTER_URL, "https://github.com/automagik-dev/automagik/releases/download/herdr-lane/pack.json");
+  assert.equal(POINTER_URL, "https://github.com/automagik-si/automagik/releases/download/herdr-lane/pack.json");
   assert.equal(POINTER_SIG_URL, `${POINTER_URL}.sig`);
   const calls = [];
   const got = await fetchPointer({ fetch: fakeFetch(served("3.57.1"), calls), env: {}, keys });
@@ -308,15 +323,15 @@ globalThis.fetch = async (url) => {
   return body === undefined ? new Response("not found", { status: 404 }) : new Response(Buffer.from(body, "base64"));
 };
 `);
-    const run = (command, h) => {
+    const run = (command, h, extra = []) => {
       const app = fakeCheckApp(join(h.home, "bad"), ["am-tabs"]);
       const env = { ...process.env, HOME: h.home, HERDR_APP_HOME: h.home, AUTOMAGIK_TEST_FETCH: fetchFile,
         PATH: `${dirname(app.bin)}:${process.env.PATH ?? ""}` };
       delete env.AUTOMAGIK_HERDR_NO_UPDATE;
       return spawnSync(process.execPath, ["--import", fakeFetch, join(pack, "update.mjs"), command,
-        ...(command === "update" ? ["--json"] : []), "--mods", h.mods], { env, encoding: "utf8" });
+        ...(command === "update" ? ["--json"] : []), ...extra, "--mods", h.mods], { env, encoding: "utf8" });
     };
-    const homes = [autoHome(["0.2.0"]), autoHome(["0.2.0"])];
+    const homes = [autoHome(["0.2.0"]), autoHome(["0.2.0"]), autoHome(["0.2.0"]), autoHome(["0.2.0"])];
     try {
       const applied = run("apply", homes[0]);
       assert.equal(applied.status, 5, applied.stderr);
@@ -328,6 +343,27 @@ globalThis.fetch = async (url) => {
       const updateAnswer = JSON.parse(updated.stdout.trim().split("\n").at(-1));
       assert.equal(updateAnswer.installed.restored.version, "0.1.0");
       assert.equal(updateAnswer.installed.restored.failedVersion, "0.2.0");
+      // #524: a restore whose rollback guard leaves a note: still exit 5, the note in restored.notes and
+      // the restore record, never in restored.warnings; stderr (update only) says it once.
+      const note = "going on without knowing the layout Herdr shows (Herdr is not asked here, and layouts/broken.json does not read): "
+        + "if one names am-tabs and Herdr shows it, Herdr drops it (plain Herdr instead)";
+      for (const [command, h] of [["apply", homes[2]], ["update", homes[3]]]) {
+        // 0.1.0 without am-tabs: the restore takes the failed am-tabs out of mods/.
+        rmSync(join(h.mods, "am-tabs"), { recursive: true, force: true });
+        writeFileSync(markerOf(h.mods), "version=0.1.0\nmods=am-sidebar\nbefore=none\nsequence=10000\n");
+        mkdirSync(join(h.home, "layouts"));
+        writeFileSync(join(h.home, "layouts", "broken.json"), "{");
+        const r = run(command, h, command === "apply" ? ["--landing-id", "apply-524"] : []);
+        assert.equal(r.status, 5, `${command}: ${r.stderr}`);
+        const answer = JSON.parse(r.stdout.trim().split("\n").at(-1));
+        assert.equal(answer.installed.restored.version, "0.1.0", command);
+        assert.deepEqual(answer.installed.restored.notes, [note], command);
+        assert.equal(answer.installed.restored.warnings, undefined, `${command}: a note is not a warning`);
+        assert.equal(r.stderr.split(note).length - 1, command === "update" ? 1 : 0, `${command}: ${r.stderr}`);
+        const record = JSON.parse(readFileSync(join(h.home, "automagik-herdr", RESTORE_FILE), "utf8"));
+        assert.deepEqual(record.notes, [note], command);
+        assert.equal(record.warnings, undefined, command);
+      }
     } finally { for (const h of homes) h.done(); }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -480,8 +516,10 @@ test("update.mjs runs from a copy of the pack outside the repository (no package
   try {
     const pack = join(home, "mods", "am-sidebar");
     cpSync(fileURLToPath(new URL("../mods/am-sidebar", import.meta.url)), pack, { recursive: true });
+    assertNoFixtureManifest(home, dirname(pack), pack);
     const r = spawnSync(process.execPath, [join(pack, "update.mjs"), "check"], {
-      env: { ...process.env, HERDR_APP_HOME: home, AUTOMAGIK_HERDR_NO_UPDATE: "1", NODE_OPTIONS: "" }, encoding: "utf8",
+      env: { ...process.env, HERDR_APP_HOME: home, AUTOMAGIK_HERDR_NO_UPDATE: "1", NODE_OPTIONS: "", ...quietOuterManifestEnv(home) },
+      encoding: "utf8",
     });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, "");
@@ -1148,6 +1186,11 @@ test("node update.mjs apply --expect <v>: the flag takes a value; other commands
   const { parseArgs } = await import("../mods/am-sidebar/update.mjs");
   assert.deepEqual(parseArgs(["apply", "--expect", "0.8.1", "--mods", "/m"]), { command: "apply", opts: { expect: "0.8.1", mods: "/m" } });
   assert.throws(() => parseArgs(["apply", "--expect"]), /usage/);
+  // #524: the sidebar's claim rides on apply only, and needs its value.
+  assert.deepEqual(parseArgs(["apply", "--expect", "0.8.1", "--landing-id", "apply-1", "--mods", "/m"]),
+    { command: "apply", opts: { expect: "0.8.1", "landing-id": "apply-1", mods: "/m" } });
+  assert.throws(() => parseArgs(["apply", "--landing-id"]), /usage/);
+  assert.throws(() => parseArgs(["update", "--landing-id", "apply-1"]), /usage/);
   assert.throws(() => parseArgs(["check", "--expect", "0.8.1"]), /usage/);
 });
 
@@ -1518,6 +1561,25 @@ kill -TERM $$
   return { bin, calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean) : []) };
 }
 
+/**
+ * A stand-in herdr-app that passes every check but the one for `mod` (or all of them, with none):
+ * exits `code`, printing `stderr` first when given. 126/127 is the program loader's "never
+ * started"; 1 is a check that ran and judged a mod failed.
+ */
+function fakeCheckExit(dir, { code, stderr = "", mod = null } = {}) {
+  mkdirSync(dir, { recursive: true });
+  const bin = join(dir, "herdr-app"), calls = join(dir, "herdr-app-calls");
+  const only = mod ? `case "$2" in */${mod}) ;; *) exit 0 ;; esac\n` : "";
+  const said = stderr ? `printf '%s\\n' ${JSON.stringify(stderr)} >&2\n` : "";
+  writeFileSync(bin, `#!/bin/sh
+printf '%s\\n' "$*" >> "${calls}"
+[ "$1" = check ] || exit 0
+${only}${said}exit ${code}
+`);
+  chmodSync(bin, 0o755);
+  return { bin, calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean) : []) };
+}
+
 test("a herdr-app check killed by a signal is could-not-run: update kept, no restore, one unchecked note", async () => {
   const h = autoHome(["0.2.0"]);
   const app = fakeCheckKilled(join(h.home, "killed"));
@@ -1536,6 +1598,297 @@ test("a herdr-app check killed by a signal is could-not-run: update kept, no res
     assert.deepEqual([note.version, note.from], ["0.2.0", "0.1.0"]);
     assert.match(note.unavailable, /could not run/);
     assert.equal(app.calls().length, 1, "it stops at the first check that could not run");
+  } finally { h.done(); }
+});
+
+/**
+ * An unchecked update's receipt: no mod was judged, nothing rolled back, and the note the new build
+ * reads says the same. The caller asserts what the runner said on top of this.
+ */
+function assertUncheckedReceipt(h, r, unavailable, version = "0.2.0") {
+  assert.equal(r.installed.version, version, "the update was kept");
+  assert.equal(r.installed.restored, undefined, "nothing was restored");
+  assert.equal(r.installed.restoreError, undefined);
+  assert.deepEqual(r.installed.check, { failed: [], checked: false, unavailable });
+  assert.equal(readVersion(join(h.mods, "am-sidebar")), version, "the release stayed installed");
+  assert.equal(readMarker(h.mods).version, version, "the pack marker names the installed release");
+  assert.equal(existsSync(join(stateDirOf(h.mods), RESTORE_FILE)), false, "no restore receipt was written");
+  assert.equal(existsSync(autoFileOf(h.mods)), false, "no skip was written");
+  assert.equal(readVersion(join(prevSetOf(h.mods), "am-sidebar")), "0.1.0", "the kept set stayed the rollback target");
+  const note = JSON.parse(readFileSync(join(stateDirOf(h.mods), CHECK_FILE), "utf8"));
+  assert.deepEqual([note.version, note.from, note.failed, note.checked, note.unavailable],
+    [version, "0.1.0", [], false, unavailable], "the receipt the new build reads says the same");
+}
+
+test("a check runner that exits 127 is unchecked: receipt fields, no restore, no skip", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "exit-127"), { code: 127 });
+  const lines = [];
+  try {
+    const direct = checkMods({ modsDir: h.mods, mods: toCheck(h.mods, readMarker(h.mods).mods), herdrApp: app.bin,
+      log: (l) => lines.push(l) });
+    assert.deepEqual(direct, { failed: [], checked: false, unavailable: "the herdr-app check could not run (exit 127)" });
+    assert.ok(lines.includes("the herdr-app check could not run (exit 127): no mod was checked"), lines.join("; "));
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assertUncheckedReceipt(h, r, "the herdr-app check could not run (exit 127)");
+  } finally { h.done(); }
+});
+
+test("a check runner that exits 126 is unchecked: receipt fields, no restore, no skip", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "exit-126"), { code: 126 });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assertUncheckedReceipt(h, r, "the herdr-app check could not run (exit 126)");
+  } finally { h.done(); }
+});
+
+test("a 127 with the loader's words keeps them in the reason: unchecked, no restore, no skip", async () => {
+  const h = autoHome(["0.2.0"]);
+  const said = "error while loading shared libraries: libxkbcommon-x11.so.0";
+  const app = fakeCheckExit(join(h.home, "loader-words"), { code: 127, stderr: said });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assertUncheckedReceipt(h, r, `the herdr-app check could not run (exit 127: ${said})`);
+  } finally { h.done(); }
+});
+
+test("a real mod failure still rolls back and records skipCause mods", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "mod-fails"), { code: 1, mod: "am-tabs", stderr: "am-tabs: cannot load" });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assert.deepEqual(r.installed.restored, { version: "0.1.0", failedVersion: "0.2.0", mod: "am-tabs", failed: ["am-tabs"],
+      checked: true, prevRemoved: true });
+    assert.deepEqual(r.installed.check, { failed: ["am-tabs"], checked: true });
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0", "the kept set is back");
+    assert.equal(readMarker(h.mods).version, "0.1.0");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: "0.2.0", skipCause: "mods" },
+      "the skip says a real mod failure caused it");
+    assert.equal(existsSync(join(stateDirOf(h.mods), CHECK_FILE)), false, "a judged failure is not an unchecked note");
+    const note = JSON.parse(readFileSync(join(stateDirOf(h.mods), RESTORE_FILE), "utf8"));
+    assert.deepEqual([note.version, note.failedVersion, note.failed, note.checked], ["0.1.0", "0.2.0", ["am-tabs"], true]);
+  } finally { h.done(); }
+});
+
+test("a mod failure that prints loader words with exit 1 still rolls back", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "mod-words"), { code: 1, mod: "am-tabs",
+    stderr: "error while loading shared libraries: libxkbcommon-x11.so.0" });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assert.deepEqual(r.installed.check, { failed: ["am-tabs"], checked: true },
+      "the words alone are a mod error, not the loader's");
+    assert.equal(r.installed.restored.version, "0.1.0");
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: "0.2.0", skipCause: "mods" });
+  } finally { h.done(); }
+});
+
+test("a later mod's 127 leaves the whole check unchecked, no rollback", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "late-127"), { code: 127, mod: "am-tabs" });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assertUncheckedReceipt(h, r, "the herdr-app check could not run (exit 127)");
+    assert.equal(app.calls().length, 2, "the mod before it passed, then the runner never started");
+  } finally { h.done(); }
+});
+
+test("an old rolled-back install: am update --retry-skipped clears the skip and installs it", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    // The state an install the old updater rolled back keeps: a skip with no recorded cause, and
+    // the restore receipt saying a mod failed (the only thing that code could say).
+    writeAuto(h.mods, { skip: "0.2.0" });
+    writeFileSync(join(stateDirOf(h.mods), RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: "0.2.0",
+      mod: "am-tabs", failed: ["am-tabs"], checked: true, at: Date.now() }));
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: h.mods, env: {}, keys, fetch: fakeFetch(h.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.2.0", "the skipped release is installed");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: null }, "the skip is cleared");
+    assert.equal(existsSync(join(stateDirOf(h.mods), RESTORE_FILE)), false, "the old restore receipt is gone");
+  } finally { h.done(); }
+});
+
+test("#1486: --retry-skipped on the affected machine, whose check runner still never starts, keeps the release unchecked", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "still-127"), { code: 127 });
+  try {
+    // The old updater's rollback, made by a runner that never started (#1486).
+    writeAuto(h.mods, { skip: "0.2.0" });
+    writeFileSync(join(stateDirOf(h.mods), RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: "0.2.0",
+      mod: "am-tabs", failed: ["am-tabs"], checked: true, at: Date.now() }));
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin, retrySkipped: true });
+    assert.equal(r.installed.version, "0.2.0", "the skipped release is installed and kept");
+    assert.equal(r.installed.restored, undefined, "nothing was rolled back again");
+    assert.deepEqual(r.installed.check, { failed: [], checked: false, unavailable: "the herdr-app check could not run (exit 127)" });
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.2.0");
+    assert.equal(readAuto(h.mods).skip, null, "the skip is cleared, and no new one is written");
+    assert.equal(existsSync(join(stateDirOf(h.mods), RESTORE_FILE)), false, "the old restore receipt is gone");
+    assert.equal(existsSync(join(stateDirOf(h.mods), CHECK_FILE)), true, "the unchecked note is written");
+  } finally { h.done(); }
+});
+
+test("a skip recorded from a real mod failure holds through an ordinary update", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    writeAuto(h.mods, { skip: "0.2.0", skipCause: "mods" });
+    const auto = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(auto.installed, null);
+    assert.match(auto.held, /0\.2\.0 was rolled back here/);
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: "0.2.0", skipCause: "mods" }, "an automatic update leaves it");
+    const plain = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0" });
+    assert.equal(plain.installed.version, "0.2.0", "asked for by hand, it installs");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: "0.2.0", skipCause: "mods" }, "and the record holds");
+  } finally { h.done(); }
+});
+
+test("#1505: the linked-machine cycle's env takes the automatic path: the machine's auto off and its skip hold", async () => {
+  for (const [name, setting] of [["auto off", { on: false }], ["rolled-back skip", { skip: "0.2.0" }]]) {
+    const h = autoHome(["0.2.0"]);
+    try {
+      writeAuto(h.mods, setting);
+      // The cycle's variable: same installUpdate, the automatic hold read under its lock.
+      const held = await cmdUpdate({ json: true }, [], { modsDir: h.mods, env: { AUTOMAGIK_HERDR_LINKED_UPDATE: "1" }, keys, fetch: fakeFetch(h.table) });
+      assert.equal(held.installed, null, name);
+      assert.match(held.held, setting.on === false ? /Install updates automatically is off/ : /0\.2\.0 was rolled back here/, name);
+      assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0", name);
+      // The person's explicit retry wins even beside the cycle's variable: it installs and clears a skip.
+      const explicit = await cmdUpdate({ json: true, "retry-skipped": true }, [], { modsDir: h.mods, env: { AUTOMAGIK_HERDR_LINKED_UPDATE: "1" }, keys, fetch: fakeFetch(h.table) });
+      assert.equal(explicit.installed.version, "0.2.0", `${name}: a person's explicit retry still installs`);
+      assert.equal(readAuto(h.mods).skip, null, `${name}: and the record is cleared`);
+    } finally { h.done(); }
+  }
+});
+
+test("am update --retry-skipped with no skip set just updates", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: h.mods, env: {}, keys, fetch: fakeFetch(h.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: null });
+  } finally { h.done(); }
+});
+
+test("a legacy cause-less skip: auto waits, a newer release moves past, am update installs, --retry-skipped clears", async () => {
+  /** The state the old updater left after a rollback: a skip with no cause, and its restore receipt. */
+  const legacySkip = (mods, version = "0.2.0") => {
+    writeAuto(mods, { skip: version });
+    writeFileSync(join(stateDirOf(mods), RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: version,
+      mod: "am-tabs", failed: ["am-tabs"], checked: true, at: Date.now() }));
+  };
+  const first = autoHome(["0.2.0"]);
+  try {
+    legacySkip(first.mods);
+    // (a) An automatic update still refuses the very version the skip names.
+    const auto = await installUpdate({ keys, fetch: fakeFetch(first.table), env: {}, modsDir: first.mods,
+      expect: "0.2.0", auto: true });
+    assert.equal(auto.installed, null);
+    assert.match(auto.held, /0\.2\.0 was rolled back here/);
+    assert.equal(readVersion(join(first.mods, "am-sidebar")), "0.1.0");
+    assert.deepEqual(readAuto(first.mods), { on: true, skip: "0.2.0" }, "an automatic update leaves the skip");
+    // (b) A newer release is past the skip and installs on its own.
+    first.serve("0.3.0");
+    const newer = await installUpdate({ keys, fetch: fakeFetch(first.table), env: {}, modsDir: first.mods,
+      expect: "0.3.0", auto: true });
+    assert.equal(newer.installed.version, "0.3.0");
+    assert.equal(readVersion(join(first.mods, "am-sidebar")), "0.3.0");
+  } finally { first.done(); }
+  const second = autoHome(["0.2.0"]);
+  try {
+    legacySkip(second.mods);
+    // (c) Asked for by hand, the skipped release installs; the record stays as it was.
+    const plain = await installUpdate({ keys, fetch: fakeFetch(second.table), env: {}, modsDir: second.mods, expect: "0.2.0" });
+    assert.equal(plain.installed.version, "0.2.0");
+    assert.deepEqual(readAuto(second.mods), { on: true, skip: "0.2.0" }, "a plain update leaves the record");
+  } finally { second.done(); }
+  const third = autoHome(["0.2.0"]);
+  try {
+    legacySkip(third.mods);
+    // (d) The explicit retry clears the record and installs the release the old code skipped.
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: third.mods, env: {}, keys, fetch: fakeFetch(third.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.equal(readVersion(join(third.mods, "am-sidebar")), "0.2.0");
+    assert.deepEqual(readAuto(third.mods), { on: true, skip: null }, "the cause-less skip is cleared");
+    assert.equal(existsSync(join(stateDirOf(third.mods), RESTORE_FILE)), false, "and the old receipt is gone");
+  } finally { third.done(); }
+});
+
+/** The auto-update record exactly as the file holds it, unknown fields included. */
+const autoRecordOf = (modsDir) => JSON.parse(readFileSync(autoFileOf(modsDir), "utf8"));
+/** Seeds the auto-update file as a newer release (or a hand edit) would leave it. */
+const seedAutoRecord = (modsDir, record) => {
+  mkdirSync(stateDirOf(modsDir), { recursive: true });
+  writeFileSync(autoFileOf(modsDir), `${JSON.stringify(record, null, 2)}\n`);
+};
+
+test("an unknown skipCause survives the record's writes and the skip still holds", async () => {
+  const h = autoHome(["0.2.0"]);
+  const raw = { auto: true, skip: "0.2.0", skipCause: "vendor-specific", extra: "x" };
+  try {
+    seedAutoRecord(h.mods, raw);
+    const held = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(held.installed, null, "an ordinary update does not install the skipped version");
+    assert.match(held.held, /0\.2\.0 was rolled back here/);
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the first ordinary update keeps the unknown cause");
+    // The setting changer writes the same record: it must carry the cause and the extra field.
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the setting write keeps the unknown cause");
+    const again = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(again.installed, null, "a second ordinary update still does not install it");
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the second ordinary update keeps the unknown cause");
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0", "the skipped version was never installed");
+  } finally { h.done(); }
+});
+
+test("an unknown extra field beside a skip survives every write of the record", async () => {
+  const h = autoHome(["0.2.0"]);
+  const raw = { auto: true, skip: "0.2.0", skipCause: "mods", keepMe: { nested: ["x"] } };
+  try {
+    seedAutoRecord(h.mods, raw);
+    const held = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(held.installed, null);
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the update keeps it");
+    writeAuto(h.mods, { on: false });
+    assert.deepEqual(autoRecordOf(h.mods), { ...raw, auto: false }, "switching off keeps it");
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), raw, "switching on keeps it");
+  } finally { h.done(); }
+});
+
+test("--retry-skipped clears a known skip and its cause but keeps an unknown field", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: h.mods, env: {}, keys, fetch: fakeFetch(h.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, extra: "x" },
+      "the skip and its cause are cleared, the unknown field stays");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: null });
+  } finally { h.done(); }
+});
+
+test("the setting changer changes on but keeps the skip, its cause and an unknown field", async () => {
+  const h = autoHome([]);
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    writeAuto(h.mods, { on: false });
+    assert.deepEqual(autoRecordOf(h.mods), { auto: false, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+  } finally { h.done(); }
+});
+
+test("a rollback writes its new skip and cause over an older one, keeping an unknown field", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "bad-new-skip"), { code: 1, mod: "am-tabs", stderr: "am-tabs: cannot load" });
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.1.0", skipCause: "mods", extra: "x" });
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assert.equal(r.installed.restored.version, "0.1.0");
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" },
+      "the new skip and cause replace the old ones; the unknown field stays");
   } finally { h.done(); }
 });
 
@@ -1715,21 +2068,12 @@ test("a bad first install with nothing kept cannot restore: a clear reason, no c
   } finally { h.done(); }
 });
 
-test("herdr-app missing after an update: no restore, the update is kept and said unchecked", async () => {
+test("herdr-app missing after an update: receipt fields, no restore, no skip", async () => {
   const h = autoHome(["0.2.0"]);
   try {
     const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods,
       herdrApp: join(h.home, "no-herdr-app") });
-    assert.equal(r.installed.version, "0.2.0");
-    assert.equal(r.installed.restored, undefined);
-    assert.equal(r.installed.restoreError, undefined);
-    assert.deepEqual(r.installed.check, { failed: [], checked: false, unavailable: "herdr-app is not on PATH" });
-    const note = JSON.parse(readFileSync(join(h.home, "automagik-herdr", CHECK_FILE), "utf8"));
-    assert.deepEqual([note.version, note.from, note.unavailable], ["0.2.0", "0.1.0", "herdr-app is not on PATH"],
-      "the new build can say it was not checked");
-    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.2.0", "the update was kept");
-    assert.equal(readVersion(join(prevSetOf(h.mods), "am-sidebar")), "0.1.0");
-    assert.equal(readAuto(h.mods).skip, null);
+    assertUncheckedReceipt(h, r, "herdr-app is not on PATH");
   } finally { h.done(); }
 });
 
@@ -2125,6 +2469,107 @@ test("overtaken (under the lock): the version installed since the check, or a re
       assert.equal(readFileSync(join(h.home, "layouts", "odd.json"), "utf8"), odd, "left as it is");
     } finally { h.done(); }
   });
+
+  test("#524 an unreadable layout's retire/rename warning is in the update's JSON answer", async () => {
+    const h = renameHome();
+    try {
+      writeFileSync(join(h.home, "layouts", "broken.json"), '{"content": {"mod": "auto-tabs"');
+      const logs = [];
+      const r = await applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods, log: (l) => logs.push(l) });
+      assert.deepEqual(r.retired, ["auto-tabs"]);
+      assert.ok(r.notes.some((w) => /without knowing the layout Herdr shows/.test(w)), (r.notes ?? []).join("\n"));
+      assert.ok(r.notes.some((w) => /broken\.json/.test(w)));
+      assert.ok(logs.some((l) => /without knowing the layout Herdr shows/.test(l)), "still said on stderr");
+    } finally { h.done(); }
+  });
+
+  test("#524 a rollback without a readable layout carries its warning in the answer", async () => {
+    const h = renameHome();
+    try {
+      const up = await applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods });
+      assert.equal(up.version, "0.2.0");
+      writeFileSync(join(h.home, "layouts", "broken.json"), '{"content": {"mod": "am-tabs"');
+      const r = rollback({ modsDir: h.mods });
+      assert.equal(r.version, "0.1.0");
+      assert.ok(r.notes.some((w) => /without knowing the layout Herdr shows/.test(w)), (r.notes ?? []).join("\n"));
+    } finally { h.done(); }
+  });
+
+  // #524 residual: Herdr can reload at the first folder move, before update.mjs answers, so the
+  // notes are in held-mods.json, under the sidebar's claim, before it; a failed swap undoes that.
+  {
+    const { heldAfterMigration } = await import("../mods/am-sidebar/update.mjs");
+    const { heldRecordFrom } = await import("../mods/am-sidebar/updateCheck.js");
+    const unread = (mod) => "going on without knowing the layout Herdr shows (Herdr is not asked here, and layouts/broken.json does not read): "
+      + `if one names ${mod} and Herdr shows it, Herdr drops it (plain Herdr instead)`;
+    const heldFile = (mods) => join(stateDirOf(mods), "held-mods.json");
+    const leftovers = (mods) => readdirSync(stateDirOf(mods)).filter((n) => n.startsWith("held-mods.json."));
+    /** retire: old-mod leaves while an unreadable layout names it; rename: auto-tabs's old folder does. */
+    const rows = {
+      retire: () => {
+        const h = appHome("0.1.0", ["am-sidebar", "old-mod"]);
+        mkdirSync(join(h.home, "layouts"));
+        return { ...h, leaving: "old-mod", t: tarball("0.2.0", { mods: ["am-sidebar"] }),
+          done() { rmSync(this.t.src, { recursive: true, force: true }); rmSync(h.home, { recursive: true, force: true }); } };
+      },
+      rename: () => ({ ...renameHome(), leaving: "auto-tabs" }),
+    };
+    const withBroken = (row) => {
+      const h = rows[row]();
+      writeFileSync(join(h.home, "layouts", "broken.json"), `{"content": {"mod": "${h.leaving}"`);
+      return h;
+    };
+
+    for (const row of Object.keys(rows)) {
+      test(`#524 ${row}: the note is in held-mods.json at the first rename (nothing held), kept after the swap and the migration, logged once`, async () => {
+        const h = withBroken(row);
+        try {
+          const logs = [];
+          let atFirst;
+          let n = 0;
+          const rename = (a, b) => { if (n++ === 0) atFirst = existsSync(heldFile(h.mods)) ? readFileSync(heldFile(h.mods), "utf8") : null; renameSync(a, b); };
+          const r = await applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods, log: (l) => logs.push(l), rename, landingId: "apply-524" });
+          const line = unread(h.leaving);
+          assert.ok(r.retired.includes(h.leaving), "the mod left (fail open)");
+          assert.deepEqual(r.notes, [line]);
+          assert.equal(logs.filter((l) => l === line).length, 1, "stderr says it once");
+          assert.ok(!r.warnings.some((w) => w.includes("without knowing")), "never a warning: exit 4 reads r.warnings");
+          const want = { version: "0.2.0", held: [], notes: [line], landingId: "apply-524" };
+          assert.ok(atFirst, "the record exists before the first rename");
+          assert.deepEqual(JSON.parse(atFirst), want, "zero held mods: the record is written for the note alone");
+          assert.deepEqual(JSON.parse(readFileSync(heldFile(h.mods), "utf8")), want, "the post-swap rewrite keeps it");
+          assert.deepEqual(leftovers(h.mods), [], "no temp file left");
+          assert.deepEqual(heldRecordFrom(readFileSync(heldFile(h.mods), "utf8"), "0.2.0"), { held: [], notes: [line], landingId: "apply-524" });
+          // The migration's rewrite (a stranded, gone folder joins held) keeps the note and the claim.
+          heldAfterMigration(h.mods, { version: "0.2.0", held: [], notes: r.notes,
+            migration: { stranded: [{ mod: "gone-mod", layouts: ["x"], gone: true }] } }, () => {}, "apply-524");
+          const after = JSON.parse(readFileSync(heldFile(h.mods), "utf8"));
+          assert.deepEqual([after.notes, after.landingId], [[line], "apply-524"]);
+          assert.ok(after.held.some((x) => x.mod === "gone-mod"));
+        } finally { h.done(); }
+      });
+
+      test(`#524 ${row}: a swap that fails puts the folders and the prior held-mods.json back byte for byte, or leaves it absent`, async () => {
+        for (const prior of [null, '{ "version":"0.1.0",  "held":[{"mod":"x","layouts":["y"]}] }\n']) {
+          const h = withBroken(row);
+          try {
+            if (prior !== null) writeFileSync(heldFile(h.mods), prior);
+            let n = 0;
+            let staged = null;
+            const rename = (a, b) => { if (++n === 2) { staged = readFileSync(heldFile(h.mods), "utf8"); throw new Error("disk full"); } renameSync(a, b); };
+            await assert.rejects(applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods, rename, landingId: "apply-524" }), /disk full/);
+            assert.deepEqual(JSON.parse(staged).notes, [unread(h.leaving)], "it was staged before the swap");
+            if (prior === null) assert.equal(existsSync(heldFile(h.mods)), false, "absent again");
+            else assert.equal(readFileSync(heldFile(h.mods), "utf8"), prior, "the prior record, byte for byte");
+            assert.equal(readMarker(h.mods).version, "0.1.0");
+            assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0");
+            assert.ok(existsSync(join(h.mods, h.leaving, "main.js")), "the folders are back");
+            assert.deepEqual(leftovers(h.mods), []);
+          } finally { h.done(); }
+        }
+      });
+    }
+  }
 
   test("a held old folder survives a repair and a rollback, and the auto-update's notice says it", async () => {
     const h = renameHome();
@@ -2735,6 +3180,11 @@ test("#883: tightenLedgers skips an owner-unreadable ledger for every user, name
   assert.deepEqual(fchmods, [0o600, 0o400]);
 });
 
+const restorePane = (address, cwd, fields = {}) =>
+  ({ address, cwd, state: "live", created_ms: 10, labels: { bot: "b-main" }, ...fields });
+const compactRestoreListing = (...panes) => ({ terminals: panes.map(({ address, cwd, state }) => ({ address, cwd, state })) });
+const restoreRead = { text: "❯ " };
+
 test("#805 restore notifies only the live project main bot once per version", async (t) => {
   const { notifyMainBotOfRestore } = await import("../mods/am-sidebar/update.mjs");
   assert.equal(typeof notifyMainBotOfRestore, "function");
@@ -2745,7 +3195,8 @@ test("#805 restore notifies only the live project main bot once per version", as
   writeFileSync(join(projectDir, ".herdr/bots.json"), JSON.stringify({ bots: [{ id: "b-main", kind: "main" }, { id: "b-other", kind: "member" }] }));
   const calls = [];
   let live = false;
-  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? { terminals: live ? [{ address: "t5", state: "live" }] : [] } : {}); };
+  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? compactRestoreListing(...(live ? [restorePane("t5", projectDir)] : []))
+    : args[0] === "get" ? restorePane("t5", projectDir) : restoreRead); };
   const args = { modsDir, projectDir, version: "0.2.0", restored: "0.1.0", failed: ["am-tabs"], hcRun };
   assert.deepEqual(notifyMainBotOfRestore(args), { sent: false });
   live = true;
@@ -2769,7 +3220,8 @@ test("#805 update restoration sends the main-bot notice and keeps its dedup reco
   mkdirSync(join(projectDir, ".herdr"), { recursive: true });
   writeFileSync(join(projectDir, ".herdr/bots.json"), JSON.stringify({ bots: [{ id: "b-main", kind: "main" }] }));
   const calls = [];
-  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? { terminals: [{ address: "t5", state: "live" }] } : {}); };
+  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? compactRestoreListing(restorePane("t5", projectDir))
+    : args[0] === "get" ? restorePane("t5", projectDir) : restoreRead); };
   for (let n = 0; n < 2; n += 1) {
     const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin, projectDir, hcRun });
     assert.equal(r.installed.restored.version, "0.1.0");
@@ -2790,7 +3242,7 @@ test("#805 restore falls back to a live binding and the last bound project", asy
   writeFileSync(join(state, "attach.jsonl"), attachLine(attachRow({ event: "attach", bot: "b-aaaaaaaaaa", terminal: "t5", created_ms: 10, core: "fake", project: projectDir, by: "start" })));
   const calls = [];
   let live = false;
-  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? { terminals: [] } : { state: live ? "live" : "finished", created_ms: 10 }); };
+  const hcRun = (args) => { calls.push(args); return JSON.stringify(args[0] === "ls" ? { terminals: [] } : args[0] === "get" ? restorePane("t5", projectDir, { state: live ? "live" : "finished" }) : restoreRead); };
   const args = { modsDir, version: "0.2.0", restored: "0.1.0", failed: ["am-tabs"], hcRun };
   assert.deepEqual(notifyMainBotOfRestore({ ...args, projectDir }), { sent: false });
   live = true;
@@ -2815,7 +3267,9 @@ test("#805 a blocked main bot is recorded pending and notified on the next call"
   let blocked = true;
   const hcRun = (args) => {
     calls.push(args);
-    if (args[0] === "ls") return JSON.stringify({ terminals: [{ address: "t5", state: "live" }] });
+    if (args[0] === "ls") return JSON.stringify(compactRestoreListing(restorePane("t5", projectDir)));
+    if (args[0] === "get") return JSON.stringify(restorePane("t5", projectDir));
+    if (args[0] === "read") return JSON.stringify(restoreRead);
     if (args[0] === "send" && blocked) { const error = new Error("hc send failed"); error.status = 9; throw error; }
     return "{}";
   };
@@ -2849,11 +3303,13 @@ test("#805 restore notifies every project main bot and prefers its own live bind
   const calls = [];
   const hcRun = (args) => {
     calls.push(args);
-    if (args[0] === "get") return JSON.stringify({ state: "live", created_ms: 10 });
+    if (args[0] === "get") return JSON.stringify(args[1] === "t5" ? restorePane("t5", p1)
+      : restorePane("t6", p2, { labels: { bot: "b-cccccccccc" } }));
+    if (args[0] === "read") return JSON.stringify(restoreRead);
     if (args[0] === "ls") {
       const label = args[args.indexOf("--label") + 1];
       if (label === "bot=b-aaaaaaaaaa") return JSON.stringify({ terminals: [{ address: "t9", state: "live", cwd: "/elsewhere" }] });
-      return JSON.stringify({ terminals: [{ address: "t8", state: "live", cwd: "/elsewhere" }, { address: "t6", state: "live", cwd: p2 }] });
+      return JSON.stringify(compactRestoreListing({ address: "t8", state: "live", cwd: "/elsewhere" }, restorePane("t6", p2)));
     }
     return "{}";
   };
@@ -2877,7 +3333,8 @@ test("#805 checkForUpdate retries a pending rollback notice", async (t) => {
   const calls = [];
   const hcRun = (args) => {
     calls.push(args);
-    return JSON.stringify(args[0] === "ls" ? { terminals: [{ address: "t5", state: "live", cwd: projectDir }] } : {});
+    return JSON.stringify(args[0] === "ls" ? compactRestoreListing(restorePane("t5", projectDir))
+    : args[0] === "get" ? restorePane("t5", projectDir) : restoreRead);
   };
   const r = await checkForUpdate({ modsDir, projectDir, env: {}, fetch: async () => ({ status: 404, ok: false }), hcRun });
   assert.equal(r.disabled, false);
@@ -2904,10 +3361,11 @@ test("#805 a blocked main pane is kept pending and never receives the notice", a
   const calls = [];
   const hcRun = (args) => {
     calls.push(args);
-    if (args[0] === "get") return JSON.stringify({ state: "live", created_ms: 20, status: { state: "blocked" } });
+    if (args[0] === "get") return JSON.stringify(args[1] === "t5" ? restorePane("t5", p1, { status: "blocked", labels: { bot: "b-aaaaaaaaaa" } })
+      : restorePane("t6", p2, { created_ms: 20, status: { state: "blocked" } }));
     if (args[0] === "ls") {
       const label = args[args.indexOf("--label") + 1];
-      return JSON.stringify({ terminals: label === "bot=b-aaaaaaaaaa" ? [{ address: "t5", state: "live", cwd: p1, status: "blocked" }] : [] });
+      return JSON.stringify(label === "bot=b-aaaaaaaaaa" ? compactRestoreListing(restorePane("t5", p1)) : compactRestoreListing());
     }
     throw new Error("send must not run on a blocked pane");
   };
@@ -2920,4 +3378,136 @@ test("#805 a blocked main pane is kept pending and never receives the notice", a
   assert.deepEqual(note.pendingBots, ["b-cccccccccc"]);
   assert.deepEqual(note.notifiedBots, []);
   assert.equal(calls.filter((c) => c[0] === "send").length, 0);
+});
+
+test("#1557 rollback delivery holds a footerless dialog, an unreadable tail and a reused generation", async (t) => {
+  const { notifyMainBotOfRestore } = await import("../mods/am-sidebar/update.mjs");
+  const root = mkdtempSync(join(tmpdir(), "restore-rate-limit-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const modsDir = join(root, "app/mods"), projectDir = join(root, "project");
+  mkdirSync(join(projectDir, ".herdr"), { recursive: true });
+  writeFileSync(join(projectDir, ".herdr/bots.json"), JSON.stringify({ bots: [{ id: "b-main", kind: "main" }] }));
+  const pane = restorePane("t5", projectDir, { status: { state: "working" } });
+  const sends = [];
+  let current = pane;
+  let onRead;
+  let screen = "Rate limit reached\nYour limit resets in 2 hours.\n❯ 1. Wait until it resets\n  2. Upgrade your plan";
+  let competing;
+  const run = () => notifyMainBotOfRestore({ modsDir, projectDir, version: "0.2.0", restored: "0.1.0", hcRun });
+  function hcRun([verb, ...args]) {
+    if (verb === "ls") return JSON.stringify({ terminals: [{ address: pane.address, state: pane.state }] });
+    if (verb === "get") return JSON.stringify(current);
+    if (verb === "read") {
+      onRead?.();
+      return JSON.stringify({ text: screen });
+    }
+    if (verb === "send") {
+      sends.push(args);
+      // Simulate a retry entering before the first sender can persist its acknowledgement.
+      if (sends.length === 1) competing = run();
+      return "{}";
+    }
+    assert.fail(verb);
+  }
+  for (const text of [screen, ""]) {
+    screen = text;
+    assert.deepEqual(run(), { sent: false });
+    assert.deepEqual(sends, []);
+  }
+  screen = "❯ ";
+  current = { ...pane, labels: { bot: "wrong-bot" } };
+  assert.deepEqual(run(), { sent: false });
+  current = pane;
+  onRead = () => { current = { ...pane, created_ms: 11 }; };
+  assert.deepEqual(run(), { sent: false });
+  assert.deepEqual(sends, []);
+  current = pane;
+  onRead = null;
+  assert.deepEqual(run(), { sent: true });
+  assert.deepEqual(competing, { sent: false });
+  assert.deepEqual(run(), { sent: false });
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0][0], "t5");
+});
+
+test("#1557 rollback tracks same-ID mains by project and never falls back to another clone", async (t) => {
+  const { notifyMainBotOfRestore } = await import("../mods/am-sidebar/update.mjs");
+  const root = mkdtempSync(join(tmpdir(), "restore-clones-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const modsDir = join(root, "app/mods");
+  const projects = ["one", "two"].map(name => join(root, name));
+  for (const project of projects) {
+    mkdirSync(join(project, ".herdr"), { recursive: true });
+    writeFileSync(join(project, ".herdr/bots.json"), JSON.stringify({ bots: [{ id: "b-main", kind: "main" }] }));
+  }
+  mkdirSync(dirname(modsDir));
+  writeFileSync(join(dirname(modsDir), "am-sidebar-projects.json"), JSON.stringify(projects));
+  const [one, two] = projects.map((project, i) => restorePane(`t${5 + i}`, project));
+  const sends = [];
+  let live = [one];
+  function hcRun([verb, terminal]) {
+    if (verb === "ls") return JSON.stringify(compactRestoreListing(...live));
+    if (verb === "get") return JSON.stringify(live.find(row => row.address === terminal));
+    if (verb === "read") return JSON.stringify(restoreRead);
+    if (verb === "send") sends.push(terminal);
+    return "{}";
+  }
+  const args = { modsDir, projectDir: projects[0], version: "0.2.0", restored: "0.1.0", hcRun };
+  assert.equal(notifyMainBotOfRestore(args).sent, true);
+  assert.deepEqual(sends, ["t5"]);
+  live = [one, two];
+  assert.equal(notifyMainBotOfRestore(args).sent, true);
+  assert.deepEqual(sends, ["t5", "t6"]);
+  assert.equal(notifyMainBotOfRestore(args).sent, false);
+});
+
+test("#1557 the ordinary update tick retries the second rollback notice after an interruption", async (t) => {
+  const { notifyMainBotOfRestore } = await import("../mods/am-sidebar/update.mjs");
+  const root = mkdtempSync(join(tmpdir(), "restore-interrupted-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const modsDir = join(root, "app/mods"), state = stateDirOf(modsDir);
+  const file = join(state, "restore-notified.json");
+  const projects = ["one", "two"].map(name => join(root, name));
+  const rosters = projects.map(project => join(project, ".herdr/bots.json"));
+  const ids = ["b-first", "b-second"];
+  rosters.forEach((roster, index) => {
+    mkdirSync(dirname(roster), { recursive: true });
+    writeFileSync(roster, JSON.stringify({ bots: [{ id: ids[index], kind: "main" }] }));
+  });
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(dirname(modsDir), "am-sidebar-projects.json"), JSON.stringify(projects));
+  writeFileSync(join(state, RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: "0.2.0", failed: ["am-tabs"] }));
+  const panes = projects.map((project, index) => restorePane(`t${index + 5}`, project, { labels: { bot: ids[index] } }));
+  const sent = [];
+  let interrupted;
+  function hcRun([verb, arg, label]) {
+    if (verb === "ls") {
+      if (label === "bot=b-second" && !interrupted) {
+        interrupted = readFileSync(file, "utf8");
+        throw new Error("interrupted before the second recipient");
+      }
+      return JSON.stringify(compactRestoreListing(panes.find(pane => `bot=${pane.labels.bot}` === label)));
+    }
+    if (verb === "get") return JSON.stringify(panes.find(pane => pane.address === arg));
+    if (verb === "read") return JSON.stringify(restoreRead);
+    if (verb === "send") sent.push(arg);
+    return "{}";
+  }
+  const args = { modsDir, projectDir: projects[0], hcRun };
+  assert.equal(notifyMainBotOfRestore({ ...args, version: "0.2.0", restored: "0.1.0" }).sent, true);
+  assert.deepEqual(sent, ["t5"]);
+  assert.deepEqual(JSON.parse(interrupted).pendingBots, [ids[1]]);
+  writeFileSync(file, interrupted);
+  const tick = () => checkForUpdate({ ...args, env: {}, fetch: async () => ({ status: 404, ok: false }) });
+  const roster = readFileSync(rosters[1]);
+  writeFileSync(rosters[1], "temporarily unreadable");
+  await tick();
+  assert.deepEqual(JSON.parse(readFileSync(file)).pendingBots, [ids[1]]);
+  assert.deepEqual(sent, ["t5"]);
+  writeFileSync(rosters[1], roster);
+  await tick();
+  assert.deepEqual(sent, ["t5", "t6"]);
+  assert.deepEqual(JSON.parse(readFileSync(file)).pendingBots, []);
+  await tick();
+  assert.deepEqual(sent, ["t5", "t6"]);
 });

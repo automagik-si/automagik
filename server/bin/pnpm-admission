@@ -1,0 +1,110 @@
+#!/bin/sh
+# One admission queue for every pnpm entry in the image. The lock is a flock on fd 9, inherited
+# by the real pnpm and its descendants: it lasts until the last install process is gone, so
+# killing the wrapper alone does not let a second pnpm start. A nested pnpm that presents the
+# holder token re-enters. A waiter logs the holder and age, then refuses after the bounded wait.
+set -eu
+real=${1:?missing pnpm real path}
+shift
+umask 077
+if [ ! -d /data/run ]; then
+  /nodejs/bin/node -e 'require("node:fs").mkdirSync("/data/run", { recursive: true, mode: 0o700 })' || exit 1
+fi
+lock=/data/run/pnpm-admission.lock
+log=/data/run/pnpm-admission.log
+safe_owner() (
+  LC_ALL=C
+  case "$1" in
+    ''|*[!A-Za-z0-9._:-]*) printf '%s' unknown ;;
+    *) if [ "${#1}" -le 128 ]; then printf '%s' "$1"; else printf '%s' unknown; fi ;;
+  esac
+)
+owner=$(safe_owner "${AUTOMAGIK_PNPM_OWNER:-unknown}")
+wait_seconds=${AUTOMAGIK_PNPM_LOCK_WAIT:-1800}
+holder_token=
+holder_owner=
+holder_started=
+holder_pid=
+holder_real_pid=
+holder_info() {
+  holder_token='' holder_owner='' holder_started='' holder_pid='' holder_real_pid=''
+  [ -e "$lock" ] || return 0
+  first=
+  second=
+  { IFS= read -r first; IFS= read -r second; } <"$lock" || true
+  for field in $first $second; do
+    case "$field" in
+      token=*) holder_token=${field#token=} ;;
+      owner=*) holder_owner=$(safe_owner "${field#owner=}") ;;
+      started=*) holder_started=${field#started=} ;;
+      pid=*) holder_pid=${field#pid=} ;;
+      real_pid=*) holder_real_pid=${field#real_pid=} ;;
+    esac
+  done
+}
+lock_age() {
+  case "$holder_started" in
+    ''|*[!0-9]*) echo unknown; return 0 ;;
+  esac
+  uptime=
+  IFS= read -r uptime < /proc/uptime || true
+  now=${uptime%%.*}
+  [ -n "$now" ] || { echo unknown; return 0; }
+  echo $((now - holder_started))
+}
+inherited=${AUTOMAGIK_PNPM_ADMISSION_TOKEN:-}
+if [ -n "$inherited" ] && [ -e "$lock" ]; then
+  exec 8<>"$lock"
+  if ! /usr/bin/flock -n 8; then
+    holder_info
+    if [ "$holder_token" = "$inherited" ]; then
+      printf 'reentry pid=%s ppid=%s owner=%s token=%s real=%s\n' "$$" "$PPID" "$owner" "$inherited" "$real" >>"$log"
+      exec 8>&-
+      /nodejs/bin/node "$real" "$@" 8>&-
+      exit $?
+    fi
+  fi
+  exec 8>&-
+fi
+holder_info
+printf 'wait pid=%s owner=%s holder_owner=%s holder_pid=%s holder_real_pid=%s age=%s wait=%s\n' "$$" "$owner" "${holder_owner:-none}" "${holder_pid:-none}" "${holder_real_pid:-none}" "$(lock_age)" "$wait_seconds" >>"$log"
+exec 9<>"$lock"
+if ! /usr/bin/flock -w "$wait_seconds" 9; then
+  holder_info
+  age=$(lock_age)
+  message="failed, lock held by ${holder_owner:-unknown} for ${age}s"
+  printf '%s\n' "$message" >&2
+  printf 'refused pid=%s owner=%s holder_owner=%s holder_pid=%s holder_real_pid=%s age=%s wait=%s message=%s\n' "$$" "$owner" "${holder_owner:-none}" "${holder_pid:-none}" "${holder_real_pid:-none}" "$age" "$wait_seconds" "$message" >>"$log"
+  /nodejs/bin/node -e '
+    const [owner, ageSeconds, message, waitSeconds] = process.argv.slice(1)
+    console.log(JSON.stringify({ owner, ageSeconds, message, waitSeconds }))
+  ' -- "${holder_owner:-unknown}" "$age" "$message" "$wait_seconds" \
+    >/data/run/pnpm-admission-refusal
+  exit 1
+fi
+token=
+IFS= read -r token </proc/sys/kernel/random/uuid || token="$$-$PPID"
+uptime=
+IFS= read -r uptime < /proc/uptime || true
+started=${uptime%%.*}
+[ -n "$started" ] || started=0
+printf 'token=%s owner=%s started=%s pid=%s\n' "$token" "$owner" "$started" "$$" >&9
+AUTOMAGIK_PNPM_ADMISSION_TOKEN=$token
+NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=1024"
+npm_config_child_concurrency=1
+npm_config_network_concurrency=2
+export AUTOMAGIK_PNPM_ADMISSION_TOKEN NODE_OPTIONS npm_config_child_concurrency npm_config_network_concurrency
+printf 'admit pid=%s ppid=%s owner=%s token=%s cwd=%s real=%s\n' "$$" "$PPID" "$owner" "$token" "$PWD" "$real" >>"$log"
+/nodejs/bin/node "$real" "$@" 8>&- &
+real_pid=$!
+printf 'real_pid=%s\n' "$real_pid" >&9
+status=0
+wait "$real_pid" || status=$?
+if [ "$status" -ne 0 ]; then
+  events=
+  while IFS= read -r line; do events="$events $line"; done < /sys/fs/cgroup/memory.events 2>/dev/null || true
+  peak=
+  IFS= read -r peak < /sys/fs/cgroup/memory.peak 2>/dev/null || true
+  printf 'failed pid=%s owner=%s token=%s status=%s peak=%s events=%s\n' "$$" "$owner" "$token" "$status" "$peak" "$events" >>"$log"
+fi
+exit "$status"

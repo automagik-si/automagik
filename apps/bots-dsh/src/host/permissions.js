@@ -1,3 +1,4 @@
+import { withGrantHold } from './grants.js'
 // Permissions. A Bot's permission level is its own: kept on the Bot and set on every
 // Session it speaks from, so a fresh part or a new group Session keeps it. A group may
 // set one level for all its members there, in place of each member's own, as it may
@@ -7,8 +8,10 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import { HELD_NOT_SET, HELD_UNREAD } from '../shared/held.js'
 import { AUTO, AUTO_FALLBACK } from '../shared/permission-levels.js'
+import { MAX_SESSION_LINEAGE_DEPTH } from './bot-sessions.js'
 import { refusal } from './refusal.js'
 import { narrowerLevel, narrowestOffered, rankOf } from './permission-rank.js'
+import { shellHoldText } from '../shared/routes.js'
 
 export function install(rt) {
   const { ctx } = rt
@@ -65,6 +68,25 @@ export function install(rt) {
       return typeof level === 'string' && level !== '' ? level : undefined
     } catch {
       return undefined
+    }
+  }
+
+  // A group member's live level must stay within the Bot's own level.
+  function groupMemberHolds(sessionId, bot) {
+    try {
+      const service = presets()
+      if (service === undefined) return false
+      const session = (ctx.sessions?.list?.() ?? []).find(loaded => loaded?.id === sessionId)
+      if (session === undefined) return true
+      if (chains.has(sessionId) || unapplied.has(sessionId)) return false
+      const current = service.current(session)
+      if (typeof current !== 'string' || current === '') return false
+      const own = bot.permission ?? service.catalog().defaultPreset
+      const a = runRank(service, current)
+      const b = runRank(service, own)
+      return a !== undefined && b !== undefined ? a <= b : current === own
+    } catch {
+      return false
     }
   }
   // `{ permissionFallback }` for a Bot's or group's view when its Auto runs as workspace-write.
@@ -244,7 +266,25 @@ export function install(rt) {
   // without one keeps DSH's default. `room` is for a group Session not indexed yet. The
   // level is read when the apply runs, not when it is queued. `start`: the Session is
   // about to start work, so a level that does not hold refuses it (startPermission).
-  async function applyPermission(bot, sessionId, room = roomOfSession(sessionId), session, { start = false, starts = false } = {}) {
+  function grantPermissionState(sessionId, session = ctx.sessions?.get?.(sessionId)) {
+    if (session === undefined) return
+    const service = presets()
+    const current = service?.current(session)
+    const knobs = current === undefined ? undefined : service.resolve?.(current)
+    return [current, knobs?.sandbox, knobs?.approval,
+      ctx.get?.('approval')?.effectivePolicy?.(session), ctx.get?.('shell')?.sandboxMode]
+  }
+
+  function applyPermission(bot, sessionId, room, session, options) {
+    return withGrantHold(rt, { sessionIds: [sessionId] },
+      () => grantPermissionState(sessionId, session),
+      () => applyPermissionHeld(bot, sessionId, room, session, options))
+  }
+
+  async function applyPermissionHeld(
+    bot, sessionId, room = roomOfSession(sessionId), session,
+    { start = false, starts = false } = {},
+  ) {
     if (start) return startPermission(bot, sessionId, room, session)
     if (presets() === undefined) return
     return serial(sessionId, async () => {
@@ -286,6 +326,7 @@ export function install(rt) {
   const taskOf = sessionId => rt.state?.tasks?.[sessionId]
   const taskLevel = (task, service) => taskRun(task, service).level
   function taskRun(task, service, depth = 0) {
+    if (task.botBound === true) return botBoundRun(task, service, depth)
     const linked = task.levelTaskId !== undefined
     if (task.from === undefined) {
       if (!linked) return {}
@@ -304,6 +345,39 @@ export function install(rt) {
   }
   // A level ranked as what it runs as: a saved Auto DSH does not offer runs as workspace-write.
   const runRank = (service, name) => rankOf(service, name === AUTO && !autoOffered(service) ? AUTO_FALLBACK : name)
+
+  // The opener's proven rank belongs to the task, even when its old preset name
+  // changes meaning. Bot and room levels still narrow that ceiling live.
+  function botBoundRun(task, service, depth) {
+    if (service === undefined || !Number.isInteger(task.openerRank) || task.openerRank < 0 || task.openerRank > 5) return { unproven: true }
+    const { options, defaultPreset } = service.catalog()
+    const own = rt.botOf(task.from)?.permission ?? defaultPreset
+    const room = task.roomId ? rt.roomOf(task.roomId)?.permission : undefined
+    const callerRoom = task.levelRoomId ? rt.roomOf(task.levelRoomId)?.permission : undefined
+    const ownRank = runRank(service, own)
+    if (!Number.isInteger(ownRank)) return { unproven: true }
+    let ceiling = Math.min(task.openerRank, task.detachedRank ?? task.openerRank, ownRank)
+    if (!Number.isInteger(ceiling)) return { unproven: true }
+    for (const name of [room, callerRoom]) {
+      if (name === undefined) continue
+      const rank = runRank(service, name)
+      if (!Number.isInteger(rank)) return { unproven: true }
+      ceiling = Math.min(ceiling, rank)
+    }
+    let level
+    let best = -1
+    for (const { value } of options) {
+      const rank = rankOf(service, value)
+      if (!Number.isInteger(rank) || rank > ceiling || rank < best) continue
+      if (rank > best || value === (room ?? callerRoom ?? own)) [level, best] = [value, rank]
+    }
+    if (level === undefined) return { unproven: true }
+    if (task.levelTaskId === undefined) return { level }
+    const bounded = boundedByParent(task, level, service, depth)
+    const rank = rankOf(service, bounded.level)
+    return !bounded.unproven && options.some(option => option.value === bounded.level) && rank !== undefined && rank <= ceiling
+      ? bounded : { unproven: true }
+  }
   const PARENT_DEPTH = 32
   // What bounds the children of a task with no level of its own (no Bot asked for it, or
   // none could be ranked): the level DSH reports for its Session while that one is loaded.
@@ -429,6 +503,10 @@ export function install(rt) {
     const call = callers.getStore()
     return call?.active === true ? call.sessionId : undefined
   }
+  rt.callerBotId = () => {
+    const call = callers.getStore()
+    if (call?.active === true) return rt.botOfSession?.(call.sessionId, { session: call.session })?.id
+  }
   rt.levelHeld = sessionId => unapplied.has(sessionId)
 
   function callerTask() {
@@ -438,19 +516,30 @@ export function install(rt) {
   }
   // What the calling Session runs at now. An unreadable opener is still an opener:
   // it gives the narrowest offered level, never the wider saved level of its owner.
-  function callerLevel() {
+  function callerLevel({ proven = false } = {}) {
     const call = callers.getStore()
     const service = presets()
     if (call?.active !== true || service === undefined) return undefined
     try {
       const session = call.session ?? (ctx.sessions?.list?.() ?? []).find(loaded => loaded?.id === call.sessionId)
-      if (session === undefined) return narrowestOffered(service)
+      if (session === undefined) return proven ? undefined : narrowestOffered(service)
       const level = service.current(session)
+      if (proven && runRank(service, level) === undefined) return undefined
       return typeof level === 'string' && level !== '' ? level : undefined
     } catch {
-      return narrowestOffered(service)
+      return proven ? undefined : narrowestOffered(service)
     }
   }
+  rt.taskBound = (task) => {
+    const service = presets()
+    if (service === undefined || task.permissionCap === undefined) return undefined
+    const run = taskRun(task, service)
+    const rank = runRank(service, run.level)
+    if (run.unproven || rank === undefined) return undefined
+    return { level: run.level, rank, wide: wideLevel(service, run.level), defaultLevel: service.catalog().defaultPreset }
+  }
+  rt.taskOpenerRank = level => rankOf(presets(), level)
+  rt.sessionLevel = session => presets()?.current(session)
   // Save only a narrowing: an opener at the same or a wider level adds no lasting cap.
   function capTaskByOpener(task, opener) {
     const service = presets()
@@ -514,7 +603,9 @@ export function install(rt) {
     for (const task of Object.values(rt.state?.tasks ?? {})) {
       if (!match(task)) continue
       const level = taskLevel(task, service)
-      if (level !== undefined) task.permissionCap = level
+      if (level === undefined) continue
+      if (task.botBound === true) task.detachedRank = rankOf(service, level)
+      else task.permissionCap = level
     }
   }
   // The level a remembered task runs at, read before startTask forgets it.
@@ -526,10 +617,44 @@ export function install(rt) {
   // Sets a task Session's level, read when the apply runs, not when it is queued, so a
   // lower level picked meanwhile lands last. The fallback mark stays the Bot's and the
   // group's own: a task does not mark them. Resolves whether the Session is a task.
-  async function applyTaskPermission(sessionId, session, { start = false, starts = false } = {}) {
+  function applyTaskPermission(sessionId, session, options) {
+    return withGrantHold(rt, { sessionIds: [sessionId] },
+      () => grantPermissionState(sessionId, session),
+      () => applyTaskPermissionHeld(sessionId, session, options))
+  }
+
+  async function applyTaskPermissionHeld(
+    sessionId, session, { start = false, starts = false, forget = false } = {},
+  ) {
     if (start) return startTaskPermission(sessionId, session)
-    if (taskOf(sessionId) === undefined) return false
+    const task = taskOf(sessionId)
+    if (task === undefined) return false
     const service = presets()
+    if (task.botBound === true) {
+      const offeredLevel = service => {
+        const { level } = botBoundRun(task, service, 0)
+        if (!forget || level === undefined) return level
+        const { options, defaultPreset } = service.catalog()
+        return options.some(({ value }) => value === defaultPreset) ? narrowerLevel(service, level, defaultPreset) : level
+      }
+      await serial(sessionId, async () => {
+        let level
+        try {
+          const target = session ?? (await rt.resolveAgent(sessionId)).session
+          if (taskOf(sessionId) !== task || (forget && !rt.canWriteTeam())) throw refusal(OPENER_UNPROVEN)
+          level = offeredLevel(service)
+          if (level === undefined) throw refusal(OPENER_UNPROVEN)
+          if (rt.readOnly() === undefined) service.set(target, level)
+          if (forget && await ctx.sessions.flush(target) === false) throw refusal(OPENER_UNPROVEN)
+          if (taskOf(sessionId) !== task || service.current(target) !== level || offeredLevel(presets()) !== level) throw refusal(OPENER_UNPROVEN)
+          unapplied.delete(sessionId)
+        } catch (error) {
+          mark(sessionId, level ?? task.permissionCap ?? AUTO_FALLBACK)
+          throw error
+        }
+      })
+      return true
+    }
     if (rt.readOnly() !== undefined || service === undefined) return true
     await serial(sessionId, async () => {
       const task = taskOf(sessionId)
@@ -548,6 +673,7 @@ export function install(rt) {
     return true
   }
   const UNPROVEN = 'The permission level of this task cannot be compared with the level of the task that started it, so nothing runs here.'
+  const OPENER_UNPROVEN = "The permission level could not be proven within this task's bounds, so no work runs here."
   // Where work starts by itself (a task's first turn, a new Bot's greeting, a member's
   // first turn in a group) nothing runs on a Session whose level did not hold: the start
   // is refused, never left on DSH's default, which may be wider than the level chosen. A
@@ -568,6 +694,9 @@ export function install(rt) {
   // applyPermission with `start`, for a Session about to start work: rejects with a
   // refusal when its level does not hold.
   async function startPermission(bot, sessionId, room, session) {
+    // A Bot held at load for its shell-off coding CLI does not start work: the CLI brings
+    // its own shell, and the person picks a native model or turns the shell on first.
+    if (bot?.shellHeld !== undefined) throw refusal(shellHoldText(bot))
     try {
       await applyPermission(bot, sessionId, room, session, { starts: true })
     } catch (error) {
@@ -582,6 +711,7 @@ export function install(rt) {
     } catch (error) {
       rt.warn('ds-bot: permission for the task %s not applied: %s', sessionId, error)
       const task = taskOf(sessionId)
+      if (task?.botBound === true) throw Object.assign(refusal(OPENER_UNPROVEN, { cause: error }), { levelNotSet: true })
       const service = presets()
       throw startRefusal(task === undefined || service === undefined ? undefined : taskLevel(task, service), error)
     }
@@ -590,8 +720,7 @@ export function install(rt) {
   // goes: a loaded one, and a working one even if DSH has to open it. Any other takes it
   // from the session/created re-apply when DSH opens it next. Resolves the tasks whose
   // level was not set, apart from those that take it on opening, for the change that asked.
-  async function reapplyTasks(match) {
-    const left = []
+  function tasksFollowing(match) {
     // And every task started from one of them, down the chain: it is bound by that one.
     const follows = (task) => {
       for (let depth = 0; task !== undefined && depth <= PARENT_DEPTH; depth += 1) {
@@ -600,10 +729,15 @@ export function install(rt) {
       }
       return false
     }
-    const picked = Object.entries(rt.state?.tasks ?? {}).filter(([, task]) => follows(task))
+    return Object.entries(rt.state?.tasks ?? {}).filter(([, task]) => follows(task))
+  }
+  async function reapplyTasks(match) {
+    const left = []
+    const picked = tasksFollowing(match)
     if (picked.length === 0 || rt.readOnly() !== undefined || presets() === undefined) return left
     const loaded = new Map((ctx.sessions?.list?.() ?? []).map(session => [session.id, session]))
     for (const [sessionId, task] of picked) {
+      rt.dropGrantsForSession?.(sessionId)
       if (!loaded.has(sessionId) && task.status !== 'working') continue
       await applyTaskPermission(sessionId, loaded.get(sessionId))
         .catch((error) => {
@@ -646,7 +780,7 @@ export function install(rt) {
   // A Session of a Bot's own chat, of a group or of a task, as DSH opens it or as the
   // presets change.
   async function reapply(session) {
-    if (rt.readOnly() !== undefined) return
+    if (rt.readOnly() !== undefined && taskOf(session.id)?.botBound !== true) return
     // Not awaited first: the first preset must still land within DSH's announce.
     if (taskOf(session.id) !== undefined) return applyTaskPermission(session.id, session)
     const group = rt.groupOwners.get(session.id)
@@ -661,10 +795,10 @@ export function install(rt) {
   // while a Session is marked (levelHolds): a Session DSH cannot read then may be a marked
   // one's child, so its call is refused, never let through.
   const UNREAD = 'DeepSeek Harness could not read where this conversation comes from while a permission level is not set, so no tool runs here until it can. Try again; if this goes on, tell the user to restart DeepSeek Harness.'
-  function markedFor(agent) {
+  function markedFor(agent, requireLineage = false) {
     let current = agent?.id ?? agent?.session?.id
     let header = agent?.session?.header
-    for (let depth = 0; typeof current === 'string' && depth < 32; depth += 1) {
+    for (let depth = 0; typeof current === 'string' && depth <= MAX_SESSION_LINEAGE_DEPTH; depth += 1) {
       if (unapplied.has(current)) return current
       try {
         header ??= ctx.sessions?.get?.(current)?.header
@@ -672,12 +806,16 @@ export function install(rt) {
         rt.warn('ds-bot: the Session %s could not be read while a permission level is not set: %s', current, error)
         throw Object.assign(refusal(UNREAD, { cause: error }), { held: HELD_UNREAD })
       }
+      if (requireLineage && (header === null || typeof header !== 'object')) break
       if (header?.origin !== 'subagent') return undefined
       current = header.parentSession
       header = undefined
     }
-    return undefined
+    if (requireLineage) throw Object.assign(refusal(UNREAD), { held: HELD_UNREAD })
   }
+  // The runner needs a synchronous hold check at dispatch, without retrying or lifting a mark.
+  rt.levelHeldFor = sessionId => unapplied.size > 0 && markedFor({ id: sessionId }, true) !== undefined
+
   // Whether the Session reads the level it should run at: a saved Auto DSH does not offer
   // runs as workspace-write. False when DSH cannot tell.
   function reads(session, level) {
@@ -693,8 +831,8 @@ export function install(rt) {
   // group's, a Bot's. No `level` when the owner has none of its own, or is gone.
   function wantedBy(sessionId) {
     const service = presets()
-    if (service === undefined) return {}
     const task = taskOf(sessionId)
+    if (service === undefined) return task?.botBound === true ? { task, unproven: true } : {}
     if (task !== undefined) return { ...taskRun(task, service), task }
     const group = rt.groupOwners.get(sessionId)
     const bot = rt.botOf(group?.botId ?? rt.chatOwners.get(sessionId))
@@ -732,7 +870,9 @@ export function install(rt) {
   async function levelHolds(exec) {
     if (unapplied.size === 0) return
     // No presets service any more: no level is set anywhere, so none is missed.
-    if (presets() === undefined) return unapplied.clear()
+    if (presets() === undefined) {
+      for (const id of unapplied.keys()) if (taskOf(id)?.botBound !== true) unapplied.delete(id)
+    }
     const sessionId = markedFor(exec?.agent)
     if (sessionId === undefined) return
     const own = sessionId === (exec.agent?.id ?? exec.agent?.session?.id) ? exec.agent?.session : undefined
@@ -786,7 +926,7 @@ export function install(rt) {
   // first preset is set within DSH's announce, before the Session is published; the
   // rest is async, and DSH only logs a rejection.
   ctx.on('session/created', (session) => {
-    if (presets() === undefined) return undefined
+    if (presets() === undefined && taskOf(session.id)?.botBound !== true) return undefined
     const run = () => reapply(session).catch(warnNotApplied(session.id))
     return rt.chatOwners.has(session.id) || rt.groupOwners.has(session.id) || taskOf(session.id) !== undefined ? run() : rt.load().then(run)
   })
@@ -794,9 +934,9 @@ export function install(rt) {
   // in one tick, so one DSH moved off Auto runs as workspace-write, not full access. An
   // idle Session is left closed.
   ctx.on('permission-presets/catalog-changed', async () => {
-    if (presets() === undefined) return
     await rt.load()
-    await Promise.all(ctx.sessions.list().map(session => reapply(session).catch(warnNotApplied(session.id))))
+    await Promise.all((ctx.sessions?.list?.() ?? []).filter(session => presets() !== undefined || taskOf(session.id)?.botBound === true)
+      .map(session => reapply(session).catch(warnNotApplied(session.id))))
   })
 
   // DSH will not reopen a Session whose log holds Auto while Auto review's layer is off
@@ -831,7 +971,12 @@ export function install(rt) {
     return levelTo(bot, wanted)
   }
 
-  async function levelTo(bot, wanted, { before = bot.permission } = {}) {
+  function levelTo(bot, wanted, options) {
+    return withGrantHold(rt, { botId: bot.id }, () => bot.permission,
+      () => levelToHeld(bot, wanted, options))
+  }
+
+  async function levelToHeld(bot, wanted, { before = bot.permission } = {}) {
     // Read before the apply: whether the Bot's saved Auto last ran as workspace-write.
     const fell = fellBack.has(`bot:${bot.id}`)
     bot.permission = wanted
@@ -859,6 +1004,7 @@ export function install(rt) {
         left.push(rt.chatOf(bot.id))
       }
     }
+    rt.dropGrantsForBot?.(bot.id)
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
       if (roomOfSession(sessionId)?.permission) continue
       await applyPermission(bot, sessionId)
@@ -867,8 +1013,8 @@ export function install(rt) {
           if (keptLevel(error)) left.push(sessionId)
         })
     }
-    // Its tasks too, but one asked for in a group with a level of its own keeps that one.
-    left.push(...await reapplyTasks(task => task.from === bot.id && !(task.roomId && rt.roomOf(task.roomId)?.permission)))
+    // Role-started tasks also keep the Bot's live bound in a group with its own level.
+    left.push(...await reapplyTasks(task => task.from === bot.id && (task.botBound === true || !(task.roomId && rt.roomOf(task.roomId)?.permission))))
     if (left.length > 0) throw notEverywhere(bot.name, left)
   }
 
@@ -898,11 +1044,25 @@ export function install(rt) {
 
   // Members' Sessions in the group change now; a member that has none there yet gets the
   // group's level when its first turn there makes one. Returns whether it changed.
-  async function setRoomPermission(room, name) {
+  function setRoomPermission(room, name) {
+    return withGrantHold(rt, { roomId: room.id }, () => room.permission,
+      () => setRoomPermissionHeld(room, name))
+  }
+
+  async function setRoomPermissionHeld(room, name) {
     const wanted = cleanRoomPermission(name) ?? undefined
     if (wanted === room.permission) return false
     if (wanted === undefined) delete room.permission
-    else room.permission = wanted
+    else {
+      room.permission = wanted
+      room.scoped = true
+    }
+    for (const sessionId of Object.values(room.sessions ?? {})) {
+      rt.dropGrantsForSession?.(sessionId)
+    }
+    for (const [id] of tasksFollowing(task => taskOfRoom(task, room.id))) {
+      rt.dropGrantsForSession?.(id)
+    }
     markFallback(`room:${room.id}`, false)
     const service = presets()
     if (service === undefined) return true
@@ -1001,8 +1161,15 @@ export function install(rt) {
       return false
     }
   }
+  rt.grantTaskRun = sessionId => {
+    const task = taskOf(sessionId)
+    const service = presets()
+    if (task !== undefined && service !== undefined) return taskRun(task, service)
+  }
+
+
   // The Sessions that carry the mark now, as a fresh list.
   const unappliedSessions = () => [...unapplied.keys()]
 
-  Object.assign(rt, { newBotPermission, sessionWide, permissionFactsOf, unappliedSessions, permissionCatalog, permissionFallbackOf, permissionKey, autoClosed, applyPermission, applyTaskPermission, levelHolds, reapplyTasks, capTasks, taskOfRoom, inToolCall, callerGroup, callerTask, callerLevel, capTaskByOpener, armedLevels, lowerScheduledSession, assertTaskDepth, taskForebears, taskLevelOf, forgetTaskPermission, checkPreset, startingSession, assertLevelOffered, setPermission, levelTo, inheritedPermission, cleanRoomPermission, setRoomPermission })
+  Object.assign(rt, { newBotPermission, sessionWide, groupMemberHolds, permissionFactsOf, unappliedSessions, permissionCatalog, permissionFallbackOf, permissionKey, autoClosed, applyPermission, applyTaskPermission, levelHolds, reapplyTasks, capTasks, taskOfRoom, inToolCall, callerGroup, callerTask, callerLevel, capTaskByOpener, armedLevels, lowerScheduledSession, assertTaskDepth, taskForebears, taskLevelOf, forgetTaskPermission, checkPreset, startingSession, assertLevelOffered, setPermission, levelTo, inheritedPermission, cleanRoomPermission, setRoomPermission })
 }

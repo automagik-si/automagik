@@ -4,6 +4,7 @@
 // the agent session of a Session the moment it is marked (`acpAgents.endSession`). Both only
 // ever refuse. acp-dsh is a fake here: the gates it was given and the sessions it was told to end.
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -40,7 +41,7 @@ const TEAM = {
 
 // The whole team over a fake DSH presets service, as in permissions.test.js. `failing`
 // holds the Sessions whose set throws; `sets` counts every set DSH was asked for.
-function team(t, { acp = true, auto = true, bots = {}, room = {}, tasks, closed = [], presets = true, levels = {}, failing: failingAtStart = [] } = {}) {
+function team(t, { acp = true, auto = true, bots = {}, room = {}, tasks, closed = [], emptySessions = [], presets = true, levels = {}, failing: failingAtStart = [] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-unapplied-agents-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify({ ...TEAM, bots: { m1: { ...TEAM.bots.m1, ...bots.m1 }, b2: { ...TEAM.bots.b2, ...bots.b2 } }, rooms: { r1: { ...TEAM.rooms.r1, ...room } }, ...(tasks ? { tasks } : {}) }))
   const presetOf = new Map(Object.entries(levels))
@@ -88,7 +89,7 @@ function team(t, { acp = true, auto = true, bots = {}, room = {}, tasks, closed 
       create: async () => ({ sessionId: `s${++sessions}` }),
       async resolveAgent(sessionId) {
         if (closed.includes(sessionId)) return { error: { code: 'gateway/internal', message: `resume failed for session "${sessionId}": Error: permission: cannot restore preset "auto" without its active integration` } }
-        const session = { id: sessionId }
+        const session = { id: sessionId, ...(emptySessions.includes(sessionId) ? { deriveMessages: () => [] } : {}) }
         if (!open.has(sessionId)) {
           open.add(sessionId)
           for (const listener of ctx.listeners.get('session/created') ?? []) void Promise.resolve(listener(session)).catch(() => {})
@@ -305,7 +306,8 @@ test('judge verdict parsing accepts only the three decisions', () => {
 })
 
 test('an unmarked route switch makes the old Auto confirmation stale', async t => {
-  const w = team(t, { bots: { m1: { model: 'deepseek/v4', appliedModel: 'deepseek/v4' } } })
+  // No turn or answer precedes this pick; only the Auto confirmation revision exists.
+  const w = team(t, { emptySessions: ['m1'], bots: { m1: { model: 'deepseek/v4', appliedModel: 'deepseek/v4' } } })
   await w.rt.load()
   w.rt.resolveModel = async ref => ref
   w.rt.applyModel = async bot => { bot.appliedModel = bot.model }
@@ -617,8 +619,14 @@ test('#1092 every new hard category reaches the person without a judge call', as
     assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall: { title: 'bash', input: { command }, allowOnce: true } }), 'person')
     assert.equal(w.rt.autoAuditRows().at(-1).code, 'hard')
   }
-  w.rt.stepHooks.sendsOutside(() => true)
-  assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall: { title: 'team_send', input: {}, allowOnce: true } }), 'person')
+  let classified
+  w.rt.stepHooks.sendsOutside(input => {
+    classified = input
+    return input.tool === 'team_send'
+  })
+  const mirrorCall = { title: 'team_send', input: {}, allowOnce: true }
+  assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall }), 'person')
+  assert.deepEqual(classified, { tool: mirrorCall.title, args: mirrorCall.input, sessionId: w.session.id })
   assert.equal(w.requests.length, 0)
 })
 for (const stuck of ['background', 'info', 'stream']) test(`#1092 total judge deadline bounds ${stuck}`, async t => {
@@ -934,5 +942,34 @@ test('#1092 review: a heredoc hides nothing without its end line, and graphql fr
     `python3 -c 'print(1<<3)'\n${push}`, `echo "use <<EOF for heredocs"\n${push}`, '# see cat <<EOF\nrm /tmp/x',
     `cat > a <<'EOF'\nx\nEOF\n${push}`, 'gh api graphql --input add-comment.json', 'gh api graphql -F query=@add-comment.graphql']) {
     assert.equal(hardToUndo({ tool: 'bash', args: { command } }, { root: '/w/repo' }), true, command)
+  }
+})
+
+test('RFC 0034 password-manager reads on the mirror reach the person without a judge call', async t => {
+  const w = await world(t, 'acp-hermes/default')
+  const mirrorCall = { title: 'bash', input: { command: 'bw get password x' }, allowOnce: true }
+  assert.equal(await w.decide({ ...w.request(), toolName: 'acp_tool', mirrorCall }), 'person')
+  assert.equal(w.rt.autoAuditRows().at(-1).code, 'hard')
+  assert.equal(w.requests.length, 0)
+})
+
+test('credential fields on a matching escalation still require the person', async t => {
+  const w = await world(t)
+  const marker = randomUUID()
+  const windows = 'cmdkey /generic:' + marker
+  const macos = 'security find-internet-password -g -s ' + marker
+  for (const fields of [
+    { permissionTitle: 'Inspect the fixture with ' + windows },
+    { justification: 'Need to run ' + macos },
+    { input: { script: macos } },
+  ]) {
+    await w.run()
+    const before = w.requests.length
+    assert.equal(await w.decide({ ...w.request(), ...fields }), 'person')
+    assert.equal(w.requests.length, before)
+    const audit = w.rt.autoAuditRows().at(-1)
+    assert.equal(audit.code, 'hard')
+    assert.equal(JSON.stringify(audit).includes(marker), false)
+    assert.equal(await w.decide(), 'person', 'the prior grant is gone')
   }
 })

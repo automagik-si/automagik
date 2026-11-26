@@ -97,6 +97,7 @@ test('PR tooling import coverage, frozen setup and source proof precede smoke; p
   expect(setup).toContain('run: bun install --frozen-lockfile --ignore-scripts');
   expect(workflow.indexOf(setup)).toBeLessThan(workflow.indexOf(block('Pack committed checkout inputs')));
   expect(workflow.indexOf(block('Prove the installed checkout child and image identity'))).toBeLessThan(workflow.indexOf(block('Smoke')));
+  expect(block('Smoke')).toContain('SMOKE_INPUT_KIND: ${{ steps.gate.outputs.source }}');
   expect(block('Keep the checkout image proof')).toContain("if: always() && github.event_name == 'pull_request'");
   expect(block('Keep the checkout image proof')).toContain('if-no-files-found: error');
   expect(workflow.indexOf(block('Refuse non-release publication before loading artifacts'))).toBeLessThan(workflow.indexOf('uses: actions/download-artifact@'));
@@ -117,6 +118,7 @@ test('push filters and literal publish/record/lane dependency contracts remain u
       - apps/desktop/runtime/patches/**
       - apps/desktop/scripts/prune-runtime.mjs
       - apps/desktop/scripts/runtime-patches.mjs
+      - apps/desktop/src/profile-patch.mjs
       - herdr/scripts/privacy-check.mjs
       - herdr/scripts/privacy-list.json
       - .github/workflows/server-image.yml

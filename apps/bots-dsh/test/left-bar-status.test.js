@@ -66,6 +66,11 @@ test('a row shows nothing when idle; not running says its word, the mark alone e
   const needs = render(Status({ status: 'needs' }))
   assert.equal(needs.props.className, 'lb-st lb-st-needs')
   assert.equal(textOf(needs), 'Needs you', 'needs you keeps its word')
+  // A Bot whose plugin cannot run says so, in words as well as its dashed mark.
+  const missing = render(Status({ status: 'not-installed' }))
+  assert.equal(textOf(missing), 'Not installed')
+  assert.equal(missing.props['data-status'], 'not-installed')
+  assert.equal(StatusMark({ status: 'not-installed' }).props.className, 'lb-mark lb-mark-not-installed')
   // Beside its word the mark is not read twice.
   const [mark] = findAll(needs, node => node.props?.['data-status'] === 'needs' && node.type === 'span' && node !== needs)
   assert.equal(mark.props['aria-hidden'], true)
@@ -88,19 +93,21 @@ test('the mascot states and the bar statuses map both ways', () => {
   assert.equal(statusOr(undefined), 'idle')
   assert.equal(statusOfState('alert'), 'needs')
   assert.equal(statusOfState('failed'), 'error')
+  assert.equal(statusOfState('not-installed'), 'not-installed')
   for (const state of ['thinking', 'searching', 'working', 'sending', 'orbit', 'waiting']) assert.equal(statusOfState(state), 'working', state)
   assert.equal(statusOfState('idle'), 'idle')
   assert.equal(statusOfState('sleeping'), 'idle')
   assert.equal(stateOfStatus('needs'), 'alert')
   assert.equal(stateOfStatus('error'), 'failed')
   assert.equal(stateOfStatus('working'), 'working')
+  assert.equal(stateOfStatus('not-installed'), 'not-installed')
   assert.equal(stateOfStatus('off'), 'idle')
 })
 
 test('every word the bar says is in the dictionary', () => {
-  assert.deepEqual([...WORDS], ['working', 'needs', 'error', 'idle', 'off', 'team', 'projects', 'add', 'faces'])
+  assert.deepEqual([...WORDS], ['working', 'needs', 'error', 'idle', 'off', 'not-installed', 'team', 'projects', 'add', 'faces'])
   const english = Object.fromEntries(WORDS.map(name => [name, word(name)]))
-  assert.deepEqual(english, { working: 'Working', needs: 'Needs you', error: 'Error', idle: 'Idle', off: 'Not running', team: 'Team', projects: 'Spaces', add: 'Create or join a space', faces: 'This Bot as' })
+  assert.deepEqual(english, { working: 'Working', needs: 'Needs you', error: 'Error', idle: 'Idle', off: 'Not running', 'not-installed': 'Not installed', team: 'Team', projects: 'Spaces', add: 'Create or join a space', faces: 'This Bot as' })
   const off = zh()
   try {
     assert.equal(word('working'), '进行中')

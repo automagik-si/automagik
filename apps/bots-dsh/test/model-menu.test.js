@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { DEFAULT_ROUTE_POLICY } from '../src/shared/route-policy.js'
 
 const bundle = await build({
   stdin: {
@@ -53,9 +54,9 @@ function nodes(tree, match) {
 }
 
 // `harness`: the window has DSH's own settings to send the user to, as the plugin does.
-function dock(models, { model, ready = true, harness = true, routePolicy } = {}) {
+function dock(models, { model, ready = true, harness = true, routePolicy, botExtra = {} } = {}) {
   const picked = []
-  const bot = { id: 'chief', name: 'Omni', model }
+  const bot = { id: 'chief', name: 'Omni', model, ...botExtra }
   const roster = { ready, byId: { chief: bot }, models, defaultModel: models[0]?.ref, ...(routePolicy ? { routePolicy } : {}) }
   const tree = ModelChoiceDock({
     sessionId: bot.id, useRoster: select => select(roster),
@@ -318,6 +319,19 @@ test('a host-owned Bot\'s settings and details name what answers now, never the 
   assert.equal(needsModelPick(bare, { ...hosted, byId: { unfold: bare } }), false)
 })
 
+test('a held shell-off coding CLI Bot names the choice before it can start', () => {
+  const { modelHint } = module.exports
+  const roster = { ready: true, byId: {}, models: [{ ref: 'acp-codex/default', provider: 'acp-codex', providerName: 'Codex', name: 'Codex' }] }
+  const bot = {
+    id: 'b1', name: 'Ops', model: 'acp-codex/default', appliedModel: 'acp-codex/default',
+    shell: false, shellHeld: { cli: 'acp-codex', model: 'acp-codex/default' },
+  }
+  assert.equal(modelHint(bot, roster),
+    'This Bot has no shell, so it cannot run on acp-codex, whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+  // Once the shell is on, the hold is gone and the ordinary hint is back.
+  assert.equal(modelHint({ ...bot, shell: true, shellHeld: undefined }, roster), 'Every message of this Bot runs on it.')
+})
+
 test('the menu leaves out a superseded model, unless the Bot is on it', () => {
   const models = [
     { ref: 'anthropic/claude-opus-5-5', provider: 'anthropic' },
@@ -480,7 +494,7 @@ const cascade = [
   { ref: 'acp-codex/gpt-6.1-sol', id: 'gpt-6.1-sol', provider: 'acp-codex', providerName: 'Codex', via: 'cli', name: '6.1 Sol' },
 ]
 
-function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', appliedModel: 'acp-codex/default', effort: 'high' }, chat = false, onPick, onPickEffort, routePolicy } = {}) {
+function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', appliedModel: 'acp-codex/default', effort: 'high' }, chat = false, onPick, onPickEffort, routePolicy, prefs, models = cascade, more = {} } = {}) {
   const updates = []
   const chosen = []
   const switched = []
@@ -489,8 +503,9 @@ function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', a
     chooseModelInChat: (id, ref, patch) => { chosen.push([id, ref, { ...patch }]); return Promise.resolve() },
     switchRoute: (id, ref, patch) => { switched.push([id, ref, { ...patch }]); return Promise.resolve() },
     openHarnessSettings: () => {},
+    ...more,
   }
-  const roster = { ready: true, byId: { [bot.id]: bot }, models: cascade, defaultModel: 'deepseek/flash', ...(routePolicy ? { routePolicy } : {}) }
+  const roster = { ready: true, byId: { [bot.id]: bot }, models, defaultModel: 'deepseek/flash', ...(routePolicy ? { routePolicy } : {}), ...(prefs ? { prefs } : {}) }
   menuOpen = true
   try {
     const open = drawMenu({ bot, roster, actions, run: promise => promise, chat, onPick, onPickEffort })
@@ -503,6 +518,38 @@ function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', a
 }
 const labelOf = row => nodes(row, node => node.props.className === 'bt-menu-label')[0].children[0]
 const hintOf = row => nodes(row, node => node.props.className === 'bt-menu-hint')[0]?.children[0] ?? null
+
+test('the default opens the allowed route rows for each kind, including disconnected Remote Hermes', () => {
+  for (const kind of [undefined, 'omni', 'genie', 'unfold', 'dsh']) {
+    const bot = { id: 'b1', name: 'Ops', model: 'deepseek/flash', ...(kind === undefined ? {} : { kind }) }
+    const { step } = openMenu({ bot, routePolicy: DEFAULT_ROUTE_POLICY })
+    const routes = nodes(step(), node => node.type === 'button' && node.props['data-route'] !== undefined)
+    assert.deepEqual(routes.map(labelOf), kind === 'dsh' ? ['Native', 'Remote Hermes'] : ['Native', 'ACP', 'Remote Hermes'], kind)
+    assert.equal(hintOf(routes.at(-1)), 'Set up', kind)
+  }
+})
+
+test('a saved Remote Hermes connection stays in the default menu for Automagik and DSH', () => {
+  for (const kind of [undefined, 'dsh']) {
+    const bot = { id: 'b1', name: 'Ops', model: 'deepseek/flash', ...(kind ? { kind } : {}) }
+    const { step } = openMenu({ bot, routePolicy: DEFAULT_ROUTE_POLICY, prefs: { hermesRemote: { enabled: true, profile: 'Lab' } } })
+    const routes = nodes(step(), node => node.type === 'button' && node.props['data-route'] !== undefined)
+    assert.deepEqual(routes.map(labelOf), kind === 'dsh' ? ['Native', 'Remote Hermes'] : ['Native', 'ACP', 'Remote Hermes'])
+    assert.equal(hintOf(routes.at(-1)), 'Lab')
+  }
+})
+
+test('with the default policy, hosted Unfold still shows its plugin entries and thinking levels', () => {
+  menuOpen = true
+  try {
+    const tree = drawHost({ bot: hostBot, roster: { ...hostRoster(), routePolicy: DEFAULT_ROUTE_POLICY }, actions: {}, run: promise => promise })
+    const rows = nodes(tree, node => node.type === 'button' && node.props.role === 'menuitemradio')
+    assert.deepEqual(rows.map(labelOf), ['Granite 4.1 3B', 'DeepSeek V4.1 Flash', 'GPT-5.5', 'Auto', 'Off', 'High'])
+    assert.equal(nodes(tree, node => node.props['data-route'] !== undefined).length, 0)
+  } finally {
+    menuOpen = false
+  }
+})
 
 test('step 1 lists the four routes in order, marks the one the Bot is on, and ends on the providers', () => {
   const { step, steps } = openMenu()
@@ -607,39 +654,50 @@ test('in a Bot\'s chat the level goes with the model through the chat pick, and 
   assert.deepEqual(fresh.updates, [])
 })
 
-test('crossing a route asks first and only then switches; crossing an ACP agent does too', () => {
+test('crossing a route while a reply runs asks first with Cancel and Switch; a Hermes crossing keeps its new-conversation question', () => {
   const { RouteConfirm } = module.exports
   const bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default' }
   const roster = { models: cascade, byId: { b1: bot } }
   const asked = []
   const route = RouteConfirm({
-    bot, roster, current: 'acp-codex/default', target: { ref: 'deepseek/flash' },
+    bot, roster, current: 'acp-codex/default', target: { ref: 'deepseek/flash' }, ask: 'running',
     onCancel: () => asked.push('cancel'), onConfirm: () => asked.push('confirm'),
   })
   const text = node => nodes(node, n => n.props.className?.startsWith('bt-model-confirm'))[0]
-  assert.equal(text(route).children[0], 'Start a new conversation?')
+  assert.equal(text(route).children[0], 'Change route?')
   assert.equal(nodes(route, node => node.props.className === 'bt-model-confirm-move')[0].children.join(''), 'ACP · Codex → Native · DeepSeek')
   assert.equal(nodes(route, node => node.props.className === 'bt-model-confirm-text')[0].children[0],
-    'Changing the route starts a new conversation. Ops writes a handoff note first.')
+    'This stops the current reply and continues on DeepSeek Flash.')
   const buttons = nodes(route, node => node.type === 'button')
-  assert.deepEqual(buttons.map(button => button.children[0]), ['Keep this conversation', 'Change route'])
+  assert.deepEqual(buttons.map(button => button.children[0]), ['Cancel', 'Switch'])
   buttons[0].props.onClick()
   buttons[1].props.onClick()
   assert.deepEqual(asked, ['cancel', 'confirm'])
-  // Another agent inside ACP is another harness: same warning, different word.
-  const agent = RouteConfirm({ bot, roster, current: 'acp-codex/default', target: { ref: 'acp-claude/default' }, onCancel: () => {}, onConfirm: () => {} })
+  // To or from a Hermes route the question is the one it always was (RFC 0030 Q7a).
+  const hermes = RouteConfirm({
+    bot: { ...bot, model: 'hermes-remote/attach' }, roster, current: 'hermes-remote/attach', target: { ref: 'deepseek/flash' }, ask: 'hermes',
+    onCancel: () => {}, onConfirm: () => {},
+  })
+  assert.equal(text(hermes).children[0], 'Change route?')
+  assert.equal(nodes(hermes, node => node.props.className === 'bt-model-confirm-text')[0].children[0],
+    'Changing the route requires a new conversation if this one has history.')
+  assert.deepEqual(nodes(hermes, node => node.type === 'button').map(button => button.children[0]), ['Keep this conversation', 'Change route'])
+  // Another agent inside ACP is another harness: the same running question, a different title.
+  const agent = RouteConfirm({ bot, roster, current: 'acp-codex/default', target: { ref: 'acp-claude/default' }, ask: 'running', onCancel: () => {}, onConfirm: () => {} })
+  assert.equal(text(agent).children[0], 'Change agent?')
   assert.equal(nodes(agent, node => node.props.className === 'bt-model-confirm-text')[0].children[0],
-    'Changing the agent starts a new conversation. Ops writes a handoff note first.')
-  assert.deepEqual(nodes(agent, node => node.type === 'button').map(button => button.children[0]), ['Keep this conversation', 'Change agent'])
+    'This stops the current reply and continues on Claude Code.')
+  assert.deepEqual(nodes(agent, node => node.type === 'button').map(button => button.children[0]), ['Cancel', 'Switch'])
 })
 
-test('a route crossing reaches the host switch, not the in-place model update', async () => {
-  const { steps, updates, switched } = openMenu()
+test('a route crossing in an idle chat reaches the host switch at once, with no question and no in-place update', async () => {
+  const { steps, open, updates, switched } = openMenu()
   steps.props.onModel(cascade[0], 'native')
   await new Promise(resolve => setTimeout(resolve, 0))
-  // The menu asks before it applies: with the confirmation still open, nothing was saved.
+  // Nothing runs in the chat: no confirmation, and the host's switch is asked once.
+  assert.equal(nodes(open, node => node.type?.name === 'RouteConfirm').length, 0)
+  assert.deepEqual(switched, [['b1', 'deepseek/flash', {}]])
   assert.deepEqual(updates, [])
-  assert.deepEqual(switched, [])
 })
 
 test('Herdr is offered, named unavailable, and lists its agents and models until #1007 wires it', () => {
@@ -758,4 +816,70 @@ test('a reopened menu starts from the default, not the choices of the menu still
   assert.deepEqual({ ...manualFor(previous, 2) }, {})
   // A click in the reopened menu builds on that empty state, not on the old one.
   assert.deepEqual({ ...toggledGroup(manualFor(previous, 2), 'relay', false) }, { relay: true })
+})
+
+test('a shell-off Bot held off its plan CLI says why, and asks for a model when the plan is gone', () => {
+  const { modelHint, needsModelPick } = module.exports
+  const held = { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' }
+  const bot = { id: 'b', name: 'B', model: 'openai-codex/gpt-6.1-sol', subscriptionShellHeld: held }
+  const served = { ready: true, models: [{ ref: 'openai-codex/gpt-6.1-sol', provider: 'openai-codex', providerName: 'ChatGPT', name: 'GPT-6.1 Sol' }] }
+  // The move notice names why: the CLI brings its own shell.
+  assert.equal(modelHint(bot, served), 'This Bot stays on GPT-6.1 Sol: Codex is a coding CLI that '
+    + "brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.")
+  // The retired route is gone: the Bot asks for a model instead of looking like it works.
+  const gone = { ready: true, models: [{ ref: 'deepseek/deepseek-v4-flash', provider: 'deepseek', providerName: 'DeepSeek', name: 'DeepSeek V4' }] }
+  assert.equal(modelHint(bot, gone), 'This model no longer answers, and this Bot cannot move to Codex '
+    + "while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.")
+  assert.equal(needsModelPick(bot, gone), false)
+})
+
+test('a shell-off Bot whose retired plan route is gone asks for a model, not a start', () => {
+  const held = { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' }
+  const gone = [{ ref: 'deepseek/deepseek-v4-flash', provider: 'deepseek', providerName: 'DeepSeek', name: 'DeepSeek V4' }]
+  // The retired route is no longer served: the chat draws the choice card, not the start card.
+  const { tree } = dock(gone, { model: 'openai-codex/gpt-6.1-sol', botExtra: { subscriptionShellHeld: held } })
+  assert.ok(tree !== null && tree !== undefined)
+  const bubble = nodes(tree, node => node.props?.className === 'bt-bubble')[0]
+  assert.equal(bubble.children[0], 'gpt-6.1-sol is not available anymore. Pick another model for me.')
+  assert.equal(nodes(tree, node => node.props?.className === 'bt-model-start').length, 0)
+  // The model hint says why the move did not happen, and still asks for the choice.
+  const { modelHint } = module.exports
+  const roster = { ready: true, models: gone }
+  assert.equal(modelHint({ id: 'chief', name: 'Omni', model: 'openai-codex/gpt-6.1-sol', subscriptionShellHeld: held }, roster),
+    'This model no longer answers, and this Bot cannot move to Codex while its shell is off. '
+      + "Pick a model that uses DeepSeek Harness's tools, or turn its shell on.")
+})
+
+// #2048 (parity): an Antigravity model that needs a sign-in opens its row in the Bot's chat,
+// as Claude Code's and Codex's do.
+test('in a Bot\'s chat, an Antigravity model that needs a sign-in opens its sign-in row', () => {
+  const opened = []
+  const agy = { ref: 'acp-antigravity/default', id: 'default', provider: 'acp-antigravity', providerName: 'Antigravity', via: 'cli', name: 'Antigravity', needsSignIn: true }
+  const menu = openMenu({ chat: true, models: [...cascade, agy], more: { openCliLogin: (...args) => { opened.push(args); return true } } })
+  menu.steps.props.onModel(agy, 'acp')
+  assert.deepEqual(opened, [['b1', 'acp-antigravity', undefined]])
+  assert.deepEqual([menu.updates, menu.chosen, menu.switched], [[], [], []])
+})
+
+// RFC 0030, Handoff note (2026-11-23): while an agent switch runs in the Bot's own chat the
+// model line says where it goes; a switch the own-tools rule stopped says that rule's words.
+test('the model line says an agent switch is running, and why an own-tools switch stopped', () => {
+  const { modelStateLine, askFirst, OWN_TOOLS_SWITCH } = module.exports
+  const models = [
+    { ref: 'deepseek/v4', provider: 'deepseek', providerName: 'DeepSeek', name: 'DeepSeek V4' },
+    { ref: 'acp-codex/default', provider: 'acp-codex', providerName: 'Codex', name: 'Default' },
+  ]
+  const roster = { ready: true, byId: {}, models }
+  assert.equal(modelStateLine({ selected: 'deepseek/v4', pending: false, switching: { to: 'acp-codex/default', since: 1 } }, roster), 'Switching to Codex…')
+  // An agent the catalog does not list yet: the menu's own name for it.
+  assert.equal(modelStateLine({ selected: 'deepseek/v4', switching: { to: 'acp-claude/default', since: 1 } }, roster), 'Switching to Claude Code…')
+  // A native model by its own name.
+  assert.equal(modelStateLine({ selected: 'acp-codex/default', switching: { to: 'deepseek/v4', since: 1 } }, roster), 'Switching to DeepSeek V4…')
+  assert.equal(OWN_TOOLS_SWITCH, 'MODEL_OWN_TOOLS_DENIED')
+  assert.match(modelStateLine({ selected: 'acp-claude/default', lastFailure: { code: OWN_TOOLS_SWITCH, ref: 'acp-antigravity/default', kept: 'acp-claude/default' } }, roster), /acp_tool/)
+  // What a crossing pick asks first.
+  assert.equal(askFirst('deepseek/v4', 'acp-codex/default', false), null)
+  assert.equal(askFirst('deepseek/v4', 'acp-codex/default', true), 'running')
+  assert.equal(askFirst('deepseek/v4', 'hermes-remote/attach', false), 'hermes')
+  assert.equal(askFirst('acp-hermes/default', 'deepseek/v4', true), 'hermes')
 })

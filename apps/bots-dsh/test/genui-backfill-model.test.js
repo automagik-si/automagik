@@ -1,0 +1,205 @@
+// #1326 K2: the interactive backfill card's words. A proposal says which chats and which
+// dates it would read, and pre-ticks only the chats the Bot named; a run says how each chat
+// moves and which rows can still be stopped. Labels and counts only: a message preview the
+// Omni plugin happened to pass is rebuilt away, never drawn.
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import {
+  backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, proposalView, runView, shortDate,
+} from '../src/client/genui-model.js'
+
+const FROM = '2026-03-01T00:00:00.000Z'
+const TO = '2026-11-15T23:59:59.999Z'
+const coverage = {
+  oldest: '2026-03-02T12:00:00Z',
+  newest: '2026-11-20T12:00:00Z',
+  count: 4400,
+  countInWindow: 120,
+  mediaMissing: 2,
+  deletedCount: 3,
+  lastInbound: '2026-11-20T12:00:00Z',
+  lastOutbound: '2026-08-01T12:00:00Z',
+}
+const PROPOSAL = {
+  id: 'p1',
+  botId: 'm1',
+  from: FROM,
+  to: TO,
+  createdAt: 1_763_500_000_000,
+  preview: 'the last thing someone wrote',
+  chats: [
+    { id: 'c1', name: 'Ana', kind: 'dm', channelId: 'inst-1', channel: 'Shop line', ticked: true, preview: 'private' },
+    { id: 'c2', name: 'Bruno', kind: 'group', channelId: 'inst-1', channel: 'Shop line', ticked: false },
+    // A chat Omni can only name by id, and a name far past the label cap.
+    { id: 'c3', channelId: 'inst-1' },
+    { id: 'c4', name: 'x'.repeat(300), ticked: true },
+    // A chat with no id names nothing to tick: left out.
+    { name: 'No id' },
+  ],
+}
+
+test('a proposal says the chats and the range it would read, and pre-ticks only what the Bot named', () => {
+  const view = proposalView(PROPOSAL)
+  assert.equal(view.id, 'p1')
+  assert.equal(view.botId, 'm1')
+  assert.equal(view.range, 'Mar 1, 2026 – Nov 15, 2026')
+  assert.equal(view.from, '2026-03-01')
+  assert.equal(view.to, '2026-11-15')
+  assert.deepEqual(view.chats.map(chat => [chat.id, chat.name, chat.ticked]),
+    [['c1', 'Ana', true], ['c2', 'Bruno', false], ['c3', 'Unnamed chat', false], ['c4', 'x'.repeat(120), true]])
+  assert.deepEqual(view.ticked, ['c1', 'c4'])
+  assert.equal(view.count, 4)
+  // A channel and a kind are labels; a preview is neither.
+  assert.equal(view.chats[0].channel, 'Shop line')
+  assert.equal(view.chats[1].kind, 'group')
+  assert.equal(JSON.stringify(view).includes('private'), false)
+  assert.equal(JSON.stringify(view).includes('the last thing someone wrote'), false)
+  // The whole history, when the Bot gave no dates, and one end of it.
+  assert.equal(proposalView({ id: 'p2', chats: [] }).range, 'All available history')
+  assert.equal(proposalView({ id: 'p2', from: FROM, chats: [] }).range, 'From Mar 1, 2026')
+  assert.equal(proposalView({ id: 'p2', to: TO, chats: [] }).range, 'Through Nov 15, 2026')
+  assert.equal(proposalView({ id: 'p2', chats: [] }).count, 0)
+  // A proposal with no id is not a card.
+  assert.equal(proposalView({ chats: [] }), undefined)
+  assert.equal(proposalView(null), undefined)
+  assert.equal(proposalView({ id: 'p2', chats: 'nope' }).count, 0)
+})
+
+test('one approval: the day a date input carries is the UTC day the host reads', () => {
+  assert.equal(backfillDay(FROM), '2026-03-01')
+  assert.equal(backfillDay(TO), '2026-11-15')
+  assert.equal(backfillDay(1_795_003_200_000), '2026-11-18')
+  assert.equal(backfillDay('2026-03-01'), '2026-03-01')
+  assert.equal(backfillDay('not a date'), '')
+  assert.equal(backfillDay(null), '')
+  assert.equal(backfillRange(FROM, TO), 'Mar 1, 2026 – Nov 15, 2026')
+  assert.equal(backfillRange(FROM, FROM), 'Mar 1, 2026')
+  assert.equal(backfillRange(null, null), 'All available history')
+})
+
+test('the range names the UTC day the date inputs carry, never the viewer\'s day', () => {
+  // The start is the first millisecond of its UTC day and the end its last: a western
+  // viewer's local label for the start would be the day before, and an eastern viewer's for
+  // the end would be the day after. The proposal's date inputs already use the UTC day
+  // (backfillDay), so the range must use the same one, whatever the viewer's zone.
+  assert.equal(backfillRange(FROM, TO), 'Mar 1, 2026 – Nov 15, 2026')
+  assert.equal(backfillRange(TO, TO), 'Nov 15, 2026')
+  assert.equal(backfillRange('2026-03-01', '2026-03-01'), 'Mar 1, 2026')
+  // The proposal's range text always agrees with its two date-input values.
+  const proposal = proposalView({ id: 'p', from: FROM, to: TO, chats: [] })
+  assert.equal(proposal.from, '2026-03-01')
+  assert.equal(proposal.to, '2026-11-15')
+  assert.equal(proposal.range, 'Mar 1, 2026 – Nov 15, 2026')
+  // A run says the same picked days, and a single-day run says one day once.
+  assert.equal(runView({ id: 'r', from: FROM, to: TO, rows: [] }).range, 'Mar 1, 2026 – Nov 15, 2026')
+  assert.equal(runView({ id: 'r', from: TO, to: TO, rows: [] }).range, 'Nov 15, 2026')
+  // An offset time still names its UTC day, the one backfillDay reads and the input shows.
+  assert.equal(backfillRange('2026-03-01T00:00:00-03:00', '2026-11-15T23:59:59.999+09:00'), 'Mar 1, 2026 – Nov 15, 2026')
+})
+
+test('a run says its range and how its chats move, and only a live job can be stopped', () => {
+  const rows = [
+    { chatId: 'c1', chat: 'Ana', jobId: 'j1', state: 'fetching', outcome: null, round: 1, counts: { fetched: 50, stored: 40, duplicates: 10, mediaDownloaded: 5, mediaMissing: 1, reactions: 2, edits: 1, deletions: 1, unmatched: 0 } },
+    { chatId: 'c2', chat: 'Bruno', jobId: 'j2', state: 'done', outcome: 'done', counts: { fetched: 80, stored: 80 }, coverage },
+    { chatId: 'c3', chat: 'Carla', jobId: 'j3', state: 'failed', outcome: 'failed' },
+    { chatId: 'c4', chat: 'Davi', jobId: 'j4', state: 'cancelled', outcome: 'stopped' },
+    { chatId: 'c5', chat: 'Eva', jobId: null, state: 'failed', outcome: 'not-started' },
+  ]
+  const view = runView({
+    id: 'r1', botId: 'm1', from: FROM, to: TO, startedAt: 1_795_003_201_000,
+    summary: { total: 5, running: 1, done: 1, phoneDidNotAnswer: 0, stopped: 1, failed: 2 },
+    rows,
+    text: 'the last thing someone wrote',
+  })
+  assert.equal(view.id, 'r1')
+  assert.equal(view.range, 'Mar 1, 2026 – Nov 15, 2026')
+  assert.equal(view.started, 'Nov 18, 2026')
+  assert.equal(view.total, 5)
+  assert.equal(view.summary, '1 running · 1 done · 1 stopped · 2 failed')
+  assert.deepEqual(view.rows.map(row => [row.name, row.word, row.cancelable]),
+    [['Ana', 'Fetching', true], ['Bruno', 'Done', false], ['Carla', 'Failed', false], ['Davi', 'Stopped', false], ['Eva', 'Not started', false]])
+  // The counts move: a fetched count with no total is still a count, and the coverage
+  // comes only once a row ends.
+  assert.equal(view.rows[0].progress, '50 fetched')
+  assert.equal(view.rows[0].media, '5 photos, 1 missing')
+  assert.equal(view.rows[0].marks, '2 reactions · 1 edits')
+  assert.equal(view.rows[0].span, '')
+  assert.equal(view.rows[1].span, 'Mar–Nov')
+  assert.equal(JSON.stringify(view).includes('the last thing someone wrote'), false)
+  // Only a job id and an explicit null outcome can still stop: a done or unknown row cannot.
+  assert.equal(canCancel(rows[0]), true)
+  for (const row of rows.slice(1)) assert.equal(canCancel(row), false, JSON.stringify(row))
+  assert.equal(canCancel({ jobId: 'j', outcome: undefined }), false)
+  assert.equal(canCancel({ jobId: null, outcome: null }), false)
+  assert.equal(canCancel(null), false)
+  // A run with no summary is read from its rows.
+  assert.equal(runView({ id: 'r2', rows }).summary, '1 running · 1 done · 1 stopped · 2 failed')
+  // A warning while the job finishes its coverage still counts as running.
+  assert.equal(backfillSummaryText(undefined, [{ outcome: null }]), '1 running')
+  // A run with no id is not a card.
+  assert.equal(runView({ rows }), undefined)
+})
+
+test('an ended row prefers an empty window over the oldest held date', () => {
+  const later = { ...coverage, oldest: '2026-11-16T00:00:00Z' }
+  const rows = [
+    { chatId: 'empty', outcome: 'done', coverage: { countInWindow: 0 } },
+    { chatId: 'partial', outcome: 'phone-did-not-answer', coverage },
+    { chatId: 'after-end', outcome: 'done', coverage: { ...later, countInWindow: 0 } },
+    { chatId: 'same-day', outcome: 'done', coverage: { ...coverage, oldest: '2026-03-01T23:59:59Z' } },
+    { chatId: 'no-coverage', outcome: 'done', coverage: null },
+    { chatId: 'no-outcome', state: 'done', outcome: null, coverage: { countInWindow: 0 } },
+    { chatId: 'unknown-outcome', state: 'done', coverage },
+  ]
+  const run = { id: 'r1', from: FROM, to: TO, rows }
+  assert.deepEqual(runView(run).rows.map(row => row.windowLine), [
+    'Omni holds nothing in this window',
+    'Omni holds nothing before Mar 2, 2026',
+    'Omni holds nothing in this window',
+    '',
+    '',
+    '',
+    '',
+  ])
+  assert.equal(runView({ ...run, from: null }).rows[1].windowLine, '')
+})
+
+test('the oldest held date uses the UTC day even west of UTC', (test) => {
+  const previous = process.env.TZ
+  process.env.TZ = 'America/Los_Angeles'
+  test.after(() => {
+    if (previous === undefined) delete process.env.TZ
+    else process.env.TZ = previous
+  })
+  const oldest = '2026-03-02T00:00:00Z'
+  assert.equal(shortDate(oldest), 'Mar 1, 2026')
+  const row = { chatId: 'c1', outcome: 'done', coverage: { oldest, countInWindow: 1 } }
+  assert.equal(runView({ id: 'r1', from: FROM, to: TO, rows: [row] }).rows[0].windowLine, 'Omni holds nothing before Mar 2, 2026')
+})
+
+test('the card shows the first three valid runs in producer order', () => {
+  const runs = Array.from({ length: 20 }, (_, index) => ({
+    id: `r${index}`, from: FROM, to: TO, startedAt: 1_795_003_201_000 + index * 86_400_000,
+    rows: [{ chatId: `c${index}`, chat: `C${index}`, jobId: `j${index}`, state: 'queued', outcome: null, counts: {} }],
+  }))
+  const roster = { omniBackfillProposals: [PROPOSAL], omniBackfills: runs, other: 1 }
+  const view = backfillView(roster)
+  assert.deepEqual(view.proposals.map(proposal => proposal.id), ['p1'])
+  assert.deepEqual(view.runs.map(run => run.id), ['r0', 'r1', 'r2'])
+  assert.equal(view.moreRuns, 17)
+  const full = backfillView({ omniBackfills: [null, ...runs.slice(0, 3), { rows: [] }] })
+  assert.deepEqual(full.runs.map(run => run.id), ['r0', 'r1', 'r2'])
+  assert.equal(full.moreRuns, 0)
+  // Many chats on one run: the card draws the first twenty and says how many more.
+  const many = { id: 'r1', rows: Array.from({ length: 25 }, (_, index) => ({ chatId: `c${index}`, chat: `C${index}`, jobId: `j${index}`, state: 'queued', outcome: null })) }
+  assert.equal(runView(many).rows.length, 20)
+  assert.equal(runView(many).more, 5)
+  // Absent, empty or malformed roster fields are no card, never a crash.
+  assert.deepEqual(backfillView({}), { proposals: [], runs: [], moreRuns: 0 })
+  assert.deepEqual(backfillView(null), { proposals: [], runs: [], moreRuns: 0 })
+  assert.deepEqual(backfillView({ omniBackfillProposals: null, omniBackfills: 'nope' }), { proposals: [], runs: [], moreRuns: 0 })
+  // A proposal or a run that fails its own shape is left out, not drawn half.
+  const dropped = backfillView({ omniBackfillProposals: [{ chats: [] }, PROPOSAL], omniBackfills: [{ rows: [] }, runs[0]] })
+  assert.deepEqual(dropped.proposals.map(proposal => proposal.id), ['p1'])
+  assert.deepEqual(dropped.runs.map(run => run.id), ['r0'])
+})

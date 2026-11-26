@@ -10,10 +10,13 @@ import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { batchSafe } from './batch-spawn.js'
 import { HOME_ENV, releaseRun, trackRun } from './cli-homes.js'
-import { BRIDGE_NAME, isBridgeName } from './names.js'
+import { AGY_SKILL_TOOL, BRIDGE_NAME, isBridgeName, mcpName } from './names.js'
 import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
+import { usageLimitOf } from './usage-limit.js'
+import { pinOf, pinWire } from './model-identity.js'
+import { observeTerminal } from './terminal-evidence.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -38,6 +41,94 @@ export function structuredNameOf(update) {
   const meta = update?._meta?.claudeCode
   if (typeof meta?.toolName === 'string' && meta.toolName !== '') return meta.toolName
   return undefined
+}
+
+const SKILL_OPERATION = mcpName(BRIDGE_NAME, 'load_skill')
+
+function skillIdentity(tool, update, provider) {
+  const agy = provider === 'acp-antigravity'
+  const exact = name => name === SKILL_OPERATION || (agy && name === AGY_SKILL_TOOL)
+  const names = [tool.structuredName, update?.name, update?._meta?.claudeCode?.toolName]
+    .filter(name => typeof name === 'string' && name !== '')
+  const { server, serverName, tool: operation, toolName } = update?.rawInput ?? {}
+  const raw = server === BRIDGE_NAME && operation === 'load_skill'
+  const named = names.some(exact)
+  const claimsSkill = named || raw || tool.skillBridge === true
+  const disagrees = !names.every(exact) ||
+    (typeof server === 'string' && server !== BRIDGE_NAME) ||
+    (typeof serverName === 'string' && serverName !== BRIDGE_NAME) ||
+    (typeof operation === 'string' && operation !== 'load_skill') ||
+    (agy && typeof toolName === 'string' && toolName !== 'load_skill')
+  if (tool.skillConflict === true || (claimsSkill && disagrees)) return 'conflict'
+  // Codex's MCP updates omit the name. Its adapter labels this RPC as MCP and
+  // supplies the server and operation outside the tool's own arguments.
+  // Antigravity's flat MCP name can collide with a different server/tool pair.
+  // Require the exact pair alongside that spelling, or a previously verified call.
+  const agyPair = raw || (serverName === BRIDGE_NAME && toolName === 'load_skill')
+  if (names.includes(SKILL_OPERATION) || (named && agy && agyPair) ||
+      (raw && update?._meta?.is_mcp_tool_call === true) || tool.skillBridge === true) return 'verified'
+}
+
+/**
+ * The Agent/Task call a call ran inside, when the agent says so: Claude Code's adapter stamps
+ * every call a native subagent makes, and its result, with `_meta.claudeCode.parentToolUseId`,
+ * the subagent's own Agent/Task call id. Undefined for a call the main agent made.
+ */
+export function parentToolOf(update) {
+  const parent = update?._meta?.claudeCode?.parentToolUseId
+  return isToolId(parent) ? parent : undefined
+}
+
+// Claude Code's subagent tool: `Agent`, `Task` on older CLIs (the adapter's agent reporter).
+export const WORKER_TOOLS = new Set(['Agent', 'Task'])
+export const WORKERS_MAX = 12
+export const WORKER_STEPS_MAX = 40
+const WORKER_TEXT_MAX = 160
+// A call DSH closed itself (`ended`: endPrompt, when the turn was stopped or the agent went
+// away) did not finish, whatever status it was closed with: it failed, it was never done.
+const workerStatus = tool => (tool.ended === true ? 'failed' : tool.status === 'completed' ? 'done' : tool.status === 'failed' ? 'failed' : 'running')
+const shortLine = text => String(text ?? '').slice(0, 4096).split('\n').map(line => line.trim()).find(Boolean)?.slice(0, WORKER_TEXT_MAX) ?? ''
+// The ending a worker reports: its stripped report, else the raw result less the adapter's
+// `<usage>` block and `agentId:` line, which only the raw text still carries for this client.
+// One DSH stopped reports only that (`Stopped`, with `stopped`): what it had said is partial.
+const workerResult = (tool) => {
+  if (tool.ended === true) return 'Stopped'
+  if (workerStatus(tool) === 'running') return ''
+  const text = contentText(tool.content) || (typeof tool.rawOutput === 'string' ? tool.rawOutput : '')
+  return shortLine(text.replace(/<usage>[\s\S]*?<\/usage>/g, '').replace(/^agentId:.*$/gm, ''))
+}
+
+/**
+ * The native subagents of one prompt, as workers: each Agent/Task call in `ids` (the prompt's
+ * calls, in the order they came) with its title, its state, the line its result opens with and
+ * the calls stamped with its id as its steps. Newest workers last; bounded, never the payloads.
+ * One DSH closed when its turn ended (`ended`) is failed, `stopped`, and its result `Stopped`.
+ * @param {Map<string, any>} tools
+ * @param {Iterable<string>} ids
+ */
+export function workersOf(tools, ids) {
+  const calls = [...ids].map(id => tools.get(id)).filter(tool => tool !== undefined && tool.retired !== true)
+  const workers = calls.filter(tool => WORKER_TOOLS.has(tool.structuredName)).slice(-WORKERS_MAX)
+  return workers.map((worker) => {
+    const steps = calls.filter(tool => tool.parent === worker.id)
+    const shown = steps.slice(-WORKER_STEPS_MAX)
+    const result = workerResult(worker)
+    return {
+      id: worker.id,
+      title: shortLine(worker.title) || worker.structuredName,
+      state: workerStatus(worker),
+      ...(result ? { result } : {}),
+      ...(worker.ended === true ? { stopped: true } : {}),
+      ...(worker.seenAt === undefined ? {} : { at: worker.seenAt }),
+      steps: shown.map(step => ({
+        id: step.id,
+        title: shortLine(step.title) || step.structuredName || 'Tool',
+        ...(step.structuredName === undefined ? {} : { tool: String(step.structuredName).slice(0, 80) }),
+        state: workerStatus(step),
+      })),
+      ...(steps.length > shown.length ? { more: steps.length - shown.length } : {}),
+    }
+  })
 }
 
 // The text of ACP content: a content block, or a tool call's content items.
@@ -65,7 +156,7 @@ export function contentImages(content) {
 // Saved image paths still scrub later replies; the image bytes and other output can go.
 function retiredTool(tool) {
   const record = { id: tool.id, retired: true, unanswerable: true }
-  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'drift', 'refused', 'mirrored']) {
+  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'skillConflict', 'drift', 'refused', 'mirrored']) {
     if (tool[key] !== undefined) record[key] = tool[key]
   }
   record.listeners = new Set()
@@ -118,10 +209,13 @@ function stopped(what) {
 export class AgentRun {
   /**
    * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string,
-   *   name: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
-   *   onWarn?: (message: string) => void, startMs?: number, requestMs?: number,
+   *   name: string, provider?: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
+   *   onWarn?: (message: string) => void, refuseTools?: boolean, onForbiddenTool?: (tool: any) => void,
+   *   startMs?: number, requestMs?: number, authenticate?: string, logout?: boolean,
    *   timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
    *   startMs, requestMs: the deadlines, START_MS and REQUEST_MS unless a test sets shorter ones.
+   *   authenticate: a sign-in run, the id of the ACP auth method to ask for instead of a session.
+   *   logout: a sign-out run, ACP `logout` when the agent offers it, instead of a session.
    *   timers: the clock the deadlines run on, for a test that moves it by hand.
    */
   constructor(spec) {
@@ -132,12 +226,18 @@ export class AgentRun {
     this.queue = []
     this.waiters = []
     this.tools = new Map()
+    // Told of each question stored for a call (onPermission): a mirror body that waits on
+    // another call hears of it (tool.js, native-tools mode: a subagent's nested calls).
+    this.askListeners = new Set()
     this.turn = new Set()
     this.retired = new Set()
     this.didIgnore = false
     this.stderr = ''
     this.prompting = undefined
     this.exited = undefined
+    // Whether this prompt was cancelled by the app (a Stop, a reap, an ended session), so a
+    // cancel the app did not ask for is told apart: it comes from the host stopping.
+    this.cancelled = false
   }
 
   /**
@@ -165,7 +265,11 @@ export class AgentRun {
     for (const pipe of [child.stdin, child.stdout, child.stderr]) pipe.unref?.()
     this.holdOn()
     child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (chunk) => { this.stderr = (this.stderr + chunk).slice(-STDERR_KEEP) })
+    child.stderr.on('data', (chunk) => {
+      this.stderr = (this.stderr + chunk).slice(-STDERR_KEEP)
+      // A sign-in run reads what the agent prints there (a sign-in link, index.js signInNative).
+      try { this.spec.onStderr?.(chunk) } catch {}
+    })
     const gone = new Promise((_, fail) => {
       child.once('error', error => fail(error))
       child.once('exit', (code, signal) => {
@@ -197,7 +301,30 @@ export class AgentRun {
         error.code = 'acp_protocol_mismatch'
         throw error
       }
+      // A sign-in run (`authenticate`, a method id the agent offers) or a sign-out run
+      // (`logout`) opens no session: it asks that one thing of the agent and ends.
+      if (this.spec.authenticate !== undefined) {
+        const offered = Array.isArray(this.init?.authMethods) ? this.init.authMethods : []
+        if (!offered.some(method => method?.id === this.spec.authenticate)) {
+          throw Object.assign(new Error(`${this.spec.name} did not offer that sign-in`), { code: 'acp-sign-in/unsupported' })
+        }
+        // The sign-in run's own clock starts here (index.js signInNative, the 15 s rule).
+        try { this.spec.onAuthenticate?.() } catch {}
+        await this.conn.authenticate({ methodId: this.spec.authenticate })
+        this.authenticated = true
+        return
+      }
+      if (this.spec.logout === true) {
+        // Only an agent that says it can sign out over ACP is asked to.
+        if (this.init?.agentCapabilities?.auth?.logout) {
+          await this.conn.logout({})
+          this.loggedOut = true
+        }
+        return
+      }
+      if (this.spec.beforeSession !== undefined) await this.spec.beforeSession(this)
       const identity = this.spec.botIdentity?.()
+      this.spec.botIdentity = undefined
       this.identityDelivery = identity
         ? this.init.agentCapabilities?.sessionCapabilities?.systemPrompt != null
           ? 'systemPrompt' : 'preamble'
@@ -205,7 +332,7 @@ export class AgentRun {
       if (this.identityDelivery === 'systemPrompt') {
         this.systemPrompt = { mode: 'append', content: [{ type: 'text', text: identity }] }
       } else if (this.identityDelivery === 'preamble') {
-        this.identityPreamble = identity
+        this.sessionPreamble = this.identityPreamble = identity
       }
       this.spec.onIdentity?.(this.identityDelivery)
       const session = await this.conn.newSession({
@@ -216,7 +343,7 @@ export class AgentRun {
       })
       this.sessionId = session.sessionId
       this.modes = session.modes
-      this.options = withModels(session.configOptions ?? [], session.models)
+      this.takeOptions(session.configOptions ?? [], session.models)
       // The model the agent started on: DSH's `default` model goes back to it.
       this.startModel = optionOf(this.options, 'model')?.currentValue
       // The session exists (the spike's ordering rule for the bridge's first announcement) and
@@ -266,8 +393,41 @@ export class AgentRun {
       ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
     }))
     this.sessionId = answer.sessionId
+    this.modelProof = undefined
+    this.reportedModel = undefined
     if (answer.modes !== undefined && answer.modes !== null) this.modes = answer.modes
-    if (Array.isArray(answer.configOptions)) this.options = withModels(answer.configOptions, answer.models ?? modelStateOf(this.options))
+    if (Array.isArray(answer.configOptions) || answer.models) {
+      this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+    }
+    await this.closeReplacedSession(source)
+    await this.spec.onReady?.(this)
+    return this.sessionId
+  }
+
+  // A fork retains provider context. A fresh session can take the conversation
+  // back from DSH without carrying discovery data from the retired session.
+  async renew({ cwd, mcpServers }) {
+    const source = this.sessionId
+    const { sessionMeta } = this.spec
+    const answer = await this.held(() => this.conn.newSession({
+      cwd, mcpServers,
+      ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }),
+      ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
+    }))
+    this.sessionId = answer.sessionId
+    this.modelProof = undefined
+    this.modes = answer.modes
+    this.takeOptions(answer.configOptions ?? [], answer.models)
+    this.startModel = optionOf(this.options, 'model')?.currentValue
+    this.identityPreamble = this.sessionPreamble
+    this.preambleOutcome = undefined
+    this.promptEnded = undefined
+    await this.closeReplacedSession(source)
+    await this.spec.onReady?.(this)
+    return this.sessionId
+  }
+
+  async closeReplacedSession(source) {
     for (const tool of this.tools.values()) tool.permission?.answer(CANCELLED)
     this.tools.clear()
     this.turn.clear()
@@ -282,8 +442,6 @@ export class AgentRun {
       // A source session that will not close still ends with this process, which is disposed
       // with the fork's Session.
     }
-    await this.spec.onReady?.(this)
-    return this.sessionId
   }
 
   // Each request the agent has yet to answer holds the event loop; the last answer lets it go.
@@ -364,11 +522,15 @@ export class AgentRun {
     })
   }
 
-  prompt(prompt) {
+  prompt(prompt, onDelivered) {
     if (this.busy) throw new Error(`${this.spec.name} is still answering`)
     this.queue = []
+    this.promptSkillRefusals = new Set()
     this.reviews = { denied: 0, inRow: 0, last: undefined, after: false }
     this.promptEnded = false
+    this.forbiddenToolSeen = false
+    this.cancelled = false
+    this.onPromptDelivered = onDelivered
     // The calls of the prompts before this one are over for DSH too: their cards ran in turns
     // that have ended, and a call already known never gets a second card. A question for one
     // has nobody left to answer it (onPermission); one still stored is withdrawn here.
@@ -389,19 +551,36 @@ export class AgentRun {
       this.tools.delete(id)
     }
     this.holdOn()
-    if (this.identityPreamble !== undefined) {
+    const carried = this.identityPreamble !== undefined
+    if (carried) {
       prompt = [{ type: 'text', text: this.identityPreamble }, ...prompt]
       this.identityPreamble = undefined
     }
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
-      result => this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' }),
-      error => this.endPrompt({ type: 'error', message: error?.message ?? String(error), ...(error?.code === undefined ? {} : { code: error.code }) }),
+      result => {
+        if (result?.stopReason !== 'cancelled' && !this.cancelled) this.confirmPromptDelivery()
+        if (carried) {
+          this.preambleOutcome = result?.stopReason !== 'cancelled' && !this.cancelled
+            ? 'delivered' : 'unsure'
+        }
+        return this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' })
+      },
+      error => {
+        if (carried) this.preambleOutcome = 'unsure'
+        return this.endPrompt({
+          type: 'error', message: error?.message ?? String(error),
+          ...(error?.code === undefined ? {} : { code: error.code }),
+          ...(this.exited === undefined && usageLimitOf(this.spec.provider, error)
+            ? { usageLimit: true } : {}),
+        })
+      },
     )
     return this.prompting
   }
 
   endPrompt(event) {
+    this.onPromptDelivered = undefined
     this.prompting = undefined
     // From here to the next prompt, a call seen for the first time gets no card (seeTool).
     this.promptEnded = true
@@ -414,6 +593,12 @@ export class AgentRun {
       if (!TERMINAL.has(tool.status)) this.changeTool(tool, { status: tool.status === 'pending' ? 'failed' : 'completed', ended: true })
     }
     this.push(event)
+  }
+
+  confirmPromptDelivery() {
+    const delivered = this.onPromptDelivered
+    this.onPromptDelivered = undefined
+    delivered?.()
   }
 
   /**
@@ -436,6 +621,36 @@ export class AgentRun {
     this.modes = { ...this.modes, currentModeId: modeId }
   }
 
+  takeOptions(options, models, fallback) {
+    const option = optionOf(options, 'model')
+    const reported = option ?? optionOf(withModels([], models), 'model')
+    // The legacy session model list can be separate from an effort option update.
+    if (reported || models !== undefined || !fallback || this.reportedModel?.id !== MODEL_STATE) {
+      this.reportedModel = reported
+    }
+    this.options = withModels(options, models ?? fallback)
+    if (this.modelProof && !this.confirmsModel(this.modelProof)) this.modelProof = undefined
+  }
+
+  confirmsModel({ wire, pin }) {
+    const pinned = pinOf(pin)
+    const confirms = option => option?.currentValue === wire && (pinned
+      ? pinWire(valuesOf(option), pinned) === wire
+      : valuesOf(option).filter(choice => choice.value === wire).length === 1)
+    return confirms(this.reportedModel) && confirms(this.option('model'))
+  }
+
+  bindModel(model, wire, pin) {
+    const proof = { session: this.sessionId, model, wire, pin }
+    if (wire !== undefined && this.confirmsModel(proof)) this.modelProof = proof
+  }
+
+  acknowledgedModel() {
+    const proof = this.modelProof
+    if (!proof || proof.session !== this.sessionId || !this.confirmsModel(proof)) return undefined
+    return proof.model
+  }
+
   /** The agent's own option of `category` (`model`, `thought_level`), as it last said. */
   option(category) {
     return optionOf(this.options, category)
@@ -447,19 +662,24 @@ export class AgentRun {
    * or effort than the person chose.
    * @param {string} category
    * @param {string} value
-   * @param {{ signal?: AbortSignal }} [options] the turn's Stop
+   * @param {{ signal?: AbortSignal, requireReported?: boolean }} [options]
    */
-  async setOption(category, value, { signal } = {}) {
+  async setOption(category, value, { signal, requireReported = false } = {}) {
     const option = this.option(category)
     if (option === undefined) throw new Error(`it has no ${category} setting`)
     const values = valuesOf(option)
     if (!values.some(choice => choice.value === value)) throw new Error(`it offers no ${category} ${value} (it offers ${values.map(choice => choice.value).join(', ') || 'none'})`)
-    if (option.currentValue === value) return
+    if (option.currentValue === value && (!requireReported || this.reportedModel?.currentValue === value)) return
+    if (category === 'model') {
+      this.reportedModel = undefined
+      this.modelProof = undefined
+    }
     if (option.id === MODEL_STATE) {
       // The session's own model list (`session/set_model`), for an agent with no model option.
       const params = { sessionId: this.sessionId, modelId: value }
+      let answer
       try {
-        await this.held(() => this.conn.setSessionModel(params), { signal, what: `taking its ${category}` })
+        answer = await this.held(() => this.conn.setSessionModel(params), { signal, what: `taking its ${category}` })
       } catch (error) {
         // A request nobody answered, or one the turn's Stop ended, goes up as it is: the turn
         // ends the session on it (adapter.js `abandoned`), which a wrapped error would hide.
@@ -469,16 +689,25 @@ export class AgentRun {
         const details = typeof error?.data?.details === 'string' && /^[\w .:-]{1,80}$/.test(error.data.details) ? ` (${error.data.details})` : ''
         throw new Error(`it could not switch to ${value}: ${error?.message ?? error}${details}`, { cause: error })
       }
-      this.options = this.options.map(other => (other.id === MODEL_STATE ? { ...other, currentValue: value } : other))
+      if (Array.isArray(answer?.configOptions) || answer?.models) {
+        this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+      } else if (!this.reportedModel) {
+        this.options = this.options.map(other => (other.id === MODEL_STATE ? { ...other, currentValue: value } : other))
+      }
       return
     }
     const answer = await this.held(() => this.conn.setSessionConfigOption({ sessionId: this.sessionId, configId: option.id, value }), { signal, what: `taking its ${category}` })
     // The answer is the whole set: a new model may bring other efforts.
-    this.options = answer?.configOptions ? withModels(answer.configOptions, modelStateOf(this.options)) : this.options.map(other => (other.id === option.id ? { ...other, currentValue: value } : other))
+    if (Array.isArray(answer?.configOptions) || answer?.models) {
+      this.takeOptions(answer.configOptions ?? [], answer.models, modelStateOf(this.options))
+    } else if (category !== 'model' || !this.reportedModel) {
+      this.options = this.options.map(other => (other.id === option.id ? { ...other, currentValue: value } : other))
+    }
   }
 
   async cancel() {
     if (!this.busy || this.sessionId === undefined) return
+    this.cancelled = true
     await this.held(() => this.conn.cancel({ sessionId: this.sessionId })).catch(() => {})
   }
 
@@ -601,6 +830,15 @@ export class AgentRun {
 
   // --- the agent's side of the conversation ---------------------------------------------
 
+  /**
+   * The native subagents this prompt started, as workers (workersOf): what the Bot team draws
+   * under the Bot's row. The prompt's calls only, so a finished worker stays until the next
+   * prompt. Read-only.
+   */
+  workers() {
+    return workersOf(this.tools, this.turn)
+  }
+
   ignored(what, payload) {
     // Rejected traffic still needs safety checks, without retaining it or making a card.
     try {
@@ -636,29 +874,35 @@ export class AgentRun {
       }
       if (this.tools.get(update.toolCallId)?.retired === true) return
     }
+    const observedAt = isTool ? performance.now() : undefined
     switch (update?.sessionUpdate) {
       case 'agent_message_chunk': {
         const text = contentText(update.content)
+        if (text) this.confirmPromptDelivery()
         if (text && this.reviews?.last) this.reviews.after = true
         if (text) this.push({ type: 'text', text })
         break
       }
       case 'agent_thought_chunk': {
         const text = contentText(update.content)
+        if (text) this.confirmPromptDelivery()
         if (text && this.reviews?.last) this.reviews.after = true
         if (text) this.push({ type: 'thought', text })
         break
       }
       case 'tool_call':
-        this.seeTool(update)
+        this.confirmPromptDelivery()
+        this.seeTool(update, observedAt)
         break
       case 'tool_call_update': {
-        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update)
+        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update, observedAt)
         if (tool !== undefined) this.changeTool(tool, update)
         break
       }
       case 'config_option_update':
-        if (Array.isArray(update.configOptions)) this.options = withModels(update.configOptions, modelStateOf(this.options))
+        if (typeof sessionId === 'string' && sessionId === this.sessionId && (Array.isArray(update.configOptions) || update.models)) {
+          this.takeOptions(update.configOptions ?? [], update.models, modelStateOf(this.options))
+        }
         break
       case 'current_mode_update':
         if (this.modes) this.modes = { ...this.modes, currentModeId: update.currentModeId }
@@ -666,9 +910,13 @@ export class AgentRun {
       default:
         break
     }
+    if (isTool && isToolId(sessionId) && sessionId === this.sessionId) {
+      const tool = this.tools.get(update.toolCallId)
+      if (tool !== undefined) observeTerminal(tool, update, sessionId, observedAt)
+    }
   }
 
-  seeTool(update) {
+  seeTool(update, observedAt = performance.now()) {
     if (!isToolId(update?.toolCallId)) {
       this.ignored('a tool update', update)
       return undefined
@@ -678,8 +926,18 @@ export class AgentRun {
       if (known.retired !== true) this.changeTool(known, update)
       return known
     }
+    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity({}, update, this.spec.provider) === 'verified')) {
+      if (!this.forbiddenToolSeen) {
+        this.forbiddenToolSeen = true
+        this.spec.onForbiddenTool?.(update)
+      }
+      return undefined
+    }
     if (this.reviews?.last) this.reviews.after = true
-    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set() }
+    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now(), observedAt }
+    // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
+    const parent = parentToolOf(update)
+    if (parent !== undefined && parent !== tool.id) tool.parent = parent
     // First seen after its prompt ended: its event lands behind the prompt's end, where no step
     // reads it, and the next prompt drops it. No card will ever ask its question.
     if (this.promptEnded === true) tool.unanswerable = true
@@ -688,6 +946,14 @@ export class AgentRun {
     // when it takes the event and makes no card for it. Drift found later is marked there
     // if the event is still queued; an existing card keeps its question for its body to ask.
     if (tool.drift === true) tool.unanswerable = true
+    // Codex with its own tools off offers none, so a call that is not the bridge's (or one of
+    // Codex's two MCP list readers) means the check missed one: it gets no card and no answer
+    // but a refusal, and the adapter ends the session (codex-native.js).
+    if (this.spec.nativeOff === true && !allowedOff(tool)) {
+      tool.refused = 'rejected'
+      tool.unanswerable = true
+      try { this.spec.onNativeOffCall?.(tool) } catch {}
+    }
     this.tools.set(tool.id, tool)
     this.turn.add(tool.id)
     this.push({ type: 'tool', id: tool.id })
@@ -696,6 +962,11 @@ export class AgentRun {
 
   /** What an update says the call is: its structured name, whether it is MCP, the bridge's. */
   markCall(tool, update) {
+    if (this.spec.skillBridge) {
+      const identity = skillIdentity(tool, update, this.spec.provider)
+      tool.skillConflict = identity === 'conflict'
+      tool.skillBridge = identity === 'verified'
+    }
     const name = structuredNameOf(update)
     if (name !== undefined) tool.structuredName = name
     if (typeof update?.rawInput?.server === 'string') tool.mcpServer = update.rawInput.server
@@ -719,6 +990,12 @@ export class AgentRun {
     if (typeof chunk === 'string') tool.output = (tool.output ?? '') + chunk
     for (const key of ['title', 'kind', 'status', 'content', 'locations', 'rawInput', 'rawOutput', 'ended']) {
       if (update[key] !== undefined && update[key] !== null) tool[key] = update[key]
+    }
+    // The link can come on a later update only (a streamed refinement or the result).
+    const parent = parentToolOf(update)
+    if (parent !== undefined && parent !== tool.id) {
+      if (typeof tool.parent === 'string' && tool.parent !== parent) tool.parentConflict = true
+      tool.parent = parent
     }
     const status = tool.rawOutput?.review?.status
     if (this.reviews && tool.id.startsWith('guardian_assessment:') && typeof status === 'string' && !tool.reviewed) {
@@ -748,14 +1025,28 @@ export class AgentRun {
     permission?.answer(refusal(tool.refused, permission.options))
   }
 
-  /** A skipped fork MCP call has no mirror to answer its question. */
+  refuseUnavailableSkill(tool) {
+    if (this.spec.provider !== 'acp-claude' || tool.retired === true || tool.structuredName !== 'Skill' ||
+        tool.mcp === true || tool.mcpServer !== undefined ||
+        !this.promptSkillRefusals?.has(tool.rawInput?.skill)) return false
+    this.refuse(tool.id, false)
+    return true
+  }
+
+  /**
+   * A skipped fork MCP call has no mirror to answer its question. An unanswerable question is
+   * cancelled first. The bridge server's call gets `allow_once` when offered and is cancelled
+   * otherwise. Answering `allow_always` would let the agent record a standing rule nobody
+   * approved (RFC 0039). The bridge's own `approval/request` is the person's dialog. Other
+   * servers get the agent's reject option, or are cancelled when none is offered.
+   */
   answerSkippedMcp(tool, options) {
-    if (this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
+    if (tool.skillConflict || this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
     const answerFor = (choices) => {
       if (tool.unanswerable === true) return CANCELLED
       if (tool.mcpServer !== BRIDGE_NAME) return refusal('rejected', choices)
-      const allow = choices.find(option => option.kind === 'allow_once') ?? choices.find(option => option.kind === 'allow_always')
-      return allow === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: allow.optionId } }
+      const once = choices.find(option => option.kind === 'allow_once')
+      return once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } }
     }
     // A question already stored is answered from its own options, a new one (`options`) from its own.
     const stored = tool.permission
@@ -775,30 +1066,38 @@ export class AgentRun {
   onPermission(params, signal) {
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
     const known = this.tools.get(params.toolCall?.toolCallId)
+    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity(known ?? {}, params.toolCall, this.spec.provider) === 'verified')) {
+      if (known && known.retired !== true) this.markCall(known, params.toolCall)
+      return Promise.resolve(refusal('rejected', params.options ?? []))
+    }
     const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall })
     if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
     const { title, ...details } = params.toolCall ?? {}
-    if (tool.retired !== true) {
-      this.changeTool(tool, { ...details, status: undefined })
-      try { this.spec.onAsked?.(tool) } catch {}
-    }
+    if (tool.retired !== true) this.changeTool(tool, { ...details, status: undefined })
     // The queued tool event is read after this synchronous handler: mark standalone approvals
     // before the adapter can turn one into a mirror card.
     if (params._meta?.is_mcp_tool_approval === true) {
       tool.mcp = true
       if (typeof params.toolCall?.rawInput?.serverName === 'string') tool.mcpServer = params.toolCall.rawInput.serverName
     }
+    if (this.refuseUnavailableSkill(tool)) return Promise.resolve(refusal('rejected', params.options ?? []))
+    if (tool.retired !== true) {
+      try { this.spec.onAsked?.(tool) } catch {}
+    }
     // The bridge's call is not the mirror's: acp-dsh answers this ACP request itself with
-    // `allow-once` and raises no DSH dialog from it. The bridge's own `approval/request` is the
-    // one dialog the person sees (RFC 0003, amendment, "One dialog per call").
-    if (this.spec.dshTools === true && tool.bridge === true) {
+    // `allow-once` or cancels a question that offers no `allow_once`: never `allow_always`,
+    // which would let the agent record a standing rule nobody approved (RFC 0039). The ACP
+    // request raises no DSH dialog. The bridge's own `approval/request` is the one dialog the
+    // person sees (RFC 0003, amendment, "One dialog per call").
+    if (tool.skillBridge === true || (!tool.skillConflict && this.spec.dshTools === true && tool.bridge === true)) {
       const once = (params.options ?? []).find(option => option.kind === 'allow_once')
-        ?? (params.options ?? []).find(option => option.kind === 'allow_always')
-      return Promise.resolve(once === undefined ? { outcome: { outcome: 'cancelled' } } : { outcome: { outcome: 'selected', optionId: once.optionId } })
+      return Promise.resolve(once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }
     const skipped = this.answerSkippedMcp(tool, params.options ?? [])
     if (skipped !== undefined) return Promise.resolve(skipped)
+    // Codex with its own tools off: a question for any call but the bridge's is refused at once.
+    if (this.spec.nativeOff === true && !allowedOff(tool)) return Promise.resolve(refusal('rejected', params.options ?? []))
     // DSH already refused this call before the mirror's body could ask (refuse): no body is
     // left to answer the agent, so the refusal is its answer.
     if (tool.refused !== undefined) return Promise.resolve(refusal(tool.refused, params.options ?? []))
@@ -820,6 +1119,8 @@ export class AgentRun {
         signal: lifetime.signal,
         invalidate: () => lifetime.abort(),
         options: params.options ?? [],
+        // codex-acp renders execute/pending on the question only before the command starts (dist/index.js:35333).
+        startsCommand: params.toolCall?.kind === 'execute' && params.toolCall?.status === 'pending',
         answer: (response) => {
           if (done) return
           done = true
@@ -833,8 +1134,8 @@ export class AgentRun {
       // A later call update must not change what an answer to this question allows
       // (tool.js reviewHolds). A failed copy leaves this question to be asked as before.
       try {
-        const { id, title, kind, rawInput, content, locations, structuredName } = tool
-        permission.call = structuredClone({ id, title, kind, rawInput, content, locations, structuredName })
+        const { id, title, kind, rawInput, content, locations, structuredName, parent } = tool
+        permission.call = structuredClone({ id, title, kind, rawInput, content, locations, structuredName, parent })
       } catch {}
       tool.permission = permission
       // The agent took its question back (it cancelled the request, or the connection closed):
@@ -843,6 +1144,7 @@ export class AgentRun {
       if (signal?.aborted) return withdraw()
       signal?.addEventListener('abort', withdraw, { once: true })
       for (const listener of tool.listeners) listener()
+      for (const listener of this.askListeners) listener(tool)
     })
   }
 }
@@ -864,6 +1166,8 @@ function connect(run, stream) {
   return {
     connection,
     initialize: params => agent.request(methods.agent.initialize, params),
+    authenticate: params => agent.request(methods.agent.authenticate, params),
+    logout: params => agent.request(methods.agent.logout, params),
     newSession: params => agent.request(session.new, params),
     forkSession: params => agent.request(session.fork, params),
     closeSession: params => agent.request(session.close, params),
@@ -874,6 +1178,15 @@ function connect(run, stream) {
     prompt: params => agent.request(session.prompt, params),
     cancel: params => agent.notify(session.cancel, params),
   }
+}
+
+// The calls Codex with its own tools off may make: the bridge's tools, and Codex's own two MCP
+// list readers. Identity comes from markCall (the server and the MCP mark), never the kind.
+const OFF_READERS = new Set(['list_mcp_resources', 'list_mcp_resource_templates'])
+function allowedOff(tool) {
+  if (tool?.mcp !== true || tool.skillConflict) return false
+  if (tool.mcpServer === BRIDGE_NAME) return true
+  return tool.mcpServer === 'codex' && OFF_READERS.has(tool.rawInput?.tool)
 }
 
 // A refusal as the agent's own reject option; a stopped call, or an agent that offers no reject

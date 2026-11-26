@@ -13,7 +13,11 @@
 // tell, exit 3; `shellPgrepError: true`: pgrep failing with exit 1 and an error; `shellPgrepKilled: true`: pgrep
 // killed before it exits, as at its timeout). space.new with a `machine` makes that machine's space: its shell is `<machine>/t-shN`
 // to hc and in ls (as the bot's panes there), and space.new prints it bare (`t-shN`): neither
-// shape is documented, so the CLI takes either. The tabs have Herdr's real ls shape
+// shape is documented, so the CLI takes either. `qualifiedSpare: "lab"` gives even a local
+// space.new a qualified spare in both the window and its reply. `canonicalSpare: true` uses an
+// hc terminal id for the shell. `spaceReply` overrides reply fields,
+// and `rivalTerminal` sets the rival's terminal when testing ambiguous ownership. `waitForSpace`
+// holds space.new until a file appears. The tabs have Herdr's real ls shape
 // (id, name, active, terminals: no pane count, no mod panes) unless `paneCounts: true` gives
 // each a `panes` count; `modInSpare: true` then counts a mod pane beside the shell (as a count
 // only). `probe: <path>` records, on every `do`, whether that file exists then (state.probed).
@@ -30,6 +34,9 @@ if (state.down) {
   process.exit(1);
 }
 const save = () => writeFileSync(statePath, JSON.stringify(state));
+const hcPath = process.env.HC_FAKE_STATE;
+const linkedState = (hc, machine) => process.env.HC_FAKE_TWO_CORE === "1"
+  ? hc.machines?.find((m) => m.name === machine)?.remoteState : null;
 if (command === "do" && state.probe) {
   state.probed = [...(state.probed ?? []), [rest[0], existsSync(state.probe)]];
   save();
@@ -52,6 +59,15 @@ if (command === "ls") {
   process.exit(0);
 }
 if (command === "do" && rest[0] === "space.new") {
+  if (state.waitForSpace) {
+    const until = Date.now() + 10_000;
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(state.waitForSpace) && Date.now() < until) Atomics.wait(sleeper, 0, 0, 20);
+    if (!existsSync(state.waitForSpace)) {
+      process.stderr.write("fake herdr-app: timed out waiting to open the space\n");
+      process.exit(1);
+    }
+  }
   const args = JSON.parse(rest[1] ?? "{}");
   const n = state.next ?? 1;
   state.next = n + 1;
@@ -59,27 +75,43 @@ if (command === "do" && rest[0] === "space.new") {
   if (state.rival) {
     state.rival = false;
     state.spaces.push({ id: "sp-rival", name: args.name ?? "", folder: args.folder ?? "", machine: null, active: false,
-      tabs: [{ id: "tb-rival", name: "1", active: true, terminals: [{ terminal: "t-rival", pane: "p-rival" }] }] });
+      tabs: [{ id: "tb-rival", name: "1", active: true, terminals: [{ terminal: state.rivalTerminal ?? "t-rival", pane: "p-rival" }] }] });
   }
   const count = state.paneCounts ? { panes: state.modInSpare ? 2 : 1 } : {};
   const machine = args.machine || null;
-  const shell = machine ? `${machine}/t-sh${n}` : `t-sh${n}`;
+  const shellMachine = machine ?? state.qualifiedSpare;
+  const bareShell = state.canonicalSpare ? `tsh${n}` : `t-sh${n}`;
+  const shell = shellMachine ? `${shellMachine}/${bareShell}` : bareShell;
   state.spaces.push({ id: `sp-new${n}`, name: args.name ?? "", folder: args.folder ?? "", machine, active: true,
     tabs: [{ id: `tb-new${n}`, name: "1", active: true, terminals: [{ terminal: shell, pane: `p-new${n}` }], ...count }] });
   if (state.place && process.env.HC_FAKE_STATE) {
-    const hcState = JSON.parse(readFileSync(process.env.HC_FAKE_STATE, "utf8"));
+    const hcState = JSON.parse(readFileSync(hcPath, "utf8"));
+    const target = linkedState(hcState, machine);
+    const core = target ? JSON.parse(readFileSync(target, "utf8")) : hcState;
     const fg = state.shellBusy ? { argv: ["vim", "notes.md"], cwd: args.folder, pid: 9100 + n } : { argv: ["-zsh"], cwd: args.folder, pid: 9000 + n };
     const children = state.shellUnknown ? null : state.shellPgrepError ? "exit1" : state.shellPgrepKilled ? "killed" : state.shellJob ? [String(9500 + n)] : [];
-    hcState.terminals.push({ address: shell, name: `t-sh${n}`, cwd: args.folder, state: "live", parent: null, created_ms: 1, labels: {},
+    core.terminals.push({ address: target ? bareShell : shell, name: bareShell, cwd: args.folder, state: "live", parent: null, created_ms: 1, labels: {},
       pid: 9000 + n, foreground: fg, status: { app: "zsh", state: "idle" }, children });
-    writeFileSync(process.env.HC_FAKE_STATE, JSON.stringify(hcState));
+    writeFileSync(target ?? hcPath, JSON.stringify(core));
   }
   writeFileSync(statePath, JSON.stringify(state));
-  process.stdout.write(JSON.stringify({ pane: `p-new${n}`, terminal: `t-sh${n}` }));
+  process.stdout.write(JSON.stringify({ pane: `p-new${n}`, terminal: state.qualifiedSpare ? shell : bareShell, ...state.spaceReply }));
   process.exit(0);
 }
 if (command === "do" && rest[0] === "space.close") {
   const { id } = JSON.parse(rest[1] ?? "{}");
+  const space = state.spaces?.find((s) => s.id === id);
+  if (space?.machine && hcPath) {
+    const target = linkedState(JSON.parse(readFileSync(hcPath, "utf8")), space.machine);
+    if (target) {
+      const core = JSON.parse(readFileSync(target, "utf8"));
+      for (const tab of space.tabs) for (const { terminal } of tab.terminals) {
+        const pane = core.terminals.find((p) => p.address === terminal.split("/").at(-1));
+        if (pane) pane.state = "finished";
+      }
+      writeFileSync(target, JSON.stringify(core));
+    }
+  }
   state.spaces = (state.spaces ?? []).filter((s) => s.id !== id);
   writeFileSync(statePath, JSON.stringify(state));
   process.stdout.write("{}");

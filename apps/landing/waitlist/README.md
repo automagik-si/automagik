@@ -55,6 +55,12 @@ and removal still takes a WhatsApp sender ID/number or code. The privacy note de
 earlier sign-ups. Turning WhatsApp back on is that one line set to `true`, then
 `node apps/landing/scripts/build-pages.mjs` to regenerate `cloud/index.html`.
 
+The tests exercise the on state without touching that line: `onRequest` takes an optional
+`whatsappSignupsOpen` context value that defaults to the switch, so a test can serve the form
+and issue a code as if the line were `true`. The runtime never passes it. The on-state test
+follows the issued code through `whatsapp-confirm` and checks the confirmation reply and the
+privacy note's claim that a sent code is recorded as confirmed, with no message text stored.
+
 ## Endpoints
 
 - `POST /api/waitlist`, native form encoding: `action=add|remove|confirm`.

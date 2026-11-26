@@ -4,14 +4,17 @@
 // back the links. Never a real home, never the network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync,
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync,
   writeFileSync } from "node:fs";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RELEASES, sequenceOf } from "../lib/lane.mjs";
+import { REPOSITORY, sequenceOf } from "../lib/lane.mjs";
+import { lockStore } from "../lib/self.mjs";
+import { signedRelease } from "./signed-release.mjs";
 
 const AM = fileURLToPath(new URL("..", import.meta.url));
 const PACK = join(AM, "..", "herdr", "mods", "am-sidebar");
@@ -28,8 +31,13 @@ function scratch(t) {
   const app = join(home, ".config", "herdr-app");
   const releases = join(root, "releases");
   mkdirSync(app, { recursive: true });
+  const fakebin = join(root, "fakebin");
+  mkdirSync(fakebin);
+  for (const command of ["hc", "herdr-core", "herdr-app", "launchctl", "systemctl", "npm", "dsh"]) {
+    symlinkSync("/bin/false", join(fakebin, command));
+  }
   const env = {
-    PATH: `${NODE_DIR}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, AUTOMAGIK_HERDR_NO_UPDATE: "1",
+    PATH: `${fakebin}:${NODE_DIR}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HERDR_APP_BIN: "/bin/false", AUTOMAGIK_HERDR_NO_UPDATE: "1",
     AM_RELEASE_URL: `file://${releases}`, AM_TRUSTED_KEYS: KEY.trusted,
   };
   const run = (cmd, args, extra = {}) => spawnSync("sh", [cmd, ...args], { encoding: "utf8", env: { ...env, ...extra }, cwd: root });
@@ -58,7 +66,7 @@ function post(s, version, { tgz = join(s.releases, "download", `v${version}`, `a
   const pointer = Buffer.from(JSON.stringify({
     schemaVersion: 1, publisher: "automagik", part: "automagik.am", keyId: "am-test", sequence: sequenceOf(version),
     issuedAt: "2026-11-03T00:00:00Z", repository: "https://github.com/automagik-dev/automagik", version, tag: `v${version}`, commit: "c".repeat(40),
-    tarball: { name: `automagik-am-${version}.tgz`, url: `${RELEASES}/download/v${version}/automagik-am-${version}.tgz`,
+    tarball: { name: `automagik-am-${version}.tgz`, url: `${REPOSITORY}/releases/download/v${version}/automagik-am-${version}.tgz`,
       sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength },
   }, null, 2));
   const lane = join(s.releases, "download", "am-lane");
@@ -126,6 +134,30 @@ test("am update --rollback and --auto are the pack's own update, as its help say
   assert.deepEqual([bad.status, bad.stdout, bad.stderr], [2, "", "am: unknown option --nope (am help)\n"]);
 });
 
+test("am update --retry-skipped is the pack's own recovery, as am's help says (#1486)", (t) => {
+  const s = scratch(t);
+  assert.equal(s.am("self", "install").status, 0);
+  const pack = join(PACK, "bin", "automagik-herdr");
+  // Forwarded as given: the pack decides what each combination does and what it exits with.
+  for (const args of [["update", "--retry-skipped"], ["update", "--retry-skipped", "--json"], ["update", "herdr.pack", "--retry-skipped"],
+    ["update", "--retry-skipped", "--check"], ["update", "--retry-skipped", "--auto", "status"]]) {
+    const want = s.run(pack, args);
+    const got = s.installed(...args);
+    assert.deepEqual([got.status, got.stdout, got.stderr], [want.status, want.stdout, want.stderr], `am ${args.join(" ")}`);
+    assert.doesNotMatch(got.stderr, /unknown option/, `am ${args.join(" ")}`);
+  }
+  // Named at another part, it does not run.
+  for (const args of [["update", "automagik.am", "--retry-skipped"], ["update", "--retry-skipped", "foo"]]) {
+    const got = s.installed(...args);
+    assert.equal(got.status, 2, `am ${args.join(" ")}`);
+    assert.equal(got.stdout, "", `am ${args.join(" ")}`);
+    assert.match(got.stderr, /^am: --retry-skipped is herdr\.pack's own update, not /, `am ${args.join(" ")}`);
+  }
+  // am's own part of the help lists it.
+  const help = s.installed("help").stdout;
+  assert.match(help.slice(0, help.length - s.run(pack, ["--help"]).stdout.length), /--retry-skipped/);
+});
+
 test("self install: the store, the links and the briefing entry; doctor is healthy", (t) => {
   const s = scratch(t);
   const r = s.am("self", "install", "--json");
@@ -189,6 +221,70 @@ test("update from a file:// am-lane: newer moves, a lower sequence is refused, r
   post(s, "3.71.0");
   assert.equal(json(s.installed("update", "automagik.am", "--json")).am.to, "3.71.0");
   assert.equal(s.installed("--version").stdout.trim(), "am 3.71.0");
+});
+
+test("local self install, update and rollback use a symlinked am home", (t) => {
+  const s = scratch(t);
+  const amHome = dirname(dirname(s.store));
+  const data = join(s.root, "data");
+  mkdirSync(data);
+  symlinkSync(data, amHome);
+  const before = "3.70.1", next = "3.70.2";
+  tarball(s, before);
+  const first = s.run(join(s.root, `src-${before}/bin/am`), ["self", "install", "--json"]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(record(s).current.version, before);
+  assert.equal(realpathSync(s.store), join(data, "parts", "automagik.am"));
+  tarball(s, next);
+  post(s, next);
+  const updated = s.installed("update", "automagik.am", "--json");
+  assert.equal(updated.status, 0, updated.stderr);
+  assert.equal(json(updated).am.to, next);
+  const rollback = s.installed("rollback", "automagik.am");
+  assert.equal(rollback.status, 0, rollback.stderr);
+  assert.equal(s.installed("--version").stdout.trim(), `am ${before}`);
+  assert.equal(readlinkSync(join(s.home, ".local/bin/am")), join(s.store, "current/bin/am"));
+  assert.equal(readlinkSync(amHome), data);
+});
+
+test("local mutations reconcile a pending linked install before changing the store", (t) => {
+  const s = scratch(t);
+  const before = "3.70.1", next = "3.70.2";
+  tarball(s, before);
+  post(s, before);
+  assert.equal(s.am("update", "automagik.am").status, 0);
+  const initial = record(s);
+  const marker = join(s.store, ".verification-pending");
+  const pending = JSON.stringify({ current: null, previous: null });
+  writeFileSync(marker, pending);
+  const launcher = join(s.store, initial.current.dir, "bin/am");
+  const original = readFileSync(launcher);
+  writeFileSync(launcher, "#!/bin/sh\necho 'am 3.0.0'\n");
+  for (const args of [["self", "install"], ["update", "automagik.am"], ["rollback", "automagik.am"], ["self", "uninstall", "--purge"]]) {
+    const r = s.am(...args);
+    assert.equal(r.status, 1, args.join(" "));
+    assert.match(r.stderr, /^am [^\n]+: am launcher verification pending\. Retry `am machines install --machine <this machine>` from the controller\.\n$/);
+    assert.deepEqual(record(s), initial);
+    assert.equal(readFileSync(marker, "utf8"), pending);
+    assert.equal(existsSync(join(s.store, ".lock")), false);
+  }
+  writeFileSync(launcher, original);
+  const alias = join(s.home, ".local/bin/automagik-herdr");
+  const target = readlinkSync(alias);
+  rmSync(alias);
+  assert.equal(s.am("update", "automagik.am").status, 1, "both links must resolve");
+  assert.equal(readFileSync(marker, "utf8"), pending);
+  symlinkSync(target, alias);
+  assert.equal(json(s.am("update", "automagik.am", "--check", "--json")).am.state, "current");
+  assert.equal(readFileSync(marker, "utf8"), pending, "a check leaves the marker in place");
+  assert.equal(json(s.am("update", "automagik.am", "--json")).am.state, "current");
+  assert.equal(existsSync(marker), false, "an update reconciles even with no new version");
+  writeFileSync(marker, pending);
+  tarball(s, next);
+  post(s, next);
+  assert.equal(json(s.am("update", "automagik.am", "--json")).am.state, "updated");
+  assert.equal(existsSync(marker), false);
+  assert.deepEqual(record(s).previous, initial.current);
 });
 
 test("refused, with nothing installed: a tarball that is not the signed one, an unsigned pointer, an unsafe tarball", (t) => {
@@ -325,7 +421,7 @@ test("a machine with no pack (work only): am update is am's alone, and herdr.pac
   const s = scratch(t);
   const all = s.am("update", "--json");
   assert.equal(all.status, 0, all.stderr);
-  assert.deepEqual(json(all), { am: { state: "none", from: null, to: null, detail: "nothing is posted on am-lane yet" }, pack: { state: "not-installed" } });
+  assert.deepEqual(json(all), { am: { state: "none", from: null, to: null, detail: "nothing is posted on am-lane yet" }, pack: { state: "not-installed" }, pocket: { state: "not-installed", detail: "Pocket Link is not installed." } });
   const pack = s.am("update", "herdr.pack");
   assert.equal(pack.status, 2);
   assert.match(pack.stderr, /the herdr pack is not installed on this machine/);
@@ -390,4 +486,175 @@ test("usage: exit 2 for an id am does not handle and an unknown option", (t) => 
   assert.equal(s.am("rollback", "herdr.am-quota").status, 2);
   assert.equal(s.am("update", "--nope").status, 2);
   assert.equal(s.am("self", "dance").status, 2);
+});
+
+function signedScene(t) {
+  const s = scratch(t);
+  const lane = signedRelease(s.root);
+  const signed = (version, options) => {
+    const { dir, archive } = lane.pack(version, options);
+    lane.post(version, archive);
+    cpSync(archive, join(lane.lane, archive.split("/").pop()));
+    return { dir, archive };
+  };
+  const env = { ...s.env, NODE_OPTIONS: process.env.NODE_OPTIONS, AM_RELEASE_URL: `file://${lane.releases}`, AM_TRUSTED_KEYS: undefined };
+  const run = (file, ...args) => spawnSync("sh", [file, ...args], { env, cwd: s.root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const candidate = (dir, ...args) => run(join(dir, "bin/am"), ...args);
+  const installed = (...args) => run(join(s.home, ".local/bin/am"), ...args);
+  const install = (dir) => candidate(dir, "self", "install", "--signed", lane.lane, "--json");
+  const entry = join(s.app, "automagik-herdr/briefing.mjs");
+  return { ...s, signed, lane, install, candidate, installed, entry };
+}
+
+test("signed install, update and rollback through the installed launcher keep linked entry mode", (t) => {
+  const s = signedScene(t);
+  const first = s.signed("3.162.4");
+  const initial = s.install(first.dir);
+  assert.equal(initial.status, 0, initial.stdout || initial.stderr);
+  assert.deepEqual(json(initial), { part: "automagik.am", ok: true, changed: true, state: "installed", version: "3.162.4",
+    sequence: 1620004, sha256: createHash("sha256").update(readFileSync(first.archive)).digest("hex") });
+  assert.equal(record(s).entry, false);
+  assert.equal(existsSync(s.entry), false);
+  const again = s.install(first.dir);
+  assert.equal(again.status, 0, again.stdout || again.stderr);
+  assert.equal(json(again).state, "current");
+  assert.equal(json(again).changed, false);
+  const next = s.signed("3.162.5");
+  const concurrent = s.install(next.dir);
+  assert.equal(concurrent.status, 0, concurrent.stdout || concurrent.stderr);
+  assert.deepEqual([json(concurrent).state, json(concurrent).version, json(concurrent).changed], ["installed", "3.162.4", false]);
+  mkdirSync(dirname(s.entry), { recursive: true });
+  writeFileSync(s.entry, "their stable entry\n");
+  const update = s.installed("update", "automagik.am", "--json");
+  assert.equal(update.status, 0, update.stdout || update.stderr);
+  assert.equal(json(update).am.state, "updated");
+  assert.equal(record(s).entry, false);
+  assert.equal(s.installed("rollback", "automagik.am").status, 0);
+  assert.equal(record(s).current.version, "3.162.4");
+  assert.equal(record(s).entry, false);
+  assert.equal(record(s).seen, 1620005);
+  assert.equal(readFileSync(s.entry, "utf8"), "their stable entry\n");
+  const doctor = s.installed("self", "doctor", "--json");
+  assert.equal(doctor.status, 0, doctor.stdout || doctor.stderr);
+  const lines = doctor.stdout.trim().split("\n").map(JSON.parse);
+  assert.equal(lines.find((line) => line.check === "briefing entry").detail, "a linked install writes no stable entry");
+  assert.equal(lines.find((line) => line.check === "briefing hook").ok, true);
+});
+
+test("an update through a genuinely pre-9a rollback drops linked entry mode", (t) => {
+  const s = signedScene(t);
+  const old = s.signed("3.162.4", { edit: (dir) => {
+    for (const path of ["bin/am", "bin/run.sh", "bin/am.mjs", "lib/self.mjs", "lib/lane.mjs"]) {
+      const bytes = execFileSync("git", ["-C", AM, "show", `3e58d9d57:am/${path}`], { stdio: ["ignore", "pipe", "pipe"] });
+      writeFileSync(join(dir, path), bytes);
+    }
+  } });
+  // The pre-9a am was installed with no app home, then uninstalled without purging its tree.
+  rmSync(s.app, { recursive: true });
+  assert.equal(s.candidate(old.dir, "self", "install").status, 0);
+  assert.equal(s.installed("self", "uninstall").status, 0);
+  const next = s.signed("3.162.5");
+  const installed = s.install(next.dir);
+  assert.equal(installed.status, 0, installed.stdout || installed.stderr);
+  mkdirSync(s.app, { recursive: true });
+  assert.equal(s.installed("rollback", "automagik.am").status, 0);
+  assert.equal(record(s).entry, false);
+  assert.equal(record(s).current.version, "3.162.4");
+  assert.equal(existsSync(s.entry), false);
+  const update = s.installed("update", "automagik.am", "--json");
+  assert.equal(update.status, 0, update.stdout || update.stderr);
+  assert.equal(record(s).entry, undefined);
+  assert.ok(lstatSync(s.entry).isSymbolicLink());
+});
+
+test("a fresh empty owner is busy; two contenders cannot both reclaim a stale am lock", async (t) => {
+  const s = scratch(t);
+  mkdirSync(s.store, { recursive: true });
+  const lock = join(s.store, ".lock");
+  writeFileSync(lock, "");
+  assert.throws(() => lockStore(s.store), { state: "busy" });
+  assert.equal(readFileSync(lock, "utf8"), "");
+  utimesSync(lock, new Date(0), new Date(0));
+  const ready = join(s.root, "ready"), go = join(s.root, "go"), child = promisify(execFile);
+  const script = `import { lockStore } from ${JSON.stringify(new URL("../lib/self.mjs", import.meta.url).href)};
+import { existsSync, appendFileSync } from 'node:fs';
+const [store, ready, go] = process.argv.slice(1);
+appendFileSync(ready, 'ready\\n');
+while (!existsSync(go)) await new Promise((done) => setTimeout(done, 10));
+try {
+  const drop = lockStore(store);
+  console.log('held');
+  await new Promise((done) => setTimeout(done, 500));
+  drop();
+} catch (e) { console.log(e.state ?? e.message); }`;
+  const workers = [0, 1].map(() => child(process.execPath, ["--input-type=module", "-e", script, s.store, ready, go]));
+  for (const worker of workers) worker.catch(() => {});
+  try {
+    for (let i = 0; i < 150; i++) {
+      if (existsSync(ready) && readFileSync(ready, "utf8") === "ready\nready\n") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(readFileSync(ready, "utf8"), "ready\nready\n");
+  } finally { writeFileSync(go, "go\n"); }
+  assert.deepEqual((await Promise.all(workers)).map((r) => r.stdout.trim()).sort(), ["busy", "held"]);
+  assert.deepEqual(readdirSync(s.store), []);
+});
+
+test("a stale-lock reclaimer holds ownership until death even when its owner file is old", (t) => {
+  const s = scratch(t);
+  mkdirSync(s.store, { recursive: true });
+  const lock = join(s.store, ".lock"), reclaim = `${lock}-reclaim`;
+  const owner = join(reclaim, "owner-test.json");
+  const staleLock = () => writeFileSync(lock, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now() }));
+  staleLock();
+  mkdirSync(reclaim);
+  assert.throws(() => lockStore(s.store), { state: "busy" });
+  utimesSync(reclaim, new Date(0), new Date(0));
+  lockStore(s.store)();
+  assert.deepEqual(readdirSync(s.store), []);
+  for (const at of [Date.now(), Date.now() - 31_000]) {
+    staleLock();
+    mkdirSync(reclaim);
+    writeFileSync(owner, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    assert.throws(() => lockStore(s.store), { state: "busy" });
+    writeFileSync(owner, JSON.stringify({ pid: process.pid, at }));
+    assert.throws(() => lockStore(s.store), { state: "busy" });
+    writeFileSync(owner, JSON.stringify({ pid: 2 ** 22 + 12345, at }));
+    lockStore(s.store)();
+    assert.deepEqual(readdirSync(s.store), []);
+  }
+});
+
+test("a reclaimer's reused PID with a different start identity is stale", (t) => {
+  const s = scratch(t);
+  const lock = join(s.store, ".lock");
+  const reclaim = `${lock}-reclaim`;
+  mkdirSync(reclaim, { recursive: true });
+  writeFileSync(lock, "");
+  utimesSync(lock, new Date(0), new Date(0));
+  writeFileSync(join(reclaim, "owner-test.json"), JSON.stringify({ pid: process.pid, start: "start of a different process" }));
+  const release = lockStore(s.store);
+  try { assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, process.pid); }
+  finally { release(); }
+  assert.deepEqual(readdirSync(s.store), []);
+});
+
+test("Pocket Link dispatch stays in am's own entry", (t) => {
+  const s = scratch(t);
+  const status = s.am("pocket", "link", "status", "--json");
+  assert.equal(status.status, 2);
+  assert.deepEqual(json(status), { installed: false, running: false });
+  for (const verb of ["install", "uninstall", "doctor"]) {
+    const r = s.am(verb, "another.part");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /not a part am installs yet/);
+  }
+  for (const flag of ["--confirm", "--local-only"]) {
+    const r = s.am("pocket", "pair", flag);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, new RegExp(flag));
+  }
+  const pack = s.run(join(AM, "bin", "automagik-herdr"), ["pocket", "link", "status"]);
+  assert.notEqual(pack.status, 0);
+  assert.doesNotMatch(pack.stdout, /"installed"/);
 });

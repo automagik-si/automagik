@@ -2,14 +2,24 @@
 // pane, keystrokes never recorded, and no start, stop, resize or kill. Every core here is the
 // test's own fake (fixtures/fake-hc-core.mjs), never a live Herdr and never a real pane.
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import { createTypingService, typingRoutes } from '../src/host/code-typing.js'
+import { verifiedWindow } from '../src/host/desktop-window.js'
 import { connectCore } from '../src/host/code-core.js'
+import { coreProbeFixture } from './fixtures/fake-core-probe.mjs'
+import { connectFakeCore } from './fixtures/fake-core-connection.mjs'
+import { attachPath } from '../src/shared/attach-record.js'
+import { workersPath } from '../src/shared/workers-journal.js'
+
+const WINDOW = 'ab'.repeat(32)
+const DIGEST = createHash('sha256').update(WINDOW, 'ascii').digest('hex')
+const WINDOW_HEADERS = { 'x-automagik-window': WINDOW }
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-hc-core.mjs', import.meta.url))
 const LEAD = 'b-aaaaaaaaaa'
@@ -20,7 +30,7 @@ const TERMINALS = [
   { address: 't8', created_ms: 800, state: 'live', cols: 100, rows: 30, status: 'working' },
 ]
 
-function fixture(t) {
+function fixture(t, { probe = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'automagik-code-typing-'))
   // A plugin's own writes can still be in flight when the test ends: retry the tree removal.
   t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
@@ -34,6 +44,7 @@ function fixture(t) {
   writeFileSync(join(automagikHome, 'bots', 'bots.json'), JSON.stringify({
     version: 2,
     projects: [{ folder: project }],
+    shown: [{ project, bots: [LEAD, DEV] }],
     bots: [
       { id: LEAD, name: 'Atlas', main: true, folder: project },
       { id: DEV, name: 'Dev', folder: project },
@@ -49,8 +60,11 @@ function fixture(t) {
   writeFileSync(terminalsFile, JSON.stringify(TERMINALS))
   const log = join(root, 'core.log')
   const recordPath = join(root, 'typing.jsonl')
+  const probeEnv = probe ? coreProbeFixture(t, root) : {}
   const env = {
     ...process.env,
+    ...probeEnv,
+    AUTOMAGIK_WINDOW_DIGEST: DIGEST,
     HOME: root,
     AUTOMAGIK_HOME: automagikHome,
     HERDR_APP_HOME: appHome,
@@ -59,7 +73,7 @@ function fixture(t) {
     FAKE_CORE_TERMINALS: terminalsFile,
     FAKE_CORE_KEEP_OPEN: '1',
   }
-  return { root, project, env, log, recordPath }
+  return { root, project, env, probeEnv, log, recordPath }
 }
 
 const readLog = (path) => {
@@ -75,6 +89,105 @@ const wait = async (check, ms = 5000) => {
 }
 const service = (f, { admit = () => ({}), ...more } = {}) => createTypingService({ env: f.env, admit, recordPath: f.recordPath, warn: () => {}, ...more })
 const request = () => ({ headers: new Headers({ 'content-type': 'application/json', host: '127.0.0.1' }) })
+
+test('typing confirms its own connection before attaching and checks the reply before watching', async (t) => {
+  const f = fixture(t, { probe: false })
+  const [pane] = TERMINALS
+  for (const [core, reply] of [['other-core', pane], [CORE, null], [CORE, { ...pane, created_ms: 701 }]]) {
+    const call = t.mock.fn(async () => pane)
+    const attach = t.mock.fn(async () => ({ channel: 7, terminal: reply }))
+    const watch = t.mock.fn((_channel, handlers) => handlers.onData(Buffer.from('foreign paint')))
+    const detach = t.mock.fn()
+    const close = t.mock.fn()
+    let connections = 0
+    const connect = async () => ++connections === 1
+      ? { info: { core: { id: CORE } }, call: async () => pane, close() {} }
+      : { info: { core: { id: core } }, call, attach, watch, detach, close }
+    const typing = service(f, { connect })
+    const taken = await typing.take({ request: request(), bot: LEAD, viewer: 'viewer-1' })
+    assert.deepEqual(taken, { status: 404, body: { error: 'no-pane' } })
+    assert.deepEqual(typing.sessions(), [])
+    assert.equal(attach.mock.callCount(), core === CORE ? 1 : 0)
+    assert.equal(call.mock.callCount(), core === CORE ? 1 : 0, 'only the pre-attach resolution may call terminal.get')
+    assert.equal(watch.mock.callCount(), 0)
+    assert.equal(detach.mock.callCount(), core === CORE ? 1 : 0)
+    assert.equal(close.mock.callCount(), 1)
+  }
+})
+
+for (const phase of ['attach', 'first paint']) {
+  test(`typing refuses a worker reassigned to another Bot during ${phase}`, async (t) => {
+    const f = fixture(t, { probe: false })
+    const pane = { ...TERMINALS[0], address: 't9', created_ms: 900 }
+    addTypingWorkers(f, [pane])
+    const reassign = () => appendFileSync(attachPath(f.env.HERDR_APP_HOME), JSON.stringify({
+      v: 1, event: 'attach', bot: LEAD, project: f.project, terminal: pane.address, created_ms: pane.created_ms, core: CORE,
+    }) + '\n')
+    const detach = t.mock.fn()
+    const close = t.mock.fn()
+    const typing = service(f, {
+      connect: async () => ({
+        info: { core: { id: CORE } }, call: async () => pane, detach, close, credit() {},
+        async attach() {
+          await Promise.resolve()
+          if (phase === 'attach') reassign()
+          return { channel: 9, terminal: pane }
+        },
+        watch(_channel, { onData }) {
+          queueMicrotask(() => {
+            if (phase === 'first paint') reassign()
+            onData(Buffer.from('paint'))
+          })
+        },
+      }),
+    })
+    t.after(() => typing.dispose())
+    const taken = await typing.take({ request: request(), bot: DEV, worker: pane.address, viewer: 'viewer-1' })
+    assert.deepEqual(taken, { status: 404, body: { error: 'no-pane' } })
+    assert.deepEqual(typing.sessions(), [])
+    assert.deepEqual(readLog(f.recordPath), [])
+    assert.deepEqual(detach.mock.calls.map(call => call.arguments), [[9]])
+    assert.equal(close.mock.callCount(), 2, 'the resolver and typing connections both close')
+  })
+}
+
+for (const withdrawal of ['project grant', 'worker binding']) {
+  test(`typing refuses a withdrawn ${withdrawal} during first paint`, async (t) => {
+    const f = fixture(t, { probe: false })
+    const isWorker = withdrawal === 'worker binding'
+    const pane = isWorker ? { ...TERMINALS[1], address: 't9', created_ms: 900 } : TERMINALS[1]
+    if (isWorker) addTypingWorkers(f, [pane])
+    const detach = t.mock.fn()
+    const close = t.mock.fn()
+    const typing = service(f, {
+      connect: async () => ({
+        info: { core: { id: CORE } }, call: async () => pane, detach, close, credit() {},
+        attach: async () => ({ channel: 9, terminal: pane }),
+        watch(_channel, { onData }) {
+          queueMicrotask(() => {
+            if (isWorker) {
+              appendFileSync(workersPath(f.env.HERDR_APP_HOME), JSON.stringify({
+                event: 'end', terminal: pane.address, created_ms: pane.created_ms, core: CORE,
+              }) + '\n')
+            } else {
+              const path = join(f.env.AUTOMAGIK_HOME, 'bots', 'bots.json')
+              const registry = JSON.parse(readFileSync(path, 'utf8'))
+              writeFileSync(path, JSON.stringify({ ...registry, shown: [] }))
+            }
+            onData(Buffer.from('paint'))
+          })
+        },
+      }),
+    })
+    t.after(() => typing.dispose())
+    const taken = await typing.take({ request: request(), bot: DEV, worker: isWorker ? pane.address : null, viewer: 'viewer-1' })
+    assert.deepEqual(taken, { status: 404, body: { error: 'no-pane' } })
+    assert.deepEqual(typing.sessions(), [])
+    assert.deepEqual(readLog(f.recordPath), [])
+    assert.deepEqual(detach.mock.calls.map(call => call.arguments), [[9]])
+    assert.equal(close.mock.callCount(), 2)
+  })
+}
 
 test('take, type one batch, release: the keys reach the core and appear in no record', async (t) => {
   const f = fixture(t)
@@ -167,13 +280,13 @@ test('owner only: the take route is an exact Fetch route DSH answers only for th
   const f = fixture(t)
   const typing = service(f)
   t.after(() => typing.dispose())
-  const routes = typingRoutes(typing)
+  const routes = typingRoutes(typing, req => verifiedWindow(req, f.env))
   assert.deepEqual(routes.map(([path]) => path), ['/api/omni-ui/code/take', '/api/omni-ui/code/input', '/api/omni-ui/code/release'])
   const take = routes[0][1]
   const connection = { fetchRoutes: new Map(), interceptors: new Map() }
   HostConnectionService.prototype.registerFetchRoute.call(connection, { effect: setup => setup() }, { path: '/api/omni-ui/code/take', methods: ['POST'], requestBody: 'buffered', fetch: take })
   const handler = HostConnectionService.prototype.createSharedFetchHandler.call(connection, '/api')
-  const request = () => new Request('http://127.0.0.1/api/omni-ui/code/take', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bot: LEAD, viewer: 'viewer-1' }) })
+  const request = () => new Request('http://127.0.0.1/api/omni-ui/code/take', { method: 'POST', headers: { ...WINDOW_HEADERS, 'content-type': 'application/json' }, body: JSON.stringify({ bot: LEAD, viewer: 'viewer-1' }) })
   const viewer = { principal: { kind: 'share-viewer', shareId: 'share', actor: { providerId: 'p', tenantId: 't', subjectId: 's' } } }
   const botSession = { principal: { kind: 'agent', sessionId: 'session-341a3de3-87c4-4dda-b228-67efca79821b' } }
   assert.equal((await handler.fetch(request(), viewer)).status, 403)
@@ -199,9 +312,12 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
   mkdirSync(team, { recursive: true })
   const saved = {}
   const env = {
+    ...f.probeEnv,
+    AUTOMAGIK_WINDOW_DIGEST: DIGEST,
     HOME: f.root,
     AUTOMAGIK_HOME: join(f.root, 'automagik'),
     AUTOMAGIK_BOTS_HOME: team,
+    AUTOMAGIK_APP_BROWSER: '1',
     HERDR_APP_HOME: join(f.root, 'herdr-app'),
     HERDR_HC: FAKE,
     FAKE_CORE_TERMINALS: join(f.root, 'terminals.json'),
@@ -209,7 +325,11 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
     FAKE_CORE_KEEP_OPEN: '1',
   }
   for (const [key, value] of Object.entries(env)) { saved[key] = process.env[key]; process.env[key] = value }
+  const send = process.send
+  process.send = () => true
   t.after(() => {
+    if (send === undefined) delete process.send
+    else process.send = send
     for (const key of Object.keys(saved)) {
       if (saved[key] === undefined) delete process.env[key]
       else process.env[key] = saved[key]
@@ -246,7 +366,7 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
   assert.ok(takeRoute, 'the take route is registered in the real plugin scope')
   const response = await takeRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/take', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { ...WINDOW_HEADERS, 'content-type': 'application/json' },
     body: JSON.stringify({ bot: LEAD, viewer: 'viewer-1' }),
   }))
   assert.equal(response.status, 200)
@@ -255,7 +375,7 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
   const closed = await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2))
   // A scope that does not stop its typing attach would leave an open core; let it go before
   // failing with the reason.
-  if (!closed && releaseRoute) await releaseRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/release', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session: taken.session }) })).catch(() => {})
+  if (!closed && releaseRoute) await releaseRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/release', { method: 'POST', headers: { ...WINDOW_HEADERS, 'content-type': 'application/json' }, body: JSON.stringify({ session: taken.session }) })).catch(() => {})
   assert.ok(closed, 'stopping the real plugin scope sends CLOSE for the typing attach')
   await new Promise(resolve => setTimeout(resolve, 100))
 })
@@ -311,4 +431,99 @@ test('after the idle lease ends typing, the same viewer takes it again in place'
   const answer = await typing.input({ request: request(), session: again.body.session, data: Buffer.from('hello', 'utf8').toString('base64') })
   assert.equal(answer.status, 204)
   assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 0 && Buffer.from(row.payload, 'base64').toString() === 'hello')), 'the next key lands in the new attach')
+})
+
+function addTypingWorkers(f, terminals) {
+  const ledger = join(f.env.HERDR_APP_HOME, 'automagik-herdr', 'workers.jsonl')
+  const rows = terminals.map(({ address, created_ms }) => ({
+    event: 'start', kind: 'worker', terminal: address, created_ms, botId: DEV, lead: LEAD, role: 'dev',
+    project: f.project, worktree: f.project, core: CORE, at: '2026-11-15T00:00:00.000Z',
+  }))
+  writeFileSync(ledger, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+  writeFileSync(f.env.FAKE_CORE_TERMINALS, JSON.stringify([...TERMINALS, ...terminals]))
+}
+
+test('concurrent seat and worker takes reserve their shared physical terminal', async (t) => {
+  const f = fixture(t, { probe: false })
+  addTypingWorkers(f, [TERMINALS[1]])
+  const typing = service(f, { connect: connectFakeCore })
+  t.after(() => typing.dispose())
+  const attempts = [
+    { request: request(), bot: DEV, viewer: 'viewer-seat' },
+    { request: request(), bot: DEV, worker: 't8', viewer: 'viewer-worker' },
+  ]
+  const answers = await Promise.all(attempts.map(values => typing.take(values)))
+  assert.deepEqual(answers.map(answer => answer.status).sort(), [200, 409])
+  const refused = answers.findIndex(answer => answer.status === 409)
+  assert.deepEqual(answers[refused].body, { error: 'typing-elsewhere' })
+  assert.equal(typing.sessions().length, 1)
+  await typing.releaseViewer(attempts[1 - refused].viewer)
+  assert.equal((await typing.take(attempts[refused])).status, 200)
+})
+
+test('pending takes count towards four sessions, with room for a held viewer to move', async (t) => {
+  const f = fixture(t, { probe: false })
+  const workers = [10, 11, 12].map(n => ({ address: `t${n}`, created_ms: n * 100, state: 'live', cols: 80, rows: 24 }))
+  addTypingWorkers(f, workers)
+  const typing = service(f, { connect: connectFakeCore })
+  t.after(() => typing.dispose())
+  const attempts = [
+    { bot: LEAD }, { bot: DEV }, ...workers.map(row => ({ bot: DEV, worker: row.address })),
+  ].map((target, index) => ({ ...target, viewer: `viewer-${index}`, request: request() }))
+
+  const answers = await Promise.all(attempts.map(values => typing.take(values)))
+  assert.deepEqual(answers.map(answer => answer.status), [200, 200, 200, 200, 429])
+  assert.equal(typing.sessions().length, 4)
+  const replacement = await typing.take({ ...attempts[4], viewer: attempts[0].viewer })
+  assert.equal(replacement.status, 200)
+  assert.equal(typing.sessions().length, 4)
+  assert.equal(typing.sessions().find(session => session.viewer === attempts[0].viewer)?.terminal, 't12')
+})
+
+for (const stop of ['releaseViewer', 'dispose']) {
+  test(`${stop} cancels a typing take during attach and closes its core`, { timeout: 5000 }, async (t) => {
+    const f = fixture(t, { probe: false })
+    const started = Promise.withResolvers()
+    const finish = Promise.withResolvers()
+    let closed = false
+    let connections = 0
+    const typing = service(f, {
+      async connect(options) {
+        const core = await connectFakeCore(options)
+        if (++connections === 1) return core
+        const attach = core.attach.bind(core)
+        const close = core.close.bind(core)
+        core.attach = async (params) => {
+          const attached = await attach(params)
+          started.resolve()
+          await finish.promise
+          return attached
+        }
+        core.close = () => { closed = true; close() }
+        return core
+      },
+    })
+    t.after(() => { finish.resolve(); return typing.dispose() })
+    const taking = typing.take({ request: request(), bot: LEAD, viewer: 'viewer-cancelled' })
+    await Promise.race([started.promise, taking.then(() => assert.fail('the take ended before attaching'))])
+    await typing[stop]('viewer-cancelled')
+    finish.resolve()
+    assert.deepEqual(await taking, { status: 409, body: { error: 'not-typing' } })
+    assert.deepEqual(typing.sessions(), [])
+    assert.equal(closed, true)
+  })
+}
+
+test('releasing one pane viewer leaves a sibling pane typing', async (t) => {
+  const f = fixture(t, { probe: false })
+  const typing = service(f, { connect: connectFakeCore })
+  t.after(() => typing.dispose())
+  const first = await typing.take({ request: request(), bot: LEAD, viewer: 'viewer-first' })
+  const second = await typing.take({ request: request(), bot: DEV, viewer: 'viewer-second' })
+  assert.equal(first.status, 200)
+  assert.equal(second.status, 200)
+  assert.deepEqual(await typing.releaseViewer('viewer-first'), { released: true })
+  assert.deepEqual(typing.sessions().map(session => session.id), [second.body.session])
+  const input = await typing.input({ request: request(), session: second.body.session, data: Buffer.from('still here').toString('base64') })
+  assert.equal(input.status, 204)
 })

@@ -2,7 +2,7 @@ import { createElement as h, useCallback, useEffect, useMemo, useState } from 'r
 import { call } from './api.js'
 import { Stage, StepAside, useFinish, useGate, useGlitch } from './stage.js'
 import { SUBSCRIPTION_TILES, SubscriptionSignIn, signedInCount } from './subscriptions.js'
-import { AcpLine, agentLines, useAcp } from './acp-agents.js'
+import { AcpLine, agentLines, LOGO_OF, useAcp } from './acp-agents.js'
 import { t } from './i18n.js'
 
 // Step omni-connect-ai (order -200): every AI is a row with a switch, and several can be on.
@@ -18,6 +18,12 @@ import { t } from './i18n.js'
 // Continue. Their switch is the CLI's own, for every Bot on it. The agents' own rows are in
 // Settings → Claude Code and Codex, not here.
 //
+// Antigravity (#2048) is a third CLI row, listed when acp-dsh offers its sign-in in the app. Its
+// switch turns acp-dsh's own Antigravity switch on and opens its setup, where it installs by
+// click and signs in in place, as in Settings: the link, a Copy button and the field for the
+// address the browser ends on (onboarding may run before any Bot exists, so no Bot chat).
+// Cancel, or a second flip, before it is signed in turns it back off.
+//
 // Everything else: DSH's own sign-ins and keys, and dsh-subscriptions for what nothing else
 // covers.
 //
@@ -27,7 +33,7 @@ import { t } from './i18n.js'
 export const VENDOR_TERMS = 'Personal use under the vendor\'s terms'
 // How many "Add another" rows show before "Show N more".
 export const FIRST_OTHERS = 4
-export const LOGOS = { claude: 'C', chatgpt: 'G', deepseek: 'D', kimi: 'K', copilot: 'P', grok: 'X', openai: 'O', openrouter: 'R', zai: 'Z', moonshot: 'M', opencode: 'OC', cliproxy: '⇄', ollama: 'L' }
+export const LOGOS = { claude: 'C', chatgpt: 'G', antigravity: LOGO_OF['acp-antigravity'], deepseek: 'D', kimi: 'K', copilot: 'P', grok: 'X', openai: 'O', openrouter: 'R', zai: 'Z', moonshot: 'M', opencode: 'OC', cliproxy: '⇄', ollama: 'L' }
 
 // dsh-subscriptions' vendors as rows, when that plugin is here.
 export function subscriptionRows(subscriptions) {
@@ -206,7 +212,7 @@ function SignInOrKey({ row, provider, onSaved, onClose }) {
 
 // The rows that are a CLI, and the agent behind each: the page's latest look at it, else the
 // host's (row.cli). Without acp-dsh there is none.
-export const CLI_ROWS = { claude: 'acp-claude', chatgpt: 'acp-codex' }
+export const CLI_ROWS = { claude: 'acp-claude', chatgpt: 'acp-codex', antigravity: 'acp-antigravity' }
 function cliAgentOf(row, acp) {
   const id = CLI_ROWS[row.id]
   if (id === undefined) return undefined
@@ -215,11 +221,30 @@ function cliAgentOf(row, acp) {
 const acpBusy = acp => (acp ? acp.busy !== null : false)
 // A CLI that can take a sign-in now: found, and not installing, updating or failed.
 const canSignIn = agent => agent.cli.found === true && agent.cli.state !== 'installing' && agent.cli.state !== 'failed' && agent.cli.updating !== true
+// An agent that signs in here, in the app (Antigravity): its row installs and signs in in place.
+const appRow = agent => agent?.appSignIn === true
+
+// Antigravity's setup: its own lines, as in Settings (Install, Sign in, the link, Copy and the
+// paste field), never the "in a Bot's chat" button or a key. Cancel before it is signed in turns
+// it back off (the switch never reads off while it is on).
+function AppAgentSetup({ agent, acp, onClose }) {
+  const busy = acpBusy(acp)
+  const problem = acp?.problems?.[agent.id]
+  const cancel = async () => {
+    if (agent.signedIn !== true && acp.isOn(agent)) await acp.flip(agent)
+    onClose()
+  }
+  return h('div', { className: 'oai-signin' },
+    h('div', { className: 'oai-acp-lines' }, agentLines(agent).map((line, i) => h(AcpLine, { key: i, line, agent, acp, busy }))),
+    problem ? h('p', { className: 'oai-error', role: 'alert' }, problem) : null,
+    h('button', { type: 'button', className: 'oai-quiet', onClick: cancel }, t('Cancel')))
+}
 
 // Claude or ChatGPT: sign in to the CLI in a Bot's chat (the step steps aside), or for Claude an
 // Anthropic API key. A CLI that is missing, installing or failed shows where it stands instead.
 function CliSetup({ row, agent, acp, onSaved, onClose }) {
   const [way, setWay] = useState(null)
+  if (appRow(agent) && acp) return h(AppAgentSetup, { agent, acp, onClose })
   if (way === 'key' || (agent === undefined && row.keyUrl)) return h(KeyForm, { row, provider: providerOf(row), onSaved })
   if (agent === undefined) return h('p', null, t('This DSH offers no {name} sign-in.', { name: row.name }))
   const busy = acpBusy(acp)
@@ -268,7 +293,9 @@ export function Row({ row, acp, open, busy, problem, onFlip, onSaved, onClose, o
   // A signed-in CLI turned on but not answering yet (its connector installing, a restart
   // pending): where it stands, under the row.
   const agent = cliAgentOf(row, acp)
-  const settling = !row.on && !open && agent?.on === true && agent.signedIn === true && agent.cli.found === true
+  // Antigravity on but not signed in, with its setup closed (a reload): its lines, under the row.
+  const settling = !row.on && !open && agent?.on === true && ((agent.signedIn === true && agent.cli.found === true) || appRow(agent))
+  const agentProblem = appRow(agent) && !open ? acp?.problems?.[agent.id] : null
   return h('div', { className: `oai-ai${row.on ? ' oai-ai-on' : ''}` },
     h('div', { className: 'oai-ai-row' },
       h('div', { className: 'oai-logo', 'aria-hidden': true }, logo),
@@ -280,6 +307,7 @@ export function Row({ row, acp, open, busy, problem, onFlip, onSaved, onClose, o
     open && !row.on ? h('div', { className: 'oai-ai-setup' }, h(Setup, { row, acp, onSaved, onClose })) : null,
     settling ? h('div', { className: 'oai-acp-lines' }, agentLines(agent).map((line, i) => h(AcpLine, { key: i, line, agent, acp, busy: busy || acpBusy(acp) }))) : null,
     problem ? h('p', { className: 'oai-error oai-ai-problem', role: 'alert' }, problem) : null,
+    agentProblem ? h('p', { className: 'oai-error oai-ai-problem', role: 'alert' }, agentProblem) : null,
     h(Duplicates, { row, onDedupe }))
 }
 
@@ -305,8 +333,10 @@ export function ConnectAiStep(props) {
     setRows(reply.rows ?? [])
     setSubs(reply.subscriptions ?? null)
   }, [])
-  // The rows again whenever the agents change (a CLI's sign-in checked, its connector ready).
-  useEffect(() => { void refresh() }, [refresh, acp.view])
+  // The rows again whenever an agent's state changes (a CLI's sign-in checked, its connector
+  // ready), not on every poll while one signs in.
+  const agentsDigest = agentsDigestOf(acp.view)
+  useEffect(() => { void refresh() }, [refresh, agentsDigest])
   useEffect(() => { if (state) glitch() }, [state, glitch])
   if (!state) return null
   if (aside) {
@@ -322,6 +352,18 @@ export function ConnectAiStep(props) {
   const flip = async (row) => {
     const action = flipAction(row)
     say(row.id, null)
+    // Antigravity: the flip is the person's word to turn it on (acp-dsh's own switch), and
+    // opens its setup; a second flip before it is signed in turns it back off.
+    const agent = cliAgentOf(row, acp)
+    if (action === 'setup' && appRow(agent)) {
+      if (!acp.isOn(agent)) {
+        if (await acp.flip(agent)) setOpen(row.id)
+      } else if (open === row.id) {
+        await acp.flip(agent)
+        setOpen(null)
+      } else setOpen(row.id)
+      return
+    }
     if (action === 'setup') {
       setOpen(current => (current === row.id ? null : row.id))
       return
@@ -369,6 +411,12 @@ export function ConnectAiStep(props) {
     onModels: () => finish('models'),
     onContinue: () => proceed(),
   })
+}
+
+// What of the agents makes the rows read again: their switch, sign-in and readiness only.
+export function agentsDigestOf(view) {
+  return JSON.stringify((view?.agents ?? []).map(agent => [agent.id, agent.on, agent.signedIn, agent.cli?.found, agent.cli?.state,
+    agent.connector?.state, agent.restartNeeded]))
 }
 
 // What the step draws, from its state: `rows` is null while the host looks, `rowProps` a row's

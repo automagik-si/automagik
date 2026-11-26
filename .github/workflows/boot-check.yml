@@ -9,7 +9,8 @@ name: Boot check
 # Follow Omni calls it with a candidate Omni (omni_version and omni_commit) before it moves
 # omni.json on dev, so an Omni release that does not boot never reaches a desktop release. The
 # candidate is written exactly as Follow Omni's carry writes it (omni.json and the welcome's
-# package.json), so the tree that boots is the tree that is carried.
+# package.json), so the tree that boots is the tree that is carried. On a candidate it also runs
+# the tests that read the pin, which no CI run sees before the carry is released.
 
 on:
   workflow_call:
@@ -47,22 +48,26 @@ jobs:
 
       - name: The candidate Omni
         if: inputs.omni_version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "${OMNI_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error ::omni_version is not a release version (x.y.z)"; exit 1; }
           [[ "${OMNI_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error ::omni_commit '${OMNI_COMMIT}' is not a full commit sha"; exit 1; }
+          tree=$(gh api "repos/automagik-si/omni/git/commits/${OMNI_COMMIT}" --jq .tree.sha)
+          [[ "${tree}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error ::Omni's candidate tree is not a full sha"; exit 1; }
           node -e '
             const fs = require("node:fs")
-            const [version, commit] = process.argv.slice(1)
+            const [version, commit, tree] = process.argv.slice(1)
             const file = "apps/desktop/omni.json"
             const json = JSON.parse(fs.readFileSync(file, "utf8"))
             fs.writeFileSync(file, JSON.stringify({ ...json, version, commit }, null, 2) + "\n")
             // The welcome installs the same release of the Omni plugins in a plain DSH.
             const welcome = "apps/welcome-dsh/package.json"
             const pkg = JSON.parse(fs.readFileSync(welcome, "utf8"))
-            pkg.automagik.omni = { ...pkg.automagik.omni, version, commit }
+            pkg.automagik.omni = { ...pkg.automagik.omni, version, commit, tree }
             fs.writeFileSync(welcome, JSON.stringify(pkg, null, 2) + "\n")
-          ' "${OMNI_VERSION}" "${OMNI_COMMIT}"
+          ' "${OMNI_VERSION}" "${OMNI_COMMIT}" "${tree}"
           cat apps/desktop/omni.json
           node -p 'JSON.stringify(require("./apps/welcome-dsh/package.json").automagik.omni)'
 
@@ -85,13 +90,47 @@ jobs:
           bun install --frozen-lockfile --ignore-scripts
           [ -d apps/bots-dsh/dev/harness/node_modules ] || (cd apps/bots-dsh && bun run harness)
 
+      # Follow Omni pushes its bump with GITHUB_TOKEN, so CI never tests the pin it carries, and
+      # a release is cut on it at once: v3.172.0 went out with a welcome test red on dev. The
+      # tests that read the pin (apps/desktop/omni.json, the welcome's automagik.omni) run here
+      # on the candidate as it is written above. One that fails stops the carry, as a boot does.
+      - name: Omni's plugins at the candidate
+        # The welcome's tool list is read against the plugins of the Omni it pins (ci.yml).
+        if: inputs.omni_version != ''
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/omni"
+          git init -q "${dir}"
+          git -C "${dir}" remote add origin https://github.com/automagik-si/omni
+          git -C "${dir}" sparse-checkout set --no-cone /apps/omni-channels-dsh/ /apps/omni-canvas-dsh/
+          git -C "${dir}" fetch -q --depth 1 --filter=blob:none origin "${OMNI_COMMIT}"
+          git -C "${dir}" checkout -q FETCH_HEAD
+          echo "OMNI_CHECKOUT=${dir}" >> "$GITHUB_ENV"
+
+      - name: The tests that read the pin
+        if: inputs.omni_version != ''
+        env:
+          # The welcome's tests resolve DSH from the harness installed above: the Bot team's
+          # pins the same DSH packages as the welcome's own.
+          DSH_HARNESS: ${{ github.workspace }}/apps/bots-dsh/dev/harness
+        run: |
+          set -euo pipefail
+          node --test apps/desktop/test/version.test.js
+          cd apps/welcome-dsh
+          bun install --frozen-lockfile --ignore-scripts
+          node --import ./test/harness-resolve.mjs --test \
+            test/bot-types.test.js \
+            test/install-resolved.test.js \
+            test/omni-github-contract.test.js \
+            test/release-resolve.test.js
+
       - name: Boot
         run: node scripts/boot-check.mjs --shot boot.png
 
       - name: The candidate fails
         if: failure() && inputs.omni_version != ''
         run: |
-          line="Omni ${OMNI_VERSION} (${OMNI_COMMIT:0:9}) fails the boot check: not followed, nothing pushed, no release. The next scheduled run tries again."
+          line="Omni ${OMNI_VERSION} (${OMNI_COMMIT:0:9}) fails the boot check or the tests that read the pin: not followed, nothing pushed, no release. The next scheduled run tries again."
           echo "::error ::${line}"
           echo "### ${line}" >> "$GITHUB_STEP_SUMMARY"
 

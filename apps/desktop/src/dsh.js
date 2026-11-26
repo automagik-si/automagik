@@ -12,13 +12,16 @@
 // one (~/.automagik/bots), so neither sees the other's Bots or Sessions. Omni's own folder
 // (~/.omni: its sandbox, the Bun its channels download) is Omni's.
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { cp, rm } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { delimiter, join, resolve, win32 } from 'node:path'
 import { DEFAULTS as PRIVACY_DEFAULTS, privacyEnv } from './privacy.js'
 import { CLOSE_INHERITED } from './child-paths.js'
+import { hasSandboxAdapter, mergePatch, reconcileSandboxPatch, replaceProfilePatch } from './profile-patch.mjs'
 
 export const PROFILE = 'omni'
 const READY_TIMEOUT_MS = 120_000
@@ -47,6 +50,9 @@ export function resourcesOf({ packaged, resourcesPath, appPath }) {
   return {
     bin: join(root, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     pnpm: join(root, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+    // The launcher that gives dsh's plugin manager this pnpm (src/dsh-launch.cjs): outside the
+    // app's asar when packaged, because it runs as Node.
+    launcher: packaged ? join(root, 'dsh-launch', 'dsh-launch.cjs') : join(appPath, 'src', 'dsh-launch.cjs'),
     profile: join(root, 'profile'),
   }
 }
@@ -60,12 +66,14 @@ const batchQuote = text => `"${String(text).replaceAll('%', '%%')}"`
 export const toolFileOf = (dir, name, platform = process.platform) => join(dir, platform === 'win32' ? `${name}.cmd` : name)
 
 /**
- * Write `node` and `pnpm` into `dir` for dsh's PATH: dsh's plugin manager installs plugins
- * (the market, Settings → Plugins) with pnpm, and nothing guarantees a machine has Node or
- * pnpm. Both run on `node`, the app's own binary as Node (ELECTRON_RUN_AS_NODE). Checked at
- * every launch, since the app's path changes with each install; a file that already says the
- * same, and can run, is left as it is. On Windows they are batch files, `node.cmd` and
- * `pnpm.cmd`, which PATH finds by PATHEXT.
+ * Write `node` and `pnpm` into `dir` for dsh's PATH: dsh's commands and the agent CLIs a plugin
+ * starts run with them, and nothing guarantees a machine has Node or pnpm. Plugin installs,
+ * updates and removals do not resolve them here: the app starts dsh through src/dsh-launch.cjs,
+ * which gives the plugin manager the bundled pnpm by absolute path (#1466). Both tools run on
+ * `node`, the app's own binary as Node (ELECTRON_RUN_AS_NODE). Checked at every launch, since
+ * the app's path changes with each install; a file that already says the same, and can run, is
+ * left as it is. On Windows they are batch files, `node.cmd` and `pnpm.cmd`, which PATH finds
+ * by PATHEXT.
  */
 export function writeTools({ dir, node, pnpm, platform = process.platform }) {
   mkdirSync(dir, { recursive: true })
@@ -97,47 +105,25 @@ const sameTool = (file, text, windows) => {
   }
 }
 
-// The top-level entries of a cordis patch file (a YAML list): each starts with "- " at the
-// first column, runs over its indented lines, and takes the comment lines right above it.
-function patchEntries(text) {
-  const entries = []
-  let comments = []
-  let current = null
-  for (const line of String(text).split('\n')) {
-    if (line.startsWith('- ')) {
-      current = { lines: [...comments, line], ids: [] }
-      comments = []
-      entries.push(current)
-    } else if (line.startsWith('#')) {
-      comments.push(line)
-      continue
-    } else if (current && /^\s+\S/.test(line)) {
-      current.lines.push(line)
-    } else {
-      comments = []
-      continue
-    }
-    const id = line.match(/^[\s-]*id:\s*['"]?([^'"\s#]+)/)
-    if (id) current.ids.push(id[1])
-  }
-  return entries
+/** The user's profile patch with missing shipped operations merged, or null if unchanged. */
+export function mergeProfilePatch(user, shipped) {
+  return mergePatch(createRequire(import.meta.url)('yaml'), user, shipped)
 }
 
-const idsIn = text => new Set([...String(text).matchAll(/^[\s-]*id:\s*['"]?([^'"\s#]+)/gm)].map(match => match[1]))
-
-/**
- * The user's profile patch with the shipped entries it lacks appended, or null when it
- * lacks none. An entry is missing when none of the ids it names appears in the user's file;
- * one the user has (changed or not) is theirs and stays. DSH's empty template (`[]`) is
- * replaced rather than appended to.
- */
-export function mergeProfilePatch(user, shipped) {
-  const have = idsIn(user)
-  const missing = patchEntries(shipped).filter(entry => entry.ids.length > 0 && entry.ids.every(id => !have.has(id)))
-  if (missing.length === 0) return null
-  const added = missing.map(entry => entry.lines.join('\n')).join('\n')
-  const base = String(user).replace(/^\[\]\s*$/m, '').replace(/\s*$/, '')
-  return `${base === '' ? '' : `${base}\n`}${added}\n`
+export function reconcileSandboxRow({ profile, runtime, log = () => {} }) {
+  try {
+    const file = join(profile, 'cordis.patch.yml')
+    const text = readFileSync(file, 'utf8')
+    const yaml = createRequire(import.meta.url)('yaml')
+    const updated = reconcileSandboxPatch(yaml, text, hasSandboxAdapter(profile, runtime), log)
+    if (updated === null) return null
+    replaceProfilePatch(file, updated, statSync(file).mode & 0o777)
+    log('sandbox: reconciled the DSH sandbox provider in the profile patch')
+    return updated
+  } catch (error) {
+    log(`sandbox: could not reconcile the profile patch (${error.message})`)
+    return null
+  }
 }
 
 /**
@@ -385,7 +371,7 @@ export function backupSettingsOrLog({ dshHome, version, log = () => {} }) {
  * each with .build-id) is left as it is. Another build's gets the new packages
  * (node_modules, package.json) and nothing else: dsh keeps the user's settings in that
  * folder too (models and preferences in cordis.patch.yml, .plugin-manager/), and an
- * update must not take them away. The shipped cordis.patch.yml only seeds a new profile.
+ * update merges missing shipped patch operations into the existing settings.
  * The copies are asynchronous, so the window stays live while a new build's packages go in;
  * dsh must not start before the returned promise resolves. A quit can cut a copy short (the app
  * lets it through while dsh is not spawned yet): a new profile is copied beside its place and
@@ -407,10 +393,11 @@ export async function installProfile({ dshHome, source }) {
     renameSync(fresh, target)
     return { target, installed: true }
   } else {
+    const shipped = readJson(join(source, 'package.json'))
     // A profile from a build that shipped the Bot team or the welcome under its old name.
-    migrateRenamed({ target, dshHome, shipped: readJson(join(source, 'package.json')) })
+    migrateRenamed({ target, dshHome, shipped })
     // A profile with a package this build no longer ships (RETIRED).
-    migrateRetired({ target, dshHome, shipped: readJson(join(source, 'package.json')) })
+    migrateRetired({ target, dshHome, shipped })
     // Only the packages the app ships are replaced: a plugin the user installed (the market,
     // Settings → Plugins) stays, with its dependencies, and in package.json.
     for (const name of packagesIn(join(source, 'node_modules'))) {
@@ -420,7 +407,6 @@ export async function installProfile({ dshHome, source }) {
     // The tarballs in vendor/ are the app's (file:vendor/… in the shipped package.json), except
     // those a plugin the person installed names.
     const user = readJson(join(target, 'package.json'))
-    const shipped = readJson(join(source, 'package.json'))
     const own = ownDependencies(user, shipped)
     const kept = new Set(own.map(([, spec]) => /^file:(?:\.\/)?vendor\/([^/]+)$/.exec(String(spec))?.[1]))
     for (const file of existsSync(join(target, 'vendor')) ? readdirSync(join(target, 'vendor')) : []) {
@@ -430,13 +416,15 @@ export async function installProfile({ dshHome, source }) {
     writeFileSync(join(target, 'package.json'), mergeProfilePackage(user, shipped))
     replaceLocks({ target, source, ownPlugins: own.length > 0 })
     if (existsSync(join(source, '.build-id'))) cpSync(join(source, '.build-id'), join(target, '.build-id'))
-    for (const file of ['cordis.patch.yml', 'pnpm-workspace.yaml']) {
-      if (!existsSync(join(target, file)) && existsSync(join(source, file))) cpSync(join(source, file), join(target, file))
+    if (!existsSync(join(target, 'pnpm-workspace.yaml')) && existsSync(join(source, 'pnpm-workspace.yaml'))) {
+      cpSync(join(source, 'pnpm-workspace.yaml'), join(target, 'pnpm-workspace.yaml'))
     }
-    // A setting a newer build ships (a new plugin's row, a seed) reaches an existing profile.
     const patch = join(target, 'cordis.patch.yml')
-    const merged = mergeProfilePatch(readFileSync(patch, 'utf8'), readFileSync(join(source, 'cordis.patch.yml'), 'utf8'))
-    if (merged !== null) writeFileSync(patch, merged)
+    const shippedPatch = readFileSync(join(source, 'cordis.patch.yml'), 'utf8')
+    const merged = existsSync(patch) ? mergeProfilePatch(readFileSync(patch, 'utf8'), shippedPatch) : shippedPatch
+    if (merged !== null) {
+      replaceProfilePatch(patch, merged, existsSync(patch) ? statSync(patch).mode & 0o777 : undefined)
+    }
   }
   writeFileSync(marker, stamp)
   return { target, installed: true }
@@ -699,7 +687,7 @@ export async function startDshOnPort({ port, fresh = freePort, onPort, stopped =
  * `since` is when the current one was spawned: a busy file older than that is not its own
  * (quit-guard.js liveBusy).
  */
-export function dshRun({ now = Date.now } = {}) {
+export function dshRun({ now = Date.now, beforeStop = () => {} } = {}) {
   let child = null
   let since = null
   let stopped = false
@@ -715,6 +703,7 @@ export function dshRun({ now = Date.now } = {}) {
       if (stopped) void stopDsh(next, undefined, { tree: false })
     },
     stop(graceMs) {
+      beforeStop()
       stopped = true
       return stopDsh(child, graceMs)
     },
@@ -747,6 +736,54 @@ export async function serveDsh({ run, portFile, onSpawn, onUnkept = () => {}, ..
 export function servesOrigin(running, origin) {
   if (!running?.child || running.child.exitCode !== null || running.child.signalCode !== null) return false
   try { return new URL(running.url).origin === origin } catch { return false }
+}
+
+const WINDOW_HEADER = 'x-automagik-window'
+const WINDOW_PATHS = new Set([
+  '/api/omni-ui',
+  '/api/omni-ui/code/stream',
+  '/api/omni-ui/code/take',
+  '/api/omni-ui/code/input',
+  '/api/omni-ui/code/release',
+])
+
+/** Hold the secret in main, and mark only the DSH page's requests to the ready child. */
+export function dshWindowMarker() {
+  let active = null
+  return {
+    start() {
+      const mark = { secret: randomBytes(32).toString('hex'), origin: null }
+      active = mark
+      const digest = createHash('sha256').update(mark.secret, 'ascii').digest('hex')
+      return {
+        digest,
+        ready(running, origin) {
+          if (active !== mark || !servesOrigin(running, origin)) return
+          mark.origin = origin
+          running.child.once('exit', () => { if (active === mark) active = null })
+        },
+      }
+    },
+    clear() { active = null },
+    bind(contents) {
+      const { id, session } = contents
+      // Electron's URL filter has no webContentsId field. Match the actual request's id,
+      // and check its full origin because URL patterns alone do not bind the port.
+      session.webRequest.onBeforeSendHeaders({ urls: ['http://127.0.0.1/*'] }, (details, done) => {
+        const requestHeaders = details.requestHeaders
+        if (active && details.webContentsId === id) {
+          const url = new URL(details.url)
+          if (url.origin === active.origin && WINDOW_PATHS.has(url.pathname)) {
+            for (const name of Object.keys(requestHeaders)) {
+              if (name.toLowerCase() === WINDOW_HEADER) delete requestHeaders[name]
+            }
+            requestHeaders[WINDOW_HEADER] = active.secret
+          }
+        }
+        done({ requestHeaders })
+      })
+    },
+  }
 }
 
 /** The URL to load into the window: `running`'s launch URL, only when it serves `origin`. */
@@ -808,16 +845,29 @@ export async function forgetDshLogins(cookies, origin) {
  */
 export const toolDirs = (userHome = homedir()) => [join(userHome, '.local', 'bin'), join(userHome, '.claude', 'local'), '/opt/homebrew/bin', '/usr/local/bin']
 
-export function dshEnv({ base = process.env, home, electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform }) {
+export function dshEnv({ base = process.env, home, root = automagikHome(base), electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform, windowDigest, instanceId }) {
   // After the machine's own: a project's commands keep the user's node and pnpm, and then the
-  // usual tool folders, then the app's own node and pnpm.
+  // usual tool folders, then the app's own node and pnpm. dsh's plugin manager does not resolve
+  // pnpm here: startDsh binds it to the bundled pnpm by absolute path (src/dsh-launch.cjs).
   const PATH = [...String(base.PATH ?? '').split(delimiter), ...toolDirs(userHome), ...(binDir ? [binDir] : [])]
     .filter((dir, index, all) => dir !== '' && all.indexOf(dir) === index)
     .join(delimiter)
+  const env = { ...base }
+  delete env.AUTOMAGIK_WINDOW_DIGEST
+  // The launcher owns the instance id (RFC 0024 amendment (l)) and registry root. Drop
+  // inherited aliases too on Windows, where the child sees case-insensitive names.
+  for (const key of Object.keys(env)) {
+    const name = platform === 'win32' ? key.toUpperCase() : key
+    if (name === 'AUTOMAGIK_INSTANCE_ID' || name === 'AUTOMAGIK_HOME') delete env[key]
+  }
   return {
-    ...base,
+    ...env,
+    ...(windowDigest ? { AUTOMAGIK_WINDOW_DIGEST: windowDigest } : {}),
+    ...(typeof instanceId === 'string' ? { AUTOMAGIK_INSTANCE_ID: instanceId } : {}),
     PATH,
     DSH_HOME: join(home, 'dsh'),
+    // Code rows and the DSH Code tree read the same shared registry even after DSH changes cwd.
+    AUTOMAGIK_HOME: root,
     // The app's own team, apart from one in a dsh the person runs (bots-dsh folders.js).
     AUTOMAGIK_BOTS_HOME: join(home, 'bots'),
     // Signs in to an Omni as the desktop app (the Better Auth device-flow client id).
@@ -848,15 +898,20 @@ export const busyFileOf = home => join(home, 'busy.json')
 
 /**
  * Start dsh on 127.0.0.1:`port` and resolve with { child, url } once it prints its launch
- * URL. `node` is the executable that runs dsh: Electron itself (with ELECTRON_RUN_AS_NODE),
+ * URL. An `env` factory is called for each spawn, including a retry.
+ * `node` is the executable that runs dsh: Electron itself (with ELECTRON_RUN_AS_NODE),
  * or a Node in tests. Output goes to `log` (a writable stream) when given. `onSpawn` gets
  * the process at once, so a quit while dsh starts can stop it, and the app can answer its
  * messages (the Bot browser bridge, main.js) from the start. `urlFile` is the file dsh's web
  * app records the URL in: the previous start's is removed, and it is read when output is lost.
+ *
+ * `bundledPnpm` (with `launcher`, src/dsh-launch.cjs) binds dsh's plugin installs, updates and
+ * removals to the app's own pnpm by absolute path, instead of the `pnpm` PATH resolves; a
+ * missing pnpm or launcher fails here, before dsh starts, and never falls back to PATH.
  */
 export function startDsh({
   node, bin, env, port, cwd, log, privacy, timeoutMs = READY_TIMEOUT_MS, onSpawn, urlFile,
-  spawn = nodeSpawn,
+  bundledPnpm, launcher, spawn = nodeSpawn,
 }) {
   // A file left by an earlier start must not sign this one in: dsh writes its own once it is
   // ready, and this start falls back to it when dsh's output is unavailable. A removal that
@@ -872,13 +927,35 @@ export function startDsh({
       log?.write(`automagik: could not remove the previous launch URL ${urlFile}: ${reason}\n`)
     }
   }
+  // The app's package manager comes through the launcher, which imports the pinned dsh and
+  // passes runCli its ProfilePnpmInvocation (src/dsh-launch.cjs). Both are checked here so a
+  // build without them says what is missing instead of dsh starting and failing on PATH.
+  if (bundledPnpm !== undefined && launcher === undefined) {
+    return Promise.reject(new Error('startDsh: bundledPnpm needs the dsh launcher'))
+  }
+  if (launcher !== undefined && bundledPnpm === undefined) {
+    return Promise.reject(new Error("startDsh: the dsh launcher needs the app's bundled pnpm"))
+  }
+  if (bundledPnpm !== undefined && !existsSync(bundledPnpm)) {
+    return Promise.reject(new Error(`the app's bundled pnpm is missing at ${bundledPnpm}`))
+  }
+  if (bundledPnpm !== undefined && !existsSync(launcher)) {
+    return Promise.reject(new Error(`the dsh launcher is missing at ${launcher}`))
+  }
   const args = [
-    '--require', CLOSE_INHERITED, bin, '--profile', PROFILE,
+    '--require', CLOSE_INHERITED, bundledPnpm === undefined ? bin : launcher, '--profile', PROFILE,
     ...(privacy ? ['--patch', privacy] : []),
     '--no-open', '--host', '127.0.0.1', '--port', String(port),
   ]
+  const childEnv = typeof env === 'function' ? env() : env
   const child = spawn(node, args, {
-    cwd, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    cwd,
+    env: bundledPnpm === undefined ? childEnv : {
+      ...childEnv,
+      AUTOMAGIK_DSH_ENTRY: bin,
+      AUTOMAGIK_DSH_PNPM: bundledPnpm,
+    },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
   onSpawn?.(child)
   const ready = new Promise((done, fail) => {

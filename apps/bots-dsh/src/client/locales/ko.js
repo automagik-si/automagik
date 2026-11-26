@@ -92,9 +92,9 @@ export const KO = {
   'The Bot team could not start. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'Bot 팀을 시작할 수 없습니다. 엔진의 시작 출력(콘솔 또는 앱의 시작 오류 창)에서 원인을 확인할 수 있습니다.',
   'The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'Bot 팀을 시작할 수 없습니다. {error}. 엔진의 시작 출력(콘솔 또는 앱의 시작 오류 창)에서 원인을 확인할 수 있습니다.',
   'Automation tasks': '자동화 작업',
-  Connectors: '커넥터',
-  'Search connectors': '커넥터 검색',
-  'No connectors': '커넥터 없음',
+  Apps: '앱',
+  'Search apps': '앱 검색',
+  'No apps': '앱 없음',
   IM: 'IM',
   'via {platform}': '{platform} 경유',
   'Your IM bots': '내 IM 봇',
@@ -613,7 +613,8 @@ export const KO = {
   Whale: '고래', Star: '별', Moon: '달', Wave: '파동', Squircle: '둥근 사각형', Bull: '뿔', Blossom: '꽃',
   Gumdrop: '젤리', Peanut: '땅콩', Bubbles: '거품', Saucer: '비행접시', Sprout: '새싹', Bunny: '토끼',
   Kitty: '고양이', Beacon: '등대', Plus: '플러스', Magnet: '자석', Acorn: '도토리', Pebbles: '조약돌', Cushion: '쿠션',
-  Ring: '링', Gem: '보석',
+  Ring: '링', Gem: '보석', Puff: '솜뭉치', Cap: '버섯', Bell: '종', Cloud: '구름', Spike: '가시', Floppy: '늘어진 귀',
+  Antenna: '안테나', Cactus: '선인장', Bulb: '전구', Chick: '병아리', Frog: '개구리',
 
   // Colors
   Black: '검정', Brown: '갈색', Red: '빨강', Orange: '주황', Yellow: '노랑', Green: '초록', Cyan: '청록', Blue: '파랑',
@@ -1203,9 +1204,9 @@ export const KO = {
   // About
   'About Omni': 'Omni 정보',
   'Version {version}': '버전 {version}',
-  'Star Omni on GitHub': 'GitHub에서 Omni에 Star 누르기',
+  'Star Automagik on GitHub': 'GitHub에서 Automagik에 Star 누르기',
   '{count} stars': 'Star {count}개',
-  'If Omni helps you, a star on GitHub helps more people find it.': 'Omni이 도움이 되었다면 더 많은 사람이 찾을 수 있도록 GitHub에서 Star를 눌러 주세요.',
+  'If Automagik helps you, a star on GitHub helps more people find it.': 'Automagik이 도움이 되었다면 더 많은 사람이 찾을 수 있도록 GitHub에서 Star를 눌러 주세요.',
   Updates: '업데이트',
   'Check for updates': '업데이트 확인',
   'Checking…': '확인 중…',
@@ -1286,7 +1287,7 @@ export const KO = {
   'Who to chat with…': '대화할 상대…',
   'Add at least one more Bot': '최소 1개의 Bot을 더 추가하세요',
   Members: '멤버',
-  // Connectors and scheduled tasks
+  // Apps and scheduled tasks
   'Scheduled tasks': '예약 작업',
   'Every day': '매일',
   'Every {count} days': '{count}일마다',
@@ -1489,7 +1490,7 @@ export const KO = {
   'Design': '디자인',
   'Data': '데이터',
   'Commerce': '커머스',
-  'No connectors connected': '연결된 커넥터 없음',
+  'No apps connected': '연결된 앱 없음',
   '{bot} needs {name}': '{bot}에 {name} 필요',
   '{bot} wants to send an email': '{bot}이(가) 이메일을 보내려고 합니다',
   'Mail': '메일',

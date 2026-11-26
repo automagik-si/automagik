@@ -7,25 +7,25 @@
 // JavaScript, Node 22.7+ or bun, no dependencies. Apache-2.0.
 
 import { createPublicKey, verify } from "node:crypto";
+import { VERSION, sequenceOf } from "../amInstallState.js";
 
-export const REPO = "automagik-dev/automagik";
-export const REPOSITORY = `https://github.com/${REPO}`;
-export const RELEASES = `${REPOSITORY}/releases`;
+export { VERSION, sequenceOf };
+
+export const REPO = "automagik-si/automagik";
+/** Where am-lane and the releases are read from. */
+export const RELEASES = `https://github.com/${REPO}/releases`;
+/**
+ * The repository a signed pointer names, and its tarball URL's: still the pre-transfer name, which
+ * every installed am compares exactly, so the release keeps writing it (scripts/am-lane.ts).
+ */
+export const REPOSITORY = "https://github.com/automagik-dev/automagik";
 export const LANE_RELEASE = "am-lane";
 export const POINTER = "am.json";
 export const SIGNATURE = "am.json.sig";
 export const SCHEMA_VERSION = 1;
 export const PART = "automagik.am";
-export const VERSION = /^3\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})$/;
 
 export const tarballName = (version) => `automagik-am-${version}.tgz`;
-
-/** A release's place in the lane's order: 3.N.P as N·10000 + P (scripts/lane.ts sequenceOf). */
-export function sequenceOf(version) {
-  const match = VERSION.exec(version);
-  if (!match) throw new Error(`not a release version: ${version}`);
-  return Number(match[1]) * 10_000 + Number(match[2]);
-}
 
 const fail = (why) => { throw new Error(`am lane: ${why}`); };
 
@@ -40,7 +40,7 @@ export function checkPointer(p) {
   if (typeof p.commit !== "string" || !/^[0-9a-f]{40}$/.test(p.commit)) fail("the pointer names no commit");
   const t = p.tarball ?? {};
   if (t.name !== tarballName(p.version)) fail(`the pointer's tarball ${t.name} is not ${tarballName(p.version)}`);
-  if (t.url !== `${RELEASES}/download/${p.tag}/${t.name}`) fail(`the pointer's tarball URL ${t.url} is not on ${p.tag}`);
+  if (t.url !== `${REPOSITORY}/releases/download/${p.tag}/${t.name}`) fail(`the pointer's tarball URL ${t.url} is not on ${p.tag}`);
   if (typeof t.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(t.sha256)) fail("the pointer names no sha256");
   if (!Number.isSafeInteger(t.size) || t.size <= 0) fail("the pointer names no size");
   return p;

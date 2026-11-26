@@ -7,6 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use common::{Env, serial};
+use meter::event::key_hash;
 use meter::evidence::SessionKey;
 use meter::hc::{Labels, Terminal};
 use meter::time::{format_rfc3339, parse_rfc3339};
@@ -1000,6 +1001,115 @@ fn a_quiet_row_with_a_missing_step_counts_with_the_times_present() {
     assert_eq!(ctx.cursor_ts, at("2026-01-15T10:02:00Z") + 250);
     let r = env.run(&o);
     assert_eq!(r.health.events, 0, "{r:?}");
+
+    // This store has only the key an older reader wrote for the first available time.
+    let seen = Connection::open(env.state().join("meter.db")).unwrap();
+    let old_key = format!(
+        "agy|conv-quiet-missing-step|0|{}",
+        at("2026-01-15T10:02:00Z") + 250
+    );
+    assert_eq!(
+        seen.query_row(
+            "SELECT count(*) FROM seen WHERE k = ?1",
+            [key_hash(&old_key)],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    drop(seen);
+
+    // The missing step lands with an earlier time. The changed cursor forces a full rescan.
+    let c = Connection::open(&path).unwrap();
+    c.execute(
+        "INSERT INTO steps(idx, step_type, status, metadata) VALUES(9, 15, 3, ?1)",
+        [step_metadata(at("2026-01-15T10:01:00Z") / 1000)],
+    )
+    .unwrap();
+    drop(c);
+    let r = env.run(&o);
+    assert_eq!(r.health.events, 0, "{r:?}");
+    assert_eq!(env.totals()["claude-opus-5-5"].total(), 600);
+    let saved = env.store().file(&path.to_string_lossy()).unwrap().unwrap();
+    assert_eq!(
+        saved.ctx.agy.unwrap().cursor_ts,
+        at("2026-01-15T10:01:00Z") + 250
+    );
+
+    // A genuinely new generation may reuse the index with fresh step times.
+    let c = Connection::open(&path).unwrap();
+    for (idx, time) in [
+        (2, "2026-01-15T11:00:00Z"),
+        (3, "2026-01-15T11:01:00Z"),
+        (9, "2026-01-15T11:02:00Z"),
+    ] {
+        c.execute(
+            "UPDATE steps SET metadata = ?1 WHERE idx = ?2",
+            params![step_metadata(at(time) / 1000), idx],
+        )
+        .unwrap();
+    }
+    drop(c);
+    put_gen(&path, 0, &opus_gen(&usage(900, 0, 0, 100, 0), &[2, 3, 9]));
+    let r = env.run(&o);
+    assert_eq!(r.health.events, 1, "{r:?}");
+    assert_eq!(env.totals()["claude-opus-5-5"].total(), 1_600);
+}
+
+#[test]
+fn a_late_step_behind_a_held_row_does_not_count_again() {
+    use std::time::{Duration, SystemTime};
+    let env = Env::new();
+    let path = env.agy("conv-held-late-step.db");
+    base_db(&path, at("2026-01-15T09:55:00Z"));
+    put_gen(&path, 0, &[0xff]); // A refused row keeps the cursor behind the counted row.
+    put_gen(&path, 1, &opus_gen(&usage(500, 0, 0, 100, 0), &[2, 3, 9]));
+    let old = SystemTime::UNIX_EPOCH + Duration::from_millis(at("2026-01-15T09:00:00Z") as u64);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let mut o = env.opts();
+    o.now_ms = at("2026-01-15T12:00:00Z");
+    let r = env.run(&o);
+    assert_eq!(r.health.events, 1, "{r:?}");
+    assert_eq!(env.totals()["claude-opus-5-5"].total(), 600);
+    assert_eq!(
+        env.store()
+            .file(&path.to_string_lossy())
+            .unwrap()
+            .unwrap()
+            .ctx
+            .agy
+            .unwrap()
+            .max_gen,
+        -1
+    );
+
+    // The same row is read again after its missing, earlier step time arrives.
+    let c = Connection::open(&path).unwrap();
+    c.execute(
+        "INSERT INTO steps(idx, step_type, status, metadata) VALUES(9, 15, 3, ?1)",
+        [step_metadata(at("2026-01-15T10:01:00Z") / 1000)],
+    )
+    .unwrap();
+    drop(c);
+    let r = env.run(&o);
+    assert_eq!(r.health.events, 0, "{r:?}");
+    assert_eq!(env.totals()["claude-opus-5-5"].total(), 600);
+    assert_eq!(
+        env.store()
+            .file(&path.to_string_lossy())
+            .unwrap()
+            .unwrap()
+            .ctx
+            .agy
+            .unwrap()
+            .max_gen,
+        -1
+    );
 }
 
 #[test]

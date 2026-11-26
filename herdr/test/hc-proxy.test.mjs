@@ -1,5 +1,5 @@
 // The per-pane hc proxy (#631 PR A): every row the brief asks for, against a fake herdr-core
-// 0.1.14 over a scratch Unix socket. Hermetic: temp app home, project, worktree and runtime
+// over a scratch Unix socket. Hermetic: temp app home, project, worktree and runtime
 // folder; no real core, no pane, no socket from the host. The proxy is imported and started
 // in-process (one row spawns its CLI), and the fake records what actually reached the core.
 import test from "node:test";
@@ -15,8 +15,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { HC_PIN, MAX_CONNECTIONS, MAX_READ_LINES, MAX_REPLY_BYTES, METHOD_PARAMS, runProblem, socketPathLimit, startProxy } from "../mods/am-sidebar/hcProxy.mjs";
+import { HC_SUPPORTED, coreVersionProblem, MAX_CONNECTIONS, MAX_READ_LINES, MAX_REPLY_BYTES, METHOD_PARAMS, runProblem, socketPathLimit, startProxy } from "../mods/am-sidebar/hcProxy.mjs";
 import { approveProject, approvedSettingsDir, recordFileOf, sha256Of } from "../mods/am-sidebar/approved.js";
+import { loginFixture } from "./login-fixture.mjs";
+import { botLoginWords } from "../mods/am-sidebar/loginRecord.js";
 import { ENV, GUARD_DIR, KILL_GUARD_DIR, WORKER_OF_LABEL, stableGuardDir, stableHelper, stableKillDir, stableRootOf, stableRunner, templateAgent, workerArgs, workerPlan } from "../mods/am-sidebar/workers.js";
 import { stableRootProblem, stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
 import { commandArgv } from "../mods/am-sidebar/restart.js";
@@ -25,7 +27,6 @@ import { startFakeCore } from "./fake-hc-core.mjs";
 import { shortSocketDir } from "./scratch-project.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const PROXY = join(here, "..", "mods", "am-sidebar", "hcProxy.mjs");
 const PROXY_HARNESS = join(here, "cli-proxy-harness.mjs");
 /** A path under literal /tmp (real path, so macOS /private/tmp works), never created. */
 const literalTmpData = () => join(realpathSync("/tmp"), `am-hc-literal-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`, "data");
@@ -54,7 +55,7 @@ const team = () => ({
 });
 
 /** One scene: temp app home + ledger, project + bots.json, a worktree and the runtime folder. */
-function scene() {
+function scene(extraTerminals = []) {
   const root = shortSocketDir(null, "hcp-");
   const app = join(root, "app"), project = join(root, "project"), home = join(root, "home"), runtime = join(root, "run");
   const worktree = join(project, ".claude", "worktrees", "wt");
@@ -103,18 +104,30 @@ function scene() {
     rec("t112", { bot: ID.jun }, { name: "huge", huge: true }),
     rec("t120", { bot: ID.other }, { name: "other-bot" }),
     rec("t121", { [WORKER_OF_LABEL]: ID.cap }, { name: "cap-worker", parent: "t101", cwd: worktree }),
+    // Linked machines (#628): a stranger's pane whose role=reviewer label would pass the send
+    // rule, the caller's team lead's pane, and the caller's own worker there. The proxy refuses
+    // every machine address on every verb, so none is a terminal the caller may reach or type
+    // into; the list must not name them or their machines.
+    rec("mac/t90", { bot: ID.other, role: "reviewer" }, { name: "reviewer-mac" }),
+    rec("mac/t91", { bot: ID.cap }, { name: "cap-mac" }),
+    rec("mac/t105", { [WORKER_OF_LABEL]: ID.dev }, { name: "worker-mac", parent: "t100", cwd: worktree }),
+    ...extraTerminals.map(({ address, labels, ...extra }) => rec(address, labels, extra)),
+  ];
+  const machines = [
+    { name: "mac", target: "mac", state: "connected" },
+    { name: "builder", target: "builder", state: "connected" },
   ];
   const forbiddenRoots = [["the project", project], ["the app home", app], ["the temp folder", paneTmp], ["the runtime folder", runtime]];
   const env = { XDG_RUNTIME_DIR: runtime, XDG_DATA_HOME: join(home, ".local", "share"), HOME: home,
     HERDR_APP_HOME: app, TMPDIR: paneTmp, PATH: `${stableGuard}:${shimDir}:${bin}:/usr/bin:/bin` };
   // The approved record every explicit-caller row reads (the by-hand rows keep the ledger).
   approveProject({ project, env, approvedAt: "2026-11-01T00:00:00.000Z", approvedBy: "test" });
-  return { root, app, project, home, runtime, worktree, bin, shimDir, paneTmp, stableRoot, stableGuard, ledger, terminals, env, forbiddenRoots };
+  return { root, app, project, home, runtime, worktree, bin, shimDir, paneTmp, stableRoot, stableGuard, ledger, terminals, machines, env, forbiddenRoots };
 }
 
 /** Start the fake core and, unless proxy: false, the pane t100 proxy; one cleanup for all. */
-async function sceneWithCore(t, { version = "0.1.14", proxy = true, proxyOptions = {} } = {}) {
-  const s = scene();
+async function sceneWithCore(t, { version = "0.1.14", proxy = true, proxyOptions = {}, extraTerminals = [] } = {}) {
+  const s = scene(extraTerminals);
   let fake = null;
   const proxies = [];
   const closeAll = async () => {
@@ -125,7 +138,7 @@ async function sceneWithCore(t, { version = "0.1.14", proxy = true, proxyOptions
   };
   t.after(closeAll);
   try {
-    fake = await startFakeCore({ socket: join(s.root, "core.sock"), terminals: s.terminals, version });
+    fake = await startFakeCore({ socket: join(s.root, "core.sock"), terminals: s.terminals, machines: s.machines, version });
     const start = async (terminal = "t100", extra = {}) => {
       const started = await startProxy({ terminal, upstream: fake.socket, appHome: s.app, env: s.env, forbiddenRoots: s.forbiddenRoots, ...extra });
       started.server?.unref?.();
@@ -233,7 +246,7 @@ const REFUSED_METHODS = [
   "terminal.attach", "terminal.interrupt", "terminal.keep", "terminal.keys", "terminal.put",
 ];
 
-const waitFor = async (check, timeout = 4000) => {
+const waitFor = async (check, timeout = 10_000) => {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
     if (check()) return true;
@@ -333,6 +346,8 @@ test("get/read/wait/send are scoped to the team and its own workers", async (t) 
     allowed("terminal.wait", "t110", { timeout: 1 }),
     allowed("terminal.send", "t110", { text: "not mine" }),
     allowed("terminal.send", "t121", { text: "another bot's worker" }),
+    allowed("terminal.send", "t111", { text: "a plain shell pane" }),
+    allowed("terminal.read", "t111", { lines: 2 }),
     allowed("terminal.get", "t121"),
     allowed("terminal.read", "t104", { lines: 3 }),
     allowed("terminal.read", "t107", { lines: 3 }),
@@ -347,14 +362,247 @@ test("get/read/wait/send are scoped to the team and its own workers", async (t) 
     assert.match(answer.error.message, /^hc-proxy: /);
     if (target.includes("/")) assert.equal(fake.log.length, before, "a machine target is refused before any call");
   }
-  // --children waits on the caller's own children; it needs no target and cannot name one.
+});
+
+test("wait --children any and all are targetless and forwarded without a terminal", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
   const client = await clientFor(proxy.socket);
-  const answer = await client.call("terminal.wait", { children: true, timeout: 1 });
+  t.after(() => client.close());
+  fake.clearLog();
+  for (const children of ["any", "all"]) {
+    const params = { children, timeout: 1 };
+    assert.ok((await client.call("terminal.wait", params)).result);
+    assert.ok((await client.call("terminal.wait", { ...params, terminal: "t110" })).result);
+  }
+  assert.deepEqual(fake.calls("terminal.wait").map(({ params }) => params),
+    ["any", "any", "all", "all"].map((children) => ({ children, timeout: 1, caller: "t100" })));
+  assert.deepEqual(fake.calls("terminal.get"), [], "child waits do not resolve the supplied target");
+});
+
+test("a targeted wait with children:null resolves its target", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  assert.ok((await client.call("terminal.wait", { terminal: "cap", children: null })).result);
+  assert.deepEqual(fake.calls("terminal.wait").at(-1).params,
+    { terminal: "t101", children: null, caller: "t100" });
+});
+
+test("wait children:5 and other invalid modes are refused even with a valid target", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  fake.clearLog();
+  for (const children of [5, true, false, "some", {}]) {
+    const answer = await client.call("terminal.wait", { terminal: "t101", children });
+    assert.match(answer.error.message, /^hc-proxy: terminal\.wait: children /);
+  }
+  assert.deepEqual(fake.log, [], "an invalid mode is refused before any lookup");
+});
+
+test("a 0.1.21 core starts the proxy and forwards a send", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t, { version: "0.1.21" });
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  assert.equal(proxy.policy.coreVersion, "0.1.21");
+  assert.ok((await client.call("terminal.send", { terminal: "t101", text: "hello" })).result);
+  assert.equal(fake.calls("terminal.send").length, 1);
+});
+
+test("an ordinary send with force:false is forwarded with force false", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const params = { terminal: "t101", text: "hello", force: false, if: null, timeout: null, wait: false };
+  assert.ok((await client.call("terminal.send", params)).result);
+  assert.deepEqual(fake.calls("terminal.send")[0].params, { ...params, caller: "t100" });
+});
+
+test("a send with force:true is refused and never reaches the core", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  fake.clearLog();
+  const answer = await client.call("terminal.send", { terminal: "t101", text: "hello", force: true });
+  assert.equal(answer.error.message,
+    "hc-proxy: terminal.send: force is not allowed from a sandboxed pane (it types past a blocked dialog)");
+  assert.deepEqual(fake.calls("terminal.send"), []);
+  assert.deepEqual(fake.log, [], "the proxy refuses before resolving the target");
+});
+
+test('a send with force:"yes" is refused as malformed', async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  for (const force of ["yes", 0, null]) {
+    const answer = await client.call("terminal.send", { terminal: "t101", text: "hello", force });
+    assert.match(answer.error.message, /^hc-proxy: terminal\.send: force is malformed/);
+  }
+  assert.deepEqual(fake.calls("terminal.send"), []);
+});
+
+test("terminal.run with size or display is refused on both supported versions", async (t) => {
+  for (const version of ["0.1.14", "0.1.21"]) {
+    await t.test(version, async (t) => {
+      const { s, fake, proxy } = await sceneWithCore(t, { version });
+      const client = await clientFor(proxy.socket);
+      t.after(() => client.close());
+      fake.clearLog();
+      for (const param of ["size", "display"]) {
+        const answer = await client.call("terminal.run", runParams(s, { [param]: {} }));
+        assert.equal(answer.error.message, `hc-proxy: terminal.run: unknown parameter ${param}`);
+      }
+      assert.deepEqual(fake.log, []);
+    });
+  }
+});
+
+test("terminal.run refuses an empty parameter key before size without contacting the core", async (t) => {
+  const { s, fake, proxy } = await sceneWithCore(t, { version: "0.1.21" });
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  fake.clearLog();
+  const answer = await client.call("terminal.run", { "": true, size: {}, ...runParams(s) });
+  assert.match(answer.error?.message ?? "", /^hc-proxy: terminal\.run: unknown parameter$/);
+  assert.deepEqual(fake.log, []);
+});
+
+test("terminal.list answers only the terminals the caller may type into (#628)", async (t) => {
+  const { s, fake, proxy, start } = await sceneWithCore(t);
+  fake.clearLog();
+  const client = await clientFor(proxy.socket);
+  const listed = await client.call("terminal.list", { all: true });
   client.close();
-  assert.ok(answer.result);
-  const forwarded = fake.calls("terminal.wait").at(-1).params;
-  assert.equal(forwarded.terminal, undefined);
-  assert.equal(forwarded.caller, "t100");
+  assert.ok(listed.result, JSON.stringify(listed));
+  // The caller's own pane, its team graph (lead, member, main), its own worker and the shared
+  // review roles (a roster reviewer-rank bot and a role=labeled pane). Another team's bot and
+  // its worker, another bot's worker, a bare shell pane and the caller's unrelated pm are out.
+  assert.deepEqual(listed.result.terminals.map((row) => row.address).sort(),
+    ["t100", "t101", "t102", "t103", "t104", "t105", "t107", "t112"].sort());
+  // Linked machines are out of scope: the fake carries a stranger's reviewer-labelled machine
+  // pane, the caller's team lead's machine pane and its own worker there, and the core's
+  // machine inventory; none of it may be named (#628).
+  assert.equal(fake.state.machines.length, 2, "the fake core really has a machine inventory");
+  for (const hidden of ["mac/t90", "mac/t91", "mac/t105"]) {
+    assert.equal(listed.result.terminals.some((row) => row.address === hidden), false,
+      `the list never names the machine pane ${hidden}`);
+  }
+  for (const hidden of ["reviewer-mac", "cap-mac", "worker-mac"]) {
+    assert.equal(listed.result.terminals.some((row) => row.name === hidden), false,
+      `the list never names the machine pane ${hidden} by name`);
+  }
+  assert.deepEqual(listed.result.machines, [], "no machine name or target reaches the reply");
+  assert.equal(fake.calls("terminal.list").length, 1, "the request itself reaches the core");
+  assert.deepEqual(fake.calls("terminal.list")[0].params, { all: true },
+    "list's own parameters are forwarded unchanged");
+  assert.equal(listed.result.hidden_finished, 0, "the reply's other fields are kept");
+
+  // A worker's list is the same scope: its own pane, its bot's team and its own workers.
+  const worker = await start("t105", { caller: { bot: ID.dev, project: s.project, worker: true }, bound: false });
+  const workerClient = await clientFor(worker.socket);
+  const report = await workerClient.call("terminal.list", {});
+  workerClient.close();
+  assert.ok(report.result, JSON.stringify(report));
+  for (const hidden of ["t110", "t120", "t121", "t108", "t111", "t106"]) {
+    assert.equal(report.result.terminals.some((row) => row.address === hidden), false,
+      `a worker's list never names ${hidden}`);
+  }
+  assert.deepEqual(report.result.machines, [], "a worker's list names no machine either");
+});
+
+test("the list reply keeps only terminals, hidden_finished and machines", async (t) => {
+  for (const version of HC_SUPPORTED) {
+    const { fake, proxy } = await sceneWithCore(t, { version });
+    const client = await clientFor(proxy.socket);
+    t.after(() => client.close());
+    const terminals = fake.state.terminals.filter((row) => ["t100", "t110"].includes(row.address));
+    const inventory = version === "0.1.21" ? { machines: fake.state.machines } : {};
+    fake.state.reply = ({ id, method }) => method === "terminal.list"
+      ? { jsonrpc: "2.0", id, extra: "private", result: { terminals, hidden_finished: 7,
+        ...inventory, secret: "private" } }
+      : undefined;
+    assert.deepEqual(await client.call("terminal.list"), { jsonrpc: "2.0", id: 1, result: {
+      terminals: [terminals[0]], hidden_finished: 7, ...(inventory.machines ? { machines: [] } : {}),
+    } });
+    fake.state.reply = ({ id, method }) => method === "terminal.list"
+      ? { jsonrpc: "2.0", id, result: { terminals, hidden_finished: "seven" } } : undefined;
+    assert.match((await client.call("terminal.list")).error.message,
+      /^hc-proxy: terminal\.list: the core's answer could not be read/);
+  }
+});
+
+test("terminal.list refuses invalid hidden_finished counts with a correlated error", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  for (const count of [-1, 1.5]) {
+    fake.state.reply = ({ id, method }) => method === "terminal.list"
+      ? { jsonrpc: "2.0", id, result: { terminals: [], hidden_finished: count } } : undefined;
+    const id = client.nextId;
+    const answer = await client.call("terminal.list");
+    assert.equal(answer.id, id);
+    assert.equal(answer.result, undefined);
+    assert.match(answer.error?.message ?? "", /^hc-proxy: terminal\.list: the core's answer could not be read/);
+  }
+});
+
+test("a malformed ordinary forward reply becomes a correlated proxy error", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  for (const reply of ["no JSON", "[]", '{"jsonrpc":"2.0","id":"wrong","result":{}}']) {
+    const client = await clientFor(proxy.socket);
+    t.after(() => client.close());
+    fake.state.reply = ({ method }) => method === "terminal.read" ? reply : undefined;
+    const id = client.nextId;
+    const answer = await client.call("terminal.read", { terminal: "t101" });
+    assert.equal(answer.id, id);
+    assert.match(answer.error.message, /^hc-proxy: terminal\.read: the core's answer could not be read/);
+  }
+});
+
+test("a wrong reply id retires the connection before a late reply can satisfy a reused id", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const id = 42;
+  const badReply = JSON.stringify({ jsonrpc: "2.0", id: "wrong", result: {} });
+  const lateReply = JSON.stringify({ jsonrpc: "2.0", id, result: { terminals: [], hidden_finished: 99 } });
+  fake.state.reply = ({ method }) => method === "terminal.list" ? `${badReply}\n${lateReply}` : undefined;
+  const request = `${JSON.stringify({ jsonrpc: "2.0", id, method: "terminal.list" })}\n`;
+  // Queue a second request with the same ID while the first one is still in flight.
+  const closed = once(client.socket, "close", { signal: AbortSignal.timeout(3000) });
+  client.socket.write(request + request);
+  const [line] = await Promise.all([client.next(), closed]);
+  const answer = JSON.parse(line);
+  assert.equal(answer.id, id);
+  assert.match(answer.error.message, /^hc-proxy: terminal\.list: the core's answer could not be read/);
+  assert.deepEqual(client.lines, [], "the late result did not answer the queued request");
+  assert.equal(fake.calls("terminal.list").length, 1);
+
+  fake.state.reply = null;
+  const next = await clientFor(proxy.socket);
+  t.after(() => next.close());
+  next.nextId = id;
+  const fresh = await next.call("terminal.list");
+  assert.equal(fresh.id, id);
+  assert.equal(fresh.result?.hidden_finished, 0);
+  const [first, second] = fake.calls("terminal.list");
+  assert.notEqual(first.conn, second.conn);
+});
+
+test("terminal.list never passes an error reply's rows through (#628)", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  const clean = await client.call("terminal.list", {});
+  assert.ok(clean.result, "the fake core answers a list first");
+  assert.ok(fake.state.terminals.length > 0, "the fake core's error reply will carry rows");
+  // A malformed core error that also holds a result must not become a way around the filter.
+  fake.state.listError = { code: -32000, message: "the list failed", data: { kind: "unavailable" } };
+  const answer = await client.call("terminal.list", {});
+  client.close();
+  assert.ok(answer.error, "the core's error is kept");
+  assert.equal(answer.error.message, "the list failed");
+  assert.deepEqual(answer, { jsonrpc: "2.0", id: 2, error: fake.state.listError });
+  fake.state.listError = null;
 });
 
 test("the pm/integrator/fixer send widening is send only", async (t) => {
@@ -461,6 +709,7 @@ test("terminal.run accepts only the exact worker shape and refuses the rest", as
   const exact = await client.call("terminal.run", runParams(s));
   client.close();
   assert.ok(exact.result, `the worker shape is allowed: ${JSON.stringify(exact)}`);
+  assert.equal(exact.result.address, "t200");
   const forwarded = fake.calls("terminal.run")[0].params;
   assert.equal(forwarded.caller, "t100");
   assert.equal(forwarded.parent, "t100");
@@ -812,12 +1061,12 @@ test("a dead upstream answers an error and never falls back", async (t) => {
   assert.match(refused.error.message, /^hc-proxy: .*upstream/);
 });
 
-test("a version mismatch refuses to start and creates no socket", async (t) => {
+test("a 0.1.18 core and a core with no version are refused at start, naming the set", async (t) => {
   const { s, fake } = await sceneWithCore(t, { version: "0.1.18", proxy: false });
   const socket = join(s.runtime, "automagik-hc-proxy", "t100", "hc.sock");
   await assert.rejects(
     startProxy({ forbiddenRoots: s.forbiddenRoots, terminal: "t100", upstream: fake.socket, appHome: s.app, env: s.env }),
-    /0\.1\.18.*not the pinned 0\.1\.14/,
+    /0\.1\.18.*not a supported version \(0\.1\.14, 0\.1\.21\)/,
   );
   assert.equal(existsSync(socket), false, "no socket exists after the refusal");
 
@@ -830,9 +1079,148 @@ test("a version mismatch refuses to start and creates no socket", async (t) => {
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   const [code] = await once(child, "exit");
   assert.equal(code, 1, stderr);
-  assert.match(stderr, /hc-proxy: .*0\.1\.18.*not the pinned 0\.1\.14/);
+  assert.match(stderr, /hc-proxy: .*0\.1\.18.*not a supported version \(0\.1\.14, 0\.1\.21\)/);
+  assert.equal(existsSync(socket), false);
+
+  delete fake.state.version;
+  await assert.rejects(
+    startProxy({ forbiddenRoots: s.forbiddenRoots, terminal: "t100", upstream: fake.socket, appHome: s.app, env: s.env }),
+    /unknown.*not a supported version \(0\.1\.14, 0\.1\.21\)/,
+  );
   assert.equal(existsSync(socket), false);
 });
+
+test("a version with a suffix (0.1.21-rc1, 0.1.210) is refused", async (t) => {
+  const { s, fake, start } = await sceneWithCore(t, { proxy: false });
+  for (const version of ["0.1.21-rc1", "0.1.210"]) {
+    fake.state.version = version;
+    fake.clearLog();
+    await assert.rejects(start());
+    assert.equal(fake.calls("server.status").length, 1);
+    assert.equal(existsSync(join(s.runtime, "automagik-hc-proxy", "t100", "hc.sock")), false);
+  }
+});
+
+test("proxy.status answers the verified version and is never forwarded", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t, { version: "0.1.21" });
+  fake.clearLog();
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  assert.deepEqual(await client.call("proxy.status"),
+    { jsonrpc: "2.0", id: 1, result: { v: 1, terminal: "t100", version: "0.1.21" } });
+  assert.match((await client.call("proxy.status", { other: true })).error.message, /unknown parameter other/);
+  assert.match((await client.call("proxy.status", ["other"])).error.message, /no parameters are allowed/);
+  assert.deepEqual(fake.log, []);
+});
+
+test("a client can reuse the upstream probe id", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  client.socket.write(JSON.stringify({ jsonrpc: "2.0", id: "hc-proxy:status", method: "terminal.list" }) + "\n");
+  const answer = JSON.parse(await client.next());
+  assert.equal(answer.id, "hc-proxy:status");
+  assert.ok(Array.isArray(answer.result.terminals));
+  const list = fake.calls("terminal.list")[0];
+  assert.deepEqual(fake.log.filter(({ conn }) => conn === list.conn).map(({ id, method }) => [id, method]), [
+    ["hc-proxy:status", "server.status"], ["hc-proxy:status", "terminal.list"],
+  ]);
+});
+
+test("a notification checks the version and leaves no reply before the next call", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  client.socket.write('{"jsonrpc":"2.0","method":"terminal.list"}\n');
+  assert.ok((await client.call("terminal.list")).result);
+  const list = fake.calls("terminal.list");
+  assert.deepEqual(fake.log.filter(({ conn }) => conn === list[0].conn).map(({ id, method }) => [id, method]), [
+    ["hc-proxy:status", "server.status"], [undefined, "terminal.list"], [1, "terminal.list"],
+  ]);
+});
+
+test("a stalled status reply fails closed even for a long wait", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t, { proxyOptions: { controlTimeoutMs: 150 } });
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  fake.state.reply = ({ method }) => method === "server.status" ? null : undefined;
+  const closed = once(proxy.server, "close");
+  const answer = await client.call("terminal.wait", { children: "all" });
+  assert.equal(answer.id, 1);
+  assert.match(answer.error.message, /^hc-proxy: .*version.*did not answer within 150 ms/);
+  assert.deepEqual(fake.calls("terminal.wait"), []);
+  await closed;
+});
+
+test("a malformed status reply fails closed before a send with wait:true", async (t) => {
+  for (const badStatus of [
+    () => "broken JSON",
+    ({ id }) => ({ jsonrpc: "1.0", id, result: { version: "0.1.14" } }),
+    () => ({ jsonrpc: "2.0", id: "wrong", result: { version: "0.1.14" } }),
+    ({ id }) => ({ jsonrpc: "2.0", id, error: { code: -32000, message: "unavailable" },
+      result: { version: "0.1.14" } }),
+    ({ id }) => ({ jsonrpc: "2.0", id, result: { version: null } }),
+  ]) {
+    const { fake, proxy } = await sceneWithCore(t);
+    const client = await clientFor(proxy.socket);
+    t.after(() => client.close());
+    // The target lookup succeeds. The malformed probe is on the new forwarding connection.
+    fake.state.reply = (request) => request.id === "hc-proxy:status" ? badStatus(request) : undefined;
+    const closed = once(proxy.server, "close");
+    const answer = await client.call("terminal.send", { terminal: "t101", text: "hello", wait: true });
+    assert.equal(answer.id, 1);
+    assert.match(answer.error.message, /^hc-proxy: .*version/);
+    assert.deepEqual(fake.calls("terminal.send"), []);
+    await closed;
+  }
+});
+
+function assertVerified(fake, method) {
+  const operation = fake.calls(method).at(-1);
+  assert.ok(operation, `${method} reached the core`);
+  const first = fake.log.find(({ conn }) => conn === operation.conn);
+  assert.equal(first.method, "server.status", `${method} uses a verified connection`);
+}
+
+test("a replacement core fails a direct send and closes the proxy", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const first = await clientFor(proxy.socket);
+  t.after(() => first.close());
+  const params = { terminal: "t101", text: "hello" };
+  assert.ok((await first.call("terminal.send", params)).result);
+  assertVerified(fake, "terminal.get");
+  assertVerified(fake, "terminal.send");
+  fake.clearLog();
+  fake.state.afterGet = () => { fake.state.version = "0.1.21"; };
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const closed = once(proxy.server, "close");
+  const answer = await client.call("terminal.send", params);
+  assert.equal(answer.id, 1);
+  assert.match(answer.error.message, /^hc-proxy: .*version.*0\.1\.21.*0\.1\.14/);
+  assert.deepEqual(fake.log.map(({ method }) => method), ["server.status", "terminal.get", "server.status"]);
+  assertVerified(fake, "terminal.get");
+  assert.notEqual(fake.log[1].conn, fake.log[2].conn, "the forward's probe saw the replacement");
+  await closed;
+});
+
+test("a replacement core fails the target lookup and closes the proxy", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const params = { terminal: "t101" };
+  assert.ok((await client.call("terminal.get", params)).result);
+  assertVerified(fake, "terminal.get");
+  fake.clearLog();
+  fake.state.version = "0.1.21";
+  const closed = once(proxy.server, "close");
+  const answer = await client.call("terminal.get", params);
+  assert.equal(answer.id, 2);
+  assert.match(answer.error.message, /^hc-proxy: .*version.*0\.1\.21.*0\.1\.14/);
+  assert.deepEqual(fake.log.map(({ method }) => method), ["server.status"]);
+  await closed;
+});
+
 
 test("the CLI starts a proxy, serves it, and removes its socket on SIGTERM", async (t) => {
   const { s, fake } = await sceneWithCore(t, { proxy: false });
@@ -844,7 +1232,10 @@ test("the CLI starts a proxy, serves it, and removes its socket on SIGTERM", asy
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-  assert.ok(await waitFor(() => existsSync(socket)), `the CLI listened: ${stderr}`);
+  // Wait for the CLI's own ready line, not the socket file: the file exists from bind(), a
+  // moment before listen(), and a connect in that gap is refused (ECONNREFUSED).
+  assert.ok(await waitFor(() => stderr.includes('hc-proxy {"ev":"listening"')), `the CLI listened: ${stderr}`);
+  assert.ok(existsSync(socket), "the socket is there once the CLI says it listens");
   const answer = await (await clientFor(socket)).call("terminal.list");
   assert.ok(answer.result, JSON.stringify(answer));
   child.kill("SIGTERM");
@@ -954,7 +1345,13 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
   const { proxy } = await sceneWithCore(t);
   const held = [];
   for (let i = 0; i < MAX_CONNECTIONS; i += 1) held.push(await clientFor(proxy.socket));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Every held client has answered through its session, so each one is registered before the
+  // next connects; no sleep guesses when the proxy got to accept them. The client's own 5 s
+  // test timeout is the bound: a missing answer fails here, naming the list that never came.
+  await Promise.all(held.map((client) => client.call("terminal.list").catch((e) => {
+    throw new Error("herdr/test/hc-proxy.test.mjs, the connection cap row: a held client's terminal.list answer "
+      + `did not arrive within the client's test timeout: ${e.message}`);
+  })));
   const extra = await clientFor(proxy.socket);
   const answer = JSON.parse(await extra.next());
   assert.match(answer.error.message, new RegExp(`^hc-proxy: too many connections \\(${MAX_CONNECTIONS} max\\)`));
@@ -965,10 +1362,10 @@ test("the connection cap refuses the extra client with a proxy error", async (t)
 test("an idle connection and a slow partial line are closed by the idle timeout", async (t) => {
   const { proxy } = await sceneWithCore(t, { proxyOptions: { idleTimeoutMs: 120 } });
   const idle = await clientFor(proxy.socket);
-  assert.ok(await waitFor(() => idle.closed, 2000), "an idle connection is closed");
+  assert.ok(await waitFor(() => idle.closed, 10_000), "an idle connection is closed");
   const slow = await clientFor(proxy.socket);
   slow.socket.write('{"jsonrpc":"2.0","id":1');
-  assert.ok(await waitFor(() => slow.closed, 2000), "a slow partial line is closed");
+  assert.ok(await waitFor(() => slow.closed, 10_000), "a slow partial line is closed");
 });
 
 test("an in-flight wait keeps the connection alive", async (t) => {
@@ -988,9 +1385,11 @@ test("a forwarded call other than wait times out", async (t) => {
   fake.state.hang = null;
 });
 
-test("the version pin is one constant, 0.1.14", () => {
-  assert.equal(HC_PIN, "0.1.14");
-  assert.equal(readFileSync(PROXY, "utf8").includes('export const HC_PIN = "0.1.14"'), true);
+test("the core version set is 0.1.14 and 0.1.21", () => {
+  assert.deepEqual(HC_SUPPORTED, ["0.1.14", "0.1.21"]);
+  assert.ok(Object.isFrozen(HC_SUPPORTED));
+  for (const version of HC_SUPPORTED) assert.equal(coreVersionProblem(version), null);
+  for (const version of [null, 0.1, ["0.1.14"], "0.1.21 "]) assert.match(coreVersionProblem(version), /not a supported version/);
 });
 
 test("the socket-path limit follows the platform: 104 on darwin, 107 on linux", async (t) => {
@@ -1127,6 +1526,31 @@ test(
   assert.match(warnings[0].message, /differs from the approved one/);
 });
 
+test("the proxy detects changed roster bytes even when a lossy UTF-8 read matches", async (t) => {
+  const { s, start } = await sceneWithCore(t, { proxy: false });
+  const roster = team();
+  roster.bots[0].name = "Main \uFFFD";
+  const text = `${JSON.stringify(roster, null, 2)}\n`;
+  const botsPath = join(s.project, ".herdr", "bots.json");
+  writeFileSync(botsPath, text);
+  approveProject({ project: s.project, env: s.env });
+  s.terminals.push({ address: "t200", name: "new-seat", labels: { bot: ID.dev }, cwd: s.project,
+    state: "live" });
+  const events = [];
+  const options = { caller: { bot: ID.dev, project: s.project, worker: false }, bound: true,
+    log: (event) => events.push(event) };
+  const drift = () => events.filter((event) => event.ev === "roster_unapproved");
+  const initial = await start("t200", options);
+  assert.equal(drift().length, 0);
+  await initial.close();
+  const [before, after] = text.split("\uFFFD");
+  const changed = Buffer.concat([Buffer.from(before), Buffer.from([0xff]), Buffer.from(after)]);
+  assert.equal(changed.toString("utf8"), text);
+  writeFileSync(botsPath, changed);
+  await start("t200", options);
+  assert.equal(drift().length, 1);
+});
+
 test("G1 (c): a missing record refuses a proxied pane and names the command", async (t) => {
   const { s, start } = await sceneWithCore(t, { proxy: false });
   s.terminals.push({ address: "t200", name: "new-seat", labels: { bot: ID.dev }, cwd: s.project,
@@ -1215,8 +1639,8 @@ test(
 });
 
 // Refs #631: approved template/agent workers, with every saved switch left off.
-async function approvedWorkerScene(t, worker, botExtra = {}) {
-  const result = await sceneWithCore(t, { proxy: false });
+async function approvedWorkerScene(t, worker, botExtra = {}, { version, setupCore } = {}) {
+  const result = await sceneWithCore(t, { proxy: false, version });
   const { s, fake, start } = result;
   const file = team();
   file.bots.find((row) => row.id === ID.dev).worker = worker;
@@ -1229,13 +1653,14 @@ async function approvedWorkerScene(t, worker, botExtra = {}) {
     { name: "review-sol", command: "claude --model chosen", description: "Other", body: "Review" },
     { name: "agy-sol", command: "agy --mode auto", description: "Antigravity", body: "Ag" },
   ];
+  setupCore?.(s, fake);
   const proxy = await start("t100", { caller: { bot: ID.dev, project: s.project }, bound: true });
   const client = await clientFor(proxy.socket);
   t.after(() => client.close());
   return { ...result, proxy, client };
 }
 
-function approvedParams(s, worker, templateCommand = null, { killGuard = stableKillDir(s.stableRoot) } = {}) {
+function approvedParams(s, worker, templateCommand = null, { killGuard = stableKillDir(s.stableRoot), loginDir = null } = {}) {
   const plan = workerPlan({ agent: "dsh-tui", worker });
   const task = "do the task";
   const runs = plan.agent ?? (templateCommand ? templateAgent(templateCommand) : null);
@@ -1245,10 +1670,10 @@ function approvedParams(s, worker, templateCommand = null, { killGuard = stableK
   const args = workerArgs({ botId: ID.dev, branch: "feat/worker", role: "dev", name: "worker-one",
     cwd: s.worktree, parent: "t100", ...plan, task, path: s.env.PATH,
     project: s.project, taskId: "gn-1", lead: ID.dev,
-    login: claude ? ["-u", "CLAUDE_CONFIG_DIR"] : [], agySettingsPath,
+    login: loginDir ? botLoginWords(runs, loginDir) : claude ? ["-u", "CLAUDE_CONFIG_DIR"] : [], agySettingsPath,
     // #955: an approved worker's `hc kill` shim is the stable folder's copy, first on its PATH.
     killGuard,
-    templateArgv: plan.template && runs === "claude" ? commandArgv({ shell: templateCommand }, [task])
+    templateArgv: plan.template && (claude || loginDir) ? commandArgv({ shell: templateCommand }, [task])
       : plan.template && runs === "antigravity" ? commandArgv({ shell: templateCommand }, [...agySettingsArgs("antigravity", agySettingsPath), task])
         : null });
   const labels = {};
@@ -1258,8 +1683,34 @@ function approvedParams(s, worker, templateCommand = null, { killGuard = stableK
       labels[key] = value.join("=");
     }
   }
-  return runParams(s, { argv: plan.template && !claude && !agySettingsPath ? args.slice(-2)
+  return runParams(s, { argv: plan.template && !claude && !agySettingsPath && !loginDir ? args.slice(-2)
     : args.slice(args.indexOf("--") + 1), labels, env: {} });
+}
+
+for (const [vendor, worker] of [["claude", { agent: "claude" }], ["codex", { agent: "codex" }], ["codex", { template: "dev-sol" }]]) {
+  test(worker.template ? "#1509 the proxy refuses an approved shell-form template"
+    : `#1509 the proxy compares the approved ${vendor} reader argv exactly`, (t) => {
+    const s = scene();
+    t.after(() => rmSync(s.root, { recursive: true, force: true }));
+    const file = team();
+    file.bots.find((bot) => bot.id === ID.dev).worker = worker;
+    writeFileSync(join(s.project, ".herdr", "bots.json"), JSON.stringify(file));
+    const { record: approval } = approveProject({ project: s.project, env: s.env, approvedBy: "test" });
+    const login = loginFixture(t, join(s.root, "acp", "cli-homes"), vendor);
+    const template = worker.template ? "codex --model chosen" : null;
+    const templates = template ? [{ name: worker.template, command: template }] : [];
+    const snapshot = { terminal: "t100", bound: true, caller: { bot: ID.dev, project: s.project },
+      appHome: s.app, approval, approvalEnv: s.env, path: s.env.PATH, stableRoot: s.stableRoot, loginEnv: login.env };
+    const params = approvedParams(s, worker, template, { loginDir: login.dir });
+    if (template) {
+      assert.equal(runProblem(params, snapshot, templates),
+        "Under the Bot login policy only a direct Claude or Codex command can start; run the agent directly. (launch-not-direct)");
+      return;
+    }
+    assert.equal(runProblem(params, snapshot, templates), null);
+    const wrong = { ...params, argv: params.argv.map((word) => word.replace(login.dir, "/wrong-login")) };
+    assert.match(runProblem(wrong, snapshot, templates), /does not match approved/);
+  });
 }
 
 test("approved worker (#955): a sandboxed bot's worker of another agent keeps the pane's full guard, with no shim; the pack's own shim first is refused", async (t) => {
@@ -1421,6 +1872,68 @@ test("approved Antigravity worker: its permission file is the approved snapshot'
   assert.equal(written.permissions.allow.includes("command(rm -rf /tmp/x)"), false, "an unapproved working rule never reaches it");
 });
 
+for (const version of HC_SUPPORTED) {
+  test(`replays the herdr-core ${version} tagged wire fixtures`, async (t) => {
+    const worker = { agent: "codex" };
+    let wire;
+    const { client, fake, proxy } = await approvedWorkerScene(t, worker, {}, { version,
+      setupCore(s, core) {
+        // The tagged fields are fixed. The worker command, cwd and project use this test's seat.
+        const paths = { $PROJECT: s.project, $WORKTREE: s.worktree, $WORKER_ARGV: approvedParams(s, worker).argv };
+        wire = JSON.parse(readFileSync(join(here, "fixtures", `hc-wire-${version}.json`), "utf8"),
+          (_key, value) => typeof value === "string" && Object.hasOwn(paths, value) ? paths[value] : value);
+        core.state.reply = ({ id, method, params }) => {
+          const fixture = method === "terminal.wait" ? (params.children ? wire.waitChildren : wire.waitTarget)
+            : Object.values(wire).find((entry) => entry.request.method === method);
+          // The startup get and the fixture get share a row. Policy lookups of other
+          // addresses still use the fake core's team inventory.
+          if (method === "terminal.get" && params.terminal !== "t100") return undefined;
+          return fixture ? { ...fixture.reply, id } : undefined;
+        };
+      },
+    });
+    assert.equal(proxy.policy.coreVersion, wire.status.reply.result.version);
+    assert.deepEqual(fake.log.map(({ conn, id, method, params }) => [conn, id, method, params]), [
+      [1, 1, wire.status.request.method, wire.status.request.params],
+      [2, 1, wire.status.request.method, wire.status.request.params],
+      [2, 2, wire.get.request.method, { terminal: "t100" }],
+    ]);
+    fake.clearLog();
+    for (const [key, { request, reply }] of Object.entries(wire)) {
+      if (key === "status") continue;
+      client.socket.write(`${JSON.stringify(request)}\n`);
+      const expected = structuredClone(reply);
+      if (key === "list") {
+        expected.result.terminals = [wire.get.reply.result];
+        if (Object.hasOwn(expected.result, "machines")) expected.result.machines = [];
+      }
+      assert.deepEqual(JSON.parse(await client.next()), expected, `${key} reply`);
+      const forwarded = fake.calls(request.method).at(-1);
+      const params = { ...request.params };
+      if (Object.hasOwn(params, "caller")) params.caller = "t100";
+      if (key === "waitChildren") delete params.terminal;
+      assert.deepEqual(forwarded.params, params, `${key} request`);
+      assert.equal(forwarded.id, request.id, `${key} reply correlation`);
+      assertVerified(fake, request.method);
+    }
+    assert.equal(wire.run.reply.result.address, "t200", "RunResult flattens the worker address");
+  });
+}
+
+test("a replacement core fails the approved template metadata lookup and closes the proxy", async (t) => {
+  const { proxy, client, fake } = await approvedWorkerScene(t, { template: "dev-sol" });
+  assert.ok((await client.call("templates.list")).result);
+  assertVerified(fake, "templates.list");
+  fake.clearLog();
+  fake.state.version = "0.1.21";
+  const closed = once(proxy.server, "close");
+  const answer = await client.call("templates.list");
+  assert.equal(answer.id, 2);
+  assert.match(answer.error.message, /^hc-proxy: .*version.*0\.1\.21.*0\.1\.14/);
+  assert.deepEqual(fake.log.map(({ method }) => method), ["server.status"]);
+  await closed;
+});
+
 test("approved worker template listing is filtered and a live edit widens neither list nor start", async (t) => {
   const worker = { template: "dev-sol" };
   const { s, client, fake } = await approvedWorkerScene(t, worker);
@@ -1487,6 +2000,33 @@ for (const [name, change] of [
     assert.equal(fake.calls("terminal.run").length, 0, "no cached or live-roster fallback");
   });
 }
+
+test("terminal.run refuses re-approval while the forwarding status reply is pending", async (t) => {
+  const { s, client, fake } = await approvedWorkerScene(t, { agent: "dsh-tui" });
+  const statusRequested = Promise.withResolvers();
+  const releaseStatus = Promise.withResolvers();
+  t.after(() => releaseStatus.resolve());
+  fake.clearLog();
+  fake.state.reply = ({ method }) => {
+    if (method !== "server.status") return undefined;
+    statusRequested.resolve();
+    return releaseStatus.promise;
+  };
+
+  const pending = client.call("terminal.run", runParams(s));
+  await Promise.race([statusRequested.promise,
+    pending.then((answer) => assert.fail(`the worker answered before the handshake: ${JSON.stringify(answer)}`))]);
+  assert.deepEqual(fake.log.map(({ method }) => method), ["server.status"]);
+  approveProject({ project: s.project, env: s.env, approvedBy: "test",
+    approvedAt: "2026-11-03T00:00:00.000Z" });
+  releaseStatus.resolve();
+
+  const answer = await pending;
+  assert.equal(answer.id, 1);
+  assert.match(answer.error?.message ?? "",
+    /^hc-proxy: terminal\.run: approved worker refused: worker allowance approval approvedAt changed/);
+  assert.deepEqual(fake.calls("terminal.run"), []);
+});
 
 test("approved helper worker re-reads at spawn time and refuses after re-approval", async (t) => {
   // The wrapped dsh-tui shape (`workerArgs` with sandbox: true): no named template or agent.
@@ -1650,4 +2190,199 @@ test("approved Claude worker: the proxy accepts its chosen session id and refuse
   const answer = await other.client.call("terminal.run", { ...cp, labels: { ...cp.labels, "agent.session": SESSION } });
   assert.match(answer.error?.message ?? "", /approved worker label agent\.session does not match approval/);
   assert.equal(other.fake.calls("terminal.run").length, 0);
+});
+
+test("#540 the proxy forwards exactly the set and both clear forms on the caller's pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const expected = ["q", "", null].map((value) => ({
+    terminal: "t100", labels: { "automagik-herdr.needs-owner": value },
+  }));
+  for (const { labels } of expected) {
+    const answer = await client.call("terminal.label", { terminal: "dev", labels });
+    assert.ok(answer.result, JSON.stringify(answer));
+  }
+  assert.deepEqual(fake.calls("terminal.label").map(({ params }) => params), expected);
+});
+
+test("#540 the proxy refuses a malformed own-pane label without forwarding it", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  for (const labels of [
+    { "automagik-herdr.needs-owner": "q", other: "x" },
+    { other: "x" },
+    [],
+    "x",
+    { "automagik-herdr.needs-owner": 3 },
+  ]) {
+    const answer = await client.call("terminal.label", { terminal: "t100", labels });
+    assert.match(answer.error?.message ?? "", /the caller's own pane takes only the automagik-herdr\.needs-owner label/, JSON.stringify(labels));
+  }
+  assert.equal(fake.calls("terminal.label").length, 0);
+});
+
+test("#540 the proxy refuses the owner question label on a foreign pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const labels = { "automagik-herdr.needs-owner": "q" };
+  for (const terminal of ["t120", "t106"]) {
+    const answer = await client.call("terminal.label", { terminal, labels });
+    assert.match(answer.error?.message ?? "", /the target is not the caller's own worker/);
+  }
+  assert.equal(fake.calls("terminal.label").length, 0);
+});
+
+test("#540 a proxied worker can label its own pane", async (t) => {
+  const { fake, start } = await sceneWithCore(t, { proxy: false });
+  const proxy = await start("t105");
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  const params = { terminal: "t105", labels: { "automagik-herdr.needs-owner": "q" } };
+  const answer = await client.call("terminal.label", params);
+  assert.ok(answer.result, JSON.stringify(answer));
+  assert.deepEqual(fake.calls("terminal.label").map((call) => call.params), [params]);
+});
+
+test("#540 the proxy still refuses killing or removing the caller's pane", async (t) => {
+  const { fake, proxy } = await sceneWithCore(t);
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  for (const method of ["terminal.kill", "terminal.rm"]) {
+    const answer = await client.call(method, { terminal: "t100" });
+    assert.match(answer.error?.message ?? "", /the target is not the caller's own worker/, method);
+    assert.equal(fake.calls(method).length, 0, method);
+  }
+});
+
+test("#1208 an approved bot that names worker.agentHome starts no worker through the proxy, in either worker shape", async (t) => {
+  for (const [worker, params] of [
+    [{ agent: "codex", agentHome: "/homes/codex-b" }, (s) => approvedParams(s, { agent: "codex" })],
+    [{ template: "dev-sol", agentHome: "/homes/b" }, (s) => approvedParams(s, { template: "dev-sol" })],
+    // Worker defaults the snapshot had to drop still name the home: refused, never run without them.
+    [{ agent: "codex", model: 7, agentHome: "/homes/codex-b" }, (s) => approvedParams(s, { agent: "codex" })],
+    // The helper shape (a dsh-tui worker, no named template or agent).
+    [{ agent: "dsh-tui", agentHome: "/homes/b" }, (s) => runParams(s)],
+  ]) {
+    const { s, client, fake } = await approvedWorkerScene(t, worker);
+    const answer = await client.call("terminal.run", params(s));
+    assert.equal(answer.result, undefined, JSON.stringify(worker));
+    assert.match(answer.error.message, /^hc-proxy: terminal\.run: approved worker refused: worker\.agentHome needs a local, unproxied worker launch$/);
+    assert.equal(fake.calls("terminal.run").length, 0, "the core never received the start");
+  }
+  // The same approved bot without the field: started as before.
+  const { s, client } = await approvedWorkerScene(t, { agent: "codex" });
+  assert.ok((await client.call("terminal.run", approvedParams(s, { agent: "codex" }))).result);
+});
+
+const grantTerminals = [
+  { address: "t140", labels: {}, parent: "t100" },
+  { address: "t141", labels: { bot: ID.jun, [WORKER_OF_LABEL]: ID.dev }, parent: "t199" },
+  { address: "t142", labels: { role: "reviewer" } },
+  { address: "t143", labels: { bot: ID.jun }, parent: "t100" },
+];
+const grantChildren = ["t140", "t141"];
+const questionLabel = "automagik-herdr.needs-owner";
+
+async function grantProxyScene(t) {
+  const { fake, proxy } = await sceneWithCore(t, { extraTerminals: grantTerminals });
+  const client = await clientFor(proxy.socket);
+  t.after(() => client.close());
+  fake.clearLog();
+  return {
+    fake, client,
+    label: (terminal, labels) => client.call("terminal.label", { terminal, labels }),
+    writes: () => fake.calls("terminal.label").map(({ params }) => params),
+  };
+}
+
+test("#628 r3 P1 refuses both grants on both kinds of own child", async (t) => {
+  const { fake, label, writes } = await grantProxyScene(t);
+  for (const terminal of grantChildren) {
+    for (const role of ["reviewer", "fixer"]) {
+      assert.match((await label(terminal, { role })).error?.message ?? "",
+        /^hc-proxy: terminal\.label: only the lead or the pack may set role=reviewer or role=fixer$/);
+    }
+  }
+  assert.deepEqual(fake.calls("terminal.get").map(({ params }) => params.terminal), ["t140", "t140", "t141", "t141"]);
+  assert.deepEqual(writes(), []);
+});
+
+test("#628 r3 P2 forwards benign labels and role removal exactly", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  const expected = [];
+  for (const terminal of grantChildren) {
+    for (const labels of [{ [questionLabel]: "ready", role: "tester", category: "x" }, { role: "" }, { role: null }]) {
+      assert.ok((await label(terminal, labels)).result);
+      expected.push({ terminal, labels });
+    }
+  }
+  assert.deepEqual(writes(), expected);
+});
+
+test("#628 r3 P3 keeps trusted reviewer and fixer roles sendable and listed", async (t) => {
+  const { client } = await grantProxyScene(t);
+  const list = await client.call("terminal.list", {});
+  for (const terminal of ["t142", "t107"]) {
+    assert.ok(list.result?.terminals.some((pane) => pane.address === terminal));
+    assert.ok((await client.call("terminal.send", { terminal, text: "test message" })).result);
+  }
+});
+
+test("#628 r3 P4 rejects the whole update when a grant accompanies a benign label", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  assert.match((await label("t140", { [questionLabel]: "ready", role: "reviewer" })).error?.message ?? "", /may set role=/);
+  assert.deepEqual(writes(), []);
+});
+
+for (const [number, key, changes, repeats] of [
+  ["P5", "bot", [["t140", ID.rev], ...["t143", "t141"].flatMap((terminal) =>
+    [ID.rev, null, ""].map((value) => [terminal, value]))], [["t143", ID.jun], ["t141", ID.jun]]],
+  ["P6", WORKER_OF_LABEL, [["t140", ID.dev], ...[ID.other, null, ""].map((value) => ["t141", value])], [["t141", ID.dev]]],
+]) {
+  test(`#628 r3 ${number} refuses setting changing or removing ${key}`, async (t) => {
+    const { label, writes } = await grantProxyScene(t);
+    for (const [terminal, value] of changes) {
+      for (const companion of [{}, { [questionLabel]: "ready" }]) {
+        assert.match((await label(terminal, { ...companion, [key]: value })).error?.message ?? "", /may change/);
+      }
+    }
+    assert.deepEqual(writes(), []);
+  });
+  test(`#628 r3 ${number} repeats of ${key} are local no-ops and companions still forward`, async (t) => {
+    const { label, writes } = await grantProxyScene(t);
+    const expected = [];
+    for (const [terminal, value] of repeats) {
+      assert.ok((await label(terminal, { [key]: value })).result);
+      assert.deepEqual(writes(), expected);
+      assert.ok((await label(terminal, { [key]: value, category: "x" })).result);
+      expected.push({ terminal, labels: { category: "x" } });
+      assert.deepEqual(writes(), expected);
+    }
+  });
+}
+
+test("#628 r3 P7 rejects malformed label maps and values", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  for (const labels of [["role=reviewer"], '{"role":"reviewer"}', 1,
+    { role: ["reviewer"] }, { role: { name: "reviewer" } }, { role: 1 }, { role: false }]) {
+    assert.match((await label("t140", labels)).error?.message ?? "", /labels must be an object with string or null values/);
+    assert.deepEqual(writes(), []);
+  }
+});
+
+test("#628 r3 P7b keeps exact role spelling", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  const inputs = [{ role: "Reviewer" }, { role: "reviewer " }, { Role: "reviewer" }];
+  for (const labels of inputs) assert.ok((await label("t140", labels)).result);
+  assert.deepEqual(writes(), inputs.map((labels) => ({ terminal: "t140", labels })));
+});
+
+test("#628 r3 P8 forwards ordinary worker placement", async (t) => {
+  const { label, writes } = await grantProxyScene(t);
+  const labels = { "herdr.space": "s1", "herdr.tab": "tb1" };
+  assert.ok((await label("t141", labels)).result);
+  assert.deepEqual(writes(), [{ terminal: "t141", labels }]);
 });

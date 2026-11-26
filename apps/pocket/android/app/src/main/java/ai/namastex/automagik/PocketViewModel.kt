@@ -8,11 +8,15 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.CoroutineContext
 
 // session increases with each successful connection, so open terminal views know to attach again.
 data class MachineState(val connecting: Boolean = false, val connected: Boolean = false, val version: String = "",
@@ -64,7 +68,7 @@ data class PocketState(
     /** The legacy SSH machine ([LegacySsh]) whose "Pair with QR" started the scan: the next pairing replaces it. */
     val repairing: String? = null,
     /** A pairing link that arrived from outside the app, waiting for the person to confirm it. */
-    val offeredPairing: PairingLink? = null,
+    val offeredPairing: PairingOffer? = null,
     /** Folded drawer machine groups, as "hostId|machine". */
     val folded: Set<String> = emptySet(),
     /** Finished turns the person looked at on the phone ([Cockpit.seenKey]); they leave the cockpit's Done. */
@@ -93,16 +97,32 @@ fun PocketState.withMachine(id: String, transform: (MachineState) -> MachineStat
     if (id !in machines && hosts.none { it.id == id }) this
     else copy(machines = machines + (id to transform(machines[id] ?: MachineState())))
 
-class PocketViewModel(application: Application, private val initDispatcher: CoroutineDispatcher = Dispatchers.IO) : AndroidViewModel(application) {
+class PocketViewModel(application: Application, private val initDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val hostStore: HostStore = HostStore.of(application)) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("pocket", 0)
-    /** Null when the saved list couldn't be read: it then shows empty, but its SSH entries may still be in the preferences. */
-    private val savedHosts = LegacySsh.loadHosts(prefs.getString("hosts", "[]"))
+    private val loaded = hostStore.load()
+    /** Null when the saved list couldn't be read: its SSH entries may still be on disk. */
+    private val savedHosts = loaded.hosts
+    @Volatile private var hostsBlocked = loaded.blocked
+    private val hostLock = Any()
+    private var hostSeq = 0L
+    private var hostSaved = 0L
+    private var oversizedSeq: Long? = null
+    private var pendingHosts: List<HostProfile>? = null
+    private val pendingEvictions = mutableSetOf<String>()
+    private val hostWaiters = mutableListOf<Pair<Long, CompletableDeferred<HostStore.Result>>>()
+    private val hostWriter = Mutex()
     private val _state = MutableStateFlow(PocketState(nativeDisplay = prefs.getBoolean("native_display", false),
         fontSize = prefs.getInt("font_size", DEFAULT_FONT_SIZE).coerceIn(FONT_SIZES), folded = prefs.getStringSet("folded_machines", null).orEmpty().toSet(),
         alertSounds = prefs.getBoolean("alert_sounds", true), alertBlocked = prefs.getBoolean("alert_blocked", true), alertDone = prefs.getBoolean("alert_done", true),
         lockAnswers = prefs.getBoolean("lock_answers", false), watch = prefs.getBoolean(WatchResume.PREF_WATCH, true),
-        seen = runCatching { JSONArray(prefs.getString("seen_done", "[]")).let { a -> (0 until a.length()).map(a::getString) }.toSet() }.getOrDefault(emptySet()), hosts = savedHosts.orEmpty()))
+        seen = runCatching { JSONArray(prefs.getString("seen_done", "[]")).let { a -> (0 until a.length()).map(a::getString) }.toSet() }.getOrDefault(emptySet()),
+        hosts = savedHosts.orEmpty(), message = if (loaded.blocked) HOSTS_UNREADABLE else null))
     val state = _state.asStateFlow()
+    internal var pocketLink: PocketLinkBackend = IrohBackend
+    internal var linkDispatcher: CoroutineDispatcher = Dispatchers.IO
+    /** The latest external offer or pairing action, changed on Main. */
+    private var offerGen = 0L
     /** Herdr desktop's program table, for the drawer's names and icons. */
     val programs: Programs by lazy { Programs(JSONObject(application.assets.open("programs.json").bufferedReader().use { it.readText() })) }
     private val colorsRead = ConcurrentHashMap<String, Long>()
@@ -168,6 +188,9 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private val keystrokes = Channel<Pair<Pair<CoreClient, Int>, ByteArray>>(64)
 
     companion object {
+        private const val HOSTS_UNREADABLE = "Saved computers can’t be read right now. Try again later; if it keeps failing, clear Automagik’s storage in Android settings and pair again."
+        private const val HOST_NOT_SAVED = "Couldn’t save that change on this phone."
+        private const val HOSTS_TOO_LARGE = "Too many saved computers to save on this phone."
         /** The live instance, for notification actions that arrive outside the activity. */
         @Volatile var current: PocketViewModel? = null
     }
@@ -213,32 +236,147 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     fun dismissMessage() { _state.update { it.copy(message = null) } }
-    private fun saveHosts(hosts: List<HostProfile>) {
-        prefs.edit().putString("hosts", JSONArray(hosts.map { it.json() }).toString()).apply()
-        _state.update { it.copy(hosts = hosts) }
+
+    /** Derives the new list, shows it at once and queues it, or joins an unchanged pending save. */
+    private fun mutateHosts(transform: (List<HostProfile>) -> List<HostProfile>): Deferred<HostStore.Result>? {
+        val waiter = synchronized(hostLock) {
+            if (hostsBlocked) return CompletableDeferred(HostStore.Result.BLOCKED)
+            val before = state.value.hosts
+            val after = transform(before)
+            if (after != before) {
+                hostSeq++
+                pendingHosts = after
+            } else {
+                if (hostSeq == hostSaved) return null
+                if (hostSeq == oversizedSeq) return CompletableDeferred(HostStore.Result.TOO_LARGE)
+                hostWaiters.lastOrNull()?.takeIf { it.first == hostSeq }?.let { return it.second }
+            }
+            CompletableDeferred<HostStore.Result>().also {
+                hostWaiters.add(hostSeq to it)
+                if (after != before) _state.update { it.copy(hosts = after) }
+            }
+        }
+        viewModelScope.launch(linkDispatcher) { drainHosts() }
+        return waiter
     }
+
+    /** Writes the latest queued list and resolves all the changes it represents. */
+    private suspend fun drainHosts(retry: Boolean = false) = hostWriter.withLock {
+        val (seq, hosts) = synchronized(hostLock) {
+            if (hostsBlocked || hostSeq == hostSaved || hostSeq == oversizedSeq || (!retry && hostWaiters.isEmpty())) return@withLock
+            hostSeq to (pendingHosts ?: return@withLock)
+        }
+        val result = runCatching { hostStore.write(JSONArray(hosts.map { it.json() }).toString()) }.getOrDefault(HostStore.Result.FAILED)
+        val (waiters, evictions) = synchronized(hostLock) {
+            val evict = when (result) {
+                HostStore.Result.SAVED -> {
+                    hostSaved = seq
+                    if (hostSeq == seq) pendingHosts = null
+                    pendingEvictions.filter { id -> hosts.none { it.id == id } }.also { pendingEvictions.removeAll(it) }
+                }
+                HostStore.Result.BLOCKED -> {
+                    hostsBlocked = true
+                    emptyList()
+                }
+                HostStore.Result.TOO_LARGE -> {
+                    oversizedSeq = seq
+                    emptyList()
+                }
+                HostStore.Result.FAILED -> emptyList()
+            }
+            val done = hostWaiters.filter { it.first <= seq || hostsBlocked }
+            hostWaiters.removeAll(done)
+            done to evict
+        }
+        if (result == HostStore.Result.TOO_LARGE) _state.update { it.copy(message = HOSTS_TOO_LARGE) }
+        if (result == HostStore.Result.SAVED) runCatching {
+            LegacySsh.deleteKeyIfUnused(getApplication<Application>().noBackupFilesDir, if (savedHosts == null) null else hosts)
+        }
+        waiters.forEach { it.second.complete(result) }
+        for (id in evictions) {
+            try { teamsSync.removed(id) } catch (e: CancellationException) { throw e } catch (_: Exception) { }
+        }
+    }
+
+    /** Reloads the authoritative list when access to the sealed record returns. */
+    private suspend fun retryHosts(): Boolean {
+        if (!hostsBlocked) return true
+        return hostWriter.withLock {
+            if (!hostsBlocked) return@withLock true
+            val recovered = runCatching { hostStore.load().hosts }.getOrNull() ?: return@withLock false
+            synchronized<Unit>(hostLock) {
+                if (hostsBlocked) {
+                    pendingHosts = null
+                    pendingEvictions.clear()
+                    hostSaved = hostSeq
+                    oversizedSeq = null
+                    _state.update { it.copy(hosts = recovered, message = it.message?.takeUnless { it == HOSTS_UNREADABLE }) }
+                    hostsBlocked = false
+                }
+            }
+            true
+        }
+    }
+
+    private fun showHostSaveFailure(waiter: Deferred<HostStore.Result>?) {
+        if (waiter == null) return
+        viewModelScope.launch {
+            when (waiter.await()) {
+                HostStore.Result.SAVED -> Unit
+                HostStore.Result.TOO_LARGE -> _state.update { it.copy(message = HOSTS_TOO_LARGE) }
+                else -> _state.update { it.copy(message = HOST_NOT_SAVED) }
+            }
+        }
+    }
+
     fun saveHost(profile: HostProfile) {
         if (state.value.demo) leaveDemo()
-        val hosts = state.value.hosts
-        val previous = hosts.find { it.id == profile.id }
-        val moved = previous != null && (previous.host != profile.host || previous.port != profile.port || previous.user != profile.user || previous.session != profile.session)
         val live = state.value.machines[profile.id]?.let { it.connected || it.connecting } == true
-        saveHosts(if (previous != null) hosts.map { if (it.id == profile.id) profile.copy(linked = if (moved) emptyList() else it.linked) else it } else hosts + profile)
+        var reconnect: HostProfile? = null
+        val waiter = mutateHosts { hosts ->
+            val previous = hosts.find { it.id == profile.id } ?: return@mutateHosts hosts + profile
+            val moved = previous.host != profile.host || previous.port != profile.port || previous.user != profile.user || previous.session != profile.session
+            val edited = previous.copy(name = profile.name, session = profile.session, host = profile.host, user = profile.user,
+                port = profile.port, fingerprint = profile.fingerprint, linked = if (moved) emptyList() else previous.linked)
+            if (moved && live) reconnect = edited
+            hosts.map { if (it.id == profile.id) edited else it }
+        }
         // A live connection to the old address would otherwise keep running under the new name.
-        if (moved && live) connect(profile)
+        reconnect?.let { connect(it) }
+        showHostSaveFailure(waiter)
     }
     fun removeHost(id: String) {
-        // Its cached projects and bots go with it (TeamsSync), so Teams never shows a machine the phone no longer has.
-        viewModelScope.launch(Dispatchers.IO) { runCatching { teamsSync.removed(id) } }
-        disconnect(id)
-        saveHosts(state.value.hosts.filter { it.id != id })
-        _state.update { it.copy(machines = it.machines - id, repairing = if (it.repairing == id) null else it.repairing) }
-        dropSshKeyIfUnused()
+        var allowed = false
+        val waiter = mutateHosts { hosts ->
+            allowed = true
+            hosts.filter { it.id != id }.also {
+                if (it != hosts) pendingEvictions.add(id)
+            }
+        }
+        if (allowed) {
+            disconnect(id)
+            _state.update { it.copy(machines = it.machines - id, repairing = if (it.repairing == id) null else it.repairing) }
+        }
+        showHostSaveFailure(waiter)
     }
     private fun dropSshKeyIfUnused() {
         // An unreadable saved list may still hold SSH entries: keep the key for as long as this process runs.
-        val hosts = if (savedHosts == null) null else state.value.hosts
-        viewModelScope.launch(Dispatchers.IO) { runCatching { LegacySsh.deleteKeyIfUnused(getApplication<Application>().noBackupFilesDir, hosts) } }
+        // Started from init, before linkDispatcher can be set, so it runs on initDispatcher.
+        viewModelScope.launch(initDispatcher) {
+            hostWriter.withLock<Unit> {
+                val dir = getApplication<Application>().noBackupFilesDir
+                if (savedHosts == null || !File(dir, "ssh").exists()) return@withLock
+                val idle = synchronized(hostLock) {
+                    !hostsBlocked && hostSeq == hostSaved && LegacySsh.keyDeletable(state.value.hosts)
+                }
+                if (!idle || !hostStore.confirmDurable()) return@withLock
+                synchronized<Unit>(hostLock) {
+                    if (!hostsBlocked && hostSeq == hostSaved) runCatching {
+                        LegacySsh.deleteKeyIfUnused(dir, state.value.hosts)
+                    }
+                }
+            }
+        }
     }
     /** A tab (or Settings), opened at its top. */
     fun navigate(screen: String) { place(Nav.tab(screen)) }
@@ -281,12 +419,12 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         LegacySsh.refusal(profile)?.let { reason -> _state.update { it.copy(message = reason) }; return }
         disconnect(profile.id, deliberate = retry == 0)
         if (state.value.demo) leaveDemo()
-        jobs[profile.id] = viewModelScope.launch(Dispatchers.IO) {
+        jobs[profile.id] = viewModelScope.launch(linkDispatcher) {
             updateMachine(profile.id) { it.copy(connecting = true, connected = false, error = null) }
             var client: CoreClient? = null
             try {
                 val connectionScope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
-                val t = IrohLink.open(getApplication(), profile.ticket, profile.session, connectionScope)
+                val t = pocketLink.open(getApplication(), profile.ticket, profile.session, connectionScope)
                 ensureActive()
                 lateinit var c: CoreClient
                 c = CoreClient(t.input, t.output, t, connectionScope) { reason -> lost(profile, c, reason) }
@@ -337,13 +475,40 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     fun offerPairing(text: String) {
-        val link = PairingLink.parse(text) ?: run { _state.update { it.copy(message = "That isn’t a Pocket Link pairing link.") }; return }
-        _state.update { it.copy(offeredPairing = link) }
+        val gen = ++offerGen
+        _state.update { it.copy(offeredPairing = null) }
+        val link = PairingLink.parse(text) ?: run { _state.update { it.copy(message = LegacySsh.NOT_A_LINK) }; return }
+        viewModelScope.launch(linkDispatcher) {
+            if (!retryHosts()) {
+                withContext(Dispatchers.Main) {
+                    if (gen == offerGen) _state.update { it.copy(message = HOSTS_UNREADABLE) }
+                }
+                return@launch
+            }
+            val desktop = runCatching { pocketLink.desktopId(link.ticket) }.getOrNull()
+            val offer = desktop?.let { PairingOffer.of(gen, link, it, state.value.hosts, pocketLink::desktopId) }
+            withContext(Dispatchers.Main) {
+                if (gen == offerGen) _state.update {
+                    when {
+                        hostsBlocked -> it.copy(message = HOSTS_UNREADABLE)
+                        offer == null -> it.copy(message = LegacySsh.NOT_A_LINK)
+                        else -> it.copy(offeredPairing = offer)
+                    }
+                }
+            }
+        }
     }
-    fun dismissOfferedPairing() { _state.update { it.copy(offeredPairing = null) } }
+    fun dismissOfferedPairing(id: Long) {
+        if (state.value.offeredPairing?.id != id) return
+        ++offerGen
+        _state.update { it.copy(offeredPairing = null) }
+    }
+    fun confirmOfferedPairing(id: Long) {
+        val offer = state.value.offeredPairing?.takeIf { it.id == id } ?: return
+        pair(offer.link, connectNow = false)
+    }
 
-    /** Pairs with the desktop that showed [text] (a Pocket Link QR or pasted link), saves it and connects. */
-    /** A pasted link: it replaces no legacy card. */
+    /** Pairs, saves and connects from a pasted link, without replacing a legacy card. */
     fun pair(text: String) {
         pair(PairingLink.parse(text) ?: run { _state.update { it.copy(message = LegacySsh.NOT_A_LINK) }; return })
     }
@@ -357,28 +522,58 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     fun repairWithQr(hostId: String) { _state.update { LegacySsh.start(it, hostId) } }
     /** The scan was cancelled: the legacy card stays as it was. */
     fun cancelRepair() { _state.update(LegacySsh::cancel) }
-    /** [replacing]: the legacy SSH card this pairing replaces once it succeeds ([scanned]); none for a pasted or external link. */
-    fun pair(link: PairingLink, replacing: String? = null) {
+    /** [replacing] is the legacy SSH card to replace on success. [connectNow] opens a session after saving. */
+    fun pair(link: PairingLink, replacing: String? = null, connectNow: Boolean = true) {
+        ++offerGen
         if (state.value.demo) leaveDemo()
         _state.update { it.copy(pairing = true, offeredPairing = null) }
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(linkDispatcher) {
             try {
+                if (!retryHosts()) {
+                    _state.update { it.copy(pairing = false, repairing = null, message = HOSTS_UNREADABLE) }
+                    return@launch
+                }
                 val device = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL).distinct().joinToString(" ").trim().ifBlank { "Android phone" }
-                val name = IrohLink.pair(getApplication(), link, device)
-                val desktop = IrohLink.desktopId(link.ticket)
+                val name = displayName(pocketLink.pair(getApplication(), link, device)).ifBlank { displayName(link.name).ifBlank { "Herdr desktop" } }
+                val desktop = pocketLink.desktopId(link.ticket)
                 // Pairing the same desktop again keeps its card and history, with the new ticket.
-                val previous = state.value.hosts.find { it.paired && runCatching { IrohLink.desktopId(it.ticket) }.getOrNull() == desktop }
-                val profile = (previous ?: HostProfile(UUID.randomUUID().toString(), name, desktop.take(12), "", 0, transport = "iroh"))
-                    .copy(ticket = link.ticket, transport = "iroh")
-                withContext(Dispatchers.Main) {
+                val previousId = state.value.hosts.find { it.paired && runCatching { pocketLink.desktopId(it.ticket) }.getOrNull() == desktop }?.id
+                val newProfile = HostProfile(UUID.randomUUID().toString(), name, desktop.take(12), "", 0, transport = "iroh", ticket = link.ticket)
+                var saved: HostProfile? = null
+                var pairedAgain = false
+                val waiter = withContext(Dispatchers.Main) {
+                    var replaced = emptySet<String>()
                     // The legacy SSH entry this pairing replaces goes only now, after the pairing succeeded.
-                    val hosts = LegacySsh.afterPairing(state.value.hosts, profile, replacing)
-                    val replaced = state.value.hosts.filter { h -> hosts.none { it.id == h.id } }.map { it.id }
+                    val pending = mutateHosts { before ->
+                        val previous = before.find { it.id == previousId }
+                        pairedAgain = previous != null
+                        val profile = previous?.copy(ticket = link.ticket, transport = "iroh") ?: newProfile
+                        val after = LegacySsh.afterPairing(before, profile, replacing)
+                        saved = after.first { it.id == profile.id }
+                        replaced = before.filter { h -> after.none { it.id == h.id } }.map { it.id }.toSet()
+                        after
+                    }
                     replaced.forEach { disconnect(it) }
-                    saveHosts(hosts)
-                    _state.update { it.copy(pairing = false, repairing = null, machines = it.machines - replaced.toSet(), message = "Paired with $name") }
-                    dropSshKeyIfUnused()
-                    hosts.find { it.id == profile.id }?.let { connect(it) }
+                    _state.update { it.copy(repairing = null, machines = it.machines - replaced) }
+                    pending
+                }
+                val result = waiter?.await() ?: HostStore.Result.SAVED
+                withContext(Dispatchers.Main) {
+                    val current = state.value.hosts.find { it.id == saved?.id && it.ticket == link.ticket }
+                    if (current == null) {
+                        _state.update { it.copy(pairing = false, message = if (saved == null) HOSTS_UNREADABLE else it.message) }
+                        return@withContext
+                    }
+                    val savedName = displayName(current.name)
+                    val message = when {
+                        result == HostStore.Result.TOO_LARGE -> HOSTS_TOO_LARGE
+                        result != HostStore.Result.SAVED -> "Paired with $savedName, but this phone couldn’t save it yet. Automagik will try again; if it keeps failing, pair again."
+                        pairedAgain -> "Paired $savedName again."
+                        connectNow -> "Paired with $savedName"
+                        else -> "Paired with $savedName. Connect it in Settings when you’re ready."
+                    }
+                    _state.update { it.copy(pairing = false, message = message) }
+                    if (connectNow) connect(current)
                 }
             } catch (e: Throwable) {
                 if (e is CancellationException) throw e
@@ -460,7 +655,9 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         // What to reconnect if an update or a restart ends the process ([WatchResume]).
         val active = s.machines.filterValues { it.connected || it.connecting }.keys + retrying
         val watched = WatchResume.watched(s.watch, s.demo, active)
-        if (watched != kept) { kept = watched; prefs.edit { putStringSet(WatchResume.PREF, watched) } }
+        synchronized<Unit>(hostLock) {
+            if (!hostsBlocked && watched != kept) { kept = watched; prefs.edit { putStringSet(WatchResume.PREF, watched) } }
+        }
         val machines = s.machines.values.count { it.connected }
         if (!s.watch || s.demo || (machines == 0 && retrying.isEmpty() && s.machines.values.none { it.connecting })) {
             watchText = ""; WatchService.stop(app); return
@@ -501,14 +698,24 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     fun setForeground(shown: Boolean) {
         onScreen.value = shown
         // Android lets the watch service start only from the foreground.
-        if (shown) { watchText = ""; syncWatch(); kickSlowReconnects() }
-        if (shown) Updater.opened() else Updater.left()
+        if (shown) {
+            watchText = ""; syncWatch(); kickSlowReconnects()
+            if (synchronized(hostLock) { !hostsBlocked && hostSeq > hostSaved && hostSeq != oversizedSeq }) {
+                viewModelScope.launch(linkDispatcher) { drainHosts(retry = true) }
+            }
+        }
+        AppUpdates.setForeground(shown)
     }
     // Opening the app checks for an update (setForeground); this tells a waiting one when installing would interrupt.
-    // Registered after the fields its lambda reads (onScreen, watchText): Updater can call it while this view model is
+    // Registered after the fields it reads (onScreen, watchText): the GitHub updater can call it while this view model is
     // still being constructed (a download finishing then), and a registration before them would read a null field (#762).
     init {
-        Updater.usage = { val s = state.value; Updater.Usage(foreground, s.selected != null, watchText.isNotEmpty()) }
+        AppUpdates.registerUsage({ foreground }, { state.value.selected != null }, { watchText.isNotEmpty() })
+        if (loaded.migrate) viewModelScope.launch(initDispatcher) {
+            if (runCatching { hostStore.migrate() }.getOrNull() == HostStore.Result.TOO_LARGE) {
+                _state.update { it.copy(message = HOSTS_TOO_LARGE) }
+            }
+        }
     }
     private suspend fun alert(found: List<Alerts.Alert>, client: CoreClient) {
         val s = state.value
@@ -806,9 +1013,10 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }.getOrDefault("")
     /** Saves which machines a core reaches, so the start screen lists them before the next connection. */
     private fun rememberLinked(id: String, names: List<String>) {
-        val hosts = state.value.hosts
-        if (hosts.none { it.id == id && it.linked != names }) return
-        saveHosts(hosts.map { if (it.id == id) it.copy(linked = names) else it })
+        mutateHosts { hosts ->
+            if (hosts.none { it.id == id && it.linked != names }) hosts
+            else hosts.map { if (it.id == id) it.copy(linked = names) else it }
+        }
     }
 
     // Called only once the local terminal page has measured its actual viewport.
@@ -976,7 +1184,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     // never in preferences, Room or the log (docs/privacy.md). One chat open at a time, on its own connection.
     private val _chat = MutableStateFlow<Chat.State?>(null)
     val chat = _chat.asStateFlow()
-    /** Each machine's Automagik Bot chats (read only), as chat.list gave them; null while loading. */
+    /** Each machine's Automagik chat list, Bot chats and granted groups. Null while loading. */
     private val _botChats = MutableStateFlow<Map<String, Result<List<Chat.Terminal>>?>>(emptyMap())
     val botChats = _botChats.asStateFlow()
     /** What the phone saw of each Bot chat between readings ([ChatWatch]): Home's word for it and its receipt. */
@@ -989,25 +1197,42 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     @Volatile private var chatRef: TerminalRef? = null
     @Volatile private var chatLink: ChatLink? = null
     @Volatile private var chatGen = 0
+    internal var chatIo: CoroutineContext = Dispatchers.IO
     /**
      * How [openChatLink] reaches a chat route. It is the production Pocket Link route by default; a unit test points
      * it at a fake bridge to drive the chat wiring without a device (#754). The app never sets it.
      */
-    internal var chatOpener: suspend (hostId: String, scope: CoroutineScope, lost: (String) -> Unit) -> ChatLink =
-        { hostId, scope, lost -> connectChatLink(hostId, scope, lost) }
+    private val defaultChatOpener: suspend (String, CoroutineScope, (String) -> Unit) -> ChatLink =
+        { hostId, scope, lost -> connectChatLink(hostId, scope, emptyList(), false, lost) }
+    internal var chatOpener: suspend (hostId: String, scope: CoroutineScope, lost: (String) -> Unit) -> ChatLink = defaultChatOpener
+    internal var chatOpenerManage: (suspend (String, CoroutineScope, List<String>, (String) -> Unit) -> ChatLink)? = null
+    internal var chatOpenerAttach: (suspend (String, CoroutineScope, List<String>, Boolean, (String) -> Unit) -> ChatLink)? = null
+    internal val attachments = AttachImage(getApplication<Application>().contentResolver).let { images ->
+        AttachSession(viewModelScope, chat = { _chat.value }, ref = { chatRef }, demo = { state.value.demo },
+            link = { chatLink }, notice = { n -> chatUpdate(chatGen) { it.copy(notice = n) } },
+            prepare = { uri, offer -> images.prepare(uri, offer) })
+    }
     /** Automatic reconnects of the open DSH chat since its last snapshot (main thread only); see [Chat.RESUMABLE]. */
     private var resumeAttempt = 0
     private var resumeJob: Job? = null
 
-    private suspend fun openChatLink(hostId: String, scope: CoroutineScope, lost: (String) -> Unit): ChatLink =
-        chatOpener(hostId, scope, lost)
+    private suspend fun openChatLink(hostId: String, scope: CoroutineScope, manage: List<String> = emptyList(),
+                                     attachments: Boolean = false, lost: (String) -> Unit): ChatLink =
+        chatOpenerAttach?.invoke(hostId, scope, manage, attachments, lost)
+            ?: chatOpenerManage?.invoke(hostId, scope, manage, lost)
+            ?: if ((manage.isEmpty() && !attachments) || chatOpener !== defaultChatOpener) chatOpener(hostId, scope, lost)
+            else connectChatLink(hostId, scope, manage, attachments, lost)
 
     /** The production chat route: Iroh to the paired desktop, then Pocket Link's chat version 1 ([ChatClient]). */
-    private suspend fun connectChatLink(hostId: String, scope: CoroutineScope, lost: (String) -> Unit): ChatLink {
+    private suspend fun connectChatLink(hostId: String, scope: CoroutineScope, manage: List<String>, attachments: Boolean, lost: (String) -> Unit): ChatLink {
         val profile = state.value.hosts.find { it.id == hostId && it.paired } ?: error("This machine isn’t paired with Pocket Link.")
         val t = try { IrohLink.open(getApplication(), profile.ticket, profile.session, scope, IrohLink.CHAT) }
             catch (e: Exception) { if (e !is CancellationException && ChatClient.refusedRoute(e)) throw ChatUnsupported() else throw e }
-        return withTimeout(20_000) { PocketLinkChat(ChatClient.start(CoreClient(t.input, t.output, t, scope, lost))) }
+        val core = CoreClient(t.input, t.output, t, scope, lost)
+        // The transport scope owns the hello read so a timeout can close it while it is still blocked on input.
+        val hello = scope.async(Dispatchers.IO) { ChatClient.start(core, manage, attachments, groups = true) }
+        try { return withTimeout(20_000) { PocketLinkChat(hello.await()) } }
+        catch (e: Exception) { core.close(); hello.cancel(); throw e }
     }
 
     private fun chatUpdate(gen: Int, change: (Chat.State) -> Chat.State) {
@@ -1030,7 +1255,10 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         val prior = _chat.value?.takeIf { chatRef == ref }
         val unknown = prior?.let(Chat::unknown).orEmpty()
         val attempt = if (resuming) resumeAttempt else 0
-        closeChat()
+        closeChat(ref = null, keepManagement = chatRef == ref)
+        _botManage.update { it - ref.hostId }
+        _botSchedules.update { it - ref.hostId }
+        _botSettings.update { it - ref.hostId }
         resumeAttempt = attempt
         val gen = ++chatGen
         chatRef = ref
@@ -1043,21 +1271,35 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
             var link: ChatLink? = null
             try {
-                link = openChatLink(ref.hostId, scope) { reason -> chatUpdate(gen) { it.copy(connected = false, error = "Chat disconnected: $reason",
-                    messages = it.messages.map { m -> if (m.state == "sending") m.copy(state = "maybe") else m }) } }
+                link = openChatLink(ref.hostId, scope, attachments = !Chat.isGroup(ref.address)) { reason ->
+                    attachments.linkClosed(gen)
+                    chatUpdate(gen) {
+                        val error = "Chat disconnected: $reason"
+                        if (it.group) Chat.groupDisconnected(it, error)
+                        else it.copy(connected = false, error = error,
+                            messages = it.messages.map { m -> if (m.state == "sending") m.copy(state = "maybe") else m })
+                    }
+                }
+                if (gen != chatGen) return@launch
                 chatLink = link
+                attachments.linkOpened(gen, if (Chat.isGroup(ref.address)) Attach.Peer.NotAsked else link.attach)
                 val dshWrite = link.dshWrite
-                chatUpdate(gen) { it.copy(dshWrite = dshWrite) }
+                val groups = link.groups
+                chatUpdate(gen) { it.copy(dshWrite = dshWrite, groups = groups) }
                 if (!Chat.isDsh(ref.address) && link.list().none { it.terminal == ref.address }) { chatUpdate(gen) { it.copy(error = Chat.NO_CHAT) }; return@launch }
+                if (Chat.isGroup(ref.address) && !groups) throw GroupsUnsupported()
                 chatSubscribe(link, ref.address, null, gen)
                 awaitCancellation()
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 // A DSH chat coming back keeps trying (within RESUME_DELAYS_MS); anything else waits for Reconnect.
-                if (resuming && e !is ChatUnsupported) { chatUpdate(gen) { it.copy(connected = false) }; viewModelScope.launch { resumeLater(ref, gen) } }
+                if (e is GroupsUnsupported) {
+                    chatUpdate(gen) { Chat.groupLost(it) }
+                    viewModelScope.launch { chatEvent(gen, "gone") }
+                } else if (resuming && e !is ChatUnsupported) { chatUpdate(gen) { it.copy(connected = false) }; viewModelScope.launch { resumeLater(ref, gen) } }
                 else chatUpdate(gen) { it.copy(connected = false, resuming = false, error = e.message ?: "Chat couldn’t connect") }
             }
-            finally { if (chatLink === link) chatLink = null; link?.close() }
+            finally { attachments.linkClosed(gen); if (chatLink === link) chatLink = null; link?.close() }
         }
     }
 
@@ -1074,13 +1316,21 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             "snapshot" -> resumeAttempt = 0
             "gone" -> if (s.resuming) resumeLater(ref, gen)
         }
+        if (s.group && s.gone) {
+            _botChats.update { m ->
+                val list = m[ref.hostId]?.getOrNull() ?: return@update m
+                val now = ChatGroups.without(list, ref.address)
+                if (now === list) m else m + (ref.hostId to Result.success(now))
+            }
+        }
         if (s.dsh && s.connected) {
             _botChats.update { m ->
                 val list = m[ref.hostId]?.getOrNull() ?: return@update m
-                val now = Chat.withStatus(list, ref.address, s.status, Chat.asked(s))
+                val now = if (s.group) ChatGroups.withState(list, ref.address, s.title, s.status, s.answerable)
+                else Chat.withStatus(list, ref.address, s.status, Chat.asked(s))
                 if (now === list) m else m + (ref.hostId to Result.success(now))
             }
-            if (type == "snapshot" || type == "status") _chatWatch.update { ChatWatch.status(it, ChatWatch.key(ref.hostId, ref.address), s.status.state, System.currentTimeMillis()) }
+            if (!s.group && (type == "snapshot" || type == "status")) _chatWatch.update { ChatWatch.status(it, ChatWatch.key(ref.hostId, ref.address), s.status.state, System.currentTimeMillis()) }
         }
     }
 
@@ -1088,7 +1338,9 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private fun resumeLater(ref: TerminalRef, gen: Int) {
         if (gen != chatGen || chatRef != ref) return
         val wait = Chat.resumeDelayMs(resumeAttempt)
-            ?: return chatUpdate(gen) { it.copy(resuming = false, error = Chat.NOT_ANSWERING) }
+            ?: return chatUpdate(gen) {
+                it.copy(resuming = false, error = if (it.group) Chat.GROUP_UNAVAILABLE else Chat.NOT_ANSWERING)
+            }
         resumeAttempt++
         resumeJob?.cancel()
         resumeJob = viewModelScope.launch {
@@ -1098,32 +1350,45 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     private suspend fun chatSubscribe(link: ChatLink, terminal: String, after: String?, gen: Int) {
+        val token = attachments.watchStarted(gen)
         link.subscribe(terminal, after, { e ->
+            attachments.event(token, e)
             val before = _chat.value?.takeIf { gen == chatGen }?.receipts.orEmpty()
             chatUpdate(gen) { Chat.reduce(it, e) }
             val type = e.optString("type")
             // A closed card's receipt goes on the chat's Home row, for its Done line: one seen close, or the newest a
             // reconnect's snapshot found settled while the phone was away.
-            if (Chat.isDsh(terminal)) {
+            if (Chat.isDsh(terminal) && !Chat.isGroup(terminal)) {
                 val fresh = _chat.value?.takeIf { gen == chatGen }?.receipts.orEmpty().filter { r -> before.none { it.id == r.id } }
                 (Chat.receiptLine(e) ?: fresh.lastOrNull { it.settled }?.let(Chat::doneLine))
                     ?.let { line -> chatRef?.let { r -> _chatWatch.update { ChatWatch.receipt(it, ChatWatch.key(r.hostId, terminal), line) } } }
             }
             viewModelScope.launch { chatEvent(gen, type) }
         }) { reason ->
+            attachments.watchEnded(token)
             // Too slow to keep up: the bridge closed the stream; come back from the cursor.
             if (reason == "slow" && gen == chatGen) viewModelScope.launch(Dispatchers.IO) {
                 runCatching { chatSubscribe(link, terminal, _chat.value?.cursor, gen) }
-                    .onFailure { e -> chatUpdate(gen) { it.copy(connected = false, error = e.message) } }
-            } else chatUpdate(gen) { it.copy(connected = false, error = if (reason.isBlank()) "The chat closed." else "The chat closed: $reason") }
+                    .onFailure { e -> chatUpdate(gen) {
+                        if (it.group) Chat.groupDisconnected(it, e.message ?: Chat.GROUP_UNAVAILABLE)
+                        else it.copy(connected = false, error = e.message)
+                    } }
+            } else chatUpdate(gen) {
+                val error = if (reason.isBlank()) "The chat closed." else "The chat closed: $reason"
+                if (it.group) Chat.groupDisconnected(it, error) else it.copy(connected = false, error = error)
+            }
         }
     }
 
     /** Closes the chat for [ref] (any chat when null); its rows are dropped. */
-    fun closeChat(ref: TerminalRef? = null) {
+    fun closeChat(ref: TerminalRef? = null) = closeChat(ref, keepManagement = false)
+
+    private fun closeChat(ref: TerminalRef?, keepManagement: Boolean) {
         if (ref != null && ref != chatRef) return
+        if (!keepManagement) { closeMemory(); closeSchedules(); closeSettings() }
+        attachments.closed(keep = keepManagement, gen = chatGen)
         // bots-dsh stops following a Bot chat no phone watches: what it lists next is not a finish ([ChatWatch.left]).
-        chatRef?.takeIf { Chat.isDsh(it.address) }?.let { r -> _chatWatch.update { ChatWatch.left(it, ChatWatch.key(r.hostId, r.address)) } }
+        chatRef?.takeIf { Chat.isDsh(it.address) && !Chat.isGroup(it.address) }?.let { r -> _chatWatch.update { ChatWatch.left(it, ChatWatch.key(r.hostId, r.address)) } }
         ++chatGen
         chatRef = null
         chatJob?.cancel(); chatJob = null
@@ -1139,6 +1404,10 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
      */
     fun streams(started: Boolean) {
         if (!started) {
+            attachments.linkClosed(chatGen)
+            closeMemory()
+            closeSchedules()
+            closeSettings()
             held.stop(activeChannel != null || attachJob?.isActive == true || nativeJob?.isActive == true, chatRef?.takeIf { chatJob?.isActive == true || resumeJob?.isActive == true })
             dropStream()
             chatJob?.cancel(); chatJob = null
@@ -1181,11 +1450,47 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         viewModelScope.launch(Dispatchers.IO) { block(link, s, gen) }
     }
 
+    /** Admits a group action against the current pane, keeping the identity of the state that admitted it. */
+    private fun chatClaim(admit: (Chat.State) -> Chat.State?): Pair<Int, Chat.State>? {
+        val gen = chatGen
+        var claimed: Chat.State? = null
+        _chat.update { s ->
+            // update may run again if a bridge event wins the race to commit.
+            claimed = null
+            if (s == null || gen != chatGen || !s.group) s else admit(s)?.also { claimed = it } ?: s
+        }
+        return claimed?.let { gen to it }
+    }
+
+    /** Drops a group action if the pane moved on before dispatch, and drops any completion after a gone. */
+    private fun groupAct(gen: Int, claim: Chat.State, block: suspend (ChatLink, (Chat.State.() -> Chat.State) -> Unit) -> Unit) {
+        val link = chatLink ?: return
+        viewModelScope.launch(chatIo) {
+            if (!sameGroup(gen, claim.wiped)) return@launch
+            block(link) { change -> chatUpdate(gen) { if (it.wiped != claim.wiped) it else it.change() } }
+        }
+    }
+
+    private fun sameGroup(gen: Int, wiped: Int) =
+        gen == chatGen && _chat.value?.let { it.wiped == wiped && it.connected } == true
+
     /** Sends [text] to the open chat; a chat that cannot send (read only, ended, reconnecting) says why instead. */
-    fun chatSend(text: String, id: String = UUID.randomUUID().toString()) {
+    fun chatSend(text: String, id: String = UUID.randomUUID().toString(), retry: Boolean = false) {
         val s = _chat.value ?: return
         if (text.isBlank()) return
         if (previewChat()) return
+        if (s.group) {
+            val (gen, st) = chatClaim { current ->
+                when {
+                    !ChatActions.canSend(current) -> current.copy(
+                        notice = ChatActions.whyNoSend(current) ?: "Not sent: the chat isn’t ready yet.")
+                    retry && current.messages.none { it.id == id && ChatActions.canRetry(current, it) } -> null
+                    else -> current.copy(messages = current.messages.filterNot { it.id == id } + Chat.Message(id, text, "sending"))
+                }
+            } ?: return
+            if (ChatActions.canSend(st)) groupSend(gen, st, text, id, retry)
+            return
+        }
         if (!ChatActions.canSend(s)) { chatUpdate(chatGen) { it.copy(notice = ChatActions.whyNoSend(it) ?: "Not sent: the chat isn’t ready yet.") }; return }
         chatUpdate(chatGen) { it.copy(messages = it.messages.filterNot { m -> m.id == id } + Chat.Message(id, text, "sending")) }
         chatAct { link, st, gen ->
@@ -1196,7 +1501,27 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
 
     /** A message that may not have gone: sent again with the same id, so the bridge types it at most once. */
-    fun chatRetry(m: Chat.Message) { if (_chat.value?.let { ChatActions.canRetry(it, m) } == true) chatSend(m.text, m.id) }
+    fun chatRetry(m: Chat.Message) {
+        val s = _chat.value ?: return
+        if (ChatActions.canRetry(s, m)) chatSend(m.text, m.id, retry = s.group)
+    }
+
+    fun chatSendAsNew(m: Chat.Message) {
+        val fresh = UUID.randomUUID().toString()
+        val (gen, st) = chatClaim { s ->
+            val original = s.messages.find { it.id == m.id && ChatActions.canSendAsNew(s, it) }
+            original?.let { s.copy(messages = s.messages.filterNot { it.id == m.id } + Chat.Message(fresh, it.text, "sending")) }
+        } ?: return
+        groupSend(gen, st, st.messages.last().text, fresh, retry = false)
+    }
+
+    private fun groupSend(gen: Int, st: Chat.State, text: String, id: String, retry: Boolean) {
+        groupAct(gen, st) { link, done ->
+            runCatching { if (retry) link.send(st.terminal, text, id, true) else link.send(st.terminal, text, id) }
+                .onSuccess { a -> done { Chat.answered(this, id, text, a) } }
+                .onFailure { done { Chat.unanswered(this, id, text) } }
+        }
+    }
 
     fun chatSendHeld(m: Chat.Message) {
         val s = _chat.value ?: return
@@ -1219,6 +1544,17 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     fun chatAnswer(row: Chat.Row, choice: String) {
         val s = _chat.value ?: return
+        if (s.group) {
+            val (gen, st) = chatClaim { current ->
+                current.takeIf { choice in ChatActions.choices(it, it.approvals.find { card -> card.id == row.id }) }
+            } ?: return
+            groupAct(gen, st) { link, done ->
+                runCatching { link.answer(st.terminal, row.id, choice) }
+                    .onSuccess { a -> done { Chat.answerReply(this, row.id, a) } }
+                    .onFailure { done { copy(notice = Chat.ANSWER_MAYBE) } }
+            }
+            return
+        }
         if (choice !in ChatActions.choices(s, row)) return
         if (previewAnswer(row)) return
         chatAct { link, st, gen ->
@@ -1230,6 +1566,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     /** A question answered on the phone: the options picked (0-based) or a typed answer, only as [ChatActions] offers it. */
     fun chatAnswerQuestion(row: Chat.Row, picked: List<Int>, text: String? = null) {
         val s = _chat.value ?: return
+        if (s.group) return
         val (choice, typed) = ChatActions.questionAnswer(s, row, picked, text) ?: return
         if (previewAnswer(row)) return
         chatAct { link, st, gen ->
@@ -1240,6 +1577,14 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
 
     fun chatInterrupt() {
         val s = _chat.value ?: return
+        if (s.group) {
+            val (gen, st) = chatClaim { it.takeIf(ChatActions::canInterrupt) } ?: return
+            groupAct(gen, st) { link, done ->
+                val notice = Chat.interruptNotice(runCatching { link.interrupt(st.terminal) }.getOrNull(), st.dsh, group = st.group)
+                done { copy(notice = notice) }
+            }
+            return
+        }
         if (!ChatActions.canInterrupt(s)) return
         if (previewChat()) return
         chatAct { link, st, gen ->
@@ -1255,7 +1600,17 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     private fun unconfirmed(s: Chat.State) = if (s.dsh) Chat.ANSWER_MAYBE else "Not confirmed. Check the terminal."
 
     fun chatEarlier() {
-        val before = _chat.value?.oldest ?: return
+        val s = _chat.value ?: return
+        val before = s.oldest ?: return
+        if (s.group) {
+            val (gen, st) = chatClaim { current -> current.takeIf { it.oldest == before && it.connected } } ?: return
+            groupAct(gen, st) { link, done ->
+                runCatching { link.backfill(st.terminal, before) }
+                    .onSuccess { page -> done { Chat.earlier(this, page) } }
+                    .onFailure { e -> done { copy(notice = e.message) } }
+            }
+            return
+        }
         chatAct { link, st, gen ->
             runCatching { link.backfill(st.terminal, before) }
                 .onSuccess { page -> chatUpdate(gen) { Chat.earlier(it, page) } }
@@ -1267,7 +1622,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     /** Dismisses the receipt of a card that closed while the phone was away; it does not come back on the next reconnect. */
     fun dismissReceipt(id: String) { _chat.update { it?.let { s -> Chat.dismissReceipt(s, id) } } }
 
-    /** Reads machine [hostId]'s Automagik Bot chats (read only) for the Bot chats list, on a short-lived connection. */
+    /** Reads machine [hostId]'s Automagik chats on a short-lived connection. */
     fun loadBotChats(hostId: String) {
         if (state.value.demo) return
         _botChats.update { it + (hostId to null) }
@@ -1276,12 +1631,447 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
                 coroutineScope {
                     val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
                     val link = openChatLink(hostId, scope) { }
-                    try { link.list().filter { it.dsh }.also { _botWrites.update { w -> w + (hostId to link.dshWrite) } } } finally { link.close(); scope.cancel() }
+                    try { link.list().filter { it.dsh && (!it.group || link.groups) }.also { _botWrites.update { w -> w + (hostId to link.dshWrite) } } } finally { link.close(); scope.cancel() }
                 }
             }
-            result.getOrNull()?.let { rows -> _chatWatch.update { ChatWatch.read(it, hostId, rows, System.currentTimeMillis()) } }
+            result.getOrNull()?.let { rows -> _chatWatch.update { ChatWatch.read(it, hostId, rows.filterNot { r -> r.group }, System.currentTimeMillis()) } }
             _botChats.update { it + (hostId to result) }
         }
+    }
+
+    private val _memory = MutableStateFlow<ChatMemory.State?>(null)
+    val memory = _memory.asStateFlow()
+    /** The latest memory hello for each host since its chat last opened or reconnected. */
+    private val _botManage = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val botManage = _botManage.asStateFlow()
+    private var memoryToken = 0L
+    private var memoryLink: ChatLink? = null
+    private var memoryJob: Job? = null
+    private val memoryNotice = mutableSetOf<TerminalRef>()
+
+    /** The dialog owns a connection even when the Bot chat could not subscribe. Its claims and completions run on Main. */
+    fun openMemory(ref: TerminalRef) {
+        if (state.value.demo || !Chat.isDsh(ref.address) || Chat.isGroup(ref.address)) return
+        if (_memory.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
+        closeMemory()
+        val token = ++memoryToken
+        val notice = ChatMemory.EARLIER_CHANGE.takeIf { memoryNotice.remove(ref) }
+        val connecting = ChatMemory.State(ref.hostId, ref.address, token, op = ChatMemory.Op.READ, notice = notice)
+        _memory.value = connecting
+        memoryJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
+            var ownedLink: ChatLink? = null
+            try {
+                val link = try {
+                    withContext(linkDispatcher) {
+                        openChatLink(ref.hostId, scope, ChatClient.MEMORY) {
+                            viewModelScope.launch { memoryLost(token) }
+                        }.also { ownedLink = it }
+                    }
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if (e is ChatUnsupported) memoryUnsupported(connecting)
+                    else endMemory(connecting.closed("Couldn't connect to the computer."))
+                    return@launch
+                }
+                if (token != memoryToken) return@launch
+                val grants = link.manage
+                if ("memory.read" !in grants) { memoryUnsupported(connecting); return@launch }
+                _botManage.update { it + (ref.hostId to true) }
+                memoryLink = link
+                _memory.value = connecting.copy(phase = ChatMemory.Phase.LOADING, status = ChatMemory.CHECKING, grants = grants)
+                launch { readMemory(token, link) }
+                awaitCancellation()
+            } finally {
+                scope.cancel()
+                ownedLink?.let { link ->
+                    withContext(NonCancellable + linkDispatcher) { runCatching { link.close() } }
+                }
+            }
+        }
+        memoryJob?.start()
+    }
+
+    private fun memoryUnsupported(s: ChatMemory.State) {
+        _botManage.update { it + (s.hostId to false) }
+        endMemory(s.closed("Memory isn't offered on this connection. If this keeps happening, update Pocket Link and Automagik on this computer."))
+    }
+
+    private fun memoryLost(token: Long) {
+        val s = _memory.value ?: return
+        if (token != memoryToken || s.phase == ChatMemory.Phase.CLOSED) return
+        val mayHaveSaved = s.mayHaveSaved
+        if (mayHaveSaved) memoryNotice += TerminalRef(s.hostId, s.terminal)
+        val line = if (mayHaveSaved)
+            "The connection closed before the computer answered. The change may have been saved: open Memory again to check."
+        else "The connection to the computer closed."
+        endMemory(s.closed(line))
+    }
+
+    private fun currentMemory(token: Long, link: ChatLink) =
+        _memory.value?.takeIf { token == memoryToken && memoryLink === link }
+
+    private fun endMemory(closed: ChatMemory.State) {
+        releaseMemory()
+        _memory.value = closed
+    }
+
+    private fun releaseMemory() {
+        memoryLink = null
+        // The job closes its link on linkDispatcher, including when its own scope is already cancelled.
+        memoryJob?.cancel(); memoryJob = null
+    }
+
+    fun closeMemory() {
+        _memory.value?.takeIf { it.mayHaveSaved }?.let { memoryNotice += TerminalRef(it.hostId, it.terminal) }
+        ++memoryToken
+        releaseMemory()
+        _memory.value = null
+    }
+
+    private suspend fun readMemory(token: Long, link: ChatLink) {
+        val terminal = currentMemory(token, link)?.terminal ?: return
+        val result = memoryResult { link.memoryRead(terminal) }
+        val current = currentMemory(token, link) ?: return
+        applyMemory(ChatMemory.afterRead(current, result).first)
+    }
+
+    fun refreshMemory() {
+        val s = _memory.value?.takeIf { it.canRefresh } ?: return
+        val link = memoryLink ?: return
+        val parent = memoryJob ?: return
+        val token = s.token
+        _memory.value = s.copy(phase = ChatMemory.Phase.LOADING, op = ChatMemory.Op.READ, status = ChatMemory.CHECKING)
+        viewModelScope.launch(parent) { readMemory(token, link) }
+    }
+
+    fun memoryAdd(text: String) = writeMemory("memory.add", ChatMemory.Op.ADD, text) { link, terminal ->
+        link.memoryAdd(terminal, text)
+    }
+
+    fun memoryEdit(entry: ChatMemory.Entry, text: String) = writeMemory("memory.edit", ChatMemory.Op.EDIT, text) { link, terminal ->
+        link.memoryEdit(terminal, entry.id, entry.rev, text)
+    }
+
+    /** Claim the operation before dispatching so a second tap cannot send another write. */
+    private fun writeMemory(method: String, op: ChatMemory.Op, text: String, call: suspend (ChatLink, String) -> JSONObject) {
+        val s = _memory.value?.takeIf { it.canWrite(method) } ?: return
+        val issue = ChatMemory.checkText(text)
+        if (issue != null) { _memory.value = s.copy(outcome = issue); return }
+        val link = memoryLink ?: return
+        val parent = memoryJob ?: return
+        val (_, terminal, token) = s
+        _memory.value = s.copy(op = op, outcome = null)
+        viewModelScope.launch(parent) {
+            val result = memoryResult { call(link, terminal) }
+            val current = currentMemory(token, link) ?: return@launch
+            val (next, needsRead) = ChatMemory.afterWrite(current, op, result)
+            applyMemory(next)
+            if (needsRead) readMemory(token, link)
+        }
+    }
+
+    /** A per-call timeout is a reply failure. Closing the dialog cancels the operation itself. */
+    private suspend fun memoryResult(call: suspend () -> JSONObject): Any = withContext(linkDispatcher) {
+        try { call() } catch (e: Exception) { currentCoroutineContext().ensureActive(); e }
+    }
+
+    private fun applyMemory(s: ChatMemory.State) {
+        if (s.phase == ChatMemory.Phase.CLOSED) endMemory(s) else _memory.value = s
+    }
+
+    private val _schedules = MutableStateFlow<ChatSchedules.State?>(null)
+    val schedules = _schedules.asStateFlow()
+    /** Discover the offer on demand, so chat and Memory never request schedule authority. */
+    private val _botSchedules = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val botSchedules = _botSchedules.asStateFlow()
+    private var scheduleToken = 0L
+    private var scheduleLink: ChatLink? = null
+    private var scheduleJob: Job? = null
+    /** A later connection can show that an earlier edit was pending with only the Bot's address. */
+    private val scheduleNotice = mutableSetOf<TerminalRef>()
+
+    /** The dialog owns its connection so its grant and task data end with it. */
+    fun openSchedules(ref: TerminalRef) {
+        if (state.value.demo || !Chat.isDsh(ref.address) || Chat.isGroup(ref.address)) return
+        if (_schedules.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
+        closeSchedules()
+        val token = ++scheduleToken
+        val notice = ChatSchedules.EARLIER_CHANGE.takeIf { scheduleNotice.remove(ref) }
+        val connecting = ChatSchedules.State(ref.hostId, ref.address, token, op = ChatSchedules.Op.READ, notice = notice)
+        _schedules.value = connecting
+        scheduleJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
+            var ownedLink: ChatLink? = null
+            try {
+                val link = try {
+                    withContext(linkDispatcher) {
+                        openChatLink(ref.hostId, scope, ChatClient.SCHEDULES) {
+                            viewModelScope.launch { schedulesLost(token) }
+                        }.also { ownedLink = it }
+                    }
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if (e is ChatUnsupported) schedulesUnsupported(connecting)
+                    else endSchedules(connecting.closed("Couldn't connect to the computer."))
+                    return@launch
+                }
+                if (token != scheduleToken) return@launch
+                val grants = link.manage.intersect(ChatClient.SCHEDULES.toSet())
+                if ("schedule.list" !in grants) { schedulesUnsupported(connecting); return@launch }
+                _botSchedules.update { it + (ref.hostId to true) }
+                scheduleLink = link
+                _schedules.value = connecting.copy(phase = ChatSchedules.Phase.LOADING, status = ChatSchedules.CHECKING, grants = grants)
+                launch { readSchedules(token, link) }
+                awaitCancellation()
+            } finally {
+                scope.cancel()
+                ownedLink?.let { link ->
+                    withContext(NonCancellable + linkDispatcher) { runCatching { link.close() } }
+                }
+            }
+        }
+        scheduleJob?.start()
+    }
+
+    private fun schedulesUnsupported(s: ChatSchedules.State) {
+        _botSchedules.update { it + (s.hostId to false) }
+        endSchedules(s.closed("Schedules aren't offered on this connection. If this keeps happening, update Pocket Link and Automagik on this computer."))
+    }
+
+    private fun schedulesLost(token: Long) {
+        val s = _schedules.value ?: return
+        if (token != scheduleToken || s.phase == ChatSchedules.Phase.CLOSED) return
+        if (s.mayHaveSaved) {
+            endSchedules(s.copy(uncertain = s.uncertain ?: s.opTask, outcome = s.outcome ?: ChatSchedules.UNCONFIRMED)
+                .closed("The connection closed before the computer answered. The change may have been saved: check it on the computer."))
+        } else endSchedules(s.closed("The connection to the computer closed."))
+    }
+
+    private fun currentSchedules(token: Long, link: ChatLink) =
+        _schedules.value?.takeIf { token == scheduleToken && scheduleLink === link }
+
+    private fun endSchedules(closed: ChatSchedules.State) {
+        releaseSchedules()
+        _schedules.value = closed
+    }
+
+    private fun releaseSchedules() {
+        scheduleLink = null
+        scheduleJob?.cancel(); scheduleJob = null
+    }
+
+    fun closeSchedules() {
+        _schedules.value?.takeIf { it.mayHaveSaved }?.let { scheduleNotice += TerminalRef(it.hostId, it.terminal) }
+        ++scheduleToken
+        releaseSchedules()
+        _schedules.value = null
+    }
+
+    private suspend fun readSchedules(token: Long, link: ChatLink) {
+        val (terminal, id) = currentSchedules(token, link)?.let { it.terminal to it.uncertain } ?: return
+        val result = managementResult { link.scheduleList(terminal, id) }
+        val current = currentSchedules(token, link) ?: return
+        applySchedules(ChatSchedules.afterRead(current, id, result))
+    }
+
+    fun refreshSchedules() {
+        val s = _schedules.value?.takeIf { it.canRefresh } ?: return
+        val link = scheduleLink ?: return
+        val parent = scheduleJob ?: return
+        val phase = if (s.uncertain == null) ChatSchedules.Phase.LOADING else ChatSchedules.Phase.RECONCILING
+        val token = s.token
+        _schedules.value = s.copy(phase = phase, op = ChatSchedules.Op.READ, opTask = s.uncertain, status = ChatSchedules.CHECKING)
+        viewModelScope.launch(parent) { readSchedules(token, link) }
+    }
+
+    fun schedulePause(task: ChatSchedules.Task) = writeSchedule("schedule.pause", ChatSchedules.Op.PAUSE, task) { link, terminal, id, rev ->
+        link.schedulePause(terminal, id, rev)
+    }
+
+    fun scheduleResume(task: ChatSchedules.Task) = writeSchedule("schedule.resume", ChatSchedules.Op.RESUME, task) { link, terminal, id, rev ->
+        link.scheduleResume(terminal, id, rev)
+    }
+
+    fun scheduleRename(task: ChatSchedules.Task, title: String) {
+        val trimmed = ChatSchedules.trimTitle(title)
+        writeSchedule("schedule.rename", ChatSchedules.Op.RENAME, task, ChatSchedules.checkTitle(trimmed)) { link, terminal, id, rev ->
+            link.scheduleRename(terminal, id, rev, trimmed)
+        }
+    }
+
+    /** Claim the displayed revision on Main before another tap or refresh can send a call. */
+    private fun writeSchedule(method: String, op: ChatSchedules.Op, task: ChatSchedules.Task, issue: String? = null,
+                              call: suspend (ChatLink, String, String, String) -> JSONObject) {
+        val s = _schedules.value ?: return
+        val (id, rev) = task
+        val row = s.listing?.tasks?.find { it.id == id && it.rev == rev } ?: return
+        if (!s.canAct(method, row)) return
+        if (issue != null) { _schedules.value = s.copy(outcome = issue); return }
+        val link = scheduleLink ?: return
+        val parent = scheduleJob ?: return
+        val (_, terminal, token) = s
+        _schedules.value = s.copy(op = op, opTask = id, outcome = null, status = null)
+        viewModelScope.launch(parent) {
+            val result = managementResult { call(link, terminal, id, rev) }
+            val current = currentSchedules(token, link) ?: return@launch
+            val next = ChatSchedules.afterWrite(current, result)
+            applySchedules(next)
+            if (next.phase == ChatSchedules.Phase.RECONCILING) readSchedules(token, link)
+        }
+    }
+
+    /** Treat a request timeout as a lost reply while letting dialog cancellation end its work. */
+    private suspend fun managementResult(call: suspend () -> JSONObject): Any = withContext(linkDispatcher) {
+        try { call() } catch (e: Exception) { currentCoroutineContext().ensureActive(); e }
+    }
+
+    private fun applySchedules(s: ChatSchedules.State) {
+        if (s.phase == ChatSchedules.Phase.CLOSED) endSchedules(s) else _schedules.value = s
+    }
+
+    private val _settings = MutableStateFlow<ChatSettings.State?>(null)
+    val settings = _settings.asStateFlow()
+    private val _botSettings = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val botSettings = _botSettings.asStateFlow()
+    private var settingsToken = 0L
+    private var settingsLink: ChatLink? = null
+    private var settingsJob: Job? = null
+    private val settingsNotice = mutableSetOf<TerminalRef>()
+
+    /** Negotiate settings only while its dialog is open. */
+    fun openSettings(ref: TerminalRef) {
+        if (state.value.demo || !ChatSettings.isBot(ref.address)) return
+        if (_settings.value?.let { it.hostId == ref.hostId && it.terminal == ref.address } == true) return
+        closeSettings()
+        val token = ++settingsToken
+        val notice = ChatSettings.EARLIER_CHANGE.takeIf { settingsNotice.remove(ref) }
+        val connecting = ChatSettings.State(ref.hostId, ref.address, token, op = ChatSettings.Op.READ, notice = notice)
+        _settings.value = connecting
+        settingsJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
+            var ownedLink: ChatLink? = null
+            try {
+                val link = try {
+                    withContext(linkDispatcher) {
+                        openChatLink(ref.hostId, scope, ChatClient.SETTINGS) {
+                            viewModelScope.launch { settingsLost(token) }
+                        }.also { ownedLink = it }
+                    }
+                } catch (e: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if (e is ChatUnsupported) settingsUnsupported(connecting)
+                    else endSettings(connecting.closed("Couldn't connect to the computer."))
+                    return@launch
+                }
+                if (token != settingsToken) return@launch
+                val grants = link.manage.intersect(ChatClient.SETTINGS.toSet())
+                if (ChatSettings.Op.READ.method !in grants) { settingsUnsupported(connecting); return@launch }
+                _botSettings.update { it + (ref.hostId to true) }
+                settingsLink = link
+                _settings.value = connecting.copy(phase = ChatSettings.Phase.LOADING, status = ChatSettings.CHECKING, grants = grants)
+                launch { readSettings(token, link) }
+                awaitCancellation()
+            } finally {
+                scope.cancel()
+                ownedLink?.let { link ->
+                    withContext(NonCancellable + linkDispatcher) { runCatching { link.close() } }
+                }
+            }
+        }
+        settingsJob?.start()
+    }
+
+    private fun settingsUnsupported(s: ChatSettings.State) {
+        _botSettings.update { it + (s.hostId to false) }
+        endSettings(s.closed("Bot settings aren't offered on this connection."))
+    }
+
+    private fun settingsLost(token: Long) {
+        val s = _settings.value ?: return
+        if (s.token != token || s.phase == ChatSettings.Phase.CLOSED) return
+        rememberSettingsOutcome(s)
+        endSettings(s.closed(ChatSettings.CONNECTION_CLOSED, ChatSettings.MAY_HAVE_CHANGED.takeIf { s.mayHaveChanged }))
+    }
+
+    private fun currentSettings(token: Long, link: ChatLink): ChatSettings.State? {
+        val s = _settings.value?.takeIf { it.token == token && settingsLink === link } ?: return null
+        // The transport can fail the pending call before its disconnect callback reaches Main.
+        if (link.isClosed) { settingsLost(token); return null }
+        return s
+    }
+
+    private fun endSettings(closed: ChatSettings.State) {
+        releaseSettings()
+        _settings.value = closed
+    }
+
+    private fun releaseSettings() {
+        settingsLink = null
+        settingsJob?.cancel(); settingsJob = null
+    }
+
+    private fun rememberSettingsOutcome(s: ChatSettings.State) {
+        if (s.mayHaveChanged) settingsNotice += TerminalRef(s.hostId, s.terminal)
+    }
+
+    fun closeSettings() {
+        _settings.value?.let(::rememberSettingsOutcome)
+        ++settingsToken
+        releaseSettings()
+        _settings.value = null
+    }
+
+    private suspend fun readSettings(token: Long, link: ChatLink) {
+        val terminal = currentSettings(token, link)?.terminal ?: return
+        val result = managementResult { link.settingsRead(terminal) }
+        val current = currentSettings(token, link) ?: return
+        applySettings(ChatSettings.afterRead(current, result))
+    }
+
+    fun refreshSettings() {
+        val s = _settings.value?.takeIf { it.canRefresh } ?: return
+        val link = settingsLink ?: return
+        val parent = settingsJob ?: return
+        val phase = if (s.uncertain) ChatSettings.Phase.RECONCILING else ChatSettings.Phase.LOADING
+        _settings.value = s.copy(phase = phase, op = ChatSettings.Op.READ, status = ChatSettings.CHECKING)
+        viewModelScope.launch(parent) { readSettings(s.token, link) }
+    }
+
+    fun settingsName(token: Long, rev: String, name: String) =
+        writeSettings(token, rev, ChatSettings.Op.NAME, ChatSettings.trimName(name))
+
+    fun settingsModel(token: Long, rev: String, model: String) = writeSettings(token, rev, ChatSettings.Op.MODEL, model)
+
+    /** Check the editor's token, revision and method grant, then claim the operation on Main. */
+    private fun writeSettings(token: Long, rev: String, op: ChatSettings.Op, value: String) {
+        val s = _settings.value ?: return
+        val snapshot = s.snapshot ?: return
+        if (s.token != token || snapshot.settings.rev != rev || !s.canEdit(op)) return
+        if (op == ChatSettings.Op.MODEL && snapshot.models.entries.none { it.id == value }) return
+        if (op == ChatSettings.Op.NAME) ChatSettings.checkName(value)?.let {
+            _settings.value = s.copy(outcome = it, autoOff = false)
+            return
+        }
+        val link = settingsLink ?: return
+        if (currentSettings(token, link) == null) return
+        val parent = settingsJob ?: return
+        val terminal = s.terminal
+        _settings.value = s.copy(op = op, outcome = null, status = ChatSettings.CHECKING, autoOff = false)
+        viewModelScope.launch(parent) {
+            val result = managementResult {
+                if (op == ChatSettings.Op.NAME) link.settingsName(terminal, rev, value)
+                else link.settingsModel(terminal, rev, value)
+            }
+            val current = currentSettings(token, link) ?: return@launch
+            val next = ChatSettings.afterWrite(current, result)
+            applySettings(next)
+            if (next.phase == ChatSettings.Phase.RECONCILING) readSettings(token, link)
+        }
+    }
+
+    private fun applySettings(s: ChatSettings.State) {
+        if (s.phase == ChatSettings.Phase.CLOSED) endSettings(s) else _settings.value = s
     }
 
     fun startTerminal(hostId: String, cwd: String, command: String) {

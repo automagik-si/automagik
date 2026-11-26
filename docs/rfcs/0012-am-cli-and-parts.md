@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-2: #254, #258, #263; 3-10 not found; owner's answers in: D35) |
+| Status | In delivery (deliveries 1-2: #254, #258, #263; 3-10 not found; owner's answers in: D35; #206 amendment (delivery 9a, am on a linked machine) approved by the owner's delegate on 2026-11-20, questions 6-11 answered with its recommendations, 9a in delivery; #1007 amendment (Pocket Link's part, `am pocket`) approved by the owner's delegate on 2026-11-21, RFC 0046's six questions decided with its recommendations) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | am (3.N.P, D35), herdr (3.N.P), plugin (3.N.P), pocket (3.N.P), desktop (3.N) |
 | Created | 2026-11-03 |
@@ -128,7 +128,8 @@ change.
 - **As built in delivery 1** (t30j, agreed with t22n and t259, 2026-11-03):
   - The secret is `AM_LANE_KEY` (rotation slot `AM_LANE_KEY_NEXT`, picked by the variable
     `AM_LANE_SIGNER`), the public keys `am/am-keys.json`, made by `bun scripts/am-lane.ts
-    keygen`. Amending the bullet above: while `am-keys.json` lists no key, or the secret is not
+    keygen`. The workflow uses only the selected slot, even when its secret is empty.
+    Amending the bullet above: while `am-keys.json` lists no key, or the secret is not
     set, a release attaches am, posts no `am-lane` and says so in a `::warning::` (the key is
     the owner's to add; a release never fails over its absence, nor in the window between
     keygen and its `am-keys.json` reaching dev). Once keys are listed, a secret that is none of
@@ -274,9 +275,10 @@ need. All are `targets: local`, `set: ["code"]`, artifact `automagik-herdr-pack-
 - None declares `~/.local/bin/usagemeter`: that becomes usagemeter's own part (t22b);
   `install.sh` and `am meter` keep handling it until then.
 - Pocket Link (`herdr/mods/pocket-link`) is on the herdr lane but is not a pack member (it is
-  never in `PACK_MODS`, and the pack never writes it). Proposed: its own part, owned by Pocket.
-  Pocket itself (`android-app`) installs nothing on a computer: proposed, its doctor reports 2
-  there, and `am pocket pair` is how a phone joins.
+  never in `PACK_MODS`, and the pack never writes it). Its own part, owned by Pocket, decided by
+  the owner's delegate on 2026-11-21 (RFC 0030, Decisions (2026-11-21), 4): `pocket.link`, see
+  "Amendment (2026-11-21, #1007)". Pocket itself (`android-app`) installs nothing on a computer:
+  proposed, its doctor reports 2 there, and `am pocket pair` is how a phone joins.
 
 ### herdr-app as a part (D27)
 
@@ -343,7 +345,8 @@ sha256 the pointer names, before anything is written. Each lane has its own key:
 records the tarball's hash, and no member has a hash of its own (D35; one would need a new
 pointer field, and rule 5 says a part's sha256 comes from the pointer, never from the
 download). Pocket's `latest.json` is unsigned on purpose (the APK's signer is the check);
-usagemeter's trust is t22b's to decide (question 5).
+usagemeter's trust was t22b's to decide (question 5), since settled by RFC 0017's signed
+`meter-lane` pointer.
 
 A named version is checked only against the `.sha256` beside it, which comes from the same
 download: integrity, not who published it. So am records it as unsigned and asks for the same
@@ -483,6 +486,223 @@ keyed by hc's machine name. Proposed:
 - parts.json is keyed by hc's machine name (D35). This machine writes its own entry; a remote's
   entry here is only its last report, marked with when it came.
 
+### Amendment (2026-11-20, #206): am on a linked machine, before delivery 3
+
+Status: In delivery. Approved by the owner's delegate on 2026-11-20, questions 6-11 answered with
+this amendment's recommendations (see "Answers to questions 6-11" under Open questions). The
+amendment splits delivery 9 into 9a, in delivery, and 9b, after delivery 3.
+
+**What #206 still needs.** Issue #206 asks that a Bot in a project on a linked machine be
+configured, started and inspected from the desktop. On `dev` at `e7de3fde1`:
+
+- Configure, create and Prompt write that machine's `.herdr/bots.json` through herdr-core with
+  compare-and-swap (#255).
+- Start and Restart run the pane there (`machine/tN`); Attach and Detach bind or unbind a live
+  pane there (#261, #444, #1661). The binding is committed in this computer's attach ledger and
+  the pane's bot label.
+- The launch briefing goes in the command or in a file under that machine's app home, depending
+  on the agent and on that app home being there (#303, #582, #823).
+- Inspect reads this computer's attach ledger for that machine's panes (#1709). The linked
+  machine's own starts, workers, sessions and transcript are not read (the remote-panes test
+  expects them empty).
+- A linked Claude bot gets its per-turn briefing hook only where the machine has the pack under
+  its app home. `briefingHookOn` returns early when the pack's stable entry is missing and calls
+  `installHook` with no am store (`herdr/mods/am-sidebar/bin/automagik-herdr.mjs:4764-4769`), while
+  the local path passes this computer's (`:1596`), so an am-only machine gets no hook
+  (`herdr/mods/am-sidebar/briefingText.mjs:705-720`). Attach on a linked machine never writes the
+  hook (`automagik-herdr.mjs:8945-8946`).
+- Nothing puts am on a linked machine that has none. The hourly linked updater runs that
+  machine's own `am update`, or the pack's update; with neither it records am and the pack as
+  `absent` (`am/machineUpdates.js:97-113`, `:225`).
+- The CLI's warning names a command that does not exist, `am machine install <M>`
+  (`automagik-herdr.mjs:8856-8858`).
+
+The issue's literal `am install herdr.cli --machine M` names a part this RFC retired before it
+shipped ("`herdr.cli` is retired before it ships"): the CLI is `automagik.am` now. Delivery 9's
+far side (`hc exec --on M am install <id>`) needs `am install <id>`, which is delivery 3 and not
+built. Only am itself has to reach the machine for #206, and am already installs and updates
+itself without delivery 3. So **9a** puts am on one linked machine now and makes the linked hook
+use it; **9b** is the rest of delivery 9, still after delivery 3.
+
+**9a, choosing the machine.** `am machines install --machine M`: exactly one machine. `--local`,
+`--linked`, no selector, and a name that is unknown, temporary, disconnected or matches more than
+one entry are refused. The CLI reads the whole machine list (`hc machine ls --json`, through the
+identity-aware parser in `am/accountsRows.js`, never `meterFleet.js`'s, which drops ids and reads
+a malformed list as empty), keeps the machine's core id, refuses a name that more than one row
+carries (temporary rows counted), and checks the name and core id together again just before the
+install and at the read-back. `hc exec --on` takes a name, so a relink between that check and the
+command is the transport's limit, as RFC 0043 found; the line names the core id it checked.
+Installing am grants no membership in RFC 0043's accounts plan.
+
+**9a, reading the machine** (read-only, `hc exec`, files and links read directly, no CLI there
+trusted yet). One of:
+
+- *missing*: no am record, no `am` link.
+- *retained*: an am record with no links (a plain `self uninstall` keeps the store). Installed
+  like missing; the record's sequence is the floor.
+- *pack only*: `am` and `automagik-herdr` are the pack's links by `self install`'s own rule
+  (`am/lib/self.mjs` `linkCommands`, against the paths that machine's app home gives). The
+  standalone am goes in and takes the links over by that rule.
+- *installed `<v>`*: am's own links into its store. Reported with the version; `current` only
+  when it equals the version the verified pointer names, else the hourly updater (or `am update`
+  there) moves it. A machine that opted out (`machines --auto off`) is told so.
+- *incomplete*: one of `am` and `automagik-herdr` is am's link and the other is missing. The
+  install relinks the missing one by `linkCommands`' rule.
+- *broken*: a foreign file or link at `am` or `automagik-herdr`, an unreadable or damaged record
+  (never read as empty), a store link that points nowhere. Reported with the path; nothing is
+  replaced.
+
+Also read: the user `hc exec` runs as (`id -u`, `$HOME`), `uname -sm` (D28's targets; Intel macOS
+and anything outside them are refused), an absolute path to Node 22.7 or later found as
+`am/bin/run.sh` finds one (PATH, then nvm and Homebrew; Bun alone is refused with a line, since the
+verification runs on Node), and `curl`, `tar`, and `sha256sum` or `shasum`.
+
+**9a, the bootstrap** (question 7; D35's bootstrap verifies `am-lane` itself). A fixed script,
+`sh -c SCRIPT sh <args>` with every value as argv, runs with the absolute Node path:
+
+1. It downloads `am.json` and `am.json.sig` from the canonical `am-lane` release over HTTPS only
+   (`curl --proto =https --proto-redir =https`; the script refuses any other base and reads no
+   environment override), and checks the Ed25519 signature over the exact bytes against am's
+   public keys, which this computer sends from its own install. It checks the pointer's fields as
+   `am/lib/lane.mjs` does (the official repository, the `v<version>` tag, the tarball URL),
+   and every other field `checkPointer` requires (its sequence and commit included), refuses a
+   sequence lower than the one a retained `record.json` there took, downloads the tarball, checks
+   its sha256 and size, and refuses absolute paths, `..`, links and anything but files and folders
+   in its entries, all before anything is extracted. A missing pointer, a bad signature, an unknown
+   key or any failed check installs nothing, and the candidate never runs. The verifier is one text
+   shared with the README's hand steps (which gain the sequence and commit checks), kept equal by a
+   test (question 7 asks to put it in place of D35's one-liner for this path).
+2. It extracts the verified tarball only to run its `am`: `self install --signed <folder>`, a new
+   input of am's own, given the folder holding the pointer, its signature and the tarball. Under
+   the store's lock (busy: the line says another install is running, and a retry is safe), it
+   re-reads the record (a damaged one stops it), checks again the sequence floor, the pointer
+   against its own `am-keys.json`, the tarball against the pointer and its entries, extracts that
+   tarball into staging and places the staging tree, the way
+   `am update` places one (`fetchAndPlace`, `am/lib/self.mjs:379-410`), never its own folder. The
+   record says signed, with the sequence and sha256, and `entry: false`: a linked install writes no
+   stable briefing entry (the linked hook uses am's own form, below), and am's update, rollback and
+   doctor honour that mode, so a later update never writes or replaces one there and doctor does not
+   ask for it. Before it reports success it checks that both links point into the store and that
+   `current` runs; when a check after the swap fails, `current`, `record.json` (its taken sequence
+   kept as the floor) and the two links go back to what they were, or, for a first install, are
+   removed and the line says `broken` with the paths.
+3. Its temporary folder is removed on every exit.
+
+The first am on a machine is trusted through this computer's installed am keys: a fresh machine
+has no floor of its own, as a hand install has none. From then on that am updates only from the
+keys it carries.
+
+**9a, the keys a pack-only computer sends.** A computer with only the pack has no am keys today.
+`am/am-keys.json` stays the one source: `bun scripts/am-lane.ts keygen` writes it and a pack copy
+(`herdr/mods/am-sidebar/am-keys.json`) together, a test keeps them equal (as `meter-keys.json`'s
+copies are kept equal), and a rotation's two phases (RFC 0011) ship the new key in both before the
+signer switches. A pointer signed by a key this computer's copy does not list is refused with the
+fix (update this computer's pack or am first). An `am-lane` that still names an am too old for
+`self install --signed` (the am-lane post runs after the cut, as its own job) is refused with the
+version needed. Neither case falls back to an unsigned install.
+
+**9a, the result.** One line (`--json`: one object with the machine, its core id, the user, the
+state `installed`, `current`, `installed <v>`, `refused`, `busy`, `failed` or `unknown`, and why).
+Exit 0 only for `installed` and `current`. It is merged into `linked-updates.json` under the
+updater's lock as a timestamped observation, other machines and parts kept, and printed even when
+that file cannot be written; the far `record.json` stays am's authority (rule 2; D35's parts.json
+keyed by machine is 9b). `unknown` is a connection lost after the bootstrap began: exit non-zero,
+and `am machines install --machine M --check` reads the machine again, read-only, the same way.
+`am machines` shows each of these states by its own word, never "up to date" for one it does not
+know. The hourly cycle never bootstraps am (usagemeter keeps its own scope); an installed am is
+updated by it only while that machine is connected and has not opted out.
+
+**9a, the linked hook.** When neither the pack's stable entry nor the pack's `briefing.mjs` is
+there, `briefingHookOn` no longer returns early: it passes that machine's am part store (`<AM_HOME,
+else ~/.automagik>/parts/automagik.am`, for the same user) to `installHook`, which writes am's form
+(`amPartHookCommand`: absolute runner and entry, guarded). Where the pack is there, today's path
+stays as it is (no stable entry is made over hc, whose create would not keep its 0600 mode). The
+pane's PATH has `~/.local/bin`, after the project's and login paths
+(`herdr/mods/am-sidebar/agentPath.mjs:249-253`), so the Start warning also says when `am` in the
+pane's PATH resolves to something other than am's link. Attach on a linked machine writes the hook
+the same way, in the session folder it already validated, after the binding is committed; a hook
+that fails leaves the binding and is a warning. The warnings say which case it is: no am on the
+machine (naming `am machines install --machine <M>`), no app home there (`launchHomeOn`'s), the
+project's pane env refused, the app home or am store not readable or writable by the user `hc exec`
+runs as (herdr-core runs its panes as that user; a pane running as another user is not proved, and
+the warning says the check was made as `hc exec`'s user), or a running Claude session that needs a
+restart.
+
+**9a, a target with its own attach ledger.** The briefing on the machine finds the pane's bot in
+that machine's own attach ledger when one is there, and reads the pane's label only when there is
+none (`am/briefing.mjs:185-187`). A pane bound from this computer has no row in that ledger, so it
+gets no per-turn briefing there. 9a does not change who binds: the Start and Attach warnings say so
+when the machine has its own ledger (read through hc); when that ledger has a live row binding the
+pane to another bot, which would give the pane that bot's briefing, the warning names that bot.
+Question 11 leaves the case out of #206. A binding that holds on both computers is RFC 0014's shared
+registry.
+
+**9a, an app home on a headless machine** (question 9). The briefing keeps its `briefed` state under
+an app home, and a start never makes one. Proposed: a separate, project-scoped step,
+`am machines install --machine M --project DIR --app-home`, resolves that project's app home as
+Start does (its pane env's `HERDR_APP_HOME`, else `~/.config/herdr-app`; a refused pane env stops
+it), refuses a path that is a link or not owned by the user `hc exec` runs as, and makes only that
+folder, 0700. It writes nothing in it. herdr-core runs its panes as the user its `hc exec` runs as;
+where a project's pane env names a home that user cannot write, the step refuses and the Start
+warning says the same.
+
+**9a, the desktop.** RFC 0030 (accepted) holds the pack's UI to fixes until its deliveries 1 and 2
+are in a stable release, so 9a adds no sidebar action: the sidebar's Start and Attach warnings
+carry the exact command (question 10 asks for an exception). RFC 0030 delivery 6 says "after
+#206"; any split of it needs an amendment of RFC 0030 (#1007). Reaching linked machines from the
+Automagik app is RFC 0022's delivery H, which allows no `exec`, `run` or file writes; an installer
+there needs its own authority.
+
+**9a, unchanged.** The start path (`startOnMachine`, `briefedOn`), the attach ledger's rows
+(`bots.attach-ledger@1`), `whois --json` (`bots.whois-json@1`), the local `am self install` and its
+stable entry, and the herdr pack, herdr-app and herdr-core on the machine (9a installs none of
+them).
+
+**9a, where the code lives.** The CLI (`machines install`, the hook, the warnings),
+`briefingText.mjs` and `machineUpdates.js` are the pack's sources, copied into `am/` by
+`scripts/am-copies.mjs`. `self install --signed` is am's own (`am/lib/self.mjs`, `am/bin/am.mjs`).
+`am/am-keys.json` is am's and the pack's copy is written from it. The change ships as a herdr
+patch carrying am (`scripts/lane.ts` from the paths).
+
+**9a, threat model.** `hc exec` already runs any command on a linked machine, so whoever holds
+this computer's hc fleet holds that machine ("Fleet", under Threat model); 9a adds no reach. The
+first am there is checked on that machine against am's signed pointer with the public keys this
+computer's install carries; this computer's word about the bytes is never trusted alone, and
+nothing is installed without the person's command for that machine. `file://` release folders
+and a test's own keys stay out of the bootstrap: its script takes HTTPS only, and the tests reach
+the far side through a fake `hc exec` runner. (`am update`'s own test overrides in `sourceOf`,
+`am/lib/self.mjs:62-75`, are unchanged and not used.)
+
+### Amendment (2026-11-21, #1007): Pocket Link, Pocket's own part
+
+Status: In delivery. The owner's delegate decided the direction on 2026-11-21 (RFC 0030, Decisions
+(2026-11-21), 4: Pocket Link runs without herdr-app as its own Pocket-owned part, installed and
+started by `am`, paired with `am pocket pair`) and RFC 0046's six questions, each with its
+recommended option. The design is [RFC 0046](0046-pocket-link-without-herdr-app.md), Pocket's;
+this amendment records what changes here.
+
+- **A part `pocket.link`** (proposed id), kind `binary`, `macos` and `linux`, in no set. Its files
+  are byte copies of `herdr/mods/pocket-link/`'s shipped bridge and chat files in `am/pocket/link/`
+  (`scripts/am-copies.mjs`; Pocket Link stays the source), so `automagik-am-<v>.tgz` carries them
+  and they are as signed as am. Its entries ship in the am part, as `herdr.app`'s do. It keeps
+  each version in the parts store (`parts/pocket.link/<version>/`, `current` and `previous`).
+- **The `am pocket` group:** `am pocket pair [--minutes N]` (installs the part when missing,
+  starts the bridge's login service, prints the QR code and the link) and `am pocket link
+  status|on|off|forget|reset`, each a call of the bridge's own verb.
+- **Updates.** When am updates itself and its copy differs from the installed one, am stages and checks the
+  packages first, stops a running bridge, swaps the version and starts it again. A failed start restores the prior version. The hourly linked
+  updater never installs `pocket.link`, and 9a never places it on a linked machine.
+- **`writes`** gains the bridge's login service file (LaunchAgent or systemd user unit) and its
+  state folder, both today Pocket Link's; the pack's `parts.mjs` rule that no herdr part writes
+  them is unchanged.
+- **Who may pair.** `am pocket pair` refuses inside a Herdr terminal or a DSH tool call, by D35's
+  test for an unsigned-source prompt (Threat model), and never prints the code in `--json`
+  (RFC 0046, Decided 3).
+- **Unchanged:** the pack, herdr-app as a part, the bridge's service names, state folder and
+  pairing link, and Pocket's `latest.json`, `pocket-lane`, app ID and signing key.
+- **Delivery 8** gains Pocket Link's part as RFC 0046's deliveries 1 and 2 (one herdr patch carrying
+  am); Pocket's own part (`android-app`) stays as written.
+
 ### Operating systems
 
 Supported targets are D28's: macOS arm64, Linux x86_64 and aarch64, and Windows x86_64 via WSLC
@@ -549,7 +769,8 @@ feed. For those, `am update` asks the owner (the desktop app) and reports.
   }
   ```
   (`os` as it reads after deliveries 5 and 6; today `["macos"]`.)
-- **Part ids**: `automagik.am` and `herdr.app` (proposed), `herdr.pack` (proposed), the nine
+- **Part ids**: `automagik.am` and `herdr.app` (proposed), `herdr.pack` (proposed),
+  `pocket.link` (proposed, Pocket's; Amendment (2026-11-21, #1007)), the nine
   `herdr.am-*` and `herdr.layout`, and one per `apps/*` part as each owner adds it. `herdr.cli`
   is not released.
 - **Capabilities** in the table above. A major is never reused for an incompatible change.
@@ -664,15 +885,52 @@ check passes on all three OSes.
    *Rollback:* revert; an installed fork stays, listed as unsigned, until it is uninstalled.
 8. **The `apps/*` parts** (one PR per owner and lane): Bot team and plugins (plugin, through
    `dsh plugin`), pets and the desktop app (t259's worker), usagemeter (t22b), Pocket and Pocket
-   Link (t16r).
+   Link (t16r). Pocket Link's part is RFC 0046's deliveries 1 and 2 (Amendment (2026-11-21,
+   #1007)).
    *Check:* each part's doctor in `am doctor`; `am install work` on a fresh machine.
    *Rollback:* revert each; the part's own updater is unchanged.
-9. **Fleet** (am). `--machine`, `targets: fleet`, `am doctor --machine all`, the far-side
-   bootstrap.
-   *Check:* two machines in a test Herdr (the second over `hc machine add` with a command);
-   install and doctor on both; a machine with no am is bootstrapped after a yes; a git source
-   whose commit differs on the far side is refused; a dead machine is one failed line.
-   *Rollback:* revert; local installs are unaffected.
+9. **Fleet** (am). Split by the 2026-11-20 amendment (#206), approved by the owner's delegate on
+   2026-11-20:
+   - **9a. am on one linked machine** (herdr patch carrying am; no wait on delivery 3).
+     `am machines install --machine M`, its `--check` and `--app-home` steps,
+     `self install --signed`, the pack's `am-keys.json` copy, the linked hook with am's store,
+     Attach's hook, the warnings, as "Amendment (2026-11-20, #206)" says.
+     *Check:* the pack's and am's gates, with fake `hc`, `herdr-core` and `systemctl` first on
+     PATH, a fake `hc exec` runner as the far side, and a fixture release served to it whose
+     pointer a per-run key signs.
+     Installs: a missing and a retained far side (recorded signed, with its sequence; the next
+     `am update` there verifies with the installed keys, no override set); a pack-only far side
+     (the standalone am takes the links).
+     Refused, nothing installed: a bad signature, an unknown key, a wrong sha256 or size, a link
+     or `..` entry, a sequence lower than the record's, a damaged record, a genuine pointer with
+     different tarball bytes (the candidate never runs), an am-lane am without `--signed`, no
+     Node 22.7, Bun alone, an
+     Intel Mac, a foreign `am` link (broken), a non-HTTPS base.
+     Two installs at once: one is `busy`, a retry finds it `current`. A failed check after the swap
+     puts `current`, the record and both links back, the floor kept. An incomplete pair is
+     relinked. `install`, `--app-home`, doctor, then an update: no stable entry is written and an
+     existing file there is left.
+     Hook: on an am-only far side, install with no app home, then `--app-home`, then Start: the
+     hook is `amPartHookCommand` and a prompt gets its briefing, with no stable entry seeded;
+     Attach writes the same; a far side with the pack but no stable entry keeps today's path; a far
+     side with its own attach ledger gets the warning, naming the other bot for a conflicting
+     row; `--app-home` honours a refused pane env and two projects' homes, and refuses a link
+     or
+     a folder another user owns.
+     Selection: `--local`, `--linked`, no selector, an ambiguous name, and a relinked core id are
+     refused; a disconnected machine and an unreadable list are one failed line; a lost connection
+     is `unknown` and `--check` reads the machine again; the hourly cycle never bootstraps am.
+     Manual, after a release whose `am-lane` names an am with `--signed`, before #206 closes: one
+     real linked Linux machine and one macOS arm64 machine with a sparse service PATH, started
+     from this computer's sidebar; a Windows WSLC guest on RFC 0016's runner once it exists.
+     *Rollback:* revert; an am already installed on a machine stays and keeps updating itself.
+   - **9b. The rest** (am; after delivery 3). `am install <id> --machine`, `targets: fleet`,
+     `am doctor --machine all`, unsigned sources over `--machine`, parts.json per machine; a
+     machine with no am gets one through 9a's steps after a yes.
+     *Check:* two machines in a test Herdr (the second over `hc machine add` with a command);
+     install and doctor on both; a git source whose commit differs on the far side is refused; a
+     dead machine is one failed line.
+     *Rollback:* revert; local installs are unaffected.
 10. **The bridge ends** (herdr and am). am migrates the marker into parts.json once; the herdr
     entries stop writing it.
     *Check:* migration twice gives the same file; an old pack updater still reads a marker left
@@ -682,17 +940,76 @@ check passes on all three OSes.
 
 ## Open questions
 
-The owner answered the rest on 2026-11-03 (D35 additions, under Decided). One question is left.
+The owner answered the rest on 2026-11-03 (D35 additions, under Decided). Question 5 was left from
+then (since settled by RFC 0017); questions 6-11 are the 2026-11-20 amendment's.
 
 5. **usagemeter's trust** (owner: t22b). Its `SHA256SUMS` proves integrity, not provenance
    (handoff). Recommended: sign a usagemeter pointer as `herdr-lane` does, or pin its hash in
-   the part.
+   the part. *Since settled by [RFC 0017](0017-usagemeter-crate.md) delivery 6: the signed
+   `meter-lane` pointer (noted 2026-11-20 with the #206 amendment).*
+
+Questions 6-11 are the 2026-11-20 amendment's (#206), each with the recommended option first.
+
+**Answers to questions 6-11** (approved by the owner's delegate on 2026-11-20, every
+recommendation; the owner may amend on return):
+
+- Q6: this amendment; 9a now, 9b after delivery 3.
+- Q7: the machine verifies the signed `am-lane` pointer itself, with am's public keys from this
+  computer's install (the pack gains a copy written from `am/am-keys.json`); for this path the
+  shared verifier takes the place of D35's one-liner.
+- Q8: only an explicit `am machines install --machine M`; the hourly cycle never bootstraps am.
+- Q9: the separate, project-scoped `--app-home` step.
+- Q10: no new pack UI; the Start and Attach warnings carry the exact command.
+- Q11: a working `automagik.am` on the linked machine, installed from this computer, and a linked
+  Claude bot's per-turn briefing from it replace `am install herdr.cli --machine M`; 9a's PR says
+  `Refs #206`, and #206 closes after a release whose `am-lane` names an am with
+  `self install --signed`, once both are shown on a real linked Linux machine and a macOS arm64
+  one. Remote Inspect rows and machines with their own attach ledger are left out.
+
+
+6. **Where the rest of #206 goes.** (a) *Recommended:* this amendment, delivery 9 split into 9a
+   now and 9b after delivery 3; (b) a new RFC for linked installs; (c) wait for delivery 3 and
+   build delivery 9 whole (a linked Claude bot gets its per-turn briefing only where the pack is
+   installed on that machine until then).
+7. **What a machine with no am trusts first.** (a) *Recommended:* the machine verifies the signed
+   `am-lane` pointer itself, with am's public keys from this computer's install (the pack gains a
+   copy written from `am/am-keys.json`); the trust root of a first install is this computer's
+   installed keys, and a fresh machine has no replay floor until it has a record. For this path
+   the shared verifier (the README's hand steps' text) takes the place of D35's bootstrap
+   one-liner, which approving this option approves; (b) the machine fetches
+   `am-keys.json` from `main` over HTTPS, as the README's hand steps do (no pack copy, but it
+   trusts `main` at fetch time and GitHub's TLS); (c) this computer verifies the pointer and the
+   machine checks only the sha256, as `am meter install` does: an exception to D35 for the first
+   am, whose bytes also bring the keys every later am update trusts.
+8. **Who decides that a machine gets am.** (a) *Recommended:* only an explicit
+   `am machines install --machine M`, one machine at a time; the hourly cycle keeps an installed
+   am current and never installs one; (b) also `--linked`, one run over the connected machines
+   it lists first; (c) a standing fleet-wide yes, after which the hourly cycle installs am on
+   every linked machine that has none.
+9. **A headless machine's app home** (the per-turn hook needs one). (a) *Recommended:* the
+   separate project-scoped `--app-home` step, which makes only that project's app home folder;
+   (b) never make one: the person makes the folder, or sets `HERDR_APP_HOME` in the project's
+   pane env (today's warning).
+10. **The desktop.** (a) *Recommended:* no new pack UI under RFC 0030's freeze; the sidebar's
+    Start and Attach warnings carry the exact command; (b) an exception to the freeze for one
+    "Install am on <machine>" action in a linked bot's menu, with a confirmation naming the
+    machine and a read-back after it (an install can outlast the sidebar's 30 s exec).
+11. **Issue #206's last bullet.** (a) *Recommended:* two criteria replace the retired
+    `am install herdr.cli --machine M`: a working `automagik.am` on the linked machine, installed
+    from this computer, and a linked Claude bot's per-turn briefing from it on a machine without
+    its own attach ledger. 9a's PR says `Refs #206`; #206 closes once a release's `am-lane` names
+    an am with `self install --signed` and both are shown on a real linked Linux machine and a
+    macOS arm64 one. Left
+    out: the linked machine's own worker history in Inspect, and a machine with its own attach
+    ledger (RFC 0014); (b) the same, plus Inspect reading the linked machine's own rows; (c) close
+    #206 now and track 9a here.
 
 ## Tracking
 
 Ledger pass (2026-11-10): the board links this RFC from its file.
 
-- Open issues: #768, #815.
+- Open issues: #768, #815, #206 (delivery 9a; amendment approved 2026-11-20, #1932), #1007
+  (Pocket Link's part; amendment approved 2026-11-21, RFC 0046).
 - Merged changes that cite this RFC: #203, #205, #252, #254, #258, #263, #265, #288, #292, #300, #302, #330, #427, #751, #783, #806 (last merged 2026-11-09).
 
 ## Links

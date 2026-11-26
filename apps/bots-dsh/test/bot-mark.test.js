@@ -4,9 +4,10 @@ import { runInNewContext } from 'node:vm'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
+import { CHARACTERS, SOLVER_SHAPES } from '../src/client/characters.js'
 
 const bundle = await build({
-  stdin: { contents: "export { botState, BotAvatar, BotMark } from './src/client/mark.js'\nexport { SHELL_CSS } from './src/client/styles.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
+  stdin: { contents: "export { botState, BotAvatar, BotMark, petOf } from './src/client/mark.js'\nexport { SHELL_CSS } from './src/client/styles.js'", resolveDir: dirname(dirname(fileURLToPath(import.meta.url))) },
   bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
@@ -25,7 +26,7 @@ const react = {
   useState: initial => [states.length > 0 ? states.shift() : initial, value => sets.push(value)], useEffect: () => {}, useRef: current => ({ current }), useLayoutEffect: () => {}, Fragment: 'fragment',
 }
 runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, URLSearchParams, require: name => (name === 'react' ? react : {}) })
-const { botState, BotAvatar, BotMark: markOf, SHELL_CSS } = module.exports
+const { botState, BotAvatar, BotMark: markOf, petOf, SHELL_CSS } = module.exports
 // A mark hands over to the mark that draws it (a pet, or the character itself): render through.
 const BotMark = (props) => {
   let element = markOf(props)
@@ -124,6 +125,17 @@ test('a Genie Bot wears its pet, and its clay face where a mark is too small for
   assert.match(SHELL_CSS, /\.bt-clay-genie\{[^}]*url\("data:image\/webp;base64,/)
 })
 
+test('a Bot whose plugin is not installed does not look idle or working', () => {
+  // A crew Bot with no plugin cannot run at all: no activity and no approval make it idle.
+  assert.equal(botState(false, undefined, false, { notInstalled: true }), 'not-installed')
+  assert.equal(botState(true, 'searching', true, { notInstalled: true }), 'not-installed')
+  // It is not the failed state either: a missing plugin is not a failed turn.
+  assert.equal(botState(false, undefined, false, { failed: true, notInstalled: true }), 'not-installed')
+  const badges = state => BotAvatar({ bot: { id: 'b', name: 'Writer', installed: false }, size: 36, state }).children.slice(1).filter(Boolean).map(child => child.props.className)
+  assert.deepEqual(badges('not-installed'), ['bt-badge bt-badge-missing'])
+  assert.match(SHELL_CSS, /\.bt-mark\[data-state=not-installed\]\{[^}]*grayscale/)
+})
+
 test('a Bot whose last turn failed looks sad, and one whose reply waits to be read looks it over', () => {
   assert.equal(botState(false, undefined, false, { failed: true }), 'failed')
   assert.equal(botState(false, undefined, false, { unread: true }), 'review')
@@ -136,4 +148,81 @@ test('a Bot whose last turn failed looks sad, and one whose reply waits to be re
   const badges = state => BotAvatar({ bot: { id: 'b', name: 'Writer' }, size: 36, state }).children.slice(1).filter(Boolean).map(child => child.props.className)
   assert.deepEqual(badges('failed'), [])
   assert.deepEqual(badges('review'), [])
+})
+
+test('a Solver wears its fur at the smallest marks too, and the bar\'s live pet bakes the same entry', () => {
+  for (const shape of SOLVER_SHAPES) {
+    const { body } = CHARACTERS[shape]
+    const lock = CHARACTERS[shape].paints.at(-1)[0]
+    const look = { shape, color: 'red' }
+    // The chat's and the bar's small marks: 16, 24 and 28 px.
+    for (const size of [16, 24, 28]) {
+      const mark = BotMark({ look, size })
+      assert.equal(mark.props['data-shape'], shape, `${shape} ${size}`)
+      const svg = mark.children.find(child => child.type === 'svg')
+      const html = svg.props.dangerouslySetInnerHTML.__html
+      assert.ok(html.includes(body), `${shape} at ${size}: the fur body`)
+      assert.ok(html.includes(lock), `${shape} at ${size}: the lock layer`)
+    }
+    assert.deepEqual(JSON.parse(JSON.stringify(petOf({ id: 'b' }, look, { live: true, size: 28 }))), { bake: { shape, color: 'red' } })
+  }
+})
+
+test('useBaked clears the old sprite while a different look is baking', async () => {
+  const code = await build({
+    stdin: {
+      contents: "export { useBaked } from './src/client/mark.js'",
+      resolveDir: dirname(dirname(fileURLToPath(import.meta.url))),
+    },
+    bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
+    external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
+    plugins: [{
+      name: 'held-bake',
+      setup(plugin) {
+        plugin.onResolve({ filter: /^\.\/pet-bake\.js$/ }, () => ({ path: 'pet-bake', namespace: 'fixture' }))
+        plugin.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({
+          contents: 'export const canBake = () => true; export const bakedPet = globalThis.heldBake',
+        }))
+      },
+    }],
+  })
+  const pending = new Map()
+  const module = { exports: {} }
+  let state = null
+  let key
+  let cleanup
+  let effect
+  const hooks = {
+    ...react,
+    useState: () => [state, next => { state = next }],
+    useEffect(run, [next]) {
+      if (key === next) return
+      key = next
+      effect = run
+    },
+  }
+  runInNewContext(code.outputFiles[0].text, {
+    module, exports: module.exports,
+    require: name => (name === 'react' ? hooks : {}),
+    heldBake: ({ color }) => new Promise(resolve => pending.set(color, resolve)),
+  })
+  const draw = (color) => {
+    const shown = module.exports.useBaked({ shape: 'frog', color })
+    if (effect) {
+      cleanup?.()
+      cleanup = effect()
+      effect = undefined
+    }
+    return shown
+  }
+  assert.equal(draw('red'), null)
+  const red = { sheet: 'fixture-red' }
+  pending.get('red')(red)
+  await Promise.resolve()
+  assert.equal(draw('red'), red)
+  assert.equal(draw('blue'), null)
+  const blue = { sheet: 'fixture-blue' }
+  pending.get('blue')(blue)
+  await Promise.resolve()
+  assert.equal(draw('blue'), blue)
 })

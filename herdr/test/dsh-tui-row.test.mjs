@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // dsh-tui as an agent row (#598): Start, Restart and workers run it as the DSH lane fixed it
 // (DSH 0.2.2-rc.1, dsh-tui 0.19.0). An interactive pane only, never a permission, add-dir or
 // approval flag (the dsh-tui profile on that machine supplies the sandbox); the briefing, or a
@@ -8,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -139,7 +140,17 @@ function scene(t, { terminals = [] } = {}) {
   writeFileSync(logPath, "");
   const env = { XDG_DATA_HOME: join(root, "data"), PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "300", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "4000", AUTOMAGIK_HERDR_TAB_WAIT_MS: "0" };
+  // The dsh-tui install's stable copies the sandboxed pane's PATH names (guard and kill shim).
+  const stable = join(env.XDG_DATA_HOME, "automagik-herdr", "dsh-sandbox");
+  for (const [dir, from] of [["guard", GUARD_DIR], ["hc-kill", join(GUARD_DIR, "..", "hc-kill")]]) {
+    mkdirSync(join(stable, dir), { recursive: true });
+    copyFileSync(join(from, "hc"), join(stable, dir, "hc"));
+    chmodSync(join(stable, dir, "hc"), 0o755);
+  }
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const cli = (args, extra = {}) => {
+    core.control({ ...env, ...extra });
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...extra }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
@@ -353,7 +364,8 @@ test("M4: switch off keeps the complete start argv byte for byte, even with AM_H
     return s.runs().at(-1);
   };
   const original = argv();
-  // Re-recorded from dev (0524c6e1) after #729; only fixture folders normalised.
+  // Re-recorded from dev (0524c6e1) after #729, and for #1556 (one handoff line in the seat
+  // briefing); only fixture folders normalised.
   // #747's C1 baseline differs only by the fixture bot's "Genie - " prompt prefix.
   const baseline = JSON.parse(readFileSync(new URL("./fixtures/dsh-proxy-off-argv.json",
     import.meta.url), "utf8")).start;

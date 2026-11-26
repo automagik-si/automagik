@@ -1,16 +1,23 @@
 // The welcome's copy follows the DSH language: the companion step, the team step, Connect AI with
 // its sign-ins and the Claude Code and Codex rows (acp-agents.js), the step rail. Keys are the
-// English text; welcome.team is registered in English and in Brazilian Portuguese, and a key with
-// no text in the active language reads in English. Copy is looked up at render time, so nothing
-// caches a translated string. Names stay as written (products, providers, plans, the companion's
-// name ideas), and so do the host's error messages and what a provider's sign-in says.
+// English text; welcome.team is registered in English, in Brazilian Portuguese and in Chinese
+// (only Antigravity's Windows warning so far), and a key with no text in the active language
+// reads in English. Copy is looked up at render time, so nothing caches a translated string.
+// Names stay as written (products, providers, plans, the companion's name ideas), and so do the
+// host's error messages and what a provider's sign-in says.
 
 export const NAMESPACE = 'welcome.team'
 
 export const PT_BR = {
   // Installs and their errors
   'The install was cancelled.': 'A instalação foi cancelada.',
+  'Viewer unavailable': 'Visualização indisponível',
   'Omni\'s installer stopped (exit code {code}). What it printed is above.': 'O instalador do Omni parou (código de saída {code}). A saída está acima.',
+  'Omni {version} is not on npm, where Omni\'s installer gets it. The newest there is {npm}.': 'O Omni {version} não está no npm, de onde o instalador do Omni o baixa. A versão mais recente lá é {npm}.',
+  'Omni {github} is out on GitHub and not on npm yet.': 'O Omni {github} já saiu no GitHub e ainda não chegou ao npm.',
+  'Power Omni off and on again to take the Omni plugins that work with it, or use an Omni on another computer.': 'Desligue e ligue o Omni novamente para usar os plugins compatíveis com essa versão ou use um Omni em outro computador.',
+  'Omni\'s installer needs systemd on this computer, and it has none (a container, for example). Use an Omni on another computer.': 'O instalador do Omni precisa do systemd, que não está disponível neste computador (como acontece em um contêiner, por exemplo). Use um Omni em outro computador.',
+  'unknown': 'desconhecida',
 
   // A found Omni, and where Omni comes from
   'Your Omni on this Mac': 'Seu Omni neste Mac',
@@ -155,6 +162,37 @@ export const PT_BR = {
   'Approve this device on your phone': 'Aprove este dispositivo no seu celular',
   'Downloading Bun for Omni…': 'Baixando o Bun para o Omni…',
   'Setting up your Omni…': 'Configurando seu Omni…',
+  'Checking Omni {version}…': 'Verificando o Omni {version}…',
+  'Downloading Omni {version} from GitHub…': 'Baixando o Omni {version} do GitHub…',
+  'Building Omni {version}…': 'Compilando o Omni {version}…',
+  'Installing Omni {version} from npm…': 'Instalando o Omni {version} pelo npm…',
+  'Installing Omni {version}…': 'Instalando o Omni {version}…',
+  'Connecting to your Omni…': 'Conectando ao seu Omni…',
+  'Stopping after this step…': 'Parando após esta etapa…',
+  'npm\'s newest Omni is {npm}, older than Omni {version}, which this Automagik installs.': 'A versão mais recente do Omni no npm é {npm}, anterior à versão {version} que este Automagik instala.',
+  'Omni {version} is not on npm (the newest there is {npm}).': 'O Omni {version} não está no npm (a versão mais recente lá é {npm}).',
+  'Installing Omni from npm failed (exit code {code}).': 'A instalação do Omni pelo npm falhou (código de saída {code}).',
+  'Installing Omni from npm failed.': 'A instalação do Omni pelo npm falhou.',
+  'Omni\'s npm installer needs systemd, and this computer has none.': 'O instalador do Omni pelo npm precisa do systemd, que não está disponível neste computador.',
+  'Installing Omni {version} from GitHub instead.': 'Instalando o Omni {version} pelo GitHub.',
+  'Installing Omni from GitHub instead.': 'Instalando o Omni pelo GitHub.',
+  'Installing Omni {version} from npm.': 'Instalando o Omni {version} pelo npm.',
+  'npm could not install it either. Installing Omni {version} from GitHub instead.': 'A instalação pelo npm também falhou. Instalando o Omni {version} pelo GitHub.',
+  'The install steps': 'As etapas da instalação',
+  'Check': 'Verificar',
+  'Download': 'Baixar',
+  'Build': 'Compilar',
+  'Install': 'Instalar',
+  'What the GitHub install printed': 'A saída da instalação pelo GitHub',
+  'It stopped at the {step} step.': 'Parou na etapa {step}.',
+  'Power Omni on to try again.': 'Ligue o Omni para tentar novamente.',
+  'Update Automagik, then power Omni on again.': 'Atualize o Automagik e ligue o Omni novamente.',
+  'Use an Omni on another computer.': 'Use um Omni em outro computador.',
+  'The install\'s progress was lost (Automagik may have restarted). Power Omni on to try again.': 'O progresso da instalação foi perdido (o Automagik pode ter reiniciado). Ligue o Omni para tentar novamente.',
+  'Omni could not be installed from GitHub.': 'Não foi possível instalar o Omni pelo GitHub.',
+  'Omni is installed, but its address is unknown. Power Omni on to try again.': 'O Omni está instalado, mas não foi possível identificar o endereço. Ligue o Omni para tentar novamente.',
+  'Omni is installed but did not answer at {url}. Power Omni on to try again.': 'O Omni está instalado, mas não respondeu em {url}. Ligue o Omni para tentar novamente.',
+  'Another Omni sign-in is waiting ({origin}). Finish or cancel it, then connect to the new Omni at {url} from the Omni list.': 'Há outro login do Omni aguardando ({origin}). Conclua ou cancele esse login e depois conecte-se ao novo Omni em {url} pela lista de Omnis.',
   'Installed · restart DSH to start it': 'Instalação concluída · reinicie o DSH para começar',
   'Could not install Omni': 'Não foi possível instalar o Omni',
   'Installing Genie…': 'Instalando o Genie…',
@@ -170,22 +208,15 @@ export const PT_BR = {
   'link': 'conexão',
   'team': 'equipe',
   'The Omni plugins': 'Os plugins do Omni',
+  'Power': 'Energia',
   'Power {name} off': 'Desligar {name}',
   'Power {name} on': 'Ligar {name}',
 
-  // The power shortcut in the Bot team's sidebar (power-shortcut.js)
-  'Omni and Genie': 'Omni e Genie',
-  'Omni, Genie and Unfold': 'Omni, Genie e Unfold',
+  // The power card in each built-in Bot's settings (power-shortcut.js)
   'Try again': 'Tentar de novo',
   'Choose where Omni lives': 'Escolher onde o Omni fica',
   'Add Omni': 'Adicionar o Omni',
   'Open Plugins': 'Abrir Plugins',
-  'Open team setup': 'Abrir configuração da equipe',
-  '{name} on': '{name}: energia ligada',
-  '{name} off': '{name}: energia desligada',
-  '{name} working': '{name}: trabalhando',
-  '{name} needs you': '{name}: precisa de você',
-  '{a}, {b}': '{a}, {b}',
   'On · {status}': 'Ligado · {status}',
   '{name} stays on once it joins your team.': 'O {name} fica ligado depois que entra na sua equipe.',
   'Adds the Omni plugins to this DSH, then looks for your Omni.': 'Adiciona os plugins do Omni a este DSH e depois procura o seu Omni.',
@@ -253,8 +284,8 @@ export const PT_BR = {
   'Continue with just {name}': 'Continuar só com {name}',
   'Continue with {who}': 'Continuar com {who}',
   ' and ': ' e ',
-  // Claude Code and Codex (acp-agents.js), in Connect AI and in Settings
-  'Claude Code and Codex': 'Claude Code e Codex',
+  // Coding agents (acp-agents.js), in Connect AI and in Settings
+  'Coding agents': 'Agentes de código',
   'Use the coding agents you already have as models in DSH. Each runs your own CLI, with your own sign-in and settings.': 'Use os agentes de código que você já tem como modelos no DSH. Cada um roda a sua própria CLI, com o seu login e as suas configurações.',
   'Looking at what this computer has…': 'Vendo o que este computador tem…',
   'The ACP agents plugin is not running in this DSH.': 'O plugin de agentes ACP não está rodando neste DSH.',
@@ -276,23 +307,46 @@ export const PT_BR = {
   'Found the {cli} CLI on this computer.': 'A CLI {cli} está neste computador.',
   'Found the {cli} CLI on this computer (version {version}).': 'A CLI {cli} está neste computador (versão {version}).',
   'Installing {name} automatically…': 'Instalando o {name} automaticamente…',
+  'Installing {name}…': 'Instalando o {name}…',
+  'Install it yourself instead': 'Ou instale por conta própria',
+  'The {cli} CLI is not on this computer. Automagik can install it for you.': 'A CLI {cli} não está neste computador. O Automagik pode instalar para você.',
+  'The {cli} CLI is not on this computer. Turn {name} on to install it.': 'A CLI {cli} não está neste computador. Ligue o {name} para instalar.',
+  'Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).': 'A CLI {cli} está neste computador (o Automagik instalou a versão {version}; a CLI se atualiza por conta própria).',
   'Updating {name} automatically…': 'Atualizando o {name} automaticamente…',
   'The {name} installation or update failed: {error}': 'A instalação ou atualização do {name} falhou: {error}',
   'The {name} installation or update failed.': 'A instalação ou atualização do {name} falhou.',
   'Signed in to {name}.': 'Login feito no {name}.',
+  'Signed in to {name} as {account}.': 'Login feito no {name} como {account}.',
+  'Switch account': 'Trocar de conta',
+  'Bots in this installation share this account. Your terminal sign-in stays as it is.': 'Os Bots desta instalação compartilham esta conta. O login no terminal continua como está.',
+  'This stops running Bot work for this account. Continue?': 'Isso interrompe o trabalho dos Bots nesta conta. Continuar?',
   'Not signed in to {name}. Sign in from a Bot\'s chat.': 'Sem login no {name}. Entre pelo chat de um Bot.',
   'Or run {command} in a terminal, then check again.': 'Ou rode {command} em um terminal e verifique de novo.',
   'Not signed in to {name}. Run {command} in a terminal, then check again.': 'Sem login no {name}. Rode {command} em um terminal e verifique de novo.',
   'Turning it on lets Automagik use the sign-in {name} already has on this computer.': 'Ao ligar, o Automagik passa a usar o login que o {name} já tem neste computador.',
   'The sign-in to {name} has not been checked yet.': 'O login no {name} ainda não foi verificado.',
+  'Could not check the sign-in to {name}: {cli} took too long to answer.': 'Não foi possível verificar o login no {name}: o {cli} demorou demais para responder.',
+  'Could not tell whether you are signed in to {name}.': 'Não foi possível saber se há login no {name}.',
   'Sign in': 'Entrar',
+  // Antigravity in its own home (#2048): its sign-in in the app, and Windows's shared account
+  'Not signed in to {name}.': 'Sem login no {name}.',
+  'The CLI did not offer a sign-in link in time. Try again.': 'O CLI não ofereceu um link de login a tempo. Tente de novo.',
+  'Finish the sign-in to {name} in your browser…': 'Conclua o login no {name} pelo navegador…',
+  '{name} did not offer a Google sign-in. Try again.': 'O {name} não ofereceu login com Google. Tente de novo.',
+  'The sign-in to {name} took too long. Try again.': 'O login no {name} demorou demais. Tente de novo.',
+  'The sign-in to {name} did not finish. Try again.': 'O login no {name} não terminou. Tente de novo.',
+  'Automagik keeps its own {name} sign-in, apart from the one in your terminal.': 'O Automagik mantém um login próprio do {name}, separado do login do seu terminal.',
+  'Sign out': 'Sair',
+  'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': 'No Windows, a conta do {name} é compartilhada: o Automagik e o seu próprio {name} neste computador usam o mesmo login, guardado no Gerenciador de Credenciais do Windows. Sair não está disponível aqui: saia pelo próprio {name}.',
   'No Bot chat to sign in from here. Run {command} in a terminal instead.': 'Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.',
+  'Sign-in needs a Bot chat. If you have no Bot yet, set one up first.': 'Para entrar, você precisa de um chat de Bot. Se ainda não tiver um Bot, configure um primeiro.',
   'Sign in from the Bot\'s chat, then come back to finish setting up.': 'Entre pelo chat do Bot e volte para terminar a configuração.',
   'Back to setup': 'Voltar à configuração',
   'Off. Turn it on to use {name} as a model in DSH.': 'Desligado. Ligue para usar o {name} como modelo no DSH.',
   'Installing its connector in the background. This takes a minute or two.': 'Instalando o conector em segundo plano. Leva um ou dois minutos.',
   'The connector did not install: {error}': 'O conector não foi instalado: {error}',
   'The connector did not install.': 'O conector não foi instalado.',
+  'Could not reach the connector registry. Automagik tries again by itself, or press Retry.': 'Não foi possível acessar o registro de conectores. O Automagik tenta de novo automaticamente. Para tentar agora, clique em Tentar de novo.',
   'The connector did not start: {error}': 'O conector não iniciou: {error}',
   'Install details': 'Detalhes da instalação',
   'Log: {path}': 'Registro: {path}',
@@ -347,7 +401,6 @@ export const PT_BR = {
   'Telegram bot': 'Bot do Telegram',
   'Telegram': 'Telegram',
   'Move its Telegram bot to Omni, with the bot you already know.': 'Mova o bot do Telegram do Hermes para o Omni, com o bot que você já conhece.',
-  'We are still mapping how it keeps its bot.': 'Ainda estamos mapeando como essa ferramenta guarda o bot.',
   'Coming soon': 'Em breve',
   '{name}: coming soon': '{name}: em breve',
   'Move {name} to Omni': 'Mover {name} para o Omni',
@@ -415,6 +468,11 @@ export const PT_BR = {
   'Omni has the channel. Its next update adds your Bot as the one who answers.': 'O Omni está com o canal. A próxima atualização do Omni adiciona o seu Bot como quem responde.',
   'Hermes: Telegram off': 'Hermes: Telegram desligado',
   'Hermes\'s Telegram is off. Omni did not confirm which channel is the move\'s, so check Omni\'s Channels before trying again. Hermes still has the key.': 'O Telegram do Hermes está desligado. O Omni não confirmou qual canal é o da mudança, então verifique os Canais do Omni antes de tentar de novo. O Hermes ainda tem a chave.',
+  'Turn Hermes\'s Telegram back on': 'Religar o Telegram do Hermes',
+  'Hermes\'s Telegram is back on': 'O Telegram do Hermes está de volta',
+  'That is your way back. Hermes has its Telegram again.': 'Esse é o caminho de volta. O Hermes está com o Telegram de novo.',
+  'Nothing else changed. If Omni kept a channel from this move, check it in Omni\'s Channels before moving again.': 'Nada mais mudou. Se o Omni ficou com um canal desta mudança, verifique nos Canais do Omni antes de mover de novo.',
+  'No Bot answers in these chats yet. Pick one in Omni\'s Channels.': 'Nenhum Bot responde nesses chats ainda. Escolha um nos Canais do Omni.',
   'Hermes was not running. Its Telegram stays off until you start Hermes again.': 'O Hermes não estava rodando. O Telegram fica desligado até você iniciar o Hermes de novo.',
   'Hermes: Telegram was already off': 'Hermes: o Telegram já estava desligado',
   'Omni: listening': 'Omni: escutando',
@@ -532,10 +590,45 @@ export const PT_BR = {
   'Copy your {what} from ': 'Copie o valor “{what}” em ',
   ' and paste it here. It stays in DSH\'s credential store on this computer.': ' e cole aqui. Fica no cofre de credenciais do DSH, neste computador.',
   'The address you landed on': 'O endereço da página final',
+  // Antigravity's sign-in from any computer (#2048, paste-back). The expired sentence and the
+  // expiry are the Bot chat's own (bots-dsh omni-ui), byte for byte.
+  'Your Google account, through Antigravity': 'Sua conta Google, pelo Antigravity',
+  'This link is not from this sign-in.': 'Este link não é deste login.',
+  'Signed in on another computer? Paste the address the browser ends on:': 'Entrou em outro computador? Cole o endereço em que o navegador parou:',
+  'Finishing the sign-in to {name}…': 'Concluindo o login em {name}…',
+  'This sign-in expired. Start again.': 'Este login expirou. Comece de novo.',
+  'Send': 'Enviar',
+  'Expires at {time}': 'Expira às {time}',
 }
 
 // English is the key itself; registering it keeps the namespace whole in both languages.
 const EN = Object.fromEntries(Object.keys(PT_BR).map(key => [key, key]))
+
+// Chinese: Antigravity's own lines (#2048): its sign-in in the app, its Connect AI row and the
+// Windows warning.
+// Every other key reads in English, the buttons and the link label shared with other rows too. `zh` is the Chinese id of DSH's locale service (dsh-client-locale 0.2.2-rc.2 lists
+// `zh` and `en`; `zh-CN` is only the page's lang attribute).
+export const ZH = {
+  'Not signed in to {name}.': '未登录 {name}。',
+  'The CLI did not offer a sign-in link in time. Try again.': 'CLI 没有及时给出登录链接，请重试。',
+  'Finish the sign-in to {name} in your browser…': '请在浏览器中完成 {name} 的登录…',
+  '{name} did not offer a Google sign-in. Try again.': '{name} 没有提供 Google 登录。请重试。',
+  'The sign-in to {name} took too long. Try again.': '{name} 的登录用时过长。请重试。',
+  'The sign-in to {name} did not finish. Try again.': '{name} 的登录没有完成。请重试。',
+  'On Windows, the {name} account is shared: Automagik and your own {name} on this computer use one sign-in, kept in Windows Credential Manager. Sign out is not available here: sign out in {name} itself.': '在 Windows 上，{name} 的账号是共享的：Automagik 和你在这台电脑上自己的 {name} 使用同一个登录，保存在 Windows 凭据管理器中。这里无法退出登录：请在 {name} 中退出。',
+  // Its row in Connect AI and its sign-in from any computer (#2048, paste-back). The expired
+  // sentence and the expiry are the Bot chat's own (bots-dsh i18n.js), byte for byte.
+  'Your Google account, through Antigravity': '你的 Google 账号，通过 Antigravity',
+  'Installing {name}…': '正在安装 {name}…',
+  'The {cli} CLI is not on this computer. Automagik can install it for you.': '这台电脑上没有 {cli} CLI。Automagik 可以为你安装。',
+  'The {cli} CLI is not on this computer. Turn {name} on to install it.': '这台电脑上没有 {cli} CLI。开启 {name} 即可安装。',
+  'Found the {cli} CLI (installed by Automagik as version {version}; it updates itself).': '已找到 {cli} CLI（由 Automagik 安装，版本 {version}；它会自行更新）。',
+  'This link is not from this sign-in.': '此链接不属于本次登录。',
+  'Signed in on another computer? Paste the address the browser ends on:': '在另一台电脑上登录了？请粘贴浏览器最后停留的地址：',
+  'Finishing the sign-in to {name}…': '正在完成 {name} 的登录…',
+  'This sign-in expired. Start again.': '本次登录已过期，请重新开始。',
+  'Expires at {time}': '{time} 过期',
+}
 
 const fill = (text, params) => (params
   ? text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
@@ -548,7 +641,7 @@ export function installLocale(locale) {
   if (!locale || typeof locale.register !== 'function' || typeof locale.bind !== 'function') return () => {}
   // DSH 0.2.2 lists both `pt` (its own entry) and the locale pack's `pt-BR`; the same copy
   // must answer for either, or a reader moved onto DSH's `pt` falls back to English here.
-  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, 'pt-BR': PT_BR })
+  const off = locale.register(NAMESPACE, { en: EN, pt: PT_BR, 'pt-BR': PT_BR, zh: ZH })
   const mine = locale.bind(NAMESPACE)
   bound = mine
   return () => {
