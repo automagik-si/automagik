@@ -2953,6 +2953,7 @@ const pack = createPack({
     "Only the person turns Auto on, from the Bot's permission choice.": "Só a pessoa ativa o Automático, na escolha de permissão do Bot.",
     "Only a Solver wears the Solver characters. Choose another character.": "Só um Solver usa os personagens Solver. Escolha outro personagem.",
     "A Solver wears one of the Solver characters. Choose one of those characters.": "Um Solver usa um dos personagens Solver. Escolha um desses personagens.",
+    "Antigravity cannot be a Solver yet. Choose another agent for the Solver.": "O Antigravity ainda não pode ser um Solver. Escolha outro agente para o Solver.",
     "Only the person can make a Bot a Solver.": "Só a pessoa pode tornar um Bot um Solver.",
     "That look is not valid. Choose another character.": "Esse visual não é válido. Escolha outro personagem.",
     "Works as Workspace. Where Workspace would ask you, Claude Code decides first, with its auto mode: it runs the step, refuses it, or asks you.": "Funciona como Espaço de trabalho. Quando esse nível pediria sua autorização, Claude Code decide primeiro, com seu modo auto: executa a etapa, recusa ou pergunta a você.",

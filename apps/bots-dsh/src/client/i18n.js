@@ -3439,6 +3439,7 @@ const ZH = {
   'Latest': '最新',
   // New Solver (RFC 0048).
   'If the Solver role is not installed yet, Create installs it first.': '如果尚未安装 Solver 角色，点击创建会先安装它。',
+  'Antigravity cannot be a Solver yet. Choose another agent for the Solver.': 'Antigravity 暂时不能用作 Solver。请为 Solver 选择其他智能体。',
   'The Solver role could not be installed now, so this Solver uses the written method. The role is attached when it can be installed.': '目前无法安装 Solver 角色，因此此 Solver 使用书面方法。角色可安装时会自动附加。',
   'The Solver role could not be attached now, so this Solver uses the written method. The role is attached when it can be.': '目前无法附加 Solver 角色，因此此 Solver 使用书面方法。角色可附加时会自动附加。',
   'Roles are turned off for this team, so this Solver uses the written method.': '此团队已关闭角色，因此此 Solver 使用书面方法。',

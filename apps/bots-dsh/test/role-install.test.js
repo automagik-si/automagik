@@ -16,6 +16,7 @@ import { ROUTE } from '../src/host/constants.js'
 import { installRoles } from '../src/host/roles.js'
 import { fakeContext } from './fake-ctx.js'
 import { entryOf, INDEX, manifestOf, packageOf, SHA256, SIGNATURE, VERSION as PLUGIN_VERSION, signer, solverCutHistory } from './role-fixture.js'
+import { AGY, refusedSolverAgent, serve } from './fixtures/solver-agent-catalog.mjs'
 
 const ID = 'sample-role'
 const VERSION = '1.0.0'
@@ -66,7 +67,7 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false, role
     await fs.writeFile(join(home, 'state.lock'), JSON.stringify({ pid: process.ppid, host: hostname(), token: 'fixture-holder' }))
   }
 
-  async function start() {
+  async function start(configure) {
     const ctx = fakeContext({ services: {
       sessionPersistence: { open: async () => ({ read: async () => ({ events: [{
         type: 'request/header', data: { header: { config: { provider: 'test-provider', model: 'fixture' } } },
@@ -88,6 +89,7 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false, role
         : { ...agent, id, session: { id }, followup() {}, inject() {}, steer() {} } }),
       ...(roleDeps ? { create: async () => ({ sessionId: `created-${++created}` }), selectModel: async () => {} } : {}),
     }
+    configure?.(ctx)
     apply(ctx, { home, memory: false, browser: false, updateCheck: false, mainName: BOT.name })
     const rt = ctx.provided.get('omniTeam')
     installRoles(rt, {
@@ -1186,6 +1188,230 @@ const officialSolver = async f => {
   await immediate()
   return result.value
 }
+
+test('Q3 installs the team Solver package and refuses a new Antigravity pin', async t => {
+  const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: AGY } } } })
+  await officialSolver(f)
+  const before = await f.disk()
+  assert.ok(before.roles.solver)
+  assert.deepEqual(await attachTo(f, BOT.id, 'solver'), refusedSolverAgent)
+  assert.deepEqual((await f.disk()).bots, before.bots)
+})
+
+for (const [path, assign] of [
+  ['package attachment', f => attachTo(f, BOT.id, 'solver')],
+  ['written assignment', f => f.call('update-bot', { id: BOT.id, role: 'Solver', instructions: solverInstructions() })],
+]) {
+  test(`Q3 catalog recovery blocks Solver ${path} on the running Antigravity route`, async t => {
+    const lost = 'deepseek/v4-lost'
+    const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: lost } } } })
+    await officialSolver(f)
+    const { agent } = await f.ctx.sessionController.resolveAgent(BOT.id)
+    const get = f.ctx.get
+    t.mock.method(f.ctx, 'get', name => name === 'agents' ? { get: id => id === BOT.id ? agent : undefined } : get(name))
+    let selection
+    agent.model = { current: () => selection }
+    t.mock.method(f.ctx.sessionController, 'selectModel', async ({ sessionId, provider, model }) => {
+      assert.equal(sessionId, BOT.id)
+      selection = { provider, model }
+    })
+
+    const bot = f.rt.botOf(BOT.id)
+    serve(f.ctx, [lost, AGY])
+    await f.rt.catalog({ fresh: true })
+    assert.equal(await f.rt.applyModel(bot, { force: true }), lost)
+    assert.deepEqual(agent.model.current(), { provider: 'deepseek', model: 'v4-lost' })
+    serve(f.ctx, [AGY])
+    await f.rt.catalog({ fresh: true })
+    assert.equal(await f.rt.applyModel(bot, { force: true }), AGY)
+
+    const antigravity = { provider: 'acp-antigravity', model: 'default' }
+    const before = (await f.disk()).bots[BOT.id]
+    assert.equal(before.model, lost)
+    assert.equal(before.appliedModel, AGY)
+    assert.equal(before.role, BOT.role)
+    assert.equal(before.roles, undefined)
+    assert.deepEqual(agent.model.current(), antigravity)
+
+    const result = await assign(f)
+    assert.deepEqual({ result, bot: (await f.disk()).bots[BOT.id], selection: agent.model.current() }, {
+      result: refusedSolverAgent, bot: before, selection: antigravity,
+    })
+  })
+}
+
+test('AN-4 preserves a grandfathered Antigravity pin and permits detach', async t => {
+  const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: AGY } } } })
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  bot.roles = [pinOf('solver', PLUGIN_VERSION)]
+  await f.rt.save()
+  assert.deepEqual(await attachTo(f, BOT.id, 'solver'), { ok: true, value: ['solver'] })
+  assert.deepEqual((await f.disk()).bots[BOT.id].roles, bot.roles)
+  assert.equal((await f.call('role-detach', { id: BOT.id })).ok, true)
+  assert.deepEqual((await f.disk()).bots[BOT.id].roles, [])
+  assert.equal((await f.disk()).bots[BOT.id].model, AGY)
+})
+
+test('AN-4 the background settler cannot replace a grandfathered Antigravity Solver method with a new pin', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  const bot = f.rt.state.bots[BOT.id]
+  const instructions = solverInstructions()
+  Object.assign(bot, { model: AGY, role: 'Solver', instructions, waitingRole: waitFor(instructions) })
+  await f.rt.save()
+  const before = (await f.disk()).bots[BOT.id]
+  const finished = Promise.withResolvers()
+  const attach = f.rt.attachRole
+  t.mock.method(f.rt, 'attachRole', async (...args) => {
+    try { return await attach(...args) }
+    finally { finished.resolve() }
+  })
+  f.rt.solverSettle.schedule()
+  await finished.promise
+  assert.deepEqual((await f.disk()).bots[BOT.id], before)
+})
+
+test('AN-4 an Antigravity model picked during package verification wins over the pending role attachment', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  serve(f.ctx, [AGY, 'deepseek/v4'])
+  const verifying = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  f.hooks.open = async (path, ...args) => {
+    if (path.endsWith('.tgz')) {
+      verifying.resolve()
+      await release.promise
+    }
+    return fs.open(path, ...args)
+  }
+  const attaching = attachTo(f, BOT.id, 'solver')
+  try {
+    await Promise.race([verifying.promise, attaching.then(result => assert.fail(JSON.stringify(result)))])
+    const picked = await f.call('update-bot', { id: BOT.id, model: AGY })
+    assert.equal(picked.ok, true, JSON.stringify(picked))
+  } finally { release.resolve() }
+  assert.deepEqual(await attaching, refusedSolverAgent)
+  const bot = (await f.disk()).bots[BOT.id]
+  assert.equal(bot.model, AGY)
+  assert.equal(bot.sessionId, BOT.id)
+  assert.equal(bot.roles, undefined)
+})
+
+test('AN-4 a Solver pin at its commit owns the slot before a competing Antigravity pick', async t => {
+  const f = await catalogSolverFixture(t)
+  await officialSolver(f)
+  serve(f.ctx, [AGY, 'deepseek/v4'])
+  const saving = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const saveCopy = f.rt.saveCopy
+  t.mock.method(f.rt, 'saveCopy', async (...args) => {
+    saving.resolve()
+    await release.promise
+    return saveCopy(...args)
+  })
+  const attaching = attachTo(f, BOT.id, 'solver')
+  await Promise.race([saving.promise, attaching.then(result => assert.fail(JSON.stringify(result)))])
+  const picking = f.call('update-bot', { id: BOT.id, model: AGY })
+  await immediate()
+  release.resolve()
+  assert.deepEqual(await attaching, { ok: true, value: ['solver'] })
+  assert.deepEqual(await picking, refusedSolverAgent)
+  const bot = (await f.disk()).bots[BOT.id]
+  assert.deepEqual(bot.roles, [pinOf('solver', PLUGIN_VERSION)])
+  assert.equal(bot.model, undefined)
+  assert.equal(bot.sessionId, BOT.id)
+})
+
+test('AN-4 a pending conversation switch to Antigravity prevents attaching a Solver pin', async t => {
+  const current = 'deepseek/v4'
+  const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: current } } } })
+  await officialSolver(f)
+  serve(f.ctx, [AGY, current])
+  const release = Promise.withResolvers()
+  const { agent } = await f.ctx.sessionController.resolveAgent(BOT.id)
+  agent.session.deriveMessages = () => [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Fixture history' }] }]
+  agent.inbox = { nextStep: [], nextTurn: [], remove: () => false }
+  agent.whenIdle = () => release.promise
+  agent.runMaintenance = async () => { throw new Error('Fixture stops the switch after the attachment attempt') }
+  let job
+  try {
+    const picked = await f.call('switch-route', { id: BOT.id, model: AGY })
+    assert.deepEqual(picked, { ok: true, value: { id: BOT.id, model: AGY, status: 'switching' } })
+    ;[job] = f.rt.switchJobs()
+    assert.equal(job.target, AGY)
+    await job.autoCleared
+    await f.rt.save()
+    const before = (await f.disk()).bots[BOT.id]
+    assert.deepEqual(await attachTo(f, BOT.id, 'solver'), refusedSolverAgent)
+    assert.deepEqual((await f.disk()).bots[BOT.id], before)
+  } finally {
+    release.resolve()
+    await job?.finished
+  }
+})
+
+for (const from of [AGY, 'deepseek/v3']) {
+  test(`round 2 a persisted restart rollback to ${from} checks Solver attachment until recovery finishes`, async t => {
+    const f = await catalogSolverFixture(t)
+    await officialSolver(f)
+    const oldId = 'earlier-part'
+    const freshId = 'fresh-part'
+    const target = 'deepseek/v4'
+    const team = await f.disk()
+    Object.assign(team.bots[BOT.id], {
+      sessionId: freshId, model: target, appliedModel: target,
+      segments: [{ sessionId: oldId, switchedTo: target, archivePending: true }],
+    })
+    team.switching = { [oldId]: {
+      botId: BOT.id, target, back: { model: from, appliedModel: from }, wakeTries: 2, wakeFailedAt: Date.now(),
+    } }
+    await f.close()
+    await fs.writeFile(f.statePath, JSON.stringify(team))
+    const release = Promise.withResolvers()
+    const archived = []
+    const restarted = await f.start(ctx => {
+      serve(ctx, [from, target])
+      const fakeAgent = (id, pending = []) => ({
+        id, session: { id }, ctx: { tools: { register: () => () => {}, restrict: () => () => {} } },
+        status: 'idle',
+        send() { throw new Error('Fixture fresh part cannot start') },
+        inbox: {
+          nextStep: [], nextTurn: pending,
+          remove(id) { const at = pending.findIndex(message => message.id === id); if (at >= 0) pending.splice(at, 1) },
+          append(_target, message) { pending.push(message) },
+        },
+      })
+      const old = fakeAgent(oldId)
+      const fresh = fakeAgent(freshId, [{ id: 'handoff', source: { handoff: true }, content: [] }])
+      const resolve = ctx.sessionController.resolveAgent
+      ctx.sessionController.resolveAgent = async id => {
+        if (id === oldId) { await release.promise; return { agent: old } }
+        return id === freshId ? { agent: fresh } : resolve(id)
+      }
+      ctx.workspaceRegistry.archiveSession = async id => { archived.push(id) }
+    })
+    const recovery = restarted.rt.heldBack()
+    let attached
+    try {
+      assert.deepEqual([...restarted.rt.switchJobs()], [])
+      assert.equal(restarted.rt.awaitingFirstAnswer(freshId), false)
+      assert.deepEqual((await f.disk()).switching[oldId].back, { model: from, appliedModel: from })
+      attached = await attachTo(restarted, BOT.id, 'solver')
+    } finally {
+      release.resolve()
+      await recovery
+    }
+    const finished = await f.disk()
+    const bot = finished.bots[BOT.id]
+    const expectedPin = from === AGY ? undefined : [pinOf('solver', PLUGIN_VERSION)]
+    assert.deepEqual([bot.sessionId, bot.model, bot.appliedModel, bot.roles], [oldId, from, from, expectedPin])
+    assert.equal(finished.switching[oldId], undefined)
+    assert.deepEqual(archived, [freshId])
+    assert.deepEqual(attached, from === AGY ? refusedSolverAgent : { ok: true, value: ['solver'] })
+  })
+}
+
 async function catalogSolverFixture(t, options = {}) {
   const bytes = packageOf(manifestOf({ id: 'solver', version: PLUGIN_VERSION, capabilities: [] }))
   const entry = entryOf(bytes, { id: 'solver', version: PLUGIN_VERSION, capabilities: [] })

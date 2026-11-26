@@ -75,3 +75,16 @@ test('the Solver look refusals pass the copy check and hostText words them in pt
     }
   } finally { off() }
 })
+
+test('AN-6 hostText words the Solver agent refusal in pt-BR', () => {
+  const pack = loadDictionaries()['omni-ui']
+  const off = installLocale({
+    register: () => () => {},
+    bind: () => key => pack[key] ?? key,
+    getLocale: () => ({ active: 'pt' }),
+  })
+  try {
+    assert.equal(hostText('Antigravity cannot be a Solver yet. Choose another agent for the Solver.'),
+      'O Antigravity ainda não pode ser um Solver. Escolha outro agente para o Solver.')
+  } finally { off() }
+})

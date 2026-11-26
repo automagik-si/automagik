@@ -5,6 +5,8 @@ const { outputFiles } = await build({
   stdin: { contents: [
     "export { NewSolver } from './src/client/solver-new.js'",
     "export { CommandPalette } from './src/client/palette.js'",
+    "export { ModelMenu } from './src/client/model-menu.js'",
+    "export { settingsModelPicker } from './src/client/settings-model-picker.js'",
     "export { teamActions } from './src/client/team-actions.js'",
   ].join('\n'), resolveDir: import.meta.dirname + '/../..' },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
@@ -47,11 +49,11 @@ runInNewContext(outputFiles[0].text, {
     throw new Error(`no platform module ${name}`)
   },
   window: { addEventListener() {}, removeEventListener() {}, innerWidth: 1200, innerHeight: 800, matchMedia: () => ({ matches: false }) },
-  document: { querySelector: () => null, documentElement: { addEventListener() {}, removeEventListener() {} }, addEventListener() {}, removeEventListener() {} },
+  document: { body: {}, querySelector: () => null, documentElement: { addEventListener() {}, removeEventListener() {} }, addEventListener() {}, removeEventListener() {} },
   requestAnimationFrame: () => 0, cancelAnimationFrame() {}, performance: { now: () => 0 },
   setTimeout: (fn) => { timers.push(fn); return timers.length }, clearTimeout() {},
 })
-export const { NewSolver, CommandPalette, teamActions } = module.exports
+export const { NewSolver, CommandPalette, ModelMenu, settingsModelPicker, teamActions } = module.exports
 
 export const mount = (Component, props) => {
   const instance = {

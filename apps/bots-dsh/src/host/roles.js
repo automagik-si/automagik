@@ -8,6 +8,7 @@ import { refusal } from './refusal.js'
 import { createRoleCatalog } from './role-catalog.js'
 import { createRolePackages } from './role-package.js'
 import { createRoleRuntime } from './role-runtime.js'
+import { assertSolverAssignment } from './solver-agent.js'
 
 let roleQueue = Promise.resolve()
 const serialize = (edit) => {
@@ -280,7 +281,7 @@ export function installRoles(rt, deps = {}) {
       }
     } else if (!waiting && ((hasSlot && Array.isArray(bot.roles) && bot.roles.length === 0)
       || (!hasSlot && bot.kind !== BUILTIN_ROLES.genie.kind))) return effective
-    await commit((team) => {
+    const write = () => commit((team) => {
       const target = rt.own(team.bots, id)
       if (target === undefined) {
         if (team !== state) throw refusal('No such Bot')
@@ -292,7 +293,14 @@ export function installRoles(rt, deps = {}) {
         && JSON.stringify(solverMarker(target)) === detachedMarker) delete target.waitingRole
       if (next === undefined) delete target.roles
       else target.roles = next
-    }, check)
+    }, () => {
+      check()
+      if (attach && roleId === SOLVER_ROLE_ID) assertSolverAssignment(rt, bot, bot.model ?? bot.appliedModel)
+    })
+    // Verification can await a package read. Acquire the model slot for the actual
+    // write and re-read the Bot there, including any conversation crossing under way.
+    if (attach && roleId === SOLVER_ROLE_ID) await rt.withModelChange(id, write, true)
+    else await write()
     if (attach && next?.length) {
       lastAttachmentTime.set(id, Date.parse(next[0].attachedAt))
       await runtime.ready(id)

@@ -11,6 +11,7 @@ import { osBlocked } from './folder-access.js'
 import { refusal } from './refusal.js'
 import { instructionsDigest, unchangedSolverWaiter } from './roles.js'
 import { packageAttachment } from '../shared/roles.js'
+import { hasSolverSetup } from '../shared/solver-agent.js'
 import { CHOOSE_CONCRETE } from '../shared/solver-model.js'
 import { SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isWrittenSolverMethod, solverInstructions } from '../shared/solver-method.js'
 import { DRAFT_SWEEP_MAX, MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
@@ -24,6 +25,7 @@ import { peopleOf } from './people.js'
 import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_MODEL_TEXT, addsAcpToolDeny, deniesAcpTool } from '../shared/own-tools.js'
 import { avatarProblem, isSolverLooks } from '../shared/solver-look-policy.js'
 import { LOOK_INVALID, SOLVER_BY_PERSON, SOLVER_WEARS, solverDefaultShape } from '../shared/solver-looks.js'
+import { assertSolverAgent, assertSolverAssignment } from './solver-agent.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -318,7 +320,7 @@ export function install(rt) {
   // `pickModel` leaves the model to the user: the chat opens on a model card, and the
   // greeting waits until a model is chosen. So does a Bot made when no model it can
   // run on is served.
-  async function createBot(options, { readScopeSource = rt.callerSessionId?.() } = {}) {
+  async function createBot(options, { readScopeSource = rt.callerSessionId?.(), preparedModel } = {}) {
     const leave = rt.enterOwnership?.() ?? (() => {})
     try {
       const cleanName = String(options.name ?? '').trim().slice(0, 40)
@@ -326,7 +328,7 @@ export function install(rt) {
       if (problem !== undefined) throw refusal(problem)
       if (botNameTaken(cleanName)) throw refusal(`A Bot named ${cleanName} already exists`)
       const existing = options.existingSessionId
-      if (existing === undefined) return await holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource))
+      if (existing === undefined) return await holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource, preparedModel))
       if (typeof existing !== 'string' || !existing.trim()) throw refusal('An existing Session needs its id')
       const readOnly = rt.readOnly()
       if (readOnly !== undefined) throw refusal(readOnly)
@@ -372,12 +374,41 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, options, readScopeSource) {
-    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy, solverAuto, solverModelChoice } = options
+  const waitsForSolver = (next, waitingRole) =>
+    next.instructions !== '' && ((waitingRole === SOLVER_ROLE_ID && next.role === SOLVER_DESCRIPTION)
+      || waitingRole?.hostCopy === true)
+
+  async function resolveCreateModel(next, { model, pickModel, waitingRole, reviewerId, solverModelChoice }) {
+    const strictChoice = solverModelChoice || (waitingRole === SOLVER_ROLE_ID && reviewerId !== undefined
+      && next.role === SOLVER_DESCRIPTION && isWrittenSolverMethod(next.instructions))
+    if (strictChoice && !model) throw refusal(CHOOSE_CONCRETE)
+    const modelRef = model ? await rt.resolveModel(model, { remember: false }).catch(error => {
+      if (strictChoice && error?.modelUnavailable) throw refusal(CHOOSE_CONCRETE)
+      throw error
+    }) : pickModel ? undefined : await rt.defaultBotModel()
+    return { modelRef, strictChoice }
+  }
+
+  // The first request can create the Main Bot before it creates the requested Bot.
+  // Resolve a Solver's model before either allocation and carry that choice through.
+  async function prepareCreate(options) {
+    const { next } = createLook(options)
+    if (state.mainBotIds.some(id => rt.botOf(id))) return undefined
+    if (!waitsForSolver(next, options.waitingRole) && !hasSolverSetup(next)) return undefined
+    const preparedModel = await resolveCreateModel(next, options)
+    assertSolverAgent(preparedModel.modelRef)
+    return preparedModel
+  }
+
+  async function buildBot(cleanName, options, readScopeSource, preparedModel) {
+    const { color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId, reviewerId, reviewGuard, reviewerMade, waitingRole, solverCopy, solverAuto } = options
     if (existingSessionId !== undefined && (createdBy !== undefined || reviewerId !== undefined || reviewGuard !== undefined)) {
       throw refusal('An adopted Session takes no creator or reviewer.')
     }
-    const { next: { kind } } = createLook(options)
+    const { next } = createLook(options)
+    const { kind } = next
+    const waitForSolver = waitsForSolver(next, waitingRole)
+    const solverCreate = waitForSolver || hasSolverSetup(next)
     const copyAvatar = copyOf === undefined ? undefined : cleanAvatar(avatar)
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     // Checked before the Session exists, so a bad list or shell choice creates no Bot and
@@ -386,15 +417,14 @@ export function install(rt) {
     const shell = cleanShell(shellInput)
     const isPrivate = privateInput === true
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
-    // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
-    // its Session exists.
-    const strictChoice = solverModelChoice || (waitingRole === SOLVER_ROLE_ID && reviewerId !== undefined
-      && options.role === SOLVER_DESCRIPTION && isWrittenSolverMethod(options.instructions))
-    if (strictChoice && !model) throw refusal(CHOOSE_CONCRETE)
-    const modelRef = model ? await rt.resolveModel(model, { remember: false }).catch(error => {
-      if (strictChoice && error?.modelUnavailable) throw refusal(CHOOSE_CONCRETE)
-      throw error
-    }) : pickModel ? undefined : await rt.defaultBotModel()
+    const { modelRef, strictChoice } = preparedModel ?? await resolveCreateModel(next, options)
+    const checkSolverAgent = () => {
+      const source = copyOf === undefined ? undefined : rt.botOf(copyOf)
+      const solverSource = hasSolverSetup(source)
+      if (solverSource) assertSolverAgent(source.model ?? source.appliedModel)
+      if (solverCreate || solverSource) assertSolverAgent(modelRef)
+    }
+    checkSolverAgent()
     const linkedReviewer = reviewerId === undefined ? undefined : rt.botOf(reviewerId)
     if (strictChoice) {
       if ((reviewerId !== undefined && !linkedReviewer) || model !== modelRef) throw refusal(CHOOSE_CONCRETE)
@@ -467,10 +497,12 @@ export function install(rt) {
     let sectionsBefore
     let resolvedSecId
     try {
+      checkSolverAgent()
       if (id === undefined) {
         const guard = () => {
           assertCaller(createdBy)
           createLook(options)
+          checkSolverAgent()
         }
         id = await createSession(cleanName, { dir, readScopeSource, guard, allocation })
         // Check the new Session's own tool surface before publishing its Bot.
@@ -479,12 +511,11 @@ export function install(rt) {
       sectionsBefore = new Set((state.sections ?? []).map(sec => sec.id))
       assertCaller(createdBy)
       if (strictChoice) await rt.checkSolverModel(modelRef, linkedReviewer)
+      checkSolverAgent()
       const { next, avatar: checkedAvatar } = createLook(options, id)
       const savedAvatar = copyOf !== undefined ? copyAvatar
         : checkedAvatar ?? (isSolverLooks(next) ? { shape: solverDefaultShape(id) } : undefined)
       resolvedSecId = !main ? resolveSectionInput({ section, sectionId }) : undefined
-      const waitForSolver = next.instructions !== '' && ((waitingRole === SOLVER_ROLE_ID && next.role === SOLVER_DESCRIPTION)
-        || waitingRole?.hostCopy === true)
       bot = {
         id,
         name: cleanName,
@@ -551,6 +582,7 @@ export function install(rt) {
       const saveBot = async () => {
         if (solverCopy) {
           const check = () => {
+            checkSolverAgent()
             solverCopy.check(bot)
             if (rt.botOf(id)) throw refusal('Session already belongs to the team')
           }
@@ -723,6 +755,7 @@ export function install(rt) {
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
     if (bot.private === true) throw refusal(`${bot.name} is private, so it cannot be copied`)
+    if (hasSolverSetup(bot)) assertSolverAgent(bot.model ?? bot.appliedModel)
     const served = (await rt.catalog()).some(entry => entry.ref === bot.model)
     // A folder that went away since leaves the copy in the team workspace.
     const workDir = bot.workDir !== undefined && await rt.isFolder(bot.workDir) ? bot.workDir : undefined
@@ -772,9 +805,8 @@ export function install(rt) {
     return copy
   }
 
-  // Pocket owns the model-change slot exclusively through Auto clearing, selection
-  // and rollback. Desktop picks keep their concurrency with each other, including
-  // route changes during validation. A nested switchRoute uses its update's slot.
+  // Pocket and Solver identity commits take the model-change slot exclusively.
+  // Desktop picks can still validate concurrently. A nested switchRoute uses its update's slot.
   const modelChanges = new Map()
   const modelChange = new AsyncLocalStorage()
   async function withModelChange(id, run, exclusive = false) {
@@ -859,14 +891,18 @@ export function install(rt) {
     }
     if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
     const model = patch.model !== undefined || patch.effort !== undefined
+    // Either half can complete a written Solver setup. Removing a setup does not
+    // need the model slot, so an already queued pick still rechecks the updated look.
+    const setup = (typeof patch.role === 'string' && cleanRole(patch.role) === SOLVER_DESCRIPTION)
+      || (patch.instructions !== undefined && isWrittenSolverMethod(String(patch.instructions).trim()))
     const look = lookChange.getStore()
-    if (model && look?.id === id && look.active) {
+    if ((model || setup) && look?.id === id && look.active) {
       throw new Error('lock order: model change inside a look hold')
     }
     const identity = ['role', 'instructions', 'avatar', 'color'].some(key => patch[key] !== undefined)
     const record = checkedAvatar => updateBotRecord(id, patch, actorId, fromSessionId, { ...options, checkedAvatar })
     const run = identity ? () => withLookHold(id, () => record(checkUpdateLook(id, patch, actorId))) : () => record()
-    return model ? withModelChange(id, run, options?.admit !== undefined) : run()
+    return model || setup ? withModelChange(id, run, setup || options?.admit !== undefined) : run()
   }
 
   function updateBotRecord(id, patch, actorId, fromSessionId, options) {
@@ -944,6 +980,7 @@ export function install(rt) {
     // Checked first, so a folder, model or level that does not pass leaves the rest
     // unchanged too.
     const role = patch.role === undefined ? undefined : cleanRole(patch.role)
+    const instructions = patch.instructions === undefined ? undefined : String(patch.instructions).trim()
     const moving = patch.workDir !== undefined
     const workDir = moving ? await rt.cleanWorkDir(patch.workDir ?? '') : undefined
     // An adopted Session works in the folder its host gave it (parts.js `pinned`).
@@ -973,6 +1010,20 @@ export function install(rt) {
         throw error
       }
     }
+    const checkSolverChange = () => {
+      if (modelRef === undefined && role === undefined && instructions === undefined) return
+      const wasSolver = hasSolverSetup(bot)
+      const isSolver = role === undefined && instructions === undefined ? wasSolver
+        : hasSolverSetup({ ...bot, role: role ?? bot.role, instructions: instructions ?? bot.instructions })
+      if (!isSolver) return
+      // Clearing the chosen model exposes the last applied one. Unrelated edits can keep
+      // a grandfathered Solver on its effective model.
+      const current = bot.model ?? bot.appliedModel
+      const target = modelRef === undefined ? current : modelRef ?? bot.appliedModel
+      if (!wasSolver) assertSolverAssignment(rt, bot, target)
+      else if (target !== current) assertSolverAgent(target)
+    }
+    checkSolverChange()
     // A Bot that denies acp_tool and a model that runs its own tools (#2026): a save that makes
     // that pair is refused here, before anything is written or an account is observed. Each
     // write below checks again, with no await between its check and its write.
@@ -1026,6 +1077,7 @@ export function install(rt) {
     // update-bot is the same person's pick, so it takes that path too rather than silently
     // carrying the old conversation across the harness. Other fields cannot ride along: the
     // switch is its own step, and the caller can update them after it.
+    checkSolverChange()
     const currentModel = bot.model ?? bot.appliedModel
     const crossing = modelRef != null && crossesHarness(currentModel, modelRef)
     // Another pick may finish while the connection is checked.
@@ -1067,6 +1119,7 @@ export function install(rt) {
       if (problem !== undefined) throw refusal(problem)
     }
     if (patch.permission !== undefined) rt.checkPreset(patch.permission)
+    checkSolverChange()
     if (modelEntry === undefined) commit(modelRef)
     // The model goes first: checked above, applied to the Session now, and only then part of
     // the record. A model selection DSH turns down can still have cleared Auto.
@@ -1106,7 +1159,7 @@ export function install(rt) {
     // another save may not add acp_tool meanwhile (own-tools.js, `settlingModel`).
     if (modelChanged) settle(id, 1)
     try {
-      if (modelChanged) await switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev)
+      if (modelChanged) await switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev, checkSolverChange)
       const denyBefore = Object.hasOwn(bot, 'denyTools') ? bot.denyTools : undefined
       if (denyTools !== undefined) {
         // Checked against the live model and way back, then written, with no await between.
@@ -1126,8 +1179,10 @@ export function install(rt) {
           if (session !== undefined) await ctx.sessionTitle.rename(session, nextName)
           await followMemberNames(Object.values(state.rooms).filter(room => room.members.includes(id)))
         }
+        // A model apply or Session rename can yield before the Solver method is written.
+        if (role !== undefined || instructions !== undefined) checkSolverChange()
         if (role !== undefined) bot.role = role
-        if (patch.instructions !== undefined) bot.instructions = String(patch.instructions).trim()
+        if (instructions !== undefined) bot.instructions = instructions
         if (patch.color !== undefined) {
           if (patch.color === null) delete bot.color
           else if (isColor(currentColor(patch.color))) bot.color = currentColor(patch.color)
@@ -1316,7 +1371,7 @@ export function install(rt) {
     })
   }
 
-  async function switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev) {
+  async function switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev, checkSolverChange) {
     const before = modelFields(bot)
     const blockedBefore = bot.blocked
     const choose = () => {
@@ -1344,6 +1399,7 @@ export function install(rt) {
           if (!selected && patch.model !== undefined && modelRef != null) {
             rt.assertOwnToolsModel?.(bot, { next: modelRef, denyTools: bot.denyTools })
           }
+          if (!selected) checkSolverChange()
         }
         try {
           await rt.applyModel(bot, { force: true, modelEntry, checkChoice, selected: () => {
@@ -1364,6 +1420,7 @@ export function install(rt) {
       if (patch.model !== undefined && modelRef != null) {
         rt.assertOwnToolsModel?.(bot, { next: modelRef, denyTools: bot.denyTools })
       }
+      checkSolverChange()
       choose()
       try {
         await rt.applyModel(bot, { force: true, requireReadable: true })
@@ -2165,7 +2222,7 @@ export function install(rt) {
       const bot = rt.botOf(id)
       return bot === undefined ? 'Unknown Bot' : nameRefusal(bot, String(name).trim().slice(0, 40))
     },
-    ensureWorkspace, keepTeamFolder, createSession, createBot, checkCreateLook: options => createLook(options),
+    ensureWorkspace, keepTeamFolder, createSession, createBot, prepareCreate,
     newBotStoredPermission, duplicateBot, updateBot, setFlags,
     saveSection, reorderSections, deleteSection,
     roomBusy, autoRoomName, retitleRoom, createRoom, updateRoom, deleteRoom,
