@@ -45,7 +45,7 @@ import { randomUUID } from 'node:crypto'
 import { isSandboxGrant } from '../shared/hermes-consent.js'
 import { isBotId } from '../shared/registry.js'
 import { guardGroupText, guardOffNoticeOf } from '../shared/guard-groups.js'
-import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
+import { teamLookup } from './approvals.js'
 import { ATTACH_REQUEST_PREFIX, THUMBNAILS, attachmentCode, effectiveAttachments, positiveInt, sanitizeAttachmentName, validId } from './pocket-attach.js'
 import { startPocketSocket } from './pocket-socket.js'
 import { pocketSettingsOf } from './pocket-settings.js'
@@ -1099,7 +1099,7 @@ export class DshChatSource {
    */
   raceApproval(request, next) {
     const sessionId = sessionOfAgent(request?.agent)
-    if (!this.writable || typeof sessionId !== 'string' || this.chatOwner(sessionId) === undefined || TEAM_LOOKUPS.has(teamToolOf(request.toolName))) return next()
+    if (!this.writable || typeof sessionId !== 'string' || this.chatOwner(sessionId) === undefined || teamLookup(request)) return next()
     const callId = typeof request.callId === 'string' && request.callId ? request.callId : randomUUID()
     const input = this.callInput(sessionId, request.callId)
     const row = {

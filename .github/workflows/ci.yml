@@ -2061,6 +2061,11 @@ jobs:
         working-directory: apps/acp-dsh
         run: bun install --frozen-lockfile
 
+      - name: Bots plugin dependencies for the ACP history approval test
+        if: matrix.app == 'acp-dsh'
+        working-directory: apps/bots-dsh
+        run: bun install --frozen-lockfile
+
       - name: Desktop dependencies for ACP lifecycle tests
         # The app-build upgrade case calls Desktop's profile merger, which resolves yaml here.
         if: matrix.app == 'acp-dsh'

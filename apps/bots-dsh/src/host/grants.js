@@ -4,7 +4,7 @@ import { isAbsolute } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { commandCapableAgent, piAiRoutes, routeOf } from '../shared/routes.js'
-import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
+import { teamLookup, teamToolOf } from './approvals.js'
 import { bindTicketDesk } from './grant-ticket.js'
 import { cleanArgs, effectiveRoute, hardContext, hardToUndo } from './auto-judge.js'
 import { capabilityOfArgs } from './turns.js'
@@ -853,7 +853,7 @@ export function install(rt) {
   })
 
   ctx.on('approval/request', (request, next) => {
-    if (TEAM_LOOKUPS.has(teamToolOf(request.toolName))) return next()
+    if (teamLookup(request)) return next()
     const session = request.agent?.session ?? request.agent
     const call = calls.get(pair(session?.id, request.callId))
     const ask = call?.ask

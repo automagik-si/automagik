@@ -29,6 +29,8 @@ if (typeof CREDENTIAL !== 'string' || CREDENTIAL === '' || typeof URL !== 'strin
 
 let generation = 0
 let listed = false
+let listingStarted = false
+let probed = false
 let stopped = false
 
 const write = (message) => {
@@ -96,6 +98,7 @@ function rpc(op, payload = {}, { signal } = {}) {
 }
 
 async function tools() {
+  listingStarted = true
   const answer = await rpc('list')
   if (typeof answer.generation === 'number') generation = answer.generation
   listed = true
@@ -126,7 +129,7 @@ async function call(params, requestId) {
   try {
     const callId = typeof params._meta?.callId === 'string' ? params._meta.callId : undefined
     answer = await rpc('call', { name, arguments: params.arguments ?? {}, callId,
-      ...(name === 'load_skill' && callId === undefined && { requestId }),
+      ...((name === 'load_skill' || name === 'read_own_chat') && callId === undefined && { requestId }),
     }, { signal: controller.signal })
   } catch (error) {
     // A cancelled request gets no response (MCP): the agent already stopped waiting for it.
@@ -162,10 +165,14 @@ async function poll() {
 }
 
 function stop() {
+  if (stopped) return
   stopped = true
   try {
     process.stdin.pause()
   } catch {}
+  // omp closes its probe after falling back to initialize. Its next process will list the
+  // tools, so the probe must leave the back-channel waiting for that first list.
+  if (probed && !listingStarted) return process.stdout.write('', () => process.exit(0))
   // Let the last reply flush before leaving; `bye` is best effort.
   rpc('bye').catch(() => {}).finally(() => process.exit(0))
 }
@@ -208,9 +215,12 @@ async function handle(line) {
     reply(id, null)
     return stop()
   }
+  if (message.method === 'server/discover') {
+    probed = true
+    return fail(id, -32601, 'method not found: server/discover')
+  }
   const handler = handlers[message.method]
   if (handler === undefined) {
-    // `server/discover` and every unadvertised method: method not found, the MCP fallback.
     return fail(id, -32601, `method not found: ${message.method}`)
   }
   try {
