@@ -2565,13 +2565,15 @@ export function install(rt) {
   // request this listener rewrote passes straight through.
   // The agent loop mark belongs to the request object, so carry it to the copy
   // to keep agent routes accepting the redacted request.
+  const redactModelFields = ({ messages, system }) => {
+    const mask = redactorForOutput()
+    return mask === undefined ? { messages, system }
+      : { messages: redactDeep(messages, mask), system: redactDeep(system, mask) }
+  }
   const rewritten = new WeakSet()
   ctx.on('llm/stream', function redactModelRequest(options, next) {
     if (rewritten.has(options.messages)) return next()
-    const mask = redactorForOutput()
-    if (mask === undefined) return next()
-    const messages = redactDeep(options.messages, mask)
-    const system = redactDeep(options.system, mask)
+    const { messages, system } = redactModelFields(options)
     if (messages === options.messages && system === options.system) return next()
     const fresh = [...(messages ?? [])]
     rewritten.add(fresh)
@@ -2673,6 +2675,7 @@ export function install(rt) {
     loadSecrets,
     redactSecrets: text => redact(text),
     connectorDiagnosticRedactor: redactorForOutput,
+    redactModelFields,
     redactSecretsAnywhere: text => redactAnywhere(text),
   })
 }

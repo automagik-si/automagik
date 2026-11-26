@@ -87,6 +87,8 @@ function resolvedDefault(provider, model) {
 // The DeepSeek account's sign-in grant (dsh-deepseek-account-platform).
 const ACCOUNT_RECORD = 'deepseek-account-platform/default'
 const TRANSIENT_LLM_CODES = new Set(['TRANSPORT', 'TIMEOUT'])
+export const QUOTA_CODES = new Set(['QUOTA', 'ACCOUNT_QUOTA', 'acp/aside-quota'])
+const QUOTA_HOLD_MS = 60 * 60_000
 
 function retryPolicyOf(ctx, provider) {
   try {
@@ -183,6 +185,17 @@ export async function assembleLlmStream(ctx, options, { signal, backoff, random 
 
 export function install(rt) {
   const { ctx, state } = rt
+  const asideQuota = new Map()
+  const quotaUntil = provider => {
+    const until = asideQuota.get(provider)
+    if (until > Date.now()) return until
+    asideQuota.delete(provider)
+    return undefined
+  }
+  const liftQuota = () => {
+    asideQuota.clear()
+    rt.liftMemoryHolds?.()
+  }
   // Bots a plugin answers for on its own engine (host-models.js) never run on a DSH model.
   installHostModels(rt)
   const onDsh = bot => !rt.hostOwned(bot)
@@ -239,7 +252,10 @@ export function install(rt) {
   })
   ctx.on?.('credentials/reference-updated', async (ref) => {
     invalidate()
-    if (await inPlace(credentials => credentials.describe(ref))) rt.unblockBots?.({ ref })
+    if (await inPlace(credentials => credentials.describe(ref))) {
+      liftQuota()
+      rt.unblockBots?.({ ref })
+    }
   })
   // A sign-in writes the account's record. A sign-out removes it, and so does a token
   // the provider refused, while the turn that failed on it still runs. Other plugins'
@@ -247,7 +263,10 @@ export function install(rt) {
   ctx.on?.('credentials/record-updated', async (key) => {
     invalidate()
     if (String(key) !== ACCOUNT_RECORD) return
-    if (await inPlace(credentials => credentials.describeRecord(key))) rt.unblockBots?.({ signedIn: true })
+    if (await inPlace(credentials => credentials.describeRecord(key))) {
+      liftQuota()
+      rt.unblockBots?.({ signedIn: true })
+    }
   })
   ctx.on?.('settings/document-updated', invalidate)
 
@@ -470,15 +489,24 @@ export function install(rt) {
   // model (DeepSeek, unless the person chose another there) when that can; else the first
   // account connected here, as for a Bot's default.
   const answersAside = entry => !['acp', 'hermes-remote'].includes(routeOf(entry.provider).connectedBy)
-  function pickBackground(entries) {
+  function pickBackground(entries, canRun = entry => !entry.needsKey && !quotaUntil(entry.provider)) {
     const aside = entries.filter(answersAside)
     const chosen = state.prefs?.backgroundModel
-    if (typeof chosen === 'string' && aside.some(entry => entry.ref === chosen && !entry.needsKey)) return chosen
-    return pickDefault(aside, entry => !entry.needsKey)
+    if (typeof chosen === 'string' && aside.some(entry => entry.ref === chosen && canRun(entry))) return chosen
+    return pickDefault(aside, canRun)
   }
-  const backgroundModel = async (sessionId) => {
+  const backgroundModel = async (sessionId, { noCommands = false } = {}) => {
     rt.assertBotRunnerProvider?.(state.prefs?.backgroundModel, sessionId)
-    return pickBackground(await catalog({ noCommands: rt.botRunnerRequired?.(sessionId) }))
+    return pickBackground(await catalog({ noCommands: noCommands || rt.botRunnerRequired?.(sessionId) }))
+  }
+  const memoryBackground = async (sessionId) => {
+    rt.assertBotRunnerProvider?.(state.prefs?.backgroundModel, sessionId)
+    const entries = await catalog({ noCommands: true })
+    const ref = pickBackground(entries)
+    if (ref !== undefined) return { ref }
+    const holds = entries.filter(entry => answersAside(entry) && !entry.needsKey)
+      .map(entry => quotaUntil(entry.provider)).filter(Boolean)
+    return { retryAt: holds.length ? Math.min(...holds) : undefined }
   }
   /** Whether a `provider/model` ref can answer a job beside the chats (not an ACP agent). */
   const answersAsideRef = ref => typeof ref === 'string' && ref.includes('/') && !['acp', 'hermes-remote'].includes(routeOf(ref.split('/')[0]).connectedBy)
@@ -630,6 +658,13 @@ export function install(rt) {
     if (!wide) return ref
     stays(bot, ref)
     return undefined
+  }
+  async function memoryModel(bot) {
+    if (!bot?.model || !onDsh(bot) || rt.switchingChat?.(bot.id)) return undefined
+    if (routeOf(splitRef(bot.model)?.provider).connectedBy === 'acp') return bot.model
+    if (!answersAsideRef(bot.model)) return undefined
+    const entries = await catalog({ noCommands: true })
+    return entries.some(entry => entry.ref === bot.model && configured(entry)) ? bot.model : undefined
   }
   // Before a Session of the Bot takes a turn by itself (a task, a group seat, a fresh part, a
   // greeting): when the Bot's saved CLI model is not served, so the Session would run on
@@ -1000,6 +1035,10 @@ export function install(rt) {
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, checkSolverModel, modelAccess, assertModelAccess, desiredModel, taskAskerState, taskAskerModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
+    memoryModel, memoryBackground, quotaUntil,
+    quotaHeld: provider => quotaUntil(provider) !== undefined,
+    noteAsideQuota: provider => asideQuota.set(provider, Date.now() + QUOTA_HOLD_MS),
+    clearAsideQuota: provider => asideQuota.delete(provider),
     selectSessionModel, reselectOwnRoute, keepsCarriedRoute, assertReadableRoute, storedRouteOf: storedRoute,
     applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => {

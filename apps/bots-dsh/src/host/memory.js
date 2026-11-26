@@ -25,7 +25,7 @@
 // provider's prefix cache holds; a fresh part, or a checkpoint (which breaks the cache
 // anyway), freezes it anew.
 import { NO_BOT_RUNNER } from './bot-runner.js'
-import { assembleLlmStream } from './models.js'
+import { assembleLlmStream, QUOTA_CODES } from './models.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { appendFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
@@ -63,6 +63,10 @@ const RECENT_TAIL_CHARS = 512 * 1024
 const QUERY_TERMS_MAX = 6
 const SOURCE_READ_MS = 5_000
 const MODEL_TIMEOUT_MS = 120_000
+const NO_MODEL = 'memory/no-model'
+const staleShot = () => Object.assign(new Error('The memory request changed'), { code: 'bot/stale' })
+const terminalShot = error => error?.cancelled === true
+  || [NO_BOT_RUNNER, 'bot/stale', 'bot/shell'].includes(error?.code)
 // A thinking model spends several thousand output tokens before its answer starts. On a
 // 13k-token context one spent a 2,048-token budget on reasoning alone and wrote nothing;
 // given 16,384 it wrote the answer. The first try gets that room, the retry gets more,
@@ -70,8 +74,11 @@ const MODEL_TIMEOUT_MS = 120_000
 const SUMMARY_MAX_TOKENS = 16_384
 const SUMMARY_RETRY_MAX_TOKENS = 32_768
 function providerFailure(failure) {
-  const label = [failure?.code, failure?.status].filter(part => part !== undefined && part !== '').join(' ')
-  return modelFailure(`The provider returned an error${label === '' ? '' : ` (${label})`}`)
+  const code = failureCode(failure, '')
+  const status = Number.isInteger(failure?.status) ? failure.status : ''
+  const label = [code, status].filter(Boolean).join(' ')
+  return Object.assign(modelFailure(`The provider returned an error${label ? ` (${label})` : ''}`),
+    { providerCode: code })
 }
 // What a failure may say. A log line and a foreign failure (the file system, a provider) give
 // a code only: their own words can quote a path, an entry or a provider's reply. Memory's own
@@ -139,7 +146,9 @@ export function install(rt) {
       },
       memoryNews: () => ({}),
       memoryReviews: () => 0,
-      memoryReviewStatus: () => ({ enabled: false, allowed: false, pending: false, running: false }),
+      memoryReviewStatus: () => ({
+        enabled: false, allowed: false, pending: false, running: false, failure: null,
+      }),
       memoryTidyStatus: () => ({ enabled: false, allowed: false, always: false }),
     })
     return
@@ -776,7 +785,7 @@ export function install(rt) {
     // The memory review's place in each part of its own chat goes with it; its group
     // Sessions' places are their groups'. Saved before the archive answers.
     const parts = new Set([botId, rt.chatOf(botId), ...(bot?.segments ?? []).map(segment => segment.sessionId)])
-    const forgetting = forgetCursors([...parts].map(id => `chat:${id}`))
+    const forgetting = forgetCursors([...parts].map(id => `chat:${id}`), `bot:${botId}`)
     return queued(async () => {
       await forgetting
       if (rt.readOnly() !== undefined) return
@@ -803,7 +812,7 @@ export function install(rt) {
     summaries.delete(room.id)
     summaryFailures.delete(room.id)
     news.delete(room.id)
-    const forgetting = forgetCursors([`group:${room.id}`])
+    const forgetting = forgetCursors([`group:${room.id}`], `group:${room.id}`)
     return queued(async () => {
       await forgetting
       if (rt.readOnly() !== undefined) return
@@ -1466,13 +1475,10 @@ export function install(rt) {
     until: entry.meta.until ?? null, pinned: isPinned(entry), expired: isExpired(entry, today()),
   }))
 
-  // Memory runs beside the chats, on the team's background model (models.js), never on an
-  // agent over ACP, which answers only in its own chat.
-  async function modelFor(sessionId) {
-    const route = splitRef(await rt.backgroundModel(sessionId))
-    if (route === undefined) throw Object.assign(new Error('No model can run memory review. Pick a background model in Settings, or add a model in Harness settings.'), { code: 'memory/no-model' })
-    return route
-  }
+  const noModel = () => Object.assign(
+    new Error('No model can run memory review. Pick a background model in Settings, or add a model in Harness settings.'),
+    { code: NO_MODEL },
+  )
   // The panel's model calls belong to the Bot or group whose memory they serve;
   // without the tag the meter would file them under "other".
   async function oneShot(route, system, text, tag, sessionId, dispatch) {
@@ -1489,9 +1495,12 @@ export function install(rt) {
     const budgets = [first, retry]
     const messages = [{ role: 'user', content: [{ type: 'text', text }] }]
     if (tag !== undefined) rt.tagUsage?.(messages, tag)
+    const timedOut = () => modelFailure('The model call timed out.')
     let lastKind = 'stop'
     for (let attempt = 0; attempt < budgets.length; attempt += 1) {
       const maxTokens = budgets[attempt]
+      const timeout = AbortSignal.timeout(MODEL_TIMEOUT_MS)
+      const signal = AbortSignal.any([dispatch.signal, timeout])
       const callOptions = {
         provider: route.provider,
         model: route.model,
@@ -1502,21 +1511,42 @@ export function install(rt) {
         system,
         messages,
         maxTokens,
-        signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+        signal,
       }
-      const assembler = await (rt.assembleLlm
-        ? rt.assembleLlm(callOptions, { dispatch })
-        : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff, dispatch }))
+      const attemptDispatch = {
+        ...dispatch,
+        check: () => {
+          dispatch.check()
+          signal.throwIfAborted()
+        },
+      }
+      let assembler
+      try {
+        assembler = await (rt.assembleLlm
+          ? rt.assembleLlm(callOptions, { dispatch: attemptDispatch })
+          : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff, dispatch: attemptDispatch }))
+      } catch (error) {
+        dispatch.signal.throwIfAborted()
+        if (timeout.aborted && (error === signal.reason || error?.cancelled === true)) throw timedOut()
+        const failure = error?.failure ?? error
+        if (terminalShot(error) || !QUOTA_CODES.has(failure?.code)) throw error
+        throw providerFailure(failure)
+      }
+      dispatch.signal.throwIfAborted()
       const finish = assembler.finish
-      // A cancelled call is the caller's decision, not a route that may answer again.
-      if (finish.kind === 'aborted') throw modelFailure('The model call was aborted.')
+      if (timeout.aborted && !QUOTA_CODES.has(finish.failure?.code)) throw timedOut()
+      if (finish.kind === 'aborted') {
+        throw Object.assign(modelFailure('The model call was aborted.'), { cancelled: true })
+      }
       if (finish.kind === 'error') {
         const failure = finish.failure
         // A gateway can report empty output as 502. The pi-ai adapter
         // classifies 5xx as SERVER without preserving the HTTP status.
         const mayBeEmpty = failure?.code === 'EMPTY_RESPONSE' || failure?.status === 502
           || (failure?.code === 'SERVER' && failure.status === undefined)
-        if (attempt !== 0 || !mayBeEmpty) throw providerFailure(failure)
+        if (QUOTA_CODES.has(failure?.code) || attempt !== 0 || !mayBeEmpty) {
+          throw providerFailure(failure)
+        }
         continue
       }
       const reply = assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('\n').trim()
@@ -1530,30 +1560,200 @@ export function install(rt) {
       : `The model wrote nothing within ${where}; no complete answer was written`)
   }
 
-  // A served model can still refuse the call (a key without access, say), so a failed call
-  // is tried once more on the Bot's own model, when that one answers beside its chat.
-  // The provider's own error is not passed on: its message may quote the request.
+  const asideRuns = new Map()
+  const asideAborts = new Map()
+  const foreground = new Set()
+  const lifetime = new AbortController()
+  ctx.on('agent/status', ({ agent, status }) => {
+    const chat = agent?.id
+    if (status === 'idle') foreground.delete(chat)
+    else if (asideAborts.has(chat) || rt.chatOwners.has(chat)) {
+      foreground.add(chat)
+      asideAborts.get(chat)?.abort()
+    }
+  })
+  ctx.effect(() => () => lifetime.abort(), 'omni-ui: memory answers')
+
+  const busy = chat => foreground.has(chat) || rt.live?.get?.(chat)?.turn !== undefined
+  const stopped = () => Object.assign(new Error('The memory session stopped.'), {
+    code: 'acp/aside-stopped',
+  })
+  const reserved = () => Object.assign(new Error('The account is reserved.'), {
+    code: 'acp/aside-unavailable',
+  })
+  async function acpShot(acp, bot, ref, route, chat, sessionId, system, text, dispatch, onAdmitted) {
+    if (chat === undefined || busy(chat)) return undefined
+    const effort = bot.effort
+    const accountGeneration = acp.asideAccountGeneration?.(route.provider)
+    const previous = asideRuns.get(bot.id) ?? Promise.resolve()
+    const slot = Promise.withResolvers()
+    const tail = previous.then(() => slot.promise)
+    asideRuns.set(bot.id, tail)
+    const controller = new AbortController()
+    const signal = AbortSignal.any([controller.signal, lifetime.signal,
+      AbortSignal.timeout(MODEL_TIMEOUT_MS), ...(dispatch?.signal ? [dispatch.signal] : [])])
+    let releaseWork
+    let onAbort
+    try {
+      await Promise.race([previous, new Promise((_, reject) => {
+        onAbort = () => reject(stopped())
+        signal.addEventListener('abort', onAbort, { once: true })
+        if (signal.aborted) onAbort()
+      })])
+      asideAborts.set(chat, controller)
+      const reservations = rt.machineReservations
+      let prepared = false
+      const check = () => {
+        if (lifetime.signal.aborted || dispatch?.signal?.aborted) throw staleShot()
+        if (acp.asideAccountGeneration?.(route.provider) !== accountGeneration) {
+          throw Object.assign(new Error('The Bot account changed.'), { code: 'acp/aside-signed-out' })
+        }
+        const current = rt.botOf(bot.id)
+        if (!current || current.model !== ref || current.effort !== effort || rt.chatOf(bot.id) !== chat
+          || rt.switchingChat?.(bot.id) || rt.hostOwned(current)) throw staleShot()
+        rt.assertShellChoice?.(chat, bot.id)
+        if (current.shell === false) throw Object.assign(staleShot(), { code: 'bot/shell' })
+        rt.assertBotRunnerProvider?.(route.provider, chat)
+        rt.assertBotRunnerProvider?.(route.provider, sessionId)
+        if (prepared) dispatch?.check?.()
+        if (signal.aborted || busy(chat)) throw stopped()
+        if (rt.quotaHeld?.(route.provider) || reservations?.held?.(route.provider)) throw reserved()
+      }
+      const prepare = async () => {
+        check()
+        await dispatch?.prepare?.()
+        prepared = true
+        check()
+      }
+      check()
+      releaseWork = reservations?.workStarted?.(route.provider)
+      const answer = await acp.answerAside({
+        ...route, effort, signal, accountGeneration, timeoutMs: MODEL_TIMEOUT_MS,
+        check, prepare,
+        admit: async () => {
+          await prepare()
+          if (await reservations?.imageGate?.(route.provider)) throw reserved()
+          check()
+        },
+        readPrompt: () => {
+          check()
+          onAdmitted()
+          const fields = { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }] }
+          const masked = rt.redactModelFields?.(fields) ?? fields
+          return { system: masked.system, text: masked.messages[0].content[0].text }
+        },
+      })
+      check()
+      if (typeof answer?.text !== 'string' || answer.text.trim() === '') {
+        throw modelFailure('The memory session wrote nothing.')
+      }
+      return answer
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+      if (asideAborts.get(chat) === controller) asideAborts.delete(chat)
+      releaseWork?.()
+      slot.resolve()
+      if (asideRuns.get(bot.id) === tail) void tail.then(() => {
+        if (asideRuns.get(bot.id) === tail) asideRuns.delete(bot.id)
+      })
+    }
+  }
+
+  // Provider diagnostics can quote the request. Keep only the structured code.
   const answerFailure = error => (ownFailure(error) ? error : modelFailure(`The model could not answer (${failureCode(error, 'provider error')}).`))
   const shotSession = (bot, tag) => rt.botRunnerRequired === undefined ? tag?.sessionId : rt.chatOf(bot.id)
-  async function botShot(bot, system, text, tag, dispatch) {
+  async function botShot(bot, system, text, tag, dispatch, backgroundOnly = false) {
     const sessionId = shotSession(bot, tag)
-    const cancelled = error => error?.code === NO_BOT_RUNNER || error?.code === 'bot/stale'
-    const first = await modelFor(sessionId)
-    try {
-      return await oneShot(first, system, text, tag, sessionId, dispatch)
-    } catch (error) {
-      if (cancelled(error)) throw error
-      const mine = await rt.desiredModel(bot, { aside: true, noCommands: rt.botRunnerRequired?.(sessionId) })
-      const fallback = rt.answersAside(mine) ? splitRef(mine) : undefined
-      if (fallback === undefined || (fallback.provider === first.provider && fallback.model === first.model)) throw answerFailure(error)
+    const chat = rt.chatOf(bot.id)
+    const signal = dispatch?.signal ? AbortSignal.any([lifetime.signal, dispatch.signal]) : lifetime.signal
+    const checkActive = () => { if (signal.aborted) throw staleShot() }
+    checkActive()
+    rt.assertShellChoice?.(sessionId ?? chat, bot.id)
+    const mine = backgroundOnly ? undefined : await rt.memoryModel(bot)
+    const own = splitRef(mine)
+    let acp
+    if (own?.provider.startsWith('acp-')) {
+      try { acp = ctx.get?.('acpAgents') } catch {}
+    }
+    const hidden = typeof acp?.answerAside === 'function' && acp.supportsAside?.(own.provider) !== false
+    const eligible = own !== undefined && (hidden || rt.answersAside(mine))
+    let ownAdmitted = eligible && !hidden
+    const failures = []
+    let quota = false
+    let ownFailureCode
+    const record = (ref, provider, error, isOwn = false) => {
+      checkActive()
+      if (terminalShot(error)) throw error
+      if (error?.code === 'acp/aside-stopped') return
+      if (QUOTA_CODES.has(error?.providerCode ?? error?.code)) {
+        rt.noteAsideQuota(provider)
+        quota = true
+      } else if (isOwn) {
+        ownFailureCode = failureCode({ code: error?.providerCode || error?.code })
+      }
+      failures.push({ ref, error })
+    }
+    const answered = (route, reply, via) => {
+      rt.clearAsideQuota(route.provider)
+      dispatch?.onAnswer?.(route, via)
+      return reply
+    }
+    const dispatchNative = {
+      signal,
+      prepare: dispatch?.prepare,
+      check: () => {
+        checkActive()
+        rt.assertShellChoice?.(sessionId ?? chat, bot.id)
+        dispatch?.check?.()
+      },
+    }
+    const native = (route, via) => oneShot(route, system, text, tag, sessionId, {
+      ...dispatchNative,
+      check: () => {
+        dispatchNative.check()
+        if (rt.quotaHeld(route.provider)) {
+          throw modelFailure('The model account is out of quota.')
+        }
+      },
+    }).then(reply => answered(route, reply, via))
+    if (eligible && !rt.quotaHeld(own.provider)) {
       try {
-        return await oneShot(fallback, system, text, tag, sessionId, dispatch)
-      } catch (again) {
-        if (cancelled(again)) throw again
-        const said = failure => failureText(failure, 'provider error')
-        throw modelFailure(`${first.provider}/${first.model}: ${said(error)}; ${fallback.provider}/${fallback.model}: ${said(again)}`)
+        if (!hidden) return await native(own, 'own')
+        const reply = await acpShot(acp, bot, mine, own, chat, sessionId, system, text, dispatch,
+          () => { ownAdmitted = true })
+        if (reply !== undefined) {
+          return answered({ ...own, model: reply.model ?? own.model }, reply.text.trim(), 'own-acp')
+        }
+      } catch (error) {
+        record(mine, own.provider, error, true)
       }
     }
+    const background = await rt.memoryBackground(sessionId)
+    const fallback = splitRef(background.ref)
+    if (fallback !== undefined && !failures.some(failure => failure.ref === background.ref)) {
+      try { return await native(fallback, 'background') } catch (error) {
+        record(background.ref, fallback.provider, error)
+      }
+    }
+    const next = failures.length ? await rt.memoryBackground(sessionId) : background
+    const ownHold = eligible ? rt.quotaUntil(own.provider) : undefined
+    // A supported ACP route can still refuse admission for this account or executable.
+    const ownMayRun = ownAdmitted && !ownHold
+    // The review can retry when either eligible route comes back, after its holder delay.
+    const holds = [ownHold, next.retryAt].filter(Boolean)
+    const retryAt = next.ref === undefined && !ownMayRun && holds.length
+      ? Math.min(...holds) : undefined
+    const error = failures.length > 1
+      ? modelFailure(failures.map(({ ref, error }) => `${ref}: ${failureText(error, 'provider error')}`).join('; '))
+      : failures.length === 1 ? answerFailure(failures[0].error)
+        : retryAt ? modelFailure('The available model accounts are out of quota.') : noModel()
+    throw Object.assign(error, { quota, retryAt, ownFailureCode })
+  }
+
+  function memoryShot(bot, system, text, tag, dispatch) {
+    const provider = splitRef(bot.model)?.provider
+    const backgroundOnly = provider === 'acp-omp' || provider === 'acp-antigravity'
+    return botShot(bot, system, text, tag, dispatch, backgroundOnly)
   }
 
   /** @type {Map<string, {hash:string, text:string, at:number}>} */
@@ -1590,9 +1790,11 @@ export function install(rt) {
   const panelBody = panel => (panel.group ? { roomId: panel.id } : { botId: panel.id })
   const panelLabel = (panel, scope) => (scope.kind === 'team' ? 'the team memory' : panel.group ? 'the group memory' : `${panel.name}'s memory`)
 
-  // The models a summary runs on, the background model first and the keeper's after it: a
-  // failure stands until one of them changes.
-  const summaryModels = async (keeper, sessionId) => `${await rt.backgroundModel(sessionId) ?? ''}|${keeper?.model ?? ''}`
+  // The keeper's model and its background fallback. A failure stands until one changes.
+  const summaryModels = async (keeper, sessionId) => {
+    const ref = await rt.backgroundModel(sessionId, { noCommands: true })
+    return `${keeper?.model ?? ''}|${ref ?? ''}`
+  }
 
   function startSummary(panel, loaded, language, hash, models) {
     const { keeper } = panel
@@ -1600,7 +1802,7 @@ export function install(rt) {
       ? groupSummaryRequest({ name: panel.name, lines: linesFor(loaded.group), language })
       : summaryRequest({ name: panel.name, own: linesFor(loaded.own), team: linesFor(loaded.team), language })
     const job = (async () => {
-      const text = await botShot(keeper, SUMMARY_SYSTEM, request, panel.tag)
+      const text = await memoryShot(keeper, SUMMARY_SYSTEM, request, panel.tag)
       const value = { hash, text: text.slice(0, SUMMARY_TEXT_MAX), at: Date.now() }
       summaries.set(panel.id, value)
       summaryFailures.delete(panel.id)
@@ -1655,7 +1857,7 @@ export function install(rt) {
     const text = String(body.text ?? '').trim().slice(0, ASK_TEXT_MAX)
     if (text === '') throw new Error('Type a question or a change first')
     const numbered = await settled(() => Object.entries(panel.scopes).flatMap(([tag, scope]) => allEntries(loadScope(scope)).map(entry => ({ ...entry, scope: tag }))))
-    const answer = parseAsk(await botShot(panel.keeper, askSystem(panel.group), askRequest({ name: panel.name, group: panel.group, numbered, language: languageNow(), text }), panel.tag))
+    const answer = parseAsk(await memoryShot(panel.keeper, askSystem(panel.group), askRequest({ name: panel.name, group: panel.group, numbered, language: languageNow(), text }), panel.tag))
     const meta = { source: 'memory panel', by: 'user', added: today() }
     const home = panel.group ? 'group' : 'own'
     const changes = []
@@ -2016,9 +2218,12 @@ export function install(rt) {
     return await memoryView(panelBody(panel))
   }
 
-  const { memoryReviews, memoryReviewStatus, forgetCursors } = installReview(rt, { root, reviewOn, mainLimit, TEAM, ownScope, groupScope, keeperOf, writesTeam, labelOf, today, writeText, settled, loadScope, addEntry, replaceEntry, removeEntry, entryProblem, secretEntry, botShot, languageNow })
+  const { memoryReviews, memoryReviewStatus, forgetCursors, liftMemoryHolds } =
+    installReview(rt, { root, reviewOn, mainLimit, TEAM, ownScope, groupScope, keeperOf, writesTeam,
+      labelOf, today, writeText, settled, loadScope, addEntry, replaceEntry, removeEntry,
+      entryProblem, secretEntry, botShot: memoryShot, languageNow })
 
-  const { tidyView, undoTidy, tidyNow, memoryTidyStatus } = installTidy(rt, { TEAM, ownScope, groupScope, keeperOf, scopeKey, dirOf, today, queued, recoverPending, writable, settled, loadScope, publish, writeStep, removeStep, writeText, botShot, languageNow, allEntries, entryProblem, USER, changedSince })
+  const { tidyView, undoTidy, tidyNow, memoryTidyStatus } = installTidy(rt, { TEAM, ownScope, groupScope, keeperOf, scopeKey, dirOf, today, queued, recoverPending, writable, settled, loadScope, publish, writeStep, removeStep, writeText, botShot: memoryShot, languageNow, allEntries, entryProblem, USER, changedSince })
 
   async function memoryTidyUndo(body) {
     const panel = panelOf(body)
@@ -2056,6 +2261,6 @@ export function install(rt) {
   Object.assign(rt, {
     memoryEnabled: true, renewMemory, archiveBotMemory, archiveGroupMemory, memoryReviews, memoryReviewStatus, memoryTidyStatus, pocketMemory,
     memoryEndpoint: panelCall(memoryEndpoint), memoryEdit: panelCall(memoryEdit), memoryAdd: panelCall(memoryAdd),
-    memoryNews: () => Object.fromEntries(news), botShot, tidyMemoryNow: tidyNow,
+    memoryNews: () => Object.fromEntries(news), botShot, tidyMemoryNow: tidyNow, liftMemoryHolds,
   })
 }

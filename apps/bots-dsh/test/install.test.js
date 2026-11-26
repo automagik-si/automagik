@@ -154,6 +154,9 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: memory section',
     'prompt bot-memory 645',
     'on agent/pre-step',
+    // An active foreground turn preempts the Bot's hidden ACP memory answer.
+    'on agent/status',
+    'effect omni-ui: memory answers',
     'on agent/status',
     'effect omni-ui: memory review',
     // The daily tidy's clock runs so a Bot whose own switch is on gets tidied; with no switch on it does nothing.

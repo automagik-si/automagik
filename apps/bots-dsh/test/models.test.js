@@ -9,13 +9,14 @@ const PROVIDERS = {
   ollama: [{ id: 'kimi-k3' }, { id: 'deepseek-v4-pro' }],
 }
 
-function runtime(defaultSelection) {
+function runtime(defaultSelection, on) {
   const ctx = {
     llm: {
       listProviders: () => Object.keys(PROVIDERS).map(id => ({ id })),
       listModels: async id => PROVIDERS[id],
     },
     get: name => (name === 'agentDefaultModel' && defaultSelection ? { currentSelection: () => defaultSelection } : undefined),
+    on,
   }
   const rt = { ctx, state: { bots: {} } }
   install(rt)
@@ -1118,4 +1119,23 @@ test('Solver host accepts distinct choices without ACP proofs and refuses only e
   }
   await assert.rejects(rt.checkSolverModel('acp-claude/opus', { ...reviewer }), /Choose a specific model/)
   assert.equal(rt.upgradeReviewerModels, undefined)
+})
+
+test('T1 background quota holds skip a provider, expire, and lift on a saved key', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const listeners = new Map()
+  const rt = runtime({ provider: 'deepseek', model: 'deepseek-v4.1-flash' },
+    (name, listener) => listeners.set(name, listener))
+  rt.state.prefs = { backgroundModel: 'deepseek/deepseek-v4.1-flash' }
+  assert.equal(await rt.backgroundModel(), 'deepseek/deepseek-v4.1-flash')
+  rt.noteAsideQuota('deepseek')
+  assert.equal(rt.cachedBackground(), 'ollama/kimi-k3')
+  rt.noteAsideQuota('ollama')
+  assert.equal(rt.cachedBackground(), undefined)
+  t.mock.timers.tick(60 * 60_000)
+  assert.equal(rt.cachedBackground(), 'deepseek/deepseek-v4.1-flash')
+  rt.noteAsideQuota('deepseek')
+  assert.equal(rt.cachedBackground(), 'ollama/kimi-k3')
+  await listeners.get('credentials/reference-updated')('fixture-ref')
+  assert.equal(rt.cachedBackground(), 'deepseek/deepseek-v4.1-flash')
 })

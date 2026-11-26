@@ -395,7 +395,17 @@ The same card can carry DSH itself: a DS Bot release may name the DSH release it
 
 Model providers are set up with dsh's `llm-pi-ai` plugin in `cordis.patch.yml`. Every Bot runs on one model of its own, from the models DSH serves. A new team's first Main Bot has none, and holds its greeting until it has one. With `@automagik/welcome-dsh`, finishing Connect AI with an AI on gives it (and the Omni Bot) the team's default model, and the greeting goes out then. Otherwise its chat offers that model with one press to start and a "change" link to the model menu; with no model that can run, the card offers ways to set one up. The team's default model is DSH's default model when it is served and its provider has its key, else the first model that can run (a provider's `default` alias after the models it names). While a chat holds only the greeting, one line under it names the model and its provider, with "change". Of the Claude models pi-ai serves on `anthropic`, the menus offer each family's newest (Opus, Sonnet, Haiku, Fable); the older versions and dated snapshots stay served, so a Bot already on one keeps it and its menu still shows it. The Create Bot form starts on the DSH default model. The Bot's details panel and settings (or a Main Bot's `update_bot`) change it; a Bot whose model is no longer served shows the card again. A team saved by an older version keeps the model each Bot last ran on.
 
-**Background model**: the jobs that run beside the chats use one model of the team's, never the Bot's agent: memory review and the memory panel, and, for a chat on an agent over ACP (`acp-claude`, `acp-codex`), the steward's call and the part's note and checkpoint. An agent answers only in its own chat, so it cannot take those. Other chats keep their own model for these, so the provider serves their prefix from cache. The model is the team's pick in Settings → Bots → Background jobs (`prefs.backgroundModel`, any model DSH serves that is not an agent), else DSH's default model (DeepSeek, unless the person chose another there) when it can run, else the first account connected here. A memory call that fails on it is tried once more on the Bot's own model, when that one is not an agent. DSH's own session titles and compaction summaries pick their model in DSH's config (`session-title-llm`'s `provider` and `model`, `compaction-basic`'s `summarizationProvider` and `summarizationModel`); those fields are not live settings, so this setting does not reach them.
+**Background model.** Memory jobs try the Bot's eligible DSH-native model or an admitted
+Codex model in a hidden, tools-denied session first. They use the team's background model
+when the own route is unavailable or fails. Claude Code, omp, Antigravity, ACP Hermes and
+custom ACP agents use the configured background model for memory. A provider that returned
+quota is skipped for up to an hour. Automatic review also backs off on quota and reports
+the last failure in Advanced.
+
+The steward, part note and checkpoint of an ACP chat continue to use the background model.
+Choose it in Settings → Bots → Background jobs. The selection falls through to DSH's
+runnable default or the first connected account when necessary. DSH's session titles
+and compaction summaries keep their own config in `session-title-llm` and `compaction-basic`.
 
 **Claude on ACP**: Claude Code came back through `@automagik/acp-dsh`. Once per team, a Bot that ran
 on the retired Claude Code plugin and is still on the pi-ai Claude model it was moved to takes
