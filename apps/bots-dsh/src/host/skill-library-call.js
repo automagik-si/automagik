@@ -16,7 +16,7 @@ export { SKILL_TOOL } from './skill-message.js'
 
 const GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)|\b(?:use the skill|use a skill)\s+([a-z0-9-]+)\b|使用技能\s*([a-z0-9-]+)/gi
 const acp = provider => routeOf(provider).connectedBy === 'acp'
-function skillOwner(rt, sessionId) {
+function skillOwner(rt, sessionId, session) {
   const lineage = []
   const seen = new Set()
   const { ctx } = rt
@@ -34,7 +34,9 @@ function skillOwner(rt, sessionId) {
         if (lineage.length && !keepsGroupMembership(rt, id, botId)) return
         return { botId, lineage, root: id, kind: lineage.length ? 'subagent' : 'own' }
       }
-      const header = (ctx.sessions ?? ctx.get?.('sessions'))?.get?.(id)?.header
+      // ACP can replay a retained Session after DSH detaches it from the registry.
+      const header = id === sessionId && session !== undefined ? session.header
+        : (ctx.sessions ?? ctx.get?.('sessions'))?.get?.(id)?.header
       if (header?.origin !== 'subagent') return
       lineage.push(id)
       id = header.parentSession
@@ -496,11 +498,14 @@ export function install(rt) {
   }
 
   function project(options, { catalog = true, turnStart, historyOnly = false,
-    session = sessionOf(options.sessionId), auxiliary = auxiliaryRequest(options),
+    session: capturedSession, auxiliary = auxiliaryRequest(options),
     personCalls = catalog ? new WeakSet() : undefined } = {}) {
     const messages = options.messages
     if (!Array.isArray(messages)) return options
-    const owner = skillOwner(rt, options.sessionId)
+    const { sessionId } = options
+    const matches = typeof sessionId === 'string' && capturedSession?.id === sessionId && capturedSession.header?.id === sessionId
+    const session = capturedSession === undefined ? sessionOf(sessionId) : matches ? capturedSession : undefined
+    const owner = capturedSession === undefined || matches ? skillOwner(rt, sessionId, capturedSession) : undefined
     const botId = owner?.botId
     const bot = rt.botOf(botId)
     const worker = owner !== undefined && owner.kind !== 'own'

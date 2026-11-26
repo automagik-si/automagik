@@ -266,15 +266,22 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
 
 test('2083 a Codex task gets the same checked catalog and load as its Bot through ACP', { timeout: 15_000 }, async t => {
   const prompt = 'Choose a skill for the worker.'
+  const load = 'Load the offered skill for the report.'
   const restricted = 'A later restricted request.'
   const f = fixture(t, 'acp-codex', { worker: 'task',
-    probeTurns: [{ text: prompt, loads: [skill.name] }, { text: restricted, loads: [] }] })
+    probeTurns: [{ text: prompt, loads: [] }, { text: load, loads: [skill.name] }, { text: restricted, loads: [] }] })
   f.active.add('owner-a')
-  await f.run([user(prompt)])
+  // Let the opening turn finish on both revisions. The fake only uses MCP once
+  // the opening request has established that this Session offers the skill.
+  const initial = user(prompt)
+  const reply = answer('acp-codex')
+  await f.run([initial], { record: [initial], reply })
   const sent = f.events('prompt').at(-1)
   assert.deepEqual(sent.prompt, [text(prompt), text(catalog)])
   const listed = f.events('mcp-list').find(event => event.sessionId === sent.sessionId && event.server === 'dsh')
   assert.ok(listed.definitions.some(definition => definition.name === 'load_skill'))
+  const loaded = await f.run([initial, reply, user(load)])
+  assert.equal(loaded.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'Fixture work completed.')
   assert.deepEqual(f.events('skills-load').at(-1).answer, { content: [text(skill.content)], isError: false })
   f.excludeSkill()
   assert.equal(f.rt.skillCalls.load(f.agent.id, skill.name), undefined)
@@ -284,16 +291,22 @@ test('2083 a Codex task gets the same checked catalog and load as its Bot throug
 })
 
 test('2083 ACP replay strips delegated skill gestures while keeping ordinary child instructions', { timeout: 15_000 }, async t => {
+  const delegatedText = 'Keep these delegated instructions and use the skill mint-notes.'
+  const followup = 'Check the result again.'
+  // The probe matches an entire text block. Accept both inputs here so the
+  // assertions below judge the replay, irrespective of the fixture's reply.
+  const probeTurns = [delegatedText, 'Keep these delegated instructions and.', followup]
+    .map(text => ({ text, loads: [] }))
   const f = fixture(t, 'acp-codex', { worker: 'subagent', addedSkills: [manual],
-    probeTurns: [{ text: 'Keep these delegated instructions', loads: [] }, { text: 'Check the result again.', loads: [] }] })
+    probeTurns })
   f.active.add('owner-a')
-  const delegated = user('Keep these delegated instructions and use the skill mint-notes.')
+  const delegated = user(delegatedText)
   const reply = answer('acp-codex')
   await f.run([delegated], { record: [delegated], reply })
   assert.match(f.events('prompt').at(-1).text, /Keep these delegated instructions/)
   assert.doesNotMatch(f.events('prompt').at(-1).text, /mint-notes|MINT-OK/)
-  f.adapter.end(f.agent.id)
-  await f.run([delegated, reply, user('Check the result again.')])
+  f.adapter.endSession(f.agent.id)
+  await f.run([delegated, reply, user(followup)])
   const replay = f.events('prompt').at(-1).text
   assert.match(replay, /Keep these delegated instructions/)
   assert.doesNotMatch(replay, /mint-notes|MINT-OK/)

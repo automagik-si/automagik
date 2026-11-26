@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import fsp from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -17,8 +19,9 @@ import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { offeredTools } from '../../acp-dsh/src/host/backchannel.js'
+import { redactorFor } from '../../acp-dsh/src/host/redact.js'
 import { replayBlocks } from '../../acp-dsh/src/host/switch.js'
-import { apply, inject } from '../index.js'
+import * as bots from '../index.js'
 import { CLEAN_REVIEW } from './fixtures/skill-review-model.js'
 
 const botA = 'b-aaaaaaaaaa'
@@ -65,6 +68,7 @@ async function fixture(t, { program = false } = {}) {
   }))
   const requests = []
   let nextCall = 0
+  let reviews = 0
   const called = new Set()
   class FakeModel extends LlmAdapter {
     async listModels(provider) {
@@ -77,6 +81,7 @@ async function fixture(t, { program = false } = {}) {
 
     async *stream({ sessionId, messages, tools, system }) {
       if (tools.length === 0 && system?.startsWith('Review the supplied skill')) {
+        reviews++
         yield { type: 'text-delta', index: 0, text: CLEAN_REVIEW }
       } else {
         requests.push({ sessionId, messages: structuredClone(messages), tools: tools.map(tool => tool.name) })
@@ -108,6 +113,7 @@ async function fixture(t, { program = false } = {}) {
     await root.plugin(LocalFileSystem)
     await root.plugin(LocalSubprocessRuntime)
     root.provide('sandboxPolicy', { defaultMode: 'read-only',
+      overrideOf: () => undefined,
       resolve: ({ session } = {}) => ({ mode: 'read-only', workspaceRoot: home, sessionId: session?.id }) })
     root.provide('sandbox', { confine: async argv => ({ argv, enforcement: 'full', denialSignatures: [], runnerFailureRules: [] }) })
     await root.plugin(NodePtcRuntime)
@@ -145,11 +151,11 @@ async function fixture(t, { program = false } = {}) {
       return { records: visible.slice(-maxMessages).map(event => ({ event })), hasMore: visible.length > maxMessages }
     },
   })
-  const plugin = { name: 'worker-skills-fixture', inject, apply(ctx) {
-    apply(ctx, { home, github: false, memory: false, browser: false, diagnosticsFile: false, updateCheck: false })
-  } }
-  let fiber = root.plugin(plugin)
+  const config = { home, github: false, memory: false, browser: false, diagnosticsFile: false, updateCheck: false }
+  let fiber = root.plugin(bots, config)
   await fiber
+  assert.ok(fiber.runtime)
+  assert.notEqual(fiber.ctx, root)
   const team = () => root.get('omniTeam')
   const owner = async (endpoint, payload = {}) => {
     const response = await routes.get('/api/omni-ui').fetch(new Request('http://fixture.invalid/api/omni-ui', {
@@ -182,8 +188,37 @@ async function fixture(t, { program = false } = {}) {
     return child
   }
   return { root, get team() { return team() }, home, owner, requests, a, b, task, start,
+    get reviews() { return reviews },
     create: id => harness.create(id, route, { cwd: home }),
-    async reload() { await fiber.dispose(); fiber = root.plugin(plugin); await fiber; await team().load() },
+    async reload() { await fiber.dispose(); fiber = root.plugin(bots, config); await fiber; await team().load() },
+  }
+}
+
+async function checkPublication(t, f, task) {
+  const path = join(f.home, 'state.json')
+  const rename = fsp.rename
+  const published = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const spy = t.mock.method(fsp, 'rename', async (from, to) => {
+    await rename(from, to)
+    if (to === path) {
+      published.resolve(true)
+      await release.promise
+    }
+  })
+  syncBuiltinESMExports()
+  const saving = f.team.save({ required: true })
+  try {
+    const observed = await Promise.race([published.promise, saving.then(() => false)])
+    assert.equal(observed, true, 'fixture paused after publication')
+    assert.equal(f.team.teamCurrent(), true, 'owned state publication stays current before rename resolves')
+    f.team.reapplyToolMasks()
+    assert.equal(f.team.skillCalls.load(task.id, marker.name)?.text, marker.content)
+  } finally {
+    release.resolve()
+    spy.mock.restore()
+    syncBuiltinESMExports()
+    await saving
   }
 }
 
@@ -243,7 +278,7 @@ test('2083 DSH child dispatch keeps delegated input Bot-authored and returns the
   const raw = child.session.deriveMessages()
   const replay = f.team.skillCalls.project({ sessionId: child.id, messages: raw },
     { catalog: false, session: child.session, historyOnly: true }).messages
-  const replayText = JSON.stringify(replayBlocks(replay, { to: 'Fixture ACP agent' }))
+  const replayText = JSON.stringify(replayBlocks(replay, { redact: redactorFor(f.root), to: 'Fixture ACP agent' }))
   assert.match(replayText, /Write the child report/)
   assert.doesNotMatch(replayText, /use the skill manual-one|MANUAL-TASK-22/)
   assert.deepEqual(activity(child), [marker.name])
@@ -297,6 +332,7 @@ test('2083 removals, downgrades and edits keep the original snapshot and cannot 
   const a = await f.start(f.a)
   const original = structuredClone(f.team.state.tasks[a.id].skills)
   assert.deepEqual(original.map(pin => pin.name), [marker.name, manual.name])
+  await checkPublication(t, f, a)
   const assignment = { id: botA, name: marker.name, mode: 'automatic' }
   await f.owner('bot-skill-remove', assignment)
   await f.owner('bot-skill-add', assignment)
@@ -314,9 +350,9 @@ test('2083 removals, downgrades and edits keep the original snapshot and cannot 
   assert.ok(newer.session.deriveMessages().some(row => textOf(row).includes('The skill task-marker is not active')))
   assert.ok(f.requests.filter(request => request.sessionId === newer.id).every(request => !sentText(request).includes(marker.content)))
 
-  await f.owner('skill-library-save', { ...late, content: 'Reply with a different note.' })
+  await f.owner('skill-library-save', { ...late, edit: true, content: 'Reply with a different note.' })
   assert.equal(f.team.skillCalls.load(newer.id, late.name), undefined)
-  await f.owner('skill-library-save', late)
+  await f.owner('skill-library-save', { ...late, edit: true })
   assert.equal(f.team.skillCalls.load(newer.id, late.name), undefined, 'restoring the old hash cannot revive it')
   await f.owner('bot-skill-mode', assignment)
   await f.reload()
@@ -344,7 +380,6 @@ test('2083 inherited delivery uses the merged review decision and a later author
   const data = JSON.parse(readFileSync(path, 'utf8'))
   const record = data.skills[marker.name]
   const hash = record.hash
-  const reviewed = structuredClone(data)
   delete record.review
   delete record.reviewSeal
   delete data.reviews[hash]
@@ -353,15 +388,20 @@ test('2083 inherited delivery uses the merged review decision and a later author
   assert.equal(pending.hash, hash)
   assert.equal(pending.reviewHash, hash)
   assert.match(pending.held, /model has not reviewed this skill/)
+  assert.equal(f.team.skillCalls.load(f.a.id, marker.name), undefined)
   assert.equal(f.team.skillCalls.load(existing.id, marker.name), undefined)
   const held = await f.start(f.a)
   assert.ok(f.team.state.tasks[held.id].skills.every(pin => pin.name !== marker.name))
-  assert.deepEqual(await f.owner('skill-library-save', { name: marker.name, reviewHash: hash }), { saved: true })
+  const before = f.reviews
+  assert.deepEqual(await f.owner('skill-library-save', { name: marker.name, edit: true, reviewHash: hash }), { saved: true })
+  assert.equal(f.reviews, before + 1)
   assert.equal((await f.owner('skill-library-get', { name: marker.name })).held, undefined)
+  assert.equal(f.team.skillCalls.load(f.a.id, marker.name)?.text, marker.content)
   assert.equal(f.team.skillCalls.load(existing.id, marker.name), undefined)
   assert.equal(f.team.skillCalls.load(held.id, marker.name), undefined)
   const current = await f.start(f.a)
   assert.equal(f.team.skillCalls.load(current.id, marker.name)?.text, marker.content)
+  const reviewed = JSON.parse(readFileSync(path, 'utf8'))
   reviewed.skills[marker.name].content = 'Different bytes with the original hash.'
   writeFileSync(path, JSON.stringify(reviewed))
   assert.equal(f.team.skillCalls.load(current.id, marker.name), undefined)
@@ -398,7 +438,7 @@ test('2083 the task grants one scoped tool after reload and refuses dispatch if 
   const teamOnly = agent => definitions(agent).filter(name => f.team.teamTools.some(def => def.name === name))
   assert.deepEqual(teamOnly(a), ['load_skill'])
   f.team.addTeamTool(defineTool({ name: 'fixture_late', description: 'Late Bot-only tool', parameters: {},
-    output: { schema: { type: 'object' }, render: () => [] }, execute: () => ({}) }))
+    output: { schema: { type: 'object', additionalProperties: false }, render: () => [] }, execute: () => ({}) }))
   assert.ok(teamOnly(f.a).includes('fixture_late'))
   assert.deepEqual(teamOnly(a), ['load_skill'])
   await f.reload()

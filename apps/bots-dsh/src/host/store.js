@@ -100,15 +100,19 @@ export function install(rt) {
   // Other notes kept beside the team (resume.js's inflight.json) end their last write before
   // the lock is released at stop (rt.holdLockUntil).
   const lockWaits = new Set()
-  // mtime and size of the state.json this host last read or wrote.
+  // The identity and version of the state.json this host last read or wrote.
   let seen = ''
+  let publishing
   // Bumped each time the in-memory state is replaced from the file, so a queued
   // save cannot write a snapshot taken of the state it replaced.
   let lockEpoch = 0
+  const fileStamp = path => {
+    const { dev, ino, mtimeNs, size } = statSync(path, { bigint: true })
+    return `${dev}:${ino}:${mtimeNs}:${size}`
+  }
   const stamp = () => {
     try {
-      const { mtimeMs, size } = statSync(statePath)
-      return `${mtimeMs}:${size}`
+      return fileStamp(statePath)
     } catch {
       return ''
     }
@@ -988,10 +992,18 @@ export function install(rt) {
         }
         const checked = ensureCommit()
         if (checked !== undefined) await checked
-        await replaceFile(temp, statePath, ensureCommit)
-        // Even if the directory sync fails, this rename was ours. A later save
-        // can retry durability without mistaking the new stamp for an outside edit.
-        seen = stamp()
+        // The file can become visible before rename resolves. Recognize only
+        // the exact file this host is publishing, including during that gap.
+        const nextStamp = fileStamp(temp)
+        publishing = nextStamp
+        try {
+          await replaceFile(temp, statePath, ensureCommit)
+          // Keep our published stamp even if directory sync later fails or
+          // another file has already replaced the one we published.
+          seen = nextStamp
+        } finally {
+          publishing = undefined
+        }
         savedRecovery = recovery
         if (flush) {
           pendingDurability = undefined
@@ -1236,7 +1248,11 @@ export function install(rt) {
   // or was saved since: false before the first load, and after a file that could not be
   // read or was set aside as corrupt. It reads memory only.
   const teamLoaded = () => teamRead
-  const teamCurrent = () => adopting === undefined && stamp() === seen
+  const teamCurrent = () => {
+    if (adopting !== undefined) return false
+    const current = stamp()
+    return current === seen || current === publishing
+  }
 
   const savedListeners = new Set()
   const onSaved = (listener) => {
