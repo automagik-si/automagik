@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { createConnection, createServer } from 'node:net'
@@ -13,6 +14,7 @@ import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { fileURLToPath } from 'node:url'
 import { apply as applyAcp } from '../../acp-dsh/index.js'
 import { Session } from '@deepseek-ai/dsh-session'
+import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import * as timeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as native from '@deepseek-ai/dsh-tool-executor-native'
 import { ToolsService, defineTool } from '@deepseek-ai/dsh-tools'
@@ -23,7 +25,7 @@ import { apply } from '../index.js'
 import { ROUTE, STEER_CUT } from '../src/host/constants.js'
 import { questionReply } from '../src/host/parts.js'
 import { socketPathOf } from '../src/host/pocket-socket.js'
-import { resultSnapshot } from '../src/host/solver-progress.js'
+import { inspectResult, resultSnapshot } from '../src/host/solver-progress.js'
 import { answerSender } from '../src/host/turns.js'
 import { DICTIONARY, installLocale } from '../src/client/i18n.js'
 import { reviewMarkText, solverAutoView } from '../src/client/solver-draft.js'
@@ -940,9 +942,9 @@ async function reviewReplyFixture(t, averageCommand = 'node --test average.test.
     deliveries.push({ message, sent })
     return sent
   }
-  const review = async kind => {
+  const review = async (kind, images) => {
     await h.tool('message_bot', { to: 'reviewer', message: `Review the ${kind}.`,
-      solver_review: kind, solver_request: request, reply_to: 'me' })
+      solver_review: kind, solver_request: request, reply_to: 'me', ...(images ? { images } : {}) })
     return deliveries.at(-1).message.exchangeId
   }
   const answer = (exchangeId, shouldSend, model = refOf(reviewerModel)) => {
@@ -4186,4 +4188,408 @@ test('Snapshot E P1: a plain Solver folder still records a verified pass', async
   const { request } = await reviewedPlan(h, ['check-a'])
   assert.match(await checked(h, request, 'plain-check'), /^Recorded\./)
   assert.deepEqual(h.rt.botOf('solver').reviewTrack.solver.passed, ['check-a'])
+})
+
+const reviewPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
+  'base64',
+)
+const reviewDigest = data => createHash('sha256').update(data).digest('hex')
+const reviewPath = '.automagik/bots/solver/review/art.png'
+const reviewAnswer = 'RESULT SHIP\nThe checked result is ready.'
+
+async function checkedVisualReview(t, { path = reviewPath, bytes = reviewPng, prepareFiles } = {}) {
+  const f = await reviewReplyFixture(t)
+  const { h, request, review, answer, openReply } = f
+  const planExchange = await review('plan')
+  h.finish('solver', 'Waiting for plan review.')
+  h.event('reviewer', 'turn/start', { turn: 2 })
+  const planReply = answer(planExchange)
+  h.event('reviewer', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  await openReply(3, planReply)
+  const folder = h.rt.botOf('solver').workDir
+  if (path) {
+    mkdirSync(dirname(join(folder, path)), { recursive: true })
+    writeFileSync(join(folder, path), bytes)
+    utimesSync(join(folder, path), new Date(1_000), new Date(1_000))
+  }
+  writeFileSync(join(folder, 'report.md'), 'Verified result')
+  prepareFiles?.(folder)
+  assert.match(await checked(h, request, 'test', { check: 'average-test', command: 'node --test average.test.mjs' }), /^Recorded\./)
+  assert.match(await checked(h, request, 'diff', { check: 'diff-check', command: 'git diff --check' }), /^Recorded\./)
+  const stored = new Map()
+  function attachStore(host) {
+    host.ctx.provided.set('attachments', {
+      async saveImage(input) {
+        const attachmentId = `sha256:${reviewDigest(input.data)}`
+        stored.set(attachmentId, Buffer.from(input.data))
+        return { attachmentId, bytes: input.data.length, mediaType: input.mediaType, width: 1, height: 1, name: input.name }
+      },
+      async readImage(ref) { return { ref, data: stored.get(ref.attachmentId) } },
+    })
+  }
+  attachStore(h)
+  // Return actual exhausted paging for empty fake history.
+  h.agentOf('solver').session.seq = 0
+  async function send(host, images) {
+    const call = inputs => host.tool('message_bot', { to: 'reviewer', message: 'Review the checked result.',
+      solver_review: 'result', solver_request: request, ...(inputs ? { images: inputs } : {}) })
+    const receipt = await call(images)
+    // On the parent the Solve flow can only fall back to a text designation after
+    // the selected result file is refused. The same fake still supplies its answer.
+    if (receipt?.sent === false) await call()
+    const row = host.agentOf('reviewer').message
+    assert.equal(row?.source.exchangeId, host.rt.botOf('solver').reviewTrack.solver.review?.exchangeId)
+    return { receipt, row }
+  }
+  return { ...f, folder, stored, attachStore, send }
+}
+
+function answeringReviewer(t, h, { native = false, capable = true, shared = false, stored } = {}) {
+  const provider = native ? 'fake' : 'acp-review-fixture'
+  const route = { provider, model: native ? 'reviewer-model' : 'default' }
+  const agent = h.agentOf('reviewer')
+  agent.ctx.tools.register = () => () => {}
+  const session = Session.create(agent.id)
+  const folder = shared ? h.rt.botOf('solver').workDir : join(h.home, 'reviewer-folder')
+  mkdirSync(folder, { recursive: true })
+  session.header = { ...session.header, cwd: folder }
+  session.requestHeader = () => ({ config: route })
+  agent.session = session
+  h.ctx.agents = { get: id => h.agentOf(id) }
+  h.ctx.llm.resolveModelInfo = async () => capable ? { inputModalities: ['text', 'image'] } : {}
+  const projected = []
+  const prompts = []
+  const consume = async row => {
+    const id = row.content.find(block => block.type === 'image')?.attachment?.attachmentId
+    return id === undefined ? undefined : (await h.ctx.get('attachments').readImage({ attachmentId: id })).data
+  }
+  const adapter = native ? undefined : new AcpAdapter(h.ctx, new Map([[provider, {
+    name: 'Fake reviewer', spawn: () => assert.fail('no native process'),
+  }]]))
+  let nextRun = 0
+  const replaceRun = () => {
+    if (nextRun > 0) adapter.end(session.id, adapter.live.get(session.id))
+    const run = new AgentRun({ name: 'Fake reviewer' })
+    run.child = {}
+    run.sessionId = `fake-run-${++nextRun}`
+    run.init = { agentCapabilities: { promptCapabilities: { image: capable } } }
+    run.gone = new Promise(() => {})
+    run.conn = { prompt: async params => {
+      prompts.push(structuredClone(params))
+      const data = params.prompt.find(block => block.type === 'image')?.data
+      const suffix = data && Buffer.from(data, 'base64').equals(reviewPng) ? '\nPicture bytes verified.' : ''
+      await run.onUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: reviewAnswer + suffix } }, params.sessionId)
+      return { stopReason: 'end_turn' }
+    } }
+    run.dispose = () => run.letGo(true)
+    adapter.live.set(session.id, { run, provider, name: 'Fake reviewer', dshAgent: agent,
+      asks: false, calls: new Set(), open: false })
+  }
+  if (adapter) {
+    replaceRun()
+    t.after(() => adapter.dispose())
+  }
+  const imageMiddleware = h.ctx.listeners.get('llm/stream').find(fn => {
+    return fn.name === 'resultPictureStream' || fn.toString().includes('imagesAsTextOrPass')
+  })
+  async function* boundary(options) {
+    projected.push(options.messages)
+    if (adapter) yield* adapter.stream(options)
+    else {
+      const bytes = await consume(options.messages.at(-1))
+      prompts.push({ prompt: bytes ? [{ type: 'image', data: bytes.toString('base64') }] : [] })
+      yield { type: 'text-delta', text: reviewAnswer }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  const dispatch = options => imageMiddleware(options, () => boundary(options))
+  h.ctx.llm.stream = dispatch
+  const enter = (row, turn) => {
+    h.event('reviewer', 'turn/start', { turn })
+    session.append('user/message', row, { surfaceOp: 'append' })
+    h.takeInput('reviewer', row)
+  }
+  const generate = async () => {
+    const options = markAgentLoopRequest({ ...route, sessionId: session.id, messages: session.deriveMessages() })
+    const chunks = await Array.fromAsync(dispatch(options))
+    assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1)))
+    return chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
+  }
+  const answer = async (text, turn = 5, model = route) => {
+    const prior = h.agentOf('solver').message
+    if (model !== route) agent.session.requestHeader = () => ({ config: model })
+    h.event('reviewer', 'assistant/message', { turn, message: { source: { kind: 'model', ...route }, content: content(text) } })
+    h.event('reviewer', 'turn/end', { turn, reason: { kind: 'completed' } })
+    await until(() => h.agentOf('solver').message !== prior, { label: 'the reviewer’s answer in the Solver chat' })
+    const reply = h.agentOf('solver').message
+    h.event('solver', 'turn/start', { turn: turn + 1 })
+    h.takeInput('solver', reply)
+    h.finish('solver', 'Delivered the checked result.')
+    return reply
+  }
+  return { enter, generate, answer, replaceRun, projected, prompts, session }
+}
+
+for (const [id, options] of Object.entries({
+  'E1 Test 5 T2a': { capable: false, why: 'unseen' },
+  E2: { capable: true, shared: true },
+  E3: { native: true },
+  'E4 Test 8': { capable: false, text: true },
+  'E5 Test 6': { omit: true, why: 'missing' },
+  E6: { replaces: true, why: 'lost' },
+  'Test 7': { changesRoute: true, why: 'lost' },
+  T2b: { missingRoute: true, why: 'lost' },
+  T3a: { omit: true, why: 'missing' },
+  T3b: { omit: true, path: 'old.png', why: 'missing' },
+})) {
+  test(`2133 ${id} follows the received prompt and answer through the delivery mark`, async t => {
+    const f = await checkedVisualReview(t, { path: options.text ? null : options.path })
+    const { h, track } = f
+    const reviewer = answeringReviewer(t, h, { ...options, stored: f.stored })
+    const priorVerdicts = structuredClone(track().verdicts)
+    const selector = options.text || options.omit ? undefined : [options.path ?? reviewPath]
+    const { receipt, row } = await f.send(h, selector)
+    h.finish('solver', 'Waiting for RESULT review.')
+    reviewer.enter(row, 5)
+    let text = await reviewer.generate()
+    if (options.replaces) {
+      reviewer.replaceRun()
+      text = await reviewer.generate()
+      assert.notEqual(reviewer.prompts[0].sessionId, reviewer.prompts[1].sessionId)
+    }
+    const replyingModel = options.missingRoute ? {} : options.changesRoute ? { provider: 'fake', model: 'changed' } : undefined
+    const reply = await reviewer.answer(text, 5, replyingModel)
+    const result = track().solver.review
+    const sentImage = reviewer.prompts[0].prompt.find(block => block.type === 'image')
+    if (options.why) {
+      assert.equal(result.verdict, 'unverified', 'a visual SHIP must be withheld')
+      assert.equal(result.unverified, 'images')
+      assert.equal(result.imagesWhy, options.why)
+      assert.deepEqual(track().verdicts, priorVerdicts)
+      assert.equal(track().last?.done, undefined)
+      assert.equal(track().last?.result, false)
+      assert.match(reply.content.at(-1).text, /RESULT review is unverified/)
+      assert.equal(h.rt.solverStatusOf(h.rt.botOf('solver')).solverStatus.imagesWhy, options.why)
+      if (id.startsWith('E1')) {
+        assert.match(receipt, /reviewer cannot see pictures/)
+        assert.equal(sentImage, undefined)
+      }
+      if (id.startsWith('E5')) assert.match(receipt, /art\.png/)
+      if (id === 'E6') assert.deepEqual(Buffer.from(sentImage.data, 'base64'), reviewPng)
+    } else {
+      assert.equal(result.verdict, 'SHIP')
+      assert.equal(track().last?.done, true)
+      assert.equal(track().last?.result, true)
+      assert.equal(track().verdicts.length, priorVerdicts.length + 1)
+      if (!options.text) {
+        assert.deepEqual(Buffer.from(sentImage?.data ?? '', 'base64'), reviewPng, 'the real boundary received result PNG bytes')
+        assert.ok(reviewer.projected[0].some(row => row.content.some(block =>
+          block.attachment?.attachmentId === `sha256:${reviewDigest(reviewPng)}`)))
+      } else assert.equal(sentImage, undefined)
+    }
+  })
+}
+
+test('2133 E7 a real text-only resume loses visual credit and a fresh designation earns it', async t => {
+  const f = await checkedVisualReview(t)
+  const { h, request } = f
+  const reviewer = answeringReviewer(t, h, { stored: f.stored })
+  const { row } = await f.send(h, [reviewPath])
+  h.finish('solver', 'Waiting for RESULT review.')
+  reviewer.session.append('turn/start', { turn: 5 })
+  reviewer.enter(row, 5)
+  await reviewer.generate()
+  reviewer.session.append('turn/end', { turn: 5, reason: { kind: 'interrupted' } })
+  await h.rt.save({ required: true, durable: true })
+  assert.equal(await h.rt.flushUpdateNotes(), true)
+  await h.close()
+
+  const next = fixture(t, h.home)
+  next.ctx.sessionController.inspect = async id => ({
+    events: id === 'reviewer' ? reviewer.session.snapshotEvents(0, reviewer.session.seq) : [],
+  })
+  await next.rt.load()
+  f.attachStore(next)
+  next.agentOf('solver').session.seq = 0
+  const waiting = setInterval(() => {}, 1000)
+  try { await next.rt.resumesDone } finally { clearInterval(waiting) }
+  const resumed = next.agentOf('reviewer').message
+  assert.equal(resumed?.source.exchangeId, row.source.exchangeId, JSON.stringify(resumed?.source))
+  assert.equal(resumed.source.resumed, true)
+  assert.equal(resumed.content.some(block => block.type === 'image'), false)
+  const work = next.rt.state.works[resumed.source.exchangeId]
+  assert.equal(next.rt.designatedReplyRequest('solver', 'reviewer', resumed.source.exchangeId, work), request,
+    JSON.stringify({ work, track: next.rt.botOf('solver').reviewTrack }))
+  const newReviewer = answeringReviewer(t, next, { stored: f.stored })
+  newReviewer.enter(resumed, 7)
+  const track = () => next.rt.botOf('solver').reviewTrack
+  const resumedText = await newReviewer.generate()
+  assert.match(resumedText, /^RESULT SHIP/)
+  const resumedReply = await newReviewer.answer(resumedText, 7)
+  assert.equal(track().solver.review.verdict, 'unverified')
+  assert.equal(track().solver.review.imagesWhy, 'lost', JSON.stringify({
+    source: resumedReply.source, resultFolder: next.rt.botOf('solver').workDir, expectedFolder: f.folder,
+    images: track().solver.review.images, checked: track().solver.snapshot,
+    current: inspectResult(f.folder, { manifest: true, botId: 'solver' }),
+  }))
+  assert.equal(track().last?.result, false)
+  assert.equal(track().last?.done, undefined)
+  assert.equal(await requestOf(next), request)
+  const fresh = await f.send(next, [reviewPath])
+  assert.notEqual(fresh.row.source.exchangeId, resumed.source.exchangeId)
+  newReviewer.enter(fresh.row, 9)
+  await newReviewer.answer(await newReviewer.generate(), 9)
+  assert.equal(track().last?.done, true)
+  assert.equal(track().last?.resultExchangeId, fresh.row.source.exchangeId)
+  await next.close()
+})
+
+test('2133 T2c visual FIX-FIRST and BLOCKED remain recorded vetoes', async t => {
+  for (const veto of ['FIX-FIRST', 'BLOCKED']) {
+    await t.test(veto, async t => {
+      const f = await checkedVisualReview(t)
+      const reviewer = answeringReviewer(t, f.h, { native: true, stored: f.stored })
+      const { row } = await f.send(f.h)
+      f.h.finish('solver', 'Waiting for the review.')
+      reviewer.enter(row, 5)
+      await reviewer.answer(`RESULT ${veto}`)
+      assert.equal(f.track().solver.review.verdict, veto)
+      assert.equal(f.track().verdicts.at(-1).verdict, veto)
+      assert.equal(f.track().last?.done, undefined)
+    })
+  }
+})
+
+test('2133 T2d a pending pre-upgrade visual designation requires a fresh review', async t => {
+  const f = await checkedVisualReview(t)
+  const reviewer = answeringReviewer(t, f.h, { native: true, stored: f.stored })
+  const { row } = await f.send(f.h)
+  delete f.track().solver.review.images
+  delete f.track().solver.imageBase
+  f.h.finish('solver', 'Waiting for the review.')
+  reviewer.enter(row, 5)
+  const reply = await reviewer.answer(reviewAnswer)
+  assert.equal(f.track().solver.review.unverified, 'images')
+  assert.equal(f.track().solver.review.imagesWhy, 'missing')
+  assert.match(reply.content.at(-1).text, /fresh RESULT review/)
+  assert.equal(f.track().last?.result, false)
+  const fresh = await f.send(f.h, [reviewPath])
+  assert.notEqual(fresh.row.source.exchangeId, row.source.exchangeId)
+  reviewer.enter(fresh.row, 7)
+  await reviewer.answer(await reviewer.generate(), 7)
+  assert.equal(f.track().last?.done, true)
+})
+
+test('2133 T2e a complete legacy scan credits only an old text-only SHIP', async t => {
+  for (const path of [null, reviewPath]) {
+    await t.test(path ?? 'definite text control', async t => {
+      const f = await checkedVisualReview(t, { path })
+      const { row } = await f.send(f.h)
+      const track = f.track()
+      const result = track.solver.review
+      delete result.images
+      delete track.solver.imageBase
+      result.verdict = 'SHIP'
+      result.reviewer = { id: 'reviewer', name: 'reviewer', model: refOf(reviewerModel) }
+      track.verdicts.push({ verdict: 'SHIP', at: Date.now() + 10 })
+      f.h.rt.dropWork(row.source.exchangeId)
+      f.h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request: f.request })
+      assert.equal(f.track().last?.done, path ? undefined : true)
+      assert.equal(f.track().last?.result, path ? false : true)
+      assert.equal(f.track().delivered === true, !path)
+    })
+  }
+})
+
+test('2133 T2f an already delivered legacy track stays unchanged', async t => {
+  const f = await checkedVisualReview(t)
+  const { row } = await f.send(f.h)
+  delete f.track().solver.review.images
+  const prior = { at: 17, review: 'bot', plan: true, result: true, done: true, resultExchangeId: row.source.exchangeId }
+  f.track().last = prior
+  f.track().outcome = { done: true, exchangeId: row.source.exchangeId }
+  f.track().delivered = true
+  const stored = structuredClone(f.track())
+  f.h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request: f.request })
+  assert.deepEqual(f.track(), stored)
+})
+
+test('2133 T3c an unrelated forwarded image cannot verify the checked result', async t => {
+  const f = await checkedVisualReview(t)
+  const { h } = f
+  const reviewer = answeringReviewer(t, h, { stored: f.stored })
+  const data = Buffer.concat([reviewPng, Buffer.from('unrelated')])
+  const ref = await h.ctx.get('attachments').saveImage({ data, mediaType: 'image/png', name: 'unrelated.png' })
+  h.rt.eventsBackwards = async function* (_id, _signal, _cap, exhausted) {
+    yield { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'image', attachment: ref }] } }
+    exhausted?.()
+  }
+  const { row } = await f.send(h, ['unrelated.png'])
+  assert.ok(row.content.some(block => block.attachment?.attachmentId === ref.attachmentId))
+  h.finish('solver', 'Waiting for the review.')
+  reviewer.enter(row, 5)
+  await reviewer.answer(await reviewer.generate())
+  assert.equal(f.track().solver.review.imagesWhy, 'missing')
+  assert.equal(f.track().last?.done, undefined)
+  assert.deepEqual(f.track().solver.review.images.carried, [])
+})
+
+for (const fault of ['missing baseline', 'indeterminate head', 'five pictures']) {
+  test(`2133 T3d ${fault} keeps the visual result unverified`, async t => {
+    const f = await checkedVisualReview(t, {
+      prepareFiles(folder) {
+        if (fault === 'indeterminate head') writeFileSync(join(folder, 'metadata'), 'checked')
+        if (fault === 'five pictures') {
+          for (let i = 1; i <= 4; i++) writeFileSync(join(folder, `image-${i}.png`), reviewPng)
+        }
+      },
+    })
+    const { h } = f
+    const reviewer = answeringReviewer(t, h, { native: true, stored: f.stored })
+    if (fault === 'missing baseline') delete f.track().solver.imageBase
+    let mock
+    if (fault === 'indeterminate head') {
+      const open = fs.openSync
+      mock = t.mock.method(fs, 'openSync', (path, ...args) => {
+        if (String(path).endsWith('/metadata')) throw Object.assign(new Error('mocked metadata read error'), { code: 'EIO' })
+        return open(path, ...args)
+      })
+      syncBuiltinESMExports()
+    }
+    try {
+      const { row } = await f.send(h)
+      h.finish('solver', 'Waiting for the review.')
+      reviewer.enter(row, 5)
+      await reviewer.answer(await reviewer.generate())
+      assert.equal(f.track().solver.review.imagesWhy, 'missing')
+      assert.equal(f.track().last?.result, false)
+      assert.equal(f.track().last?.done, undefined)
+    } finally {
+      mock?.mock.restore()
+      syncBuiltinESMExports()
+    }
+  })
+}
+
+test('2133 T3e only a verified host copy preserves the check snapshot in a shared folder', async t => {
+  const f = await checkedVisualReview(t)
+  f.h.rt.botOf('reviewer').workDir = f.folder
+  const reviewer = answeringReviewer(t, f.h, { shared: true, stored: f.stored })
+  const userPicture = await f.h.ctx.get('attachments').saveImage({ data: reviewPng, mediaType: 'image/png', name: 'received.png' })
+  const copied = await f.h.rt.sharedUploads.withPaths([{
+    role: 'user', source: { kind: 'user' }, content: [{ type: 'image', attachment: userPicture }],
+  }], 'reviewer', 'fake')
+  assert.match(copied[0].content.at(-1).text, /read-only copy/)
+  const { row } = await f.send(f.h, [reviewPath])
+  f.h.finish('solver', 'Waiting for the review.')
+  reviewer.enter(row, 5)
+  const text = await reviewer.generate()
+  const path = join(f.folder, '.automagik', 'uploads', reviewDigest(reviewPng), 'art.png')
+  assert.deepEqual(readFileSync(path), reviewPng)
+  fs.chmodSync(path, 0o600)
+  writeFileSync(path, Buffer.concat([reviewPng, Buffer.from('tampered')]))
+  await reviewer.answer(text)
+  assert.equal(f.track().outcome?.reason, 'checks')
+  assert.equal(f.track().last?.done, undefined)
 })

@@ -73,7 +73,7 @@ test('a same-content copy outside the uploads region gets actionable refusal tex
   assert.deepEqual((await input.resolve('picture.png')).data, await fsPromises.readFile(copy))
   await assert.rejects(input.resolve(copy), {
     code: 'bot/unavailable',
-    message: "No picture the user attached in this chat matches that. Pass the picture's name as the chat shows it, its sha256, or the path of your own copy under .automagik/bots; a copy you made anywhere else does not count. If the user has not attached it here, ask them to.",
+    message: "No picture the user attached in this chat matches that. Pass the picture's name as the chat shows it, its sha256, or the path of your own copy under .automagik/bots; a copy you made anywhere else does not count. If the user has not attached it here, ask them to. A Solver shows its own result pictures to its reviewer only in a designated RESULT review (message_bot with solver_review \"result\" and the file's path inside its result folder).",
   })
   assert.equal(input.reads.length, 1, 'only the chat name authorizes a store read')
 })

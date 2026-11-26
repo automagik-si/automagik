@@ -4,6 +4,7 @@
 // tools Omni owns and checks the paths that the file tools and the shell are given;
 // a shell can still reach any file the account can (see docs/plans).
 import { homedir } from 'node:os'
+import { realpathSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { install as installPrivateForward } from './private-forward.js'
@@ -115,7 +116,7 @@ export function install(rt) {
 
   // Where a private Bot keeps what must stay closed: its folder and its memory. Its
   // Sessions and its id are in file names under DSH's and the team's data.
-  const regionsOf = async bot => (await Promise.all([
+  const regionPaths = bot => [
     bot.workDir,
     join(rt.home, 'memory', 'bots', bot.id),
     join(rt.home, 'browser-profiles', bot.id),
@@ -123,8 +124,9 @@ export function install(rt) {
     join(rt.home, 'side', `${bot.id}.json`),
     join(rt.home, 'btw', bot.id),
     bot.archivePath,
-  ].filter(Boolean).map(spellings))).flat()
-  const sharedFiles = async () => (await Promise.all([
+  ].filter(Boolean)
+  const regionsOf = async bot => (await Promise.all(regionPaths(bot).map(spellings))).flat()
+  const sharedPaths = () => [
     rt.statePath,
     join(rt.home, 'chat-index.sqlite'),
     join(rt.home, 'chat-index.sqlite-wal'),
@@ -145,7 +147,27 @@ export function install(rt) {
     join(rt.home, 'memory', 'journal.torn'),
     join(rt.home, 'memory', 'pending.json'),
     join(rt.home, 'logs', 'diagnostics.jsonl'),
-  ].filter(Boolean).map(spellings))).flat()
+  ].filter(Boolean)
+  const sharedFiles = async () => (await Promise.all(sharedPaths().map(spellings))).flat()
+
+  // The result walker resolves and holds its own root. Reuse the private
+  // regions before it opens an entry, including discovery by magic bytes.
+  rt.resultReadAllowed = self => {
+    const others = protectedBots().filter(bot => bot.id !== self)
+    const needles = others.flatMap(sessionsOf).filter(Boolean).map(fold)
+    const paths = [...sharedPaths(), ...others.flatMap(regionPaths)]
+    const closed = paths.flatMap(path => {
+      const spelled = fold(resolve(path))
+      try { return [spelled, fold(realpathSync.native(path))] } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return [spelled]
+        return [spelled, fold(dirname(spelled))]
+      }
+    })
+    return path => {
+      const key = fold(path)
+      return !closed.some(region => within(key, region)) && !needles.some(id => key.includes(id))
+    }
+  }
 
   const teamFolder = () => rt.teamFolder() ?? resolve(rt.defaultTeamFolder())
   const teamMemory = join(rt.home, 'memory', 'team')

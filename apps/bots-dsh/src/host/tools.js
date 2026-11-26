@@ -273,7 +273,7 @@ export function install(rt) {
     parameters: {
       to: { type: 'string', required: true, description: 'Bot ID or exact Bot name from list_bots' },
       message: { type: 'string', required: true, description: 'Self-contained message; the other Bot cannot see this conversation' },
-      images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along, each by its name, sha256 or saved path as your own chat shows it; the other Bot gets its own copy. Only pictures you were given.' },
+      images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along by name, sha256 or saved path as your own chat shows it. In a designated RESULT review you can also give the paths of image files inside your result folder.' },
       reply_to: {
         type: 'string',
         enum: ['me', 'user', 'none'],
@@ -321,10 +321,12 @@ export function install(rt) {
       let text = absoluteLinks(String(args.message), rt.sessionFolder?.(exec.agent?.session ?? exec.agent))
       const room = rt.roomOf(rt.groupOwners.get(exec.agent?.id)?.roomId)
       const images = []
+      const resultReview = args.solver_review === 'result'
+      const editInput = createEditInput({ rt, ctx })
       if (Array.isArray(args.images) && args.images.length > 0) {
         if (room !== undefined || rt.groupOwners.has(exec.agent?.session?.id ?? exec.agent?.id)) return refusedMessage('Not sent: forward pictures from your own chat.')
-        for (const selector of args.images) {
-          try { images.push(await createEditInput({ rt, ctx }).findPicture(exec, selector, exec.signal)) } catch (error) {
+        for (const selector of resultReview ? [] : args.images) {
+          try { images.push(await editInput.findPicture(exec, selector, exec.signal)) } catch (error) {
             return refusedMessage(`${JSON.stringify(selector)}: ${error.message}`)
           }
         }
@@ -341,6 +343,7 @@ export function install(rt) {
           when: designating || args.when === 'queue' ? 'queue' : 'now',
           ...(designating ? { solver_review: args.solver_review, solver_request: args.solver_request } : {}),
           ...(images.length > 0 ? { images: images.map(ref => ref.attachmentId).sort() } : {}),
+          ...(resultReview && args.images?.length > 0 ? { images: [...args.images].sort() } : {}),
         },
       })
       // What the caller gets for a request that was admitted before.
@@ -373,11 +376,14 @@ export function install(rt) {
       if (rt.upstreamOf(works).has(target.id)) {
         return refusedMessage(`Not sent: ${target.name} is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back. Finish the work and end your turn; to ask ${target.name} something, end your turn with the question.`)
       }
-      const send = async () => {
-        if (images.length > 0 && rt.isPrivate(sender.id)) {
-          await rt.approvePictureForward(exec, { sender, target, images })
+      const authorizePictures = async pictures => {
+        if (pictures.length > 0 && rt.isPrivate(sender.id)) {
+          await rt.approvePictureForward(exec, { sender, target, images: pictures })
           exec.signal?.throwIfAborted()
         }
+      }
+      const send = async () => {
+        if (!resultReview) await authorizePictures(images)
         const work = toUser || noReply ? undefined : works[0]
         const chat = rt.chatOf(target.id)
         const agent = await rt.resolveAgent(chat)
@@ -393,6 +399,9 @@ export function install(rt) {
         if (designating) {
           long = await rt.solverReview(sender, target, true, {
             kind: args.solver_review, request: args.solver_request, exchangeId: reviewExchange, agent: exec.agent,
+            ...(resultReview ? { pictures: { selectors: args.images, signal: exec.signal,
+              find: selector => editInput.findPicture(exec, selector, exec.signal, { requireExhaustion: true }),
+              authorize: authorizePictures } } : {}),
             prepare: (kind, checks, commands) => {
               const stage = kind.toUpperCase()
               const evidence = commands ? `\nAgreed check commands: ${JSON.stringify(commands)}` : ''
@@ -407,6 +416,9 @@ export function install(rt) {
         // Nothing went out, so a named request must not take this as a delivered
         // receipt: admitRequest drops the pending record instead, and a retry can send.
         if (long === undefined) { if (request !== undefined) request.unsent = true; return refusedMessage(tooLong(text)) }
+        if (long.images) images.push(...long.images)
+        const currentReview = () => !exec.signal?.aborted && rt.chatOf(target.id) === chat
+          && rt.resultReviewCurrent(sender, target, args.solver_request, reviewExchange)
         const joins = before !== undefined && agent.inbox?.remove?.(earlier.message.id) === true
         if (before !== undefined && !joins) long = await rt.attachLong(text, `Message from ${sender.name}.txt`) ?? long
         const working = rt.live.get(chat)?.turn !== undefined
@@ -417,13 +429,21 @@ export function install(rt) {
         const mergedNoReply = noReply && (joins ? earlierNoReply : true)
         if (joins) rt.forgetDelivery?.(exchangeId)
         try {
+          if (resultReview && !currentReview()) throw refusal('The Solver request changed before the review could be sent.')
           // A request that owes a reply needs its work, also when it grew out of an
           // earlier no-reply message that had none.
           if (!toUser && !mergedNoReply && state.works?.[exchangeId] === undefined) {
             rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work,
               ...(designating ? { name: `solver-review-${args.solver_review}` } : {}) })
           }
-          await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(mergedNoReply ? { noReply: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
+          const delivered = await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, resultReview, ...(joins ? { merged: true } : {}), ...(mergedNoReply ? { noReply: true } : {}), ...(toUser ? { audience: 'user' } : {}) },
+            resultReview ? { shouldSend: currentReview } : undefined)
+          if (resultReview && delivered === undefined) {
+            if (request !== undefined) request.unsent = true
+            rt.forgetDelivery?.(exchangeId)
+            rt.dropWork(exchangeId)
+            throw refusal('The Solver request changed before the review could be sent.')
+          }
         } catch (error) {
           // The delivery stays noted for the next start while its Bot exists
           // (resume.js), and the resent request still answers up the tree, so the
@@ -447,7 +467,11 @@ export function install(rt) {
                 ? `Queued for ${target.name}: it reads your message after its current work. Its reply will arrive later as a new message; do not wait for it.`
                 : `Delivered to ${target.name}. Its reply will arrive later as a new message; do not wait for it.`
         const asker = work !== undefined && rt.ownsWork(sender.id, work) ? rt.botOf(state.works[work].from)?.name : undefined
+        const route = agent.session?.requestHeader?.()?.config
+        const unseen = long.reviewComplete && !(await rt.readsImagesStrict?.(route?.provider, route?.model))
         const notes = [
+          long.reviewNotice,
+          unseen ? 'The reviewer cannot see pictures on this route. A RESULT SHIP will stay unverified if its answering turn cannot see the pictures.' : '',
           joins ? `${target.name} had not read your earlier message yet, so this one was added to it, ${mergedNoReply ? 'and it reads them together.' : 'and it answers both at once.'}` : '',
           status === 'idle' ? '' : `${target.name} now: ${status}.`,
           asker ? `When you have handed on everything, end your turn: each reply brings you back to this work, and your answer goes to ${asker} once all of it is back.` : '',

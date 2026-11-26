@@ -3528,6 +3528,9 @@ const ZH = {
   "RESULT review unverified. {reason}": "结果审阅未通过验证。{reason}",
   "The reviewer’s effective model could not be verified.": "无法验证审阅者实际使用的模型。",
   "The reviewer used the same model as the Solver.": "审阅者使用了与 Solver 相同的模型。",
+  "The result has pictures and the reviewer could not see them.": "结果包含图片，审阅者无法查看。",
+  "The reviewer’s answering turn lost the result pictures. Ask for a fresh RESULT review with the pictures.": "审阅者在回复时丢失了结果图片。请附上图片重新请求结果审阅。",
+  "The result pictures were not all carried. Ask for a fresh RESULT review with the pictures.": "结果图片未全部发送。请附上图片重新请求结果审阅。",
   "The reviewer did not give a strict verdict.": "审阅者未按要求给出明确结论。",
   "the Solver reached an attempt limit and is waiting for your answer": "Solver 已达到尝试上限，正在等待你的答复",
 }

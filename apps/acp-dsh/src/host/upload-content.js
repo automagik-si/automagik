@@ -39,7 +39,7 @@ export function checkUploadSize(sessionId, prompt) {
 
 /** Prepare current uploads before any dispatch or replay consumption. */
 export async function prepareUpload({ blocks, replay = [], run, attachments, cwd, signal,
-  valid, warn = () => {}, timers = globalThis }) {
+  valid, remember, warn = () => {}, timers = globalThis }) {
   valid()
   const images = run.init?.agentCapabilities?.promptCapabilities?.image === true
   const reader = attachments?.readImage
@@ -94,7 +94,7 @@ export async function prepareUpload({ blocks, replay = [], run, attachments, cwd
       valid()
       const result = await Promise.race([
         copyUpload({ cwd, ref: input.attachment, kind: input.type,
-          attachments, signal: controller.signal }), cancelled,
+          attachments, signal: controller.signal, remember }), cancelled,
       ])
       valid()
       controller.signal.throwIfAborted()

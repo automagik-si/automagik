@@ -5,7 +5,7 @@
 // see, or no reviewer. It grants and refuses nothing, so it reads the cosmetic marker and the
 // reviewer id the New Solver dialog stores (`reviewerId`). Groups, tasks and scheduled runs of a
 // Solver are not marked: only its own chat (and the subagents under it).
-import { originalReviewContent, unverifiedNotice, unverifiedReason } from '../shared/solver-model.js'
+import { chosenIdentity, chosenIdentityOf, originalReviewContent, unverifiedNotice, unverifiedReason, unverifiedText } from '../shared/solver-model.js'
 import { lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { SOLVER_NOTES } from '../shared/solver-method.js'
@@ -17,9 +17,10 @@ import { reachesShell } from './tool-deny.js'
 import { refusal } from './refusal.js'
 import { nativeCheckDirectory, normalizeCheckCommand, withinCheckRoot } from './solver-check-command.js'
 import {
-  activeSolverLimit, cleanProgress, designateReview, inspectResult, invalidateResult, legacyResultReview, modelOf, newProgress, recordedModelOf,
-  normalizedAutoInstruction, recordProgress, recordSolverVerdict, resultSnapshot, resumeProgress, solverOutcome, solverTracked,
+  activeSolverLimit, cleanProgress, designateReview, imageBaseline, inspectResult, invalidateResult, legacyResultReview, modelOf, newProgress,
+  normalizedAutoInstruction, recordedModelOf, recordProgress, recordSolverVerdict, resumeProgress, solverOutcome, solverTracked,
 } from './solver-progress.js'
+import { readResultPicture } from './image-input.js'
 
 // The tools that change files by name (as private-bots.js and auto-judge.js read them), after
 // the `dsh` bridge's `mcp__dsh__` prefix is taken off.
@@ -178,7 +179,25 @@ export function install(rt) {
   const progressWrites = new WeakMap()
   const reviewSends = new Set()
   const folderOf = bot => bot.workDir ?? rt.teamFolder?.()
-  const snapshotOf = bot => resultSnapshot(folderOf(bot))
+  const uploadEntries = new Map()
+  const rememberReviewUpload = (path, stat) => {
+    if (uploadEntries.size >= 20_000) uploadEntries.delete(uploadEntries.keys().next().value)
+    uploadEntries.set(path, stat)
+  }
+  const managedEntry = (path, stat) => {
+    const created = uploadEntries.get(path)
+    return created !== undefined && created.dev === stat.dev && created.ino === stat.ino && created.mode === stat.mode
+      && (stat.isDirectory() || (stat.nlink === 1n && created.size === stat.size
+        && created.mtimeNs === stat.mtimeNs && created.ctimeNs === stat.ctimeNs))
+  }
+  const inspect = (bot, options) => inspectResult(folderOf(bot), { botId: bot.id, managedEntry,
+    ...(options?.manifest ? { allowPath: rt.resultReadAllowed?.(bot.id) } : {}), ...options })
+  const snapshotOf = bot => inspect(bot).snapshot
+  const manifestsMatch = (bot, progress) => {
+    const result = inspect(bot, { manifest: true })
+    return result.snapshot === progress.snapshot && result.manifest?.indeterminate === false ? result.manifest : undefined
+  }
+  const legacyText = (bot, progress) => manifestsMatch(bot, progress)?.entries.length === 0
   const deferIngress = (bot, apply) => {
     const queue = progressWrites.get(bot)
     if (queue === undefined) return false
@@ -206,6 +225,9 @@ export function install(rt) {
     const { last, outcome } = cleanTrack(bot.reviewTrack) ?? {}
     bot.reviewTrack = { requested: true, requestAt: at, personAt: at, verdicts: [], solver: newProgress(origin),
       ...(last ? { last } : {}), ...(outcome ? { outcome } : {}) }
+    // This baseline is an internal scan of the Solver's readable result region for its newly
+    // opened request. Review sends additionally require designation and passing check authority.
+    bot.reviewTrack.solver.imageBase = imageBaseline(inspect(bot, { manifest: true }))
     autoInstructions.delete(bot)
   }
   const reviewOf = (bot) => {
@@ -323,7 +345,7 @@ export function install(rt) {
       now: Date.now(),
       authorizedAuto: authority?.request === args.request && authority.instruction === normalizedAutoInstruction(args.quote),
       running: runningWork.has(bot),
-      inspect: () => inspectResult(folderOf(bot)),
+      inspect: () => inspect(bot),
       snapshotOf: () => snapshotOf(bot),
     })
     if (changed.changed) {
@@ -337,7 +359,7 @@ export function install(rt) {
     return changed.text
   }
 
-  async function solverReview(bot, reviewer, own, { kind, request, exchangeId, agent, prepare }) {
+  async function solverReview(bot, reviewer, own, { kind, request, exchangeId, agent, prepare, pictures }) {
     const before = bot.reviewTrack
     const track = cleanTrack(before)
     if (!own || !tracked(bot) || bot.reviewerId !== reviewer.id || !track?.solver
@@ -347,17 +369,29 @@ export function install(rt) {
     if (progressWrites.has(bot) || runningWork.has(bot)) throw refusal('Finish the current Solver work before requesting a review.')
     const progress = structuredClone(track.solver)
     const prior = kind === 'plan' ? progress.plan?.review : progress.review
-    if (prior && prior.verdict === undefined && !(kind === 'result' && legacyResultReview(prior)) && (reviewSends.has(prior.exchangeId) || rt.deliveryNote?.(prior.exchangeId)
+    if (prior && prior.verdict === undefined && !(kind === 'result' && prior.images?.v !== 1) && (reviewSends.has(prior.exchangeId) || rt.deliveryNote?.(prior.exchangeId)
       || rt.exchangeOf?.(prior.exchangeId, bot.id, reviewer.id))) {
       throw refusal('A designated review is already waiting for its answer.')
     }
     const issue = designateReview(progress, { kind, exchangeId, reviewerId: reviewer.id,
       model: modelOf(agent?.session), snapshot: kind === 'result' ? snapshotOf(bot) : undefined })
     if (issue) throw refusal(issue)
+    const assertAuthority = () => {
+      pictures?.signal?.throwIfAborted()
+      if (rt.botOf(bot.id) !== bot || rt.botOf(reviewer.id) !== reviewer || bot.reviewTrack !== before
+        || !before.requested || before.delivered || before.solver?.request !== request || before.solver.revision !== track.solver.revision
+        || bot.reviewerId !== reviewer.id || progressWrites.has(bot) || runningWork.has(bot)
+        || (kind === 'result' && progress.snapshot !== snapshotOf(bot))) {
+        throw refusal('The Solver result changed. Verify the current checks before requesting a review.')
+      }
+    }
     const prepared = await prepare(kind, progress.plan.checks, progress.plan.commands)
     if (prepared === undefined) return
-    if (runningWork.has(bot) || (kind === 'result' && progress.snapshot !== snapshotOf(bot))) {
-      throw refusal('The Solver result changed. Verify the current checks before requesting a review.')
+    assertAuthority()
+    let resultPictures
+    if (kind === 'result') {
+      resultPictures = await prepareResultPictures(bot, progress, pictures, assertAuthority)
+      assertAuthority()
     }
     reviewSends.add(exchangeId)
     try {
@@ -367,7 +401,158 @@ export function install(rt) {
       reviewSends.delete(exchangeId)
       throw error
     }
-    return prepared
+    return resultPictures === undefined ? prepared : { ...prepared, ...resultPictures }
+  }
+
+  function resultReviewCurrent(bot, reviewer, request, exchangeId) {
+    const track = bot.reviewTrack
+    const progress = track?.solver
+    return rt.botOf(bot.id) === bot && rt.botOf(reviewer.id) === reviewer && bot.reviewerId === reviewer.id
+      && track?.requested && !track.delivered && progress?.request === request
+      && progress.review?.exchangeId === exchangeId && progress.review.revision === progress.revision
+      && progress.review.verdict === undefined && !progressWrites.has(bot) && !runningWork.has(bot)
+      && progress.snapshot === snapshotOf(bot)
+  }
+
+  async function prepareResultPictures(bot, progress, pictures, assertAuthority) {
+    const manifest = manifestsMatch(bot, progress)
+    const base = progress.imageBase?.indeterminate ? undefined : progress.imageBase?.keys
+    const { signal } = pictures ?? {}
+    const images = []
+    const selected = new Map()
+    const read = selector => readResultPicture(folderOf(bot), { bot, selector, signal, allowPath: rt.resultReadAllowed?.(bot.id) })
+    for (const selector of pictures?.selectors ?? []) {
+      try {
+        images.push(await pictures.find(selector))
+      } catch (error) {
+        if (error.missing !== true) throw error
+        assertAuthority()
+        const result = read(selector)
+        selected.set(result.path, result)
+      }
+    }
+    const paths = new Set(manifest?.entries.filter(entry => !base?.includes(entry.key.slice(0, 16))).map(entry => entry.path))
+    for (const path of selected.keys()) paths.add(path)
+    if (images.length > 0 && manifest) {
+      const selectors = new Set(pictures.selectors)
+      for (const { path } of manifest.entries) {
+        if (selectors.has(path) || selectors.has(resolve(folderOf(bot), path))) paths.add(path)
+      }
+    }
+    const required = []
+    let missing = !manifest || (!base && paths.size === 0) || paths.size > 4
+    for (const path of [...paths].slice(0, 4)) {
+      try {
+        const result = selected.get(path) ?? read(path)
+        required.push({ path, digest: result.digest, ...(selected.has(path) ? { attachmentId: result.attachmentId } : {}) })
+        if (!selected.has(path)) missing = true
+      } catch {
+        missing = true
+      }
+    }
+    const carried = [...new Set(required.map(entry => entry.attachmentId).filter(Boolean))].sort()
+    const kind = !manifest || !base ? 'indeterminate' : paths.size > 0 ? 'visual' : 'text'
+    const names = [...paths].slice(0, 20)
+    const receipts = missing ? [
+      names.length ? `Result pictures require review: ${names.map(name => JSON.stringify(name)).join(', ')}.`
+        : 'The result picture manifest could not be verified.',
+      paths.size > 4 ? 'Combine the result into at most 4 pictures and remove the rest from the result.'
+        : 'Attach the result picture paths under images. Convert unsupported pictures to PNG.',
+    ] : []
+    assertAuthority()
+    const outgoing = [...images, ...selected.values()]
+    if (outgoing.length > 0) await pictures.authorize(outgoing)
+    assertAuthority()
+    for (const result of selected.values()) {
+      const store = rt.ctx.get('attachments')
+      if (typeof store?.saveImage !== 'function') throw refusal('This Automagik cannot store pictures.')
+      const ref = await store.saveImage(result.image)
+      if (ref?.attachmentId !== result.attachmentId || ref.bytes !== result.image.data.length
+        || ref.mediaType !== result.image.mediaType) throw refusal('The stored result picture does not match its verified bytes.')
+      images.push(ref)
+      assertAuthority()
+    }
+    progress.review.images = { v: 1, kind, required, carried, names, definite: manifest !== undefined && !missing }
+    return { images, reviewNotice: receipts.join(' '), reviewComplete: kind !== 'text' && !missing }
+  }
+
+  function pendingReviewImages(sessionId) {
+    const reviewer = rt.botOfSession?.(sessionId)
+    if (!reviewer || rt.chatOf(reviewer.id) !== sessionId) return []
+    const pending = []
+    for (const bot of Object.values(rt.state.bots ?? {})) {
+      const track = bot.reviewTrack
+      const progress = track?.solver
+      const review = progress?.review
+      if (bot.reviewerId === reviewer.id && track?.requested && !track.delivered && review?.reviewerId === reviewer.id
+        && review.verdict === undefined && review.revision === progress.revision && review.images?.v === 1) {
+        pending.push({ bot, progress, review })
+      }
+    }
+    return pending
+  }
+
+  const reviewImages = (sessionId, exchangeId) => pendingReviewImages(sessionId)
+    .find(({ review }) => review.exchangeId === exchangeId)?.review
+  const resultReviewImages = (sessionId, exchangeId) => reviewImages(sessionId, exchangeId)?.images.carried
+  const currentGeneration = new Map()
+  function beginReviewGeneration({ sessionId, messages, provider, model, runKey, nativeIds }) {
+    const pending = pendingReviewImages(sessionId)
+    if (pending.length === 0) {
+      currentGeneration.delete(sessionId)
+      return
+    }
+    const previous = currentGeneration.get(sessionId)
+    const entries = new Map()
+    for (const { bot, progress, review } of pending) {
+      const row = messages.findLast(row => row.source?.exchangeId === review.exchangeId)
+      const source = row?.source
+      const marked = source?.kind === SOURCE_KIND && source.form === 'relay' && source.role === 'request'
+        && source.resultReview?.v === 1 && source.senderSessionId === bot.id
+        && !source.resumed && !source.resumedByUpdate && !source.retried && !source.resume
+      const previousEntry = previous?.entries.get(review.exchangeId)
+      const replaced = previous?.runKey !== undefined && previous.runKey !== runKey && previousEntry !== undefined
+      const native = marked ? nativeIds?.(row, review.images.carried) ?? [] : []
+      entries.set(review.exchangeId, { request: progress.request, revision: review.revision, native,
+        lost: !marked || replaced || previousEntry?.lost === true })
+    }
+    const generation = { entries, runKey, sessionId, route: chosenIdentity(provider, model), confirmed: false, ended: false }
+    currentGeneration.set(sessionId, generation)
+    return generation
+  }
+
+  function reviewGenerationOutput(generation, { confirmed, completed } = {}) {
+    if (!generation || currentGeneration.get(generation.sessionId) !== generation) return
+    if (confirmed !== undefined) generation.confirmed = confirmed
+    if (completed !== undefined) generation.ended = completed
+    if (confirmed === false || completed === false) {
+      for (const entry of generation.entries.values()) entry.lost = true
+    }
+  }
+
+  function generationForReply(sessionId, event) {
+    const generation = currentGeneration.get(sessionId)
+    const source = event.data?.message?.source
+    if (generation?.ended && !event.data.interrupted && generation.route === chosenIdentity(source?.provider, source?.model)) {
+      generation.ended = false
+      return generation
+    }
+  }
+
+  function visualVerdict(bot, progress, model, generation) {
+    const { review } = progress
+    if (review.images?.v !== 1) return legacyText(bot, progress) ? { ok: true } : { why: 'missing' }
+    const { kind, definite, required } = review.images
+    if (!definite || !manifestsMatch(bot, progress)) return { why: 'missing' }
+    if (kind === 'text') return { ok: true }
+    if (!required?.length) return { why: 'missing' }
+    const sessionId = rt.chatOf(review.reviewerId)
+    const entry = generation?.entries.get(review.exchangeId)
+    if (!entry || entry.lost || !generation.confirmed || generation !== currentGeneration.get(sessionId)
+      || entry.request !== progress.request || entry.revision !== review.revision
+      || generation.route !== chosenIdentityOf(model)) return { why: 'lost' }
+    return required.every(file => file.attachmentId === `sha256:${file.digest}` && entry.native.includes(file.attachmentId))
+      ? { ok: true } : { why: 'unseen' }
   }
 
   async function solverQuestion(botId, callId) {
@@ -551,7 +736,7 @@ export function install(rt) {
   // late verdict on the last one), or to no open work at all, is not this request's review (SR3-2).
   // The guard's own strict reading (guardVerdictOf) dates the plan's verdict once per request, for
   // every tracked Bot, so a guard turned on mid-request reads a verdict that already came.
-  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model, firstLine, solverEvents, legacyHeld) {
+  function reviewVerdict(fromId, toId, roomId, text, workAt, reply, model, firstLine, solverEvents, legacyHeld, generation) {
     const bot = rt.botOf(toId)
     if (roomId !== undefined || !tracked(bot) || bot.reviewerId !== fromId || fromId === toId) return
     if (typeof workAt !== 'number') return
@@ -585,9 +770,13 @@ export function install(rt) {
           if (original) current.solver = { ...current.solver, review: { ...result, solverModel: original } }
         }
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
+        const visual = stage === 'result' && strict === 'SHIP' ? visualVerdict(bot, current.solver, model, generation) : undefined
         const reason = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt,
-          stage === 'result' && legacyHeld)
-        withholdShip = reason === 'held' || reason === 'same'
+          stage === 'result' && legacyHeld, visual)
+        withholdShip = reason === 'held' || reason === 'same' || reason === 'images'
+        if (stage === 'result' && generation === currentGeneration.get(generation?.sessionId)) {
+          currentGeneration.delete(generation?.sessionId)
+        }
       }
       const at = Date.now()
       if (planVerdict !== undefined && (!withholdShip || planVerdict !== 'SHIP')) current.planVerdictAt ??= at
@@ -756,13 +945,14 @@ export function install(rt) {
       && result?.revision === track.solver.revision && result?.receipt === binding.receipt
       && (result.verdict === 'unverified' || result.unverified === 'held')
       && unverifiedReason(result.unverified)
-    const notice = unverifiedNotice(reason)
+    const imagesWhy = reason === 'images' ? result.imagesWhy : undefined
+    const notice = unverifiedNotice(reason, imagesWhy)
     if (!notice && !source.reviewFeedback) return message
-    const { reviewFeedback: _previous, ...originalSource } = source
+    const { reviewFeedback: _previous, reviewImagesWhy: _why, ...originalSource } = source
     const content = originalReviewContent(message)
     return {
       ...message,
-      source: notice ? { ...originalSource, reviewFeedback: reason } : originalSource,
+      source: notice ? { ...originalSource, reviewFeedback: reason, ...(imagesWhy ? { reviewImagesWhy: imagesWhy } : {}) } : originalSource,
       content: notice ? [...content, { type: 'text', text: notice }] : content,
     }
   }
@@ -840,10 +1030,17 @@ export function install(rt) {
     // Reviewer work this request opened, still out when the person asked: delivered before its
     // verdict (Run 3). Work left from an earlier request is not this one's.
     const pending = review === 'bot' && works.some(work => work?.from === bot.id && work?.to === bot.reviewerId && typeof work.at === 'number' && work.at >= track.requestAt)
-    track.outcome = solverOutcome(bot, track, review, pending, model, track.solver?.snapshot ? snapshotOf(bot) : undefined)
+    const oldShip = result?.verdict === 'SHIP' && result.images?.v !== 1
+    const visualKind = oldShip ? (legacyText(bot, track.solver) ? 'text' : 'indeterminate') : undefined
+    if (oldShip && visualKind !== 'text') {
+      track.solver.review = { ...result, verdict: 'unverified', unverified: 'images', imagesWhy: 'missing' }
+    }
+    track.outcome = solverOutcome(bot, track, review, pending, model, track.solver?.snapshot ? snapshotOf(bot) : undefined, visualKind)
+    const imagesUnverified = track.solver?.review?.unverified === 'images'
     track.last = { ...deliveryMark(track, review, Date.now(), { pending }), ...(track.outcome.done
-      ? { done: true, reviewer: track.outcome.reviewer, plan: true, result: true, resultExchangeId: track.outcome.exchangeId } : {}) }
-    track.delivered = true
+      ? { done: true, reviewer: track.outcome.reviewer, plan: true, result: true, resultExchangeId: track.outcome.exchangeId }
+      : imagesUnverified ? { result: false } : {}) }
+    if (!imagesUnverified) track.delivered = true
     save()
   }
 
@@ -867,11 +1064,13 @@ export function install(rt) {
       ...(limit ? { limit: { kind: limit.kind, check: limit.check } } : {}),
       ...(track?.outcome ? { outcome: track.outcome } : {}),
       ...(reason ? { unverified: reason } : {}),
+      ...(reason === 'images' && result.imagesWhy ? { imagesWhy: result.imagesWhy } : {}),
     } }
   }
 
   Object.assign(rt, { reviewCreated, reviewRequest, reviewBotRequest, reviewWork, reviewVerdict, reviewReplyTurnEnd, reviewReplyDiscarded, reviewTurnEnd, reviewMarkOf,
     solverProgress, solverReview, solverQuestion, solverStatusOf, solverBeforeWork, designatedReplyRequest, takeReviewReply, withReviewFeedback,
+    rememberReviewUpload, resultReviewCurrent, resultReviewImages, beginReviewGeneration, reviewGenerationOutput, generationForReply,
     resultReplyRequest: binding => {
       const bot = rt.botOf(binding.toId)
       return resultReplyRequest(bot, bot?.reviewTrack, binding)

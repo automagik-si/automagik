@@ -1,9 +1,12 @@
 import { HISTORY_PAGES_MAX } from './constants.js'
 import { MAX_IMAGE_BYTES } from './imagegen.js'
 import { pictureGrant } from './shared-uploads.js'
+import { createHash } from 'node:crypto'
+import { basename } from 'node:path'
+import { readResultFile, resultImageType } from './solver-progress.js'
 
 const refused = message => Object.assign(new Error(message), { code: 'bot/unavailable' })
-const missing = () => refused("No picture the user attached in this chat matches that. Pass the picture's name as the chat shows it, its sha256, or the path of your own copy under .automagik/bots; a copy you made anywhere else does not count. If the user has not attached it here, ask them to.")
+const missing = exhausted => Object.assign(refused("No picture the user attached in this chat matches that. Pass the picture's name as the chat shows it, its sha256, or the path of your own copy under .automagik/bots; a copy you made anywhere else does not count. If the user has not attached it here, ask them to. A Solver shows its own result pictures to its reviewer only in a designated RESULT review (message_bot with solver_review \"result\" and the file's path inside its result folder)."), { missing: exhausted })
 const TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 function matchesMagic(data, type) {
@@ -33,7 +36,7 @@ async function bounded(work, signal) {
 
 /** Only pictures durably sent to this Bot authorize an edit; selectors never authorize filesystem reads. */
 export function createEditInput({ rt, ctx }) {
-  async function findPicture(exec, selector, signal) {
+  async function findPicture(exec, selector, signal, { requireExhaustion = false } = {}) {
     if (typeof selector !== 'string' || !selector.trim() || selector.trim().length > 1024) {
       throw refused('Name the uploaded picture to edit (at most 1024 characters).')
     }
@@ -51,10 +54,11 @@ export function createEditInput({ rt, ctx }) {
       ? parts.map(part => part.sessionId).reverse() : [sessionId]
     const historySignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(10_000)])
     try {
-      const matches = await bounded(async () => {
+      const { matches, exhausted } = await bounded(async () => {
         const found = new Map()
+        let exhausted = 0
         for (const id of ids) {
-          for await (const event of rt.eventsBackwards(id, historySignal, HISTORY_PAGES_MAX)) {
+          for await (const event of rt.eventsBackwards(id, historySignal, HISTORY_PAGES_MAX, () => exhausted++)) {
             historySignal.throwIfAborted()
             if (event.type !== 'user/message') continue
             const grant = pictureGrant(rt, { ...event.data, role: 'user' }, rt.botOfSession(sessionId, exec.agent))
@@ -68,9 +72,12 @@ export function createEditInput({ rt, ctx }) {
             }
           }
         }
-        return [...found.values()]
+        return { matches: [...found.values()], exhausted: exhausted === ids.length }
       }, historySignal)
-      if (matches.length === 0) throw missing()
+      if (matches.length === 0) {
+        if (requireExhaustion && !exhausted) throw refused('The upload history could not be searched completely. Name a picture from this chat or ask the user to attach it again.')
+        throw missing(exhausted)
+      }
       if (matches.length > 1) throw refused(`More than one picture matches: ${matches.map(ref => `${ref.attachmentId.slice(0, 19)} (${ref.name ?? 'unnamed picture'})`).join(', ')}. Ask the user which one, by sha256.`)
       return matches[0]
     } catch (error) {
@@ -104,4 +111,18 @@ export function createEditInput({ rt, ctx }) {
     }
   }
   return { resolve, findPicture }
+}
+
+export function readResultPicture(folder, { bot, selector, signal, allowPath }) {
+  try {
+    const { bytes, path } = readResultFile(folder, selector, { botId: bot.id, maxBytes: MAX_IMAGE_BYTES, signal, allowPath })
+    const mediaType = resultImageType(bytes)
+    if (!mediaType) throw refused('Convert the result picture to PNG, JPEG or WebP.')
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    return { path, digest, attachmentId: `sha256:${digest}`, image: { mediaType, data: bytes, name: basename(path) } }
+  } catch (error) {
+    if (error.code === 'bot/unavailable') throw error
+    throw refused(error.reason ?? (signal?.aborted ? 'Reading the result picture was stopped.'
+      : 'The result picture could not be read. Use a regular picture inside the result folder.'))
+  }
 }
