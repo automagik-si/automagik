@@ -1198,6 +1198,48 @@ test('Q3 installs the team Solver package and refuses a new Antigravity pin', as
   assert.deepEqual((await f.disk()).bots, before.bots)
 })
 
+for (const [path, assign] of [
+  ['package attachment', f => attachTo(f, BOT.id, 'solver')],
+  ['written assignment', f => f.call('update-bot', { id: BOT.id, role: 'Solver', instructions: solverInstructions() })],
+]) {
+  test(`Q3 catalog recovery blocks Solver ${path} on the running Antigravity route`, async t => {
+    const lost = 'deepseek/v4-lost'
+    const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: lost } } } })
+    await officialSolver(f)
+    const { agent } = await f.ctx.sessionController.resolveAgent(BOT.id)
+    const get = f.ctx.get
+    t.mock.method(f.ctx, 'get', name => name === 'agents' ? { get: id => id === BOT.id ? agent : undefined } : get(name))
+    let selection
+    agent.model = { current: () => selection }
+    t.mock.method(f.ctx.sessionController, 'selectModel', async ({ sessionId, provider, model }) => {
+      assert.equal(sessionId, BOT.id)
+      selection = { provider, model }
+    })
+
+    const bot = f.rt.botOf(BOT.id)
+    serve(f.ctx, [lost, AGY])
+    await f.rt.catalog({ fresh: true })
+    assert.equal(await f.rt.applyModel(bot, { force: true }), lost)
+    assert.deepEqual(agent.model.current(), { provider: 'deepseek', model: 'v4-lost' })
+    serve(f.ctx, [AGY])
+    await f.rt.catalog({ fresh: true })
+    assert.equal(await f.rt.applyModel(bot, { force: true }), AGY)
+
+    const antigravity = { provider: 'acp-antigravity', model: 'default' }
+    const before = (await f.disk()).bots[BOT.id]
+    assert.equal(before.model, lost)
+    assert.equal(before.appliedModel, AGY)
+    assert.equal(before.role, BOT.role)
+    assert.equal(before.roles, undefined)
+    assert.deepEqual(agent.model.current(), antigravity)
+
+    const result = await assign(f)
+    assert.deepEqual({ result, bot: (await f.disk()).bots[BOT.id], selection: agent.model.current() }, {
+      result: refusedSolverAgent, bot: before, selection: antigravity,
+    })
+  })
+}
+
 test('AN-4 preserves a grandfathered Antigravity pin and permits detach', async t => {
   const f = await catalogSolverFixture(t, { extra: { bots: { [BOT.id]: { ...BOT, model: AGY } } } })
   await officialSolver(f)

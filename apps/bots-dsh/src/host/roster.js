@@ -1179,6 +1179,8 @@ export function install(rt) {
           if (session !== undefined) await ctx.sessionTitle.rename(session, nextName)
           await followMemberNames(Object.values(state.rooms).filter(room => room.members.includes(id)))
         }
+        // A model apply or Session rename can yield before the Solver method is written.
+        if (role !== undefined || instructions !== undefined) checkSolverChange()
         if (role !== undefined) bot.role = role
         if (instructions !== undefined) bot.instructions = instructions
         if (patch.color !== undefined) {

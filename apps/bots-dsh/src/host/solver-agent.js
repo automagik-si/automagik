@@ -9,6 +9,8 @@ export function assertSolverAgent(ref) {
 // model must both be eligible while the Bot gains a Solver setup or a new Solver pin.
 export function assertSolverAssignment(rt, bot, ref) {
   assertSolverAgent(ref)
+  // Catalog recovery can select a different route while leaving the saved pick in place.
+  assertSolverAgent(rt.runningOf?.(bot)?.runningModel ?? bot.appliedModel)
   assertSolverAgent(rt.switchingChat?.(bot.id, { crossing: true })?.to)
   assertSolverAgent(rt.crossingWayBack?.(bot.id))
   assertSolverAgent(rt.savedCrossingWayBack?.(bot.id))
