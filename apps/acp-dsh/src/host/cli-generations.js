@@ -91,7 +91,7 @@ function hasSelectedHome(root, vendor) {
   const directory = join(root, 'homes', vendor)
   if (!existsSync(directory)) return false
   const staging = join(root, 'login-staging', vendor)
-  return !existsSync(staging) || readdirSync(staging).length === 0 || readdirSync(directory).some(name =>
+  return readdirSync(directory).some(name =>
     !UUID.test(name) || !existsSync(join(staging, name)))
 }
 
@@ -129,6 +129,24 @@ export class CliGenerations {
 
   pointer(vendor) { return join(this.root, 'current', vendor) }
   current(vendor) { return generationAt(this.pointer(vendor)) }
+
+  rollbackUnselectedChat(vendor, replacement) {
+    const pointer = this.pointer(vendor)
+    const activated = `${pointer}.activated`
+    if (lstatSync(pointer, { throwIfNoEntry: false }) || hasSelectedHome(this.root, vendor)
+      || existsSync(join(this.root, 'retired', vendor)) || this.currentRecord()?.[vendor]) throw unverifiedLogin()
+    const activation = lstatSync(activated, { throwIfNoEntry: false })
+    const prefix = `${vendor}.`
+    const pending = readdirSync(dirname(pointer)).filter(name => name.startsWith(prefix) && UUID.test(name.slice(prefix.length)))
+    if (!activation?.isFile() || activation.size !== 0 || pending.length !== 1) throw unverifiedLogin()
+    const next = join(dirname(pointer), pending[0])
+    const stat = lstatSync(next)
+    if (!stat.isFile() || stat.size !== replacement.length || readFileSync(next, 'utf8') !== replacement) throw unverifiedLogin()
+    // A pointer rename would consume next. Its exact bytes prove that adoption did not commit.
+    rmSync(activated)
+    rmSync(next)
+    return this.current(vendor)
+  }
   folder(vendor, generation = this.current(vendor)) {
     return generation === 'legacy' ? join(this.root, vendor)
       : join(this.root, 'homes', vendor, generation)
@@ -315,8 +333,8 @@ export class CliGenerations {
       const next = `${pointer}.${randomUUID()}`
       let moved = false
       try {
-        writeFileSync(activated, '', { mode: 0o600 })
         writeFileSync(next, generation, { mode: 0o600 })
+        writeFileSync(activated, '', { mode: 0o600 })
         renameSync(next, pointer)
         moved = true
         // The pointer is in place first; the record is written last and names it.

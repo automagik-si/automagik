@@ -208,10 +208,12 @@ export function apply(ctx, config = {}, {
         ? join(dirname(store.home), CONSENT_FILE) : undefined
   const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, {
     probe: loginProbe,
+    platform,
     acpHome: store.home ? dirname(store.home) : undefined,
     identity,
     onSelectionError: action => warn(ctx, `the selected Bot sign-in root could not be ${action}`),
     onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
+    onChatCleanupPending: message => warn(ctx, message),
     onRetired: (vendor, retired) => info(ctx, retiredLine(vendor, retired)),
   })
   // Antigravity has its own home too (#2048), on every installation with one, even while it is
@@ -1291,7 +1293,10 @@ export function apply(ctx, config = {}, {
       if (!current()) return
       publish()
       // B can answer during teardown. Finish sign-in only after A has been removed.
-      if (preserving) await preserving.cleanup
+      if (preserving) {
+        await preserving.cleanup
+        await homes.completeChatSignIn(AGENTS[id].key)
+      }
       if (!current() || consentStates.get(id) === 'needed') return
       try {
         ctx.emit?.('acp-dsh/login-ready', { id, ...(attemptId ? { attemptId } : {}) })
@@ -2375,7 +2380,8 @@ export function apply(ctx, config = {}, {
       if (!homes || !consentIds.includes(id)) return { required: false }
       const { key } = AGENTS[id]
       await homes.recoverLogins(key).catch(() => false)
-      return { required: homes.recovery(key) }
+      const cleanupPending = homes.chatCleanupNotice(key)
+      return { required: homes.recovery(key), ...(cleanupPending ? { cleanupPending } : {}) }
     },
     chatLoginStatus,
     accountSwitch: async (id, { label, keep, fresh, withoutWarning } = {}) => {

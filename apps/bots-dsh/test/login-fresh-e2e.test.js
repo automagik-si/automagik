@@ -4,9 +4,9 @@ import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
@@ -802,6 +802,143 @@ test('second exception: rejected cancellation cleanup leaves Settings Reset avai
   assert.equal((await h.acp.accountReset(h.provider)).signedIn, false)
   await verifyOtherVendor(h, unrelated)
 })
+
+async function interruptedChatHome(t, interruption, options) {
+  const root = mkdtempSync(join(tmpdir(), 'final-chat-home-'))
+  const homes = new CliHomes(root, { identity: null, ...options })
+  t.after(() => {
+    homes.closeRecovery()
+    homes.dispose()
+    rmSync(root, { recursive: true, force: true })
+  })
+  const module = new URL('../../acp-dsh/src/host/cli-homes.js', import.meta.url).href
+  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', `
+    import { readFileSync, writeFileSync } from 'node:fs'
+    import { join } from 'node:path'
+    import { CliHomes } from ${JSON.stringify(module)}
+    const [root, interruption] = process.argv.slice(1)
+    const homes = new CliHomes(root, { identity: null })
+    const prepare = (vendor, name) => {
+      const home = homes.environment(vendor).HOME
+      writeFileSync(join(home, 'account'), name)
+      homes.begin(vendor, { preserveVersion: true })
+      const attempt = homes.stageLogin(vendor)
+      writeFileSync(join(attempt.env.HOME, 'account'), 'attempt')
+      return { home, attempt }
+    }
+    const { home: unrelated, attempt: other } = prepare('claude', 'other')
+    const { home: old, attempt } = prepare('codex', 'selected before interruption')
+    const staged = attempt.env.HOME
+    const journal = join(root, 'current', 'codex.chat-cleanup.json')
+    if (interruption.startsWith('before-')) {
+      homes.generations.select = (vendor, replacement) => {
+        if (interruption === 'before-pointer-rename') {
+          const pointer = homes.generations.pointer(vendor)
+          writeFileSync(pointer + '.42e40cdc-879d-40fb-9fee-3b80399be419', replacement)
+          writeFileSync(pointer + '.activated', '')
+        }
+        process.exit(0)
+      }
+      console.log(JSON.stringify({ old, staged, unrelated, other: other.env.HOME }))
+      attempt.adopt()
+    } else {
+      if (interruption === 'windows-old-run') {
+        attempt.adopt()
+        const entry = JSON.parse(readFileSync(journal, 'utf8'))
+        writeFileSync(journal, JSON.stringify({ ...entry, runs: null, stopped: false }))
+      }
+      console.log(JSON.stringify({ old, staged, unrelated, other: other.env.HOME }))
+    }
+  `, root, interruption])
+  return { root, homes, journal: join(root, 'current', 'codex.chat-cleanup.json'), ...JSON.parse(stdout) }
+}
+
+for (const interruption of ['before-selection', 'before-pointer-rename', 'no-journal']) {
+  test(`final exception: startup reclaims the unadopted home (${interruption})`, { timeout: 10_000 }, async t => {
+    const { root, homes, journal, old, staged, unrelated, other } = await interruptedChatHome(t, interruption)
+    assert.equal(existsSync(staged), true)
+    assert.equal(existsSync(journal), interruption !== 'no-journal')
+    if (interruption === 'no-journal') {
+      // A staged marker written by the parent version contains no directory identity.
+      writeFileSync(join(root, 'login-staging', 'codex', basename(staged)), '')
+    }
+    homes.startup('codex')
+    assert.equal(existsSync(staged), false, 'startup must reclaim the exact staged path')
+    assert.equal(existsSync(journal), false)
+    assert.equal(homes.environment('codex').HOME, old)
+    assert.equal(homes.paused('codex'), false, 'the pre-existing account can still run')
+    assert.equal(readFileSync(join(old, 'account'), 'utf8'), 'selected before interruption')
+    assert.equal(existsSync(dirname(staged)), true)
+    assert.equal(readFileSync(join(unrelated, 'account'), 'utf8'), 'other')
+    assert.equal(readFileSync(join(other, 'account'), 'utf8'), 'attempt')
+    assert.equal(existsSync(join(root, 'login-staging', 'codex')), true)
+  })
+}
+
+for (const staysInUse of [false, true]) {
+  test(`final exception: Windows recovery ${staysInUse ? 'keeps a home still in use' : 'reclaims an unused home'}`,
+    { timeout: 10_000 }, async t => {
+      const seen = []
+      const notices = []
+      const options = {
+        platform: 'win32',
+        probeChatHome: async (path, remaining) => {
+          seen.push({ path, remaining })
+          return staysInUse || seen.length === 1 ? 'in-use' : 'unused'
+        },
+        onChatCleanupPending: message => notices.push(message),
+      }
+      const { root, homes, old, staged: selected, unrelated } = await interruptedChatHome(t, 'windows-old-run', options)
+      assert.equal(homes.home('codex'), selected)
+      const unmarked = join(dirname(selected), randomUUID())
+      mkdirSync(unmarked)
+      const activeId = randomUUID()
+      const active = join(dirname(selected), activeId)
+      mkdirSync(join(active, 'login-trees'), { recursive: true })
+      writeFileSync(join(root, 'login-staging', 'codex', activeId), '')
+      writeFileSync(join(active, 'login-trees', randomUUID()), JSON.stringify({ kind: 'starting', app: process.pid }))
+      homes.startup('codex')
+      await until(() => staysInUse ? notices.length : !existsSync(old), 'startup must finish bounded Windows recovery')
+      assert.equal(seen.length, staysInUse ? 3 : 2)
+      assert.ok(seen.every(({ path, remaining }) => path === old && remaining > 0 && remaining <= 15_000))
+      assert.equal(homes.environment('codex').HOME, selected)
+      assert.equal(homes.paused('codex'), false)
+      assert.equal(readFileSync(join(selected, 'account'), 'utf8'), 'attempt')
+      assert.equal(readFileSync(join(unrelated, 'account'), 'utf8'), 'other')
+      assert.equal(existsSync(old), staysInUse)
+      assert.equal(existsSync(active), true, 'startup preserves a staged home still owned by a login')
+      assert.equal(existsSync(unmarked), true, 'startup preserves unrelated paths in the vendor parent')
+      const current = join(root, 'current')
+      const journal = join(current, 'codex.chat-cleanup.json')
+      const pending = join(current, `codex.chat-cleanup.${homes.generations.current('codex')}.json`)
+      assert.equal(existsSync(journal), false)
+      assert.equal(existsSync(pending), staysInUse)
+      if (staysInUse) assert.match(notices[0], /still in use.*current account and Reset are available/)
+      homes.begin('codex', { preserveVersion: true })
+      const later = homes.stageLogin('codex')
+      later.discard()
+      homes.resume('codex')
+      homes.end('codex')
+      const reset = homes.reset('codex')
+      assert.notEqual(reset, selected)
+      assert.equal(existsSync(selected), true, 'Reset preserves its ordinary retirement behavior')
+      if (!staysInUse) return
+      assert.equal(existsSync(pending), true)
+      assert.equal(readFileSync(join(old, 'account'), 'utf8'), 'selected before interruption')
+      homes.closeRecovery()
+      homes.dispose()
+      const restart = new CliHomes(root, { ...options, identity: null, probeChatHome: async path => {
+        assert.equal(path, old)
+        return 'unused'
+      } })
+      t.after(() => { restart.closeRecovery(); restart.dispose() })
+      restart.startup('codex')
+      await until(() => !existsSync(old), 'the next startup reclaims the deferred home after Reset')
+      assert.equal(existsSync(pending), false)
+      assert.equal(restart.home('codex'), reset)
+      assert.equal(readFileSync(join(selected, 'account'), 'utf8'), 'attempt')
+    })
+}
 
 test('exception: Antigravity Try again must show the warning before signing out an active account', { timeout: 15_000 }, async t => {
   const provider = 'acp-antigravity'

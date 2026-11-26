@@ -634,9 +634,10 @@ export class CliLogins {
         this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
         return
       }
-    } catch {
+    } catch (error) {
       if (flow.keep) {
-        this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
+        this.finish(flow, 'failed', error?.code === 'acp-account/chat-cleanup-pending'
+          ? error.message : 'The CLI did not confirm sign-in. Try again.')
         return
       }
     } finally {

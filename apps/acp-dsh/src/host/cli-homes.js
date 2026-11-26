@@ -4,8 +4,11 @@ import {
   closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import {
-  checkDirectory, completeChatCleanup, oldChatRunsExited, ownedDirectory, readChatCleanup, removeChatHome, writeChatCleanup,
+  CHAT_GENERATION, checkDirectory, completeChatCleanup, deferChatCleanup, deferredChatCleanups,
+  oldChatRunsExited, ownedDirectory, readChatCleanup, readStagedHome, removeChatHome,
+  removeStagingMarker, stagingPath, writeChatCleanup, writeStagedHome,
 } from './chat-home-cleanup.js'
 import {
   LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, reclaimWindowsLogins, unverifiedLogin, verifyLoginRecords,
@@ -18,6 +21,7 @@ import { NO_BUS_ADDRESS } from './agents.js'
 import { installationDigest, installationIdentity, publishSelectedRoot } from './installation.js'
 import { processState, validBirth } from './process-identity.js'
 import { retiredHomes, writeRetiredNote } from './retired-home.js'
+import { probeWindowsChatHome, waitForWindowsChatHome } from './windows-chat-home.js'
 import { probeWindowsLogin } from './windows-job-probe.js'
 
 export const HOME_ENV = 'AUTOMAGIK_BOT_CLI_HOME'
@@ -37,13 +41,16 @@ const inherited = new RegExp([
   '|DISPLAY|WAYLAND_DISPLAY)$',
 ].join(''), 'i')
 const failure = message => Object.assign(new Error(message), { code: 'acp-account/busy' })
+const chatCleanupPending = 'A previous Bot sign-in home is still in use or could not be checked. '
+  + 'The current account and Reset are available. Cleanup will be retried when the app starts.'
 
 export class CliHomes {
   constructor(root, {
     acpHome = dirname(resolve(root)), identity = installationIdentity(),
     onRecordError = () => console.warn('acp-dsh: the generation record could not be saved at startup'),
     onSelectionError = action => console.warn(`acp-dsh: the selected Bot sign-in root could not be ${action}`),
-    onRetired = () => {}, probe = probeWindowsLogin,
+    onRetired = () => {}, probe = probeWindowsLogin, probeChatHome = probeWindowsChatHome,
+    platform = process.platform, onChatCleanupPending = message => console.warn(message),
   } = {}) {
     this.root = resolve(root)
     this.acpHome = resolve(acpHome)
@@ -55,8 +62,14 @@ export class CliHomes {
     this.registered = new Map()
     this.changes = new Map()
     this.probe = probe
+    this.platform = platform
+    this.probeChatHome = probeChatHome
+    this.onChatCleanupPending = onChatCleanupPending
     this.recovering = new Map()
     this.cleanupTimers = new Map()
+    this.chatRecoveries = new Set()
+    this.deferredRecoveries = new Map()
+    this.chatCleanupNotices = new Map()
     this.started = new Set()
     this.generations = new CliGenerations(this.root, this.instance, { reader: true })
   }
@@ -163,6 +176,10 @@ export class CliHomes {
   }
 
   stageLogin(vendor) {
+    return this.generations.exclusive(vendor, () => this.stageLoginLocked(vendor))
+  }
+
+  stageLoginLocked(vendor) {
     const previous = this.generations.current(vendor)
     const old = this.generations.folder(vendor, previous)
     if (this.changes.get(vendor) !== old) throw failure('The Bot account is changing.')
@@ -174,7 +191,7 @@ export class CliHomes {
     const original = physical(old)
     const generation = randomUUID()
     const home = this.generations.folder(vendor, generation)
-    const staging = join(this.root, 'login-staging', vendor)
+    const staging = stagingPath(this.root, vendor)
     const marker = join(staging, generation)
     const container = dirname(home)
     const newContainer = !existsSync(container)
@@ -197,6 +214,7 @@ export class CliHomes {
       physical(container)
       mkdirSync(home, { mode: 0o700 })
       owned = physical(home)
+      writeStagedHome(this.root, marker, { home: owned, owner: { pid: process.pid, birth: this.generations.birth } })
       const env = this.environmentAt(vendor, home, process.env)
       // Windows places Job control files beside the generation pointers. Supplying the
       // staged generation does not select it, so ordinary Bot runs still cannot use it.
@@ -252,51 +270,209 @@ export class CliHomes {
     }
   }
 
-  finishChatCleanup(vendor, entry) {
+  checkAdoptedHome(vendor, entry) {
     if (this.generations.current(vendor) !== entry.replacement) throw unverifiedLogin()
-    checkDirectory(this.root, this.generations.folder(vendor, entry.replacement), entry.adopted)
+    const adopted = this.generations.folder(vendor, entry.replacement)
+    checkDirectory(this.root, adopted, entry.adopted)
+    return adopted
+  }
+
+  finishChatCleanup(vendor, entry, deferred) {
+    if (!deferred) this.checkAdoptedHome(vendor, entry)
+    if (this.generations.current(vendor) === entry.previous) throw unverifiedLogin()
     const old = this.generations.folder(vendor, entry.previous)
     if (lstatSync(join(this.root, 'retired', vendor, entry.previous), { throwIfNoEntry: false })) throw unverifiedLogin()
-    if (!entry.stopped) writeChatCleanup(this.root, vendor, { ...entry, stopped: true })
-    const marker = join(this.root, 'login-staging', vendor, entry.replacement)
-    removeChatHome(this.root, old, entry.old, marker, () => {
+    if (!entry.stopped) writeChatCleanup(this.root, vendor, { ...entry, stopped: true }, deferred)
+    removeChatHome(this.root, old, entry.old, () => {
       this.generations.peers(join(old, 'instances'), 'home', this.instance)
       this.verify(old)
       this.generations.release(join(old, 'instances', this.instance))
     })
-    completeChatCleanup(this.root, vendor)
+    if (!deferred) removeStagingMarker(this.root, join(stagingPath(this.root, vendor), entry.replacement))
+    completeChatCleanup(this.root, vendor, deferred)
+  }
+
+  recoverStagedHomes(vendor, current, home) {
+    const staging = stagingPath(this.root, vendor)
+    if (!existsSync(staging) || !ownedDirectory(this.root, staging)) return
+    const entry = readChatCleanup(this.root, vendor)
+    const lock = join(home, 'changing')
+    const legacyActive = existsSync(lock) && this.lockState(lock) !== 'dead'
+    for (const generation of readdirSync(staging)) {
+      if (!CHAT_GENERATION.test(generation) || generation === current || generation === entry?.previous
+        || lstatSync(join(this.root, 'retired', vendor, generation), { throwIfNoEntry: false })) continue
+      try {
+        const marker = join(staging, generation)
+        const staged = readStagedHome(this.root, marker)
+        if (!staged || (staged.owner ? !this.deadChatOwner(staged.owner) : legacyActive)) continue
+        const attemptedAdoption = entry?.previous === current && entry.replacement === generation
+        if (attemptedAdoption && !this.deadChatOwner(entry.owner)) continue
+        const target = this.generations.folder(vendor, generation)
+        if (existsSync(dirname(target))) {
+          const identity = ownedDirectory(this.root, target)
+          if (identity) {
+            const expected = attemptedAdoption ? entry.adopted : staged.home ?? identity
+            checkDirectory(this.root, target, expected)
+            const records = join(target, 'login-trees')
+            if (this.platform === 'win32' && existsSync(records) && ownedDirectory(this.root, records)
+              && readdirSync(records).length > 0) {
+              this.recoverStagedWindowsLogin(vendor, generation, marker, staged, target, expected)
+              continue
+            }
+            this.removeStagedHome(target, expected)
+          }
+        }
+        removeStagingMarker(this.root, marker)
+      } catch {} // Keep unproved homes and their ownership markers.
+    }
+  }
+
+  removeStagedHome(home, expected) {
+    removeChatHome(this.root, home, expected, () => {
+      this.generations.peers(join(home, 'instances'), 'home', this.instance)
+      this.verify(home)
+    })
+  }
+
+  recoverStagedWindowsLogin(vendor, generation, marker, staged, home, expected) {
+    const commit = change => {
+      if (this.recoveryClosed) return false
+      try {
+        return this.generations.exclusive(vendor, () => {
+          const markerNow = readStagedHome(this.root, marker)
+          const upgraded = !staged.owner && markerNow?.owner && this.deadChatOwner(markerNow.owner)
+            && isDeepStrictEqual(markerNow.home, expected)
+          if (this.generations.current(vendor) === generation
+            || lstatSync(join(this.root, 'retired', vendor, generation), { throwIfNoEntry: false })
+            || (!upgraded && !isDeepStrictEqual(staged, markerNow))
+            || !checkDirectory(this.root, home, expected, { missing: true })) return false
+          return change()
+        })
+      } catch { return false }
+    }
+    void reclaimWindowsLogins({
+      home, owner: this.instance, controlRoot: join(this.root, 'login-jobs'), probe: this.probe, commit,
+    }).then(removed => {
+      if (removed > 0) commit(() => {
+        this.removeStagedHome(home, expected)
+        removeStagingMarker(this.root, marker)
+      })
+    }).catch(() => {})
+  }
+
+  deadChatOwner(owner) { return processState(owner.pid, owner.birth) === 'dead' }
+
+  startupGeneration(vendor) {
+    try { return this.generations.current(vendor) } catch (error) {
+      if (vendor === 'antigravity') throw error
+      const entry = readChatCleanup(this.root, vendor)
+      if (entry?.previous !== 'legacy' || !this.deadChatOwner(entry.owner)) throw error
+      checkDirectory(this.root, this.generations.folder(vendor, entry.previous), entry.old)
+      checkDirectory(this.root, this.generations.folder(vendor, entry.replacement), entry.adopted)
+      return this.generations.rollbackUnselectedChat(vendor, entry.replacement)
+    }
   }
 
   recoverChatCleanup(vendor) {
-    if (vendor === 'antigravity' || this.recoveryClosed || this.cleanupTimers.has(vendor)) return
+    if (vendor === 'antigravity' || this.recoveryClosed || this.cleanupTimers.has(vendor)
+      || this.chatRecoveries.has(vendor)) return
+    this.chatRecoveries.add(vendor)
+    void this.retryChatCleanup(vendor).finally(() => this.chatRecoveries.delete(vendor))
+  }
+
+  async retryChatCleanup(vendor) {
     try {
       if (!readChatCleanup(this.root, vendor)) return
-      const complete = this.generations.exclusive(vendor, () => {
+      const pending = this.generations.exclusive(vendor, () => {
         const entry = readChatCleanup(this.root, vendor)
-        if (!entry) return true
-        if (processState(entry.owner.pid, entry.owner.birth) !== 'dead') return false
+        if (!entry) return
+        if (!this.deadChatOwner(entry.owner)) return false
         const current = this.generations.current(vendor)
         if (current === entry.previous) {
+          const staging = stagingPath(this.root, vendor)
+          const marker = join(staging, entry.replacement)
+          const staged = this.generations.folder(vendor, entry.replacement)
+          if (existsSync(dirname(staged)) && checkDirectory(this.root, staged, entry.adopted, { missing: true })) {
+            // Carry forward proof of the unselected home if any process still owns it.
+            if (!readStagedHome(this.root, marker)?.owner) {
+              writeStagedHome(this.root, marker, { home: entry.adopted, owner: entry.owner })
+            }
+          }
           completeChatCleanup(this.root, vendor)
-          return true
+          return
         }
-        if (current !== entry.replacement) throw unverifiedLogin()
-        const adopted = this.generations.folder(vendor, current)
-        checkDirectory(this.root, adopted, entry.adopted)
-        this.verify(adopted)
+        this.verify(this.checkAdoptedHome(vendor, entry))
         this.resume(vendor)
-        if (!oldChatRunsExited(entry, this.generations.birth)) return false
-        this.finishChatCleanup(vendor, entry)
-        return true
+        if (oldChatRunsExited(entry, this.generations.birth)) {
+          this.finishChatCleanup(vendor, entry)
+          return
+        }
+        return this.platform === 'win32' && entry.runs === null ? entry : false
       })
-      if (complete) return
+      if (pending === undefined) return
+      if (pending && await this.recoverWindowsChatCleanup(vendor, pending)) return
     } catch {} // Unproved or temporarily unavailable directories remain fenced off.
+    if (this.recoveryClosed) return
     const timer = setTimeout(() => {
       this.cleanupTimers.delete(vendor)
       this.recoverChatCleanup(vendor)
     }, 1000)
     timer.unref?.()
     this.cleanupTimers.set(vendor, timer)
+  }
+
+  async recoverWindowsChatCleanup(vendor, entry, deferred) {
+    const old = this.generations.folder(vendor, entry.previous)
+    const state = await waitForWindowsChatHome(old, this.probeChatHome)
+    if (this.recoveryClosed) return true
+    return this.generations.exclusive(vendor, () => {
+      if (!isDeepStrictEqual(entry, readChatCleanup(this.root, vendor, deferred))) return true
+      if (this.generations.current(vendor) === entry.previous) throw unverifiedLogin()
+      checkDirectory(this.root, old, entry.old, { missing: true })
+      if (state === 'unused' || !existsSync(old)) {
+        try {
+          this.finishChatCleanup(vendor, entry, deferred)
+          if (deferredChatCleanups(this.root, vendor).length === 0) this.chatCleanupNotices.delete(vendor)
+          return true
+        } catch {} // Windows can still reject removal, for example while an open file is locked.
+      }
+      if (!deferred) {
+        this.checkAdoptedHome(vendor, entry)
+        removeStagingMarker(this.root, join(stagingPath(this.root, vendor), entry.replacement))
+        deferChatCleanup(this.root, vendor, entry)
+      }
+      if (!this.chatCleanupNotices.has(vendor)) {
+        this.chatCleanupNotices.set(vendor, chatCleanupPending)
+        try { this.onChatCleanupPending(chatCleanupPending) } catch {}
+      }
+      return true
+    })
+  }
+
+  chatCleanupNotice(vendor) { return this.chatCleanupNotices.get(vendor) }
+
+  async retryDeferredChatCleanups(vendor) {
+    if (this.platform !== 'win32' || this.recoveryClosed) return true
+    const pending = this.deferredRecoveries.get(vendor)
+    if (pending) return pending
+    const deferred = deferredChatCleanups(this.root, vendor)
+    if (deferred.length === 0) return true
+    const recovery = Promise.all(deferred.map(async generation => {
+      try {
+        const entry = readChatCleanup(this.root, vendor, generation)
+        if (entry && this.deadChatOwner(entry.owner)) {
+          await this.recoverWindowsChatCleanup(vendor, entry, generation)
+        }
+      } catch {}
+    })).then(() => deferredChatCleanups(this.root, vendor).length === 0)
+      .finally(() => this.deferredRecoveries.delete(vendor))
+    this.deferredRecoveries.set(vendor, recovery)
+    return recovery
+  }
+
+  async completeChatSignIn(vendor) {
+    if (await this.retryDeferredChatCleanups(vendor)) return
+    throw Object.assign(new Error(chatCleanupPending), { code: 'acp-account/chat-cleanup-pending' })
   }
 
   requireNoChatCleanup(vendor) {
@@ -479,6 +655,9 @@ export class CliHomes {
           throw failure('Close other Automagik sessions before changing the Bot account.')
         }
       }
+      if (preserveVersion && !existsSync(join(home, 'paused'))) {
+        writeFileSync(join(lock, 'resume-chat'), '', { mode: 0o600 })
+      }
       writeFileSync(join(home, 'paused'), '', { mode: 0o600 })
       if (!preserveVersion) this.advanceVersion(vendor)
     } catch (error) {
@@ -501,7 +680,7 @@ export class CliHomes {
     const stat = lstatSync(lock)
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw unverifiedLogin()
     const fields = {}
-    for (const name of ['pid', 'owner', 'birth', 'recovering']) {
+    for (const name of ['pid', 'owner', 'birth', 'recovering', 'resume-chat']) {
       try {
         const entry = lstatSync(join(lock, name))
         if (!entry.isFile() || entry.size > 4096) throw unverifiedLogin()
@@ -539,10 +718,14 @@ export class CliHomes {
     if (this.lockState(lock, snapshot) !== 'dead') throw unverifiedLogin()
     const exact = () => JSON.stringify(this.lockSnapshot(lock)) === JSON.stringify(snapshot)
     if (!exact() || this.lockState(lock, snapshot) !== 'dead') throw unverifiedLogin()
-    // A crash may have preceded the original pause write. Persist it before clearing the
-    // only remaining barrier, without changing either the selected home or its version.
-    const fd = openSync(join(home, 'paused'), 'a', 0o600)
-    try { fsyncSync(fd) } finally { closeSync(fd) }
+    // A preserving chat sign-in left the selected account alone. Other interrupted
+    // account changes keep the pause until proof of a subsequent sign-in.
+    if (snapshot.fields['resume-chat']?.bytes === '') {
+      rmSync(join(home, 'paused'), { force: true })
+    } else {
+      const fd = openSync(join(home, 'paused'), 'a', 0o600)
+      try { fsyncSync(fd) } finally { closeSync(fd) }
+    }
     // Linux/Unix directory fsync persists the new pause entry as well as its file bytes.
     if (process.platform !== 'win32') {
       const directory = openSync(home, 'r')
@@ -556,7 +739,11 @@ export class CliHomes {
   startup(vendor) {
     this.generations.register(vendor)
     this.generations.exclusive(vendor, () => {
-      const home = this.home(vendor)
+      const current = this.startupGeneration(vendor)
+      const home = this.generations.folder(vendor, current)
+      if (vendor !== 'antigravity') {
+        this.recoverStagedHomes(vendor, current, home)
+      }
       if (existsSync(home)) {
         this.verify(home)
         this.recoverChanging(home)
@@ -572,6 +759,7 @@ export class CliHomes {
       }
     })
     this.recoverChatCleanup(vendor)
+    if (vendor !== 'antigravity') void this.retryDeferredChatCleanups(vendor).catch(() => {})
     const retired = this.collect(vendor)
     if (retired.length > 0) {
       try { this.onRetired(vendor, retired) } catch {}

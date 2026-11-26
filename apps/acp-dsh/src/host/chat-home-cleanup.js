@@ -2,22 +2,26 @@
 // old directory and the evidence needed to remove it outside either vendor home.
 import { randomUUID } from 'node:crypto'
 import {
-  closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync,
+  renameSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { unverifiedLogin } from './login-ownership.js'
 import { processState, validBirth } from './process-identity.js'
 
-const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
+export const CHAT_GENERATION = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const number = /^\d{1,24}$/
 const pid = value => Number.isSafeInteger(value) && value > 1
 const directoryId = value => typeof value?.dev === 'string' && number.test(value.dev)
   && typeof value?.ino === 'string' && number.test(value.ino)
+const appOwner = owner => pid(owner?.pid) && (owner.birth === null || validBirth(owner.birth))
 const validRun = run => pid(run?.group) && Array.isArray(run.detached)
   && run.detached.every(child => pid(child?.pid) && validBirth(child.birth))
 const recordLimit = 256 * 1024
 
-const cleanupPath = (root, vendor) => join(root, 'current', `${vendor}.chat-cleanup.json`)
+const cleanupPath = (root, vendor, deferred) =>
+  join(root, 'current', `${vendor}.chat-cleanup${deferred ? `.${deferred}` : ''}.json`)
+export const stagingPath = (root, vendor) => join(root, 'login-staging', vendor)
 
 function syncDirectory(path) {
   if (process.platform === 'win32') return
@@ -45,28 +49,46 @@ export function checkDirectory(root, path, expected, { missing = false } = {}) {
   return true
 }
 
-export function readChatCleanup(root, vendor) {
-  const path = cleanupPath(root, vendor)
+function readRecord(root, path) {
   const stat = lstatSync(path, { throwIfNoEntry: false })
   if (!stat) return undefined
   checkParent(root, path)
   if (!stat.isFile() || stat.size > recordLimit) throw unverifiedLogin()
   const data = readFileSync(path, 'utf8')
   if (Buffer.byteLength(data) > recordLimit) throw unverifiedLogin()
-  let entry
-  try { entry = JSON.parse(data) } catch { throw unverifiedLogin() }
-  if (entry?.version !== 1 || entry.vendor !== vendor || typeof entry.replacement !== 'string' || !uuid.test(entry.replacement)
-    || typeof entry.previous !== 'string' || (entry.previous !== 'legacy' && !uuid.test(entry.previous))
+  return data
+}
+
+function json(data) {
+  try { return JSON.parse(data) } catch { throw unverifiedLogin() }
+}
+
+export function readStagedHome(root, marker) {
+  const data = readRecord(root, marker)
+  if (data === undefined) return undefined
+  if (data === '') return {} // Markers written before the home identity was recorded.
+  const entry = json(data)
+  if (!appOwner(entry?.owner) || !directoryId(entry.home)) throw unverifiedLogin()
+  return entry
+}
+
+export function readChatCleanup(root, vendor, deferred) {
+  const data = readRecord(root, cleanupPath(root, vendor, deferred))
+  if (data === undefined) return undefined
+  const entry = json(data)
+  if (entry?.version !== 1 || entry.vendor !== vendor || typeof entry.replacement !== 'string'
+    || !CHAT_GENERATION.test(entry.replacement)
+    || (deferred && entry.replacement !== deferred)
+    || typeof entry.previous !== 'string' || (entry.previous !== 'legacy' && !CHAT_GENERATION.test(entry.previous))
     || entry.previous === entry.replacement || !directoryId(entry.old) || !directoryId(entry.adopted)
-    || !pid(entry.owner?.pid) || !(entry.owner.birth === null || validBirth(entry.owner.birth))
+    || !appOwner(entry.owner)
     || typeof entry.stopped !== 'boolean' || !(entry.runs === null || (Array.isArray(entry.runs) && entry.runs.every(validRun)))) {
     throw unverifiedLogin()
   }
   return entry
 }
 
-export function writeChatCleanup(root, vendor, entry) {
-  const path = cleanupPath(root, vendor)
+function writeRecord(root, path, entry) {
   const directory = dirname(path)
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   checkParent(root, path)
@@ -82,23 +104,51 @@ export function writeChatCleanup(root, vendor, entry) {
   } finally { rmSync(next, { force: true }) }
 }
 
-export function completeChatCleanup(root, vendor) {
+export const writeChatCleanup = (root, vendor, entry, deferred) =>
+  writeRecord(root, cleanupPath(root, vendor, deferred), entry)
+export const writeStagedHome = (root, marker, entry) => writeRecord(root, marker, entry)
+
+export function deferredChatCleanups(root, vendor) {
+  const prefix = `${vendor}.chat-cleanup.`
+  const directory = dirname(cleanupPath(root, vendor))
+  if (!ownedDirectory(root, directory)) return []
+  return readdirSync(directory).flatMap(name => {
+    if (!name.startsWith(prefix) || !name.endsWith('.json')) return []
+    const generation = name.slice(prefix.length, -5)
+    return CHAT_GENERATION.test(generation) ? [generation] : []
+  })
+}
+
+export function deferChatCleanup(root, vendor, entry) {
   const path = cleanupPath(root, vendor)
+  const deferred = cleanupPath(root, vendor, entry.replacement)
+  checkParent(root, path)
+  if (lstatSync(deferred, { throwIfNoEntry: false })) throw unverifiedLogin()
+  renameSync(path, deferred)
+  syncDirectory(dirname(path))
+}
+
+export function removeStagingMarker(root, marker) {
+  removeRecord(root, marker)
+}
+
+export function completeChatCleanup(root, vendor, deferred) {
+  removeRecord(root, cleanupPath(root, vendor, deferred))
+}
+
+function removeRecord(root, path) {
   checkParent(root, path)
   rmSync(path, { force: true })
   syncDirectory(dirname(path))
 }
 
-export function removeChatHome(root, home, expected, marker, verify) {
+export function removeChatHome(root, home, expected, verify) {
   if (checkDirectory(root, home, expected, { missing: true })) {
     verify()
     checkDirectory(root, home, expected)
     rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   }
   syncDirectory(dirname(home))
-  checkParent(root, marker)
-  rmSync(marker, { force: true })
-  syncDirectory(dirname(marker))
 }
 
 // An exited app is not proof that its detached processes exited. A completed stop
