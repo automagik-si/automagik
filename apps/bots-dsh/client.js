@@ -5324,14 +5324,15 @@ function SkillReport({ report }) {
     })) : null
   );
 }
-function SkillForm({ item, actions, onClose, saved, readOnly, report }) {
+function SkillForm({ item, initial, actions, onClose, saved, readOnly, report }) {
   const [draft, setDraft] = (0, import_react2.useState)(() => ({
     name: item?.name ?? "",
     description: item?.description ?? "",
     content: item?.content ?? "",
     source: item?.source?.kind ?? "text",
     fileName: item?.source?.fileName,
-    reviewHash: item?.reviewHash
+    reviewHash: item?.reviewHash,
+    ...initial
   }));
   const [busy, setBusy] = (0, import_react2.useState)(false);
   const [checking, setChecking] = (0, import_react2.useState)(false);
@@ -5439,18 +5440,35 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
   const [busy, setBusy] = (0, import_react2.useState)(false);
   const [rowReview, setRowReview] = (0, import_react2.useState)(null);
   const [recovered, setRecovered] = (0, import_react2.useState)([]);
+  const [recovering, setRecovering] = (0, import_react2.useState)(() => Boolean(actions.resumeSkillSaves));
   (0, import_react2.useEffect)(() => {
     if (!actions.resumeSkillSaves) return;
     const controller = new window.AbortController();
     const { signal } = controller;
-    void actions.resumeSkillSaves(signal).then((results) => {
-      if (signal.aborted) return;
-      const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-      setRecovered(completed.filter((value) => value.needsConfirm || value.refused));
-      if (completed.length) void refresh(signal);
-      const failed = results.find((result) => result.status === "rejected" && result.reason.code !== "bot/not-found");
-      if (failed) setError(hostText(failed.reason.message));
-    });
+    setRecovering(true);
+    void (async () => {
+      try {
+        const results = await actions.resumeSkillSaves(signal);
+        const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        const forms = [];
+        for (const { form: initial, ...report } of completed) {
+          if (report.refused) forms.push({ report });
+          if (!report.needsConfirm || !initial) continue;
+          const item = initial.reviewHash !== void 0 ? await actions.getSkill(initial.name, signal) : initial.edit ? { name: initial.name } : void 0;
+          if (initial.reviewHash !== void 0 && item?.reviewHash !== initial.reviewHash) continue;
+          forms.push({ initial, item, report });
+        }
+        if (signal.aborted) return;
+        setRecovered(forms);
+        if (completed.length) await refresh(signal);
+        const failed = results.find((result) => result.status === "rejected" && result.reason.code !== "bot/not-found");
+        if (failed && !signal.aborted) setError(hostText(failed.reason.message));
+      } catch (failure) {
+        if (!signal.aborted) setError(hostText(failure.message));
+      } finally {
+        if (!signal.aborted) setRecovering(false);
+      }
+    })();
     return () => controller.abort();
   }, [actions]);
   const change = async (action) => {
@@ -5482,7 +5500,12 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       setRowReview((current) => current?.report ? current : null);
     }
   });
-  const disabled = readOnly || busy;
+  const disabled = readOnly || busy || recovering;
+  const activeForm = form ?? recovered.find((entry) => entry.initial);
+  const closeForm = () => {
+    if (form) setForm(null);
+    else setRecovered((current) => current.filter((entry) => entry !== activeForm));
+  };
   return (0, import_react2.createElement)(
     "main",
     { className: "bt-drawer-body" },
@@ -5494,16 +5517,17 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled, onClick: () => setForm({}) }, t("New skill"))
     ),
     error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
-    recovered.map((report, index) => (0, import_react2.createElement)(SkillReport, { key: index, report })),
-    form ? (0, import_react2.createElement)(SkillForm, {
-      key: form.item?.name ?? "",
-      item: form.item,
-      report: form.report,
+    recovered.filter((entry) => !entry.initial).map(({ report }, index) => (0, import_react2.createElement)(SkillReport, { key: index, report })),
+    activeForm ? (0, import_react2.createElement)(SkillForm, {
+      key: activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? "",
+      item: activeForm.item,
+      initial: activeForm.initial,
+      report: activeForm.report,
       actions,
       readOnly,
-      onClose: () => setForm(null),
+      onClose: closeForm,
       saved: async () => {
-        setForm(null);
+        closeForm();
         await refresh();
       }
     }) : null,
@@ -24006,7 +24030,7 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
 
 // src/client/team-actions.js
 var hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-var unfinishedSave = (error) => error.code === "NETWORK" || /^HTTP_50[234]$/.test(error.code ?? "") || error.name === "AbortError" || error instanceof SyntaxError;
+var unfinishedSave = (error) => error.code === "NETWORK" || error.code === "bot/retired" || /^HTTP_50[234]$/.test(error.code ?? "") || error.name === "AbortError" || error instanceof SyntaxError;
 function teamActions({
   call: call2,
   after,
@@ -24056,7 +24080,7 @@ function teamActions({
     }
   }
   async function finishSave(scope, job, input, signal) {
-    const poll = { operation: job.id, poll: true };
+    const poll = { operation: job.id, poll: true, ...input === void 0 ? { recover: true } : {} };
     const request = (body) => {
       signal?.throwIfAborted();
       if (scope !== skillScope()) throw Object.assign(new Error("The team viewer changed."), { code: "bot/viewer-changed" });
@@ -24084,8 +24108,9 @@ function teamActions({
   async function saveSkill(skill) {
     const scope = skillScope();
     const key = JSON.stringify(skill);
+    const existing = storedSaves(scope);
     const digest = skillStorage && globalThis.crypto.subtle ? hex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)))) : void 0;
-    let job = skillSaves.get(key) ?? (digest && storedSaves(scope).find((entry) => entry.digest === digest));
+    let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find((entry) => entry.digest === digest));
     if (!job) {
       job = { id: hex(globalThis.crypto.getRandomValues(new Uint8Array(16))), digest, started: false };
       rememberSave(scope, job);
@@ -24571,7 +24596,7 @@ function teamActions({
     imLoginStart: (payload) => call2("im-login-start", payload),
     imLoginWait: (payload) => call2("im-login-wait", payload),
     skillLibrary: (signal) => call2("skill-library", {}, signal),
-    getSkill: (name) => call2("skill-library-get", { name }),
+    getSkill: (name, signal) => call2("skill-library-get", { name }, signal),
     saveSkill: (skill) => after(saveSkill(skill)),
     resumeSkillSaves,
     deleteSkill: (name) => after(call2("skill-library-delete", { name })),

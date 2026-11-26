@@ -66,11 +66,11 @@ function SkillReport({ report }) {
     })) : null)
 }
 
-function SkillForm({ item, actions, onClose, saved, readOnly, report }) {
+function SkillForm({ item, initial, actions, onClose, saved, readOnly, report }) {
   const [draft, setDraft] = useState(() => ({
     name: item?.name ?? '', description: item?.description ?? '', content: item?.content ?? '',
     source: item?.source?.kind ?? 'text', fileName: item?.source?.fileName,
-    reviewHash: item?.reviewHash,
+    reviewHash: item?.reviewHash, ...initial,
   }))
   const [busy, setBusy] = useState(false)
   const [checking, setChecking] = useState(false)
@@ -147,18 +147,36 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
   const [busy, setBusy] = useState(false)
   const [rowReview, setRowReview] = useState(null)
   const [recovered, setRecovered] = useState([])
+  const [recovering, setRecovering] = useState(() => Boolean(actions.resumeSkillSaves))
   useEffect(() => {
     if (!actions.resumeSkillSaves) return
     const controller = new window.AbortController()
     const { signal } = controller
-    void actions.resumeSkillSaves(signal).then(results => {
-      if (signal.aborted) return
-      const completed = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
-      setRecovered(completed.filter(value => value.needsConfirm || value.refused))
-      if (completed.length) void refresh(signal)
-      const failed = results.find(result => result.status === 'rejected' && result.reason.code !== 'bot/not-found')
-      if (failed) setError(hostText(failed.reason.message))
-    })
+    setRecovering(true)
+    void (async () => {
+      try {
+        const results = await actions.resumeSkillSaves(signal)
+        const completed = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
+        const forms = []
+        for (const { form: initial, ...report } of completed) {
+          if (report.refused) forms.push({ report })
+          if (!report.needsConfirm || !initial) continue
+          const item = initial.reviewHash !== undefined ? await actions.getSkill(initial.name, signal)
+            : initial.edit ? { name: initial.name } : undefined
+          if (initial.reviewHash !== undefined && item?.reviewHash !== initial.reviewHash) continue
+          forms.push({ initial, item, report })
+        }
+        if (signal.aborted) return
+        setRecovered(forms)
+        if (completed.length) await refresh(signal)
+        const failed = results.find(result => result.status === 'rejected' && result.reason.code !== 'bot/not-found')
+        if (failed && !signal.aborted) setError(hostText(failed.reason.message))
+      } catch (failure) {
+        if (!signal.aborted) setError(hostText(failure.message))
+      } finally {
+        if (!signal.aborted) setRecovering(false)
+      }
+    })()
     return () => controller.abort()
   }, [actions])
   const change = async action => {
@@ -183,16 +201,22 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       setRowReview(current => current?.report ? current : null)
     }
   })
-  const disabled = readOnly || busy
+  const disabled = readOnly || busy || recovering
+  const activeForm = form ?? recovered.find(entry => entry.initial)
+  const closeForm = () => {
+    if (form) setForm(null)
+    else setRecovered(current => current.filter(entry => entry !== activeForm))
+  }
   return h('main', { className: 'bt-drawer-body' },
     h('header', { className: 'bt-set-row' },
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-label': t('Back'), onClick: onBack }, h(ChevronLeftIcon)),
       h('h1', { className: 'bt-section-title' }, t('Skills')),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled, onClick: () => setForm({}) }, t('New skill'))),
     error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null,
-    recovered.map((report, index) => h(SkillReport, { key: index, report })),
-    form ? h(SkillForm, { key: form.item?.name ?? '', item: form.item, report: form.report, actions, readOnly,
-      onClose: () => setForm(null), saved: async () => { setForm(null); await refresh() } }) : null,
+    recovered.filter(entry => !entry.initial).map(({ report }, index) => h(SkillReport, { key: index, report })),
+    activeForm ? h(SkillForm, { key: activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? '',
+      item: activeForm.item, initial: activeForm.initial, report: activeForm.report, actions, readOnly,
+      onClose: closeForm, saved: async () => { closeForm(); await refresh() } }) : null,
     library.skills.length ? h('div', { className: 'bt-set-card' }, library.skills.map(skill => {
       const result = skill.held ? hostText(skill.held) : skill.check?.verdict === 'warn' ? t('Warnings') : t('Verified')
       const checked = skill.check?.ranAt ? t('Checked {time}', { time: new Date(skill.check.ranAt).toLocaleString() }) : null

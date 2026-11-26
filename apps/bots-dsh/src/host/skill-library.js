@@ -188,7 +188,8 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
   }
 
   const mac = (key, ...value) => createHmac('sha256', key).update(JSON.stringify(value)).digest('hex')
-  const attestation = (key, review) => mac(key, 'review-v2', hashJson(review))
+  // An older review seal cannot establish provider-observed completion.
+  const attestation = (key, review) => mac(key, 'review-v3', hashJson(review))
   const acceptance = (key, record, fingerprint, digest, findingsDigest) =>
     mac(key, 'accept-v2', record.name, record.source, record.hash, fingerprint, digest, findingsDigest)
   const verifies = (key, hash, review, seal) => key && review?.status === 'done' && review.hash === hash &&
@@ -472,7 +473,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
   // review or the write, so disconnecting the initiating request cannot repeat either.
   function saveOperation(body, identity, generation) {
     authorizedGeneration(generation)
-    const { operation, poll, ...input } = body
+    const { operation, poll, recover, ...input } = body
     if (operation === undefined) return save(input, identity, generation)
     if (typeof operation !== 'string' || !/^[a-f0-9]{32}$/.test(operation)) throw reject('Invalid Skills save operation.')
     const scope = JSON.stringify(generation)
@@ -483,12 +484,23 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       }
       if (poll !== true && entry.inputHash !== hashJson(input)) throw reject(CHANGED, 'bot/refused')
       if (entry.error) throw entry.error
+      if (poll === true && recover === true && entry.form) return { ...entry.result, form: entry.form }
       return entry.result ?? { pending: true }
     }
     if (poll === true) throw reject('This Skills save is no longer available. Save the skill again.', 'bot/not-found')
     const job = { scope, identity, inputHash: hashJson(input) }
     saves.set(operation, job)
-    void save(input, identity, generation).then(result => { job.result = result }, error => { job.error = error })
+    void save(input, identity, generation).then(result => {
+      job.result = result
+      // The initiating viewer may be gone before it receives a warning. Keep
+      // its exact form with the result, behind the same actor and team checks.
+      if (result.needsConfirm) {
+        const fields = input.reviewHash === undefined ? ['name', 'description', 'content', 'source', 'fileName', 'fileBytes']
+          : ['name', 'reviewHash']
+        job.form = Object.fromEntries(fields.filter(key => typeof input[key] === 'string').map(key => [key, input[key]]))
+        job.form.edit = input.edit === true
+      }
+    }, error => { job.error = error })
     return { pending: true }
   }
 

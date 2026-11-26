@@ -271,6 +271,16 @@ export function reviewFrames({ name, entries, hash = skillHash(entries) }, draw 
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 
+function parseFinding(row, frame) {
+  const line = row?.line === null ? null : frame.mapLine(row?.line)
+  if (!exact(row, ['file', 'line', 'area', 'severity', 'reason']) || row.file !== frame.path || line === undefined ||
+      !AREAS.has(row.area) || !SEVERITIES.has(row.severity) ||
+      typeof row.reason !== 'string' || row.reason.length > 300 || !row.reason.trim()) return
+  const reason = row.reason.replace(/\s+/g, ' ').trim()
+  return { ...row, line, reason: credentialShapes(reason) !== reason || looksLikeKey(reason)
+    ? 'Mentions a credential (value hidden).' : reason }
+}
+
 export function parseReview(text, frame) {
   let value
   try { value = JSON.parse(text) } catch { return { findings: [], why: 'malformed' } }
@@ -280,18 +290,45 @@ export function parseReview(text, frame) {
   const findings = []
   let why = value.overflow || value.findings.length > 50 ? 'overflow' : undefined
   for (const row of value.findings) {
-    const line = row?.line === null ? null : frame.mapLine(row?.line)
-    if (!exact(row, ['file', 'line', 'area', 'severity', 'reason']) || row.file !== frame.path || line === undefined ||
-        !AREAS.has(row.area) || !SEVERITIES.has(row.severity) ||
-        typeof row.reason !== 'string' || row.reason.length > 300 || !row.reason.trim()) {
-      why ??= 'malformed'
-      continue
-    }
-    const reason = row.reason.replace(/\s+/g, ' ').trim()
-    findings.push({ ...row, line, reason: credentialShapes(reason) !== reason || looksLikeKey(reason)
-      ? 'Mentions a credential (value hidden).' : reason })
+    const finding = parseFinding(row, frame)
+    if (finding) findings.push(finding)
+    else why ??= 'malformed'
   }
   return { findings, why }
+}
+
+// Walk the leading findings array of an interrupted JSON document. Only whole,
+// individually valid rows count. A string or nested value cannot supply a row.
+function interruptedInjection(text, frame) {
+  const prefix = /^\s*\{\s*(?:"overflow"\s*:\s*(?:true|false)\s*,\s*)?"findings"\s*:\s*\[/.exec(text)
+  if (!prefix) return []
+  const rowToken = /\s*([{,])/y
+  rowToken.lastIndex = prefix[0].length
+  const findings = []
+  let first = true
+  for (;;) {
+    if (!first && rowToken.exec(text)?.[1] !== ',') break
+    if (rowToken.exec(text)?.[1] !== '{') break
+    first = false
+    const start = rowToken.lastIndex - 1
+    let depth = 1
+    let string = false
+    let end = start + 1
+    for (; depth && end < text.length; end++) {
+      const char = text[end]
+      if (string && char === '\\') end++
+      else if (char === '"') string = !string
+      else if (!string && char === '{') depth++
+      else if (!string && char === '}') depth--
+    }
+    if (depth) break
+    rowToken.lastIndex = end
+    let row
+    try { row = JSON.parse(text.slice(start, end)) } catch { break }
+    const finding = parseFinding(row, frame)
+    if (finding?.area === 'prompt-injection') findings.push(finding)
+  }
+  return findings
 }
 
 async function chooseReviewer(rt) {
@@ -311,10 +348,21 @@ async function callFrame(rt, options, frame, signal, check, block) {
   const timeout = AbortSignal.timeout(CALL_TIMEOUT)
   const requestSignal = AbortSignal.any([signal, timeout])
   let abort
+  let attempt
+  let abortPersistence
+  const retain = async text => {
+    const injection = interruptedInjection(text, frame)
+    if (injection.length) await block(injection)
+  }
+  const onFailedAttempt = assembler => retain(reviewText(assembler.interruptedBlocks()))
   try {
     check()
     const stopped = new Promise((_, reject) => {
-      abort = () => reject(requestSignal.reason)
+      abort = () => {
+        // Save the received prefix even if the transport never unwinds after abort.
+        if (attempt) abortPersistence = onFailedAttempt(attempt)
+        reject(requestSignal.reason)
+      }
       if (requestSignal.aborted) abort()
       else requestSignal.addEventListener('abort', abort, { once: true })
     })
@@ -322,21 +370,21 @@ async function callFrame(rt, options, frame, signal, check, block) {
       ...options, tools: [], purpose: 'compaction', signal: requestSignal, system: REVIEW_PROMPT,
       messages: [{ role: 'user', content: [{ type: 'text', text: frame.message }] }],
     }
-    const onFailedAttempt = async attempt => {
-      const { findings } = parseReview(reviewText(attempt.interruptedBlocks()), frame)
-      const injection = findings.filter(finding => finding.area === 'prompt-injection')
-      if (injection.length) await block(injection)
-    }
-    const response = await Promise.race([stopped, rt.assembleLlm(request, { check, dispatch: { check }, onFailedAttempt })])
-    const parsed = parseReview(reviewText(response.blocks()), frame)
+    const response = await Promise.race([stopped, rt.assembleLlm(request, {
+      check, dispatch: { check }, requireProviderFinish: true, onAttempt: assembler => { attempt = assembler }, onFailedAttempt,
+    })])
+    const text = reviewText(response.blocks())
+    const parsed = parseReview(text, frame)
     if (response.observedFinish?.kind !== 'stop') {
       parsed.why = response.finish.kind === 'error' ? 'provider-error' : 'incomplete'
     }
+    if (parsed.why) await retain(text)
     return parsed
   } catch {
     return { findings: [], why: timeout.aborted ? 'timeout' : 'provider-error' }
   } finally {
     if (abort) requestSignal.removeEventListener('abort', abort)
+    await abortPersistence
   }
 }
 

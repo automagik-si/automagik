@@ -140,23 +140,67 @@ function canRetryPolicy(policy, code, retry) {
   return Array.isArray(policy.retryableCodes) && policy.retryableCodes.includes(code) && retry <= policy.maxRetries
 }
 
+// The pinned pi-ai adapter drops the raw provider reason from its finish chunk.
+// Observe it in the OpenAI-compatible transport for this call's snapshot only.
+function skillReviewStream(llm, request, observedFinish) {
+  const registration = llm.registration?.(request.provider)
+  const adapter = registration?.adapter
+  if (!adapter?.current || !adapter.modelOf || !adapter.streamWithSnapshot) return
+  const snapshot = adapter.current()
+  const model = adapter.modelOf(snapshot, request.provider, request.model)
+  if (model.api !== 'openai-completions') return
+
+  async function* streamSimple(model, context, options) {
+    for await (const event of snapshot.models.streamSimple(model, context, options)) {
+      if (event.type === 'done' && typeof event.message.rawStopReason === 'string' && event.message.rawStopReason.length) {
+        observedFinish()
+      }
+      yield event
+    }
+  }
+  const models = Object.create(snapshot.models, { streamSimple: { value: streamSimple } })
+  const reviewAdapter = Object.create(adapter, { current: { value: () => ({ ...snapshot, models }) } })
+  // Keep DSH's preparation, middleware and failure normalization. The scoped
+  // registration substitutes the adapter only on this prepared call.
+  const scoped = Object.create(llm, {
+    registration: { value: () => ({ ...registration, adapter: reviewAdapter }) },
+    streamWithRegistration: { value: llm.streamWithRegistration.bind(llm) },
+  })
+  return (async function* () {
+    const { provider, model, maxTokens, reasoningEffort, signal } = request
+    const prepared = await scoped.prepareCall({ provider, model, maxTokens, reasoningEffort }, signal)
+    yield* prepared.stream({ ...request, ...prepared.config })
+  })()
+}
+
 // Auxiliary calls (memory, learning, handoff, steward, OCR, side chats, browser_task)
 // bypass the agent loop's `agent/request-error` hook, so `dsh-llm-retry` never sees
 // their transport or stream-idle failures. Retry those transient codes on the same
 // route with the provider's own retry policy, discarding partial chunks from failed attempts.
-export async function assembleLlmStream(ctx, options, { signal, backoff, random = Math.random, check, dispatch, onFailedAttempt } = {}) {
+export async function assembleLlmStream(ctx, options, {
+  signal, backoff, random = Math.random, check, dispatch, onAttempt, onFailedAttempt, requireProviderFinish,
+} = {}) {
   const fused = options.signal && signal ? AbortSignal.any([options.signal, signal]) : (options.signal ?? signal)
   const request = fused === options.signal ? options : { ...options, signal: fused }
   for (let retry = 1; ; retry += 1) {
     if (dispatch?.prepare !== undefined) await dispatch.prepare()
     dispatch?.check()
     const assembler = new BlockAssembler()
+    onAttempt?.(assembler)
     let thrown
     try {
-      for await (const chunk of ctx.llm.stream(request)) {
+      let providerFinished = false
+      const reviewStream = requireProviderFinish && skillReviewStream(ctx.llm, request, () => { providerFinished = true })
+      for await (const chunk of reviewStream || ctx.llm.stream(request)) {
         check?.()
         assembler.push(chunk)
-        if (chunk.type === 'finish') assembler.observedFinish = chunk.reason
+        if (chunk.type === 'finish') {
+          const replay = chunk.replayState?.response
+          const compat = replay?.kind === 'pi-ai' && replay.api === 'openai-completions'
+          const verified = reviewStream ? compat && providerFinished : !compat
+          const observed = !requireProviderFinish || chunk.reason.kind !== 'stop' || verified
+          assembler.observedFinish = observed ? chunk.reason : undefined
+        }
       }
     } catch (error) {
       thrown = error
@@ -174,8 +218,8 @@ export async function assembleLlmStream(ctx, options, { signal, backoff, random 
       continue
     }
     const finish = assembler.finish
+    if (finish.kind !== 'stop') await onFailedAttempt?.(assembler)
     if (finish.kind !== 'error') return assembler
-    await onFailedAttempt?.(assembler)
     if (fused?.aborted) return assembler
     const failure = finish.failure
     const code = failure?.code
@@ -1046,9 +1090,10 @@ export function install(rt) {
 
   const lifetime = new AbortController()
   ctx.effect?.(() => () => lifetime.abort(), 'ds-bot: auxiliary llm retry')
-  const assembleLlm = async (options, { check, dispatch, onFailedAttempt } = {}) => {
+  const assembleLlm = async (options, { check, dispatch, onAttempt, onFailedAttempt, requireProviderFinish } = {}) => {
     rt.assertBotRunnerProvider?.(options.provider, options.sessionId)
-    return assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff, check, dispatch, onFailedAttempt })
+    return assembleLlmStream(ctx, options, { signal: lifetime.signal, backoff: rt.config?.llmRetryBackoff,
+      check, dispatch, onAttempt, onFailedAttempt, requireProviderFinish })
   }
 
   Object.assign(rt, {

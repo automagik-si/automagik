@@ -5,7 +5,7 @@ import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-mode
 import { mountedViewer } from './viewer.js'
 
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
-const unfinishedSave = error => error.code === 'NETWORK' || /^HTTP_50[234]$/.test(error.code ?? '') ||
+const unfinishedSave = error => error.code === 'NETWORK' || error.code === 'bot/retired' || /^HTTP_50[234]$/.test(error.code ?? '') ||
   error.name === 'AbortError' || error instanceof SyntaxError
 
 // The actions every window that draws the Bot views shares: dialogs and panels (the `ui`
@@ -33,7 +33,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     } catch { /* The current client still has its operation. */ }
   }
   async function finishSave(scope, job, input, signal) {
-    const poll = { operation: job.id, poll: true }
+    const poll = { operation: job.id, poll: true, ...(input === undefined ? { recover: true } : {}) }
     const request = body => {
       signal?.throwIfAborted()
       if (scope !== skillScope()) throw Object.assign(new Error('The team viewer changed.'), { code: 'bot/viewer-changed' })
@@ -61,9 +61,10 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
   async function saveSkill(skill) {
     const scope = skillScope()
     const key = JSON.stringify(skill)
+    const existing = storedSaves(scope)
     const digest = skillStorage && globalThis.crypto.subtle
       ? hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(key)))) : undefined
-    let job = skillSaves.get(key) ?? (digest && storedSaves(scope).find(entry => entry.digest === digest))
+    let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find(entry => entry.digest === digest))
     if (!job) {
       // Only an operation ID and a request digest enter browser storage.
       job = { id: hex(globalThis.crypto.getRandomValues(new Uint8Array(16))), digest, started: false }
@@ -521,7 +522,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     imLoginStart: payload => call('im-login-start', payload),
     imLoginWait: payload => call('im-login-wait', payload),
     skillLibrary: signal => call('skill-library', {}, signal),
-    getSkill: name => call('skill-library-get', { name }),
+    getSkill: (name, signal) => call('skill-library-get', { name }, signal),
     saveSkill: skill => after(saveSkill(skill)),
     resumeSkillSaves,
     deleteSkill: name => after(call('skill-library-delete', { name })),
