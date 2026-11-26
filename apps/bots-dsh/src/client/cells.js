@@ -42,6 +42,22 @@ import { READ_SCOPE_CODE } from '../shared/read-scope.js'
 
 export { clockLabel }
 
+// Keep this in step with OPENING_TURN in host/groups.js. A real turn 1 has no marker.
+const OPENING_TURN = 1
+export function isOpeningTurn(roster, sessionId, turn) {
+  if (turn !== OPENING_TURN) return false
+  const opened = roster.roomsById?.[sessionId]?.opened
+  return opened?.part === sessionId && opened?.turn === turn
+}
+
+// Keep hook order stable when a recovered opening marker arrives after a row mounts.
+export function withoutOpeningTurn(Cell, turnOf) {
+  return function RoomTurnCell(props) {
+    const hidden = props.useRoster(roster => isOpeningTurn(roster, props.sessionId, turnOf(props)))
+    return hidden ? h(CellEmpty) : h(Cell, props)
+  }
+}
+
 // -------------------------------------------------------------------------
 // Chat cells
 
@@ -850,7 +866,9 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
   }, [relayed, sessionId, turn, source.senderSessionId])
   const order = useSessions((list) => {
     const outline = list.projectionsBySession?.[sessionId]?.values?.turnOutline ?? list.byId[sessionId]?.projectionValues?.turnOutline
-    return Array.isArray(outline) ? outline.map(entry => entry.turn).join(',') : ''
+    return Array.isArray(outline)
+      ? outline.filter(entry => !isOpeningTurn(roster, sessionId, entry.turn)).map(entry => entry.turn).join(',')
+      : ''
   })
   const peers = useTurnClock((state) => {
     if (!relayed) return ''
@@ -862,7 +880,7 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
   const visit = useUi(state => state.visits?.[sessionId])
   const hiddenTurns = roster.exchangeTurns[sessionId]
   const unreadOpening = useTurnClock((state) => {
-    const first = openingTurn(state[sessionId], order, hiddenTurns)
+    const first = openingTurn(state[sessionId], order, hiddenTurns, isOpeningTurn(roster, sessionId, OPENING_TURN))
     return first?.turn === turn && unseenSince(visit, first.start) ? clockLabel(first.start) : ''
   })
   const body = triggerBody()
@@ -1006,8 +1024,12 @@ function nextTurnStart(turns, turn) {
 }
 // The first turn the transcript shows: the earliest rendered start, with only hidden
 // exchange turns before it. `firstTurns` lists the outline's first turns.
-export function openingTurn(turns, firstTurns, hiddenTurns) {
+export function openingTurn(turns, firstTurns, hiddenTurns, opened = false) {
   if (!turns || !firstTurns) return null
+  if (opened) {
+    const { [OPENING_TURN]: _opening, ...visible } = turns
+    turns = visible
+  }
   const start = nextTurnStart(turns, -Infinity)
   if (start === undefined) return null
   const turn = Number(Object.keys(turns).filter(key => turns[key].first === start)[0])

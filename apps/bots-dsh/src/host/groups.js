@@ -37,6 +37,28 @@ import { GROUP_REF, output } from './tools.js'
 import { failureLine } from './turns.js'
 import { parseBook } from './books.js'
 
+export const OPENING_TURN = 1
+
+export function openingEvents(seq, time = Date.now()) {
+  return [
+    { type: 'turn/start', seq, time, data: { turn: OPENING_TURN } },
+    { type: 'turn/end', seq: seq + 1, time, data: { turn: OPENING_TURN, reason: { kind: 'completed' } } },
+  ]
+}
+
+const startsConversation = event => ['turn/start', 'agent/inbox/spliced', 'user/message'].includes(event.type)
+
+export function openingTurnOf(events) {
+  const first = events.findIndex(startsConversation)
+  if (first < 0) return undefined
+  const start = events[first]
+  const end = events[first + 1]
+  if (start.type === 'turn/start' && start.data.turn === OPENING_TURN
+    && end?.type === 'turn/end' && end.data.turn === OPENING_TURN
+    && ['completed', 'interrupted'].includes(end.data.reason?.kind)) return OPENING_TURN
+  return undefined
+}
+
 const ROOM_LOG_MAX = 60
 const ROOM_FIRST_LOOK = 12
 const ROOM_DELTA_MAX = 24
@@ -215,6 +237,105 @@ const withoutPocketFields = (line) => {
 
 export function install(rt) {
   const { ctx, state } = rt
+
+  const openingRepairs = new Map()
+  const warnedOpening = new Set()
+  let openingStopped = false
+  const currentRoom = (id, room, generation) => !openingStopped && room !== undefined
+    && rt.readOnly() === undefined && rt.sameTeam(generation) && rt.roomOf(id) === room && rt.sessionOfRoom(room) === id
+  const liveSession = id => ctx.sessions?.get(id)
+  const liveAgent = id => ctx.get?.('agents')?.get(id)
+
+  function warnOpening(id, error) {
+    if (warnedOpening.has(id)) return
+    warnedOpening.add(id)
+    rt.warn('omni-ui: opening record for room Session %s could not be reconciled: %s', id, error)
+  }
+
+  async function publishOpening(id, room, generation, turn) {
+    if (turn === undefined || !currentRoom(id, room, generation)) return
+    if (room.opened?.part === id && room.opened.turn === turn) return
+    room.opened = { part: id, turn }
+    await rt.save({ required: true })
+  }
+
+  function openRoomCold(id, persistence, canAppend) {
+    const pending = openingRepairs.get(id)
+    if (pending !== undefined) return pending
+    const room = rt.roomOf(id)
+    const generation = rt.teamGeneration()
+    const cold = () => liveAgent(id) === undefined && liveSession(id) === undefined
+    if (!currentRoom(id, room, generation) || !cold()) return
+    const repair = (async () => {
+      let turn
+      const handle = await persistence.open(id, canAppend ? 'write' : 'read')
+      try {
+        const { events } = await handle.read()
+        turn = openingTurnOf(events)
+        // The writer lease excludes resume, and the team may have changed while
+        // we were obtaining it. Check the exact part again before appending.
+        if (canAppend && currentRoom(id, room, generation) && cold() && !events.some(startsConversation)) {
+          await handle.append(openingEvents((events.at(-1)?.seq ?? -1) + 1))
+          turn = OPENING_TURN
+        }
+      } finally {
+        await handle.close()
+      }
+      await publishOpening(id, room, generation, turn)
+    })().catch(error => warnOpening(id, error)).finally(() => { openingRepairs.delete(id) })
+    openingRepairs.set(id, repair)
+    return repair
+  }
+
+  ctx.effect(() => {
+    // Roster loading calls group helpers during adoption. Let the rest of the
+    // team finish registering those helpers before the startup pass loads it.
+    void Promise.resolve().then(async () => {
+      if (openingStopped) return
+      const persistence = ctx.get?.('sessionPersistence')
+      if (persistence === undefined || typeof ctx.sessionController?.list !== 'function') return
+      await rt.load()
+      if (openingStopped || rt.readOnly() !== undefined) return
+      const generation = rt.teamGeneration()
+      const { items } = await ctx.sessionController.list({})
+      const summaries = new Map(items.map(item => [item.sessionId, item]))
+      for (const room of Object.values(state.rooms)) {
+        const id = rt.sessionOfRoom(room)
+        if (!currentRoom(id, room, generation)) continue
+        if (room.opened !== undefined) {
+          if (room.opened.part === id) continue
+          delete room.opened
+          await rt.save({ required: true }).catch(error => warnOpening(id, error))
+        }
+        if (!currentRoom(id, room, generation)) continue
+        const session = liveSession(id)
+        if (session !== undefined) {
+          await publishOpening(id, room, generation, openingTurnOf(session.snapshotEvents())).catch(error => warnOpening(id, error))
+          continue
+        }
+        const item = summaries.get(id)
+        if (item !== undefined && !item.agentAvailable) {
+          await openRoomCold(id, persistence, item.blank || item.projections?.values?.sessionListMetadata === undefined)
+        }
+      }
+    }).catch(error => rt.warn('omni-ui: reconciling room opening records failed: %s', error))
+    return () => { openingStopped = true }
+  }, 'omni-ui: reconcile room opening records')
+
+  // rc.2 resumes only after appending an interrupted tail. Agent admission
+  // awaits this listener, so the first view can already hide that opening row.
+  ctx.on('agent/created', async ({ agent, source }) => {
+    if (source !== 'resume') return
+    try {
+      await rt.load()
+      const room = rt.roomOf(agent.id)
+      const generation = rt.teamGeneration()
+      if (!currentRoom(agent.id, room, generation)) return
+      await publishOpening(agent.id, room, generation, openingTurnOf(agent.session.snapshotEvents()))
+    } catch (error) {
+      rt.warn('omni-ui: restoring the opening marker for room Session %s failed: %s', agent.id, error)
+    }
+  })
 
   // Everything said in a group is in the group's book of the ledger (books.js), whole,
   // before anything reads it. The room's own log in state.json keeps the latest lines,

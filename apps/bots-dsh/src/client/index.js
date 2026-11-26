@@ -1,3 +1,4 @@
+import { createElement as h } from 'react'
 import { SKILLS_PANEL, SkillsScreen } from './skills-screen.js'
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
@@ -54,7 +55,8 @@ import { AnsweredReply, WidgetDock, WIDGET_CSS } from './widget-cell.js'
 import { HandoffDock, HANDOFF_CSS } from './handoff-card.js'
 import { AppAccessDock, ComputerHandoffDock, ComputerIndicator, COMPUTER_CSS } from './computer.js'
 import { headerNavigation, installHeaderNavigation } from './header-navigation.js'
-import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, registerSkillActivity, SkillActivityCell, SkillNoticeCell, TurnTailCell, OrderedToolCell, registerToolActivity, ToolActivityCell } from './cells.js'
+import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, registerSkillActivity, SkillActivityCell, SkillNoticeCell, TurnTailCell, OrderedToolCell, registerToolActivity, ToolActivityCell, isOpeningTurn, withoutOpeningTurn } from './cells.js'
+import { installOnboardingGate } from './onboarding-gate.js'
 import { TOOL_ACTIVITY } from '../shared/tool-activity.js'
 import { SKILL_ACTIVITY } from '../shared/skill-activity.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
@@ -118,6 +120,66 @@ import * as gatedShared from './gated-shared.js'
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
 const LIVE_OWN = new Set(['revision', 'unchanged', 'activity', 'work', 'memoryNews', 'memoryReviews', 'liveKey', 'computerLive'])
+
+// rc.2 wraps its turn navigation immediately before the transcript's scroll
+// container. Use the flow anchor and virtual row index, which survive locale and CSS builds.
+const ROOM_RAIL = 'div:has(+ div > div > [data-chat-flow]) > nav'
+const ROOM_OPENING_RAIL_CSS = `
+html[data-bot-opening="rail"] ${ROOM_RAIL},
+html[data-bot-opening="first"] ${ROOM_RAIL} button[data-index="0"] { display: none !important }
+`
+
+function installRoomOpeningRail({ roster, sessions, mainView }) {
+  const root = document.documentElement
+  const sync = () => {
+    const id = mainView()
+    const current = roster.getSnapshot()
+    const turn = current.roomsById?.[id]?.opened?.turn
+    if (isOpeningTurn(current, id, turn)) {
+      const list = sessions.getSnapshot()
+      const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline
+      if (Array.isArray(outline) && outline.length >= 2) {
+        root.setAttribute('data-bot-opening', outline.length === 2 ? 'rail' : 'first')
+        return
+      }
+    }
+    root.removeAttribute('data-bot-opening')
+  }
+  const style = installStyles(ROOM_OPENING_RAIL_CSS, 'room-opening-rail')
+  const offRoster = roster.subscribe(sync)
+  const offSessions = sessions.subscribe(sync)
+  sync()
+  return () => { offSessions(); offRoster(); root.removeAttribute('data-bot-opening'); style.remove() }
+}
+
+const RoomTurnProcess = withoutOpeningTurn(TurnProcessCell, ({ node }) => node?.location?.turn?.turn ?? node?.data?.turn)
+const RoomTurnTail = withoutOpeningTurn(TurnTailCell, ({ turn }) => turn.turn)
+
+function OpeningAwareHeader(props) {
+  const { sessionId: id, useRoster, useSessions } = props
+  const opened = useRoster(roster => {
+    const turn = roster.roomsById?.[id]?.opened?.turn
+    return isOpeningTurn(roster, id, turn) ? turn : undefined
+  })
+  // The header uses the same outline for its first visible time as TriggerCell.
+  // Keep the projection unchanged everywhere else, including DSH's own rail.
+  const useVisibleSessions = select => useSessions(list => {
+    if (opened === undefined) return select(list)
+    const projection = list.projectionsBySession?.[id]
+    const summary = list.byId[id]
+    const visible = outline => outline.filter(entry => entry.turn !== opened)
+    if (Array.isArray(projection?.values?.turnOutline)) {
+      const values = { ...projection.values, turnOutline: visible(projection.values.turnOutline) }
+      return select({ ...list, projectionsBySession: { ...list.projectionsBySession, [id]: { ...projection, values } } })
+    }
+    if (Array.isArray(summary?.projectionValues?.turnOutline)) {
+      const projectionValues = { ...summary.projectionValues, turnOutline: visible(summary.projectionValues.turnOutline) }
+      return select({ ...list, byId: { ...list.byId, [id]: { ...summary, projectionValues } } })
+    }
+    return select(list)
+  })
+  return h(HeaderPill, { ...props, useSessions: useVisibleSessions })
+}
 
 // What other Omni plugins build on (the channels and canvas plugins, which require this
 // bundle through `dsh.client.external`). They share this module instance: one interface
@@ -605,6 +667,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   const latestAgentSession = (agentId, list) => agentSessions(agentId)
     .sort((a, b) => (list.byId[b]?.updatedAt ?? 0) - (list.byId[a]?.updatedAt ?? 0))[0]
   const mainView = () => Object.values(ctx.sessions.list.getSnapshot().byId ?? {}).find(session => (session?.retainedBy?.mainView ?? 0) > 0)?.id
+  ctx.effect(() => installOnboardingGate(ctx, { roster, mainView, sessions: ctx.sessions.list }), 'ds-bot: gate Settings onboarding')
   const show = listedOpener({ list: ctx.sessions.list, refresh: () => Promise.resolve(ctx.sessions.refresh?.()).catch(quietly('refresh sessions')), open: (target) => { expected = target; ctx.uiWorkspace.openSession(target) }, current: mainView })
   // Whether the open Bot panel is folded away for lack of room: its opener then
   // means "show it" (over the conversation), not "close it". A panel shown because
@@ -1180,7 +1243,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   }
   const controlSources = () => [ctx.sessions.list, ctx.get('sidebarRight')?.mounted]
   const simpleOnly = install => installSimpleControls({ roster, sources: controlSources(), sessionId: controlSession, install })
-  const installHeader = () => simpleOnly(() => ctx.slots.inject('conversation.session.header', () => installHeaderNavigation(ctx.slots, face, HeaderPill, BOT_PRIORITY)))
+  const installHeader = () => simpleOnly(() => ctx.slots.inject('conversation.session.header', () => installHeaderNavigation(ctx.slots, face, OpeningAwareHeader, BOT_PRIORITY)))
   Object.assign(actions, sidebarActions({ sidebar: () => ctx.get('sidebarRight'), shown: mainView,
     teamSession: id => { const state = roster.getSnapshot(); return Boolean(state.byId[id] || state.roomsById[id] || state.tasks?.[id]) },
     closePanel: () => actions.closePanel(), reportError: (...args) => actions.reportError(...args) }))
@@ -1195,7 +1258,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   }
   const installNativeBotHeader = () => ctx.slots.inject('conversation.session.header.actions', () => {
     // Share only navigation injection/store. Native header retains exclusive children ownership.
-    const navigation = headerNavigation(ctx.slots.entries('conversation.session.header').filter(entry => entry.component !== HeaderPill), face)
+    const navigation = headerNavigation(ctx.slots.entries('conversation.session.header').filter(entry => entry.component !== OpeningAwareHeader), face)
     return ctx.slots.register({ name: 'conversation.session.header.actions', id: 'bot-native-header', order: -100, ...navigation }, NativeBotHeader)
   })
 
@@ -1409,6 +1472,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     // composer card is two-row from its first paint, before DSH mounts its input slots (#322).
     () => markConversation(),
     () => installUserTimes(),
+    () => installRoomOpeningRail({ roster, sessions: ctx.sessions.list, mainView }),
     () => installCompiledStyles(COMPOSER_PACK_CSS, 'composer-packs'),
     () => installCompiledStyles(CONVERSATION_CSS, 'conversation'),
     () => installCompiledStyles(TURN_ERROR_CSS, 'turn-errors'),
@@ -1428,12 +1492,12 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => registerToolActivity(ctx),
     () => shadow('conversation.chat.node', { key: TOOL_ACTIVITY, priority: BOT_PRIORITY, locale: 'chat', inject: face }, ToolActivityCell),
     () => shadow('conversation.chat.node', { key: 'tool-call', priority: BOT_PRIORITY, locale: 'chat', inject: face }, OrderedToolCell),
-    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'turn-process', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TurnProcessCell)),
+    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'turn-process', priority: BOT_PRIORITY, locale: 'chat', inject: face }, RoomTurnProcess)),
     // A failed turn shows what the user can do about it instead of the provider's raw text.
     () => shadow('conversation.chat.node', { key: 'turn-error', priority: BOT_PRIORITY, locale: 'chat', inject: face }, FailureCell),
     // DSH's own turn tail stays, so what other plugins add there shows, such as the
     // cards of the files a turn delivered; its copy and branch row is hidden.
-    () => shadow('conversation.chat.turnTail', { id: 'bot-turn-separators', order: 1000, inject: face }, TurnTailCell),
+    () => shadow('conversation.chat.turnTail', { id: 'bot-turn-separators', order: 1000, inject: face }, RoomTurnTail),
     // A side question is not a transcript row. After its snapshot turn closes it
     // sits on that turn's tail, ahead of the time separator.
     () => shadow('conversation.chat.turnTail', { id: 'bot-btw', order: 800, priority: BOT_PRIORITY, inject: face }, BtwTurnTail),
