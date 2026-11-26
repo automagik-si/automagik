@@ -83,6 +83,10 @@ function assignments(list, skills) {
 }
 
 const asList = active => [...active].map(([name, mode]) => ({ name, mode }))
+const assignmentKeys = list => new Map((Array.isArray(list) ? list : [])
+  .filter(item => typeof item?.assignment === 'string').map(item => [item.name, item.assignment]))
+const storedAssignments = (active, keys) => asList(active).map(row => keys.has(row.name)
+  ? { ...row, assignment: keys.get(row.name) } : row)
 
 function documentOf(name, body) {
   if (![undefined, 'text', 'file'].includes(body.source)) throw reject(FILE_FORMAT)
@@ -304,6 +308,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       if (sameInode(rootInfo, directory())) fs.rmSync(temp, { force: true })
       cache = undefined
     }
+    rt.dropUnavailableWorkerTools?.()
   }
 
   function reviewReceipt(check, reviewDigest, findingsDigest, identity, generation) {
@@ -432,7 +437,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
 
       return await serial(async () => {
         authorizedGeneration(generation)
-        const { data, stamp } = snapshot(true)
+        const { data, stamp, skills } = snapshot(true)
         if (JSON.stringify(own(data.skills, name)) !== JSON.stringify(first.previous)) throw reject(CHANGED, 'bot/refused')
         const { previous, bytes, parsed, check, source, frontmatter } = prepareSave(data, body)
         if (!bytes.equals(first.bytes) || check.hash !== first.check.hash) throw reject(CHANGED, 'bot/refused')
@@ -452,6 +457,12 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
           ...(frontmatter === undefined ? {} : { frontmatter }),
           review: decision.review, reviewSeal: attestation(key, decision.review),
         }
+        // A new or re-accepted revision cannot revive a worker's earlier pin,
+        // even if the person later restores the original bytes.
+        const eligible = skills.get(name)
+        const revision = eligible && !eligible.held && eligible.hash === check.hash
+          ? previous?.workerRevision : randomUUID()
+        if (revision !== undefined) record.workerRevision = revision
         if (decision.decision === 'confirm') {
           record.accepted = check.hash
           record.acceptedReview = decision.reviewDigest
@@ -504,13 +515,18 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     return { pending: true }
   }
 
-  function active(botId) {
+  function active(botId, { worker = false } = {}) {
     if (typeof botId !== 'string' || !rt.botOf(botId) || rt.teamCurrent?.() === false) return []
     try {
       const { data, skills } = snapshot()
-      return asList(assignments(own(data.active, botId), skills))
+      const list = own(data.active, botId)
+      const keys = worker ? assignmentKeys(list) : undefined
+      return asList(assignments(list, skills))
         .filter(({ name }) => !skills.get(name).held)
-        .map(({ name, mode }) => ({ ...skills.get(name), mode }))
+        .map(({ name, mode }) => ({
+          ...skills.get(name), mode,
+          ...(worker && { assignment: keys.get(name) ?? null, revision: own(data.skills, name)?.workerRevision ?? null }),
+        }))
     } catch { return [] }
   }
 
@@ -552,11 +568,13 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
           delete data.skills[name]
           for (const [key, list] of Object.entries(data.active)) {
             const active = assignments(list, skills)
-            if (active.delete(name)) data.active[key] = asList(active)
+            if (active.delete(name)) data.active[key] = storedAssignments(active, assignmentKeys(list))
           }
         } else if (action === 'bot-skill-add' || action === 'bot-skill-remove' || action === 'bot-skill-mode') {
           if (typeof id !== 'string' || !rt.botOf(id) || !skills.has(name)) throw reject('Unknown Bot or skill', 'bot/not-found')
-          const active = assignments(own(data.active, id), skills)
+          const list = own(data.active, id)
+          const active = assignments(list, skills)
+          const keys = assignmentKeys(list)
           const editing = action === 'bot-skill-mode'
           if (editing && !active.has(name)) throw reject('This skill is not active on this Bot.', 'bot/not-found')
           if (action === 'bot-skill-remove') active.delete(name)
@@ -566,13 +584,16 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
             const record = skills.get(name)
             if (record.held) throw reject(`${name} is held: ${record.held} Open it on the Skills screen and save it again.`)
             const prior = active.get(name)
-            if (prior === undefined || editing) active.set(name, mode)
+            if (prior === undefined || editing) {
+              active.set(name, mode)
+              if (prior === undefined || (prior === AUTOMATIC_SKILL_MODE && mode !== prior)) keys.set(name, randomUUID())
+            }
             const automatic = [...active].filter(([skill, use]) => use === AUTOMATIC_SKILL_MODE && !skills.get(skill).held)
             if (prior !== AUTOMATIC_SKILL_MODE && active.get(name) === AUTOMATIC_SKILL_MODE && automatic.length >= 5) {
               result.warning = 'Many active skills use more of the model’s context.'
             }
           }
-          Object.defineProperty(data.active, id, { value: asList(active), enumerable: true, configurable: true, writable: true })
+          Object.defineProperty(data.active, id, { value: storedAssignments(active, keys), enumerable: true, configurable: true, writable: true })
         } else throw reject('Unknown Skills action')
         if (!result.needsConfirm) await write(data, generation, stamp)
         audit(action, body, identity, result.needsConfirm ? 'pending' : 'allowed', result.needsConfirm ? 'confirmation' : null)
