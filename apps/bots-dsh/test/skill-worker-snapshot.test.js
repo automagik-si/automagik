@@ -38,16 +38,17 @@ function scratch(t) {
 }
 
 function fixture(t, { home = scratch(t), platform, writer = true, ids = ['a', 'b'] } = {}) {
-  const bots = new Set(ids)
+  const bots = Object.fromEntries(ids.map(id => [id, { id }]))
   const warnings = []
   const listeners = new Map()
   let term = 1
   const rt = {
-    home, ctx: {}, botOf: id => bots.has(id) ? { id } : undefined, readOnly: () => writer ? undefined : 'reader',
+    home, ctx: {}, state: { bots }, botOf: id => Object.hasOwn(bots, id) ? bots[id] : undefined,
+    readOnly: () => writer ? undefined : 'reader',
     teamGeneration: () => term, sameTeam: generation => writer && generation === term,
     teamCurrent: () => true, warn: (...args) => warnings.push(args),
     deleteBot: id => rt.skillLibrary.duringBotDeletion(id, () => {
-      bots.delete(id)
+      delete bots[id]
       listeners.get('Saved')?.()
     }),
   }
@@ -72,7 +73,7 @@ function fixture(t, { home = scratch(t), platform, writer = true, ids = ['a', 'b
   const gain = () => { term++; writer = true; listeners.get('LockGained')?.() }
   const lose = () => { term++; writer = false }
   return { rt, home, dir, target, library, save, assign, remove, change, call, plant, warnings, gain, lose,
-    trigger: () => listeners.get('Saved')?.(), key: join(home, 'skill-review.key') }
+    advanceTerm: () => { term++ }, trigger: () => listeners.get('Saved')?.(), key: join(home, 'skill-review.key') }
 }
 
 async function assigned(f, form = notes) {
@@ -455,22 +456,48 @@ test('#2084 case 11b fence before unlink preserves a successor entry', async t =
   assert.equal(mode(target), 0o444)
 })
 
-test('#2084 case 11a first rename fence stops after authority changes following temp creation', async t => {
+test('#2084 case 11a first rename callback observes the new term after the destination check', async t => {
   const f = fixture(t)
   await assigned(f)
   const before = available(f)
-  const close = fs.closeSync
+  const lstat = fs.lstatSync
   const chmod = fs.fchmodSync
-  let tempFd
-  let lost = false
-  t.mock.method(fs, 'fchmodSync', (fd, value) => { if (value === 0o444) tempFd = fd; return chmod(fd, value) })
-  t.mock.method(fs, 'closeSync', fd => {
-    close(fd)
-    if (fd === tempFd && !lost) { lost = true; f.lose() }
+  const sameTeam = f.rt.sameTeam
+  const term = f.rt.teamGeneration()
+  const observations = []
+  let phase = 'writing temp'
+  let destinationChecks = 0
+  t.mock.method(fs, 'fchmodSync', (fd, value) => {
+    const result = chmod(fd, value)
+    if (value === 0o444 && phase === 'writing temp') phase = 'temp ready'
+    return result
+  })
+  t.mock.method(fs, 'lstatSync', (path, ...args) => {
+    const result = lstat(path, ...args)
+    if (path === f.target && phase === 'temp ready') phase = 'destination check'
+    if (path.startsWith(f.dir) && path.endsWith('.tmp') && phase === 'destination checked') phase = 'rename callback'
+    return result
+  })
+  f.rt.holdsLock = () => {
+    if (phase === 'destination check' && ++destinationChecks === 2) {
+      observations.push(['destination check', f.rt.teamGeneration()])
+      phase = 'destination checked'
+      f.advanceTerm()
+    }
+    return true
+  }
+  t.mock.method(f.rt, 'sameTeam', generation => {
+    const current = sameTeam(generation)
+    if (phase === 'rename callback') {
+      observations.push(['rename callback', f.rt.teamGeneration(), generation, current])
+      phase = 'observed'
+    }
+    return current
   })
   const rename = t.mock.method(fs, 'renameSync', fs.renameSync)
   await f.change(notes.name, 'manual')
   await settle(f.rt)
+  assert.deepEqual(observations, [['destination check', term], ['rename callback', term + 1, term, false]])
   assert.equal(rename.mock.calls.filter(call => call.arguments[1] === f.target).length, 0)
   assert.deepEqual(read(f.target), before)
   assert.equal(fs.readdirSync(f.dir).filter(name => name.endsWith('.tmp')).length, 1)
@@ -478,6 +505,123 @@ test('#2084 case 11a first rename fence stops after authority changes following 
   await settle(f.rt)
   assert.deepEqual(fs.readdirSync(f.dir), ['a.json'])
   assert.deepEqual(read(f.target), snapshot([entry(f, notes, 'manual')]))
+})
+
+test('#2084 revocation listing removes known names before Remove returns and retries unknown names', async t => {
+  const f = fixture(t, { ids: ['a', 'b', 'retired'] })
+  await assigned(f)
+  await f.assign(notes.name, 'automatic', 'retired')
+  await settle(f.rt)
+  const retired = join(f.dir, 'retired.json')
+  const rosterOnly = join(f.dir, 'b.json')
+  const assignmentOnly = join(f.dir, 'orphan.json')
+  const unknown = join(f.dir, 'undiscovered.json')
+  const folder = join(f.dir, 'folder.json')
+  assert.ok(stat(f.target))
+  assert.ok(stat(retired))
+  const data = read(f.library)
+  data.active.orphan = data.active.retired
+  delete data.active.retired
+  write(f.library, data)
+  delete f.rt.state.bots.retired
+  for (const path of [rosterOnly, assignmentOnly, unknown]) f.plant('synthetic stale snapshot', path)
+  fs.mkdirSync(folder)
+  fs.writeFileSync(join(folder, 'sentinel'), 'keep')
+  const readdir = fs.readdirSync
+  let enumerationFails = true
+  let denied = 0
+  t.mock.method(fs, 'readdirSync', (path, ...args) => {
+    if (path === f.dir && enumerationFails) {
+      denied++
+      throw makeError('synthetic search-only directory', 'EACCES')
+    }
+    return readdir(path, ...args)
+  })
+  assert.deepEqual(await f.remove(), { saved: true })
+  assert.ok(denied > 0)
+  assert.equal(stat(f.target), undefined, 'last Remove revokes before returning even when listing fails')
+  for (const path of [retired, rosterOnly, assignmentOnly]) assert.equal(stat(path), undefined, path)
+  assert.ok(stat(unknown))
+  assert.ok(f.warnings.some(args => /synthetic search-only directory/.test(String(args[1]))))
+  await settle(f.rt)
+  enumerationFails = false
+  assert.deepEqual(f.rt.skillLibrary.active('a'), [])
+  await settle(f.rt)
+  assert.equal(stat(unknown), undefined, 'an unchanged library read retries incomplete publication')
+  assert.equal(fs.readFileSync(join(folder, 'sentinel'), 'utf8'), 'keep')
+})
+
+function simulateCaseAliases(t, dir, { uncertain }) {
+  const readdir = fs.readdirSync
+  const resolve = path => {
+    if (typeof path !== 'string' || !path.startsWith(dir + '/')) return path
+    const requested = path.slice(dir.length + 1)
+    if (requested.includes('/')) return path
+    const existing = readdir(dir).find(name => name.toLowerCase() === requested.toLowerCase())
+    return existing === undefined ? path : join(dir, existing)
+  }
+  const lstat = fs.lstatSync
+  const open = fs.openSync
+  const rename = fs.renameSync
+  const unlink = fs.unlinkSync
+  t.mock.method(fs, 'lstatSync', (path, ...args) => {
+    if (uncertain && path.startsWith(dir + '/') && path.endsWith('.TMP')) {
+      throw makeError('synthetic alternate lookup refusal', 'EACCES')
+    }
+    return lstat(resolve(path), ...args)
+  })
+  const opens = t.mock.method(fs, 'openSync', (path, ...args) => open(resolve(path), ...args))
+  t.mock.method(fs, 'renameSync', (from, to) => rename(resolve(from), resolve(to)))
+  const unlinks = t.mock.method(fs, 'unlinkSync', path => unlink(resolve(path)))
+  return { opens, unlinks }
+}
+
+for (const [label, bothAssigned, uncertain] of [
+  ['two assigned Bots', true, false],
+  ['one unassigned Bot', false, false],
+  ['uncertain alternate lookup', true, true],
+]) {
+  test('#2084 revocation alias withholds the shared entry with ' + label, async t => {
+    const f = fixture(t, { ids: ['a', 'A', 'other'] })
+    await f.save(notes)
+    await f.save(memo)
+    await f.assign(memo.name, 'automatic', 'other')
+    await settle(f.rt)
+    const other = join(f.dir, 'other.json')
+    const inode = stat(other).ino
+    const upper = join(f.dir, 'A.json')
+    f.plant(JSON.stringify(snapshot([entry(f, memo)], 'A')), upper)
+    const { opens, unlinks } = simulateCaseAliases(t, f.dir, { uncertain })
+    assert.equal(stat(f.target).ino, stat(upper).ino, 'both spellings resolve to the planted entry')
+    assert.deepEqual(await f.assign(notes.name), { saved: true })
+    if (bothAssigned) assert.deepEqual(await f.assign(memo.name, 'manual', 'A'), { saved: true })
+    await settle(f.rt)
+    assert.equal(stat(upper), undefined, 'the ambiguous shared entry must be revoked')
+    assert.equal(stat(f.target), undefined)
+    assert.deepEqual(fs.readdirSync(f.dir), ['other.json'])
+    assert.equal(stat(other).ino, inode)
+    assert.deepEqual(read(other), snapshot([entry(f, memo)], 'other'))
+    assert.ok(opens.mock.calls.some(({ arguments: [path, flag, mode] }) =>
+      path.startsWith(f.dir) && path.endsWith('.tmp') && flag === 'wx' && mode === 0o600))
+    assert.equal(unlinks.mock.calls.filter(({ arguments: [path] }) => path === f.target || path === upper).length, 1)
+    assert.ok(f.warnings.some(args => /ambiguous|alternate lookup refusal/.test(String(args[1]))))
+    assert.equal(Object.hasOwn(read(f.library).active, 'A'), bothAssigned)
+  })
+}
+
+test('#2084 revocation alias case-sensitive directory preserves distinct snapshots', async t => {
+  const f = fixture(t, { ids: ['a', 'A', 'other'] })
+  await assigned(f)
+  await f.save(memo)
+  await f.assign(memo.name, 'manual', 'A')
+  await f.assign(memo.name, 'automatic', 'other')
+  await settle(f.rt)
+  const upper = join(f.dir, 'A.json')
+  assert.notEqual(stat(f.target).ino, stat(upper).ino)
+  assert.deepEqual(read(f.target), snapshot([entry(f)]))
+  assert.deepEqual(read(upper), snapshot([entry(f, memo, 'manual')], 'A'))
+  assert.deepEqual(read(join(f.dir, 'other.json')), snapshot([entry(f, memo)], 'other'))
+  assert.deepEqual(fs.readdirSync(f.dir).sort(), ['A.json', 'a.json', 'other.json'])
 })
 
 function roster(botId = 'a') {

@@ -141,7 +141,8 @@ export function install(rt) {
     return () => adoptedListeners.delete(fn)
   }
   const teamAdopted = () => {
-    if (!teamRead || readOnly() !== undefined || !rt.holdsLock() || !teamCurrent()) return
+    // A corrupt roster with a complete backup adopts a writable empty view.
+    if (readOnly() !== undefined || !rt.holdsLock() || !teamCurrent()) return
     for (const fn of adoptedListeners) {
       try { fn() } catch (error) { warn('ds-bot: an adoption listener failed: %s', error) }
     }

@@ -156,6 +156,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
   let published
   let pending = false
   let publicationWarnings = new Set()
+  const rememberedNames = new Set()
   const botRemovals = new Map()
   const saves = new Map()
   let reviewing
@@ -423,6 +424,29 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
     }
   }
 
+  function snapshotNamesAreCaseSensitive(name, check) {
+    const stem = join(workerSnapshots, `.${name}.${randomUUID()}`)
+    const temp = stem + '.tmp'
+    let created
+    try {
+      check()
+      const fd = fs.openSync(temp, 'wx', 0o600)
+      try {
+        const info = fs.fstatSync(fd)
+        if (!info.ino || !singleRegular(info)) throw new Error('A worker snapshot probe has no verified identity')
+        created = info
+        const alternate = stat(stem + '.TMP')
+        if (!singleRegular(verifyEntry(temp, created, check)) ||
+            (alternate && (!singleRegular(alternate) || !sameInode(created, alternate)))) {
+          throw new Error('A worker snapshot probe entry changed')
+        }
+        return alternate === undefined
+      } finally { fs.closeSync(fd) }
+    } finally {
+      if (created) removeSnapshot(temp, created, check)
+    }
+  }
+
   async function publishWorkerSnapshots(generation) {
     published = undefined
     const authority = () => {
@@ -439,6 +463,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
       authority()
       let input
       try { input = readSnapshot(true) } catch (error) { warn(error) }
+      const rosterNames = Object.keys(rt.state?.bots ?? {}).map(id => id + '.json').filter(name => SNAPSHOT_NAME.test(name))
       const wanted = new Map()
       if (input) {
         const { data, skills } = input
@@ -466,12 +491,51 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
       }
       if (check) {
         check()
-        for (const name of fs.readdirSync(workerSnapshots)) {
-          if (wanted.has(name) || !(SNAPSHOT_NAME.test(name) || SNAPSHOT_TEMP.test(name))) continue
+        let names
+        try {
+          names = new Set(fs.readdirSync(workerSnapshots).filter(name => SNAPSHOT_NAME.test(name) || SNAPSHOT_TEMP.test(name)))
+          rememberedNames.clear()
+          for (const name of names) if (SNAPSHOT_NAME.test(name)) rememberedNames.add(name)
+        } catch (error) {
+          recordFailure(error)
+          // A search-only directory can still allow revocation by name.
+          names = new Set([...rememberedNames, ...rosterNames])
+          for (const id of Object.keys(input?.data.active ?? {})) {
+            const name = id + '.json'
+            if (SNAPSHOT_NAME.test(name)) names.add(name)
+          }
+        }
+        const byFoldedName = new Map()
+        for (const name of rosterNames) {
+          const folded = name.toLowerCase()
+          const group = byFoldedName.get(folded)
+          if (group) group.push(name)
+          else byFoldedName.set(folded, [name])
+        }
+        const collisions = [...byFoldedName.values()].filter(group => group.length > 1)
+        const probe = collisions.flat().find(name => wanted.has(name))
+        let distinct = false
+        if (probe) {
+          try { distinct = snapshotNamesAreCaseSensitive(probe, check) } catch (error) { recordFailure(error) }
+          if (!distinct) warn(new Error('Worker snapshot filenames are ambiguous in this directory'))
+        }
+        for (const group of collisions) {
+          for (const name of group) {
+            if (!distinct) wanted.delete(name)
+            names.add(name)
+          }
+        }
+        for (const name of names) {
+          if (wanted.has(name)) continue
+          if (SNAPSHOT_NAME.test(name)) rememberedNames.add(name)
           const path = join(workerSnapshots, name)
-          try { removeSnapshot(path, stat(path), check) } catch (error) { recordFailure(error) }
+          try {
+            removeSnapshot(path, stat(path), check)
+            rememberedNames.delete(name)
+          } catch (error) { recordFailure(error) }
         }
         for (const [name, bytes] of wanted) {
+          rememberedNames.add(name)
           try { await replaceSnapshot(name, bytes, check) } catch (error) { recordFailure(error) }
         }
       }

@@ -772,6 +772,51 @@ test('#2084 AS-R2 repaired refresh retires a Bot before any save or library read
   assert.equal(fs.existsSync(target), false, 'lock-holder repair refresh reconciles before a save or library read')
 })
 
+for (const backupFails of [false, true]) {
+  const condition = backupFails ? 'failed backup keeps the publisher read-only' : 'writable corrupt adoption revokes before any save or library read'
+  test('#2084 revocation roster ' + condition, async t => {
+    const { rt, home, statePath, target, library } = await workerSnapshotRoster(t)
+    const before = fs.readFileSync(target)
+    const beforeInfo = fs.lstatSync(target)
+    const libraryBefore = fs.readFileSync(library)
+    const malformed = '{"synthetic":'
+    const backup = join(home, hashName(malformed))
+    const adopted = []
+    rt.onAdopted(() => adopted.push([rt.teamCurrent(), rt.holdsLock(), rt.teamLoaded()]))
+    if (backupFails) {
+      const restore = patchSync('copyFileSync', copy => (from, to, ...args) => {
+        if (from === statePath && to === backup) throw Object.assign(new Error('synthetic backup refusal'), { code: 'EACCES' })
+        return copy(from, to, ...args)
+      })
+      t.after(restore)
+    }
+    fs.writeFileSync(statePath, malformed)
+    await assert.rejects(rt.save(), { code: 'ELOCKLOST' })
+    await rt.refresh()
+    await settleSkills(rt)
+    assert.equal(rt.botOf('retired'), undefined)
+    assert.equal(rt.teamLoaded(), false)
+    assert.equal(rt.teamHealth(), null)
+    assert.equal(rt.teamCurrent(), true)
+    assert.equal(rt.holdsLock(), !backupFails)
+    assert.equal(fs.readFileSync(statePath, 'utf8'), malformed)
+    assert.deepEqual(fs.readFileSync(library), libraryBefore)
+    if (backupFails) {
+      assert.match(rt.readOnly(), /could not be read \(EACCES\)/)
+      assert.deepEqual(backupsIn(home), [])
+      assert.deepEqual(adopted, [])
+      assert.deepEqual(fs.readFileSync(target), before)
+      const { ino, mode, ctimeMs } = fs.lstatSync(target)
+      assert.deepEqual([ino, mode, ctimeMs], [beforeInfo.ino, beforeInfo.mode, beforeInfo.ctimeMs])
+    } else {
+      assert.equal(rt.readOnly(), undefined)
+      assert.equal(fs.readFileSync(backup, 'utf8'), malformed)
+      assert.equal(fs.existsSync(target), false, 'writable adoption revokes the retired snapshot')
+      assert.deepEqual(adopted, [[true, true, false]])
+    }
+  })
+}
+
 test('a state file changed while the lock was gone is adopted, this host\'s state kept aside', async (t) => {
   const { rt, home, statePath, warnings } = runtime(t)
   await rt.load()
