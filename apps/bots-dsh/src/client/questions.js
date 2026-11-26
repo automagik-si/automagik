@@ -1,4 +1,5 @@
 import { createElement as h, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
+import { isSandboxGrant } from '../shared/hermes-consent.js'
 import { CloseIcon, CheckIcon } from './icons.js'
 import { CellEmpty } from './cell-empty.js'
 import { sendsOnEnter } from './enter-key.js'
@@ -17,7 +18,7 @@ export const keyLetter = index => String.fromCharCode(65 + index)
 // detail is what the other side wrote, kept word for word; only the host's stand-in for a
 // step that came with no words of its own is worded here.
 const wordingOf = question => question?.intent?.kind === 'approval'
-  ? { prompt: hostText(question.question ?? ''), label: label => t(label), detail: question.detail === 'Run a remote tool' ? t('Run a remote tool') : question.detail }
+  ? { prompt: hostText(question.question ?? ''), label: label => t(label), detail: !isSandboxGrant(question) && question.detail === 'Run a remote tool' ? t('Run a remote tool') : question.detail }
   : { prompt: question?.question ?? '', label: label => label, detail: question?.detail }
 const optionsOf = question => (question?.options ?? []).map(option => (typeof option === 'string' ? { label: option } : option))
 const isTypingTarget = node => node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
@@ -166,7 +167,9 @@ export function SettledQuestion({ question, answer, closed }) {
   ] : []
   return h('div', { className: answered ? 'bt-q bt-q-settled bt-q-answered' : 'bt-q bt-q-settled bt-q-dismissed', role: 'group', 'aria-label': prompt },
     h('div', { className: 'bt-q-head' },
-      h('div', { className: 'bt-q-text' }, prompt ? h('p', { className: 'bt-q-title' }, prompt) : null),
+      h('div', { className: 'bt-q-text' },
+        prompt ? h('p', { className: 'bt-q-title' }, prompt) : null,
+        isSandboxGrant(question) && wording.detail ? h('div', { className: 'bt-q-detail' }, wording.detail) : null),
       answered ? null : h('span', { className: 'bt-q-badge' }, closedLabel(closed))),
     chosen.length > 0 ? h('div', { className: 'bt-q-list', role: 'group', 'aria-label': t('Your answer') }, chosen.map(({ label, at }, index) =>
       h('div', { key: `${label}-${index}`, className: 'bt-q-opt', title: t('Selected') },

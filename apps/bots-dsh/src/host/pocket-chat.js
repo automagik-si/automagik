@@ -41,6 +41,7 @@
 import { chatPersonParts, personParts, SKILL_NOTICE, SKILL_TOOL } from './skill-message.js'
 import { SKILL_ACTIVITY_RECORD, skillActivityOf } from '../shared/skill-activity.js'
 import { randomUUID } from 'node:crypto'
+import { isSandboxGrant } from '../shared/hermes-consent.js'
 import { isBotId } from '../shared/registry.js'
 import { guardGroupText, guardOffNoticeOf } from '../shared/guard-groups.js'
 import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
@@ -284,6 +285,17 @@ export function pendingRowOf(state, sessionId, turn = 0) {
     return { id: rowIdOf(sessionId, at, 'question'), turn, at: null, source: 'session', kind: 'question', prompt: ANSWER_ON_COMPUTER, options: [], multi: false, answerable: false }
   }
   return null
+}
+
+// The Android question card shows only prompt and options. A sandbox grant must
+// carry its full scope there, including the target and any remote context.
+function pocketQuestionPrompt(question) {
+  if (!question) return null
+  const title = String(question.question ?? '')
+  if (!isSandboxGrant(question)) return cut(title, PREVIEW_MAX)
+  if (!title || typeof question.detail !== 'string' || !question.detail.trim()) return null
+  const full = `${title}\n${question.detail}`
+  return bytes(full) <= PREVIEW_MAX ? full : null
 }
 
 /** The newest rows that fit one page. */
@@ -1004,11 +1016,12 @@ export class DshChatSource {
     const questions = Array.isArray(request?.questions) ? request.questions : []
     const one = questions.length === 1 ? questions[0] : null
     const callId = typeof request.wait?.callId === 'string' && request.wait.callId ? request.wait.callId : randomUUID()
+    const prompt = pocketQuestionPrompt(one)
     const options = (one?.options ?? []).map(option => String(option?.label ?? ''))
     const row = {
       id: requestRowId(sessionId, this.cursorOfSession(sessionId), 'question', callId), turn: this.turnOfSession(sessionId), at: this.now(), source: 'session', kind: 'question',
-      prompt: one ? cut(String(one.question ?? ''), PREVIEW_MAX) : ANSWER_ON_COMPUTER, options, multi: one?.multiSelect === true,
-      answerable: one !== null && typeof one.id === 'string', open: true, call: typeof request.wait?.callId === 'string' ? request.wait.callId : null,
+      prompt: prompt ?? ANSWER_ON_COMPUTER, options: prompt === null ? [] : options, multi: one?.multiSelect === true,
+      answerable: prompt !== null && typeof one?.id === 'string', open: true, call: typeof request.wait?.callId === 'string' ? request.wait.callId : null,
     }
     return this.hold(sessionId, row, request, next, (value) => {
       const answer = Array.isArray(value?.answers) ? value.answers[0] : null
@@ -1124,7 +1137,7 @@ function questionAnswer(request, choice, text) {
   if (!request.row.answerable || !question) return { ok: false, reason: 'invalid' }
   const options = request.row.options
   if (choice === OTHER) {
-    if (request.row.multi || text === undefined) return { ok: false, reason: 'invalid' }
+    if (request.row.multi || isSandboxGrant(question) || text === undefined) return { ok: false, reason: 'invalid' }
     if (bytes(text) > SEND_TEXT_MAX) return { ok: false, reason: 'too-long' }
     if (/[\r\n]/.test(text)) return { ok: false, reason: 'invalid' }
     if (text.trim() === '') return { ok: false, reason: 'empty' }

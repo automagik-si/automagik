@@ -276,7 +276,7 @@ body[data-ds-dark-theme] .bt-q{--bt-q-edge:rgba(255,255,255,.16);--bt-q-rule:rgb
 .bt-q-head{display:flex;align-items:flex-start;gap:8px;min-width:0}
 .bt-q-text{flex:1 1 0;min-width:0;display:flex;flex-direction:column}
 .bt-q-title{margin:0;font-size:15px;line-height:22px;font-weight:600;overflow-wrap:anywhere}
-.bt-q-detail{font-size:13px;line-height:18px;color:var(--bt-ink-2)}
+.bt-q-detail{font-size:13px;line-height:18px;color:var(--bt-ink-2);white-space:pre-wrap;overflow-wrap:anywhere}
 .bt-q-x{flex:none;width:20px;height:20px;border:0;padding:0;border-radius:6px;background:none;color:var(--bt-ink-2);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:background-color .12s ease,color .12s ease,${spring(SPRING_TAP, 'scale')}}
 .bt-q-x svg{width:14px;height:14px}
 .bt-q-x:hover{background:var(--bt-hover);color:var(--bt-ink)}

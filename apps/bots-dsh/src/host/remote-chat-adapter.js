@@ -4,6 +4,7 @@ import { types, isDeepStrictEqual } from 'node:util'
 import { LlmAdapter, isAgentLoopRequest, projectFilesToText } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { LOST } from './hermes-transport.js'
+import { SANDBOX_ALLOW } from '../shared/hermes-consent.js'
 
 export const REMOTE_TOOL = 'remote_hermes_tool'
 // A carried-over attached chat has no visible row until its first open normalizes the
@@ -32,24 +33,46 @@ const withoutSavedPath = messages => messages.map(message => {
   return changed ? { ...message, content: next } : message
 })
 
-// What Hermes asks is the person's to answer at every chat level: nothing here says yes or
-// no for them. A level that asks shows the chat's approval card. A level that never asks has
-// no such card, so the same question goes to the chat as a question with these two answers.
+// Hermes's wire choice 'once' is one action for commands, but lasts until sandbox
+// shutdown for folder and site grants. Only the latter need a different consent card.
 const ALLOW = 'Allow once', DENY = 'Deny'
 const asked = params => String(params?.description || params?.command || params?.tool_name || 'Run a remote tool')
 
-async function askInChat(ctx, agent, params, signal) {
+// Targets are displayed literally, without a shell or URL interpretation. Reject a
+// missing, masked or multi-line target rather than asking the person to guess it.
+const visibleTarget = value => typeof value === 'string' && value.trim() !== '' && !value.includes('[redacted]')
+  && !/[\p{Cc}\p{Bidi_Control}\u2028\u2029]/u.test(value)
+
+function sandboxConsent(params) {
+  let prompt, target
+  if (params.kind === 'network') {
+    prompt = 'Allow Remote Hermes to access this site until its sandbox is turned off?'
+    target = params.host
+  } else if (params.kind === 'access') {
+    if (params.access === 'read') prompt = 'Allow Remote Hermes to read this folder until its sandbox is turned off?'
+    else if (params.access === 'read_write') prompt = 'Allow Remote Hermes to read and write this folder until its sandbox is turned off?'
+    else return
+    target = params.path
+  } else return
+  if (!visibleTarget(target)) return
+  const context = [params.label, params.risk].filter(value => value != null && value !== '')
+  if (!context.every(visibleTarget)) return
+  return { prompt, detail: [target, ...context].join('\n'), allow: SANDBOX_ALLOW }
+}
+
+async function askInChat(ctx, agent, params, signal, card) {
   const questions = service(ctx, 'userQuestions')
   if (!questions?.ask) return 'deny'
+  const { prompt, detail, allow } = card ?? { prompt: 'Remote Hermes asks before it runs this. Allow it?', detail: asked(params), allow: ALLOW }
+  const id = String(params?.request_id ?? 'remote-hermes-approval')
   try {
     const answer = await questions.ask({ agent, signal, questions: [{
-      id: String(params?.request_id ?? 'remote-hermes-approval'),
-      question: 'Remote Hermes asks before it runs this. Allow it?', detail: asked(params),
-      options: [{ label: ALLOW }, { label: DENY }],
-      intent: { kind: 'approval', approve: ALLOW, reject: DENY, subject: { name: 'Remote Hermes' } },
+      id, question: prompt, detail,
+      options: [{ label: allow }, { label: DENY }],
+      intent: { kind: 'approval', approve: allow, reject: DENY, subject: { name: 'Remote Hermes' } },
     }] })
     const [picked] = answer?.answers ?? []
-    return !picked?.custom && picked?.selected?.length === 1 && picked.selected[0] === ALLOW ? 'once' : 'deny'
+    return !signal?.aborted && answer?.answers?.length === 1 && picked?.id === id && !picked.custom && picked.selected?.length === 1 && picked.selected[0] === allow ? 'once' : 'deny'
   } catch (error) {
     // Classify the failure without logging question text, remote output or credentials.
     const code = ['ASK_ABORTED', 'BAD_INTENT', 'CALLER_NOT_LIVE', 'DELEGATED_CALLER', 'EMPTY_QUESTIONS', 'NO_PROVIDER'].includes(error?.code)
@@ -60,14 +83,23 @@ async function askInChat(ctx, agent, params, signal) {
 }
 
 export async function remoteApproval(ctx, agent, params, signal) {
-  if (!agent) return 'deny'
+  if (!agent || signal?.aborted) return 'deny'
+  // Legacy commands may omit choices. Never substitute session/always for a missing once.
+  const choices = params?.choices
+  if (choices !== undefined && (!Array.isArray(choices) || !choices.every(choice => typeof choice === 'string')
+    || !choices.includes('once') || !choices.includes('deny'))) return 'deny'
+  if (params?.kind != null && params.kind !== 'command') {
+    if (choices === undefined) return 'deny'
+    const card = sandboxConsent(params)
+    return card ? askInChat(ctx, agent, params, signal, card) : 'deny'
+  }
   const approval = service(ctx, 'approval')
   let policy
   try { policy = approval?.effectivePolicy?.(agent.session) } catch { policy = undefined }
   if (!approval?.request || policy === undefined || policy === 'never') return askInChat(ctx, agent, params, signal)
   try {
     const answer = await approval.request({ agent, toolName: REMOTE_TOOL, callId: params.request_id, reason: `Remote Hermes: ${asked(params)}`, signal })
-    return answer === 'allowed-once' || answer === 'allowed' ? 'once' : 'deny'
+    return !signal?.aborted && (answer === 'allowed-once' || answer === 'allowed') ? 'once' : 'deny'
   } catch { return 'deny' }
 }
 

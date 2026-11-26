@@ -10,7 +10,7 @@ import { join, relative } from 'node:path'
 import { test } from 'node:test'
 import { createAdapter } from '../src/host/pocket-chat-adapter.js'
 import {
-  ANSWER_ON_COMPUTER, DshChatSource, KEEP_SENT_IDS, KEEP_SETTLED, SEND_TEXT_MAX, cursorOf, hasSessionApi, hasWriteApi, install, ownBots, rowIdOf, rowsOf, statusOf,
+  ANSWER_ON_COMPUTER, DshChatSource, KEEP_SENT_IDS, KEEP_SETTLED, PREVIEW_MAX, SEND_TEXT_MAX, cursorOf, hasSessionApi, hasWriteApi, install, ownBots, rowIdOf, rowsOf, statusOf,
 } from '../src/host/pocket-chat.js'
 import { CLOSE_GRACE_MS, INTERRUPT_EVERY_MS, MAX_LINE, MAX_WRITES_PER_MINUTE, socketPathOf, startPocketSocket } from '../src/host/pocket-socket.js'
 import { shownReader } from '../src/host/shown.js'
@@ -1030,6 +1030,45 @@ test('approvals: a new channel\'s snapshot re-sends the open rows and the settle
   assert.equal(await outcome, 'rejected')
   keepOpen.handle.close()
   late.handle.close()
+})
+
+test('Pocket keeps the full Hermes grant on open, reconnect and close; incomplete grants stay on the computer', async () => {
+  const source = writableOf(fakeController(sessions()))
+  const phone = await watching(source)
+  const pc = computer()
+  const allow = 'Allow until sandbox is off'
+  const title = 'Allow Remote Hermes to read this folder until its sandbox is turned off?'
+  const target = '/work/Relatórios  2026\nRetain {name}'
+  const boundary = 'x'.repeat(PREVIEW_MAX - Buffer.byteLength(title + '\n'))
+  for (const [index, [detail, fits]] of [[target, true], [boundary, true], [boundary.slice(1) + 'é', false], ['', false]].entries()) {
+    const question = { id: 'scope', question: title, detail, intent: { kind: 'approval', approve: allow, reject: 'Deny' }, options: [{ label: allow }, { label: 'Deny' }] }
+    const { answer } = askQuestion(source, pc, question, { callId: 'grant-' + index })
+    await settle()
+    const row = openRow(phone, 'question')
+    const expected = fits ? title + '\n' + detail : ANSWER_ON_COMPUTER
+    assert.equal(row.prompt, expected)
+    assert.equal(row.answerable, fits)
+    assert.deepEqual(row.options, fits ? [allow, 'Deny'] : [])
+    const reconnected = await watching(source)
+    assert.deepEqual(openRow(reconnected, 'question'), row)
+    assert.equal((await reconnected.handle.answer({ row: row.id, choice: 'other', text: allow })).reason, 'invalid')
+    const choice = await reconnected.handle.answer({ row: row.id, choice: '1' })
+    if (fits) {
+      assert.equal(choice.ok, true)
+      assert.deepEqual(await answer, { answers: [{ id: 'scope', selected: [allow] }] })
+    } else {
+      assert.equal(choice.reason, 'invalid')
+      const dialog = pc.dialogs.at(-1)
+      assert.equal(dialog.withdrawn, false)
+      assert.equal(dialog.request.questions[0].detail, detail)
+      dialog.answer({ answers: [{ id: 'scope', selected: ['Deny'] }] })
+      assert.deepEqual(await answer, { answers: [{ id: 'scope', selected: ['Deny'] }] })
+    }
+    assert.equal(phone.last('question').row.prompt, expected)
+    assert.equal(phone.last('question').row.receipt.by, fits ? 'phone' : 'computer')
+    reconnected.handle.close()
+  }
+  phone.handle.close()
 })
 
 test('questions: a single-select "other" text reaches DSH byte-for-byte as that question\'s answer; a Retry with the same text gets settled', async () => {

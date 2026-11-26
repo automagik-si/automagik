@@ -1039,14 +1039,16 @@ cannot be used by this route and says so, with its one fix: connect to a Hermes 
 `hermes serve`.
 
 **Approvals are Hermes's own.** No approval setting is required, read or waited for. A Hermes
-that approves on its own (yolo, or its allow rules) simply runs its tools. When Hermes asks,
-its question is shown in the chat and the person's answer is sent back: nothing answers yes or
-no for them, at any chat level, and no deadline answers either. A level that asks (Read only,
-Workspace, Auto review) shows the chat's approval card. A level that never asks (Full access
-included) has no such card, so the question appears as a chat question with **Allow once** and
-**Deny**. The question closes when Hermes withdraws it, the chat stops or the connection is
-lost. Automagik's local sandbox does not constrain the remote computer. Distinct remote
-approval boundaries are follow-up [#1084](https://github.com/automagik-si/automagik/issues/1084).
+that approves on its own (yolo, or its allow rules) simply runs its tools. For a command approval, a level that asks (for example, Workspace)
+shows the usual approval card. Full access still asks the person in chat with **Allow once**
+and **Deny**. For a sandbox folder or site, every level uses a chat question that shows the
+folder and requested read or read/write access, or the site. **Allow until sandbox is off**
+reflects the lifetime Hermes assigns to the wire choice `once`. The client declines a
+structured request if it cannot present the target, access or offered choices faithfully.
+It never sends a session-wide or permanent grant. A pending question closes when Hermes
+withdraws it, the chat stops or the connection is lost. Enforcing different boundaries on
+remote actions requires support from the executor and is tracked in
+[#1084](https://github.com/automagik-si/automagik/issues/1084).
 Other server requests (including secret/sudo/clarification) receive an unsupported-method error
 in this delivery.
 
