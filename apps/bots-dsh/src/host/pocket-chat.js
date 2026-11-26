@@ -629,7 +629,7 @@ export class DshChatSource {
     entry.floorSeq = records.length ? records[0].event.seq : (Number.isSafeInteger(opening.cursor) ? opening.cursor + 1 : 0)
     entry.mediaFloorSeq = entry.floorSeq
     entry.cursor = Number.isSafeInteger(opening.cursor) ? opening.cursor : -1
-    if (opening.hasMore) await this.seedOpeningTurn(entry, records)
+    if (opening.hasMore) await this.seedOpeningTurn(entry, records, entry.scope, { live: true })
     for (const record of records) this.noteRequestId(entry.sessionId, record.event)
     this.keepRows(entry, records.flatMap(record => rowsOf(record.event, entry.scope)))
     this.applyState(entry, await this.adapter.state(entry.sessionId, signal), { quiet: true })
@@ -640,13 +640,16 @@ export class DshChatSource {
     return { ok: true }
   }
 
-  async seedOpeningTurn(entry, records, scope = entry.scope) {
+  async seedOpeningTurn(entry, records, scope, { live = false } = {}) {
     // At a truncated boundary, the preceding turn may have carried a private exchange.
     scope.carryPrivate = true
-    const boundary = records.findIndex(({ event }) => event.type === 'turn/start')
-    const initial = boundary < 0 ? records : records.slice(0, boundary)
-    if (boundary !== 0 && !initial.some(({ event }) =>
-      event.type === 'tool/call' || event.type === 'tool/result' || event.type === SKILL_ACTIVITY_RECORD)) return
+    // A live watch may receive activity for this turn after the snapshot.
+    if (!live) {
+      const boundary = records.findIndex(({ event }) => event.type === 'turn/start')
+      const initial = boundary < 0 ? records : records.slice(0, boundary)
+      if (boundary !== 0 && !initial.some(({ event }) =>
+        event.type === 'tool/call' || event.type === 'tool/result' || event.type === SKILL_ACTIVITY_RECORD)) return
+    }
     // Read one contiguous preceding page to recover the opener and the preceding cut.
     // Its tool calls and text remain outside the returned window.
     const beforeSeq = records[0]?.event.seq

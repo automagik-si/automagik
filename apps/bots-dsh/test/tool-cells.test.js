@@ -1242,8 +1242,10 @@ test('an agent\'s image call draws the image card: Omni paints, then the image, 
   // Another agent's call that answered with an image draws once it ends; its other calls do not.
   const other = { id: 'c-1', title: 'Render chart', kind: 'other', input: {} }
   assert.ok(find(show(call('acp_tool', 'acp_2', { args: other, content: 'Image generated and saved as /team/images/img-abcdef12.png.' })), node => node.type === 'figure'))
-  assert.equal(shown(call('acp_tool', 'acp_3', { args: other, running: true })), '')
-  assert.equal(shown(call('acp_tool', 'acp_4', { args: { ...other, title: 'Run ls' }, content: 'images/img-abcdef12.png' })), '')
+  assert.equal(shown(call('acp_tool', 'acp_3', { args: other, running: true })), 'Tool: tool')
+  const plain = show(call('acp_tool', 'acp_4', { args: { ...other, title: 'Run ls' }, content: 'images/img-abcdef12.png' }))
+  assert.equal(text(plain), 'Tool: tool')
+  assert.equal(find(plain, node => node.type === 'figure' || node.type === 'img'), undefined)
 })
 
 test('a finished image that does not load says it is gone, and Omni stops painting', () => {
