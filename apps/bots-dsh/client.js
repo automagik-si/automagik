@@ -735,6 +735,8 @@ var ZH2 = {
   "No skills are active on this Bot.": "这个 Bot 没有启用的技能。",
   "Not saved: every skill needs a model review, and no background model is available. Choose one in Settings, Background model, then try again.": "未保存：每个技能都需要模型审查，但没有可用的后台模型。请在“设置”的“后台模型”中选择一个，然后重试。",
   "Not saved: the model review did not finish, and every skill needs one. Try again.": "未保存：模型审查未完成，而每个技能都需要模型审查。请重试。",
+  "Not saved: the model review did not finish on the background model or on the Main Bot's model, and every skill needs one. Try again.": "未保存：模型审查在后台模型和主 Bot 的模型上都未完成，而每个技能都需要模型审查。请重试。",
+  "Not saved: every skill needs a model review. The background model failed, and the Main Bot's agent cannot run it in a separate session without tools.": "未保存：每个技能都需要模型审查。后台模型失败，而主 Bot 的代理无法在不带工具的独立会话中进行审查。",
   "Not saved: prompt injection was found. A skill with prompt injection is never accepted.": "未保存：发现提示注入。含有提示注入的技能永远不会被接受。",
   "Held: prompt injection was found. A skill with prompt injection is never accepted.": "已暂停：发现提示注入。含有提示注入的技能永远不会被接受。",
   "A model has not reviewed this skill yet. Review the stored skill to continue.": "模型尚未审查此技能。请审查已保存的技能以继续。",
@@ -742,6 +744,7 @@ var ZH2 = {
   "Only retained findings are shown. This review cannot be confirmed.": "仅显示保留的发现。无法确认此次审查。",
   "Checking the skill…": "正在检查技能…",
   "Reviewed by a model": "已由模型审查",
+  "Reviewed by {model} (fallback)": "已由 {model} 审查（备用）",
   "Review skill": "审查技能",
   "Prompt injection": "提示注入",
   "Mentions a credential (value hidden).": "提及凭据（值已隐藏）。",
@@ -5561,12 +5564,15 @@ async function skillArchiveBytes(file) {
   }
   return chunks.join("");
 }
+var fallbackReviewLabel = (review) => review?.status === "done" && review.via === "fallback" ? t("Reviewed by {model} (fallback)", { model: review.modelName ?? review.model }) : null;
 function SkillReport({ report, title }) {
   if (!report) return null;
+  const label = fallbackReviewLabel(report.review);
   return (0, import_react2.createElement)(
     "div",
     { className: "bt-set-row bt-bs-stack", role: "status" },
-    report.refused ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, hostText(report.message)) : title ?? (report.needsConfirm ? t("Review the warnings, then save again to confirm.") : t("Warnings")),
+    report.refused ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, hostText(report.message)) : title ?? (report.needsConfirm ? t("Review the warnings, then save again to confirm.") : label && !report.findings?.length ? null : t("Warnings")),
+    label ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, label) : null,
     report.truncated ? (0, import_react2.createElement)(
       "p",
       { className: "bt-set-hint" },
@@ -5735,7 +5741,7 @@ function TreePreview({ tree, onClose, readOnly }) {
     view.keyNames?.length ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, t("Declared key names"), " · ", view.keyNames.join(", ")) : null,
     (0, import_react2.createElement)(TreeDetails, { view }),
     (0, import_react2.createElement)(TreeDiff, { diff: view.diff }),
-    view.refused || view.findings?.length ? (0, import_react2.createElement)(SkillReport, { report: view }) : null,
+    view.refused || view.findings?.length || fallbackReviewLabel(view.review) ? (0, import_react2.createElement)(SkillReport, { report: view }) : null,
     error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
     (0, import_react2.createElement)(
       "div",
@@ -5832,7 +5838,7 @@ function LinkUpdate({ report, actions, onClose, saved, readOnly }) {
     ) : null,
     view.diff?.held ? (0, import_react2.createElement)(TreeDetails, { view }) : null,
     (0, import_react2.createElement)(TreeDiff, { diff: view.diff?.held ? { ...view.diff, held: false } : view.diff }),
-    view.refused || view.findings?.length ? (0, import_react2.createElement)(SkillReport, {
+    view.refused || view.findings?.length || fallbackReviewLabel(view.review) ? (0, import_react2.createElement)(SkillReport, {
       report: view,
       title: view.needsConfirm ? t("Review the warnings, then apply again to confirm.") : void 0
     }) : null,
@@ -6226,7 +6232,7 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
             result,
             skill.scripts?.length ? t("Scripts: {count}", { count: skill.scripts.length }) : null,
             skill.references?.length ? t("References: {count}", { count: skill.references.length }) : null,
-            skill.review?.status === "done" ? t("Reviewed by a model") : null,
+            skill.review?.status === "done" ? fallbackReviewLabel(skill.review) ?? t("Reviewed by a model") : null,
             checked
           ].filter(Boolean).join(" · ")),
           linked ? (0, import_react2.createElement)(

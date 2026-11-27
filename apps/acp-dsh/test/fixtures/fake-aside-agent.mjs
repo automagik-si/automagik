@@ -1,6 +1,7 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
+import { setTimeout as delay } from 'node:timers/promises'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from '../../dev/serve-agent.mjs'
 import { AGY_SETTINGS_FAILED, agyOffPaths } from '../../src/host/agy-off.js'
@@ -10,8 +11,9 @@ const [traceFile, replyFile, version, mode, startModel, systemCapability, provid
 const trace = (event, fields = {}) => appendFileSync(traceFile,
   JSON.stringify({ event, pid: process.pid, ...fields }) + '\n')
 const modelOption = () => [{ id: 'model', name: 'Model', type: 'select', category: 'model',
-  currentValue: model, options: ['gpt-6.2-sol', 'gpt-5.5'].map(value => ({ value, name: value })) }]
+  currentValue: model, options: choices ?? [...new Set(['gpt-6.2-sol', 'gpt-5.5', model])].map(value => ({ value, name: value })) }]
 let model = startModel
+let choices
 let finish
 trace('start', { cwd: process.cwd(), args })
 const wire = serveAgent({
@@ -24,6 +26,8 @@ const wire = serveAgent({
   async newSession({ cwd, mcpServers, systemPrompt, _meta }) {
     trace('new', { cwd, mcpServers, systemPrompt, meta: _meta })
     const reply = JSON.parse(readFileSync(replyFile, 'utf8'))
+    if (reply.reportModel) model = reply.reportModel
+    choices = reply.modelChoices
     const codex = provider === 'acp-codex'
     // codex-acp 2.12.0 uses ModelId strings in models and bare slugs in configOptions.
     const modelId = slug => codex ? slug + '[high]' : slug
@@ -39,8 +43,8 @@ const wire = serveAgent({
       writeFileSync(join(logDir, `acp-server-20261125_120000-${process.pid}.log`),
         failure ? AGY_SETTINGS_FAILED + ' fixture failure' : 'fixture settings loaded')
     }
-    return { sessionId: 'aside-fixture', configOptions: modelOption(),
-      ...(codex || reply.sessionModel !== undefined ? {
+    return { sessionId: 'aside-fixture', configOptions: reply.omitModel ? [] : modelOption(),
+      ...(!reply.omitModel && (codex || reply.sessionModel !== undefined) ? {
         models: { currentModelId: reply.sessionModel ?? modelId(model),
           availableModels: modelOption()[0].options.map(({ value, name }) => ({ modelId: modelId(value), name })) },
       } : {}),
@@ -51,6 +55,7 @@ const wire = serveAgent({
   async setSessionMode({ modeId }) { trace('mode', { modeId }) },
   async setSessionConfigOption({ value }) {
     model = value
+    if (choices) trace('model-selected', { model })
     return { configOptions: modelOption() }
   },
   async closeSession() { trace('close') },
@@ -58,7 +63,9 @@ const wire = serveAgent({
   async prompt({ sessionId, prompt }) {
     trace('prompt', { prompt, model })
     const update = update => wire.sessionUpdate({ sessionId, update })
-    const reply = JSON.parse(readFileSync(replyFile, 'utf8'))
+    const config = JSON.parse(readFileSync(replyFile, 'utf8'))
+    const path = /^SKR\w+ chunk [^\n]* path=([^\n]+)$/m.exec(prompt.at(-1)?.text ?? '')?.[1]
+    const reply = { ...config, ...config.byPath?.[path] }
     if (reply.quota) {
       throw RequestError.internalError({ codexErrorInfo: { usageLimitExceeded: {} } },
         'Fictitious private detail')
@@ -80,6 +87,31 @@ const wire = serveAgent({
     for (const text of reply.chunks ?? [reply.text ?? 'Fixture response.']) {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
     }
+    if (reply.gate) {
+      trace('held', { gate: reply.gate })
+      const gate = join(dirname(replyFile), reply.gate)
+      while (!existsSync(gate)) await delay(5)
+    }
+    if (reply.modelUpdates) {
+      for (const next of reply.modelUpdates) {
+        model = typeof next === 'string' ? next : next.value
+        if (typeof next !== 'string') choices = next.choices
+        trace('model-update', { model, ...(choices ? { choices } : {}) })
+        await update({ sessionUpdate: 'config_option_update', configOptions: modelOption() })
+      }
+    }
+    if (reply.effortUpdate) {
+      await update({ sessionUpdate: 'config_option_update', configOptions: [{
+        id: 'effort', name: 'Effort', type: 'select', category: 'thought_level',
+        currentValue: 'high', options: [{ value: 'high', name: 'High' }],
+      }] })
+    }
+    if (reply.textThenTool) {
+      trace('text-sent')
+      trace('tool-announced')
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'fixture', status: 'pending', title: 'Fixture tool' })
+    }
+    if (reply.gate || reply.modelUpdates) trace('end-turn')
     return { stopReason: reply.stopReason ?? 'end_turn' }
   },
 }, ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)))

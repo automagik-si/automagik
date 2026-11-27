@@ -70,12 +70,18 @@ async function skillArchiveBytes(file) {
   return chunks.join('')
 }
 
+const fallbackReviewLabel = review => review?.status === 'done' && review.via === 'fallback'
+  ? t('Reviewed by {model} (fallback)', { model: review.modelName ?? review.model }) : null
+
 function SkillReport({ report, title }) {
   if (!report) return null
+  const label = fallbackReviewLabel(report.review)
   return h('div', { className: 'bt-set-row bt-bs-stack', role: 'status' },
     report.refused
       ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, hostText(report.message))
-      : title ?? (report.needsConfirm ? t('Review the warnings, then save again to confirm.') : t('Warnings')),
+      : title ?? (report.needsConfirm ? t('Review the warnings, then save again to confirm.')
+        : label && !report.findings?.length ? null : t('Warnings')),
+    label ? h('p', { className: 'bt-set-hint' }, label) : null,
     report.truncated ? h('p', { className: 'bt-set-hint' },
       t('Only retained findings are shown. This review cannot be confirmed.')) : null,
     report.findings?.length ? h('ul', null, report.findings.map(({ rule, line, reason, path, file, severity, injection, detail }, index) => {
@@ -188,7 +194,7 @@ function TreePreview({ tree, onClose, readOnly }) {
     view.keyNames?.length ? h('p', { className: 'bt-set-hint' }, t('Declared key names'), ' · ', view.keyNames.join(', ')) : null,
     h(TreeDetails, { view }),
     h(TreeDiff, { diff: view.diff }),
-    view.refused || view.findings?.length ? h(SkillReport, { report: view }) : null,
+    view.refused || view.findings?.length || fallbackReviewLabel(view.review) ? h(SkillReport, { report: view }) : null,
     error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null,
     h('div', { className: 'bt-set-row bt-task-foot' },
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onClose }, t('Cancel')),
@@ -259,7 +265,7 @@ function LinkUpdate({ report, actions, onClose, saved, readOnly }) {
       t('The saved version could not be verified; Apply replaces it with the checked new content.')) : null,
     view.diff?.held ? h(TreeDetails, { view }) : null,
     h(TreeDiff, { diff: view.diff?.held ? { ...view.diff, held: false } : view.diff }),
-    view.refused || view.findings?.length ? h(SkillReport, { report: view,
+    view.refused || view.findings?.length || fallbackReviewLabel(view.review) ? h(SkillReport, { report: view,
       title: view.needsConfirm ? t('Review the warnings, then apply again to confirm.') : undefined }) : null,
     error ? h('p', { className: 'bt-danger bt-set-hint', role: 'alert' }, error) : null,
     h('div', { className: 'bt-set-row bt-task-foot' },
@@ -525,7 +531,7 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
           }[skill.source?.kind] ?? 'From text'), result,
             skill.scripts?.length ? t('Scripts: {count}', { count: skill.scripts.length }) : null,
             skill.references?.length ? t('References: {count}', { count: skill.references.length }) : null,
-            skill.review?.status === 'done' ? t('Reviewed by a model') : null, checked].filter(Boolean).join(' · ')),
+            skill.review?.status === 'done' ? fallbackReviewLabel(skill.review) ?? t('Reviewed by a model') : null, checked].filter(Boolean).join(' · ')),
           linked ? h('p', { className: 'bt-set-hint' }, sourceLine(skill.source), ' · ',
             t('Fetched {time}', { time: new Date(skill.source.fetchedAt).toLocaleString() })) : null,
           checkedAt !== undefined ? h('p', { className: 'bt-set-hint', role: 'status' },

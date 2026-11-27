@@ -24,6 +24,8 @@ const AREAS = new Set(['structure', 'secrets', 'prompt-injection', 'dangerous-co
 const SEVERITIES = new Set(['high', 'medium', 'low'])
 const FRAME_BODY_MAX = REVIEW_REQUEST_MAX - 4096 - 256 - 512
 const CALL_TIMEOUT = 120_000
+const RETRYABLE = new Set(['no-model', 'provider-error', 'timeout', 'incomplete'])
+const disqualifies = why => why === 'malformed' || why === 'overflow'
 const wire = text => Buffer.byteLength(JSON.stringify(text)) - 2
 const decode = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 const frameError = why => Object.assign(new Error('Skill review cannot frame the supplied bytes'), { why })
@@ -359,7 +361,44 @@ async function chooseReviewer(rt) {
   } catch { /* Unavailable. */ }
 }
 
+async function leadReviewer(rt, failedRef) {
+  const botId = rt.state?.mainBotIds?.[0]
+  const bot = botId === undefined ? undefined : rt.botOf(botId)
+  const ref = bot?.model
+  if (typeof ref !== 'string' || !/^[^/\s]+\/.+$/.test(ref) || ref === failedRef || rt.hostOwned?.(bot)) return
+  const slash = ref.indexOf('/')
+  const provider = ref.slice(0, slash)
+  const model = ref.slice(slash + 1)
+  const { connectedBy } = routeOf(provider)
+  if (rt.machineReservations?.held?.(provider)) return
+  const service = connectedBy === 'acp' ? rt.ctx?.get?.('acpAgents') : undefined
+  if (connectedBy === 'acp') {
+    if (!service?.supportsReview?.(provider)) return { unsupported: true }
+    return Object.freeze({ botId, ref, provider, model, connectedBy, service,
+      effort: bot.effort, generation: service.asideAccountGeneration(provider), binding: {} })
+  }
+  if (connectedBy !== 'native' && connectedBy !== 'pi-ai') return { unsupported: true }
+  const entry = (await rt.catalog?.({ fresh: true, remember: false, noCommands: true }))?.find(row => row.ref === ref)
+  if (!entry || rt.answersAside?.(ref) === false || entry.needsKey || entry.needsSignIn || rt.quotaHeld?.(provider)) return
+  return Object.freeze({ botId, ref, provider, model, connectedBy, modelName: entry.name ?? model })
+}
+
+function checkLead(rt, bound) {
+  const bot = rt.botOf(bound.botId)
+  if (rt.state.mainBotIds?.[0] !== bound.botId || bot?.model !== bound.ref || rt.hostOwned?.(bot)
+    || routeOf(bound.provider).connectedBy !== bound.connectedBy
+    || (bound.service && (rt.ctx.get('acpAgents') !== bound.service
+      || bound.service.asideAccountGeneration(bound.provider) !== bound.generation))) {
+    throw Object.assign(new Error('The lead reviewer changed.'), { code: 'bot/reviewer-changed' })
+  }
+}
+
 const reviewText = blocks => blocks.filter(block => block.type === 'text').map(block => block.text).join('\n')
+
+async function keepInjection(findings, block) {
+  const injection = findings.filter(finding => finding.area === 'prompt-injection')
+  if (injection.length) await block(injection)
+}
 
 async function callFrame(rt, options, frame, signal, check, block) {
   const timeout = AbortSignal.timeout(CALL_TIMEOUT)
@@ -367,10 +406,24 @@ async function callFrame(rt, options, frame, signal, check, block) {
   let abort
   let attempt
   let abortPersistence
-  const onFailedAttempt = async assembler => {
-    const { findings } = parseReview(reviewText(assembler.interruptedBlocks()), frame)
-    const injection = findings.filter(finding => finding.area === 'prompt-injection')
-    if (injection.length) await block(injection)
+  let disqualified
+  const observedFailures = new WeakMap()
+  const onFailedAttempt = assembler => {
+    if (!observedFailures.has(assembler)) {
+      const observed = (async () => {
+        // A verified provider stop can arrive before the iterator unwinds.
+        const stopped = assembler.observedFinish?.kind === 'stop'
+        const parsed = parseReview(reviewText(stopped ? assembler.blocks() : assembler.interruptedBlocks()), frame)
+        if (stopped && disqualifies(parsed.why)) disqualified ??= parsed
+        await keepInjection(parsed.findings, block)
+      })()
+      observedFailures.set(assembler, observed)
+    }
+    return observedFailures.get(assembler)
+  }
+  const live = () => {
+    requestSignal.throwIfAborted()
+    check()
   }
   try {
     check()
@@ -388,38 +441,90 @@ async function callFrame(rt, options, frame, signal, check, block) {
       messages: [{ role: 'user', content: [{ type: 'text', text: frame.message }] }],
     }
     const response = await Promise.race([stopped, rt.assembleLlm(request, {
-      check, dispatch: { check }, requireProviderFinish: true, onAttempt: assembler => { attempt = assembler }, onFailedAttempt,
+      check: live, dispatch: { check: live }, requireProviderFinish: true, onAttempt: assembler => { attempt = assembler }, onFailedAttempt,
     })])
     const text = reviewText(response.blocks())
     const parsed = parseReview(text, frame)
     if (response.observedFinish?.kind !== 'stop') {
       parsed.why = response.finish.kind === 'error' ? 'provider-error' : 'incomplete'
     }
-    return parsed
-  } catch {
-    return { findings: [], why: timeout.aborted ? 'timeout' : 'provider-error' }
+    try { check() } catch (error) {
+      await keepInjection(parsed.findings, block)
+      throw error
+    }
+    if (disqualified) await keepInjection(parsed.findings, block)
+    return disqualified ?? parsed
+  } catch (error) {
+    return disqualified ?? { findings: [], why: error?.code === 'bot/reviewer-changed'
+      ? 'reviewer-changed' : timeout.aborted ? 'timeout' : 'provider-error' }
   } finally {
     if (abort) requestSignal.removeEventListener('abort', abort)
     await abortPersistence
   }
 }
 
-export async function runSkillReview(rt, { name, entries, hash }, { check, block }) {
-  const route = await chooseReviewer(rt)
-  check()
-  const result = (status, model, findings = [], frames = 0, why) =>
-    ({ v: 1, hash, status, model, at: Date.now(), frames, findings, ...(why === undefined ? {} : { why }) })
-  if (!route) return result('none', null, [], 0, 'no-model')
-  let frames
-  try { frames = reviewFrames({ name, entries, hash }) } catch (error) {
-    return result('failed', route.ref, [], 0, error.why ?? 'coverage')
+async function callFrameAside(rt, bound, frame, signal, check, block) {
+  const reservations = rt.machineReservations
+  let releaseWork
+  let partial
+  try {
+    check()
+    releaseWork = reservations?.workStarted?.(bound.provider)
+    const { text, model, modelAlias } = await bound.service.answerReview({
+      provider: bound.provider, model: bound.model, effort: bound.effort, purpose: 'review', signal, timeoutMs: CALL_TIMEOUT,
+      accountGeneration: bound.generation, binding: bound.binding, check,
+      admit: async () => {
+        if (await reservations?.imageGate?.(bound.provider)) {
+          throw Object.assign(new Error('The account is reserved.'), { code: 'acp/aside-unavailable' })
+        }
+        check()
+      },
+      readPrompt: () => {
+        const fields = { system: REVIEW_PROMPT, messages: [{ role: 'user', content: [{ type: 'text', text: frame.message }] }] }
+        const masked = rt.redactModelFields?.(fields) ?? fields
+        return { system: masked.system, text: masked.messages[0].content[0].text }
+      },
+      onPartial: text => {
+        partial = keepInjection(parseReview(text, frame).findings, block)
+        return partial
+      },
+    })
+    const parsed = parseReview(text, frame)
+    // The review service returns a Claude alias only after proving its concrete affiliation.
+    const matchesAlias = bound.provider === 'acp-claude' && bound.model === modelAlias
+    if (typeof model !== 'string' || model === 'default' || !/^\S+$/.test(model)
+      || (bound.model !== 'default' && model !== bound.model && !matchesAlias)) {
+      await keepInjection(parsed.findings, block)
+      return { findings: [], why: 'mixed-reviewer' }
+    }
+    return { ...parsed, model }
+  } catch (error) {
+    await partial
+    const code = error?.code
+    const reasons = {
+      'acp/aside-timeout': 'timeout',
+      'acp/aside-cut-off': 'incomplete',
+      'acp/aside-unavailable': 'unavailable',
+      'acp/aside-tool-refused': 'tool-refused',
+      'acp/aside-reviewer-model': 'mixed-reviewer',
+      'bot/reviewer-changed': 'reviewer-changed',
+    }
+    return { findings: [], why: Object.hasOwn(reasons, code) ? reasons[code] : 'provider-error',
+      ...(typeof code === 'string' && code.startsWith('acp/aside-') ? { asideCode: code } : {}) }
+  } finally {
+    releaseWork?.()
   }
+}
+
+async function frameOptions(rt, route) {
   const info = await Promise.resolve().then(() => rt.ctx?.llm?.resolveModelInfo(route.provider, route.model)).catch(() => undefined)
-  check()
   const efforts = info?.reasoning?.efforts ?? []
   const effort = efforts.some(entry => entry.id === 'off') ? 'off' : efforts.at(0)?.id
-  const options = { provider: route.provider, model: route.model, maxTokens: Math.min(info?.defaultMaxTokens ?? 16384, 16384),
+  return { provider: route.provider, model: route.model, maxTokens: Math.min(info?.defaultMaxTokens ?? 16384, 16384),
     ...(effort === undefined ? {} : { reasoningEffort: effort }) }
+}
+
+async function reviewOn(frames, call, workers, block) {
   const controller = new AbortController()
   const completed = new Array(frames.length)
   let cursor = 0
@@ -427,19 +532,78 @@ export async function runSkillReview(rt, { name, entries, hash }, { check, block
   async function next() {
     while (!failure && cursor < frames.length) {
       const index = cursor++
-      const answer = await callFrame(rt, options, frames[index], controller.signal, check, block)
+      const answer = await call(frames[index], controller.signal)
       completed[index] = answer
-      const injection = answer.findings.filter(finding => finding.area === 'prompt-injection')
-      if (injection.length) await block(injection)
+      await keepInjection(answer.findings, block)
       if (answer.why) {
-        failure ??= answer.why
+        failure ??= answer
         controller.abort()
       }
     }
   }
-  await Promise.all([next(), next()])
+  await Promise.all(Array.from({ length: workers }, next))
+  return {
+    failure: completed.find(answer => disqualifies(answer?.why)) ?? failure
+      ?? (completed.filter(Boolean).length !== frames.length ? { why: 'incomplete' } : undefined),
+    findings: completed.flatMap(answer => answer.findings), frames: cursor,
+    models: completed.flatMap(answer => answer.model === undefined ? [] : [answer.model]),
+  }
+}
+
+export async function runSkillReview(rt, input, { check, block }) {
+  const route = await chooseReviewer(rt)
   check()
-  const findings = completed.flatMap(answer => answer.findings)
-  if (failure || completed.filter(Boolean).length !== frames.length) return result('failed', route.ref, findings, cursor, failure ?? 'incomplete')
-  return result('done', route.ref, findings, frames.length)
+  const result = (status, model, findings = [], frames = 0, why) =>
+    ({ v: 1, hash: input.hash, status, model, at: Date.now(), frames, findings, ...(why === undefined ? {} : { why }) })
+  let injected = false
+  const recordBlock = findings => {
+    injected = true
+    return block(findings)
+  }
+  let background = result('none', null, [], 0, 'no-model')
+  if (route) {
+    let frames
+    try { frames = reviewFrames(input) } catch (error) {
+      return result('failed', route.ref, [], 0, error.why ?? 'coverage')
+    }
+    const options = await frameOptions(rt, route)
+    check()
+    const run = await reviewOn(frames, (frame, signal) => callFrame(rt, options, frame, signal, check, recordBlock), 2, recordBlock)
+    check()
+    background = result(run.failure ? 'failed' : 'done', route.ref, run.findings, run.frames, run.failure?.why)
+  }
+  if (injected || !RETRYABLE.has(background.why)) return background
+
+  const bound = await leadReviewer(rt, route?.ref)
+  check()
+  if (!bound) return background
+  if (bound.unsupported) return { ...background, lead: 'unsupported' }
+  const via = { via: 'fallback', fallbackFrom: background.why }
+  const fail = ({ why, asideCode }, findings = [], frames = 0) =>
+    ({ ...result('failed', bound.ref, findings, frames, why), ...via, ...(asideCode ? { asideCode } : {}) })
+  const live = () => { check(); checkLead(rt, bound) }
+  let frames
+  try { frames = reviewFrames(input) } catch (error) {
+    return fail({ why: error.why ?? 'coverage' })
+  }
+  const acp = bound.connectedBy === 'acp'
+  const options = acp ? undefined : await frameOptions(rt, bound)
+  const call = acp
+    ? (frame, signal) => callFrameAside(rt, bound, frame, signal, live, recordBlock)
+    : (frame, signal) => callFrame(rt, options, frame, signal, live, recordBlock)
+  const run = await reviewOn(frames, call, acp ? 1 : 2, recordBlock)
+  check()
+  if (run.failure) return fail(run.failure, run.findings, run.frames)
+  try { checkLead(rt, bound) } catch (error) {
+    if (error?.code !== 'bot/reviewer-changed') throw error
+    return fail({ why: 'reviewer-changed' }, run.findings, run.frames)
+  }
+  const reported = run.models[0]
+  if (acp && (run.models.length !== frames.length || run.models.some(model => model !== reported))) {
+    return fail({ why: 'mixed-reviewer' }, run.findings, run.frames)
+  }
+  const model = acp ? `${bound.provider}/${reported}` : bound.ref
+  const modelName = acp
+    ? rt.cachedCatalog?.()?.find(entry => entry.ref === model)?.name ?? reported : bound.modelName
+  return { ...result('done', model, run.findings, run.frames), ...via, modelName }
 }

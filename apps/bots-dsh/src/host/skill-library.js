@@ -25,6 +25,8 @@ const CHANGED = 'Its stored files are missing or changed; save the skill again.'
 const CONFIRM = 'Review the warnings, then save again to confirm.'
 const NO_MODEL = 'Not saved: every skill needs a model review, and no background model is available. Choose one in Settings, Background model, then try again.'
 const REVIEW_FAILED = 'Not saved: the model review did not finish, and every skill needs one. Try again.'
+const FALLBACK_FAILED = 'Not saved: the model review did not finish on the background model or on the Main Bot\'s model, and every skill needs one. Try again.'
+const LEAD_CANNOT_REVIEW = 'Not saved: every skill needs a model review. The background model failed, and the Main Bot\'s agent cannot run it in a separate session without tools.'
 const INJECTION = 'Not saved: prompt injection was found. A skill with prompt injection is never accepted.'
 const HELD_INJECTION = 'Held: prompt injection was found. A skill with prompt injection is never accepted.'
 const REVIEW_NEEDED = 'A model has not reviewed this skill yet. Review the stored skill to continue.'
@@ -707,8 +709,11 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
   function auditReviewRefusal(name, identity, generation, { why, review }) {
     authorizedGeneration(generation)
     const reason = why === 'review-failed' && review?.why ? `review-failed:${review.why}` : why ?? 'deterministic'
-    audit('skill-library-save', { name }, identity, 'refused', reason)
+    audit('skill-library-save', { name }, identity, 'refused',
+      review?.via === 'fallback' ? `${reason}:fallback:${review.fallbackFrom}` : reason)
   }
+
+  const reviewDone = review => review?.via === 'fallback' ? `review-done:fallback:${review.fallbackFrom}` : 'review-done'
 
   async function write(data, generation, before, durable = false) {
     const assertOwner = () => {
@@ -755,6 +760,12 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
     }
     if (check.verdict === 'block') return { ...out, decision: 'block', message: checkFailure(check).message }
     if (check.truncated) return { ...out, decision: 'refuse', why: 'incomplete', message: INCOMPLETE }
+    if (review?.status !== 'done') {
+      if (review?.lead === 'unsupported' || (review?.via === 'fallback' && review.why === 'unavailable')) {
+        return { ...out, decision: 'refuse', why: 'review-failed', message: LEAD_CANNOT_REVIEW }
+      }
+      if (review?.via === 'fallback') return { ...out, decision: 'refuse', why: 'review-failed', message: FALLBACK_FAILED }
+    }
     if (review?.status === 'none') return { ...out, decision: 'refuse', why: 'no-model', message: NO_MODEL }
     if (review?.status !== 'done') return { ...out, decision: 'refuse', why: 'review-failed', message: REVIEW_FAILED }
     if (!findings.length) return { ...out, decision: 'accept' }
@@ -1119,7 +1130,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
       if (link) previews.delete(body.token)
       const result = await writeSkill(document, name, source, decision, key, current, generation)
       previews.delete(body.token)
-      audit('skill-library-save', { name }, identity, 'allowed', 'review-done')
+      audit('skill-library-save', { name }, identity, 'allowed', reviewDone(decision.review))
       return result
     })
   }
@@ -1180,7 +1191,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
           return saveView(decision)
         }
         const result = await writeSkill(document, name, source, decision, key, current, generation)
-        audit(action, body, identity, 'allowed', 'review-done')
+        audit(action, body, identity, 'allowed', reviewDone(decision.review))
         return result
       })
     } catch (error) {

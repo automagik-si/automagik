@@ -3,6 +3,7 @@ import { existsSync, realpathSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
+import { AgentRun } from '../src/host/acp.js'
 import { asideWorld } from './fixtures/aside-world.mjs'
 
 const installed = (world, request = {}) => world.service.answerAside({
@@ -226,4 +227,83 @@ test('setup timeout withholds text and removes its scratch cwd', async t => {
     }), { code: 'acp/aside-timeout' })
   } finally { clearTimeout(keep) }
   assert.deepEqual(world.events(), [])
+})
+
+const review = (world, request = {}) => world.service.answerReview?.({
+  provider: world.provider, model: 'default', timeoutMs: 3000,
+  readPrompt: () => ({ system: 'Fixture review instructions.', text: 'Fixture review prompt.' }), ...request,
+})
+const reviewOutcome = async (world, request) => {
+  try { return await review(world, request) } catch (error) { return error.code }
+}
+
+test('2160 review purpose admits Claude Code in a fresh tools-off session', async t => {
+  const world = asideWorld(t, { provider: 'acp-claude', start: 'claude-sonnet-5-5' })
+  await world.service.accountConfirm(world.provider)
+  assert.deepEqual(await reviewOutcome(world, { model: 'claude-sonnet-5-5' }),
+    { text: 'Fixture response.', model: 'claude-sonnet-5-5' })
+  const events = world.events()
+  const prompt = events.find(row => row.event === 'prompt'
+    && row.prompt.at(-1)?.text === 'Fixture review prompt.')
+  assert.ok(prompt, 'the Claude review prompt was dispatched')
+  const opened = events.find(row => row.event === 'new' && row.pid === prompt.pid)
+  assert.deepEqual(opened.mcpServers, [])
+  assert.deepEqual(opened.meta, { disableBuiltInTools: true, claudeCode: { options: { settingSources: [] } } })
+})
+
+test('2160 review purpose keeps the crossing chunk UTF-8 prefix without crediting the answer', async t => {
+  const prefix = 'a'.repeat(65529)
+  const world = asideWorld(t, { provider: 'acp-omp', reply: { chunks: [prefix, 'ok🫖€'] } })
+  const seen = []
+  assert.equal(await reviewOutcome(world, { onPartial: text => seen.push(text) }), 'acp/aside-cut-off')
+  assert.equal(seen.length, 1)
+  assert.equal(Buffer.byteLength(seen[0]), 65535)
+  assert.ok(seen[0] === prefix + 'ok🫖')
+})
+
+test('2160 review purpose keeps received text on abort and waits for partial handling', async t => {
+  const run = new AbortController()
+  const arrived = Promise.withResolvers()
+  const complete = Promise.withResolvers()
+  const world = asideWorld(t, { provider: 'acp-omp', reply: { chunks: ['already ', 'received'] } })
+  const onUpdate = AgentRun.prototype.onUpdate
+  t.mock.method(AgentRun.prototype, 'onUpdate', function (update, sessionId) {
+    const handled = onUpdate.call(this, update, sessionId)
+    if (update.sessionUpdate === 'agent_message_chunk' && update.content.text === 'received') run.abort()
+    return handled
+  })
+  t.after(complete.resolve)
+  let settled = false
+  const result = reviewOutcome(world, { signal: run.signal, async onPartial(text) {
+    arrived.resolve(text)
+    await complete.promise
+  } }).then(value => { settled = true; return value })
+  assert.equal(await Promise.race([arrived.promise, result]), 'already received')
+  assert.equal(settled, false)
+  complete.resolve()
+  assert.equal(await result, 'acp/aside-stopped')
+})
+
+test('2160 review purpose delivers text before tool refusal, and tool-only yields no text', async t => {
+  for (const withText of [true, false]) {
+    const world = asideWorld(t, { provider: 'acp-omp',
+      reply: withText ? { chunks: ['Fixture reply.'], textThenTool: true } : { chunks: [], drift: true } })
+    const received = []
+    assert.equal(await reviewOutcome(world, { onPartial: text => received.push(text) }), 'acp/aside-tool-refused')
+    assert.deepEqual(received, withText ? ['Fixture reply.'] : [])
+    assert.ok(world.events().every(row => row.event !== 'tool-ran'))
+  }
+})
+
+test('2160 review binding refuses account-ID drift with the same generation', async t => {
+  const world = asideWorld(t)
+  await world.ready()
+  const accountGeneration = world.service.asideAccountGeneration(world.provider)
+  const binding = {}
+  const request = { accountGeneration, binding }
+  assert.equal((await reviewOutcome(world, request))?.model, 'gpt-6.2-sol')
+  await world.signInAs('different-fixture-account')
+  assert.equal(world.service.asideAccountGeneration(world.provider), accountGeneration)
+  assert.equal(await reviewOutcome(world, request), 'acp/aside-signed-out')
+  assert.equal(world.events().filter(row => row.event === 'prompt').length, 1)
 })

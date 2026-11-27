@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { apply, SERVICE } from '../../index.js'
 import { AGY_OFF_CHECKED } from '../../src/host/agy-off.js'
 import { nativeOffLaunch } from '../../src/host/codex-native.js'
@@ -17,12 +18,17 @@ export function asideWorld(t, options = {}) {
   const traceFile = join(dir, 'trace.ndjson')
   const replyFile = join(dir, 'reply.json')
   const setReply = value => writeFileSync(replyFile, JSON.stringify(value))
+  const releaseGate = name => writeFileSync(join(dir, name), '')
   setReply(reply)
   const argv = [wire, traceFile, replyFile, version, permissionMode ??
     (provider === 'acp-codex' ? 'read-only' : 'default'), start, system ? 'on' : 'off', provider]
   const fakeCli = join(dir, 'fake-cli')
   writeFileSync(fakeCli, '#!/bin/sh\nexec ' + [process.execPath, ...argv].map(shellQuote).join(' ')
     + ' "$@"\n', { mode: 0o700 })
+  const connector = provider === 'acp-claude' ? join(dir, 'fake-connector.mjs') : wire
+  if (connector !== wire) {
+    writeFileSync(connector, `process.argv.splice(2, 0, ...${JSON.stringify(argv.slice(1))})\nawait import(${JSON.stringify(pathToFileURL(wire).href)})\n`)
+  }
   const lookups = []
   const handles = []
   const log = []
@@ -54,7 +60,7 @@ export function asideWorld(t, options = {}) {
   apply(ctx, config, {
     catalogHome: join(dir, 'catalog'), cliHome, installation: dir,
     find: name => name === providers[provider] ? fakeCli : undefined,
-    store: { binOf: () => ({ path: wire, version: 'test' }), stateOf: () => ({ version: 'test' }),
+    store: { binOf: () => ({ path: connector, version: 'test' }), stateOf: () => ({ version: 'test' }),
       busy: () => false, update: async () => {}, settle: () => {} },
     signedIn: async () => signedIn,
     account: async () => ({ id: accountId, facets: { email: 'fixture@example.test' } }),
@@ -96,5 +102,5 @@ export function asideWorld(t, options = {}) {
     if (current !== cli) wireCodex(current)
     await ready()
   }
-  return { provider, service, ready, signInAs, setReply, events, lookups, fake, contexts, log, dir, cli, ctx }
+  return { provider, service, ready, signInAs, setReply, releaseGate, events, lookups, fake, contexts, log, dir, cli, ctx }
 }
