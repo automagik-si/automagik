@@ -37,6 +37,24 @@ test('a probe is kept on disk, and the next start lists it before the agent answ
   assert.deepEqual((await next.model('fake-small')).reasoning.defaultEffort, 'low')
 })
 
+test('which models offer Standard / Fast is kept beside the models and read on the next start', async (t) => {
+  const home = scratch()
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const withFast = { ...fake, env: { ...process.env, FAKE_ACP_FAST: 'fast-mode', FAKE_ACP_FAST_MODELS: 'fake-large,fake-plain' } }
+  const first = catalog(home, { spawn: () => withFast })
+  t.after(() => first.dispose())
+  await first.models()
+  await first.probing
+  assert.deepEqual(['fake-large', 'fake-small', 'fake-plain'].map(id => first.offersFast(id)), [true, false, true], first.logs.join('\n'))
+  const kept = JSON.parse(readFileSync(join(home, 'acp-test.json'), 'utf8'))
+  assert.deepEqual([...kept.fast].sort(), ['default', 'fake-large', 'fake-plain'], 'default is the start model, fake-large')
+  assert.equal(kept.models.some(model => 'fast' in model), false, 'the models stay the shape DSH reads')
+  const next = catalog(home, { spawn: () => broken, key: () => 'v2' })
+  t.after(() => next.dispose())
+  await next.models()
+  assert.deepEqual(['fake-large', 'fake-small', 'no-such'].map(id => next.offersFast(id)), [true, false, undefined])
+})
+
 test('an agent that does not answer leaves the stand-ins, and is asked again only after a while', async (t) => {
   let now = 1000
   let spawned = 0

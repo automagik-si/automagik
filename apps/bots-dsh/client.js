@@ -25546,6 +25546,7 @@ function teamActions({
     agentModels: (route) => after(call2("local-agent-models", { route })).catch(() => {
     }),
     efforts: (ref) => call2("efforts", { ref }),
+    speed: (ref) => call2("speed", { ref }),
     // Model providers and their API keys; DSH keeps them, and a key only travels to the host.
     providers: () => call2("providers"),
     setProviderKey: (provider, value) => after(call2("provider-key", { provider, value })),

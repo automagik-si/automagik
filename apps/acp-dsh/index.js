@@ -2578,6 +2578,13 @@ export function apply(ctx, config = {}, {
       return () => { questionGuards.delete(guard) }
     },
     modelIdentityOf: (provider, model) => adapter.modelIdentityOf(provider, model),
+    /**
+     * Whether `model` of this ACP agent offers Standard / Fast (a config option of category
+     * `speed`), as the catalog read it: true, false, or undefined while unknown. Read-only.
+     */
+    offersFast: (provider, model) => {
+      try { return adapter.agents.get(provider)?.catalog?.offersFast?.(model) } catch { return undefined }
+    },
     resolveModelIdentity: (provider, model) => adapter.resolveModelIdentity(provider, model),
     /** The live ACP acknowledgement for the answering DSH turn. A canonical resolver also checks for conflicting reports. */
     /**

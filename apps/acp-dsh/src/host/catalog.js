@@ -59,8 +59,12 @@ export function reasoningOf(option) {
 export async function readCatalog(run, { defaultName, seen = () => {}, stopped = () => false }) {
   const modelOption = run.option('model')
   const startEffort = reasoningOf(run.option('thought_level'))
+  // The models that offer a speed option (category `speed`: codex-acp's `fast-mode`,
+  // claude-agent-acp's `fast`), as each model's options say. Kept beside the models, never in them.
+  const startFast = run.option('speed') !== undefined
   if (modelOption === undefined) {
-    const state = { models: [{ id: DEFAULT_MODEL, name: defaultName, reasoning: startEffort, probed: true }], complete: true, start: null }
+    const state = { models: [{ id: DEFAULT_MODEL, name: defaultName, reasoning: startEffort, probed: true }], complete: true, start: null,
+      fast: startFast ? [DEFAULT_MODEL] : [] }
     seen(state)
     return state
   }
@@ -76,7 +80,8 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
   }
   // The model the agent itself starts on: what DSH's `default` is for it (adapter.js nativeKept).
   const state = { models, offered: true, complete: false, start: typeof start === 'string' ? start : null,
-    ...(syntheticDefault && own ? { defaultModel: start } : {}) }
+    ...(syntheticDefault && own ? { defaultModel: start } : {}),
+    fast: startFast ? [...new Set([...(syntheticDefault ? [DEFAULT_MODEL] : []), ...(typeof start === 'string' ? [start] : [])])] : [] }
   seen(state)
   for (const model of models) {
     if (model.probed) continue
@@ -84,6 +89,7 @@ export async function readCatalog(run, { defaultName, seen = () => {}, stopped =
     await run.setOption('model', model.id)
     if (stopped()) return state
     model.reasoning = reasoningOf(run.option('thought_level'))
+    if (run.option('speed') !== undefined) state.fast.push(model.id)
     model.probed = true
     seen(state)
   }
@@ -175,13 +181,14 @@ export class Catalog {
     }
   }
 
-  write(key, models, start = null, at = this.now()) {
+  write(key, models, start = null, at = this.now(), fast) {
     if (this.file === undefined) return
     try {
       mkdirSync(this.spec.home, { recursive: true })
       const tmp = `${this.file}.${process.pid}.tmp`
       const measured = this.measured === undefined ? {} : { measured: this.measured }
-      writeFileSync(tmp, `${JSON.stringify({ key, at, start, models: models.map(({ probed, ...model }) => model), ...measured }, null, 2)}\n`)
+      const speeds = Array.isArray(fast) ? { fast } : {}
+      writeFileSync(tmp, `${JSON.stringify({ key, at, start, models: models.map(({ probed, ...model }) => model), ...speeds, ...measured }, null, 2)}\n`)
       renameSync(tmp, this.file)
     } catch (error) {
       this.spec.log?.(`could not keep ${this.spec.name}'s models: ${error?.message ?? error}`)
@@ -292,8 +299,8 @@ export class Catalog {
       if (!current()) return
       if (!state.complete) throw new Error('it stopped before every model was read')
       this.readAt = this.now()
-      this.saved = { key, at: this.readAt, start: state.start ?? null, models: structuredClone(state.models) }
-      this.write(key, state.models, state.start ?? null)
+      this.saved = { key, at: this.readAt, start: state.start ?? null, models: structuredClone(state.models), fast: [...state.fast] }
+      this.write(key, state.models, state.start ?? null, undefined, state.fast)
     } catch (error) {
       if (!current()) return
       this.identityListing = undefined
@@ -354,6 +361,18 @@ export class Catalog {
       clearTimeout(timer)
     }
     return this.current()
+  }
+
+  /**
+   * Whether a model offers Standard / Fast, as its own options said when it was read:
+   * true, false, or undefined while nothing has read it. Never waited for.
+   */
+  offersFast(id) {
+    const live = this.live?.models.find(model => model.id === id)
+    if (live?.probed && Array.isArray(this.live.fast)) return this.live.fast.includes(id)
+    const kept = this.saved?.fast
+    if (Array.isArray(kept) && this.saved.models.some(model => model.id === id)) return kept.includes(id)
+    return undefined
   }
 
   /**
@@ -435,7 +454,7 @@ export class Catalog {
     if (!isText(key)) return
     this.measured = { key, at: this.now(), models: slugsOf(models) }
     const saved = this.saved
-    if (saved !== undefined && saved.start !== undefined && typeof saved.at === 'number') this.write(saved.key, saved.models, saved.start, saved.at)
+    if (saved !== undefined && saved.start !== undefined && typeof saved.at === 'number') this.write(saved.key, saved.models, saved.start, saved.at, saved.fast)
   }
 
   /** One model by id, or undefined when the agent does not offer it. */

@@ -888,6 +888,25 @@ test("with no \"default\" effort row (Codex), a turn with no effort goes back to
   }
 })
 
+test('the catalog reads which models offer Standard / Fast, from each model\'s own options, and keeps it', async (t) => {
+  process.env.FAKE_ACP_FAST = 'fast-mode'
+  t.after(() => { delete process.env.FAKE_ACP_FAST })
+  const h = host()
+  try {
+    const catalog = h.adapter.agents.get('acp-fake').catalog
+    assert.equal(catalog.offersFast('fake-large'), undefined, 'unknown before any read')
+    await h.adapter.listModels('acp-fake')
+    await catalog.probing
+    assert.equal(catalog.offersFast('fake-large'), true)
+    assert.equal(catalog.offersFast('fake-small'), false)
+    assert.equal(catalog.offersFast('fake-plain'), false)
+    assert.equal(catalog.offersFast('no-such-model'), undefined)
+    assert.equal((await h.adapter.listModels('acp-fake')).every(model => !Object.hasOwn(model, 'fast')), true)
+  } finally {
+    h.close()
+  }
+})
+
 test("with no effort, the model's own is asked for only without a default row, and an unknown one sets nothing", async () => {
   const set = []
   const runOf = levels => ({

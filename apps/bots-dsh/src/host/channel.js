@@ -754,6 +754,9 @@ export function install(rt) {
           return ok({ modelsKey: modelsKey() })
         case 'efforts':
           return ok(await rt.reasoningOf(String(body.ref ?? '')) ?? { efforts: [] })
+        // Whether a model offers Standard / Fast (models.js speedOf).
+        case 'speed':
+          return ok(rt.speedOf?.(String(body.ref ?? '')) ?? { offered: null })
         // What one Bot's model really did (model-state.js): the pick, the model it goes back
         // to, the last call started, the last answer and failure, and whether it can run now.
         case 'model-state': {

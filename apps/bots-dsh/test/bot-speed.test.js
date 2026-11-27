@@ -11,7 +11,7 @@ import { fakeContext } from './fake-ctx.js'
 const saved = 'acp-codex/gpt-5.5'
 const other = 'acp-codex/gpt-5.4'
 
-function start(t, bot = {}) {
+function start(t, bot = {}, services = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-speed-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify({
     version: 1, mainBotIds: ['m1'], revision: 1,
@@ -22,7 +22,7 @@ function start(t, bot = {}) {
     rooms: {}, exchanges: [], exchangeTurns: {}, questions: {},
   }))
   const agents = new Map()
-  const ctx = fakeContext({ services: { agents } })
+  const ctx = fakeContext({ services: { agents, ...services } })
   let route
   const register = ctx.connection.fetch.register
   ctx.connection.fetch.register = options => { route = options; return register(options) }
@@ -83,4 +83,23 @@ test('a malformed speed, or one with no model, is refused and nothing changes', 
   assert.equal(bad.ok, false)
   assert.match(bad.error.message, /A speed is Standard or Fast/)
   assert.equal(Object.hasOwn(rt.state.bots.m1, 'speed'), false)
+})
+
+test('the menu asks whether a model offers Standard / Fast, as acp-dsh read it', async t => {
+  const asked = []
+  const acpAgents = { offersFast: (provider, model) => {
+    asked.push(`${provider}/${model}`)
+    return { 'gpt-5.5': true, 'gpt-5.4': false }[model]
+  } }
+  const { call } = start(t, {}, { acpAgents })
+  assert.deepEqual((await call('speed', { ref: saved })).value, { offered: true })
+  assert.deepEqual((await call('speed', { ref: other })).value, { offered: false })
+  assert.deepEqual((await call('speed', { ref: 'acp-codex/unread' })).value, { offered: null })
+  assert.deepEqual((await call('speed', { ref: 'no-slash' })).value, { offered: null })
+  assert.deepEqual(asked, [saved, other, 'acp-codex/unread'])
+})
+
+test('with no acp-dsh, no model offers a speed it could not set', async t => {
+  const { call } = start(t)
+  assert.deepEqual((await call('speed', { ref: saved })).value, { offered: null })
 })
