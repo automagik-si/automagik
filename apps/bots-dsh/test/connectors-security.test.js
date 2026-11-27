@@ -545,7 +545,7 @@ test('file tools guard both copies of an imported connector key after restart', 
   await createRuntime(importCtx, { home: dest, importHome: home }).load()
   await importCtx.dispose()
   await createRuntime(restartCtx, { home: dest }).load()
-  const agent = { id: 'm1', session: { id: 'm1', header: { cwd: dest } } }
+  const agent = { id: 'm1', session: { id: 'm1', header: { id: 'm1', cwd: dest } } }
   const execute = (name, args) => restartCtx.listeners.get('tools/execute').reduceRight((next, listener) =>
     () => listener({ name, arguments: args, agent }, next), () => 'ran')()
   for (const root of [dest, home]) {

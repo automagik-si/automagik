@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
+import { POLICY_UNAVAILABLE_TEXT } from '../src/host/review-guard.js'
 import { fakeContext } from './fake-ctx.js'
 
 const FULL = 'danger-full-access'
@@ -107,9 +108,9 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, closed = [], preset
   const settle = () => new Promise(resolve => setTimeout(resolve, 20))
   // One tool call of a Session through the team's guard, the first tools/execute listener.
   // Resolves 'ran' when the tool's body was reached.
-  const tool = (sessionId, { name = 'bash', header } = {}) => ctx.listeners.get('tools/execute')[0](
+  const tool = (sessionId, { name = 'bash', header, next = async () => 'ran' } = {}) => ctx.listeners.get('tools/execute')[0](
     { name, arguments: {}, agent: { id: sessionId, session: { id: sessionId, ...(header ? { header } : {}) } } },
-    async () => 'ran',
+    next,
   )
   // DSH opens a Session: its level is set again within the announce.
   const opens = async (sessionId) => {
@@ -120,7 +121,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, closed = [], preset
 }
 
 test('no tool runs on a Session that did not take a lowered level, until it does', async (t) => {
-  const { rt, call, settle, failing, sets, tool, levelOf } = team(t, { room: { permission: FULL }, levels: { g1: FULL, g2: FULL } })
+  const { rt, call, settle, failing, sets, headers, tool, levelOf } = team(t, { room: { permission: FULL }, levels: { g1: FULL, g2: FULL } })
   await call('state', {})
   failing.add('g2')
   await call('update-room', { id: 'r1', permission: WRITE })
@@ -132,7 +133,8 @@ test('no tool runs on a Session that did not take a lowered level, until it does
   assert.equal(rt.stopsView()[0].why, 'level')
   assert.equal(rt.stopsView()[0].count, 1)
   await assert.rejects(tool('g2', { name: 'read_file' }), refused(WRITE), 'every tool, a read-only one too')
-  // The Session that took it, and any other, runs and is not looked at.
+  // Sessions that took the level and other ordinary Sessions can still run.
+  headers.elsewhere = { id: 'elsewhere' }
   const before = sets.length
   assert.equal(await tool('g1'), 'ran')
   assert.equal(await tool('b2'), 'ran')
@@ -207,9 +209,11 @@ test('a subagent child of a marked Session is refused too', async (t) => {
   failing.add('g2')
   await call('update-room', { id: 'r1', permission: WRITE })
   await settle()
-  headers.child = { origin: 'subagent', parentSession: 'g2' }
-  headers.grandchild = { origin: 'subagent', parentSession: 'child' }
-  headers.other = { origin: 'subagent', parentSession: 'g1' }
+  headers.g1 = { id: 'g1' }
+  headers.g2 = { id: 'g2' }
+  headers.child = { id: 'child', origin: 'subagent', parentSession: 'g2' }
+  headers.grandchild = { id: 'grandchild', origin: 'subagent', parentSession: 'child' }
+  headers.other = { id: 'other', origin: 'subagent', parentSession: 'g1' }
   await assert.rejects(tool('child', { header: headers.child }), refused(WRITE))
   await assert.rejects(tool('grandchild'), refused(WRITE))
   assert.equal(await tool('other', { header: headers.other }), 'ran')
@@ -374,19 +378,30 @@ test('an error from DSH during a try that fails does not unlock the Session', as
 })
 
 test('a Session whose parents cannot be read is refused while a Session is marked', async (t) => {
-  const { ctx, call, settle, failing, headers, tool } = team(t, { room: { permission: FULL }, levels: { g1: FULL, g2: FULL } })
+  const { ctx, rt, call, settle, failing, headers, tool } = team(t, { room: { permission: FULL }, levels: { g1: FULL, g2: FULL } })
   await call('state', {})
+  headers.g2 = { id: 'g2' }
+  headers.child = { id: 'child', origin: 'subagent', parentSession: 'g2' }
+  headers.grandchild = { id: 'grandchild', origin: 'subagent', parentSession: 'child' }
+  headers.elsewhere = { id: 'elsewhere' }
   const read = ctx.sessions.get
-  const unreadable = () => { throw new Error('sessions: the store could not be read') }
-  // Nothing is marked: the guard looks at no Session, readable or not.
+  const unreadable = t.mock.fn(() => { throw new Error('sessions: the store could not be read') })
+  const next = t.mock.fn(async () => 'ran')
+  const checkWithoutLevelMark = async () => {
+    const reads = unreadable.mock.callCount()
+    const agent = { id: 'child', session: { id: 'child' } }
+    assert.equal(await rt.levelHolds({ agent }), undefined)
+    assert.equal(unreadable.mock.callCount(), reads, 'the seat level check skips lineage when no level is marked')
+    await assert.rejects(tool('child', { header: headers.child, next }), { code: 'bot/refused', message: POLICY_UNAVAILABLE_TEXT })
+    assert.ok(unreadable.mock.callCount() > reads, 'composed dispatch tried to read provenance')
+    assert.equal(next.mock.callCount(), 0)
+  }
   ctx.sessions.get = unreadable
-  assert.equal(await tool('child'), 'ran')
+  await checkWithoutLevelMark()
   ctx.sessions.get = read
   failing.add('g2')
   await call('update-room', { id: 'r1', permission: WRITE })
   await settle()
-  headers.child = { origin: 'subagent', parentSession: 'g2' }
-  headers.grandchild = { origin: 'subagent', parentSession: 'child' }
   await assert.rejects(tool('child'), refused(WRITE))
   // DSH cannot say whose child a Session is: it may be the marked one's, so it runs no tool.
   ctx.sessions.get = unreadable
@@ -400,18 +415,21 @@ test('a Session whose parents cannot be read is refused while a Session is marke
   ctx.sessions.get = read
   await assert.rejects(tool('grandchild'), refused(WRITE))
   assert.equal(await tool('elsewhere'), 'ran')
-  // And once the level holds, a read that fails refuses nothing.
+  // Recovery clears the seat mark. Composed dispatch still needs readable provenance.
   failing.clear()
   assert.equal(await tool('g2'), 'ran')
   ctx.sessions.get = unreadable
-  assert.equal(await tool('child'), 'ran')
+  await checkWithoutLevelMark()
+  ctx.sessions.get = read
+  assert.equal(await tool('child', { header: headers.child, next }), 'ran')
+  assert.equal(next.mock.callCount(), 1)
 })
 
 test('a child switched to Workspace still obeys its Bot deny list and its seat level hold', async t => {
   const b = team(t, { bots: { b2: { denyTools: ['bash'] } }, room: { permission: WRITE }, levels: { g2: WRITE, child: 'custom' } })
   await b.call('state', {})
-  b.headers.g2 = {}
-  b.headers.child = { origin: 'subagent', parentSession: 'g2' }
+  b.headers.g2 = { id: 'g2' }
+  b.headers.child = { id: 'child', origin: 'subagent', parentSession: 'g2' }
   b.policies.set('g2', 'ask')
   b.policies.set('child', 'never')
   b.modes.set('child', WRITE)

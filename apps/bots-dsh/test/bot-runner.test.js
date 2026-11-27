@@ -61,7 +61,7 @@ function setup(t, mode, { state = team(), recordedSessions, home = mkdtempSync(j
   }
   const agents = new Map()
   ctx.workspaceRegistry = new Map()
-  const add = (id, header = { id, origin: 'user', cwd: home }) => {
+  const add = (id, header = { id, cwd: home }) => {
     const agent = ctx.scopeAgent(id)
     agent.session.header = header
     agents.set(id, agent)

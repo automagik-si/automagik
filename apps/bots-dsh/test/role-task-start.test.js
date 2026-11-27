@@ -11,6 +11,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { apply as applyExecutor, inject as executorInject } from '@deepseek-ai/dsh-tool-executor-native'
 import { apply } from '../index.js'
+import { planOpenAt } from '../src/host/review-mark.js'
 import { output } from '../src/host/tools.js'
 import { installRoles } from '../src/host/roles.js'
 import { fakeContext } from './fake-ctx.js'
@@ -170,8 +171,16 @@ test('PD3N-5: Tasks APIs retain the guarded executor caller with no attribution 
   h.hostTool('fixture_task_start', () => rt.startTask({ title: 'Fixture', text: 'No work', from: 'reviewer' }))
   h.hostTool('fixture_raw_task', () => rt.createTaskSession('No attribution'))
   h.hostTool('fixture_task_agent', () => rt.createAgentSession(tasksAgent.id))
-  rt.botOf('main').reviewGuard = true
-  rt.botOf('main').reviewTrack = { planVerdictAt: 20 }
+  const main = rt.botOf('main')
+  main.reviewGuard = true
+  await rt.reviewRequest(main.id)
+  const exchangeId = 'fixture-task-plan'
+  const progress = main.reviewTrack.solver
+  progress.plan = { checks: ['fixture'], revision: progress.revision,
+    review: { exchangeId, reviewerId: main.reviewerId } }
+  await rt.reviewVerdict(main.reviewerId, main.id, undefined, 'PLAN SHIP', Date.now(),
+    { replyTo: exchangeId, reviewReceipt: `receipt-${exchangeId}` }, 'acp-codex/default')
+  assert.ok(Number.isFinite(planOpenAt(main, main.reviewTrack, { legacy: false })), 'the designated plan must be open before invoking the task APIs')
   for (const name of ['fixture_task_start', 'fixture_raw_task', 'fixture_task_agent']) {
     assert.match(await h.execute('main', {}, name), guard, name)
   }

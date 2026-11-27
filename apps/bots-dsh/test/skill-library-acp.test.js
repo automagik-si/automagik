@@ -53,7 +53,11 @@ test('Skills row 8: Antigravity OFF with exact eager proof admits only the Sessi
   install(rt)
   h.services.omniTeam = rt
   let nativeTools = false
-  h.service.botIdentity(id => rt.botOf(id) && { name: id, nativeTools, nativeToolsAgent: 'acp-antigravity' })
+  h.service.botIdentity((id, request) => {
+    if (rt.botOf(id) === undefined) return undefined
+    if (request?.policy) return { solverPolicy: { state: 'none' } }
+    return { name: id, nativeTools, nativeToolsAgent: 'acp-antigravity' }
+  })
   const tool = skillTool(rt)
   const unrelated = { name: 'other_fixture_tool' }
   const executions = []
@@ -228,9 +232,12 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
         ...(probeTurns && { FAKE_ACP_SKILLS_PROBE: JSON.stringify({ turns: probeTurns }) }) } }),
   }
   const bridge = new Backchannel({ ctx })
+  const managed = ['acp-antigravity', 'acp-omp'].includes(provider)
   const adapter = new AcpAdapter(ctx, new Map([[provider, row]]), {
     backchannel: bridge, dshTools: () => undefined,
-    teamManaged: () => ['acp-antigravity', 'acp-omp'].includes(provider),
+    teamManaged: () => managed,
+    ...(managed && { policyState: id => id === agent.id
+      ? { ok: true, identity: { solverPolicy: { state: 'none' } } } : { ok: false } }),
   })
   t.after(() => { adapter.dispose(); bridge.dispose(); rmSync(dir, { recursive: true, force: true }) })
   const run = async (messages, { record = [], reply } = {}) => {
@@ -326,16 +333,17 @@ test('2083 the Antigravity task uses its own OFF route and gives the existing av
   }
   install(rt)
   h.services.omniTeam = rt
-  const identity = []
-  h.service.botIdentity(id => {
-    identity.push(id)
+  const displayReads = []
+  h.service.botIdentity((id, request) => {
+    if (request?.policy) return id === chat.session.id ? { solverPolicy: { state: 'none' } } : undefined
+    displayReads.push(id)
     return id === 'owner-a' ? { nativeTools: true, nativeToolsAgent: 'acp-antigravity' } : undefined
   })
   h.services.tools = { definitions: () => [skillTool(rt)] }
   const result = await chat.turn(initial)
   assert.equal(result.at(-1).reason.kind, 'stop')
   const run = h.conversation('Antigravity worker route check')
-  assert.ok(identity.includes(chat.session.id))
+  assert.ok(displayReads.includes(chat.session.id))
   assert.deepEqual(run.args, AGY_OFF_ARGS)
   assert.equal(run.prompt, initial.content[0].text)
   assert.deepEqual(chat.session.deriveMessages().filter(row => row.source?.kind === SKILL_NOTICE)
