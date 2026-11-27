@@ -21,9 +21,17 @@ export const ROUTE = 'acp-fake'
 export const user = text => ({ id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
 export const answer = text => ({ role: 'assistant', source: { kind: 'model', provider: ROUTE, model: 'm' }, content: [{ type: 'text', text }] })
 
+// DSH's session store as these tests SIMULATE it: its flush reports that a persistence listener
+// saved the Session (SessionStore.flush resolving true), with no file behind it. Continuity
+// sends nothing without that answer (continuity.js writeSent); the real store and its JSONL file
+// are durable-dispatch.test.js's.
+export const simulatedFlush = async () => true
+
 // A Bot's own CLI home at a generation, and a connector build: what a real launch names
 // (agents.js launchOf, cli-homes.js environment). Without them a start binds nothing.
-export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }, account = () => 'account-a', startMs, flush, home = () => ({ AUTOMAGIK_BOT_CLI_HOME: join(dir, 'cli-home'), AUTOMAGIK_BOT_CLI_GENERATION: 'g1', AUTOMAGIK_BOT_CLI_VERSION: '' }), connector = () => ({ version: '1.0.0', key: `${FAKE} fake-cli 1.0.0` }) }) {
+// `flush` stands in for SessionStore.flush (default simulatedFlush); `store: null` gives no
+// session store at all.
+export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }, account = () => 'account-a', startMs, store, flush = simulatedFlush, home = () => ({ AUTOMAGIK_BOT_CLI_HOME: join(dir, 'cli-home'), AUTOMAGIK_BOT_CLI_GENERATION: 'g1', AUTOMAGIK_BOT_CLI_VERSION: '' }), connector = () => ({ version: '1.0.0', key: `${FAKE} fake-cli 1.0.0` }) }) {
   const trace = join(dir, 'fake.ndjson')
   const state = join(dir, 'native-state.json')
   const session = Session.create('s1', undefined, { version: 4, id: 's1', createdAt: 0, isSeeded: false, cwd: dir })
@@ -51,8 +59,8 @@ export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }
       return undefined
     },
     logger: { warn: line => logs.push(`warn: ${line}`), info: line => logs.push(line) },
-    // DSH's session store, when a test gives it a durability checkpoint (`flush`).
-    ...(flush === undefined ? {} : { sessions: { get: id => (id === 's1' ? session : undefined), flush: target => flush(target) } }),
+    // DSH's session store (simulated: `flush`), unless the test gives it none (`store: null`).
+    ...(store === null ? {} : { sessions: { get: id => (id === 's1' ? session : undefined), flush: target => flush(target) } }),
   }
   const logs = []
   const catalog = { models: async () => [{ id: 'default', name: 'Fake agent' }], model: async () => undefined, ownEffort: () => undefined, dispose() {} }
@@ -101,4 +109,3 @@ export async function withFixture(name, options, body) {
     rmSync(dir, { recursive: true, force: true })
   }
 }
-

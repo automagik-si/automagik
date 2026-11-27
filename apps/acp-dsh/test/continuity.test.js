@@ -260,15 +260,27 @@ test('an uncertain prompt of several rows is never sent again, across two crashe
   })
 })
 
-test('a sent record that cannot be saved sends nothing and leaves the record it found', async () => {
-  let failing = false
-  const flush = async () => { if (failing) throw new Error('disk full') }
+// SessionStore.flush rejects when a persistence listener failed and resolves false when none
+// took part (dsh-session flush); either way the record is not on disk, and nothing goes out.
+for (const [cause, fail, logged] of [
+  ['the store fails to write it', async () => { throw new Error('disk full') }, 'disk full'],
+  ['no store persists it (flush resolves false)', async () => false, 'no persistence listener'],
+  ['flush resolves nothing', async () => undefined, 'no persistence listener'],
+]) {
+  test(`a sent record that cannot be saved sends nothing and leaves the record it found: ${cause}`, async () => {
+    let failing = false
+    const flush = target => (failing ? fail(target) : Promise.resolve(true))
+    await unsaved(flush, () => { failing = true }, () => { failing = false }, logged)
+  })
+}
+
+async function unsaved(flush, fail, heal, logged) {
   await withFixture('unsaved', { env: { FAKE_ACP_RESUME: '1' }, flush }, async (h) => {
     await turn(h, 'native-remember m-9')
     const before = latestNative(h.session, ROUTE)
     assert.equal(before.state, 'idle')
     const prompts = of(h, 'prompt').length
-    failing = true
+    fail()
     const refused = await send(h, 'native-remember never-sent')
     assert.equal(refused.finish.reason.kind, 'error')
     assert.equal(refused.finish.reason.failure.code, 'acp_binding_unsaved')
@@ -276,15 +288,35 @@ test('a sent record that cannot be saved sends nothing and leaves the record it 
     const { v: _v, ...held } = latestNative(h.session, ROUTE)
     const { v: _w, ...was } = before
     assert.deepEqual(held, was, 'the record withdrawn: the chat says what it said before')
-    assert.ok(h.logs.some(line => line.includes('disk full')))
+    assert.ok(h.logs.some(line => line.includes(logged)), h.logs.join('\n'))
     // Saved again, the next prompt goes, and a restart takes the session back with no warning.
-    failing = false
+    heal()
     h.messages.pop()
     await turn(h, 'native-remember m-10')
     h.restart()
     const after = await turn(h, 'native-recall')
     assert.match(after.said, /m-9,m-10/)
     assert.equal(of(h, 'prompt').at(-1).text.includes('may have partly run'), false)
+  })
+}
+
+test('a qualified route with no session store sends no prompt at all', async () => {
+  await withFixture('no-store', { env: { FAKE_ACP_RESUME: '1' }, store: null }, async (h) => {
+    const refused = await send(h, 'native-remember never-sent')
+    assert.equal(refused.finish.reason.kind, 'error')
+    assert.equal(refused.finish.reason.failure.code, 'acp_binding_unsaved')
+    assert.equal(of(h, 'prompt').length, 0, 'no prompt went to the agent')
+    assert.equal(latestNative(h.session, ROUTE)?.state === 'sent', false, 'no sent record was left')
+    assert.ok(h.logs.some(line => line.includes('no session store')), h.logs.join('\n'))
+  })
+})
+
+test('a route that is not qualified needs no session store: its prompt goes and it binds nothing', async () => {
+  await withFixture('unqualified', { route: null, store: null }, async (h) => {
+    const sent = await turn(h, 'native-remember m-1')
+    assert.equal(sent.finish.reason.kind, 'stop')
+    assert.equal(of(h, 'prompt').length, 1)
+    assert.equal(h.session.snapshotEvents().some(event => event.type === NATIVE_RECORD), false)
   })
 })
 

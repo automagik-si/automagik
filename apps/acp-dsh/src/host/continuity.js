@@ -93,13 +93,18 @@ export function writeNative(session, data, warn) {
 }
 
 /**
- * Writes the 'sent' record and waits until it is durable (`flush`, DSH's session/flush), before
- * the prompt goes out. Throws when either fails: the caller then sends nothing, so a restart never
- * reads an older 'idle' record as the truth about a prompt the agent may have acted on.
+ * Writes the 'sent' record and waits until it is durable, before the prompt goes out. `flush` is
+ * DSH's SessionStore.flush for this Session: it resolves true only when a registered
+ * session/flush listener (the session store's persistence) took part and every listener settled,
+ * false when none did, and rejects when one failed. Throws unless it resolved true, so a missing
+ * store, a store with no persistence and a failed write all send nothing: a restart never reads
+ * an older 'idle' record as the truth about a prompt the agent may have acted on.
  */
 export async function writeSent(session, data, flush) {
+  if (typeof flush !== 'function') throw new Error('no session store to save it to (DSH gave no session/flush)')
   appendPluginRecord(session, NATIVE_RECORD, { v: BINDING_VERSION, ...data, state: 'sent' })
-  if (typeof flush === 'function') await flush()
+  const durable = await flush()
+  if (durable !== true) throw new Error('no session store saved it (session/flush had no persistence listener)')
 }
 
 const sameScope = (data, scope) => data?.provider === scope.provider && data?.nativeSessionId === scope.nativeSessionId

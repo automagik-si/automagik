@@ -90,7 +90,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { delimiter, dirname, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
@@ -114,6 +114,28 @@ const SKILLS_PROBE = JSON.parse(process.env.FAKE_ACP_SKILLS_PROBE ?? 'null')
 const trace = (entry) => {
   if (TRACE === undefined) return
   try { appendFileSync(TRACE, `${JSON.stringify({ pid: process.pid, ...entry })}\n`) } catch {}
+}
+// FAKE_ACP_DISK_PROBE=<folder>: at each prompt, before anything else, the 'sent' native-session
+// records the chat's session files under that folder hold right then (durable-dispatch.test.js),
+// so a test reads what was on disk when the prompt arrived, as the agent saw it.
+const DISK_PROBE = process.env.FAKE_ACP_DISK_PROBE
+const sentOnDisk = () => {
+  const found = []
+  const visit = (value) => {
+    if (value === null || typeof value !== 'object') return
+    if (value.state === 'sent' && typeof value.nativeSessionId === 'string') found.push({ nativeSessionId: value.nativeSessionId, ordinal: value.ordinal, run: value.run })
+    else for (const child of Object.values(value)) visit(child)
+  }
+  for (const name of readdirSync(DISK_PROBE, { recursive: true })) {
+    const file = join(DISK_PROBE, String(name))
+    let text
+    try { text = readFileSync(file, 'utf8') } catch { continue }
+    for (const line of text.split('\n')) {
+      if (!line.includes('plugin:acp-dsh/native-session')) continue
+      try { visit(JSON.parse(line)) } catch {}
+    }
+  }
+  return found
 }
 const MODES = (process.env.FAKE_ACP_MODES ?? '').split(',').filter(Boolean)
 const SESSION_MODELS = process.env.FAKE_ACP_SESSION_MODELS === '1'
@@ -579,7 +601,7 @@ const implementation = {
     const current = prompt.findLast(block => block.type === 'text' &&
       !block.text.startsWith('Your skills (load with load_skill):'))?.text ?? ''
     // What the client actually sent this turn (a replayed transcript, for a crossing).
-    trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
+    trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }), ...(DISK_PROBE && { sentOnDisk: sentOnDisk() }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
     keep(sessionId, session)
     // Native context only this session holds (continuity.test.js): never in DSH's transcript.
