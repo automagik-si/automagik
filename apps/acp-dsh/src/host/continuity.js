@@ -26,9 +26,16 @@ export const BINDING_VERSION = 1
 // is near the end; a chat whose last one is further back starts fresh.
 const LOOKBACK = 4000
 
-/** The parts a native session is bound to, each a string or null. */
+/**
+ * The digest of the parts a native session is bound to, or undefined when any part it needs is
+ * unknown (fails closed: an unknown account, CLI home, connector build or workspace is never
+ * "the same" as another unknown one, so such a start takes no native session and keeps none).
+ */
 export function bindingOf({ provider, dshSessionId, connector, home, account, cwd, identity, policy }) {
   const text = value => (value === undefined || value === null ? null : String(value))
+  for (const part of [provider, dshSessionId, connector, home, account, cwd, identity]) {
+    if (typeof part !== 'string' || part === '') return undefined
+  }
   return bindingDigest({
     v: String(BINDING_VERSION), provider: text(provider), dshSessionId: text(dshSessionId), connector: text(connector),
     home: text(home), account: text(account), cwd: text(cwd), identity: text(identity),
@@ -60,6 +67,7 @@ export function latestNative(session, provider) {
  */
 export function decide({ route, record, digest }) {
   if (route === undefined || !Array.isArray(route.methods) || route.methods.length === 0) return { skip: 'route-not-qualified' }
+  if (digest === undefined) return { skip: 'binding-unknown' }
   if (record === undefined) return { skip: 'no-binding' }
   if (record.v !== BINDING_VERSION || typeof record.nativeSessionId !== 'string' || record.nativeSessionId === '') return { skip: 'no-binding' }
   if (record.digest !== digest) return { skip: 'binding-changed' }

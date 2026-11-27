@@ -20,7 +20,8 @@ import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { PLAN_RECORD, USAGE_RECORD, bindingOf, decide, latestNative, writeNative } from './continuity.js'
 import { bindingDigest, planNoticeOf, todosOf, usageNoticeOf } from './features.js'
-import { HOME_ENV } from './cli-homes.js'
+import { HOME_ENV, VERSION_ENV } from './cli-homes.js'
+import { GENERATION_ENV } from './cli-generations.js'
 import { AGY_NOT_LOADED_TEXT, AGY_TOOLS_OFF_TEXT } from './agy-off.js'
 import { ACP_USAGE_LIMIT_CODES } from './usage-limit.js'
 import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
@@ -2450,9 +2451,14 @@ export class AcpAdapter extends LlmAdapter {
             // nothing it was bound to changed. Never across providers or for a skills relaunch.
             let accountKey
             try { accountKey = this.accountBinding?.(options.provider) } catch {}
+            // The connector is the build that runs (its version and what it runs, `key`, which
+            // names the CLI too); the home is the Bot's own CLI home at its generation. A launch
+            // that names neither (the terminal's own CLI) is unknown, and binds nothing.
+            const connector = typeof spec.key === 'string' ? `${spec.version ?? ''}\n${spec.key}` : undefined
+            const cliHome = typeof spec.env?.[HOME_ENV] === 'string' ? `${spec.env[HOME_ENV]}\n${spec.env[GENERATION_ENV] ?? ''}\n${spec.env[VERSION_ENV] ?? ''}` : undefined
             state.binding = bindingOf({
-              provider: options.provider, dshSessionId: sessionId, connector: launch?.version ?? spec.command,
-              home: spec.env?.[HOME_ENV] ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME, account: accountKey,
+              provider: options.provider, dshSessionId: sessionId, connector,
+              home: cliHome, account: accountKey,
               cwd: dshAgent?.session?.header?.cwd, identity: bindingDigest({ text: String(text ?? ''), role: String(role.digest ?? '') }),
               policy: { bridged, native: state.native === true, nativeOff: nativeOff ?? null, asks: spawnRules.key, twinsOff: twinsOff === true, only: [...(only ?? [])].sort(), meta: agySkills ? 'agy-skills' : null },
             })
@@ -2469,7 +2475,7 @@ export class AcpAdapter extends LlmAdapter {
               ...(reattach.sessionId === undefined ? {} : { continuity: { sessionId: reattach.sessionId, methods: reattach.methods } }),
               onUnreadPlan: update => this.warn(`${agent.name} sent a plan this app does not read (${String(update?.plan?.type ?? update?.sessionUpdate).slice(0, 40)}); it is not shown`),
               onPromptSettled: (ordinal, settled) => {
-                if (state.run !== run || !settled || agent.continuity === undefined) return
+                if (state.run !== run || !settled || agent.continuity === undefined || state.binding === undefined) return
                 writeNative(dshAgent?.session, { provider: options.provider, nativeSessionId: run.sessionId, digest: state.binding, state: 'idle', ordinal }, message => this.warn(message))
               },
               provider: options.provider,
@@ -3172,7 +3178,7 @@ export class AcpAdapter extends LlmAdapter {
       live.skillCatalog = catalog?.text ? catalog.key : undefined
       // Written before the prompt is: from here a restart cannot tell whether the agent acted.
       // Only a route that can take its session back keeps a binding in the chat.
-      if (agent.continuity !== undefined) writeNative(session, { provider: options.provider, nativeSessionId: live.run.sessionId, digest: live.binding, state: 'sent', ordinal: live.run.prompts + 1 }, message => this.warn(message))
+      if (agent.continuity !== undefined && live.binding !== undefined) writeNative(session, { provider: options.provider, nativeSessionId: live.run.sessionId, digest: live.binding, state: 'sent', ordinal: live.run.prompts + 1 }, message => this.warn(message))
       const review = teamService(this.ctx)
       const rows = promptRows(current).rows
       const verified = new Set(uploads?.reviews.size ? prompt.filter(block => block.type === 'image')

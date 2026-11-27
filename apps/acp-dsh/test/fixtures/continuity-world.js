@@ -19,10 +19,12 @@ export const ROUTE = 'acp-fake'
 export const user = text => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
 export const answer = text => ({ role: 'assistant', source: { kind: 'model', provider: ROUTE, model: 'm' }, content: [{ type: 'text', text }] })
 
-export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }, account = () => 'account-a', startMs }) {
+// A Bot's own CLI home at a generation, and a connector build: what a real launch names
+// (agents.js launchOf, cli-homes.js environment). Without them a start binds nothing.
+export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }, account = () => 'account-a', startMs, home = () => ({ AUTOMAGIK_BOT_CLI_HOME: join(dir, 'cli-home'), AUTOMAGIK_BOT_CLI_GENERATION: 'g1', AUTOMAGIK_BOT_CLI_VERSION: '' }), connector = () => ({ version: '1.0.0', key: `${FAKE} fake-cli 1.0.0` }) }) {
   const trace = join(dir, 'fake.ndjson')
   const state = join(dir, 'native-state.json')
-  const session = Session.create('s1')
+  const session = Session.create('s1', undefined, { version: 4, id: 's1', createdAt: 0, isSeeded: false, cwd: dir })
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 0 })
   const agent = { session, ctx: { tools: { register: () => () => {} } } }
@@ -52,7 +54,7 @@ export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }
   const catalog = { models: async () => [{ id: 'default', name: 'Fake agent' }], model: async () => undefined, ownEffort: () => undefined, dispose() {} }
   const spec = {
     name: 'Fake agent', catalog, installed: () => true, disableBuiltInTools: true,
-    spawn: () => ({ command: process.execPath, args: [FAKE], env: { FAKE_ACP_TRACE: trace, FAKE_ACP_STATE: state, ...env } }),
+    spawn: () => ({ command: process.execPath, args: [FAKE], ...connector(), env: { FAKE_ACP_TRACE: trace, FAKE_ACP_STATE: state, ...home(), ...env } }),
     ...(route === null ? {} : { continuity: route }),
     ...(startMs === undefined ? {} : { startMs }),
   }

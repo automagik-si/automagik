@@ -312,6 +312,11 @@ export function apply(ctx, config = {}, {
     onSignedOut: id => signedOut(id),
     access: id => consentGate(id),
     currentAccess: id => currentAccountRefusal(id),
+    // What a native session is bound to for its account (continuity.js): only a signed-in vendor
+    // whose account the person confirmed (or that was carried) has one. Any other state (signed
+    // out, not read yet, another account waiting for its confirmation) binds nothing.
+    accountBinding: id => (signIns.get(id) === true && currentAccountRefusal(id) === undefined
+      && (consentStates.get(id) === 'given' || consentStates.get(id) === 'carried') ? consents?.accountKey(id) : undefined),
   })
   // What acted on each Session's permissions (permission-diagnostics.js): it only records.
   const diagnostics = new PermissionDiagnostics()

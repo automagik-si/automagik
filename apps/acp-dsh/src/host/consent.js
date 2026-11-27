@@ -240,6 +240,20 @@ export class ConsentStore {
     this.save()
   }
 
+  /**
+   * What a native session is bound to for this vendor's account (continuity.js): a digest of the
+   * account the person confirmed (or that was carried), or undefined when there is no word for
+   * an account that names itself. Never the account's facets: only their digests, digested again.
+   */
+  accountKey(id) {
+    if (!this.ids.includes(id)) return undefined
+    this.sync()
+    const record = this.vendors[id]
+    if (!STATES.has(record?.consent) || record.account === undefined || Object.keys(record.account).length === 0) return undefined
+    const facets = Object.keys(record.account).sort().map(facet => [facet, record.account[facet]])
+    return createHmac('sha256', this.key).update(`account\n${JSON.stringify(facets)}`).digest('base64url')
+  }
+
   /** A fresh home generation has no inherited word for the previous Bot account. */
   forget(id) {
     if (!this.ids.includes(id)) return

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { rmSync } from 'node:fs'
 import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
-import { NATIVE_RECORD, decide, latestNative } from '../src/host/continuity.js'
+import { NATIVE_RECORD, bindingOf, decide, latestNative } from '../src/host/continuity.js'
 import { ROUTE, answer, of, synthetic, turn, user, withFixture } from './fixtures/continuity-world.js'
 
 for (const how of ['resume', 'load']) {
@@ -115,6 +115,46 @@ test('a changed account, a changed Bot policy or an old chat with no binding sta
     assert.ok(h.logs.some(line => line.includes('(no-binding)')))
     assert.ok(replayed(h))
   })
+})
+
+test('an unknown account, a terminal CLI with no Bot home, or a launch naming no build binds nothing', async () => {
+  // Each fails closed: no native-session record is written, and the next start is fresh.
+  for (const [name, options] of [
+    ['no-account', { account: () => undefined }],
+    ['terminal-cli', { home: () => ({}) }],
+    ['no-build', { connector: () => ({}) }],
+  ]) {
+    await withFixture(name, { env: { FAKE_ACP_RESUME: '1' }, ...options }, async (h) => {
+      await turn(h, 'native-remember m-9')
+      assert.equal(h.session.snapshotEvents(0).some(event => event.type === 'plugin:acp-dsh/native-session'), false, name)
+      h.restart()
+      const after = await turn(h, 'native-recall')
+      assert.match(after.said, /nothing/, name)
+      assert.equal(of(h, 'resume-session').length, 0, name)
+      assert.ok(h.logs.some(line => line.includes('(binding-unknown)')), name)
+    })
+  }
+  assert.equal(bindingOf({ provider: 'p', dshSessionId: 's', connector: 'c', home: 'h', account: undefined, cwd: '/w', identity: 'i' }), undefined)
+})
+
+test('a new CLI home generation (a Reset or another sign-in) or another connector build starts fresh', async () => {
+  for (const [name, change] of [['generation', 'home'], ['build', 'connector']]) {
+    let generation = 'g1'
+    let version = '1.0.0'
+    await withFixture(name, {
+      env: { FAKE_ACP_RESUME: '1' },
+      home: () => ({ AUTOMAGIK_BOT_CLI_HOME: '/bot-home', AUTOMAGIK_BOT_CLI_GENERATION: generation, AUTOMAGIK_BOT_CLI_VERSION: '' }),
+      connector: () => ({ version, key: `fake ${version}` }),
+    }, async (h) => {
+      await turn(h, 'native-remember m-10')
+      if (change === 'home') generation = 'g2'
+      else version = '1.0.1'
+      h.restart()
+      const after = await turn(h, 'native-recall')
+      assert.match(after.said, /nothing/, name)
+      assert.ok(h.logs.some(line => line.includes('(binding-changed)')), name)
+    })
+  }
 })
 
 test('a stale native id is refused by the agent: a new session on the same process, with the chat replayed', async () => {
