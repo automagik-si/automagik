@@ -2563,6 +2563,8 @@ export function apply(ctx, config = {}, {
     },
     /** Whether a Session is busy on a prompt in its own mode. */
     ownModeIn: sessionId => adapter.ownModeIn(sessionId),
+    /** Prompt image support from the matching live run's initialize, or undefined while unknown. */
+    promptImageCapability: (sessionId, provider) => adapter.promptImageCapability(sessionId, provider),
     /**
      * A veto on agent turns, for a plugin that must keep an agent from acting in a Session (the
      * Bot team: a Session whose permission level could not be set). `gate({ sessionId, agent,

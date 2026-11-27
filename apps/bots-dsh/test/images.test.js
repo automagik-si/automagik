@@ -7,6 +7,24 @@ import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { install as imagesInstall, offloadTargets } from '../src/host/images.js'
 import { assembleLlmStream } from '../src/host/models.js'
 
+test('2133 Test 9 image credit requires explicitly declared image input', async () => {
+  const models = { unknown: {}, text: { inputModalities: ['text'] }, image: { inputModalities: ['text', 'image'] } }
+  const rt = {
+    ctx: { on() {}, llm: { resolveModelInfo(_provider, model) {
+      if (!models[model]) throw new Error('fake lookup error')
+      return models[model]
+    } } },
+    home: '/unused', config: { textOnlyModels: ['blocked/image'] },
+  }
+  imagesInstall(rt)
+  assert.equal(typeof rt.readsImagesStrict, 'function')
+  assert.deepEqual(await Promise.all([
+    rt.readsImagesStrict('test', 'unknown'), rt.readsImagesStrict('test', 'text'),
+    rt.readsImagesStrict('test', 'lookup error'), rt.readsImagesStrict('test', 'image'),
+    rt.readsImagesStrict('blocked', 'image'),
+  ]), [false, false, false, true, false])
+})
+
 test('offloadTargets selects live images from prior user and tool messages', () => {
   const events = [
     { type: 'user/message' },

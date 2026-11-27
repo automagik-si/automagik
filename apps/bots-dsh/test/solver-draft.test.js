@@ -5,11 +5,21 @@ import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from '../sr
 import { createPayload } from '../src/client/bot-draft.js'
 import {
   SOLVER_LOOKS, avatarOfLook, createSolver, mayHaveBeenCreated, newBotBlock, reviewerChoices, reviewerName, reviewerPayload,
-  reviewMarkText, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
+  reviewMarkText, solverAutoView, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
   guardLevelOf, reviewGuardText, reviewGuardView,
 } from '../src/client/solver-draft.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../src/shared/review-guard.js'
 import { REVIEWER_INSTRUCTIONS } from '../src/shared/solver-method.js'
+
+test('2133 Test 10 Details reports why a visual RESULT was unverified', () => {
+  const bot = { role: 'Solver', solverStatus: { unverified: 'images' } }
+  const line = () => solverAutoView(bot, {}, 'ask').lines[0]
+  assert.equal(line(), 'RESULT review unverified. The result has pictures and the reviewer could not see them.')
+  bot.solverStatus.imagesWhy = 'lost'
+  assert.match(line(), /answering turn lost the result pictures/)
+  bot.solverStatus.imagesWhy = 'missing'
+  assert.match(line(), /result pictures were not all carried/)
+})
 
 const CLAUDE = 'acp-claude/default'
 const CODEX = 'acp-codex/gpt-5.6'

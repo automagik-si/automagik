@@ -2,7 +2,7 @@
 // triggered, the waiters and inboxes of group rounds, and routing a finished turn's reply.
 //
 // Turn tracking: which turns were triggered by another Bot, and what they said.
-import { originalReviewContent } from '../shared/solver-model.js'
+import { chosenIdentity, originalReviewContent } from '../shared/solver-model.js'
 import { requestedSkills } from './skill-library-call.js'
 import { chatPersonParts, personParts } from './skill-message.js'
 import { randomUUID } from 'node:crypto'
@@ -140,7 +140,7 @@ function sendAnswer(rt, id, source, text, long, shouldSend, model, review, solve
   // The verdict uses the selected reviewer's own reply. Notices and child results
   // still travel with the answer and receipt, without supplying verdict evidence.
   const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, review?.reviewText,
-    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine, solverEvents, review?.legacyHeld)
+    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine, solverEvents, review?.legacyHeld, review?.generation)
   const durableResult = onReplyRecorded?.ready !== undefined
   if (durableResult) closingReviews.add(answered)
   const generation = rt.teamGeneration?.()
@@ -990,6 +990,7 @@ export function install(rt) {
         entry.texts = []
         entry.rawTexts = []
         entry.textModels = []
+        entry.textGenerations = []
         entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
@@ -1022,6 +1023,7 @@ export function install(rt) {
           entry.texts = carry.texts
           entry.rawTexts = carry.rawTexts
           entry.textModels = carry.textModels
+          entry.textGenerations = carry.textGenerations
           entry.firstLine = carry.firstLine
           entry.shown = carry.shown
           entry.answers = carry.answers
@@ -1286,7 +1288,8 @@ export function install(rt) {
         }
         break
       case 'assistant/message': {
-        const content = event.data?.message?.content
+        const generation = rt.generationForReply?.(session, event)
+        const { source, content } = event.data?.message ?? {}
         const raw = rawTextOf(content)
         const text = raw.trim()
         const called = Array.isArray(content) && content.some(block => block?.type === 'tool-call')
@@ -1296,7 +1299,9 @@ export function install(rt) {
           entry.texts.push(absoluteLinks(text, rt.sessionFolder?.(session)))
           entry.rawTexts.push(raw)
           entry.textModels ??= []
-          entry.textModels.push(modelOf(session))
+          entry.textModels.push(source?.kind === 'model' ? chosenIdentity(source.provider, source.model) : modelOf(session))
+          entry.textGenerations ??= []
+          entry.textGenerations.push(generation)
           if (entry.turn !== undefined) showSteps(id, entry, called ? entry.texts.length : entry.texts.length - 1)
         }
         entry.lastText = text
@@ -1320,7 +1325,8 @@ export function install(rt) {
         const noteTurn = rt.handoffNoteTurn?.(id, entry.turn ?? event.data?.turn) === true
         if (steerCut) {
           entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0,
-            rawTexts: entry.rawTexts.slice(0, cut.texts), textModels: entry.textModels?.slice(0, cut.texts) ?? [], firstLine: cut.texts > 0 ? entry.firstLine : undefined }
+            rawTexts: entry.rawTexts.slice(0, cut.texts), textModels: entry.textModels?.slice(0, cut.texts) ?? [],
+            textGenerations: entry.textGenerations?.slice(0, cut.texts) ?? [], firstLine: cut.texts > 0 ? entry.firstLine : undefined }
         }
         const info = entry.info
         const joined = entry.joined ?? []
@@ -1334,6 +1340,7 @@ export function install(rt) {
         // Exact stage verdicts use the reviewer's own first line, before reply formatting.
         const reviewFirstLine = entry.shown === 0 ? entry.firstLine ?? '' : ''
         const textModels = entry.textModels?.slice(entry.shown) ?? []
+        const textGenerations = entry.textGenerations?.slice(entry.shown) ?? []
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
         // A turn stopped for a switch goes on in the next part, which answers instead.
@@ -1351,6 +1358,7 @@ export function install(rt) {
         entry.texts = []
         entry.rawTexts = []
         entry.textModels = []
+        entry.textGenerations = []
         entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
@@ -1436,6 +1444,7 @@ export function install(rt) {
         const model = reason?.kind === 'completed' ? modelOf(session) : undefined
         const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
         const answerModel = reason?.kind === 'completed' ? replyModel(rawTexts, textModels, reviewFirstLine, name) : undefined
+        const generation = reason?.kind === 'completed' ? replyModel(rawTexts, textGenerations, reviewFirstLine, name) : undefined
         if (owner !== undefined && !retry) {
           const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
           const mark = request => rt.reviewTurnEnd?.(owner, {
@@ -1464,7 +1473,7 @@ export function install(rt) {
           return reply
         }
         const reply = { text: replyText(), reviewText: rawTexts.join('\n\n'),
-          firstLine: reviewFirstLine, model: answerModel }
+          firstLine: reviewFirstLine, model: answerModel, generation }
         const groupReply = () => rt.withRoomSteps?.(held, reply.text) ?? reply.text
         // Whoever the turn answers gets the same three-way rule: a failure notice,
         // the turn's text (or a stopped-before-answer line), or nothing.

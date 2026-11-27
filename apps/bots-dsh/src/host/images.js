@@ -55,6 +55,39 @@ export function install(rt) {
     }
   }
 
+  async function readsImagesStrict(provider, model) {
+    if (textOnlyModels.has(`${provider}/${model}`)) return false
+    try {
+      return (await ctx.llm.resolveModelInfo(provider, model)).inputModalities?.includes('image') === true
+    } catch {
+      return false
+    }
+  }
+
+  const tracksNativeReview = options => isAgentLoopRequest(options) && !options.provider?.startsWith('acp-')
+    && typeof rt.beginReviewGeneration === 'function'
+  async function* reviewStream(options, next) {
+    const attempt = rt.reviewAttempt?.(options.sessionId)
+    const capable = options.messages.some(message => message.source?.resultReview?.v === 1 && liveImages(message))
+      && await readsImagesStrict(options.provider, options.model)
+    const generation = rt.beginReviewGeneration({
+      sessionId: options.sessionId, messages: options.messages, provider: options.provider, model: options.model,
+      nativeIds: (row, carried) => capable && Array.isArray(row.content) ? row.content
+        .filter(block => block?.type === 'image' && !block.offloaded && carried.includes(block.attachment?.attachmentId))
+        .map(block => block.attachment.attachmentId) : [],
+    })
+    let ok = false
+    try {
+      for await (const chunk of next()) {
+        if (chunk.type === 'finish') ok = !['error', 'aborted'].includes(chunk.reason?.kind)
+        yield chunk
+      }
+    } finally {
+      const completed = ok && !options.signal?.aborted
+      rt.reviewGenerationOutput(generation, { confirmed: completed, completed, attempt })
+    }
+  }
+
   // The configured `ocrModel` first, then served models that declare image input, the
   // DSH default among them first. A provider with no key set is skipped.
   async function ocrRoute(sessionId) {
@@ -197,8 +230,10 @@ export function install(rt) {
       : message))
   }
 
-  ctx.on('llm/stream', (options, next) => {
-    if (options.sessionId === undefined || rt.ownRequest(options) || !(options.messages ?? []).some(message => Array.isArray(message?.content) && message.content.some(block => block?.type === 'image'))) return next()
+  ctx.on('llm/stream', function resultPictureStream(options, next) {
+    if (options.sessionId === undefined || rt.ownRequest(options)) return next()
+    const stream = tracksNativeReview(options) ? () => reviewStream(options, next) : next
+    if (!(options.messages ?? []).some(message => Array.isArray(message?.content) && message.content.some(block => block?.type === 'image'))) return stream()
     return (async function* imagesAsTextOrPass() {
       await rt.load()
       let messages = options.messages
@@ -215,7 +250,7 @@ export function install(rt) {
       }
       const textOnly = rt.roomOf(options.sessionId) === undefined && !(await readsImages(options.provider, options.model))
       if ((!textOnly || !messages.some(liveImages)) && messages === options.messages) {
-        yield* next()
+        yield* stream()
         return
       }
       // `next` cannot take new messages, so the rewritten request starts over; it
@@ -247,5 +282,5 @@ export function install(rt) {
     })
   })
 
-  Object.assign(rt, { imagesForGroup })
+  Object.assign(rt, { imagesForGroup, readsImagesStrict })
 }

@@ -4093,6 +4093,9 @@ var ZH2 = {
   "RESULT review unverified. {reason}": "结果审阅未通过验证。{reason}",
   "The reviewer’s effective model could not be verified.": "无法验证审阅者实际使用的模型。",
   "The reviewer used the same model as the Solver.": "审阅者使用了与 Solver 相同的模型。",
+  "The result has pictures and the reviewer could not see them.": "结果包含图片，审阅者无法查看。",
+  "The reviewer’s answering turn lost the result pictures. Ask for a fresh RESULT review with the pictures.": "审阅者在回复时丢失了结果图片。请附上图片重新请求结果审阅。",
+  "The result pictures were not all carried. Ask for a fresh RESULT review with the pictures.": "结果图片未全部发送。请附上图片重新请求结果审阅。",
   "The reviewer did not give a strict verdict.": "审阅者未按要求给出明确结论。",
   "the Solver reached an attempt limit and is waiting for your answer": "Solver 已达到尝试上限，正在等待你的答复"
 };
@@ -34389,13 +34392,20 @@ var RESULT_UNVERIFIED = Object.freeze({
   model: MODEL_UNVERIFIED,
   held: MODEL_UNVERIFIED,
   same: "The reviewer used the same model as the Solver.",
-  verdict: "The reviewer did not give a strict verdict."
+  verdict: "The reviewer did not give a strict verdict.",
+  images: "The result has pictures and the reviewer could not see them."
 });
 var unverifiedReason = (reason) => typeof reason === "string" && Object.hasOwn(RESULT_UNVERIFIED, reason) ? reason : void 0;
-var unverifiedNotice = (reason) => unverifiedReason(reason) ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.` + (reason === "held" ? " Ask the designated reviewer once more on the same checked work.]" : "]") : void 0;
+var RESULT_IMAGES_UNVERIFIED = Object.freeze({
+  unseen: RESULT_UNVERIFIED.images,
+  lost: "The reviewer’s answering turn lost the result pictures. Ask for a fresh RESULT review with the pictures.",
+  missing: "The result pictures were not all carried. Ask for a fresh RESULT review with the pictures."
+});
+var unverifiedText = (reason, imagesWhy) => reason === "images" && Object.hasOwn(RESULT_IMAGES_UNVERIFIED, imagesWhy) ? RESULT_IMAGES_UNVERIFIED[imagesWhy] : RESULT_UNVERIFIED[reason];
+var unverifiedNotice = (reason, imagesWhy) => unverifiedReason(reason) ? `[Automagik: RESULT review is unverified. ${unverifiedText(reason, imagesWhy)} Keep this request unmarked Done.` + (reason === "held" ? " Ask the designated reviewer once more on the same checked work.]" : "]") : void 0;
 function originalReviewContent(message) {
   const { content, source } = message;
-  const notice = unverifiedNotice(source?.reviewFeedback);
+  const notice = unverifiedNotice(source?.reviewFeedback, source?.reviewImagesWhy);
   const tail = content?.at(-1);
   return notice && tail?.type === "text" && tail.text === notice ? content.slice(0, -1) : content;
 }
@@ -34533,7 +34543,7 @@ function solverAutoView(bot, roster, level) {
   const request = bot.solverStatus?.auto;
   const reason = unverifiedReason(bot.solverStatus?.unverified);
   const lines = [
-    ...reason ? [t("RESULT review unverified. {reason}", { reason: t(RESULT_UNVERIFIED[reason]) })] : [],
+    ...reason ? [t("RESULT review unverified. {reason}", { reason: t(unverifiedText(reason, bot.solverStatus?.imagesWhy)) })] : [],
     ...typeof request === "boolean" ? [request ? t("Auto is on for this request.") : t("This request follows the saved Auto setting.")] : [],
     ...limit ? [limit.kind === "fix" ? t("Waiting for your answer after the attempt limit for {check}.", { check: limit.check }) : t("Waiting for your answer after the re-plan limit.")] : [],
     solverAutoHint(bot, level)

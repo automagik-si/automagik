@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { link, lstat, mkdir, mkdtemp, realpath, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import LocalAttachmentStore, { prepareImageFile } from '@deepseek-ai/dsh-attachment-local'
 import { install as uploads } from '../src/host/shared-uploads.js'
 import { install as tools } from '../src/host/tools.js'
 import { install as delivery } from '../src/host/delivery.js'
@@ -11,10 +15,13 @@ import { install as requests } from '../src/host/requests.js'
 import { install as privacy } from '../src/host/private-bots.js'
 import { install as imagegen } from '../src/host/imagegen.js'
 import { install as turns } from '../src/host/turns.js'
+import { install as folders, teamHomeOf } from '../src/host/folders.js'
 import { fakeApproval } from './fake-ctx.js'
 import { createEditInput } from '../src/host/image-input.js'
+import { install as reviewMark } from '../src/host/review-mark.js'
+import { resultSnapshot } from '../src/host/solver-progress.js'
 
-async function fixture(t, { withTools = true } = {}) {
+async function fixture(t, { withTools = true, standalone = false } = {}) {
   const folder = await mkdtemp(join(tmpdir(), 'upload-access-'))
   t.after(() => rm(folder, { recursive: true, force: true }))
   const bots = Object.fromEntries(['a', 'b', 'test-private-bot', 'outside'].map(id => [id, { id, sessionId: id, name: `the test Bot ${id}`, createdAt: 1, ...(id === 'test-private-bot' ? { private: true, workDir: join(folder, 'private') } : {}) }]))
@@ -27,6 +34,18 @@ async function fixture(t, { withTools = true } = {}) {
   const refFor = (bytes, name) => ({ attachmentId: `sha256:${createHash('sha256').update(bytes).digest('hex')}`, bytes: bytes.length, mediaType: 'image/png', width: 1, height: 1, name })
   const ref = refFor(data, 'picture.png'), other = refFor(second, 'other.png')
   const bytes = new Map([[ref.attachmentId, data], [other.attachmentId, second]])
+  const saves = []
+  const attachments = {
+    async readImage(typed) { assert.equal(typed.name, undefined); return { ref: typed, data: bytes.get(typed.attachmentId) } },
+    async saveImage(image) {
+      const ref = refFor(image.data, image.name)
+      assert.equal(image.mediaType, ref.mediaType)
+      bytes.set(ref.attachmentId, image.data)
+      saves.push(ref)
+      return ref
+    },
+    imageHostPath: ref => storePath(ref),
+  }
   const storePath = ref => join(folder, 'store/objects', ref.attachmentId.slice(7, 9), ref.attachmentId.slice(7))
   const append = (id, row) => { const all = histories.get(id) ?? []; all.push(row); histories.set(id, all) }
   const agentOf = id => {
@@ -50,7 +69,7 @@ async function fixture(t, { withTools = true } = {}) {
     tools: { guard() {}, schemas: () => [] }, sessions: { flush: async () => {} },
     sessionController: { resolveAgent: async id => ({ agent: agentOf(id) }) },
     get: name => ({
-      attachments: { readImage: async typed => { assert.equal(typed.name, undefined); return { ref: typed, data: bytes.get(typed.attachmentId) } }, imageHostPath: storePath },
+      attachments,
       fs: { processPathFromHostPath: path => path },
       credentials: { readRecord: async () => undefined, resolve: async () => undefined },
       acpAgents: { imageAccess: async () => ({ ready: true }), generateImage: () => assert.fail('no draw'), editImage: async () => { edits++; return { base64: data.toString('base64') } } },
@@ -67,7 +86,8 @@ async function fixture(t, { withTools = true } = {}) {
       rest.unshift(basename(at))
     }
   }
-  const rt = { ctx, state, home: join(folder, 'home'), dshHome: join(folder, 'dsh'), statePath: join(folder, 'state.json'), teamTools: [], live: new Map(), groupOwners: owners,
+  const home = standalone ? teamHomeOf({ AUTOMAGIK_HOME: join(folder, '.automagik') }) : join(folder, 'home')
+  const rt = { ctx, state, home, dshHome: join(folder, 'dsh'), statePath: join(folder, 'state.json'), teamTools: [], live: new Map(), groupOwners: owners,
     botOf: id => bots[id], selfOf: id => bots[id]?.id ?? owners.get(id)?.botId,
     botOfSession: id => bots[id] ?? bots[owners.get(id)?.botId], chatOf: id => bots[id]?.sessionId,
     roomOf: id => rooms[id], findBot: name => Object.values(bots).find(bot => bot.name === name),
@@ -77,7 +97,10 @@ async function fixture(t, { withTools = true } = {}) {
     own: (value, key) => Object.hasOwn(value, key) ? value[key] : undefined,
     load: async () => {}, save: async () => {}, readOnly: () => undefined, warn() {},
     partsOf: id => typeof id === 'string' && bots[id] ? [{ sessionId: id }] : [],
-    async *eventsBackwards(id) { for (const row of [...histories.get(id) ?? []].reverse()) yield { type: 'user/message', data: row } },
+    async *eventsBackwards(id, _signal, _pages, exhausted) {
+      for (const row of [...histories.get(id) ?? []].reverse()) yield { type: 'user/message', data: row }
+      exhausted?.()
+    },
     ledger: { importer() {}, records: key => books.get(key) ?? [], append(key, row) { books.set(key, [...books.get(key) ?? [], row]) }, written: async () => {} },
     ensureCapabilities: async () => {}, statusOf: () => 'idle', workOf: () => undefined, upstreamOf: () => new Set(),
     sameWork: () => true, openWork: (...args) => opened.push(args), ownsWork: () => false, activeSessions: () => ({ running: [] }),
@@ -96,8 +119,645 @@ async function fixture(t, { withTools = true } = {}) {
   const rows = id => (histories.get(id) ?? []).map(row => ({ ...row, role: 'user' }))
   const person = (id, ref) => append(id, { source: { kind: 'user' }, content: [{ type: 'image', attachment: ref }] })
   const show = id => rt.sharedUploads.withPaths(rows(id), id, 'native')
-  return { rt, bots, ref, other, folder, books, approval, opened, person, show, rows, guard, call, agentOf, append, storePath, edits: () => edits }
+  return { rt, bots, ref, other, folder, books, approval, opened, person, show, rows, guard, call, agentOf, append, storePath,
+    saves, data, bytes, edits: () => edits }
 }
+
+async function resultFixture(t, { solver = 'a', rootParts = ['result'], normalization, standalone = false, mountedLookup = false } = {}) {
+  const f = await fixture(t, { standalone })
+  f.data = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4AWOUs4n6b8NwhAEADDUCtSU1IikAAAAASUVORK5CYII=',
+    'base64',
+  )
+  const bot = f.bots[solver]
+  bot.role = 'Solver'
+  bot.reviewerId = 'b'
+  let workspace
+  if (standalone) {
+    const path = join(f.rt.home, 'workspace')
+    workspace = { id: 'registered-workspace', path }
+    f.rt.config = { workspace: path }
+    f.rt.state.workspaceId = workspace.id
+    f.rt.ctx.workspaceRegistry = new Map([[workspace.id, workspace]])
+    folders(f.rt)
+  }
+  const root = bot.workDir ?? join(workspace?.path ?? f.folder, ...rootParts)
+  await mkdir(root, { recursive: true })
+  if (root !== workspace?.path) bot.workDir = root
+  const findBot = f.rt.findBot
+  f.rt.findBot = ref => f.bots[ref] ?? findBot(ref)
+  f.rt.ownChatLineage = (id, _agent, member) => id === member.id
+  f.rt.resolveAgent = async id => f.agentOf(id)
+  f.agentOf(solver).session.requestHeader = () => ({ config: { provider: 'test', model: 'solver' } })
+  f.rt.saveCopy = async (apply, write) => {
+    const draft = structuredClone(f.rt.state)
+    apply(draft)
+    write.beforeCommit()
+    write.afterWrite()
+  }
+  f.rt.readsImagesStrict = async () => true
+  f.rt.dropWork = exchange => { delete f.rt.state.works[exchange] }
+  const storeCtx = new Context()
+  t.after(() => storeCtx.fiber.dispose())
+  const mountStore = async (dshHome, policy) => {
+    const fiber = storeCtx.plugin(LocalAttachmentStore, { dshHome, ...policy })
+    await fiber
+    return { fiber, store: storeCtx.get('attachments') }
+  }
+  const first = await mountStore(f.rt.dshHome, normalization)
+  const get = f.rt.ctx.get
+  function recordStore(store) {
+    const readImage = store.readImage.bind(store)
+    const saveImage = store.saveImage.bind(store)
+    store.readImage = (ref, signal) => f.bytes.has(ref.attachmentId) ? get('attachments').readImage(ref) : readImage(ref, signal)
+    store.saveImage = async input => {
+      const ref = await saveImage(input)
+      f.bytes.set(ref.attachmentId, Buffer.from((await readImage(ref)).data))
+      f.saves.push(ref)
+      return ref
+    }
+  }
+  recordStore(first.store)
+  f.rt.ctx.get = name => name === 'attachments' ? (mountedLookup ? storeCtx.get(name) : first.store) : get(name)
+  const replaceStore = async () => {
+    await first.fiber.dispose()
+    const replacement = await mountStore(join(f.folder, 'replacement-store'), normalization)
+    recordStore(replacement.store)
+  }
+  reviewMark(f.rt)
+  f.rt.reviewCreated(bot, 'Check this result')
+  const request = bot.reviewTrack.solver.request
+  const markPassed = () => Object.assign(bot.reviewTrack.solver, {
+    plan: { revision: 0, accepted: true, checks: ['check'] }, passed: ['check'], passRuns: { check: 'run' },
+    snapshot: resultSnapshot(root),
+  })
+  const send = (images, signal) => f.call(solver, 'message_bot', {
+    to: 'b', message: 'Review the result.', solver_review: 'result', solver_request: request, images,
+  }, signal)
+  return { ...f, bot, root, markPassed, send, replaceStore }
+}
+
+async function observeResultRead(t, f, { portable = true, change, target = join(f.root, 'sub', 'visual.png') } = {}) {
+  const stat = fs.lstatSync, fstat = fs.fstatSync, open = fs.openSync, read = fs.readSync
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  const file = join(f.root, 'sub', 'visual.png')
+  const dir = dirname(file)
+  const opened = []
+  const handles = new Set()
+  let reads = 0, heads = 0, linkChecks = 0, readerLinkChecks = 0, secondStats = 0
+  const identity = stat(target, { bigint: true })
+  const different = (sample, overrides) => Object.assign(Object.create(sample), overrides)
+  const mocks = []
+  if (portable) {
+    // Load the host's raster decoder before selecting the portable filesystem branch.
+    const { imageLimits, normalizationPolicy } = f.rt.ctx.get('attachments')
+    await prepareImageFile({ data: f.data, mediaType: 'image/png' }, imageLimits, normalizationPolicy)
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
+  }
+  mocks.push(t.mock.method(fs, 'openSync', (path, ...args) => {
+    const fd = open(path, ...args)
+    const sample = fstat(fd, { bigint: true })
+    if (sample.dev === identity.dev && sample.ino === identity.ino) {
+      opened.push(path)
+      handles.add(fd)
+    } else handles.delete(fd)
+    return fd
+  }))
+  mocks.push(t.mock.method(fs, 'fstatSync', (fd, ...args) => {
+    const sample = fstat(fd, ...args)
+    if (handles.has(fd)) {
+      if (change === 'before') return different(sample, { ino: sample.ino + 1n })
+      if (reads > 0) {
+        secondStats++
+        if (change === 'version') return different(sample, { ctimeNs: sample.ctimeNs + 1n })
+        if (change === 'link count') return different(sample, { nlink: 2n })
+      }
+    }
+    return sample
+  }))
+  mocks.push(t.mock.method(fs, 'lstatSync', (path, ...args) => {
+    const sample = stat(path, ...args)
+    if ((path === file || path === dir) && sample.isSymbolicLink()) {
+      linkChecks++
+      if (new Error().stack.includes('at readResultFile ')) readerLinkChecks++
+    }
+    if (reads > 0 && ((change === 'parent' && path === dir) || (change === 'leaf' && path === file)
+      || (change === 'root' && path === f.root))) return different(sample, { ino: sample.ino + 1n })
+    return sample
+  }))
+  mocks.push(t.mock.method(fs, 'readSync', (fd, buffer, offset, length, ...args) => {
+    const count = read(fd, buffer, offset, length, ...args)
+    if (handles.has(fd)) {
+      if (buffer.length === f.data.length) reads++
+      else heads++
+    }
+    return count
+  }))
+  syncBuiltinESMExports()
+  let error, receipt
+  try { receipt = await f.send([file]) } catch (problem) { error = problem }
+  finally {
+    for (const mock of mocks) mock.mock.restore()
+    syncBuiltinESMExports()
+    Object.defineProperty(process, 'platform', platform)
+  }
+  return { error, receipt, opened, reads, heads, linkChecks, readerLinkChecks, secondStats }
+}
+
+for (const [label, change] of [['P1', 'before'], ['P2 leaf', 'leaf-link'], ['P2 parent', 'parent-link'],
+  ['P3', undefined], ['P4 parent', 'parent'], ['P4 leaf', 'leaf'], ['P4 file version', 'version'],
+  ['P4 link count', 'link count'], ['P4 root', 'root']]) {
+  test(`2133 ${label} portable reader in the actual review send`, async t => {
+    const f = await resultFixture(t)
+    const local = join(f.root, 'sub')
+    const other = join(f.folder, 'fixture')
+    if (change === 'leaf-link' || change === 'parent-link') {
+      await mkdir(other)
+      await writeFile(join(other, 'visual.png'), f.data)
+      if (change === 'parent-link') await symlink(other, local, 'dir')
+      else {
+        await mkdir(local)
+        await symlink(join(other, 'visual.png'), join(local, 'visual.png'), 'file')
+      }
+    } else {
+      await mkdir(local)
+      await writeFile(join(local, 'visual.png'), f.data)
+    }
+    f.markPassed()
+    const seen = await observeResultRead(t, f, { change,
+      ...(change?.endsWith('link') ? { target: join(other, 'visual.png') } : {}) })
+    if (change === undefined) {
+      assert.match(seen.receipt, /with 1 picture/)
+      assert.equal(seen.reads, 1)
+      assert.equal(seen.opened.at(-1), join(f.root, 'sub', 'visual.png'))
+      assert.equal(f.saves.length, 1)
+      const attachment = f.rows('b')[0].content.find(block => block.type === 'image').attachment
+      assert.deepEqual(f.bytes.get(attachment.attachmentId), f.data)
+    } else {
+      assert.match(seen.error?.message ?? seen.receipt?.text ?? '', change.endsWith('link') ? /symbolic link/ : /changed while it was read/)
+      assert.equal(f.saves.length, 0)
+      assert.equal(f.rows('b').length, 0)
+      assert.equal(seen.reads, label.startsWith('P4') ? 1 : 0)
+      if (label.startsWith('P4')) assert.ok(seen.secondStats > 0)
+      if (label.startsWith('P2')) {
+        assert.equal(seen.opened.length, 0)
+        assert.ok(seen.linkChecks > 0)
+        assert.equal(seen.readerLinkChecks, 1)
+      }
+      if (label === 'P1') {
+        assert.equal(seen.opened.length, 1)
+        assert.equal(seen.heads, 0)
+      }
+    }
+  })
+}
+
+test('2133 Test 1 and P3 Linux reviewer receives a picture from the held parent', { skip: process.platform !== 'linux' }, async t => {
+  const f = await resultFixture(t)
+  await mkdir(join(f.root, 'sub'))
+  await writeFile(join(f.root, 'sub', 'visual.png'), f.data)
+  f.markPassed()
+  const seen = await observeResultRead(t, f, { portable: false })
+  assert.match(seen.receipt, /with 1 picture/)
+  assert.match(seen.opened.at(-1), /^\/proc\/self\/fd\/\d+\/visual\.png$/)
+  assert.equal(seen.reads, 1)
+  assert.equal(f.saves.length, 1)
+  const ref = f.rows('b')[0].content.find(block => block.type === 'image').attachment
+  assert.deepEqual(f.bytes.get(ref.attachmentId), f.data)
+})
+
+test('2133 P3 a portable result root can be reached through an ancestor alias', async t => {
+  const f = await resultFixture(t)
+  await mkdir(join(f.root, 'sub'))
+  await writeFile(join(f.root, 'sub', 'visual.png'), f.data)
+  const alias = join(f.folder, 'ancestor-alias')
+  await symlink(f.folder, alias, 'dir')
+  const selected = join(alias, basename(f.root))
+  f.bot.workDir = selected
+  f.markPassed()
+  f.bot.reviewTrack.solver.snapshot = resultSnapshot(selected)
+  const seen = await observeResultRead(t, f)
+  assert.match(seen.receipt, /with 1 picture/)
+  assert.equal(seen.reads, 1)
+  assert.equal(seen.opened.at(-1), join(f.root, 'sub', 'visual.png'))
+  assert.equal(f.saves.length, 1)
+})
+
+async function reviewRefusal(run) {
+  try { return (await run())?.text ?? '' } catch (error) { return error.message }
+}
+
+test('2133 Test 3 ordinary forwarding still refuses a local path with review guidance', async t => {
+  const f = await fixture(t)
+  const path = join(f.folder, 'result.png')
+  await writeFile(path, f.data)
+  const result = await f.call('a', 'message_bot', { to: f.bots.b.name, message: 'Look', images: [path] })
+  assert.match(result.text, /No picture the user attached.*only in a designated RESULT review/)
+  assert.equal(f.rows('b').length, 0)
+})
+
+for (const condition of ['inactive', 'waiting', 'changed checks']) {
+  test(`2133 T4a ${condition} refuses before local reads and storage`, async t => {
+    const f = await resultFixture(t)
+    const path = join(f.root, 'result.png')
+    await writeFile(path, f.data)
+    f.markPassed()
+    if (condition === 'inactive') f.bot.reviewTrack.requested = false
+    if (condition === 'waiting') {
+      f.bot.reviewTrack.solver.review = { exchangeId: 'waiting', reviewerId: 'b', revision: 0,
+        solverModel: 'test/solver', images: { v: 1 } }
+      f.rt.deliveryNote = () => ({})
+    }
+    if (condition === 'changed checks') await writeFile(path, Buffer.concat([f.data, f.data]))
+    const read = fs.readSync
+    let reads = 0
+    const mock = t.mock.method(fs, 'readSync', (...args) => { reads++; return read(...args) })
+    syncBuiltinESMExports()
+    try {
+      const refusal = await reviewRefusal(() => f.send([path]))
+      assert.match(refusal, { inactive: /active Solver request/, waiting: /already waiting/, 'changed checks': /current passing runs/ }[condition])
+      assert.equal(reads, 0)
+    } finally {
+      mock.mock.restore()
+      syncBuiltinESMExports()
+    }
+    assert.equal(f.saves.length, 0)
+    assert.equal(f.rows('b').length, 0)
+  })
+}
+
+test('2133 T4b a changed snapshot after bytes are read prevents save and delivery', async t => {
+  const f = await resultFixture(t)
+  const path = join(f.root, 'result.png'), note = join(f.root, 'report.txt')
+  await writeFile(path, f.data)
+  await writeFile(note, 'checked')
+  f.markPassed()
+  const read = fs.readSync
+  let changed = false
+  const mock = t.mock.method(fs, 'readSync', (fd, buffer, ...args) => {
+    const count = read(fd, buffer, ...args)
+    if (!changed && buffer.length === f.data.length) {
+      changed = true
+      fs.writeFileSync(note, 'changed')
+    }
+    return count
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.match(await reviewRefusal(() => f.send([path])), /result changed/)
+    assert.equal(changed, true)
+    assert.equal(f.saves.length, 0)
+    assert.equal(f.rows('b').length, 0)
+  } finally {
+    mock.mock.restore()
+    syncBuiltinESMExports()
+  }
+})
+
+test('2133 T4c ambiguity, read failure, cancellation and truncated history never fall back', async t => {
+  const f = await resultFixture(t)
+  const path = join(f.root, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  f.person('a', { ...f.ref, name: 'result.png' })
+  f.person('a', { ...f.other, name: 'result.png' })
+  assert.match(await reviewRefusal(() => f.send(['result.png'])), /More than one picture matches/)
+  const history = f.rt.eventsBackwards
+  f.rt.eventsBackwards = async function* () { throw new Error('fixture unavailable') }
+  assert.match(await reviewRefusal(() => f.send([path])), /uploaded picture could not be read/)
+  f.rt.eventsBackwards = async function* () {}
+  assert.match(await reviewRefusal(() => f.send([path])), /history could not be searched completely/)
+  f.rt.eventsBackwards = history
+  assert.match(await reviewRefusal(() => f.send([path], AbortSignal.abort(new Error('Stopped')))), /stopped/i)
+  assert.equal(f.saves.length, 0)
+  assert.equal(f.rows('b').length, 0)
+  assert.match(await f.send([path]), /with 1 picture/)
+})
+
+for (const [label, relative, pattern] of [
+  ['outside result', '../outside.png', /inside the result folder/],
+  ['outside absolute', undefined, /inside the result folder/],
+  ['other Bot', '.automagik/bots/b/result.png', /another Bot's own folder/],
+  ['Solver uploads', '.automagik/bots/a/uploads/result.png', /protected folder/],
+  ['Git', '.git/result.png', /protected folder/],
+  ['multiple links', 'hard.png', /one link/],
+  ['not an image', 'not.png', /Convert the result picture/],
+  ['too large', 'large.png', /12 MiB/],
+]) {
+  test(`2133 Test 2 and T4d prohibit ${label}`, async t => {
+    const f = await resultFixture(t)
+    const selector = relative ?? join(f.folder, 'outside.png')
+    const path = resolve(f.root, selector)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, label === 'not an image' ? 'text' : f.data)
+    if (label === 'multiple links') await link(path, join(f.root, 'second.png'))
+    if (label === 'too large') await truncate(path, 12 * 1024 * 1024 + 1)
+    f.markPassed()
+    assert.match(await reviewRefusal(() => f.send([selector])), pattern)
+    assert.equal(f.saves.length, 0)
+    assert.equal(f.rows('b').length, 0)
+  })
+}
+
+test('2133 T5a and T5b a private result uses text approval and a mixed picture ledger before storage', async t => {
+  const f = await resultFixture(t, { solver: 'test-private-bot' })
+  const path = join(f.root, 'result.png')
+  const local = Buffer.concat([f.data, Buffer.from('local')])
+  await writeFile(path, local)
+  f.markPassed()
+  f.person('test-private-bot', f.other)
+  f.approval.request = async () => 'rejected'
+  assert.match(await reviewRefusal(() => f.send([path, f.other.name])), /not done/)
+  assert.equal(f.saves.length, 0)
+  assert.equal(f.rows('b').length, 0)
+  assert.equal(f.books.size, 0)
+  f.approval.request = async () => 'allowed-once'
+  assert.match(await reviewRefusal(() => f.send([path, f.other.name])), /no Main Bot/)
+  assert.equal(f.saves.length, 0)
+  assert.equal(f.rows('b').length, 0)
+  f.rt.isMain = id => id === 'outside'
+  const attachments = f.rt.ctx.get('attachments')
+  const saveImage = attachments.saveImage
+  const resultId = `sha256:${createHash('sha256').update(local).digest('hex')}`
+  attachments.saveImage = async image => {
+    const rows = f.books.get('pair-b-test-private-bot')
+    assert.deepEqual(rows.find(row => row.event === 'picture-forward-authorised').images.sort(),
+      [f.other.attachmentId, resultId].sort())
+    assert.equal(f.rows('b').length, 0)
+    return saveImage(image)
+  }
+  assert.match(await f.send([path, f.other.name]), /with 2 picture/)
+  assert.deepEqual(f.bot.reviewTrack.solver.review.images.carried, [resultId])
+  assert.equal(f.saves.length, 1)
+})
+
+test('2133 T4b authority removed while writing the private ledger prevents picture storage', async t => {
+  const f = await resultFixture(t, { solver: 'test-private-bot' })
+  const path = join(f.root, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  f.rt.isMain = id => id === 'outside'
+  f.rt.ledger.written = async book => {
+    if (f.books.get(book)?.some(row => row.event === 'picture-forward-authorised')) f.bot.reviewTrack.requested = false
+  }
+  assert.match(await reviewRefusal(() => f.send([path])), /result changed/)
+  assert.equal(f.saves.length, 0)
+  assert.equal(f.rows('b').length, 0)
+})
+
+test('2133 source 2 active authority is checked after a history match and before full reads', async t => {
+  const f = await resultFixture(t)
+  const path = join(f.root, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  f.person('a', f.other)
+  const history = f.rt.eventsBackwards
+  f.rt.eventsBackwards = async function* (...args) {
+    await Promise.resolve()
+    f.bot.reviewTrack.requested = false
+    yield* history(...args)
+  }
+  const read = fs.readSync
+  const target = await lstat(path)
+  let fullReads = 0
+  const mock = t.mock.method(fs, 'readSync', (fd, buffer, ...args) => {
+    const opened = fs.fstatSync(fd)
+    if (opened.dev === target.dev && opened.ino === target.ino && buffer.length === f.data.length) fullReads++
+    return read(fd, buffer, ...args)
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.match(await reviewRefusal(() => f.send([f.other.name])), /result changed/)
+    assert.equal(fullReads, 0)
+    assert.equal(f.saves.length, 0)
+    assert.equal(f.rows('b').length, 0)
+  } finally {
+    mock.mock.restore()
+    syncBuiltinESMExports()
+  }
+})
+
+test('2133 source 2 a private-region grant change during the ledger wait blocks publication', async t => {
+  const f = await resultFixture(t, { solver: 'test-private-bot' })
+  const region = join(f.root, 'review')
+  await mkdir(region)
+  const path = join(region, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  f.rt.isMain = id => id === 'outside'
+  f.rt.ledger.written = async book => {
+    if (f.books.get(book)?.some(row => row.event === 'picture-forward-authorised')) {
+      f.bots.outside.private = true
+      f.bots.outside.workDir = region
+    }
+  }
+  assert.match(await reviewRefusal(() => f.send([path])), /protected folder|result changed/)
+  assert.equal(f.saves.length, 0)
+  assert.equal(f.rows('b').length, 0)
+})
+
+test('2133 source 2 rechecks the path grant at delivery after designation', async t => {
+  const f = await resultFixture(t)
+  const region = join(f.root, 'review')
+  await mkdir(region)
+  const path = join(region, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  const deliver = f.rt.deliver
+  f.rt.deliver = (...args) => {
+    f.bots.outside.private = true
+    f.bots.outside.workDir = region
+    return deliver(...args)
+  }
+  assert.match(await reviewRefusal(() => f.send([path])), /changed before the review could be sent/)
+  assert.equal(f.saves.length, 1)
+  assert.equal(f.rows('b').length, 0)
+})
+
+for (const [name, rootParts, allowed] of [
+  ['Git', ['.git', 'scratch'], false],
+  ['Automagik state', ['.automagik', 'scratch'], false],
+  ['Solver uploads', ['.automagik', 'bots', 'a', 'uploads', 'scratch'], false],
+  ['Solver review', ['.automagik', 'bots', 'a', 'review', 'scratch'], true],
+]) {
+  test(`2133 source 3 canonical ${name} ancestry controls result discovery and selection`, async t => {
+    const f = await resultFixture(t, { rootParts })
+    const path = join(f.root, 'render')
+    await writeFile(path, f.data)
+    f.markPassed()
+    let opens = 0
+    const open = fs.openSync
+    const mock = t.mock.method(fs, 'openSync', (name, ...args) => {
+      if (basename(name) === 'render') opens++
+      return open(name, ...args)
+    })
+    syncBuiltinESMExports()
+    try {
+      const receipt = await reviewRefusal(() => f.send([path]))
+      if (allowed) {
+        assert.equal(f.saves.length, 1)
+        assert.equal(f.rows('b').length, 1)
+        assert.ok(opens > 0)
+      } else {
+        assert.match(receipt, /protected folder/)
+        assert.equal(opens, 0)
+        assert.equal(f.saves.length, 0)
+        assert.equal(f.rows('b').length, 0)
+      }
+    } finally {
+      mock.mock.restore()
+      syncBuiltinESMExports()
+    }
+  })
+}
+
+test('2133 source 4 the private ledger authorizes the normalized outgoing ID before saving', async t => {
+  const f = await resultFixture(t, { solver: 'test-private-bot', normalization: { normalizedImageMaxDimension: 1 } })
+  const path = join(f.root, 'result.png')
+  await writeFile(path, f.data)
+  f.markPassed()
+  f.rt.isMain = id => id === 'outside'
+  const sourceDigest = createHash('sha256').update(f.data).digest('hex')
+  const store = f.rt.ctx.get('attachments')
+  const saveImage = store.saveImage
+  let authorized
+  store.saveImage = async input => {
+    assert.equal(f.rows('b').length, 0)
+    authorized = f.books.get('pair-b-test-private-bot').find(row => row.event === 'picture-forward-authorised').images
+    return saveImage(input)
+  }
+  const outcome = await reviewRefusal(() => f.send([path]))
+  assert.equal(f.saves.length, 1)
+  const ref = f.saves[0]
+  assert.notEqual(ref.attachmentId, `sha256:${sourceDigest}`)
+  assert.equal(ref.width, 1)
+  assert.deepEqual(authorized, [ref.attachmentId], 'authorize the actual outgoing ID before publication')
+  assert.equal(f.rows('b')[0]?.content.find(block => block.type === 'image')?.attachment.attachmentId, ref.attachmentId, outcome)
+  assert.deepEqual(f.bot.reviewTrack.solver.review.images.required, [{ path: 'result.png', digest: sourceDigest, attachmentId: ref.attachmentId }])
+})
+
+test('2133 exception 4 mounted Cordis lookups bind publication to the authorized store', async t => {
+  for (const replace of [false, true]) {
+    await t.test(replace ? 'replaced store refuses publication' : 'same store publishes after authorization', async t => {
+      const f = await resultFixture(t, { solver: 'test-private-bot', mountedLookup: true, normalization: { normalizedImageMaxDimension: 1 } })
+      const path = join(f.root, 'result.png')
+      await writeFile(path, f.data)
+      f.markPassed()
+      f.rt.isMain = id => id === 'outside'
+      const first = f.rt.ctx.get('attachments')
+      assert.notEqual(f.rt.ctx.get('attachments'), first, 'pinned lookups return fresh wrappers')
+      let authorized
+      f.rt.ledger.written = async book => {
+        const event = f.books.get(book)?.find(row => row.event === 'picture-forward-authorised')
+        if (!event || authorized) return
+        assert.equal(f.saves.length, 0)
+        assert.equal(f.rows('b').length, 0)
+        authorized = event.images
+        if (replace) await f.replaceStore()
+        const original = Symbol.for('cordis.original')
+        assert.equal(f.rt.ctx.get('attachments')[original] === first[original], !replace)
+      }
+      if (replace) {
+        const receipt = await reviewRefusal(() => f.send([path]))
+        assert.equal(authorized?.length, 1, receipt)
+        assert.match(receipt, /result picture store changed/)
+        assert.equal(f.saves.length, 0)
+        assert.equal(f.rows('b').length, 0)
+        return
+      }
+      assert.match(await f.send([path]).catch(error => error.message), /with 1 picture/)
+      assert.equal(authorized?.length, 1)
+      assert.equal(f.saves.length, 1)
+      assert.notEqual(authorized[0], `sha256:${createHash('sha256').update(f.data).digest('hex')}`)
+      assert.equal(f.saves[0].attachmentId, authorized[0])
+      assert.equal(f.rows('b')[0]?.content.find(block => block.type === 'image')?.attachment.attachmentId, authorized[0])
+    })
+  }
+})
+
+test('2133 exception 3 registered standalone workspace preserves result ancestry checks', async t => {
+  const review = ['.automagik', 'bots', 'a', 'review']
+  for (const [name, rootParts, leaf] of [
+    ['team workspace result', [], ['result.png']],
+    ['own review beneath the workspace', [], [...review, 'result.png']],
+    ['own review as result root', review, ['result.png']],
+  ]) {
+    await t.test(name, async t => {
+      const f = await resultFixture(t, { standalone: true, rootParts })
+      const path = join(f.root, ...leaf)
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, f.data)
+      f.markPassed()
+      assert.match(await f.send([path]).catch(error => error.message), /with 1 picture/)
+      const images = f.bot.reviewTrack.solver.review.images
+      assert.equal(images.kind, 'visual')
+      assert.equal(images.definite, true)
+      assert.equal(f.saves.length, 1)
+      assert.deepEqual(f.bytes.get(f.saves[0].attachmentId), f.data)
+      assert.equal(f.rows('b').length, 1)
+    })
+  }
+  for (const [name, leaf, protect] of [
+    ['unregistered default', 'result.png', f => {
+      f.bot.workDir = f.root
+      f.rt.state.workspaceId = 'unregistered-workspace'
+    }],
+    ['Git folder', '.git/result.png', () => {}],
+    ['Solver uploads', '.automagik/bots/a/uploads/result.png', () => {}],
+    ['another private work folder', 'private-region/result.png', f => { f.bots['test-private-bot'].workDir = join(f.root, 'private-region') }],
+  ]) {
+    await t.test(name, async t => {
+      const f = await resultFixture(t, { standalone: true, rootParts: [] })
+      protect(f)
+      const path = join(f.root, leaf)
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, f.data)
+      f.markPassed()
+      assert.match(await reviewRefusal(() => f.send([path])), /protected folder/)
+      assert.equal(f.saves.length, 0)
+      assert.equal(f.rows('b').length, 0)
+    })
+  }
+  await t.test('linked result root stays refused', async t => {
+    const f = await resultFixture(t, { standalone: true, rootParts: [] })
+    const path = join(f.root, 'result.png')
+    await writeFile(path, f.data)
+    f.markPassed()
+    const alias = join(f.folder, 'linked-workspace')
+    await symlink(f.root, alias, 'dir')
+    f.bot.workDir = alias
+    assert.equal(resultSnapshot(alias), undefined)
+    assert.match(await reviewRefusal(() => f.send([path])), /current passing runs/)
+    assert.equal(f.saves.length, 0)
+    assert.equal(f.rows('b').length, 0)
+  })
+})
+
+test('2133 T4d result discovery and selection skip another private workspace outside Automagik', async t => {
+  const f = await resultFixture(t)
+  const privateDir = join(f.root, 'isolated')
+  const file = join(privateDir, 'render')
+  await mkdir(privateDir)
+  await writeFile(file, f.data)
+  f.bots['test-private-bot'].workDir = privateDir
+  f.markPassed()
+  let opens = 0
+  const open = fs.openSync
+  const mock = t.mock.method(fs, 'openSync', (path, ...args) => {
+    if (basename(path) === 'render') opens++
+    return open(path, ...args)
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.match(await reviewRefusal(() => f.send([file])), /protected folder/)
+    assert.equal(opens, 0)
+    assert.equal(f.rows('b').length, 0)
+    assert.equal(f.saves.length, 0)
+  } finally {
+    mock.mock.restore()
+    syncBuiltinESMExports()
+  }
+})
 
 test('a name under the bots root that is no Bot folder is not refused', async t => {
   const f = await fixture(t, { withTools: false })

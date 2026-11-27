@@ -3952,6 +3952,9 @@ const pack = createPack({
     "RESULT review unverified. {reason}": "Revisão do RESULTADO sem verificação. {reason}",
     "The reviewer’s effective model could not be verified.": "Não foi possível verificar o modelo usado pelo revisor.",
     "The reviewer used the same model as the Solver.": "O revisor usou o mesmo modelo que o Solver.",
+    "The result has pictures and the reviewer could not see them.": "O resultado tem imagens e o revisor não pôde vê-las.",
+    "The reviewer’s answering turn lost the result pictures. Ask for a fresh RESULT review with the pictures.": "As imagens do resultado foram perdidas no turno de resposta do revisor. Solicite uma nova revisão do RESULTADO com as imagens.",
+    "The result pictures were not all carried. Ask for a fresh RESULT review with the pictures.": "Nem todas as imagens do resultado foram enviadas. Solicite uma nova revisão do RESULTADO com as imagens.",
     "The reviewer did not give a strict verdict.": "O revisor não deu um veredito no formato exigido.",
     "the Solver reached an attempt limit and is waiting for your answer": "o Solver chegou a um limite de tentativas e aguarda sua resposta"
   }

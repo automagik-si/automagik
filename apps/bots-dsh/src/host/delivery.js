@@ -238,7 +238,7 @@ export function install(rt) {
   // one its recipient had not read, under that one's exchange. `uploads`: the person's
   // uploads of a group turn, for a member over ACP.
   // `onReplyRecorded` runs at the ledger append and can return a callback for pre-inbox loss.
-  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, resumedByUpdate = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], skillRequests, skillRoom, skillRoomBlocks, length, work, taskSessionId, reviewReceipt, consumedResult }, { enqueue, shouldSend, made, onReplyRecorded, closeReviewWork } = {}) {
+  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, resumedByUpdate = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], skillRequests, skillRoom, skillRoomBlocks, length, work, taskSessionId, reviewReceipt, consumedResult, resultReview }, { enqueue, shouldSend, made, onReplyRecorded, closeReviewWork } = {}) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
@@ -255,6 +255,7 @@ export function install(rt) {
       ...(work ? { work } : {}),
       ...(fromId ? { senderSessionId: fromId } : {}),
       ...(forwarded && images.length > 0 ? { forwarded: { v: 1 } } : {}),
+      ...(resultReview === true ? { resultReview: { v: 1 } } : {}),
       ...(replyTo ? { replyTo } : {}),
       ...(receipt ? { reviewReceipt: receipt } : {}),
       ...(roomId ? { roomId } : {}),

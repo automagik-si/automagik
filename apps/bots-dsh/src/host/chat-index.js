@@ -98,9 +98,10 @@ export function install(rt) {
   let indexOpening
 
   // A Session's events from newest to oldest, also for an archived part.
-  async function* eventsBackwards(sessionId, signal, maxPages = HISTORY_PAGES_MAX) {
+  async function* eventsBackwards(sessionId, signal, maxPages = HISTORY_PAGES_MAX, onExhausted) {
     const agent = await rt.resolveAgent(sessionId)
     const throughSeq = Number(agent.session.seq) - 1
+    if (throughSeq < 0) onExhausted?.()
     let beforeSeq
     for (let pages = 0; throughSeq >= 0 && pages < maxPages; pages += 1) {
       const page = await ctx.sessionController.page({
@@ -111,7 +112,11 @@ export function install(rt) {
       }, signal)
       const events = page.records.map(record => record.event)
       for (let index = events.length - 1; index >= 0; index -= 1) yield events[index]
-      if (!page.hasMore || events.length === 0) return
+      if (!page.hasMore) {
+        onExhausted?.()
+        return
+      }
+      if (events.length === 0 || (beforeSeq !== undefined && events[0].seq >= beforeSeq)) return
       beforeSeq = events[0].seq
     }
   }

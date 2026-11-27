@@ -102,23 +102,27 @@ async function bounded(work, signal) {
   }
 }
 
-async function directory(path, create = false) {
+async function directory(path, create = false, remember) {
+  let made = false
   if (create) {
-    try { await mkdir(path, { mode: 0o700 }) } catch (error) {
+    try { await mkdir(path, { mode: 0o700 }); made = true } catch (error) {
       if (error.code !== 'EEXIST') throw error
     }
   }
-  const stat = await lstat(path)
+  const stat = await lstat(path, { bigint: true })
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Unsafe upload directory.')
+  if (made) remember?.(path, stat)
 }
-async function ignore(folder) {
+async function ignore(folder, remember) {
   let file
+  const path = join(folder, '.gitignore')
   try {
-    file = await open(join(folder, '.gitignore'), 'wx', 0o600)
+    file = await open(path, 'wx', 0o600)
     await file.writeFile('*\n')
+    if (remember) remember(path, await file.stat({ bigint: true }))
   } catch (error) {
     if (error.code !== 'EEXIST') throw error
-    const stat = await lstat(join(folder, '.gitignore'))
+    const stat = await lstat(path)
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe upload ignore file.')
   } finally { await file?.close() }
 }
@@ -160,8 +164,8 @@ export function install(rt) {
     let at = folder
     for (const part of ['.automagik', 'bots', region.split(/[\\/]/).at(-2), 'uploads', hex]) {
       at = join(at, part)
-      await directory(at, create)
-      if (create && (part === 'bots' || part === 'uploads')) await ignore(at)
+      await directory(at, create, rt.rememberReviewUpload)
+      if (create && (part === 'bots' || part === 'uploads')) await ignore(at, rt.rememberReviewUpload)
     }
     if (await realpath(at) !== at) throw new Error('Unsafe upload directory.')
   }
@@ -184,15 +188,15 @@ export function install(rt) {
     let file
     try {
       file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0))
-      const stat = await file.stat()
-      if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_BYTES || (ref.bytes !== undefined && stat.size !== ref.bytes)) throw new Error('Unsafe upload copy.')
+      const stat = await file.stat({ bigint: true })
+      if (!stat.isFile() || stat.nlink !== 1n || stat.size > BigInt(MAX_BYTES) || (ref.bytes !== undefined && stat.size !== BigInt(ref.bytes))) throw new Error('Unsafe upload copy.')
       const hash = createHash('sha256')
       for await (const chunk of file.createReadStream({ autoClose: false, signal })) hash.update(chunk)
       if (`sha256:${hash.digest('hex')}` !== ref.attachmentId) throw new Error('Upload copy has different bytes.')
-      await same(path, stat)
-      const after = await file.stat()
-      if (after.ctimeMs !== stat.ctimeMs || after.nlink !== 1) throw new Error('Upload copy changed.')
-      return true
+      const seen = await lstat(path, { bigint: true })
+      const after = await file.stat({ bigint: true })
+      if (seen.dev !== stat.dev || seen.ino !== stat.ino || after.ctimeNs !== stat.ctimeNs || after.nlink !== 1n) throw new Error('Upload copy changed.')
+      return after
     } catch (error) {
       if (error.code === 'ENOENT') return false
       throw error
@@ -200,7 +204,7 @@ export function install(rt) {
   }
   async function writeCopy(ref, opts, region, path, signal) {
     const hex = hexOf(ref)
-    let file, temp, created, written
+    let file, temp, created, written, published
     try {
       signal.throwIfAborted()
       await checkDirectories(region, hex, true)
@@ -240,6 +244,7 @@ export function install(rt) {
           await link(temp, path)
           linked = true
           await same(path, written)
+          published = true
         } catch (error) {
           if (linked) await removeOwn(path, created)
           if (error.code !== 'EEXIST') throw error
@@ -251,7 +256,11 @@ export function install(rt) {
       if (temp) await removeOwn(temp, created)
     }
     // The temporary hard link is gone before nlink is checked.
-    if (!await existing(path, ref, signal)) throw new Error('Upload copy disappeared.')
+    const verified = await existing(path, ref, signal)
+    if (!verified) throw new Error('Upload copy disappeared.')
+    if (published && verified.dev === BigInt(written.dev) && verified.ino === BigInt(written.ino)) {
+      rt.rememberReviewUpload?.(path, verified)
+    }
     return { path }
   }
   async function save(ref, opts = {}) {

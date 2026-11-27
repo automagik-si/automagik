@@ -6,7 +6,7 @@
 // (tool.js), so DSH shows the card and asks for approval. The next step drains what the agent
 // said since. DSH keeps the Session, its history and the sidebar.
 import { CLAUDE_PINS, pinOf, pinWire } from './model-identity.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -356,13 +356,43 @@ function isFileHandle(text, ref) {
 
 // Legacy fallback rows still supply text, never fresh image authority. Retry and handoff
 // rows likewise cannot replay an earlier accepted image. Undefined keeps the text path exact.
+function teamService(ctx) {
+  try { return ctx.get?.('omniTeam') } catch { return undefined }
+}
+
+function designatedImages(row, saved, session, ctx) {
+  const source = row.source
+  if (source?.kind !== 'bot' || source.form !== 'relay' || source.role !== 'request' || source.resultReview?.v !== 1
+    || isHandoff(row) || source.resumed || source.resumedByUpdate || source.retried || source.resume
+    || !isDeepStrictEqual(source, saved?.source) || !Array.isArray(saved?.content) || !Array.isArray(row.content)) return
+  try {
+    const ids = teamService(ctx)?.resultReviewImages?.(session.id, source.exchangeId)
+    if (!Array.isArray(ids)) return
+    const images = blocks => blocks.filter(block => block?.type === 'image' && !block.offloaded && ids.includes(block.attachment?.attachmentId))
+    const projected = images(row.content)
+    if (projected.length === 0 || !isDeepStrictEqual(images(saved.content), projected)) return
+    return { ids: [...ids], blocks: projected }
+  } catch { return undefined }
+}
+
+const reviewRunKeys = new WeakMap()
+function reviewRunKey(run) {
+  if (!reviewRunKeys.has(run)) reviewRunKeys.set(run, randomUUID())
+  return reviewRunKeys.get(run)
+}
+
 function uploadBlocks(messages, redact, session, ctx) {
   const selected = promptRows(messages).rows
   const durable = session?.deriveMessages?.() ?? []
   const files = new Set()
   const relays = new Set()
+  const reviews = new Map()
   const rows = selected.map(row => {
     const saved = row.id ? durable.find(message => message.id === row.id) : undefined
+    if (row.source?.resultReview?.v === 1 && selected.findLast(message => message.source?.exchangeId === row.source.exchangeId) === row) {
+      const review = designatedImages(row, saved, session, ctx)
+      if (review) reviews.set(row, review)
+    }
     const verified = roomUploads(row, saved, session, ctx)
     if (verified.length > 0) {
       const content = Array.isArray(row.content)
@@ -408,11 +438,14 @@ function uploadBlocks(messages, redact, session, ctx) {
   const genuine = row => relays.has(row) ||
     (row.source?.kind === 'user' && !isHandoff(row))
   const upload = block => block?.type === 'image' || files.has(block)
-  if (!rows.some(row => genuine(row) && Array.isArray(row.content) &&
+  if (!reviews.size && !rows.some(row => genuine(row) && Array.isArray(row.content) &&
       row.content.some(upload))) return undefined
   const blocks = []
   for (const row of rows) {
-    const parts = genuine(row) && Array.isArray(row.content)
+    const review = reviews.get(row)
+    const parts = review ? row.content.map(block => block?.type === 'text' || review.blocks.includes(block)
+      ? block : { type: 'text', text: textOf([block]) })
+      : genuine(row) && Array.isArray(row.content)
       ? row.content.filter(block => upload(block) || block?.type === 'text')
       : [{ type: 'text', text: isHandoff(row) ? redact(textOf(row.content)) : textOf(row.content) }]
     if (!parts.some(block => upload(block) || block.text)) continue
@@ -422,7 +455,7 @@ function uploadBlocks(messages, redact, session, ctx) {
       blocks.push({ ...parts[i] })
     }
   }
-  return { blocks, roomIds: [...relays].map(row => row.source.uploads.roomId) }
+  return { blocks, roomIds: [...relays].map(row => row.source.uploads.roomId), reviews }
 }
 
 /** Where a Session title on an agent's chat goes when DSH's default model is an agent too. */
@@ -1293,6 +1326,19 @@ export class AcpAdapter extends LlmAdapter {
     return live?.own === true && live.run.busy === true
   }
 
+  /** Read the prompt advertisement of this Session's initialized ACP run. */
+  promptImageCapability(sessionId, provider) {
+    const live = this.live.get(sessionId)
+    if (!live?.initialized || live.provider !== provider || !live.run.alive || live.archived || live.held !== undefined) {
+      return undefined
+    }
+    const agent = this.ctx.agents?.get?.(sessionId)
+    if (agent !== live.dshAgent || agent?.session !== live.session || live.providerRow !== this.agents.get(provider)) {
+      return undefined
+    }
+    return live.run.init?.agentCapabilities?.promptCapabilities?.image === true
+  }
+
   /**
    * Whether a gate holds this Session now: the sentence to answer the step with, or undefined.
    * Every gate is asked; any refusal wins, the first to arrive. A gate lets the Session go only
@@ -1711,6 +1757,8 @@ export class AcpAdapter extends LlmAdapter {
   // exit (`starting`), whichever way it leaves: a refusal, a failure, a stop, its end.
   async *stream(options) {
     const { sessionId, signal } = options
+    const review = teamService(this.ctx)
+    const attempt = review?.reviewAttempt?.(sessionId)
     const fileOwner = this.sessionFiles.owners.get(sessionId)
     // Latch durable membership at admission, before the first await. Undo can remove
     // the id before this step resumes, but only a fresh entry may start afterward.
@@ -1737,8 +1785,16 @@ export class AcpAdapter extends LlmAdapter {
     signal?.addEventListener('abort', stopFiles, { once: true })
     if (signal?.aborted) stopFiles()
     try {
-      yield* this.step(options, entry)
+      for await (const chunk of this.step(options, entry)) {
+        if (chunk.type === 'finish') {
+          const completed = !['error', 'aborted'].includes(chunk.reason?.kind) && !signal?.aborted
+          review?.reviewGenerationOutput?.(entry.reviewGeneration, { completed, attempt })
+          entry.reviewCompleted = completed
+        }
+        yield chunk
+      }
     } finally {
+      if (!entry.reviewCompleted) review?.reviewGenerationOutput?.(entry.reviewGeneration, { completed: false })
       signal?.removeEventListener('abort', stopFiles)
       if (!entry.archived && entry.fileStartup && this.starting.get(sessionId) === entry
           && entry.fileOwner?.grant && this.sessionFiles.owners.get(sessionId) === entry.fileOwner
@@ -2381,6 +2437,7 @@ export class AcpAdapter extends LlmAdapter {
             // OFF process reads a catalog without the kept models, so it never says.
             if (codexRow && !codexOff && typeof run.startModel === 'string') this.startModels.set(agent, run.startModel)
             if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined)) throw new Error('Image permission changed during startup.')
+            state.initialized = true
             try { agent.proven?.() } catch {}
             break
           } catch (error) {
@@ -2697,7 +2754,11 @@ export class AcpAdapter extends LlmAdapter {
         live.run === uploadRun && uploadRun.alive && uploadRun.sessionId === uploadSession &&
         live.dshAgent === dshAgent && this.ctx.agents?.get(sessionId) === dshAgent &&
         this.agents.get(options.provider) === agent &&
-        uploads.roomIds.every(roomId => ownsRoomUploads(this.ctx, dshAgent?.session, roomId))
+        uploads.roomIds.every(roomId => ownsRoomUploads(this.ctx, dshAgent?.session, roomId)) &&
+        [...uploads.reviews].every(([row, review]) => {
+          const durable = dshAgent?.session?.deriveMessages?.().find(message => message.id === row.id)
+          return isDeepStrictEqual(designatedImages(row, durable, dshAgent?.session, this.ctx), review)
+        })
       )
       const uploadStopped = () => options.signal?.aborted ? STOPPED()
         : finish('error', entry.held ?? live.held ?? 'Uploaded image turn changed before the prompt. Send again.', 'acp_upload_content')
@@ -2710,6 +2771,7 @@ export class AcpAdapter extends LlmAdapter {
             blocks: uploads.blocks, replay: live.replay, run: uploadRun,
             attachments: this.ctx.get?.('attachments'), cwd: dshAgent?.session?.header?.cwd,
             warn: message => this.warn(message),
+            remember: teamService(this.ctx)?.rememberReviewUpload,
             signal: options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal,
             timers: this.timers,
             valid: () => { if (!uploadValid()) throw new Error('Uploaded image turn changed before the prompt. Send again.') },
@@ -2897,6 +2959,7 @@ export class AcpAdapter extends LlmAdapter {
       }
       const promptRefusal = firstPromptRefusal()
       if (promptRefusal !== undefined) return yield promptRefusal
+      if (!uploadValid()) return yield uploadStopped()
       started()
       live.replay = undefined
       live.owed = undefined
@@ -2911,10 +2974,26 @@ export class AcpAdapter extends LlmAdapter {
       live.confinedReason = undefined
       live.toolIds?.clear()
       live.skillCatalog = catalog?.text ? catalog.key : undefined
-      live.run.prompt(prompt, () => skills?.admit({ ...send, messages: promptRows(current).rows }, session), options.signal).catch(() => {})
+      const review = teamService(this.ctx)
+      const rows = promptRows(current).rows
+      const verified = new Set(uploads?.reviews.size ? prompt.filter(block => block.type === 'image')
+        .map(block => `sha256:${createHash('sha256').update(Buffer.from(block.data, 'base64')).digest('hex')}`) : [])
+      const admitted = new Map([...(uploads?.reviews ?? [])].map(([row, review]) => [row.id, review.blocks]))
+      live.reviewGeneration = review?.beginReviewGeneration?.({
+        sessionId, messages: rows, runKey: reviewRunKey(live.run), provider: options.provider, model: options.model,
+        nativeIds: (row, carried) => (admitted.get(row.id) ?? [])
+          .map(block => block.attachment.attachmentId).filter(id => carried.includes(id) && verified.has(id)),
+      })
+      const generation = live.reviewGeneration
+      entry.reviewGeneration = generation
+      live.run.prompt(prompt, () => {
+        review?.reviewGenerationOutput?.(generation, { confirmed: true })
+        skills?.admit({ ...send, messages: rows }, session)
+      }, options.signal).catch(() => review?.reviewGenerationOutput?.(generation, { confirmed: false }))
       // The notice belongs to this prompt, including any step after a mirror result.
       if (substitution !== undefined) live.substitution = { ...substitution, signal: options.signal }
     }
+    entry.reviewGeneration ??= live.reviewGeneration
     // The turn stays open until its end is drained here: the agent may finish it before DSH
     // asks for the step after a tool result.
     for (;;) {
