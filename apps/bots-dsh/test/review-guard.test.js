@@ -23,9 +23,9 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const step = () => wait(3)
 
 function bench(t, { home = mkdtempSync(join(tmpdir(), 'ds-bot-review-guard-')), keep = false } = {}) {
-  const ctx = fakeContext()
   const sessions = new Map()
   const agents = new Map()
+  const ctx = fakeContext({ services: { agents } })
   let created = 0
   ctx.tools.schemas = () => ['bash', 'read', 'write', 'edit'].map(name => ({ name }))
   ctx.tools.view = () => ({ restrictableNames: new Set(['bash', 'read', 'write', 'edit']), knownNames: new Set(['bash', 'read', 'write', 'edit']) })
@@ -40,7 +40,7 @@ function bench(t, { home = mkdtempSync(join(tmpdir(), 'ds-bot-review-guard-')), 
       create: async options => ({ sessionId: options.sessionId ?? `s${++created}` }),
       resolveAgent: async (sessionId) => {
         if (!agents.has(sessionId)) {
-          agents.set(sessionId, { session: sessions.get(sessionId) ?? { id: sessionId }, ctx: { tools: { restrict: () => () => {} }, effect: execute => execute() } })
+          agents.set(sessionId, { id: sessionId, session: sessions.get(sessionId) ?? { id: sessionId }, ctx: { tools: { restrict: () => () => {} }, effect: execute => execute() } })
         }
         return { agent: agents.get(sessionId) }
       },
@@ -78,9 +78,10 @@ function bench(t, { home = mkdtempSync(join(tmpdir(), 'ds-bot-review-guard-')), 
   }
   // Another Bot's message_bot in the Solver's chat, as delivery.js sends it.
   const botMessage = async (sessionId, fromId, value, extra = {}) => {
-    const message = { content: text(value), source: { kind: 'bot', role: 'request', senderSessionId: fromId, exchangeId: `e${++seq}`, ...extra } }
+    const message = { id: `message-${seq + 1}`, content: text(value), source: { kind: 'bot', role: 'request', senderSessionId: fromId, exchangeId: `e${++seq}`, ...extra } }
+    const { agent } = await ctx.sessionController.resolveAgent(sessionId)
     const handler = ctx.listeners.get('agent/pre-step').find(listener => listener.name === 'admitBotStep')
-    assert.equal(await handler({ agent: { session: { id: sessionId } }, messages: [message] }, () => 'enter'), 'enter')
+    assert.equal(await handler({ agent, messages: [message] }, () => 'enter'), 'enter')
     event(sessionId, 'user/message', message)
   }
   const endTurn = (sessionId, reply, reason = { kind: 'completed' }) => {

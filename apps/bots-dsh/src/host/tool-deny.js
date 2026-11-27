@@ -355,20 +355,20 @@ export function install(rt) {
     return undefined
   }
 
-  // Whether a Session is `bot`'s own chat (a part of it included) or a subagent under it, by the
-  // same durable parent lineage as botOfSession; a group Session or a task run is not.
-  const ownChatLineage = (sessionId, agent, bot) => {
-    let current = sessionId
-    let header = agent?.session?.header ?? headerOf(current)
-    for (let depth = 0; typeof current === 'string' && depth < 32; depth += 1) {
-      if (current === bot.id || rt.chatOwners?.get(current) === bot.id || current === rt.chatOf?.(bot.id)
-        || rt.pastOwners?.get(current)?.botId === bot.id && !rt.pastOwners.get(current).roomId) return true
-      if (rt.botOf(current) !== undefined || rt.selfOf(current) !== undefined || rt.state?.tasks?.[current] !== undefined) return false
-      if (header?.origin !== 'subagent' || header.parentSession === undefined) return false
-      current = header.parentSession
-      header = headerOf(current)
-    }
-    return false
+  // ACP supplies only the Session ID. Both entry points must see the registered
+  // lineage as well as any stored header or explicitly supplied live Session.
+  const provenanceOf = (id, agent) => {
+    const registered = ctx.get?.('agents')?.get?.(id)
+    const stored = ctx.sessions?.get?.(id)
+    if (registered !== undefined && (registered?.id !== id || registered.session?.id !== id)) return null
+    if ((agent?.id !== undefined && agent.id !== id) || (agent?.session?.id !== undefined && agent.session.id !== id)
+      || (stored?.id !== undefined && stored.id !== id)) return null
+    const headers = [registered?.session?.header, stored?.header, agent?.session?.header].filter(header => header !== undefined)
+    const [first] = headers
+    if (headers.some(header => !header || typeof header !== 'object' || Array.isArray(header)
+      || header.id !== id || header.origin !== first.origin || header.parentSession !== first.parentSession
+      || header.delegationDepth !== first.delegationDepth)) return null
+    return first
   }
 
   const solverPolicyOf = (sessionId, agent) => {
@@ -380,14 +380,23 @@ export function install(rt) {
       for (let depth = 0; depth < 32; depth += 1) {
         if (typeof current !== 'string' || current === '' || seen.has(current)) return unavailable
         seen.add(current)
-        if (rt.scheduledNativeOwner?.(current) !== undefined) return { state: 'none' }
+        const header = provenanceOf(current, depth === 0 ? agent : undefined)
+        if (header === null) return unavailable
+        const child = header?.origin === 'subagent'
+        if (child) {
+          if (typeof header.parentSession !== 'string' || header.parentSession === ''
+            || (header.delegationDepth !== undefined && (!Number.isSafeInteger(header.delegationDepth) || header.delegationDepth < 1))) return unavailable
+        } else if (header && (header.origin !== undefined || header.parentSession !== undefined
+          || (header.delegationDepth !== undefined && header.delegationDepth !== 0))) return unavailable
+        const scheduled = rt.scheduledNativeOwner?.(current) !== undefined
         const past = rt.pastOwners?.get(current)
         const excluded = rt.groupOwners?.has(current) || rt.roomOwners?.has(current) || past?.roomId !== undefined
           || rt.taskOwners?.has(current) || !!rt.state?.tasks?.[current]
         const direct = rt.botOf(current)
         const owner = rt.selfOf(current) ?? rt.state?.tasks?.[current]?.from
         const bot = direct ?? (owner === undefined ? undefined : rt.botOf(owner))
-        if (excluded) return { state: 'none', bot, own: false }
+        if (child && (scheduled || excluded || bot !== undefined)) return unavailable
+        if (scheduled || excluded) return { state: 'none', bot, own: false }
         if (owner !== undefined && bot === undefined) return unavailable
         if (bot) {
           const own = direct === bot || rt.chatOwners?.get(current) === bot.id || past?.botId === bot.id
@@ -396,23 +405,17 @@ export function install(rt) {
           if (!actualSolver(bot)) return { state: 'none', bot, own }
           return { state: 'solver', bot, own, guarded: bot.reviewGuard === true, gateClosed: rt.planGateClosed?.(bot) === true }
         }
-        const liveHeader = agent?.session?.id === current ? agent.session.header : undefined
-        const storedHeader = ctx.sessions?.get?.(current)?.header
-        const header = liveHeader ?? storedHeader
-        if (!header || typeof header !== 'object' || Array.isArray(header) || header.id !== current) return unavailable
-        if (liveHeader !== undefined && storedHeader !== undefined
-          && [liveHeader, storedHeader].some(entry => entry?.id !== current || entry.origin !== header.origin
-            || entry.parentSession !== header.parentSession || entry.delegationDepth !== header.delegationDepth)) return unavailable
-        if (header.origin === undefined) {
-          if (header.parentSession !== undefined || (header.delegationDepth !== undefined && header.delegationDepth !== 0)) return unavailable
-          return { state: 'none' }
-        }
-        if (header.origin !== 'subagent' || typeof header.parentSession !== 'string' || header.parentSession === ''
-          || (header.delegationDepth !== undefined && (!Number.isSafeInteger(header.delegationDepth) || header.delegationDepth < 1))) return unavailable
+        if (!header) return unavailable
+        if (!child) return { state: 'none' }
         current = header.parentSession
       }
     } catch {}
     return unavailable
+  }
+
+  const ownChatLineage = (sessionId, agent, bot) => {
+    const policy = solverPolicyOf(sessionId, agent)
+    return policy.own === true && policy.bot.id === bot?.id
   }
 
   /**
@@ -574,7 +577,7 @@ export function install(rt) {
     const sessionId = exec.agent.session?.id ?? exec.agent.id
     const policy = solverPolicyOf(sessionId, exec.agent)
     if (policy.state === 'unavailable') throw refusal(POLICY_UNAVAILABLE_TEXT)
-    const bot = policy.bot ?? botOfSession(sessionId, exec.agent)
+    const bot = policy.bot
     if (bot === undefined) return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
     const launch = taskLaunchOf(exec, bot)
     if (launch !== undefined) {
@@ -601,7 +604,7 @@ export function install(rt) {
           confined = solverReadPolicy(rt, bot, name, exec.arguments, cwd)
           if (confined?.arguments) exec.arguments = confined.arguments
         }
-        const { sessionId, base, own, definition, held: reviewHoldDecision, call } = reviewGuardOf(exec, bot, name)
+        const { sessionId, base, own, definition, held: reviewHoldDecision, call } = reviewGuardOf(exec, bot, name, policy.own)
         const held = confined?.held ?? reviewHoldDecision
         if (held !== undefined) {
           const detail = { why: held.why, tool: name, callId: exec.callId, text: held.text }
@@ -660,10 +663,9 @@ export function install(rt) {
   }
 
   // The review guard's answer for one call of a Solver or a guarded Bot (review-guard.js).
-  function reviewGuardOf(exec, bot, name) {
+  function reviewGuardOf(exec, bot, name, own) {
     const sessionId = exec.agent?.id ?? exec.agent?.session?.id
     const base = exec.agent?.session === undefined ? undefined : rt.sessionFolder?.(exec.agent.session)
-    const own = ownChatLineage(sessionId, exec.agent, bot)
     const definition = definitionOf(exec)
     const call = solverCallId(sessionId, name, exec.arguments, exec.callId)
     return { sessionId, base, own, definition, call, held: rt.reviewGuardHolds?.(bot, own, name, exec.arguments, definition, base, call) }
@@ -675,14 +677,15 @@ export function install(rt) {
   function heldOfExec(exec) {
     const name = typeof exec?.name === 'string' ? exec.name : ''
     if (name === '' || exec?.agent === undefined) return undefined
-    const bot = botOfSession(exec.agent?.id ?? exec.agent?.session?.id, exec.agent)
+    const policy = solverPolicyOf(exec.agent.session?.id ?? exec.agent.id, exec.agent)
+    const bot = policy.bot
     if (!solverTracked(bot)) return undefined
 
     const launch = taskLaunchOf(exec, bot)
     if (launch !== undefined) return launch
     if (deniedNames(bot, exec.agent).includes(name)) return undefined
     if (noShell(bot) && shellCall(name, exec.arguments, definitionOf(exec))) return undefined
-    const { sessionId, held } = reviewGuardOf(exec, bot, name)
+    const { sessionId, held } = reviewGuardOf(exec, bot, name, policy.own)
     return held === undefined ? undefined : { held, sessionId }
   }
 

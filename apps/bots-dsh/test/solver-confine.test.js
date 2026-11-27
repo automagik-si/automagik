@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { AgentRun } from '../../acp-dsh/src/host/acp.js'
 import { createIdentityReaders } from '../../acp-dsh/src/host/identity.js'
 import { nativeWorld } from '../../acp-dsh/test/fixtures/managed-native-world.js'
 import { apply } from '../index.js'
@@ -131,6 +132,67 @@ test('#2134 source 3 exact lineage reaches the ACP policy reader and DSH tool ga
   })
 })
 
+test('#2134 exception 3 ACP and DSH reconcile registered lineage at each exact Session', async t => {
+  const w = await setup(t)
+  const sessions = new Map()
+  const agents = new Map()
+  w.rt.ctx.sessions = sessions
+  w.rt.ctx.provide('agents', agents)
+  const id = 'lineage-child'
+  const parentId = 'lineage-parent'
+  const root = { id, cwd: w.work }
+  const parent = { id: parentId, origin: 'subagent', parentSession: w.bot.id, delegationDepth: 1 }
+  const child = { ...root, origin: 'subagent', parentSession: parentId, delegationDepth: 2 }
+  const holder = header => ({ id: header.id, session: { id: header.id, header } })
+  const store = header => sessions.set(header.id, holder(header).session)
+  const register = header => agents.set(header.id, holder(header))
+  const guard = w.rt.ctx.listeners.get('tools/execute')[0]
+  const run = header => guard({
+    name: 'read', arguments: { file_path: w.inside }, agent: holder(header),
+  }, () => 'inert body')
+  const refuse = async header => {
+    assert.deepEqual(w.identity.readState(id), { ok: false })
+    await assert.rejects(run(header), /could not confirm this Session.s rules/)
+  }
+
+  await t.test('matching registered and stored root and descendants retain their routes', async () => {
+    for (const [header, expected] of [[root, 'none'], [child, 'solver']]) {
+      store(header)
+      register(header)
+      store(parent)
+      register(parent)
+      store(w.agent.session.header)
+      register(w.agent.session.header)
+      assert.equal(w.identity.readState(id).identity.solverPolicy.state, expected)
+      assert.equal(await run(header), 'inert body')
+    }
+  })
+  await t.test('ACP sees a registered child and rejects a conflicting stored root', async () => {
+    store(root)
+    register(child)
+    await refuse(child)
+  })
+  await t.test('a traversed parent disagrees on origin, direct parent or depth', async () => {
+    store(child)
+    register(child)
+    store(parent)
+    for (const header of [{ id: parentId }, { ...parent, parentSession: 'other-fixture' }, { ...parent, delegationDepth: 2 }]) {
+      register(header)
+      await refuse(child)
+    }
+  })
+  await t.test('a registered Agent points at another Session', async () => {
+    register(parent)
+    agents.set(id, { id, session: holder(parent).session })
+    await refuse(child)
+  })
+  await t.test('DSH also checks its explicitly supplied live header against both sources', async () => {
+    register(child)
+    assert.equal(w.identity.readState(id).identity.solverPolicy.state, 'solver')
+    await assert.rejects(run(root), /could not confirm this Session.s rules/)
+  })
+})
+
 test('#2134 source 4 the ACP search root is checked independently of locations', async t => {
   const w = await setup(t)
   const search = (cwd, input, location = w.inside) => w.rt.solverQuestionDecision({
@@ -176,4 +238,64 @@ test('#2134 source 6 Claude session rules protect regular files beside the team 
   assert.ok(rules.deny.includes(`${root(w.protectedRoot)}/**)`))
   assert.ok(rules.deny.every(rule => !rule.startsWith(root(workspace))))
   assert.ok(rules.deny.includes(`${root(privateFile)})`), 'the sibling file itself has an exact Read denial')
+})
+
+test('#2134 exception 6 Claude encodes ordinary paths and holds literal POSIX names before dispatch', {
+  skip: process.platform === 'win32',
+}, async t => {
+  for (const timing of ['ordinary paths', 'before launch', 'after fake launch']) await t.test(timing, async t => {
+    const w = await setup(t)
+    const workspace = join(w.home, 'workspace')
+    const protectedFile = join(w.home, 'literal\\name.txt')
+    const ordinaryFile = join(w.home, 'fixture-state.json')
+    mkdirSync(workspace)
+    writeFileSync(ordinaryFile, 'synthetic data')
+    w.rt.teamFolder = () => workspace
+    w.bot.workDir = workspace
+    const world = nativeWorld(t, {
+      managed: true, hidden: true,
+      identity: () => ({
+        name: 'Solver', solver: true, solverPolicy: { state: 'solver' }, nativeTools: true, nativeToolsAgent: 'acp-claude',
+        confineDeny: w.identity.readState(w.bot.id).identity.confineDeny,
+      }),
+      policyState: id => world.identityReaders.readState(id),
+    })
+    world.adapter.dshTools = () => false
+    const addProtected = () => {
+      writeFileSync(protectedFile, 'synthetic data')
+      assert.ok(w.identity.readState(w.bot.id).identity.confineDeny
+        .some(entry => entry.path === protectedFile && entry.kind === 'file'))
+    }
+    const chat = world.chat('fixture-claude', { cwd: workspace })
+    if (timing === 'ordinary paths') {
+      await chat.turn('synthetic request')
+      const rules = world.events('new-session')[0].meta.claudeCode.options.settings.permissions
+      assert.ok(rules.deny.includes(`Read(/${ordinaryFile})`))
+      assert.ok(rules.deny.includes(`Read(/${w.protectedRoot}/**)`))
+      assert.ok(rules.deny.every(rule => !rule.startsWith(`Read(/${workspace}`)))
+      assert.equal(world.events('prompt').length, 1)
+      return
+    }
+    if (timing === 'before launch') {
+      addProtected()
+      await chat.turn('synthetic request')
+      assert.equal(world.events('new-session').length, 0)
+    } else {
+      const start = AgentRun.prototype.start
+      let mutations = 0
+      t.mock.method(AgentRun.prototype, 'start', async function (...args) {
+        const result = await start.apply(this, args)
+        assert.equal(world.events('new-session').length, 1, 'the fake session started before the mutation')
+        assert.equal(world.events('prompt').length, 0, 'the mutation precedes the first prompt')
+        addProtected()
+        mutations += 1
+        return result
+      })
+      await chat.turn('synthetic request')
+      assert.equal(mutations, 1, 'the protected file was added at the awaited start boundary')
+      assert.equal(world.events('new-session').length, 1)
+      t.diagnostic(`start-boundary mutations=${mutations}; new-session before mutation=1; prompts after turn=${world.events('prompt').length}`)
+    }
+    assert.equal(world.events('prompt').length, 0)
+  })
 })

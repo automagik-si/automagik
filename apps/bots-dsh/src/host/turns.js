@@ -919,39 +919,64 @@ export function install(rt) {
   })
 
   // DSH awaits this after claiming the input, before recording it or dispatching a provider.
-  const admittedRequests = new WeakMap()
-  rt.admitBotRequest = (agent, message, sendable) => {
+  const admittedRequests = new Map()
+  rt.retireBotAdmission = (session, message) => {
+    const receipt = admittedRequests.get(message?.id)
+    if (receipt && receipt.session === session && receipt.exchangeId === message.source?.exchangeId) {
+      admittedRequests.delete(message.id)
+    }
+  }
+  rt.admitBotRequest = (agent, message, { sendable, destination } = {}) => {
     const source = message?.source
     const session = agent?.session
-    const owner = rt.chatOwners.get(session?.id)
+    const id = session?.id
+    const owner = rt.chatOwners.get(id)
+    const receipt = admittedRequests.get(message?.id)
+    if (receipt !== undefined) {
+      if (receipt.agent !== agent || receipt.session !== session || receipt.exchangeId !== source?.exchangeId) return false
+      return receipt.current() ? receipt : false
+    }
     if (owner === undefined || source?.kind !== SOURCE_KIND || source.role !== 'request'
       || source.deferred === true || source.resumed === true || source.resumedByUpdate === true || source.retried === true) return
     const bot = rt.botOf(owner)
-    const eligible = () => {
-      const currentAgent = ctx.get?.('agents')?.get?.(session.id)
-      return agent.session === session && (currentAgent === undefined || currentAgent === agent)
-        && rt.chatOwners.get(session.id) === owner && rt.botOf(owner) === bot && sendable?.() !== false
-    }
-    if (!eligible()) return false
-    if (admittedRequests.get(message) === session) return true
+    const team = rt.teamGeneration?.()
+    const { exchangeId } = source
+    const messageId = message.id
+    const current = () => agent.session === session && ctx.get?.('agents')?.get?.(id) === agent
+      && rt.chatOwners.get(id) === owner && rt.chatOf(owner) === id && rt.botOf(owner) === bot
+      && (team === undefined || rt.sameTeam(team)) && destination?.() !== false
+    const eligible = () => current() && sendable?.() !== false
+    if (!bot || typeof messageId !== 'string' || typeof exchangeId !== 'string' || !eligible()) return false
     return Promise.resolve(rt.reviewBotRequest?.(owner, source.senderSessionId, {
-      noReply: source.noReply === true, exchangeId: source.exchangeId, eligible,
+      noReply: source.noReply === true, exchangeId, eligible,
     })).then(() => {
       if (!eligible()) return false
-      admittedRequests.set(message, session)
-      return true
+      // Arm the receipt only when recovery sends this input. DSH copies the input
+      // into its inbox, keeping its ID and exchange through claim and pre-step.
+      const accepted = { agent, session, exchangeId, current,
+        remember: () => admittedRequests.set(messageId, accepted) }
+      return accepted
     })
   }
-  ctx.on('agent/pre-step', async function admitBotStep({ agent, messages, signal }, next) {
-    try {
-      for (const message of messages ?? []) {
-        const admission = rt.admitBotRequest(agent, message, () => signal?.aborted !== true)
-        if (admission !== undefined && await admission === false) return { kind: 'reject' }
+  ctx.on('agent/pre-step', async function admitBotStep({ agent, messages = [], signal }, next) {
+    const session = agent.session
+    const accepted = []
+    for (const message of messages) {
+      let admission
+      try {
+        admission = rt.admitBotRequest(agent, message, { sendable: () => signal?.aborted !== true })
+        if (admission !== undefined) admission = await admission
+      } catch (error) {
+        rt.warn('omni-ui: Solver request could not be saved: %s', error)
+        admission = false
       }
-    } catch (error) {
-      rt.warn('omni-ui: Solver request could not be saved: %s', error)
-      return { kind: 'reject' }
+      rt.retireBotAdmission(session, message)
+      accepted.push({ message, admission })
     }
+    const remaining = accepted.filter(({ admission }) => admission === undefined
+      || (admission !== false && admission.current())).map(({ message }) => message)
+    if (remaining.length === 0 && messages.length > 0) return { kind: 'reject' }
+    if (remaining.length < messages.length) messages.splice(0, messages.length, ...remaining)
     return next()
   })
 

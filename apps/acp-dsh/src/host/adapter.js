@@ -80,6 +80,24 @@ const gateProfileText = kept => "Codex stopped: until the plan has its reviewer'
     : "Turn off Codex's own tools for this Bot in Details and send again.")
 const CLAUDE_GATE_ASK = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'WebFetch']
 const CLAUDE_READ_ASK = ['Read', 'Grep', 'Glob']
+// Claude's Read rules use slash-delimited absolute paths and glob syntax.
+// Hold the policy when a literal name cannot be expressed by that syntax.
+function claudeDenyRules(entries) {
+  if (!Array.isArray(entries)) return undefined
+  const windows = process.platform === 'win32'
+  const deny = []
+  for (const entry of entries) {
+    if (typeof entry?.path !== 'string' || !isAbsolute(entry.path)
+      || !['file', 'directory', 'unknown'].includes(entry.kind)) return undefined
+    const path = windows ? entry.path.replaceAll('\\', '/') : entry.path.slice(1)
+    if ((windows && !/^[A-Za-z]:\//.test(path)) || /[\\*?()[\]{}\x00-\x1f\x7f]/.test(path)) return undefined
+    if ((windows ? path.slice(3) : path).split('/').some(part => part === '' || part === '.' || part === '..')) return undefined
+    const root = `//${path}`
+    if (entry.kind !== 'directory') deny.push(`Read(${root})`)
+    if (entry.kind !== 'file') deny.push(`Read(${root}/**)`)
+  }
+  return deny
+}
 const realWorkspace = path => {
   try { return isAbsolute(path) ? realpathSync.native(path) : undefined } catch { return undefined }
 }
@@ -2125,18 +2143,12 @@ export class AcpAdapter extends LlmAdapter {
         if (options.provider !== 'acp-claude' || !builtIn || identity?.solver !== true) {
           return { key: hard, meta: hard ? agent.hardAsk() : {} }
         }
-        const deny = identity.confineDeny
-        if (!Array.isArray(deny) || deny.some(entry => typeof entry?.path !== 'string' || entry.path === ''
-          || !['file', 'directory', 'unknown'].includes(entry.kind))) return undefined
+        const deny = claudeDenyRules(identity.confineDeny)
+        if (deny === undefined) return undefined
         const permissions = {
           ask: [...(hard ? agent.hardAsk().claudeCode.options.settings.permissions.ask : []),
             ...(identity.guardedSolver ? CLAUDE_GATE_ASK : []), ...CLAUDE_READ_ASK],
-          deny: deny.flatMap(({ path, kind }) => {
-            const root = `//${path.replace(/^[\\/]/, '').replaceAll('\\', '/')}`
-            if (kind === 'file') return [`Read(${root})`]
-            if (kind === 'directory') return [`Read(${root}/**)`]
-            return [`Read(${root})`, `Read(${root}/**)`]
-          }),
+          deny,
         }
         return { key: JSON.stringify(permissions), meta: { claudeCode: { options: { settings: { permissions } } } } }
       }

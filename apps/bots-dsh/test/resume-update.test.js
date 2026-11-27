@@ -81,7 +81,7 @@ function useBootHold(rt, phase = 'health', expectedRun) {
 }
 
 function replayBench(t, home, { agents = new Map(), logs = new Map(), before, gate = true, profileDir, updateRun } = {}) {
-  const ctx = fakeContext(profileDir === undefined ? undefined : { services: { profileContext: { dir: profileDir } } })
+  const ctx = fakeContext({ services: { agents, ...(profileDir === undefined ? {} : { profileContext: { dir: profileDir } }) } })
   const sent = []
   ctx.sessions = {
     flush: async () => true,
@@ -604,6 +604,139 @@ test('#2134 source 2 claimed and recovered Bot requests wait for committed admis
     assert.deepEqual(fixture.writes, [])
     assert.deepEqual(fixture.withdrawn, [])
     assert.equal(fixture.open(), true)
+  })
+})
+
+test('#2134 exception 2 a copied recovery claim admits a closed-plan exchange once', async t => {
+  const home = temp(t)
+  const exchangeId = 'closed-plan-copy'
+  seed(home, { queued: { chat: [{ at: Date.now(), args: {
+    fromId: 'sender', toId: 'ada', role: 'request', exchangeId, text: 'Synthetic request',
+  } }] } })
+  const loop = await realLoop(t, home, { turns: true })
+  const { bot, open, writes } = guardedRequest(loop)
+  delete bot.reviewTrack.planOpen
+  delete bot.reviewTrack.planVerdictAt
+  assert.equal(open(), false)
+  const admission = loop.rt.admitBotRequest
+  const inputs = []
+  const claimed = []
+  loop.rt.admitBotRequest = (agent, message, ...options) => {
+    if (message.source.exchangeId === exchangeId) inputs.push(message)
+    return admission(agent, message, ...options)
+  }
+  loop.ctx.on('agent/inbox/claimed', ({ message }) => {
+    if (message.source.exchangeId === exchangeId) claimed.push(message)
+  })
+  const { agent } = await loop.create('chat')
+  await loop.rt.resumesDone
+  await agent.whenIdle()
+  assert.equal(claimed.length, 1)
+  assert.equal(inputs.length, 2)
+  assert.notEqual(inputs[0], inputs[1])
+  assert.equal(inputs[0].id, claimed[0].id)
+  assert.equal(inputs[1].id, claimed[0].id)
+  assert.equal(bot.reviewTrack.openerExchange, undefined)
+  assert.equal(writes.length, 1, 'the DSH inbox copy consumes the recovery decision')
+  assert.equal(bot.reviewTrack.solver.revision, 1)
+  assert.equal(loop.calls.length, 1)
+  assert.equal(loop.rt.deliveryNote(exchangeId), undefined)
+})
+
+test('#2134 exception 2 a failed Bot save preserves ordered co-claimed human input', async t => {
+  const home = temp(t)
+  const loop = await realLoop(t, home, { turns: true })
+  const fixture = guardedRequest(loop, async () => { throw new Error('synthetic required save failed') })
+  const { agent } = await loop.create('chat')
+  await loop.rt.resumesDone
+  const first = user('First independent human input')
+  const second = user('Second independent human input')
+  const relay = { fromId: 'sender', toId: 'ada', role: 'request', exchangeId: 'co-claimed', text: 'Synthetic request' }
+  const claimed = []
+  loop.ctx.on('agent/inbox/claimed', ({ message }) => claimed.push(message.source.exchangeId ?? message.id))
+  agent.inject(first)
+  await loop.rt.deliver(relay, { enqueue(agent, message) { agent.inject(message); return true } })
+  agent.followup(second)
+  await agent.whenIdle()
+  assert.deepEqual(claimed, [first.id, relay.exchangeId, second.id])
+  assert.deepEqual(fixture.writes, [relay.exchangeId])
+  assert.deepEqual(loop.events.filter(event => event.type === 'user/message')
+    .map(event => event.data.source.exchangeId ?? event.data.id), [first.id, second.id])
+  assert.equal(loop.calls.length, 1)
+  await loop.rt.flushUpdateNotes()
+  assert.deepEqual(notesOf(home).queued.chat.map(item => item.args.exchangeId), [relay.exchangeId])
+})
+
+test('#2134 exception 2 recovery fences the registered Agent through a pending write', async t => {
+  for (const change of ['unregistered', 'replacement']) await t.test(change, async t => {
+    const home = temp(t)
+    const relay = { fromId: 'sender', toId: 'ada', role: 'request', exchangeId: change, text: 'Synthetic request' }
+    seed(home, { queued: { chat: [{ at: Date.now(), args: relay }] } })
+    const entering = Promise.withResolvers()
+    const commit = Promise.withResolvers()
+    t.after(() => commit.resolve())
+    const loop = await realLoop(t, home, { turns: true })
+    const fixture = guardedRequest(loop, () => { entering.resolve(); return commit.promise })
+    const { agent } = await loop.create('chat')
+    const registry = loop.ctx.get('agents')
+    const get = registry.get.bind(registry)
+    await entering.promise
+    const replacement = change === 'replacement' ? { id: 'chat', session: agent.session } : undefined
+    const lookup = t.mock.method(registry, 'get', id => id === 'chat' ? replacement : get(id))
+    commit.resolve()
+    await loop.rt.resumesDone
+    lookup.mock.restore()
+    await agent.whenIdle()
+    assert.equal(fixture.open(), true)
+    assert.deepEqual(fixture.withdrawn, [])
+    assert.equal(loop.calls.length, 0)
+    assert.equal(loop.rt.deliveryNote(relay.exchangeId)?.sessionId, 'chat')
+  })
+})
+
+test('#2134 exception 2 relocated ordinary recovery stays pending and the remaining batch wakes', async t => {
+  const home = temp(t)
+  const ordinary = exchangeId => ({ fromId: 'sender', toId: 'ada', role: 'continue', exchangeId, text: exchangeId })
+  const stale = ordinary('stale-destination')
+  const guarded = { ...ordinary('guarded-request'), role: 'request' }
+  const wake = ordinary('remaining-wake')
+  seed(home, { queued: { chat: [stale, guarded, wake].map((args, at) => ({ at, args })) } })
+  const entering = Promise.withResolvers()
+  const commit = Promise.withResolvers()
+  t.after(() => commit.resolve())
+  const loop = await realLoop(t, home, { turns: true })
+  guardedRequest(loop, () => { entering.resolve(); return commit.promise })
+  const { agent } = await loop.create('chat')
+  await entering.promise
+  loop.rt.forgetDelivery(stale.exchangeId)
+  await loop.rt.deliver({ ...stale, sessionId: 'other-fixture-part' })
+  commit.resolve()
+  await loop.rt.resumesDone
+  await agent.whenIdle()
+  assert.deepEqual(loop.events.filter(event => event.type === 'user/message').map(event => event.data.source.exchangeId),
+    [guarded.exchangeId, wake.exchangeId])
+  assert.equal(loop.calls.length, 1)
+  assert.equal(loop.rt.deliveryNote(stale.exchangeId)?.sessionId, 'other-fixture-part')
+})
+
+test('#2134 exception 2 recovery follows only a confirmed saved part mapping', async t => {
+  for (const owner of ['ada', 'sender']) await t.test(owner, async t => {
+    const home = temp(t)
+    const relay = { fromId: 'sender', toId: 'ada', role: 'continue', exchangeId: 'part-move', text: 'Synthetic input' }
+    seed(home, { queued: { 'old-chat': [{ at: Date.now(), args: relay }] } })
+    const loop = await realLoop(t, home, { turns: true })
+    loop.rt.chatOwners.set('chat', 'ada')
+    loop.rt.pastOwners.set('old-chat', { botId: owner })
+    loop.rt.sessionNow = (id, toId) => loop.rt.isBotSession(id) ? id
+      : loop.rt.pastOwners.has(id) ? loop.rt.chatOf(toId) : undefined
+    const { agent } = await loop.create('chat')
+    await loop.rt.resumesDone
+    await agent.whenIdle()
+    const expected = owner === 'ada' ? [relay.exchangeId] : []
+    assert.deepEqual(loop.events.filter(event => event.type === 'user/message')
+      .map(event => event.data.source.exchangeId), expected)
+    assert.equal(loop.calls.length, expected.length)
+    assert.equal(loop.rt.deliveryNote(relay.exchangeId)?.sessionId, owner === 'ada' ? undefined : 'old-chat')
   })
 })
 
