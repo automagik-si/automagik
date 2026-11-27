@@ -2501,8 +2501,9 @@ test("restart: the new pane resumes the session in the old one's space and tab, 
   const seen = calls.slice(ran, killed).filter((c) => c[0] === "get" && c[1] === "t100").length;
   assert.ok(seen >= 2, `the new pane was checked before the kill: ${JSON.stringify(calls)}`);
   assert.equal(calls.filter((c) => c[0] === "kill").length, 1);
+  assert.ok(at(calls, "rm", "t5") > killed);
   const state = s.hcState();
-  assert.equal(state.terminals.find((x) => x.address === "t5").state, "finished");
+  assert.equal(state.terminals.some((x) => x.address === "t5"), false);
   assert.equal(state.terminals.find((x) => x.address === "t100").state, "live");
   // The attach ledger: t5's binding detached (by start, moved), t100 attached (by start), and
   // exactly one live binding for Genie, on t100.
@@ -2782,14 +2783,14 @@ test("#805 a queued watcher runs as its own terminal, never the caller's pane", 
     assert.equal(at(calls, "kill", watcher), -1, "the watcher's own terminal was left alone");
     const after = s.hcState();
     const stateOf = (addr) => after.terminals.find((x) => x.address === addr)?.state;
-    assert.equal(stateOf("t5"), "finished", "the old pane ended");
+    assert.equal(stateOf("t5"), undefined, "the old pane was removed");
     assert.equal(stateOf(watcher), "live", "the watcher's own terminal was left alone");
     assert.deepEqual(JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8")), []);
     if (!tree) {
       assert.equal(stateOf("t101"), "live", "the replacement runs");
       return;
     }
-    assert.deepEqual(["t7", "t8"].map(stateOf), ["finished", "finished"]);
+    assert.deepEqual(["t7", "t8"].map(stateOf), [undefined, undefined]);
     assert.equal(stateOf("t9"), "live", "the member bot that outlives the pane is left alone");
     assert.ok(calls.some((c) => c[0] === "run" && c.includes("fix-213-dev")), "the worker ran again");
     assert.ok(calls.some((c) => c[0] === "run" && c.includes("rev-1")), "the template helper ran again");
@@ -3460,15 +3461,17 @@ test("restart (#328): an agent with no resume starts fresh as before, a teammate
   assert.deepEqual(ownWords(runCall(s.calls())), ["opencode"]);
 });
 
-test("a bot restarting itself writes and prints everything before the kill that ends its own pane", (t) => {
+test("a bot restarting itself writes and prints everything before its old pane is ended and removed", (t) => {
   const s = restartScene(t);
   const r = s.cli(["restart", "Genie", "--agent", "codex", "--save", "--json"], { env: { HC_TERMINAL_ID: "t5" } });
-  // The fake hc ends the CLI as the real kill of its own pane would: what it printed first stands.
+  assert.equal(r.code, 0, r.err);
   assert.equal(r.json().terminal, "t100", r.err);
   assert.deepEqual([r.json().replaced, r.json().mode, r.json().saved], ["t5", "swap", true]);
   assert.equal(s.bots().bots[0].agent, "codex", "saved before the kill");
   const calls = s.calls();
-  assert.deepEqual(calls.at(-1), ["kill", "t5"], "the kill is the last hc call");
+  assert.ok(at(calls, "kill", "t5") > at(calls, "run"));
+  assert.deepEqual(calls.at(-1), ["rm", "t5", "--json"]);
+  assert.equal(s.hcState().terminals.some((p) => p.address === "t5"), false);
   assert.ok(ledgerOf(s).some((x) => x.terminal === "t100" && x.kind === "seat"));
 });
 
@@ -3839,8 +3842,8 @@ test("restart --tree: the helpers that end with the bot run again under its new 
   assert.ok(killAt("t5") > 0 && killAt("t5") < runAt("fix-213-dev") && runAt("fix-213-dev") < runAt("rev-1"), JSON.stringify(calls));
   assert.deepEqual([killAt("t7"), killAt("t8")], [-1, -1]);
   const state = s.hcState();
-  assert.deepEqual(["t5", "t7", "t8", "t9", "t101", "t102"].map((x) => state.terminals.find((y) => y.address === x).state),
-    ["finished", "finished", "finished", "live", "live", "live"], "the member bot that outlives the pane is left alone");
+  assert.deepEqual(["t5", "t7", "t8", "t9", "t101", "t102"].map((x) => state.terminals.find((y) => y.address === x)?.state),
+    [undefined, undefined, undefined, "live", "live", "live"], "the member bot that outlives the pane is left alone");
   // The worker's ledger row goes to its new terminal; helpers get no attach rows (they are no bots).
   assert.deepEqual(ledgerOf(s).filter((x) => x.terminal === "t101").map((x) => [x.kind, x.task, x.agent, x.model, x.effort]), [["worker", "fix-213", "omp", "kimi/k3", "high"]]);
   assert.equal(attachOf(s).some((x) => ["t101", "t102"].includes(x.terminal)), false);
@@ -3851,6 +3854,22 @@ test("restart --tree: the helpers that end with the bot run again under its new 
   assert.ok(lines.includes(`am: Genie's helper fix-213-dev: t101 replaces t7, resuming its last conversation (--continue).`), text.err);
   assert.ok(lines.includes("am: Genie's helper rev-1: t102 replaces t8, resuming its session by id (--resume=***)."), text.err);
   assert.equal(text.code, 0);
+});
+
+test("restart --tree leaves a helper that exits independently and reports one failed removal", (t) => {
+  const { s } = treeScene(t);
+  const state = s.hcState();
+  state.afterKill = { terminal: "t7", patch: { reason: "exited" } };
+  state.failRm = "t8";
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().helpers.map((h) => h.up), [true, true]);
+  const warning = "t8 was left listed. Run hc rm t8";
+  assert.deepEqual(r.json().warnings.filter((w) => w.includes("hc rm")), [warning]);
+  assert.deepEqual(r.err.split("\n").filter((line) => line.includes("hc rm")), [`am: ${warning}`]);
+  assert.equal(at(s.calls(), "rm", "t7"), -1);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t7").state, "finished");
 });
 
 test("restart --tree #413: refused before anything starts while a pane waits for an answer or an agent reports no status; --force still goes", (t) => {
@@ -3927,7 +3946,7 @@ test("restart --tree waits, before anything starts, for helpers and the old pane
   assert.equal(f.code, 0, f.err);
   assert.equal(runs(forced).length, 1, "only the bot runs again");
   assert.equal("helpers" in f.json(), false);
-  assert.deepEqual(["t7", "t8"].map((x) => forced.hcState().terminals.find((y) => y.address === x).state), ["finished", "finished"]);
+  assert.deepEqual(["t7", "t8"].map((x) => forced.hcState().terminals.find((y) => y.address === x)?.state), [undefined, undefined]);
 });
 
 test("restart --tree: a helper whose turn starts and ends once the new pane is up types into no pane older than it (the old one has ended)", (t) => {
@@ -4146,7 +4165,7 @@ test("#1509 the final helper check ends only the new parent and leaves the old t
   assert.equal(runs(s).length, 1);
   assert.deepEqual(s.calls().filter((c) => c[0] === "kill").map((c) => c[1]), ["t100"]);
   assert.deepEqual(s.hcState().terminals.map(({ address, state }) => [address, state]),
-    [["t5", "live"], ["t8", "live"], ["t100", "finished"]]);
+    [["t5", "live"], ["t8", "live"]]);
   assert.deepEqual(attachOf(s), before);
   assert.deepEqual(rowsOf_(s, "start"), starts, "the abandoned replacement adds no start row");
 });
@@ -4204,7 +4223,7 @@ test("#1509 guarded tree recovery runs after a successful kill even when queue c
   assert.equal(result.helpers[0].up, true);
   assert.equal(result.helpers[0].error, null);
   assert.deepEqual(s.hcState().terminals.map(({ address, state: life }) => [address, life]),
-    [["t5", "finished"], ["t8", "finished"], ["t100", "live"], ["t101", "live"]]);
+    [["t100", "live"], ["t101", "live"]]);
 });
 
 test("restart --tree #453: a Claude helper's by-hand line under a bad record carries login A's words and says why (review Low 2)", (t) => {
@@ -4315,8 +4334,8 @@ test("restart --tree: hc run failing for helper 2 of 3: helpers 1 and 3 run agai
   assert.equal(`${r.out}${r.err}`.includes(SID2), false, "no session id printed");
   assert.deepEqual(codexWords(agentWords(runs(s).at(-1))), ["codex", "-m", "gpt-a", ...CODEX_MODE, "resume", SID3], "helper 3 resumed by its id, in the launch mode");
   const state = s.hcState();
-  assert.deepEqual(["t5", "t7", "t8", "t10", "t100", "t101", "t102"].map((x) => state.terminals.find((y) => y.address === x).state),
-    ["finished", "finished", "finished", "finished", "live", "live", "live"], "the old pane always ends");
+  assert.deepEqual(["t5", "t7", "t8", "t10", "t100", "t101", "t102"].map((x) => state.terminals.find((y) => y.address === x)?.state),
+    [undefined, undefined, undefined, undefined, "live", "live", "live"], "the old pane and its helpers are removed");
   onePanePerSession(s);
 });
 
@@ -4349,7 +4368,7 @@ test("restart --tree: a helper that survives its parent's end (and its kill) is 
   assert.match(k.err, /t7 \(fix-213-dev\) it still runs after its parent ended \(hc kill t7 failed: kill refused on t7\): it holds its session, so it isn't run again/);
   assert.deepEqual(k.json().helpers.map((h) => [h.replaced, h.up, h.still_running, h.by_hand]), [["t7", false, true, null], ["t8", true, false, null]]);
   assert.equal(runs(stuck).filter((c) => c.includes("fix-213-dev")).length, 0, "t7 never started twice");
-  assert.deepEqual(["t5", "t7"].map((x) => stuck.hcState().terminals.find((y) => y.address === x).state), ["finished", "live"]);
+  assert.deepEqual(["t5", "t7"].map((x) => stuck.hcState().terminals.find((y) => y.address === x)?.state), [undefined, "live"]);
   onePanePerSession(stuck);
   // A helper that survives its parent but ends on its own kill: run again.
   const once = treeScene(t).s;
@@ -4359,6 +4378,7 @@ test("restart --tree: a helper that survives its parent's end (and its kill) is 
   const o = once.cli(["restart", "Genie", "--tree", "--json"]);
   assert.equal(o.code, 0, o.err);
   assert.ok(at(once.calls(), "kill", "t7") > at(once.calls(), "kill", "t5"));
+  assert.ok(at(once.calls(), "rm", "t7") > at(once.calls(), "kill", "t7"));
   assert.deepEqual(o.json().helpers.map((h) => h.up), [true, true]);
   // Never up: reported with its line, which parses. 10 s, not 0.4 s: the bot's own pane must
   // still be seen with its agent in front under load, while the helper stays a bare shell.
@@ -4373,7 +4393,7 @@ test("restart --tree: a helper that survives its parent's end (and its kill) is 
   assert.match(r.err, /t7 \(fix-213-dev\) wasn't run again: t101 didn't keep an agent in front within 10s, so it was ended\. Its conversation is kept/);
   assert.match(r.err, /# a worker: its workers-ledger row \(task fix-213\) isn't copied/);
   pastedLine(t, r.json().helpers[0].by_hand);
-  assert.deepEqual(["t101", "t102", "t5"].map((x) => late.hcState().terminals.find((y) => y.address === x).state), ["finished", "live", "finished"]);
+  assert.deepEqual(["t101", "t102", "t5"].map((x) => late.hcState().terminals.find((y) => y.address === x)?.state), [undefined, "live", undefined]);
   onePanePerSession(late);
   // hc get of t7 fails once the bot's pane starts: unknown is not gone; no second copy.
   const blind = treeScene(t).s;
@@ -4384,7 +4404,7 @@ test("restart --tree: a helper that survives its parent's end (and its kill) is 
   assert.equal(b.code, 1);
   assert.match(b.err, /t7 \(fix-213-dev\) wasn't run again: hc get t7 failed \(hc: server error reading t7\), so it may still run; with it possibly running, a second copy would share its session\./);
   assert.equal(runs(blind).filter((c) => c.includes("fix-213-dev")).length, 0);
-  assert.equal(blind.hcState().terminals.find((y) => y.address === "t5").state, "finished");
+  assert.equal(blind.hcState().terminals.some((y) => y.address === "t5"), false);
 });
 
 test("restart --tree refuses before anything starts: a gone folder, a helper hc can't read, a helper's own helpers, one session named twice", (t) => {
@@ -4413,6 +4433,7 @@ test("restart --tree refuses before anything starts: a gone folder, a helper hc 
   const f = nest.cli(["restart", "Genie", "--tree", "--force"]);
   assert.equal(f.code, 0, f.err);
   assert.match(f.err, /--force: t30 \(under t7\) ends with its parent and isn't run again\./);
+  assert.equal(nest.hcState().terminals.some((p) => p.address === "t30"), false);
   // t8 labelled with Genie's own session: two panes would run it.
   const dup = treeScene(t).s;
   const st5 = dup.hcState();
@@ -5153,8 +5174,9 @@ test("RFC 0021: a fresh Claude launch gets a new id; restart resumes that id; --
   const second = seatRows(s)[1];
   assert.deepEqual([second.terminal, second.session], ["t101", first.session]);
   // The old launch ended only once its kill succeeded: its end row, keyed by core, terminal, created_ms.
-  assert.deepEqual(rowsOf_(s, "end").map((x) => [x.kind, x.terminal, x.core, x.created_ms, x.reason]),
-    [["seat", "t100", "fakecore0000", createdOf(s, "t100"), "replaced"]]);
+  assert.deepEqual(rowsOf_(s, "end").map((x) =>
+    [x.kind, x.terminal, x.core, x.created_ms, x.reason, x.hc_reason]),
+    [["seat", "t100", "fakecore0000", first.created_ms, "replaced", "killed"]]);
   // --fresh: a new id, not the old one.
   const f = s.cli(["restart", "Genie", "--fresh", "--force", "--json"]);
   assert.equal(f.code, 0, f.err);
@@ -6487,7 +6509,7 @@ test("#1556 a due seat with a helper restarts with its helper under the new pane
   assert.ok(replacement, "the bot's new pane runs");
   assert.ok(calls.some((c) => c[0] === "send" && c[1] === replacement.address && /Helper handoff/.test(c[2])),
     "the handoff is the new conversation's first message");
-  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
+  assert.equal(s.hcState().terminals.some((x) => x.address === "t5"), false);
 });
 
 test("#1509 restart --due checks every helper before replacing a queued watcher", (t) => {
@@ -7435,8 +7457,8 @@ test("#1728 restart from a skewed member pane ends the member seat it replaces",
   const r = s.cli(["restart", "Captain", "--json"], { env });
   assert.equal(r.code, 0, r.err);
   assert.equal(r.json().replaced, "t6");
-  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "t6"]]);
-  assert.equal(s.hcState().terminals.find((pane) => pane.address === "t6").state, "finished");
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "t6", "--json"]]);
+  assert.equal(s.hcState().terminals.some((pane) => pane.address === "t6"), false);
 });
 
 test("#1557 park adopts a subsequently announced reset without replacing its watcher or notifying twice", (t) => {
@@ -7621,7 +7643,7 @@ test("#1208 restart --tree: a chosen-home worker that outlives the bot is not pl
     assert.deepEqual(r.json().helpers, [], `${agent}: nothing planned`);
     assert.equal(at(s.calls(), "kill", "t7"), -1, `${agent}: never ended`);
     assert.equal(runs(s).length, 1, `${agent}: only the bot's own replacement`);
-    assert.deepEqual(["t5", "t7"].map((x) => s.hcState().terminals.find((y) => y.address === x).state), ["finished", "live"]);
+    assert.deepEqual(["t5", "t7"].map((x) => s.hcState().terminals.find((y) => y.address === x)?.state), [undefined, "live"]);
   }
 });
 
@@ -7718,7 +7740,7 @@ exec "${process.execPath}" "${FAKE_HC}" "$@"
   assert.ok(read >= 0 && recheck > read, JSON.stringify(calls));
   assert.equal(calls.slice(read, recheck).filter(([verb, opt]) => verb === "ls" && opt === "--json").length, 1);
   assert.equal(calls.slice(read, recheck).filter(([verb, address]) => verb === "get" && address === "t7").length, 1);
-  assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "finished");
+  assert.equal(s.hcState().terminals.some((x) => x.address === "t5"), false);
 });
 
 test("#1208 ordinary restart --tree omits a listed helper whose get returns JSON null", (t) => {
@@ -7729,7 +7751,7 @@ test("#1208 ordinary restart --tree omits a listed helper whose get returns JSON
   assert.equal(r.json().terminal, "t100");
   assert.deepEqual(r.json().helpers, []);
   assert.equal(runs(s).length, 1);
-  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", "t5"]]);
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", "t5", "--json"]]);
   assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "finished");
 });
 
@@ -7741,7 +7763,7 @@ test("#1208 ordinary restart --tree omits a listed helper whose get exits 3 with
   assert.equal(r.json().terminal, "t100");
   assert.deepEqual(r.json().helpers, []);
   assert.equal(runs(s).length, 1);
-  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", "t5"]]);
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", "t5", "--json"]]);
   assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "finished");
 });
 
@@ -8001,7 +8023,8 @@ test("#1208 replacing a stale park protects a watcher only with chosen-home evid
     assert.notEqual(park.id, saved.id);
     assert.notEqual(park.watcher, saved.watcher);
     assert.equal(at(s.calls(), "kill", saved.watcher) >= 0, identity !== "chosen");
-    assert.equal(s.hcState().terminals.find((x) => x.address === saved.watcher).state, identity !== "chosen" ? "finished" : "live");
+    assert.equal(s.hcState().terminals.find((x) => x.address === saved.watcher)?.state,
+      identity === "chosen" ? "live" : undefined);
     if (identity === "chosen") assert.match(r.err, /Queued watcher .* was left as it is: it is a worker on a chosen agent home/);
   }
 });
@@ -8021,8 +8044,8 @@ test("#1208 cancel ends an ordinary watcher with its label when hc omits argv", 
   assert.equal(canceled.code, 0, canceled.err);
   assert.deepEqual(canceled.json(), { id: ID.main, canceled: true, terminal: "t5" });
   assert.deepEqual(JSON.parse(readFileSync(queueFileOf(s), "utf8")), []);
-  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", watcher]]);
-  assert.equal(s.hcState().terminals.find((x) => x.address === watcher).state, "finished");
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), [["kill", watcher, "--json"]]);
+  assert.equal(s.hcState().terminals.some((x) => x.address === watcher), false);
   assert.doesNotMatch(canceled.err, /Queued watcher/);
 });
 
@@ -8171,7 +8194,7 @@ test("#1557 a reused watcher address cannot keep a hold unwatched or be retired 
   assert.notEqual(current.watcher, old.watcher);
   assert.equal(watcherRuns(s).length, 2);
   assert.equal(s.cli(["restart", "--cancel", ID.main, "--json"]).code, 0);
-  assert.deepEqual(s.calls().filter(c => c[0] === "kill"), [["kill", current.watcher]]);
+  assert.deepEqual(s.calls().filter(c => c[0] === "kill"), [["kill", current.watcher, "--json"]]);
   assert.equal(s.hcState().terminals.find(pane => pane.address === old.watcher).state, "live");
 });
 
@@ -8199,7 +8222,7 @@ test("#1557 a live legacy handoff watcher is retired with its existing ask and f
   assert.notEqual(successor.watcher, legacy.watcher);
   assert.equal(successor.handoffFile, file);
   assert.ok(successor.handoffAsk.pausedAt);
-  assert.equal(s.hcState().terminals.find(pane => pane.address === legacy.watcher).state, "finished");
+  assert.equal(s.hcState().terminals.some(pane => pane.address === legacy.watcher), false);
   setScreen(s, "t5", "❯ ");
   const result = await s.cliAsync(["restart", ID.main, "--run-queued", successor.id, "--json"]);
   assert.equal(result.code, 0, result.err);
@@ -8416,7 +8439,7 @@ test("#1557 a legacy default-home queue keeps its row while its project-home own
   });
   assert.equal(code, 0);
   assert.deepEqual(JSON.parse(readFileSync(queue, "utf8")), []);
-  assert.equal(s.hcState().terminals.find(row => row.address === "t5").state, "finished");
+  assert.equal(s.hcState().terminals.some(row => row.address === "t5"), false);
 });
 
 test("#1557 public previews retain the same handoff without repairing, pruning, logging or relabeling", (t) => {
@@ -8795,7 +8818,7 @@ test("#628 r3 C5 restart grants on the replacement after the binding move and se
   assert.equal(runHasGrant(s), false);
   assert.deepEqual(grantWrites(s), [["label", "t100", "role=reviewer"]]);
   assert.deepEqual(trace(), [{ attached: true, seat: true }]);
-  assert.equal(labelsIn(s).t5.role, "reviewer");
+  assert.equal(labelsIn(s).t5, undefined, "the old pane was removed");
 });
 
 test("#628 r3 C6 attach grants only after a verified row and agreement on the selected name", (t) => {

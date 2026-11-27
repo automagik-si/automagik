@@ -950,8 +950,8 @@ test("linked --tree runs the real local tree restart on the holding machine and 
   assert.equal(result.machine, "vm");
   assert.equal(result.replaced, "t8");
   const panes = s.hcState().terminals;
-  assert.equal(panes.find((p) => p.address === "vm/t8").state, "finished");
-  assert.equal(panes.find((p) => p.address === "vm/t9").state, "finished");
+  assert.equal(panes.some((p) => p.address === "vm/t8"), false);
+  assert.equal(panes.some((p) => p.address === "vm/t9"), false);
   const replacements = panes.filter((p) => p.state === "live");
   assert.equal(replacements.length, 2);
   const child = replacements.find((p) => p.parent === `vm/${result.terminal}` && p.die_with_parent);
@@ -981,15 +981,21 @@ test("linked --tree delegates the local tree restart with a Claude plan present 
   exe(join(bin, "herdr-app"), "#!/bin/sh\nexit 1\n");
   const holdingCli = new URL("./fake-holding-cli.mjs", import.meta.url).pathname;
   exe(join(bin, "automagik-herdr"), `#!/bin/sh\nexec "${process.execPath}" "${holdingCli}" "$@"\n`);
-  s.setState((state) => { Object.assign(state.machines[0].env, { HOLDING_CLI: CLI, HOLDING_APP: app }); });
+  s.setState((state) => {
+    Object.assign(state.machines[0].env, { HOLDING_CLI: CLI, HOLDING_APP: app });
+    state.failRm = "t9";
+  });
   const r = s.cli(["restart", "Atlas", ...s.on, "--tree", "--force", "--fresh", "--json"]);
   assert.equal(r.code, 0, r.err);
   const result = r.json();
   assert.equal(result.machine, "vm");
   assert.equal(result.replaced, "t8");
   const panes = s.hcState().terminals;
-  assert.equal(panes.find((p) => p.address === "vm/t8").state, "finished");
+  assert.equal(panes.some((p) => p.address === "vm/t8"), false);
   assert.equal(panes.find((p) => p.address === "vm/t9").state, "finished");
+  assert.deepEqual(result.warnings.filter((line) => line.includes("hc rm")), ["vm/t9 was left listed. Run hc rm vm/t9"]);
+  assert.deepEqual(r.err.split("\n").filter((line) => line.includes("hc rm")),
+    ["am: vm/t9 was left listed. Run hc rm vm/t9"]);
   const replacements = panes.filter((p) => p.state === "live");
   assert.equal(replacements.length, 2);
   const child = replacements.find((p) => p.parent === `vm/${result.terminal}` && p.die_with_parent);
@@ -1022,8 +1028,14 @@ test("linked --tree without an installed CLI fails without ending the lead or it
 
 for (const state of ["idle", "working"]) test(`linked restart with helpers offers both actions when the lead is ${state}`, (t) => {
   const helper = atlasPane({ address: "vm/t9", created_ms: 1700000000009, parent: "vm/t8", die_with_parent: true,
-    status: { state: "working", app: "claude" } });
+    labels: { "worker.of": ATLAS }, status: { state: "working", app: "claude" } });
   const s = scene(t, { terminals: [atlasPane({ status: { state, app: "hermes" } }), helper] });
+  exe(join(s.root, "vm-bin/node"), `#!/bin/sh\nexec "${process.execPath}" "$@"\n`);
+  const ledgerDir = join(s.project, ".herdr/app-home/automagik-herdr");
+  mkdirSync(ledgerDir, { recursive: true });
+  const ledger = join(ledgerDir, "workers.jsonl");
+  writeFileSync(ledger, JSON.stringify({ event: "start", kind: "worker", terminal: "t9", core: CORE,
+    created_ms: helper.created_ms, worktree: s.project }) + "\n", { mode: 0o600 });
   assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
   const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--json"]);
   assert.equal(r.code, 1);
@@ -1033,7 +1045,10 @@ for (const state of ["idle", "working"]) test(`linked restart with helpers offer
   assert.equal(s.calls().filter((c) => c[0] === "run" || c[0] === "kill").length, 0);
   const ok = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--force", "--json"]);
   assert.equal(ok.code, 0, ok.err);
-  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t9").state, "finished");
+  assert.equal(s.hcState().terminals.some((p) => p.address === "vm/t9"), false, ok.err);
+  const end = readJsonLines(ledger).find((row) => row.event === "end");
+  assert.deepEqual([end?.terminal, end?.core, end?.created_ms, end?.hc_reason],
+    ["t9", CORE, helper.created_ms, "killed"]);
 });
 
 test("restart --machine: --continue is refused while another bot's same agent runs in that folder there", (t) => {
@@ -2735,8 +2750,8 @@ test("#1635 a lead removed after the final pre-run read triggers confirmed clean
   assert.equal(r.code, 1, r.err);
   assert.match(r.err, /the lead terminal ended during the start; no return route; nothing left running/);
   assert.equal(s.hcState().terminals.some((p) => p.address === "t1"), false);
-  assert.deepEqual(s.remote().terminals.filter((p) => p.labels?.bot === HEDGE).map((p) => [p.parent, p.state]), [["origin/t1", "finished"]]);
-  assert.deepEqual(s.calls().filter(([op]) => op === "kill"), [["kill", `${CORE}/t100`]]);
+  assert.equal(s.remote().terminals.some((p) => p.labels?.bot === HEDGE), false);
+  assert.deepEqual(s.calls().filter(([op]) => op === "kill"), [["kill", `${CORE}/t100`, "--json"]]);
   assert.deepEqual(parentedBriefings(s), []);
   assert.deepEqual(s.rows(), []);
 });
@@ -2769,9 +2784,9 @@ for (const failGet of [false, true]) test(`#1635 rebinding after run leaves an u
   assert.match(r.err, failGet ? /vm\/t100: .*cleanup is unconfirmed/ : /vm\/t100: .*nothing left running/);
   assert.equal(switched.read().terminals[0].state, "live");
   assert.ok(s.calls().some(([verb, at]) => verb === "get" && at === `${CORE}/t100`));
-  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), failGet ? [] : [["kill", `${CORE}/t100`]]);
-  const pane = s.remote().terminals.at(-1);
-  assert.equal(pane.state, failGet ? "live" : "finished");
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "kill"), failGet ? [] : [["kill", `${CORE}/t100`, "--json"]]);
+  const pane = s.remote().terminals.find((p) => p.address === "t100");
+  assert.equal(pane?.state, failGet ? "live" : undefined);
   assert.deepEqual(s.rows(), []);
   assert.deepEqual(parentedBriefings(s), failGet ? [briefingFileOf(pane.argv)] : []);
 });
@@ -2782,7 +2797,7 @@ test("#1635 an origin core change after run cleans up the verified pane and its 
   const r = s.cli(["start", "Hedge", ...s.on]);
   assert.equal(r.code, 1, r.err);
   assert.match(r.err, /vm\/t100: no return route was confirmed; nothing left running/);
-  assert.equal(s.remote().terminals.at(-1).state, "finished");
+  assert.equal(s.remote().terminals.some((p) => p.address === "t100"), false);
   assert.deepEqual(parentedBriefings(s), []);
   assert.deepEqual(s.rows(), []);
 });
@@ -2956,9 +2971,9 @@ test("#1635 wrong parent and lost replies report cleanup only when observed", as
     assert.match(r.err, message);
     assert.doesNotMatch(r.err, /nothing was started/);
     assert.equal(r.err.includes("nothing left running"), finished && !flags.loseCleanupGet);
-    assert.equal(s.remote().terminals.at(-1).state, finished ? "finished" : "live");
+    const pane = s.remote().terminals.find((p) => p.address === "t100");
+    assert.equal(pane?.state, finished ? (flags.loseCleanupReply ? "finished" : undefined) : "live");
     assert.deepEqual(s.rows(), []);
-    const pane = s.remote().terminals.at(-1);
     assert.deepEqual(parentedBriefings(s), finished && !flags.loseCleanupGet ? [] : [briefingFileOf(pane.argv)]);
   });
 });
@@ -3038,7 +3053,7 @@ test("restart --machine --expect-pane: the shown binding restarts", (t) => {
   assert.equal(r.code, 0, r.err);
   assert.deepEqual([r.json().terminal, r.json().machine, r.json().replaced], ["t100", "vm", "t8"]);
   assert.equal(r.json().retired, "ended");
-  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "finished");
+  assert.equal(s.hcState().terminals.some((p) => p.address === "vm/t8"), false);
 });
 
 for (const pinned of [true, false]) {
@@ -3054,7 +3069,7 @@ for (const pinned of [true, false]) {
     assert.equal(r.code, 0, r.err);
     if (!pinned) assert.equal(Object.hasOwn(r.json(), "retired"), false);
     const { terminals, lockProbe: { seen } } = s.hcState();
-    assert.equal(terminals.find((p) => p.address === "vm/t8").state, "finished");
+    assert.equal(terminals.some((p) => p.address === "vm/t8"), false);
     const kill = seen.findIndex(({ call }) => call === "kill");
     assert.deepEqual(seen[kill], { call: "kill", held: pinned });
     assert.deepEqual(seen.slice(0, kill).findLast(({ call }) => call === "get"), { call: "get", held: pinned });
@@ -3078,7 +3093,7 @@ test("restart --machine --expect-pane: a pane given to another bot while the rep
   assert.equal(r.code, 1, r.err);
   assert.equal(r.json().refused, "binding");
   assert.equal(r.json().error, "Atlas's pane couldn't be confirmed as the one shown (vm/t8); nothing was restarted.");
-  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "vm/t100"]]);
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "vm/t100", "--json"]]);
   assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
   assert.equal(heldIn(foldAttach(s.rows()), other, CORE).terminal, "t8");
   assert.ok(s.rows().every((row) => row.terminal !== "t100"));
@@ -3102,7 +3117,7 @@ test("restart --machine --expect-pane: the shown pane attached to the same bot i
   const r = s.cli(["restart", ATLAS, ...s.on, "--expect-pane", shown, "--fresh", "--json"]);
   assert.equal(r.code, 1, r.err);
   assert.equal(r.json().refused, "binding");
-  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "vm/t100"]]);
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "vm/t100", "--json"]]);
   assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
   const now = heldIn(foldAttach(s.rows()), ATLAS, CORE);
   assert.deepEqual([now.project, now.terminal], [other, "t8"]);
@@ -3183,7 +3198,8 @@ test("#1208 linked start recovery uses argv when ls supplies it and keeps dev's 
     const calls = s.calls();
     const ledgerRead = ["file", "read", "--json", "--on", "vm", join(s.project, ".herdr/app-home/automagik-herdr/workers.jsonl")];
     assert.deepEqual(calls.slice(calls.findIndex((c) => c[0] === "run") + 1),
-      chosen ? [["ls", "--json"]] : [["ls", "--json"], ledgerRead, ["kill", "vm/t100"]]);
+      chosen ? [["ls", "--json"]] : [["ls", "--json"], ledgerRead, ["get", "vm/t100", "--json"],
+        ["kill", "vm/t100", "--json"], ["get", "vm/t100", "--json"], ["rm", "vm/t100", "--json"]]);
     assert.deepEqual(s.rows(), []);
   }
 });
@@ -3205,8 +3221,9 @@ if (process.argv[1] === ${JSON.stringify(CLI)}) {
   assert.match(r.err, /hc run on vm didn't answer within 5 s; the pane it started \(vm\/t100, named atlas\) was ended\./);
   const calls = s.calls();
   const ledgerRead = ["file", "read", "--json", "--on", "vm", join(s.project, ".herdr/app-home/automagik-herdr/workers.jsonl")];
-  assert.deepEqual(calls.slice(calls.findIndex((c) => c[0] === "run") + 1), [["ls", "--json"], ledgerRead, ["kill", "vm/t100"]]);
-  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t100").state, "finished");
+  assert.deepEqual(calls.slice(calls.findIndex((c) => c[0] === "run") + 1), [["ls", "--json"], ledgerRead, ["get", "vm/t100", "--json"],
+    ["kill", "vm/t100", "--json"], ["get", "vm/t100", "--json"], ["rm", "vm/t100", "--json"]]);
+  assert.equal(s.hcState().terminals.some((p) => p.address === "vm/t100"), false);
   assert.deepEqual(s.rows(), []);
 });
 
@@ -3235,7 +3252,7 @@ test("#1208 linked restart ends an ordinary replacement without created_ms as on
   const calls = s.calls();
   assert.deepEqual(calls.slice(calls.findIndex(([verb]) => verb === "run") + 1), [["get", "vm/t100", "--json"],
     ["file", "read", "--json", "--on", "vm", join(s.project, ".herdr/app-home/automagik-herdr/workers.jsonl")],
-    ["kill", "vm/t100"]]);
+    ["get", "vm/t100", "--json"], ["kill", "vm/t100", "--json"]]);
   assert.deepEqual(s.hcState().terminals.map((x) => [x.address, x.state]), [["vm/t8", "live"], ["vm/t100", "finished"]]);
 });
 

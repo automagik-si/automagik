@@ -399,10 +399,11 @@ test("revive: after a reboot each bot at a bare shell is restarted in its place,
   assert.equal(cwdOf(runs[0]), s.project);
   assert.ok(hasSeq(wordsOf(runs[1]), ["--resume", SID3]), runs[1].join(" "));
   assert.ok(["herdr.space=sp9", "herdr.tab=tb5", `bot=${ID.dev}`].every((l) => runs[1].includes(l)), runs[1].join(" "));
-  // The old shells ended, each only after its replacement; Captain's running pane was never touched.
+  // The old shells were removed after their replacements; Captain's running pane was never touched.
   const state = s.hcState();
-  const stateOf = (a) => state.terminals.find((x) => x.address === a).state;
-  assert.deepEqual(["t5", "t6", "t7", "t100", "t101"].map(stateOf), ["finished", "live", "finished", "live", "live"]);
+  const stateOf = (a) => state.terminals.find((x) => x.address === a)?.state;
+  assert.deepEqual(["t5", "t6", "t7", "t100", "t101"].map(stateOf),
+    [undefined, "live", undefined, "live", "live"]);
   assert.deepEqual(s.calls().filter((c) => c[0] === "kill").map((c) => c[1]), ["t5", "t7"]);
   // Captain's pane was never ended or typed into (a restart's own tidy may set its missing labels; Dev starts under it, its lead's).
   assert.ok(!s.calls().some((c) => ["kill", "send", "keys"].includes(c[0]) && c[1] === "t6"), JSON.stringify(changes(s)));
@@ -617,13 +618,14 @@ exec "${process.execPath}" "${FAKE_HC}" "$@"
 
   const attached = readAttach(readFileSync(join(snapshot, "attach.jsonl"), "utf8")).rows;
   const starts = readLedger(readFileSync(join(snapshot, "workers.jsonl"), "utf8"));
-  const pane = s.hcState().terminals.find((x) => x.address === "t100");
+  const created = attached.find((x) => x.terminal === "t100" && x.event === "attach")?.created_ms;
+  assert.ok(Number.isSafeInteger(created));
   assert.deepEqual(attached.filter((x) => x.terminal === "t100").map((x) => [x.event, x.bot, x.by, x.created_ms]),
-    [["attach", ID.main, "start", pane.created_ms]]);
+    [["attach", ID.main, "start", created]]);
   assert.deepEqual(starts.filter((x) => x.terminal === "t100").map((x) => [x.event, x.kind, x.botId, x.created_ms]),
-    [["start", "seat", ID.main, pane.created_ms]]);
+    [["start", "seat", ID.main, created]]);
   assert.equal(runsOf(s).length, 1);
-  assert.equal(pane.state, "finished");
+  assert.equal(s.hcState().terminals.some((x) => x.address === "t100"), false);
 });
 
 test("#1208 revive retries an ordinary resume fresh when readiness exits 3 with internal", (t) => {
@@ -790,9 +792,13 @@ test("revive brings a bot's helpers back under its new pane (--tree): a helper a
   const s = world(t, { terminals: (p) => [
     pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }),
     pane("t8", { cwd: p, parent: "t5", labels: { "agent.session": SID4, "worker.of": ID.main, "worker.role": "dev" }, argv: ["/usr/bin/env", "PATH=/bin", "claude", "--session-id", SID4, "fix the thing"] }),
-  ] });
+  ], hcExtra: { failRm: "t8" } });
   const r = s.cli(["revive", "--json"]);
   assert.equal(r.code, 0, r.err);
+  assert.equal(s.hcState().terminals.some((p) => p.address === "t5"), false);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t8").state, "finished");
+  assert.deepEqual(r.err.split("\n").filter((line) => line.includes("hc rm")),
+    ["am: t8 was left listed. Run hc rm t8"]);
   const runs = runsOf(s);
   assert.equal(runs.length, 2, JSON.stringify(runs));
   assert.ok(hasSeq(wordsOf(runs[0]), ["--resume", SID]));

@@ -495,15 +495,39 @@ async function hcReal(args, { timeout, prepareArgs } = {}) {
   return r;
 }
 /**
- * End a pane for a checked CLI verb such as restart or worker kill. The pane's guard or shim
+ * End and remove a pane for a checked CLI verb such as restart or worker kill. The guard or shim
  * allows direct kills only from a project's main bot (#955). If an unvouched guard fails the
  * CLI's kill, explain how to resolve the version skew (#1728).
  */
-async function hcKill(terminal, { timeout } = {}) {
+async function hcKill(terminal, {
+  timeout, before, kind, core, reason = "finished", children = [], record, say = (line) => report([line]),
+} = {}) {
+  const linked = terminal.includes("/");
+  // A linked core's clock need not agree with ours. Use its live observation instead.
+  if (linked && before === undefined) before = await retirementGet(terminal, timeout).catch(() => null);
+  const started = Date.now();
   const file = realHcPath();
-  const r = await runProgram(hcExecutable(file), ["kill", terminal], { timeout, env: localHcEnv() });
+  const r = await runProgram(hcExecutable(file), ["kill", terminal, "--json"], { timeout, env: localHcEnv() });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
-  if (r.code === 0 || !file) return r;
+  if (r.code === 0) {
+    const ended = terminalReply(r);
+    if (!ended || ended.state !== "finished") {
+      say(leftListed(terminal));
+      return r;
+    }
+    const ownEnd = ended.reason === "killed" && Number.isSafeInteger(ended.finished_ms)
+      && (!before || before.created_ms === ended.created_ms)
+      && (!before?.address || before.address === ended.address)
+      && (!before?.state || before.state === "live")
+      && (linked ? before?.state === "live" : ended.finished_ms >= started);
+    if (ownEnd) {
+      const options = { timeout, core, reason, record, say };
+      await removeEndedChildren(children, linked ? ended.finished_ms : started, options);
+      await removeEndedPane(terminal, ended, { ...options, kind });
+    }
+    return r;
+  }
+  if (!file) return r;
   const dir = dirname(file);
   let real;
   try { real = realpathSync(dir); } catch { return r; }
@@ -511,6 +535,89 @@ async function hcKill(terminal, { timeout } = {}) {
   if ((name !== "guard" && name !== KILL_GUARD_NAME) || !looksLikeGuardFolder(real)) return r;
   const folder = dir === real ? dir : `${dir} (${real})`;
   return { ...r, stderr: `the first hc on this pane's PATH is in ${folder}, a guard folder this am cannot vouch for (another version's copy, or one outside the install); update am and the pack to one version, then restart this pane (#1728)` };
+}
+
+function terminalReply(result) {
+  try { return JSON.parse(result.stdout); } catch { return null; }
+}
+
+async function retirementGet(terminal, timeout) {
+  const r = await hcReal(["get", terminal, "--json"], { timeout });
+  if (r.code === HC_NOT_FOUND && hcErrorKind(r) === "not_found") return null;
+  const get = r.code === 0 && terminalReply(r);
+  if (!get?.address || !get.state) throw new CliError(`couldn't verify ${terminal}`);
+  return get;
+}
+
+const leftListed = (terminal) => `${terminal} was left listed. Run hc rm ${terminal}`;
+
+/** Children can take a moment to finish after the parent. Share one wait across the group. */
+async function removeEndedChildren(children, since, options) {
+  const until = Date.now() + 5000;
+  for (const child of children) {
+    for (;;) {
+      const get = await retirementGet(child.address, options.timeout).catch(() => undefined);
+      if (get === undefined) options.say(`Couldn't verify ${child.address} finished. If it did, run hc rm ${child.address}`);
+      if (!get || get.parent !== child.parent || get.created_ms !== child.created_ms) break;
+      if (get.state === "finished") {
+        if (get.reason === "killed" && Number.isSafeInteger(get.finished_ms) && get.finished_ms >= since) {
+          await removeEndedPane(child.address, get, { ...options, kind: child.kind });
+        }
+        break;
+      }
+      if (Date.now() >= until) break;
+      await later(100);
+    }
+  }
+}
+
+/** Save the finish facts before hc forgets the launch. A failed cleanup is advisory. */
+async function removeEndedPane(terminal, ended, { timeout, kind, core, reason, record, say }) {
+  try {
+    const save = record ?? (terminal.includes("/") ? null : recordRetiredPane);
+    if (!Number.isSafeInteger(ended.created_ms)
+        || (save && !await save(terminal, ended, { kind, core, reason, say }))) {
+      say(leftListed(terminal));
+      return;
+    }
+    const current = await retirementGet(terminal, timeout);
+    if (current === null) return;
+    if (current.address !== ended.address || current.created_ms !== ended.created_ms) return;
+    if (current.state !== "finished" || current.finished_ms !== ended.finished_ms || current.reason !== "killed") {
+      say(leftListed(terminal));
+      return;
+    }
+    // Like kill, am already checked the target. Keep the same socket and caller identity,
+    // including a sandbox proxy, and let hc enforce that the target is finished.
+    const r = await hcReal(["rm", terminal, "--json"], { timeout });
+    if (r.code === 0 || (r.code === HC_NOT_FOUND && hcErrorKind(r) === "not_found")) return;
+  } catch { /* Removal is best effort after a successful kill. */ }
+  say(leftListed(terminal));
+}
+
+/** A self-restart's old PTY hangs up the calling CLI, so its last operation needs its own session. */
+export async function retireSelfRestart(terminal, createdMs, core, children) {
+  const pane = await retirementGet(terminal);
+  const self = process.env.HC_TERMINAL_ID;
+  if (!self || !sameLivePane(pane, terminal, createdMs) || ![terminal, pane.name].includes(self)) return;
+  const r = await hcKill(terminal, { before: pane, kind: "seat", core, reason: "replaced", children });
+  if (r.code !== 0) report([`${terminal} wasn't ended. End it with hc kill ${terminal}.`]);
+}
+
+async function endSelfRestart(terminal, createdMs, core, children) {
+  const code = `import { retireSelfRestart } from ${JSON.stringify(import.meta.url)};
+    await retireSelfRestart(...JSON.parse(process.argv[1])).catch(() => { process.exitCode = 1; });`;
+  try {
+    await new Promise((done, reject) => {
+      const args = [terminal, createdMs, core, children];
+      const child = spawn(process.execPath, ["--input-type=module", "-e", code, JSON.stringify(args)],
+        { env: localHcEnv(), detached: true, stdio: ["ignore", "ignore", "inherit"] });
+      child.once("error", reject);
+      child.once("exit", (status) => status === 0 ? done() : reject(new Error("retirement process failed")));
+    });
+  } catch {
+    report([`Couldn't confirm ${terminal} ended. Check it with hc get ${terminal}.`]);
+  }
 }
 /** `hc <args> --json` through the real hc, parsed; a failed call throws (as hcJson does). */
 async function hcRealJson(args) {
@@ -1854,6 +1961,7 @@ async function checkLinkedRestartPane(project, bot, old, opts) {
   if (!old.status && !opts.force) throw new CliError(`${old.address} doesn't tell hc whether ${bot.name}'s agent is busy or waiting for an approval, so a restart `
     + `could end it mid-turn. Nothing was restarted. Look at the pane first, then pass --force to restart anyway `
     + `(it sends the pane no keys: it starts a new pane, then ends this one).`);
+  return observed;
 }
 
 // ---- the briefing hook (briefingText.mjs installHook, as launch.js afterBind uses it) ----
@@ -3860,6 +3968,46 @@ function sameLivePane(get, terminal, createdMs) {
     && Number.isSafeInteger(createdMs) && get.created_ms === createdMs);
 }
 
+/** Only the live descendants reached through die-with-parent edges can be ended by this kill. */
+function retirementChildren(root, panes, bindings) {
+  const edges = Map.groupBy(panes.filter((pane) => pane?.state === "live" && pane.die_with_parent === true
+    && typeof pane.address === "string" && Number.isSafeInteger(pane.created_ms)), (pane) => pane.parent);
+  const seen = new Set([root]);
+  const parents = [root];
+  const children = [];
+  for (const parent of parents) {
+    for (const pane of edges.get(parent) ?? []) {
+      if (seen.has(pane.address)) continue;
+      seen.add(pane.address);
+      parents.push(pane.address);
+      children.push({ address: pane.address, parent, created_ms: pane.created_ms,
+        kind: bindings?.get(pane.address)?.binding ? "seat" : undefined });
+    }
+  }
+  return children.reverse();
+}
+
+/** Some hc versions omit the launch identity and die-with-parent flag from ls. */
+async function readRetirementChildren(root, listed, bindings) {
+  const edges = Map.groupBy(listed.filter((pane) => pane?.address && pane.state !== "finished"),
+    (pane) => pane.parent);
+  const seen = new Set([root]);
+  const parents = [root];
+  const panes = [];
+  for (const parent of parents) {
+    for (const { address } of edges.get(parent) ?? []) {
+      if (seen.has(address)) continue;
+      seen.add(address);
+      const pane = await retirementGet(address).catch(() => null);
+      if (pane?.address !== address || pane.parent !== parent
+        || pane.state !== "live" || pane.die_with_parent !== true) continue;
+      panes.push(pane);
+      parents.push(address);
+    }
+  }
+  return retirementChildren(root, panes, bindings);
+}
+
 function seatGrant(project, bot, ref) {
   const role = roleOf(project.file, bot.id);
   if (!isSendGrantRole(role)) return null;
@@ -3957,6 +4105,51 @@ function appendEnd(row) {
   const key = launchKey(row);
   if (key && workerLedgerRows().some((r) => r?.event === "end" && launchKey(r) === key)) return null;
   return appendLedger(row);
+}
+
+function retiredEndRow(terminal, get, { kind, core, reason }) {
+  return endRow({ kind, terminal, core, createdMs: get.created_ms, reason,
+    hcReason: get.reason, exitCode: get.exit_code, signal: get.signal, at: get.finished_ms });
+}
+
+async function recordRetiredPane(terminal, get, { kind, core, reason, say }) {
+  const rows = workerLedgerRows();
+  const starts = rows.filter((row) => row?.event === "start" && row.terminal === terminal
+    && (row.created_ms == null || row.created_ms === get.created_ms));
+  if (!starts.length && !kind) return true;
+  core ??= await rowCore();
+  const current = starts.filter((row) => !row.core || row.core === core).at(-1);
+  if (!current && !kind) return !starts.some((row) => row.worktree && !core);
+  const row = retiredEndRow(terminal, get, { kind: kind ?? current?.kind, core, reason });
+  const key = launchKey(row);
+  if (!key) return false;
+  if (rows.some((r) => r?.event === "end" && launchKey(r) === key)) return true;
+  const { notes, error } = writeLedgerRow(row);
+  if (error) return false;
+  if (notes.length) say(notes.join("; "));
+  return true;
+}
+
+/** A linked worker's worktree sweep reads the ledger on the machine that launched it. */
+async function recordLinkedRetiredPane(project, core, terminal, get) {
+  if (!get.labels?.bot && !get.labels?.[WORKER_OF_LABEL]) return true;
+  const { machine, key } = await paneProject(get.cwd, project);
+  const paneEnv = await paneEnvOn(machine, key);
+  if (paneEnv.refused) return false;
+  const homes = new Set([paneEnv.appHome, projectAppHomeOf(key), await appHomeOn(machine)]);
+  const address = terminal.split("/").at(-1);
+  for (const dir of homes) {
+    if (!dir) continue;
+    const rows = readLedger(await readRemoteText(remoteIo, machine, ledgerPath(dir)));
+    const start = rows.findLast((row) => row?.event === "start" && row.terminal === address
+      && (!row.core || row.core === core) && (row.created_ms == null || row.created_ms === get.created_ms));
+    if (!start) continue;
+    const row = retiredEndRow(address, get, { kind: start.kind, core, reason: "replaced" });
+    if (rows.some((r) => r?.event === "end" && launchKey(r) === launchKey(row))) continue;
+    const result = await appendWorkerRowOn(machine, dir, row);
+    if (result.code !== 0) return false;
+  }
+  return true;
 }
 
 /** The app homes keepAppHomeOutOfGit has looked at in this run: each is checked once. */
@@ -6121,7 +6314,7 @@ async function stopParentedRun(terminal, returnTo) {
   if (finished(get)) return linkedTargetReachable(returnTo);
   bound = linkedCleanupBound();
   if (!bound || !sameLinkedLaunch(get, terminal, returnTo.launch)) return false;
-  await hcKill(at, bound).catch(() => null);
+  await hcKill(at, { ...bound, before: get }).catch(() => null);
   bound = linkedCleanupBound();
   return Boolean(bound && finished(await launchGet(at, bound)) && await linkedTargetReachable(returnTo));
 }
@@ -6318,8 +6511,21 @@ exec "$restart_cli" "$@"`;
     }
   }
   exitAfter.code = result.code === 0 ? 0 : 1;
-  report(out.warnings ?? []);
-  if (result.code !== 0 && result.stderr) console.error(result.stderr);
+  const qualifyRemoval = (line) => {
+    const terminal = /\bhc rm[ ](t[0-9a-z]+)$/.exec(line)?.[1];
+    if (!terminal) return line;
+    return line.split(" ").map((word) => word === terminal ? `${machine}/${terminal}` : word).join(" ");
+  };
+  const stderr = result.stderr.trimEnd().split("\n").filter(Boolean);
+  if (Array.isArray(out.warnings)) out.warnings = out.warnings.map(qualifyRemoval);
+  const reported = new Set(out.warnings ?? []);
+  report([...reported]);
+  for (const line of stderr) {
+    const qualified = qualifyRemoval(line);
+    if ((result.code !== 0 || qualified !== line) && !reported.has(qualified.replace(/^am: /, ""))) {
+      console.error(qualified);
+    }
+  }
   return opts.json ? { ...out, machine } : `${bot.name}: ${out.queued ? "restart queued in" : "restarted in"} ${machine}/${out.terminal}.`;
 }
 
@@ -6338,7 +6544,8 @@ async function restartOnMachine(opts, project, bot, entry, observed) {
   const m = await connectedMachine(machine, "nothing was restarted");
   const held = await linkedRestartHeld(project, bot, observed);
   const old = held?.get ?? null;
-  if (old) await checkLinkedRestartPane(project, bot, old, opts);
+  const children = old ? retirementChildren(old.address,
+    [...(await checkLinkedRestartPane(project, bot, old, opts)).values()].map(({ get }) => get)) : [];
   const recheck = () => recheckLinkedRestart(project, bot, observed, opts);
   const agentKey = entry?.agent ?? bot.agent;
   const run = agentTable()[agentKey]?.run;
@@ -6457,7 +6664,9 @@ async function restartOnMachine(opts, project, bot, entry, observed) {
           warnings.push(w); report([w]);
           return "kept";
         }
-        const kill = hcKill(old.address);
+        const kill = hcKill(old.address, { before, children,
+          record: (terminal, get) => recordLinkedRetiredPane(project, m.id, terminal, get),
+          say: (w) => { warnings.push(w); report([w]); } });
         const killed = await (opts._expectPane ? kill.catch(() => ({ code: 1, stdout: "", stderr: "" })) : kill);
         if (killed.code !== 0) {
           const w = `${old.address} wasn't ended (hc kill: ${hcSaid((killed.stderr || killed.stdout).trim())}); end it with hc kill ${old.address}.`;
@@ -7525,13 +7734,15 @@ async function treeIdle(old, plans, say, { force = false, revive = false } = {})
  * live, why }: `live` when it still runs (never run a second time then, nor offered by hand),
  * else hc can't say (unknown is never gone).
  */
-async function helperEnded(terminal, project, ms = 5000) {
+async function helperEnded(terminal, project, { createdMs, kind, core, say, children }, ms = 5000) {
   const wait = async (limit) => {
     const until = Date.now() + limit;
     for (;;) {
       const now = await hcState(terminal);
       if (now.state === "gone" || now.state === "finished") return { ended: true };
       if (now.state === "unknown") return { ended: false, live: false, why: `${now.why}, so it may still run` };
+      if (Number.isSafeInteger(createdMs) && now.get?.address === terminal
+          && Number.isSafeInteger(now.get.created_ms) && now.get.created_ms !== createdMs) return { ended: true };
       if (protectsChosenHome(await paneProof({ get: now.get, project }))) return { ended: true };
       if (Date.now() >= until) return null;
       await later(100);
@@ -7539,7 +7750,8 @@ async function helperEnded(terminal, project, ms = 5000) {
   };
   const first = await wait(ms);
   if (first) return first;
-  const k = await hcKill(terminal);
+  const k = await hcKill(terminal, { kind, core, reason: "replaced", say, children,
+    before: { created_ms: createdMs } });
   const second = await wait(k.code === 0 ? ms : 0);
   if (second) return second;
   return { ended: false, live: true, why: `it still runs after its parent ended${k.code === 0 ? ` and ${ms / 1000}s after hc kill ${terminal}` : ` (hc kill ${terminal} failed: ${(k.stderr || k.stdout).trim()})`}` };
@@ -7596,7 +7808,7 @@ function helperCommand(p, warn = () => {}) {
  * go on. `say` takes the warnings. Resolves [{ name,
  * replaced, terminal, bot, agent, mode, session, up, note, error, by_hand, still_running }].
  */
-async function rerunHelpers(plans, parent, say) {
+async function rerunHelpers(plans, parent, say, retiring) {
   const out = plans.map((p) => ({ name: p.name, replaced: p.replaced, terminal: null, bot: p.binding?.bot ?? null, agent: p.agent ?? null,
     mode: p.mode ?? null, session: p.session ?? null, up: false, note: p.note ?? null, error: null, cause: null, by_hand: null, still_running: false }));
   for (const [i, p] of plans.entries()) {
@@ -7617,7 +7829,9 @@ async function rerunHelpers(plans, parent, say) {
       say(`${who} wasn't run again: ${why}. Its conversation is kept; to run it again by hand:\n  ${hand.line}\n  ${hand.notes.join("\n  ")}`);
     };
     const project = { key: p.binding?.project ?? p.worker?.project ?? await keyOf(p.cwd).catch(() => p.cwd) };
-    const end = await helperEnded(p.replaced, project);
+    const end = await helperEnded(p.replaced, project, { createdMs: p.createdMs,
+      children: retirementChildren(p.replaced, retiring),
+      kind: p.binding ? "seat" : p.worker ? "worker" : undefined, core: p.binding?.core ?? p.worker?.core, say });
     // Ended (its parent's kill took it, or its own): a logged launch's end row (RFC 0021 (f) 4).
     if (end.ended && (p.worker || p.binding)) {
       // Keyed as its own start row or binding keyed the launch, so the sweep sees it ended.
@@ -7963,7 +8177,7 @@ async function killQueuedWatcher(entry) {
   const current = await hcState(entry.watcher);
   if (current.state === "unknown") return false;
   if (current.state !== "live" || !matchesQueueWatcher(entry, current.get) || current.get.created_ms !== get.created_ms) return true;
-  const killed = await hcKill(entry.watcher);
+  const killed = await hcKill(entry.watcher, { before: current.get });
   return killed.code === 0 || ["gone", "finished"].includes((await hcState(entry.watcher)).state);
 }
 
@@ -10432,12 +10646,10 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   for (const w of [...treeWarnings, ...early]) say(w);
   let rerun = [];
   let oldEnded = false;
-  // The old launch's end row (RFC 0021 (f) 4), written only after hc kill of it succeeded.
-  const endOld = async () => {
-    const unlogged = appendEnd(endRow({ kind: "seat", terminal: old.address, core: held.binding.core ?? await rowCore(),
-      createdMs: held.binding.created_ms ?? old.created_ms, reason: "replaced" }));
-    if (unlogged) say(unlogged);
-  };
+  const retiring = [...observed.values()].map(({ get }) => get);
+  const children = old ? retirementChildren(old.address, retiring, view.byTerminal) : [];
+  const endOld = () => hcKill(old.address, { before: old, kind: "seat", core: held.binding.core,
+    reason: "replaced", children, say });
   if (old) {
     // The old pane ends only once the new one has kept its agent up: the space is never left empty.
     let up = await agentUp(seat.terminal, { project });
@@ -10492,7 +10704,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     }
     const killTree = async () => {
       await captureHelperSkills(plans, old, { project, bot, view });
-      return hcKill(old.address);
+      return endOld();
     };
     const treeKill = managedTree ? await killTree() : null;
     if (managedTree) {
@@ -10517,8 +10729,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
       const k = treeKill ?? await killTree();
       if (k.code === 0) {
         oldEnded = true;
-        await endOld();
-        rerun = await rerunHelpers(plans, seat.terminal, say);
+        rerun = await rerunHelpers(plans, seat.terminal, say, retiring);
       } else {
         const why = `${old.address} wasn't ended (hc kill: ${(k.stderr || k.stdout).trim()}), so its helpers still run under it`;
         say(`${why}; none was run again. End it with hc kill ${old.address}, then restart them.`);
@@ -10584,20 +10795,17 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   };
   if (!old || oldEnded || (opts.tree && plans.length)) return answer();
   // A bot restarting itself runs this inside the pane the kill ends: everything is written and
-  // printed first, then the kill, the last thing it does.
+  // printed first, then a detached process ends and removes the old pane.
   if (process.env.HC_TERMINAL_ID && [old.address, old.name].includes(process.env.HC_TERMINAL_ID)) {
     const out = answer();
     // Flushed (a pipe's write can be asynchronous) before the kill takes this process with it.
     await new Promise((done) => process.stdout.write(unprinted(opts.json ? `${JSON.stringify(out, null, 2)}\n` : `${out}\n`), done));
     await new Promise((done) => process.stderr.write("", done));
-    // The end row only once the kill succeeded: this process usually ends with the pane first,
-    // and then the old launch has none (usagemeter's snapshot ends it instead).
-    if ((await hcKill(old.address)).code === 0) await endOld();
+    await endSelfRestart(old.address, held.binding.created_ms ?? old.created_ms, held.binding.core, children);
     return PRINTED;
   }
-  const killed = await hcKill(old.address);
+  const killed = await endOld();
   if (killed.code !== 0) say(`${old.address} wasn't ended (hc kill: ${(killed.stderr || killed.stdout).trim()}); end it with hc kill ${old.address}.`);
-  else await endOld();
   return answer();
 }
 
@@ -11779,6 +11987,19 @@ async function settled(names, terms, gets = new Map()) {
   }));
   return ends.every((ms) => ms !== null && Date.now() - ms >= REAP_SETTLE_MS);
 }
+
+/** A removed terminal's end row still holds its worktree for the same settle interval. */
+function worktreesSettling(rows, terms, gets = new Map()) {
+  const cutoff = Date.now() - REAP_SETTLE_MS;
+  const listed = new Map(terms.map((pane) => [pane?.address, gets.get(pane?.address)?.created_ms ?? pane?.created_ms]));
+  const ends = rows.filter((row) => row?.event === "end" && Date.parse(row.at) > cutoff
+    && (!listed.has(row.terminal)
+      || (Number.isSafeInteger(listed.get(row.terminal)) && listed.get(row.terminal) !== row.created_ms)));
+  const keys = new Set(ends.map(launchKey).filter(Boolean));
+  const terminals = new Set(ends.map((row) => row.terminal));
+  return new Set(rows.filter((row) => row?.event === "start" && row.worktree
+    && (launchKey(row) ? keys.has(launchKey(row)) : terminals.has(row.terminal))).map((row) => row.worktree));
+}
 const firstLine = (r) => (r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n")[0];
 
 /** The forge tool a project's remote names, or the one installed (gh first) when the host is unknown. */
@@ -12087,8 +12308,10 @@ async function reapOne(c, asked = new Map(), project = null) {
   // Looked at once more just before the remove: a pane started in it without the worktree lock
   // (a hand-made one, hc run) since the first look. No --force: git itself refuses a tree that
   // has gained changes since the status above.
-  const last = await hcTerminals(false);
-  if (!last || liveIn(last, path).length) return { result: "waiting" };
+  const last = await hcTerminals(true);
+  const gets = new Map();
+  if (!last || liveIn(last, path).length || !await settled(c.terminals, last, gets)
+    || worktreesSettling(workerLedgerRows(), last, gets).has(path)) return { result: "waiting" };
   // #1143: `git worktree remove` deletes git-ignored files too (build output, local env files).
   // Name them before the remove, so a cleanup that loses them is never silent; an unreadable
   // list keeps the checkout, because the sweep cannot say what it would remove.
@@ -12144,8 +12367,16 @@ async function endMergedWorkers({ terms, rows, every, start, budget, lines, out 
     if (!pr || (pr.state !== "MERGED" && pr.state !== "CLOSED")) continue;
     const closedAt = Date.parse(pr.state === "MERGED" ? pr.mergedAt : pr.closedAt);
     if (!Number.isSafeInteger(closedAt) || Date.now() - closedAt < REAP_SETTLE_MS) continue;
-    let kill = null;
-    try { kill = await hcKill(row.terminal); } catch (e) {
+    let kill;
+    try {
+      const children = await readRetirementChildren(row.terminal, terms);
+      const current = await hcGet(row.terminal);
+      if (!sameLivePane(current, row.terminal, row.created_ms) || current.labels?.bot
+        || current.labels?.[WORKER_OF_LABEL] !== get.labels[WORKER_OF_LABEL]
+        || !["idle", "done"].includes(current.status?.state)) continue;
+      kill = await hcKill(row.terminal, { before: current, kind: "worker", core: row.core, children,
+        say: (w) => lines.push(w) });
+    } catch (e) {
       lines.push(`couldn't end ${row.terminal}: ${e?.message ?? e}`);
       continue;
     }
@@ -12154,9 +12385,6 @@ async function endMergedWorkers({ terms, rows, every, start, budget, lines, out 
       continue;
     }
     ended.add(key);
-    const unlogged = appendEnd(endRow({ kind: "worker", terminal: row.terminal, core: row.core ?? await rowCore(),
-      createdMs: row.created_ms, reason: "finished", hcReason: get.reason, exitCode: get.exit_code, signal: get.signal }));
-    if (unlogged) lines.push(unlogged);
     out.ended.push(row.terminal);
     lines.push(`ended ${row.terminal}: its branch's pull request ${pr.state.toLowerCase()}`);
   }
@@ -12310,6 +12538,7 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
       const start = Date.now();
       // A finished worker's terminal, ended once its branch's pull request merged or closed (#1278).
       await endMergedWorkers({ terms, rows: ledger, every, start, budget, lines: out.lines, out });
+      const settling = worktreesSettling(workerLedgerRows(), terms);
       // The finished workers' terminals hc answered for: their end rows, after the loop.
       const gets = new Map();
       // What gh answered for a candidate's branch: its pull requests' rows, after the loop.
@@ -12328,7 +12557,7 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
         if (out.removed.length >= max) { out.more += 1; continue; }
         const path = c.worktree;
         let done;
-        if (!ready) {
+        if (!ready || settling.has(path)) {
           done = { result: "waiting" };
         } else if (!isDir(path)) {
           // A missing checkout cannot prove its actual repository. Keep its registration; a
@@ -12411,7 +12640,10 @@ async function cmdWorkerKill(opts, panes) {
   if (why) throw new CliError(`${why === "that isn't a terminal hc knows" ? `${pane} isn't a terminal hc knows` : why}. Nothing was ended.`);
 
   let current = target;
+  let children = [];
   if (!target.state || target.state === "live") {
+    const listed = await hcTerminals(false).catch(() => null);
+    children = await readRetirementChildren(address, listed ?? [], view.byTerminal);
     // Read the ledger again without importing, sweeping or locking it. The first view is cached.
     try {
       const { byKey } = foldAttach(readAttachFile(view.path) ?? []);
@@ -12439,7 +12671,7 @@ async function cmdWorkerKill(opts, panes) {
   }
   // The real hc (in a sandbox, the proxy's socket, which ends only the caller's own worker):
   // the pane's guard refuses a member's own `hc kill`, and this verb is the checked way around it.
-  const r = await hcKill(address);
+  const r = await hcKill(address, { before: current, kind: "worker", core: view.core, children });
   if (r.code !== 0) throw new CliError(`hc kill ${address} failed: ${hcSaid((r.stderr || r.stdout).trim())}`);
   return opts.json ? { terminal: address, ended: true, branch: target.labels?.branch ?? null } : `${address} ended (${bot.name}'s worker${target.labels?.branch ? ` on ${target.labels.branch}` : ""}).`;
 }
@@ -12556,13 +12788,22 @@ async function projectWorkerRowsOn(machine, dir, byName) {
   return readLedger(text);
 }
 
-/** Append one observation to the ledger that owns its intent, including on a linked project. */
-async function recordPaneProof(row, { dir, machine }, address) {
-  const { notes, error } = machine ? await remoteIo.exec("node", ["-e", `
+function appendWorkerRowOn(machine, dir, row) {
+  return remoteIo.exec("node", ["-e", `
 const fs = require("node:fs");
 const fd = fs.openSync(process.argv[1], fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW);
-try { fs.writeSync(fd, process.argv[2]); } finally { fs.closeSync(fd); }
-`, ledgerPath(dir), ledgerLine(row)], machine, { timeout: AGENT_WAIT_S })
+try {
+  const mode = fs.fstatSync(fd).mode & 0o777;
+  if (mode & ~0o600) fs.fchmodSync(fd, mode & 0o600);
+  const line = Buffer.from(process.argv[2]);
+  if (fs.writeSync(fd, line) < line.length) process.exitCode = 1;
+} finally { fs.closeSync(fd); }
+`, ledgerPath(dir), ledgerLine(row)], machine, { timeout: AGENT_WAIT_S });
+}
+
+/** Append one observation to the ledger that owns its intent, including on a linked project. */
+async function recordPaneProof(row, { dir, machine }, address) {
+  const { notes, error } = machine ? await appendWorkerRowOn(machine, dir, row)
     .then((r) => ({ notes: [], error: r.code === 0 ? null : `exit ${r.code}` }), (e) => ({ notes: [], error: e }))
     : writeLedgerRow(row, dir);
   if (error) notes.push(`The unresolved pane ${address} couldn't be recorded in ${LEDGER_FILE} (${error?.message ?? error}).`);
@@ -12615,7 +12856,9 @@ async function chosenRetirementRefusal(root, listed, observed, project) {
       const { address } = row;
       if (seen.has(address)) continue;
       seen.add(address);
-      const { get, state, confirmedGone } = observed.get(address) ?? await hcState(address).catch(() => ({ state: "unknown" }));
+      const observation = observed.get(address) ?? await hcState(address).catch(() => ({ state: "unknown" }));
+      observed.set(address, observation);
+      const { get, state, confirmedGone } = observation;
       const dies = get?.die_with_parent ?? row.die_with_parent;
       if (confirmedGone || (state === "finished" && get?.address === address) || dies === false) continue;
       const proof = await paneProof({ get, row, project: await paneProject(get?.cwd ?? row.cwd, project) });
@@ -13506,7 +13749,14 @@ const firstSentence = (text) => { const t = String(text ?? "").trim().replace(/^
  */
 async function reviveOne(target, bot) {
   const args = ["restart", bot.id, "--project", target.project, "--tree", "--revive", "--json"];
-  const read = (r) => { let out = null; try { out = JSON.parse(r.stdout); } catch { out = null; } return { code: r.code, out, err: r.stderr, killed: r.killed === true }; };
+  const read = (r) => {
+    let out = null;
+    try { out = JSON.parse(r.stdout); } catch { /* Failed restart or missing output. */ }
+    for (const line of r.stderr.split("\n")) {
+      if (/^am: .*\bhc rm t[0-9a-z]+$/.test(line)) console.error(line);
+    }
+    return { code: r.code, out, err: r.stderr, killed: r.killed === true };
+  };
   const helpersOfAnswer = (out) => (Array.isArray(out?.helpers) ? out.helpers : []).map((h) => ({ name: h.name ?? h.replaced, bot: h.bot ?? null,
     outcome: !h.up ? "failed" : h.mode === "resume" ? "resumed" : "fresh", why: !h.up ? (h.login ? h.error : firstSentence(h.error)) : h.note ?? null,
     ...(h.login ? { login: h.login } : {}),

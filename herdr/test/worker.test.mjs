@@ -667,15 +667,55 @@ test("worker kill (#955): a bot ends a worker it started and nothing else: a sea
   assert.equal(r.code, 0, r.err);
   assert.deepEqual([r.json().terminal, r.json().ended, r.json().branch], [mine, true, "feat/login"]);
   assert.deepEqual(kills().map((c) => c.slice(0, 2)), [["kill", mine]]);
-  // Ended already: said, and no second kill.
-  const again = s.cli(["worker", "kill", mine]);
+  assert.deepEqual(s.calls().filter((c) => c[0] === "rm").map((c) => c.slice(0, 2)), [["rm", mine]]);
+  assert.equal(s.hcState().terminals.some((p) => p.address === mine), false);
+  // A worker that ended on its own still has its terminal.
+  const other = s.cli(["worker", "another task", "--branch", "feat/another", "--json"]).json().terminal;
+  s.finish(other);
+  const again = s.cli(["worker", "kill", other]);
   assert.equal(again.code, 0, again.err);
   assert.match(again.out, /has already ended/);
+  assert.equal(s.hcState().terminals.find((p) => p.address === other).state, "finished");
+  assert.equal(s.calls().filter((c) => c[0] === "rm").length, 1);
   assert.equal(kills().length, 1);
   // A task whose text starts with "kill" is still a task: it names --branch.
   const task = s.cli(["worker", "kill", "the", "flaky", "test", "--branch", "feat/kill-flaky", "--json"]);
   assert.equal(task.code, 0, task.err);
   assert.equal(kills().length, 1);
+});
+
+test("worker kill succeeds and gives one manual rm line when hc refuses removal", (t) => {
+  const s = scene(t);
+  const { terminal } = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
+  const state = s.hcState();
+  state.failRm = terminal;
+  state.terminals.find((p) => p.address === terminal).status = { state: "idle" };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["worker", "kill", terminal, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().ended, true);
+  assert.deepEqual(r.err.trim().split("\n"), [`am: ${terminal} was left listed. Run hc rm ${terminal}`]);
+  assert.equal(s.hcState().terminals.find((p) => p.address === terminal).state, "finished");
+});
+
+test("worker kill removes its cascading children and leaves already finished or outliving children", (t) => {
+  const s = scene(t);
+  const { terminal } = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status = { state: "idle" };
+  const child = (address, parent = terminal) => ({
+    ...term(address, { cwd: s.project }), parent, die_with_parent: true,
+  });
+  state.terminals.push(child("t501"), child("t502", "t501"),
+    { ...child("t503"), state: "finished", reason: "killed", finished_ms: 1 },
+    { ...child("t504"), die_with_parent: false }, child("t505", "t504"));
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["worker", "kill", terminal, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const removed = s.calls().filter(([verb]) => verb === "rm").map(([, address]) => address);
+  assert.deepEqual(removed, ["t502", "t501", terminal]);
+  assert.deepEqual(s.hcState().terminals.filter((pane) => /^t50[1-5]$/.test(pane.address))
+    .map((pane) => [pane.address, pane.state]), [["t503", "finished"], ["t504", "live"], ["t505", "live"]]);
 });
 
 test("worker kill #1129: a plain hc run child is refused whatever its parent says, and a worker that changes before the kill is not ended", (t) => {
@@ -2843,6 +2883,7 @@ test("worker #1278 cause 1: a worker whose branch's PR merged is ended by the sw
   // Its turn is over (hc shows idle), but the terminal is still live, as a finished worker's is.
   const state = s.hcState();
   Object.assign(state.terminals.find((x) => x.address === w.terminal).status, { state: "idle" });
+  state.terminals.push({ ...term("t501", { cwd: w.worktree }), parent: w.terminal, die_with_parent: true });
   writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
   const head = git(w.worktree, "rev-parse", "HEAD").trim();
   writeFileSync(join(s.root, "gh.json"), JSON.stringify([{
@@ -2853,11 +2894,24 @@ test("worker #1278 cause 1: a worker whose branch's PR merged is ended by the sw
   const r = s.cli(["reap", "--json"], { from: null });
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(r.json().ended, [w.terminal], "the finished worker's terminal is ended");
-  assert.equal(s.hcState().terminals.find((x) => x.address === w.terminal).state, "finished");
+  assert.equal(s.hcState().terminals.some((x) => [w.terminal, "t501"].includes(x.address)), false);
+  assert.equal(r.json().waiting, 1, "a worktree waits even after the terminal was removed in this sweep");
+  assert.equal(s.cli(["reap", "--json"], { from: null }).json().waiting, 1, "the next sweep reads the finish time from the ledger");
   assert.ok(s.calls().some((c) => c[0] === "kill" && c[1] === w.terminal), "hc kill was called");
   const end = s.ledger().find((x) => x.event === "end" && x.terminal === w.terminal);
   assert.ok(end, "the end event is written");
   assert.equal(end.reason, "finished");
+  assert.equal(end.hc_reason, "killed");
+  // A listed, older finish from a different launch using the same address cannot replace this end.
+  const reused = s.hcState();
+  reused.terminals.push({ ...term(w.terminal, { cwd: s.project }), state: "finished",
+    created_ms: end.created_ms + 1, finished_ms: Date.now() - 16 * 60_000 });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(reused));
+  assert.equal(s.cli(["reap", "--json"], { from: null }).json().waiting, 1);
+  const aged = s.ledger().map((row) => row.event === "end" && row.terminal === w.terminal
+    ? { ...row, at: new Date(Date.now() - 16 * 60_000).toISOString() } : row);
+  writeFileSync(join(s.app, "automagik-herdr/workers.jsonl"), aged.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  assert.deepEqual(s.cli(["reap", "--json"], { from: null }).json().removed, [w.worktree]);
 });
 
 test("worker #1278 cause 2: reap lists a worktree no worker row created, and never removes it", (t) => {
@@ -4749,7 +4803,7 @@ for (const location of ["am part", "pack mod", "am part before pack mod"]) {
     const r = spawnSync(process.execPath, [CLI, "worker", "kill", terminal, "--json"], { cwd: s.project, env, encoding: "utf8" });
     assert.equal(r.status, 0, r.error?.message ?? r.stderr);
     assert.equal(JSON.parse(r.stdout).ended, true);
-    assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal]]);
+    assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal, "--json"]]);
   });
 }
 
@@ -4783,7 +4837,7 @@ test("#1728 a main bot's worker kill still succeeds through an unvouched shim", 
   const r = spawnSync(process.execPath, [CLI, "worker", "kill", terminal, "--json"], { cwd: s.project, env, encoding: "utf8" });
   assert.equal(r.status, 0, r.error?.message ?? r.stderr);
   assert.equal(JSON.parse(r.stdout).ended, true);
-  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal]]);
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", terminal, "--json"]]);
 });
 
 // ---- #1208: an ordinary seat start that times out never binds a chosen-home worker that took its name ----
