@@ -101,3 +101,17 @@ test('registration is disposed on unload for injected and direct services', asyn
     assert.equal(h.read('private'), undefined)
   }
 })
+
+test('the identity carries the Bot speed only as a well-formed choice for one model ref', t => {
+  const h = host(t)
+  const ada = h.bots.get('ada')
+  assert.equal(h.read('task').speed, undefined, 'an old Bot has none')
+  ada.speed = { model: 'acp-codex/gpt-5.5', value: 'fast' }
+  assert.deepEqual(h.read('task').speed, { model: 'acp-codex/gpt-5.5', value: 'fast' })
+  h.read('task').speed.value = 'standard'
+  assert.equal(ada.speed.value, 'fast', 'a copy, never the record')
+  ada.speed = { model: 'acp-codex/gpt-5.5', value: 'turbo' }
+  assert.equal(h.read('task').speed, undefined)
+  ada.speed = { value: 'fast' }
+  assert.equal(h.read('task').speed, undefined)
+})
