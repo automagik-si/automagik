@@ -66,9 +66,18 @@ type Record struct {
 	Trigger    Trigger   `json:"trigger,omitempty"`
 	// Session is the Herdr session WorkspaceID and PaneID belong to; IDs are
 	// only meaningful inside it. Empty on runs recorded before ADR 0010.
-	Session     string `json:"session,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
-	PaneID      string `json:"pane_id,omitempty"`
+	Session     string           `json:"session,omitempty"`
+	WorkspaceID string           `json:"workspace_id,omitempty"`
+	PaneID      string           `json:"pane_id,omitempty"`
+	TabID       string           `json:"tab_id,omitempty"`
+	Workspace   config.Workspace `json:"workspace_mode,omitempty"`
+	// TerminalID identifies the original Herdr pane or hc terminal across ID reuse.
+	TerminalID string `json:"terminal_id,omitempty"`
+	// Screen and Cleanup preserve the evidence and outcome of terminal removal.
+	Screen  string `json:"screen,omitempty"`
+	Cleanup string `json:"cleanup,omitempty"`
+	// CleanupPending lets a later occurrence retry incomplete removal.
+	CleanupPending bool `json:"cleanup_pending,omitempty"`
 	// Target is the automation's target when the run was handed to a bot or a
 	// worker instead of a terminal of its own (#498); PaneID is that terminal.
 	Target string `json:"target,omitempty"`

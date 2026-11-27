@@ -46,7 +46,9 @@ a Friday digest — deserve better than you retyping the same prompt every morni
 - **Survives sleep** — occurrences are computed off the wall clock, so a run due while the laptop slept fires on wake (within `catch_up_minutes`) instead of vanishing; anything too late is recorded as `missed`
 - **Schedules that overlap say so** — the wizard warns while you are still choosing the cron, and `list` reports every overlap in the week ahead. Herdr starts them all; the plugin never quietly holds one back, it just makes sure you knew
 - **Overlap guard** — a tick that fires while *that same* automation is still working is skipped, never queued into a pile-up
-- **Targets a bot** — `target: bot:<id>` hands the prompt to a bot's own terminal (starting it when it is not running, and re-reading it before the send), or `worker:<id>` starts a worker of that bot for the run and ends it once its turn finishes (a worker still mid-turn at the timeout stays, logged; ADR 0014). By id from the project's `bots.json`, never by a terminal address
+- **Targets a bot** — `target: bot:<id>` hands the prompt to a bot's own terminal,
+  starting the bot if needed. `worker:<id>` starts a worker for the run and ends it
+  when the run finishes (ADRs 0014 and 0015). Both use the id in the project's `bots.json`.
 - **Agent-agnostic** — anything `herdr agent start` supports: `claude`, `codex`, `opencode`, `gemini`, `cursor`, …
 - **MCP attach** — `mcp_config: path.json` hands the agent its MCP servers (GitHub, Slack, your DB…)
 - **Full run history** — append-only JSONL: `scheduled → running → done | failed | skipped | missed`, with workspace and pane IDs to jump back into
@@ -270,18 +272,11 @@ automations:
     disabled: true                # optional: keep it, don't schedule it
 ```
 
-`blocked_grace_minutes` applies to both agent backends: `0` or an omitted key
-uses 2 minutes; `-1` waits until completion or the run timeout. A continuous
-blocked state past the grace fails the run with the dialog line and a notice.
-On hc the terminal is killed without removing its record. On herdr the scheduler
-re-reads both the agent status and `pane process-info` before asking it to stop.
-If the dialog cleared, it resumes the run without a blocked failure. It requests
-SIGTERM only when the foreground group is unchanged and is not missing, the shell,
-or the scheduler. The failure error and log say "asked the agent to stop (SIGTERM)";
-exit is not confirmed and SIGTERM is not escalated, so a TERM-ignoring dialog can
-survive. A refused or unsuccessful request is reported as such. These rechecks
-narrow the read/signal window; a change after them can still race the signal.
-Neither failure path asks to close the pane, tab, or workspace.
+`blocked_grace_minutes` applies to both agent backends. An omitted key or
+`0` uses 2 minutes. A continuous blocked state past the grace fails with the
+dialog line and a notice. A recognised dialog can fail as soon as two screen
+reads confirm it. With `-1`, a reported blocked state can wait out the
+timeout, though hc still checks for an unanswered startup dialog.
 
 Herdr prompt retries check the run deadline and wait one status-poll interval
 between submissions. If submission keeps reporting blocked but status never
@@ -447,27 +442,20 @@ wizard warns while you're still choosing the cron, and `herdr-automations list`
 reports every overlap in the next week. If running them together isn't what you
 want, move a cron — one character, and the file still says what happens.
 
-**What happens to the tabs `workspace: existing` opens?** They accumulate by default,
-and nothing reaps them: a tab you have read is a tab you close. `cleanup` has
-nothing to say about them — there is no worktree and no branch, so the only trace a
-run leaves is its line in `history.jsonl`. Set `close_workspace: on-success` to have
-a successful run ask for its own tab; the scheduler issues no space close itself.
-Closes in one scheduler process serialize per workspace and re-read under the lock:
-it leaves the last tab it can see. It refuses when the space's tabs cannot be
-read or when they no longer list it. A person closing the
-space's other tabs in the same moment can still leave it last, and the app then
-takes the space. A manual `run` or a second daemon has its own lock and can race
-the same way; the mutex coordinates only closes in one scheduler process.
+**What happens to run terminals?** On failure, the scheduler saves the reason
+and last screen lines in `herdr-automations history` before ending and removing
+the run's terminal. It preserves the last tab of a shared space. Before the next
+occurrence provisions a terminal, it reconciles any earlier live run of the same
+automation and records what happened. If that removal fails, the next
+occurrence can retry it ([ADR 0015](docs/adr/0015-retire-run-terminals-after-failure.md)).
 
-**What happens to the worktrees?** They accumulate on purpose: a run whose workspace
-is still open is a run nobody has looked at, which makes the Herdr sidebar the inbox.
-Closing it is how you say you're done.
+A successful run keeps its terminal by default. `close_workspace: on-success`
+closes the workspace after recording `done`, or only the tab that the run
+opened when using `workspace: existing`. A successful run whose agent stays
+live can keep its terminal until the next occurrence.
 
-For a chore whose successful runs need no reading, `close_workspace: on-success`
-closes the workspace once the run is recorded `done`, or with `workspace: existing`
-only the tab that run opened. Failed, cancelled and timed-out runs stay open, and a
-run whose agent waits on a person is not closed. The worktree stays on disk for
-`cleanup` ([ADR 0012](docs/adr/0012-a-successful-run-may-close-its-workspace.md)).
+**What happens to the worktrees?** They stay on disk for review and manual
+`cleanup`, including worktrees from a failed run whose terminal was removed.
 
 `herdr-automations cleanup` removes only the ones whose work already landed — the
 branch is an ancestor of the default branch, so either it was merged or the agent

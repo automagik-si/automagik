@@ -494,6 +494,14 @@ func showHistory(name string) error {
 		}
 		fmt.Printf("%-20s %-24s %-9s %-7s %s\n",
 			r.At.Format(time.DateTime), r.Automation, r.Status, r.Trigger, detail)
+		if r.Cleanup != "" {
+			fmt.Printf("  %s\n", r.Cleanup)
+		}
+		for line := range strings.SplitSeq(r.Screen, "\n") {
+			if line != "" {
+				fmt.Printf("  %s\n", line)
+			}
+		}
 	}
 	return nil
 }

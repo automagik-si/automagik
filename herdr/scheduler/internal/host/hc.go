@@ -88,7 +88,7 @@ func (h *hcHost) Provision(a config.Automation) (Session, error) {
 		return Session{}, err
 	}
 	space, cwd := newID("sp"), a.Repo
-	var tabID string
+	tab := newID("tb")
 	switch a.Workspace {
 	case config.WorkspaceWorktree:
 		cwd, err = h.worktree(a)
@@ -97,25 +97,21 @@ func (h *hcHost) Provision(a config.Automation) (Session, error) {
 		}
 	case config.WorkspaceExisting:
 		space = a.WorkspaceID
-		// The app adopts this terminal into the tab named by its label, so
-		// that id identifies the run's own tab when Close checks the space.
-		tabID = newID("tb")
 	case config.WorkspaceRoot:
 	default:
 		return Session{}, fmt.Errorf("unknown workspace mode %q", a.Workspace)
 	}
-	tab := tabID
-	if tab == "" {
-		tab = newID("tb")
-	}
 	// An id the app does not know becomes a new space or tab, unnamed, so it
-	// is called after its folder and nests under its repo.
-	labels := map[string]string{"herdr.space": space, "herdr.tab": tab, "automation": a.Name}
+	// is called after its folder and nests under its repo. The tab ID also
+	// identifies this run if hc later reuses its terminal address.
+	labels := map[string]string{"herdr.space": space, "herdr.tab": tab, "automation": a.Name,
+		"automation.workspace": string(a.Workspace)}
 	address, err := h.ops.Run(cwd, labels, argv)
+	s := Session{WorkspaceID: space, PaneID: address, TabID: tab, Workspace: a.Workspace}
 	if err != nil {
-		return Session{WorkspaceID: space}, fmt.Errorf("start %s: %w", argv[0], err)
+		return s, fmt.Errorf("start %s: %w", argv[0], err)
 	}
-	return Session{WorkspaceID: space, PaneID: address, TabID: tabID}, nil
+	return s, nil
 }
 
 // worktree checks out a fresh branch where the app's "New worktree…" would:
@@ -178,17 +174,21 @@ func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration)
 				if h.agentState(s) == "working" {
 					sawWork()
 				} else {
-					return fmt.Errorf("the agent never started working: no sign of work in %s; open %s to see what it is waiting on", timeout, s.PaneID)
+					return fmt.Errorf("the agent never started working: no sign of work in %s", timeout)
 				}
 			}
 			return fmt.Errorf("the agent was still working after %s", timeout)
 		}
-		w, err := h.ops.Wait(s.PaneID, min(h.knobs.waitSlice, remaining))
+		slice := h.knobs.waitSlice
+		if !working || !blockedSince.IsZero() {
+			slice = h.knobs.statusPoll
+		}
+		w, err := h.ops.Wait(s.PaneID, min(slice, remaining))
 		if err != nil {
-			// The terminal is unreadable: removed along with its space, most
-			// likely. Not enough to call it a crash (see agentGoneOutcome).
-			log.Printf("could not wait on %s (%v), recording it as cancelled", s.PaneID, err)
-			return ErrCancelled
+			if errors.Is(err, hc.ErrNotFound) {
+				return ErrCancelled
+			}
+			return fmt.Errorf("wait for the agent: %w", err)
 		}
 		// Claude counts a turn when it starts, pi when it ends: having been
 		// seen at work is what says the prompt landed. Blocked is not that: a
@@ -222,7 +222,7 @@ func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration)
 				blockedSince = h.now()
 			}
 			if h.now().Sub(blockedSince) > grace {
-				return h.blockedOutcome(s)
+				return dialogError(promptLine(h.readScreen(s)))
 			}
 		} else {
 			blockedSince = time.Time{}
@@ -233,23 +233,26 @@ func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration)
 		// Silence alone says nothing about whether the prompt landed. Only a
 		// dialog seen twice can fail the run before its timeout, and a fresh
 		// status after the read can say the agent got past it in between.
-		if turn == 0 && !working && time.Since(started) > h.knobs.paneReady && time.Since(inspected) >= h.knobs.waitSlice {
+		if (!working || failFast && w.Status == "blocked") && time.Since(inspected) >= h.knobs.statusPoll {
 			inspected = time.Now()
-			line := ""
-			if screen, err := h.ops.Read(s.PaneID); err == nil {
-				line = dialogLine(screen)
-			} else {
-				log.Printf("could not read the screen of %s: %v", s.PaneID, err)
-			}
-			state := h.agentState(s)
-			if state == "working" {
+			screen, _ := h.ops.Read(s.PaneID)
+			line := dialogLine(screen)
+			switch h.agentState(s) {
+			case "working":
 				sawWork()
-			} else if time.Until(deadline) <= 0 {
-				continue
-			} else if line != "" && line == previousDialog && state != "blocked" && state != "done" {
-				return fmt.Errorf("the agent never started working: a dialog is waiting on its screen; open %s and answer it: %s", s.PaneID, line)
+			case "done":
+				// Let the next wait confirm the turn's outcome.
+			default:
+				if line != "" && line == previousDialog {
+					if working {
+						return dialogError(line)
+					}
+					return fmt.Errorf("the agent never started working: %w", dialogError(line))
+				}
 			}
 			previousDialog = line
+		} else if working && w.Status != "blocked" {
+			previousDialog = ""
 		}
 		if w.Ended {
 			// blocked, or idle before the prompt landed: wait answers at once
@@ -259,23 +262,12 @@ func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration)
 	}
 }
 
-// blockedOutcome ends the blocked agent's terminal and reports the dialog it
-// was waiting on. The workspace and tab are left open, as any failed run's
-// are: they are where a person goes to read what happened.
-func (h *hcHost) blockedOutcome(s Session) error {
-	line := ""
-	if screen, err := h.ops.Read(s.PaneID); err == nil {
-		line = promptLine(screen)
-	} else {
+func (h *hcHost) readScreen(s Session) string {
+	screen, err := h.ops.Read(s.PaneID)
+	if err != nil {
 		log.Printf("could not read the screen of %s: %v", s.PaneID, err)
 	}
-	if err := h.ops.Kill(s.PaneID); err != nil && !errors.Is(err, hc.ErrNotFound) {
-		log.Printf("could not end the blocked agent on %s: %v", s.PaneID, err)
-	}
-	if line == "" {
-		return fmt.Errorf("blocked on a dialog")
-	}
-	return fmt.Errorf("blocked on a dialog: %s", line)
+	return screen
 }
 
 // Close ends the run's terminal, which makes the app remove its tab, then
@@ -343,8 +335,11 @@ func (h *hcHost) agentState(s Session) string {
 // exit 0 on a quit: that is not a finished run.
 func (h *hcHost) exitOutcome(s Session, worked bool) error {
 	t, err := h.ops.Get(s.PaneID)
-	if err != nil || t.Reason == "killed" {
+	if errors.Is(err, hc.ErrNotFound) || t.Reason == "killed" {
 		return ErrCancelled
+	}
+	if err != nil {
+		return fmt.Errorf("read the agent's exit status: %w", err)
 	}
 	if t.ExitCode == nil {
 		return fmt.Errorf("the agent exited before finishing")

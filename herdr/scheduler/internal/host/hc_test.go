@@ -536,7 +536,7 @@ func TestHCCloseExistingListFailureLeavesTheTabOpen(t *testing.T) {
 }
 
 // A dialog is not work: the run must fail at the grace with the line the
-// person would have read, and the blocked agent must not be left waiting.
+// runner will record before removing its terminal.
 func TestHCDoFailsAtOnceOnALongBlockedDialog(t *testing.T) {
 	clock := time.Unix(0, 0)
 	blocked := hc.Wait{Ended: true, Reason: "status", Status: "blocked", Turn: 1}
@@ -563,11 +563,11 @@ func TestHCDoFailsAtOnceOnALongBlockedDialog(t *testing.T) {
 	if strings.Contains(err.Error(), "still working") {
 		t.Fatalf("waited for the timeout instead of failing at the grace: %v", err)
 	}
-	if f.readCalls != 1 {
-		t.Errorf("read the screen %d times, want once", f.readCalls)
+	if f.readCalls != 2 {
+		t.Errorf("read the screen %d times, want twice", f.readCalls)
 	}
-	if got := strings.Join(f.calls, "|"); got != "kill t7" {
-		t.Fatalf("calls %q, want the blocked agent's terminal ended and nothing else", got)
+	if got := strings.Join(f.calls, "|"); got != "" {
+		t.Fatalf("the wait must return before cleanup, got %q", got)
 	}
 }
 
@@ -614,5 +614,84 @@ func TestHCDoWaitsOutBlockedWhenTheGraceIsMinusOne(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("ended the agent under grace -1: %q", f.calls)
+	}
+}
+
+func automationTerminal(address, name, space, tab, state string) hc.Terminal {
+	return hc.Terminal{
+		Address: address, CreatedMS: 10, State: state, Cwd: "/repo",
+		Labels: map[string]string{"automation": name, "herdr.space": space, "herdr.tab": tab},
+	}
+}
+
+func TestHCPreviousFindsLabelledRunsAndRetriesFailedRemoval(t *testing.T) {
+	a := hcAutomation()
+	f := &fakeHC{
+		terminals: []string{"t1", "t2", "peer/t3", "t4"},
+		gets: map[string]hc.Terminal{
+			"t1": automationTerminal("t1", a.Name, "sp1", "tb1", "live"),
+			"t2": automationTerminal("t2", a.Name, "sp2", "tb2", "live"),
+			"t4": automationTerminal("t4", "another", "sp4", "tb4", "live"),
+			"t5": automationTerminal("t5", a.Name, "sp5", "tb5", "finished"),
+			"t6": automationTerminal("t6", a.Name, "sp6", "tb6", "finished"),
+		},
+	}
+	known := []Session{
+		{PaneID: "t5", WorkspaceID: "sp5", TabID: "tb5", CleanupPending: true},
+		{PaneID: "t6", WorkspaceID: "sp6", TabID: "tb6"},
+	}
+	h := newHCTest(f)
+	previous, err := h.Previous(a, known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var panes []string
+	for _, s := range previous {
+		panes = append(panes, s.PaneID)
+		if err := h.Remove(s, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Join(panes, ","); got != "t1,t2,t5" {
+		t.Fatalf("previous panes = %s", got)
+	}
+	if got := strings.Join(f.calls, ","); got != "kill t1,rm t1,kill t2,rm t2,rm t5" {
+		t.Fatalf("cleanup order = %s", got)
+	}
+}
+
+func TestHCRemoveKeepsSharedLastTabBeforeEndingAgent(t *testing.T) {
+	a := hcAutomation()
+	s := Session{PaneID: "t8", WorkspaceID: "sp1", TabID: "tb1", Workspace: config.WorkspaceExisting}
+	f := &fakeHC{terminals: []string{"t8"}, gets: map[string]hc.Terminal{
+		"t8": automationTerminal("t8", a.Name, "sp1", "tb1", "live"),
+	}}
+	f.onKill = func() {
+		if f.labels["herdr.space"] != s.WorkspaceID || f.labels["herdr.tab"] != s.TabID ||
+			f.labels["automation"] != "" || len(f.argv) != 0 {
+			t.Fatalf("shared tab needs a plain shell before kill, labels = %v, argv = %v", f.labels, f.argv)
+		}
+	}
+	if err := newHCTest(f).Remove(s, a); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.calls, ","); got != "kill t8,rm t8" {
+		t.Fatalf("cleanup order = %s", got)
+	}
+}
+
+func TestHCRemoveRefusesReusedAddressAfterKill(t *testing.T) {
+	a := hcAutomation()
+	s := Session{PaneID: "t1", WorkspaceID: "sp1", TabID: "tb1", Workspace: config.WorkspaceRoot}
+	f := &fakeHC{gets: map[string]hc.Terminal{
+		"t1": automationTerminal("t1", a.Name, "sp1", "tb1", "live"),
+	}}
+	f.onKill = func() {
+		f.gets["t1"] = automationTerminal("t1", a.Name, "sp1", "a different tab", "finished")
+	}
+	err := newHCTest(f).Remove(s, a)
+	if err == nil || !strings.Contains(err.Error(), "identity changed") ||
+		strings.Join(f.calls, ",") != "kill t1" {
+		t.Fatalf("err = %v, calls = %v", err, f.calls)
 	}
 }

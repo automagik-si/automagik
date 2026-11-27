@@ -63,7 +63,7 @@ func TestDoSubmitBlockedStatusMismatchHasPacedAttemptLimit(t *testing.T) {
 	}
 }
 
-func TestAwaitBlockedPastGraceFailsWithScreenAndStopRequest(t *testing.T) {
+func TestAwaitConfirmedDialogFailsBeforeGrace(t *testing.T) {
 	clock := time.Unix(0, 0)
 	ops := &fakeOps{
 		agentWait: func(string, time.Duration) error {
@@ -78,10 +78,10 @@ func TestAwaitBlockedPastGraceFailsWithScreenAndStopRequest(t *testing.T) {
 	w := agentWorkWith(ops, config.Automation{}) // raw zero gets the default grace
 	w.clock = func() time.Time { return clock }
 	err := w.do(Session{PaneID: "w7:p2"}, 200*time.Millisecond)
-	if err == nil || err.Error() != "blocked on a dialog: Do you want to proceed?; asked the agent to stop (SIGTERM)" {
+	if err == nil || err.Error() != "blocked on a dialog: Do you want to proceed?" {
 		t.Fatalf("want the dialog line, got %v", err)
 	}
-	if ops.waits != 4 || ops.reads != 1 || strings.Join(ops.stopRequests, "|") != "w7:p2" {
+	if ops.waits != 2 || ops.reads != 2 || len(ops.stopRequests) != 0 {
 		t.Fatalf("waits=%d reads=%d stopRequests=%v", ops.waits, ops.reads, ops.stopRequests)
 	}
 	if len(ops.closed) != 0 || len(ops.closedTabs) != 0 {
@@ -109,7 +109,7 @@ func TestAwaitBlockedBlipsResetGraceThenDoneSucceeds(t *testing.T) {
 	if err := w.await(Session{PaneID: "p"}, time.Second); err != nil {
 		t.Fatalf("a blip failed: %v", err)
 	}
-	if ops.waits != len(states) || len(ops.stopRequests) != 0 || ops.reads != 0 {
+	if ops.waits != len(states) || len(ops.stopRequests) != 0 || ops.reads != 4 {
 		t.Fatalf("waits=%d stopRequests=%v reads=%d", ops.waits, ops.stopRequests, ops.reads)
 	}
 }
@@ -134,7 +134,7 @@ func TestAwaitMinusOneWaitsOutBlockedUntilTimeout(t *testing.T) {
 	}
 }
 
-func TestDoPreAwaitDialogsFailWithGraceAndStopRequest(t *testing.T) {
+func TestDoPreAwaitDialogsFailAtGrace(t *testing.T) {
 	for _, phase := range []string{"start", "submit"} {
 		t.Run(phase, func(t *testing.T) {
 			clock := time.Unix(0, 0)
@@ -155,10 +155,10 @@ func TestDoPreAwaitDialogsFailWithGraceAndStopRequest(t *testing.T) {
 			w := agentWorkWith(ops, config.Automation{})
 			w.clock = func() time.Time { return clock }
 			err := w.do(Session{PaneID: "p"}, 200*time.Millisecond)
-			if err == nil || err.Error() != "blocked on a dialog: Do you trust this folder?; asked the agent to stop (SIGTERM)" {
+			if err == nil || err.Error() != "blocked on a dialog: Do you trust this folder?" {
 				t.Fatalf("want a blocked failure, got %v", err)
 			}
-			if strings.Join(ops.stopRequests, "|") != "p" || ops.reads != 1 || ops.waits != 0 || len(ops.closed)+len(ops.closedTabs) != 0 {
+			if len(ops.stopRequests) != 0 || ops.reads != 4 || ops.waits != 0 || len(ops.closed)+len(ops.closedTabs) != 0 {
 				t.Fatalf("stopRequests=%v reads=%d waits=%d layout closes=%v/%v", ops.stopRequests, ops.reads, ops.waits, ops.closed, ops.closedTabs)
 			}
 		})

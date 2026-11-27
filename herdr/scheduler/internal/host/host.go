@@ -26,11 +26,14 @@ import (
 // Session is a provisioned place for a run to happen: a workspace and the pane
 // its agent will live in.
 type Session struct {
-	WorkspaceID string
-	PaneID      string
-	// TabID is the tab this run opened when it opened one rather than a whole
-	// workspace (workspace: existing). Empty when the backend cannot say which
-	// tab it made, and then close_workspace leaves it alone.
+	WorkspaceID    string
+	PaneID         string
+	Workspace      config.Workspace
+	TerminalID     string
+	CleanupPending bool
+	Started        time.Time
+	Observed       time.Time
+	// TabID identifies the tab the run opened when the backend can name it.
 	TabID string
 	// HerdrSession is the Herdr session both IDs belong to. Not to be confused
 	// with Session itself, which predates Herdr having sessions.
@@ -65,6 +68,14 @@ type Host interface {
 // Noter returns the run's note and forgets it.
 type Noter interface {
 	Note(s Session) string
+}
+
+// RunTerminals owns cleanup of terminals provisioned for an automation.
+// The runner must write the screen and reason to history before Remove.
+type RunTerminals interface {
+	Previous(a config.Automation, known []Session) ([]Session, error)
+	Screen(s Session) (string, error)
+	Remove(s Session, a config.Automation) error
 }
 
 // ErrCancelled means the run's workspace was closed while it was working.
@@ -151,7 +162,15 @@ func (h *live) Provision(a config.Automation) (Session, error) {
 	default:
 		err = fmt.Errorf("unknown workspace mode %q", a.Workspace)
 	}
-	return Session{WorkspaceID: workspaceID, PaneID: paneID, TabID: tabID, HerdrSession: h.ops.CurrentSession()}, err
+	s := Session{WorkspaceID: workspaceID, PaneID: paneID, TabID: tabID, Workspace: a.Workspace,
+		HerdrSession: h.ops.CurrentSession()}
+	if err == nil && paneID != "" {
+		if pane, err := h.ops.PaneGet(paneID); err == nil && pane.PaneID == paneID {
+			s.TerminalID = pane.TerminalID
+			s.TabID = pane.TabID
+		}
+	}
+	return s, err
 }
 
 // Do runs the automation's work in the session and reports whether it worked.

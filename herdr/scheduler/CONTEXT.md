@@ -81,9 +81,9 @@ sorted into what can go and what stays.
 
 **Workspace mode** (`worktree` | `root`) is what the automation asks for.
 **Workspace** on its own is Herdr's: the thing with an ID that you can close.
-Closing one is the gesture that cancels a run — and an open one is the only
-durable signal that nobody has read a run yet, which is why `cleanup` never runs
-on a schedule. `close_workspace: on-success` is the automation's author saying its
+Closing one is the gesture that cancels a run. History keeps the reason and
+screen for a failed run after its terminal is removed (ADR 0015). Worktree
+`cleanup` is manual (ADR 0001). `close_workspace: on-success` is the automation's author saying its
 done runs need no reading (ADR 0012).
 
 **Catch-up window** is how late an occurrence may still start.

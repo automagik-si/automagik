@@ -34,7 +34,7 @@ const maxSubmitMismatches = 3
 func (w agentWork) do(s Session, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	if err := w.start(s); err != nil {
-		if !w.ops.HasCode(err, herdr.CodeAgentNotReady) {
+		if !w.ops.HasCode(err, herdr.CodeAgentNotReady) && !w.ops.HasCode(err, herdr.CodeAgentBlocked) {
 			return fmt.Errorf("start %s agent: %w", w.a.Agent, err)
 		}
 		// A blocked startup retains its agent in this pane. Wait for the
@@ -81,6 +81,7 @@ func (w agentWork) do(s Session, timeout time.Duration) error {
 // reaching await. Once it clears, the prompt still needs to be submitted.
 func (w agentWork) waitBlocked(s Session, deadline time.Time) (sawBlocked bool, err error) {
 	var since time.Time
+	var previousDialog string
 	for {
 		status, err := w.ops.AgentStatus(s.PaneID)
 		if err != nil {
@@ -93,8 +94,8 @@ func (w agentWork) waitBlocked(s Session, deadline time.Time) (sawBlocked bool, 
 		if since.IsZero() {
 			since = w.now()
 		}
-		if !w.a.WaitsOutBlocked() && w.now().Sub(since) > w.a.BlockedGrace() {
-			return true, w.blockedOutcome(s)
+		if err := w.checkDialog(s, &since, &previousDialog); err != nil {
+			return true, err
 		}
 		if !time.Now().Before(deadline) {
 			return true, fmt.Errorf("the agent was still blocked at the run timeout")
@@ -213,6 +214,7 @@ func (w agentWork) await(s Session, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last error
 	var blockedSince time.Time
+	var previousDialog string
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -234,20 +236,15 @@ func (w agentWork) await(s Session, timeout time.Duration) error {
 			if blockedSince.IsZero() {
 				blockedSince = w.now()
 			}
-			if !w.a.WaitsOutBlocked() && w.now().Sub(blockedSince) > w.a.BlockedGrace() {
-				if err := w.blockedOutcome(s); err != nil {
-					return err
-				}
-				// The final status check saw the dialog clear. Resume waiting,
-				// and give any later blocked episode a fresh grace.
-				blockedSince = time.Time{}
-				continue
+			if err := w.checkDialog(s, &blockedSince, &previousDialog); err != nil {
+				return err
 			}
 			// A blocked wait returns at once. Pace it while the grace runs.
 			time.Sleep(min(w.knobs.statusPoll, time.Until(deadline)))
 			continue
 		}
 		blockedSince = time.Time{}
+		previousDialog = ""
 		if err == nil {
 			if statusErr != nil {
 				return fmt.Errorf("read agent status after waiting: %w", statusErr)
@@ -276,27 +273,29 @@ func (w agentWork) await(s Session, timeout time.Duration) error {
 	}
 }
 
-func (w agentWork) blockedOutcome(s Session) error {
-	line := ""
-	if screen, err := w.ops.PaneRead(s.PaneID, 120); err == nil {
-		line = promptLine(screen)
-	} else {
-		log.Printf("could not read the screen of %s: %v", s.PaneID, err)
-	}
-	blocked, err := w.ops.AgentStop(s.PaneID)
-	if !blocked {
+func (w agentWork) checkDialog(s Session, since *time.Time, previous *string) error {
+	if w.a.WaitsOutBlocked() {
 		return nil
 	}
-	detail := "blocked on a dialog"
-	if line != "" {
-		detail += ": " + line
-	}
+	expired := w.now().Sub(*since) > w.a.BlockedGrace()
+	screen, err := w.ops.PaneRead(s.PaneID, 30)
 	if err != nil {
-		log.Printf("could not ask the agent to stop (SIGTERM) on %s: %v", s.PaneID, err)
-		return fmt.Errorf("%s; could not ask the agent to stop (SIGTERM): %w", detail, err)
+		log.Printf("could not read the screen of %s: %v", s.PaneID, err)
 	}
-	log.Printf("%s: asked the agent to stop (SIGTERM); exit not confirmed", s.PaneID)
-	return fmt.Errorf("%s; asked the agent to stop (SIGTERM)", detail)
+	line := dialogLine(screen)
+	confirmed := line != "" && line == *previous
+	*previous = line
+	if !expired && !confirmed {
+		return nil
+	}
+	if state, err := w.ops.AgentStatus(s.PaneID); err == nil && state != "blocked" {
+		*since, *previous = time.Time{}, ""
+		return nil
+	}
+	if line == "" {
+		line = promptLine(screen)
+	}
+	return dialogError(line)
 }
 
 // agentGoneOutcome disambiguates herdr's agent_not_running: it means either

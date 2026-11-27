@@ -1,7 +1,9 @@
 package host
 
 import (
+	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -102,4 +104,25 @@ func clipPrompt(line string) string {
 		return string(r)
 	}
 	return string(r[:promptLimit-1]) + "…"
+}
+
+// screenTail keeps a bounded, plain-text excerpt in the run's history.
+func screenTail(screen string) string {
+	lines := strings.Split(screen, "\n")
+	tail := make([]string, 0, 12)
+	for i := len(lines) - 1; i >= 0 && len(tail) < cap(tail); i-- {
+		line := cleanLine(lines[i])
+		if line != "" {
+			tail = append(tail, clipPrompt(line))
+		}
+	}
+	slices.Reverse(tail)
+	return strings.Join(tail, "\n")
+}
+
+func dialogError(line string) error {
+	if line == "" {
+		return fmt.Errorf("blocked on a dialog")
+	}
+	return fmt.Errorf("blocked on a dialog: %s", line)
 }

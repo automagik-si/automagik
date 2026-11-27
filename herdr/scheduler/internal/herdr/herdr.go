@@ -216,6 +216,60 @@ func (c Client) TabList(workspaceID string) ([]string, error) {
 	return out, nil
 }
 
+// PaneInfo identifies the terminal in a pane and the tab it currently belongs to.
+type PaneInfo struct {
+	PaneID      string `json:"pane_id"`
+	TerminalID  string `json:"terminal_id"`
+	WorkspaceID string `json:"workspace_id"`
+	TabID       string `json:"tab_id"`
+}
+
+func (c Client) PaneGet(paneID string) (PaneInfo, error) {
+	var res struct {
+		Pane PaneInfo `json:"pane"`
+	}
+	err := c.run(&res, "pane", "get", paneID)
+	return res.Pane, err
+}
+
+func (c Client) PaneList() ([]PaneInfo, error) {
+	var res struct {
+		Panes []PaneInfo `json:"panes"`
+	}
+	err := c.run(&res, "pane", "list")
+	return res.Panes, err
+}
+
+func (c Client) TabLabel(tabID string) (string, error) {
+	var res struct {
+		Tab struct {
+			Label string `json:"label"`
+		} `json:"tab"`
+	}
+	err := c.run(&res, "tab", "get", tabID)
+	return res.Tab.Label, err
+}
+
+func (c Client) WorkspaceLabel(workspaceID string) (string, error) {
+	var res struct {
+		Workspace struct {
+			Label string `json:"label"`
+		} `json:"workspace"`
+	}
+	err := c.run(&res, "workspace", "get", workspaceID)
+	return res.Workspace.Label, err
+}
+
+const CodePaneGone = "pane_not_found"
+
+func (c Client) PaneClose(paneID string) error {
+	return c.run(nil, "pane", "close", paneID)
+}
+
+func (c Client) PaneSplit(paneID string) error {
+	return c.run(nil, "pane", "split", paneID, "--no-focus")
+}
+
 // Worktree is one checkout backing a workspace. OpenWorkspaceID is empty once
 // the workspace has been closed, which is the only durable signal Herdr keeps
 // about whether anyone came back to look at a run.

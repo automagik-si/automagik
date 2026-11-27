@@ -50,6 +50,7 @@ type Terminal struct {
 	Address    string            `json:"address"`
 	CreatedMS  int64             `json:"created_ms"`
 	Cwd        string            `json:"cwd"`
+	Parent     string            `json:"parent"`
 	Labels     map[string]string `json:"labels"`
 	Foreground *Foreground       `json:"foreground"`
 }

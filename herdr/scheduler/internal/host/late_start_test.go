@@ -102,8 +102,8 @@ func TestHCLateStartIsNotNeverStarted(t *testing.T) {
 	}
 }
 
-// A trust dialog still fails before the timeout, quoting the question and
-// naming the pane, and its terminal is left for the person to answer.
+// A trust dialog fails before the timeout, quoting the question so the runner
+// can record it before removing the terminal.
 func TestHCTrustDialogFailsEarlyWithItsQuestion(t *testing.T) {
 	f := &seqHC{fakeHC: &fakeHC{}, screens: []string{trustScreen}}
 	start := time.Now()
@@ -111,7 +111,7 @@ func TestHCTrustDialogFailsEarlyWithItsQuestion(t *testing.T) {
 	if err == nil {
 		t.Fatal("a dialog held run must fail")
 	}
-	for _, want := range []string{"never started working", "a dialog is waiting", "open t7", "Do you trust the files in this folder?"} {
+	for _, want := range []string{"never started working", "blocked on a dialog", "Do you trust the files in this folder?"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q lacks %q", err, want)
 		}
@@ -123,7 +123,7 @@ func TestHCTrustDialogFailsEarlyWithItsQuestion(t *testing.T) {
 		t.Fatalf("the dialog took %s to fail, not early", time.Since(start))
 	}
 	if len(f.calls) != 0 {
-		t.Fatalf("the dialog's terminal must stay for its answer, got %v", f.calls)
+		t.Fatalf("the wait must return before cleanup, got %v", f.calls)
 	}
 	if f.reads < 2 {
 		t.Fatalf("one inspection is not a confirmed dialog: %d reads", f.reads)
@@ -135,10 +135,10 @@ func TestHCTrustDialogFailsEarlyWithItsQuestion(t *testing.T) {
 func TestHCPromptWordWithoutOptionsIsNoDialog(t *testing.T) {
 	f := &seqHC{fakeHC: &fakeHC{}, screens: []string{"Reading the issue list. Should I continue with the next page?\n"}}
 	err := newSeqTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 200*time.Millisecond)
-	if err == nil || strings.Contains(err.Error(), "dialog is waiting") {
+	if err == nil || strings.Contains(err.Error(), "blocked on a dialog") {
 		t.Fatalf("want the timeout's verdict, got %v", err)
 	}
-	for _, want := range []string{"never started working", "no sign of work in 200ms", "open t7"} {
+	for _, want := range []string{"never started working", "no sign of work in 200ms"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q lacks %q", err, want)
 		}
@@ -180,17 +180,12 @@ func TestHCGetOnlyWitnessThenIdle(t *testing.T) {
 	}
 }
 
-// Get's blocked and done are not work (#938), but they stop an early verdict
-// on a dialog screen: blocked has its own grace, done its own outcome.
-func TestHCGetBlockedOrDoneStopsTheEarlyVerdict(t *testing.T) {
-	for _, state := range []string{"blocked", "done"} {
-		t.Run(state, func(t *testing.T) {
-			f := &seqHC{fakeHC: &fakeHC{}, screens: []string{trustScreen}, gets: []string{state}}
-			err := newSeqTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 200*time.Millisecond)
-			if err == nil || strings.Contains(err.Error(), "dialog is waiting") || !strings.Contains(err.Error(), "no sign of work") {
-				t.Fatalf("want the timeout's never started, got %v", err)
-			}
-		})
+// A fresh completed status supersedes a stale dialog screen.
+func TestHCGetDoneStopsTheEarlyVerdict(t *testing.T) {
+	f := &seqHC{fakeHC: &fakeHC{}, screens: []string{trustScreen}, gets: []string{"done"}}
+	err := newSeqTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 200*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "no sign of work") {
+		t.Fatalf("want the timeout's verdict without a settled wait, got %v", err)
 	}
 }
 
@@ -332,5 +327,15 @@ func TestHCNotesOfConcurrentRunsStayApart(t *testing.T) {
 	}
 	if left := fmt.Sprint(h.notes); left != "map[]" {
 		t.Fatalf("notes left behind: %s", left)
+	}
+}
+
+func TestHCReportedStartupTrustDialogFailsBeforeGrace(t *testing.T) {
+	blocked := hc.Wait{Ended: true, Reason: "status", Status: "blocked"}
+	f := &seqHC{fakeHC: &fakeHC{waits: []hc.Wait{blocked, blocked}},
+		screens: []string{trustScreen}, gets: []string{"blocked"}}
+	err := newSeqTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 200*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "Do you trust the files in this folder?") {
+		t.Fatalf("want the trust question before the grace or timeout, got %v", err)
 	}
 }

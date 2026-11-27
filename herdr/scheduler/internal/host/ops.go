@@ -31,6 +31,12 @@ type ops interface {
 
 	PaneRun(paneID string, command ...string) error
 	PaneRead(paneID string, lines int) (string, error)
+	PaneGet(paneID string) (herdr.PaneInfo, error)
+	PaneList() ([]herdr.PaneInfo, error)
+	PaneClose(paneID string) error
+	PaneSplit(paneID string) error
+	TabLabel(tabID string) (string, error)
+	WorkspaceLabel(workspaceID string) (string, error)
 
 	// In returns the same calls aimed at a named Herdr session.
 	In(session string) ops
