@@ -13,7 +13,7 @@ const T = ["background", "border", "foreground", "muted", "dim", "raised", "soli
 export const theme = () => Object.fromEntries(T.map((k) => [k, `#${k}`]));
 export const terminals = () => state.terminals ?? [];
 export const panes = () => state.panes ?? [];
-export const spaces = () => [];
+export const spaces = () => state.spaces ?? [];
 export function run(name, args) { state.runs.push([name, args]); }
 export function notify() {}
 // state.hc, when a test sets it, answers hc itself (a fake hc: `templates --json`).

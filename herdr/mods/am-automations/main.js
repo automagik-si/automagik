@@ -69,7 +69,7 @@ export default class Automations extends View {
     this.copied = false;
     this.installing = false; // while the Install button's command runs
     this.handle = cx.focus_handle();
-    this.bin = null; this.ours = false; this.watching = false;
+    this.bin = null; this.schedulerVersion = ""; this.watching = false;
     this.rosters = new Map(); // expanded project folder -> { list, note } (#498)
     this.amBin = null; // the am CLI that read a project's bots
     cx.spawn((cx) => this.refresh(cx));
@@ -80,13 +80,13 @@ export default class Automations extends View {
   // null, and the panel shows the command that installs it (looked for again on every refresh).
   async locate() {
     // Ours carries "-am." in `version` (herdr-automations-v<version>, herdr/scheduler): only our
-    // build's ls --json and put know close_workspace. Upstream's answer leaves this.ours false.
+    // build's ls --json and put know close_workspace.
     // put() asks again right before it sends: a repair can replace the binary while we are open.
     const answers = async (bin) => {
       try {
         const r = await exec(bin, ["version"]);
         if (r.code !== 0) return false;
-        this.ours = oursVersion(r.stdout);
+        this.schedulerVersion = r.stdout.trim();
         return true;
       } catch { return false; }
     };
@@ -151,6 +151,12 @@ export default class Automations extends View {
   // #938: whether this scheduler runs a plain command. Its ls --json says so (kinds); a build
   // that does not would drop the command key from a put, so the form never offers it there.
   get commands() { return Boolean(this.list?.kinds?.includes("command")); }
+
+  get ours() { return oursVersion(this.schedulerVersion); }
+  canClose(workspace) {
+    // The first fork release supports closing fresh spaces. Closing a tab arrived in am.2.
+    return this.ours && (workspace !== "existing" || this.schedulerVersion !== "0.12.1-am.1");
+  }
 
   // #498: whether this scheduler build runs targets (ls --json's targets), and the kinds it
   // names. A build that predates them has no Target field, so it cannot return a saved target
@@ -314,8 +320,7 @@ export default class Automations extends View {
       target: saved && this.canTarget(saved.kind) ? saved.kind : a.target ? "kept" : "none", bot: saved?.bot ?? "",
       busy: a.target_when_busy || "queue", savedTarget: a.target ?? "",
       bots: null, botsNote: null,
-      // #498 (D2): a new entry closes its fresh space on success; an existing one shows what
-      // ls --json reports, "on-success" or "never".
+      // #498 (D2): new entries opt in to closing on success. Saved entries use the value from ls.
       close: original ? a.close_workspace === "on-success" : true,
       agent: a.template ? "" : a.agent || "claude", template: a.template ?? "",
       name: field(a.name, "issue-triage"), cron: field(a.cron, "0 9 * * 1-5"), repo: field(tilde(a.repo), "~/Projects/myapp"),
@@ -392,10 +397,9 @@ export default class Automations extends View {
       prompt: f.prompt.value(), mcp_config: expand(f.mcp.value().trim()), timeout_minutes: Number.isFinite(num) ? num : 0,
       ...Object.fromEntries(Object.entries(f.untouched).filter(([, v]) => v !== undefined && v !== null)),
       ...this.agentArgsOf(f),
-      // Only our build's put and ls --json carry close_workspace; sending it to upstream would have
-      // put drop the key (its api.Automation has no field). A shared space can never close: the
-      // scheduler refuses on-success with workspace: existing, so the hidden switch reads as never.
-      ...(this.ours ? { close_workspace: f.workspace !== "existing" && f.close ? "on-success" : "never" } : {}),
+      // Only our build's put and ls --json carry close_workspace. Upstream put drops a sent key
+      // it does not recognize (its api.Automation has no field).
+      ...(this.ours ? { close_workspace: f.close && this.canClose(f.workspace) ? "on-success" : "never" } : {}),
       // #498: switching back to a new session removes the target, but only where the build
       // knows the key; an older one keeps the hand-written value it cannot run.
       ...(this.targetable || f.savedTarget ? { target: "", target_when_busy: "" } : {}),
@@ -424,14 +428,13 @@ export default class Automations extends View {
   // The binary locate() found can be repaired or reinstalled while the panel is open, so put() asks
   // once more, right before it builds the JSON. A probe that fails or errors reads as upstream
   // (fail closed): close_workspace must never reach upstream's put.
-  async probeOurs() {
-    let ours = false;
+  async probeVersion() {
+    let version = "";
     try {
       const r = await exec(this.bin, ["version"]);
-      ours = r.code === 0 && oursVersion(r.stdout);
-    } catch { ours = false; }
-    this.ours = ours;
-    return ours;
+      if (r.code === 0) version = r.stdout.trim();
+    } catch {}
+    this.schedulerVersion = version;
   }
 
   async put(dryRun) {
@@ -445,7 +448,7 @@ export default class Automations extends View {
     // A word in ENV that is not KEY=value is said here: the scheduler would never see it.
     const env = f.kind === "command" ? parseEnv(f.env.value()) : {};
     if (env.problem) return { problem: env.problem };
-    await this.probeOurs();
+    await this.probeVersion();
     // exec has no stdin: hand the JSON over through the shell.
     const r = await exec("sh", ["-c", 'bin=$1 json=$2; shift 2; printf %s "$json" | "$bin" "$@"', "sh", this.bin, JSON.stringify(this.entry()), ...args]);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
@@ -886,21 +889,20 @@ export default class Automations extends View {
       }), { h: 30 }));
     if (held) return this.promptForm(el.child(label("PROJECT")).child(repoRow), f, t, label);
     if (targeted) return this.promptForm(this.targetForm(el.child(label("PROJECT")).child(repoRow), f, t, label), f, t, label);
+    const closeObject = f.workspace === "existing" ? "the run's tab" : "the space";
+    const canClose = this.canClose(f.workspace);
     return this.promptForm(el
       .child(label("REPO")).child(repoRow)
       .child(label("RUNS IN")).child(this.pills("f-ws", WORKSPACES, f.workspace, t, (v, cx) => { f.workspace = v; this.preview(cx); cx.notify(); }))
       .when(f.workspace === "existing", (el) => el.child(this.pills("f-space",
         spaces().filter((s) => !s.machine).map((s) => [s.id, s.name]), f.workspace_id, t,
         (v, cx) => { f.workspace_id = v; this.preview(cx); cx.notify(); })))
-      // #498: closing a fresh run's space only makes sense for a new worktree or the repo root (an
-      // existing space is refused); our build sets it, upstream's API cannot.
-      .when(f.workspace !== "existing", (el) => el
-        .child(label("AFTER A RUN"))
-        .when(this.ours, (el2) => el2.child(h_flex().gap(8).items_center()
-          .child(this.switch_("f-close", f.close, t, (cx) => { f.close = !f.close; this.preview(cx); cx.notify(); }))
-          .child(div().text_size(12).child("Close the space after a successful run"))))
-        .when(!this.ours, (el2) => el2.child(div().id("f-close-upstream").text_size(11).text_color(t.muted)
-          .child(`Our scheduler build (${SCHEDULER.version}) is needed to close the space after a run.`))))
+      .child(label("AFTER A RUN"))
+      .when(canClose, (el) => el.child(h_flex().gap(8).items_center()
+        .child(this.switch_("f-close", f.close, t, (cx) => { f.close = !f.close; this.preview(cx); cx.notify(); }))
+        .child(div().text_size(12).child(`Close ${closeObject} after a successful run`))))
+      .when(!canClose, (el) => el.child(div().id("f-close-upstream").text_size(11).text_color(t.muted)
+        .child(`Our scheduler build (${SCHEDULER.version}) is needed to close ${closeObject} after a run.`)))
       .child(label("AGENT")).child(this.pills("f-agent", agents, agentValue, t, (v, cx) => {
         if (v.startsWith("template:")) { f.template = v.slice(9); f.agent = ""; } else { f.template = ""; f.agent = v; }
         // An existing entry: its saved agent gets its saved args back; any other lands on Agent
