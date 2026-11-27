@@ -96,6 +96,16 @@ test('publication summary distinguishes the feed, release alone, tagged failure,
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', FEED: 'failure' })).toContain('feed publication was not confirmed');
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', PLUGINS: 'true', FEED: 'skipped' })).toContain('signed plugin feed was not posted');
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', FEED: 'skipped' })).toContain('did not include plugins');
-    expect(summary({ SUCCESSOR: 'a'.repeat(40) })).toContain('successor release run](https://github.com/example/repo/actions/runs/42)');
+    expect(summary({ SUCCESSOR: 'a'.repeat(40) })).toContain('Successor release run](https://github.com/example/repo/actions/runs/42)');
+    const indexed = 'b'.repeat(40), tagged = 'c'.repeat(40), merged = 'd'.repeat(40);
+    writeFileSync(join(dir, 'gh'), [
+      '#!/bin/sh', 'case "$2" in',
+      `  */commits/${indexed}) echo ${tagged};;`,
+      `  */commits/${tagged}) echo ${merged};;`,
+      `  *head_sha=${merged}*) echo https://github.com/example/repo/actions/runs/43;;`,
+      'esac', '',
+    ].join('\n'));
+    expect(summary({ SUCCESSOR: indexed })).toContain('Successor release run](https://github.com/example/repo/actions/runs/43)');
+    expect(summary({ SUCCESSOR: 'e'.repeat(40) })).toContain('Find the successor run');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
