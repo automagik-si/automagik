@@ -103,3 +103,52 @@ test('with no acp-dsh, no model offers a speed it could not set', async t => {
   const { call } = start(t)
   assert.deepEqual((await call('speed', { ref: saved })).value, { offered: null })
 })
+
+test('a failed speed save cannot undo a concurrent model selection', async t => {
+  const { rt } = start(t)
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const apply = rt.applyModel
+  let held = false
+  rt.applyModel = async (...args) => {
+    if (held) return apply(...args)
+    held = true
+    entered.resolve()
+    await release.promise
+    throw new Error('speed save refused')
+  }
+  const first = assert.rejects(rt.updateBot('m1', { speed: 'fast' }), error => error.cause?.message === 'speed save refused')
+  await entered.promise
+  const next = rt.updateBot('m1', { model: other })
+  await new Promise(resolve => setImmediate(resolve))
+  release.resolve()
+  await Promise.all([first, next])
+  assert.equal(rt.state.bots.m1.model, other)
+  assert.equal(rt.state.bots.m1.speed, undefined)
+})
+
+test('a queued speed choice refuses if its model changed while it waited', async t => {
+  const { rt } = start(t)
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const resolve = rt.resolveModel
+  rt.resolveModel = async (...args) => {
+    entered.resolve()
+    await release.promise
+    return resolve(...args)
+  }
+  const change = rt.updateBot('m1', { model: other })
+  await entered.promise
+  const speed = assert.rejects(rt.updateBot('m1', { speed: 'fast' }), /changed during model selection/)
+  release.resolve()
+  await Promise.all([change, speed])
+  assert.equal(rt.state.bots.m1.model, other)
+  assert.equal(rt.state.bots.m1.speed, undefined)
+})
+
+test('a read-only host can report speed availability but refuses speed changes', async t => {
+  const { call, rt } = start(t, {}, { acpAgents: { offersFast: () => true } })
+  rt.readOnly = () => 'Read-only team.'
+  assert.deepEqual((await call('speed', { ref: saved })).value, { offered: true })
+  assert.equal((await call('update-bot', { id: 'm1', speed: 'fast' })).error.code, 'bot/read-only')
+})

@@ -11368,7 +11368,7 @@ function DockedPicker({ bot, tabs, state: state2, rows: rows2, current, shown: s
                 (0, import_react17.createElement)("button", {
                   type: "button",
                   className: "bt-mp-star",
-                  tabIndex: -1,
+                  tabIndex: index === state2.highlight ? 0 : -1,
                   "aria-pressed": star,
                   "data-on": star ? "" : void 0,
                   "aria-label": star ? t("Remove {model} from favorites", { model: name }) : t("Add {model} to favorites", { model: name }),
@@ -11717,7 +11717,10 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
   const dockModels = dockRows.filter((row2) => row2.model);
   const atCurrent = Math.max(0, dockModels.findIndex((row2) => row2.model.ref === current));
   const dockState = { ...dock, tab: dockTab, highlight: Math.min(dock.highlight ?? atCurrent, Math.max(0, dockModels.length - 1)) };
-  const shownRef = dock.shown !== void 0 && dock.shown !== current ? dock.shown : current;
+  (0, import_react17.useLayoutEffect)(() => {
+    if (dock.shown !== void 0 && dock.shown === current) setDock((state2) => ({ ...state2, shown: void 0 }));
+  }, [dock.shown, current]);
+  const shownRef = dock.shown ?? current;
   const shownServed = (roster.models ?? []).find((entry) => entry.ref === shownRef);
   const shownReasoning = shownRef === void 0 ? void 0 : shownRef === current ? reasoning ?? knownEfforts(shownServed) : knownEfforts(shownServed);
   const fastOn = bot.model !== void 0 && bot.model === current && bot.speed?.model === current && bot.speed?.value === "fast" && speedOffered(current) === true;
@@ -11770,7 +11773,11 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
       const move2 = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
       if (move2 !== 0 && plain) {
         event.preventDefault();
-        if (dockModels.length > 0) setDock((state2) => ({ ...state2, highlight: Math.min(dockModels.length - 1, Math.max(0, dockState.highlight + move2)) }));
+        if (dockModels.length > 0) {
+          const highlight = Math.min(dockModels.length - 1, Math.max(0, dockState.highlight + move2));
+          setDock((state2) => ({ ...state2, highlight }));
+          menu.current?.querySelectorAll('[role="option"]')[highlight]?.scrollIntoView?.({ block: "nearest" });
+        }
         return;
       }
       const highlighted = dockModels[dockState.highlight];
@@ -12407,7 +12414,7 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 .bt-model-menu .bt-mp-row .bt-mp-star{flex:none;width:24px;height:24px;min-height:24px;padding:0;margin-left:auto;justify-content:center;border-radius:6px;color:var(--bt-ink-3);opacity:0}
 .bt-mp-row-hint+.bt-mp-star{margin-left:0}
 .bt-model-menu .bt-mp-row .bt-mp-star svg{width:14px;height:14px;margin:0}
-.bt-mp-row[data-highlighted] .bt-mp-star,.bt-mp-row:hover .bt-mp-star,.bt-mp-star[data-on]{opacity:1}
+.bt-mp-row[data-highlighted] .bt-mp-star,.bt-mp-row:hover .bt-mp-star,.bt-mp-star[data-on],.bt-mp-star:focus-visible{opacity:1}
 .bt-model-menu .bt-mp-row .bt-mp-star[data-on]{color:var(--bt-accent)}
 .bt-mp-kbd{flex:none;min-width:24px;padding:2px 5px;border-radius:4px;background:var(--bt-tag-bg);color:var(--bt-ink-3);font:inherit;font-size:11px;line-height:14px;text-align:center;font-variant-numeric:tabular-nums}
 .bt-mp-note{flex:none;padding:6px 8px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}

@@ -295,6 +295,25 @@ test('an uncertain prompt of several rows is never sent again, across two crashe
   })
 })
 
+test('account admission changing during the sent-record flush withdraws the record before dispatch', async () => {
+  let loseAccount = false
+  let refusal
+  await withFixture('account-during-flush', { flush: async () => {
+    if (loseAccount) refusal = 'Confirm the current account.'
+    return true
+  } }, async h => {
+    h.adapter.currentAccess = () => refusal
+    await turn(h, 'native-remember first')
+    const before = latestNative(h.session, ROUTE)
+    const prompts = of(h, 'prompt').length
+    loseAccount = true
+    const result = await send(h, 'native-remember second')
+    assert.equal(result.finish.reason.failure.code, 'MODEL_ACCESS_REQUIRED')
+    assert.equal(of(h, 'prompt').length, prompts)
+    assert.deepEqual(latestNative(h.session, ROUTE), before)
+  })
+})
+
 // SessionStore.flush rejects when a persistence listener failed and resolves false when none
 // took part (dsh-session flush); either way the record is not on disk, and nothing goes out.
 for (const [cause, fail, logged] of [

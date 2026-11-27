@@ -949,7 +949,9 @@ export function install(rt) {
       throw refusal(`Only the person can move ${rt.botOf(id).name} to another model while its review guard is on.`)
     }
     if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
-    const model = patch.model !== undefined || patch.effort !== undefined
+    const speed = patch.speed !== undefined
+    const model = patch.model !== undefined || patch.effort !== undefined || speed
+    const speedModel = speed && patch.model === undefined ? rt.botOf(id)?.model : undefined
     // Either half can complete a written Solver setup. Removing a setup does not
     // need the model slot, so an already queued pick still rechecks the updated look.
     const setup = (typeof patch.role === 'string' && cleanRole(patch.role) === SOLVER_DESCRIPTION)
@@ -959,9 +961,12 @@ export function install(rt) {
       throw new Error('lock order: model change inside a look hold')
     }
     const identity = ['role', 'instructions', 'avatar', 'color'].some(key => patch[key] !== undefined)
-    const record = checkedAvatar => updateBotRecord(id, patch, actorId, fromSessionId, { ...options, checkedAvatar })
+    const record = checkedAvatar => {
+      if (speed && patch.model === undefined && rt.botOf(id)?.model !== speedModel) throw refusal('The Bot changed during model selection.')
+      return updateBotRecord(id, patch, actorId, fromSessionId, { ...options, checkedAvatar })
+    }
     const run = identity ? () => withLookHold(id, () => record(checkUpdateLook(id, patch, actorId))) : () => record()
-    return model || setup ? withModelChange(id, run, setup || options?.admit !== undefined) : run()
+    return model || setup ? withModelChange(id, run, speed || setup || options?.admit !== undefined) : run()
   }
 
   function updateBotRecord(id, patch, actorId, fromSessionId, options) {

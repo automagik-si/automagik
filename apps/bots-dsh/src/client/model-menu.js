@@ -837,7 +837,7 @@ function DockedPicker({ bot, tabs, state, rows, current, shown, reasoning, picke
             why ? h('span', { className: 'bt-mp-row-hint' }, why)
               : model.ref === bot.defaultModel ? h('span', { className: 'bt-mp-row-hint' }, t('Default')) : null,
             h('button', {
-              type: 'button', className: 'bt-mp-star', tabIndex: -1, 'aria-pressed': star, 'data-on': star ? '' : undefined,
+              type: 'button', className: 'bt-mp-star', tabIndex: index === state.highlight ? 0 : -1, 'aria-pressed': star, 'data-on': star ? '' : undefined,
               'aria-label': star ? t('Remove {model} from favorites', { model: name }) : t('Add {model} to favorites', { model: name }),
               onClick: (event) => { event.stopPropagation(); onFavorite(model.ref) },
             }, h(StarIcon, { filled: star })),
@@ -1147,7 +1147,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   const atCurrent = Math.max(0, dockModels.findIndex(row => row.model.ref === current))
   const dockState = { ...dock, tab: dockTab, highlight: Math.min(dock.highlight ?? atCurrent, Math.max(0, dockModels.length - 1)) }
   // The model whose levels and speed show: the one just picked until the Bot is on it, else the Bot's.
-  const shownRef = dock.shown !== undefined && dock.shown !== current ? dock.shown : current
+  useLayoutEffect(() => {
+    if (dock.shown !== undefined && dock.shown === current) setDock(state => ({ ...state, shown: undefined }))
+  }, [dock.shown, current])
+  const shownRef = dock.shown ?? current
   const shownServed = (roster.models ?? []).find(entry => entry.ref === shownRef)
   const shownReasoning = shownRef === undefined ? undefined : shownRef === current ? reasoning ?? knownEfforts(shownServed) : knownEfforts(shownServed)
   const fastOn = bot.model !== undefined && bot.model === current && bot.speed?.model === current && bot.speed?.value === 'fast' && speedOffered(current) === true
@@ -1191,7 +1194,11 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       const move = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
       if (move !== 0 && plain) {
         event.preventDefault()
-        if (dockModels.length > 0) setDock(state => ({ ...state, highlight: Math.min(dockModels.length - 1, Math.max(0, dockState.highlight + move)) }))
+        if (dockModels.length > 0) {
+          const highlight = Math.min(dockModels.length - 1, Math.max(0, dockState.highlight + move))
+          setDock(state => ({ ...state, highlight }))
+          menu.current?.querySelectorAll('[role="option"]')[highlight]?.scrollIntoView?.({ block: 'nearest' })
+        }
         return
       }
       const highlighted = dockModels[dockState.highlight]
@@ -1740,7 +1747,7 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 .bt-model-menu .bt-mp-row .bt-mp-star{flex:none;width:24px;height:24px;min-height:24px;padding:0;margin-left:auto;justify-content:center;border-radius:6px;color:var(--bt-ink-3);opacity:0}
 .bt-mp-row-hint+.bt-mp-star{margin-left:0}
 .bt-model-menu .bt-mp-row .bt-mp-star svg{width:14px;height:14px;margin:0}
-.bt-mp-row[data-highlighted] .bt-mp-star,.bt-mp-row:hover .bt-mp-star,.bt-mp-star[data-on]{opacity:1}
+.bt-mp-row[data-highlighted] .bt-mp-star,.bt-mp-row:hover .bt-mp-star,.bt-mp-star[data-on],.bt-mp-star:focus-visible{opacity:1}
 .bt-model-menu .bt-mp-row .bt-mp-star[data-on]{color:var(--bt-accent)}
 .bt-mp-kbd{flex:none;min-width:24px;padding:2px 5px;border-radius:4px;background:var(--bt-tag-bg);color:var(--bt-ink-3);font:inherit;font-size:11px;line-height:14px;text-align:center;font-variant-numeric:tabular-nums}
 .bt-mp-note{flex:none;padding:6px 8px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}

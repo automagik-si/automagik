@@ -3272,6 +3272,11 @@ export class AcpAdapter extends LlmAdapter {
           this.warn(`the native session binding was not saved, so the message was not sent: ${error?.message ?? error}`)
           return yield finish('error', `${agent.name} was not sent this message: the chat could not save it first. Send it again.`, 'acp_binding_unsaved')
         }
+        const refusal = currentRefusal()
+        if (refusal !== undefined) {
+          withdraw()
+          return yield accountRefused(refusal)
+        }
         if (archived() || this.isArchived(sessionId)) { withdraw(); return yield finish('stop') }
         if (startChanged() || live.held !== undefined || this.live.get(sessionId) !== live || options.signal?.aborted || !uploadValid()) {
           withdraw()

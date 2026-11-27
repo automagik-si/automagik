@@ -237,6 +237,43 @@ test('a crossing while a reply runs asks inside the picker: Cancel goes back to 
   assert.deepEqual(await calls(view), [['switchRouteInChat', 'acp-claude/opus', {}, { stopReply: true }]])
 })
 
+test('keyboard users can scroll to and favorite a model without selecting it', async t => {
+  const view = await page(t)
+  if (!view) return
+  await open(view)
+  await view.addStyleTag({ content: '.bt-mp-list{max-height:48px!important}' })
+  const list = view.getByRole('listbox')
+  const active = list.locator('[data-highlighted]')
+  await view.keyboard.press('ArrowDown')
+  await view.keyboard.press('ArrowDown')
+  const visible = await active.evaluate(row => {
+    const box = row.getBoundingClientRect()
+    const list = row.closest('[role=listbox]').getBoundingClientRect()
+    return box.top >= list.top - 1 && box.bottom <= list.bottom + 1
+  })
+  assert.ok(visible)
+  await view.keyboard.press('Tab')
+  assert.equal(await active.locator('.bt-mp-star').evaluate(star => star === document.activeElement), true)
+  for (const pressed of ['true', 'false']) {
+    await view.keyboard.press('Space')
+    assert.equal(await active.locator('.bt-mp-star').getAttribute('aria-pressed'), pressed)
+  }
+  assert.deepEqual(await calls(view), [])
+})
+
+test('an open picker follows a host model change after a local pick applies', async t => {
+  const view = await page(t)
+  if (!view) return
+  await open(view)
+  await view.getByRole('option', { name: /GPT-6.2-Sol/ }).click()
+  await view.waitForFunction(() => window.bot().model === 'acp-codex/gpt-6.2-sol')
+  await view.evaluate(() => window.updateFromHost({ model: 'acp-codex/gpt-6.1-terra' }))
+  await view.waitForSelector('[data-model-ref="acp-codex/gpt-6.1-terra"][data-shown]')
+  assert.equal(await view.locator('.bt-mp-speed').count(), 0)
+  await view.locator('[data-effort-level="Low"]').click()
+  assert.deepEqual((await calls(view)).at(-1), ['updateBot', { effort: 'low' }])
+})
+
 test('favorites: the star keeps a model on the first tab, in this browser', async t => {
   const view = await page(t)
   if (!view) return

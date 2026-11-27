@@ -90,4 +90,5 @@ window.mount = ({ dark = false, model = 'acp-codex/gpt-6.2-astra', effort = 'hig
   root = createRoot(host)
   render()
 }
+window.updateFromHost = apply
 window.bot = () => bot
