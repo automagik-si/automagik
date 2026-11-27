@@ -66,15 +66,16 @@ const apply = (patch) => {
 const actions = {
   updateBot: (id, patch) => { window.calls.push(['updateBot', patch]); apply(patch); return Promise.resolve() },
   chooseModelInChat: (id, ref, extra) => { window.calls.push(['chooseModelInChat', ref, extra]); apply({ model: ref, ...extra }); return Promise.resolve() },
-  switchRouteInChat: (id, ref, extra) => { window.calls.push(['switchRouteInChat', ref, extra]); apply({ model: ref, ...extra }); return Promise.resolve() },
+  switchRouteInChat: (id, ref, extra, ...rest) => { window.calls.push(['switchRouteInChat', ref, extra, ...rest]); apply({ model: ref, ...extra }); return Promise.resolve() },
   efforts: ref => MODELS.find(model => model.ref === ref)?.reasoning ?? { efforts: [] },
   speed: ref => { window.calls.push(['speed', ref]); return { offered: FAST.has(ref) } },
   refreshModels: () => Promise.resolve(),
-  turnRunning: () => false,
+  turnRunning: () => window.replyRunning === true,
 }
 
-window.mount = ({ dark = false, model = 'acp-codex/gpt-6.2-astra', effort = 'high', speed, favorites } = {}) => {
+window.mount = ({ dark = false, model = 'acp-codex/gpt-6.2-astra', effort = 'high', speed, favorites, running = false } = {}) => {
   root?.unmount()
+  window.replyRunning = running
   setTheme(dark)
   try {
     if (favorites === undefined) localStorage.removeItem('bt-model-favorites')

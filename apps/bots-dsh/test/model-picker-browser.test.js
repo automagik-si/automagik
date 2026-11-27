@@ -206,6 +206,37 @@ test('keys: search filters every provider, arrows and Enter pick, ⌘/Ctrl+digit
   assert.deepEqual((await calls(view)).at(-1), ['switchRouteInChat', 'acp-claude/sonnet', {}])
 })
 
+test('a crossing while a reply runs asks inside the picker: Cancel goes back to it, Switch stops the reply', async t => {
+  const view = await page(t, { mount: { running: true } })
+  if (!view) return
+  assert.equal(await trigger(view).getAttribute('aria-haspopup'), 'dialog')
+  await open(view)
+  await view.locator('[data-model-picker-provider=acp-claude]').click()
+  await view.locator('[role=option]', { hasText: 'Claude Opus' }).click()
+  const confirm = view.locator('.bt-mp-confirm .bt-model-confirm')
+  await confirm.waitFor()
+  assert.match(await confirm.innerText(), /This stops the current reply and continues on/)
+  assert.deepEqual(await calls(view), [], 'nothing changes before the person answers')
+  // The question fits inside the picker: neither its buttons nor its text are cut off.
+  const clipped = await view.evaluate(() => {
+    const menu = document.querySelector('.bt-model-menu').getBoundingClientRect()
+    return [...document.querySelectorAll('.bt-mp-confirm button, .bt-mp-confirm div')].some((node) => {
+      const box = node.getBoundingClientRect()
+      return box.bottom > menu.bottom + 0.5 || box.right > menu.right + 0.5 || box.left < menu.left - 0.5
+    })
+  })
+  assert.equal(clipped, false)
+  await shot(view, 'model-picker-crossing-light.png')
+  await view.locator('.bt-model-confirm-cancel').click()
+  await view.locator('[data-model-picker-search]').waitFor()
+  assert.equal(await view.evaluate(() => document.activeElement?.hasAttribute('data-model-picker-search')), true)
+  await view.locator('[data-model-picker-provider=acp-claude]').click()
+  await view.locator('[role=option]', { hasText: 'Claude Opus' }).click()
+  await view.locator('.bt-model-confirm-go').click()
+  await picker(view).waitFor({ state: 'detached' })
+  assert.deepEqual(await calls(view), [['switchRouteInChat', 'acp-claude/opus', {}, { stopReply: true }]])
+})
+
 test('favorites: the star keeps a model on the first tab, in this browser', async t => {
   const view = await page(t)
   if (!view) return

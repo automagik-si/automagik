@@ -1304,7 +1304,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       'aria-label': t('Change the model of {name}', { name: bot.name }), onClick: toggle,
     }, t('change')) : h('button', {
       ref: button, type: 'button', className: `bt-model-trigger${bar ? ' bt-model-bar-trigger' : ''}`, 'data-wide': wide || undefined, 'aria-busy': switching || undefined,
-      'data-bar': bar || undefined, 'data-route': triggerRoute?.route, 'aria-haspopup': 'menu', 'aria-expanded': isOpen,
+      'data-bar': bar || undefined, 'data-route': triggerRoute?.route, 'aria-haspopup': docked ? 'dialog' : 'menu', 'aria-expanded': isOpen,
       'aria-label': t('Model: {model}', { model: shownRunning?.name ?? shown?.name ?? t('none') }) + (bar && fastOn && shownRunning === undefined ? `, ${t('Fast')}` : '') + (runningTitle === undefined ? '' : `. ${runningTitle}`),
       title: runningTitle,
       'data-missing': shown !== undefined && shown.unavailable && models.length > 0 ? '' : undefined, onClick: toggle,
@@ -1733,7 +1733,7 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 .bt-mp-row[data-unavailable]{color:var(--bt-ink-3)}
 .bt-mp-row-mark{flex:none;display:inline-flex;width:16px;height:16px;align-items:center;justify-content:center;color:var(--bt-ink-2)}
 .bt-mp-row-mark svg{width:16px;height:16px}
-.bt-mp-row-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.bt-mp-row-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:var(--bt-weight-label,500)}
 .bt-mp-row-check{flex:none;display:inline-flex;color:var(--bt-ink-2)}
 .bt-mp-row-check svg{width:14px;height:14px}
 .bt-mp-row-hint{flex:none;margin-left:auto;font-size:11px;line-height:14px;color:var(--bt-ink-3);white-space:nowrap}
@@ -1757,16 +1757,23 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 .bt-mp-level-default{flex:none;font-size:11px;line-height:14px;color:var(--bt-ink-3)}
 .bt-mp-effort-none{padding:6px 8px;color:var(--bt-ink-3)}
 .bt-mp-foot{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid var(--bt-line);background:var(--bt-tag-bg)}
-.bt-mp-speed{display:flex;padding:2px;border-radius:8px;background:var(--bt-tag-bg)}
-.bt-model-menu .bt-mp-speed .bt-mp-segment{width:auto;min-height:24px;height:24px;padding:0 8px;gap:4px;border-radius:6px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
+.bt-mp-speed{display:flex;padding:2px;border-radius:var(--st-r-seg,8px);background:var(--bt-tag-bg)}
+.bt-model-menu .bt-mp-speed .bt-mp-segment{width:auto;min-height:24px;height:24px;padding:0 8px;gap:4px;border-radius:calc(var(--st-r-seg,8px) - 2px);font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-model-menu .bt-mp-speed .bt-mp-segment[data-checked]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 0 0 .5px var(--bt-line-2)}
 .bt-model-menu .bt-mp-speed .bt-mp-segment:disabled{opacity:.5;cursor:default}
 .bt-mp-bolt{display:inline-flex;color:inherit}
 .bt-mp-bolt svg,.bt-model-menu .bt-mp-segment .bt-mp-bolt svg{width:13px;height:13px;margin:0}
 .bt-model-bar-fast{display:inline-flex;flex:none;color:var(--bt-ink-3)}
 .bt-mp-confirm{padding:10px}
-.bt-model-menu .bt-mp :is(button,[role=option]):focus-visible,.bt-mp-search input:focus-visible{outline:2px solid var(--bt-accent);outline-offset:-2px}
+.bt-model-menu .bt-mp :is(button,[role=option]):focus-visible{outline:2px solid var(--st-ring,var(--bt-accent));outline-offset:-2px}
 .bt-mp-search input:focus-visible{outline:0}
+/* Touch screens: rows and controls keep the 44px the other menus give a finger, and the star shows without a hover. */
+@media (hover:none){
+  .bt-mp-row,.bt-model-menu .bt-mp-level{min-height:44px}
+  .bt-model-menu .bt-mp-rail .bt-mp-tab{width:40px;height:40px;min-height:40px}
+  .bt-model-menu .bt-mp-row .bt-mp-star{width:36px;height:36px;min-height:36px;opacity:1}
+  .bt-model-menu .bt-mp-speed .bt-mp-segment{height:36px;min-height:36px;padding:0 12px}
+}
 @media (max-width:639px){
   .bt-mp-body{flex-direction:column;height:auto}
   .bt-mp-picker{height:300px;flex:0 1 auto}
