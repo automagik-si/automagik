@@ -4791,9 +4791,18 @@ test('2133 T2f an already delivered legacy track stays unchanged', async t => {
 })
 
 test('2133 exception 5 a first follow-up preserves restored visual verification', async t => {
-  for (const legacy of ['visual SHIP', 'unverified images', 'definite text SHIP', 'delivered SHIP']) {
+  for (const [legacy, { verdictCount, workOffset, resultCredit } = {}] of [
+    ['visual SHIP'],
+    ['unverified images'],
+    ['definite text SHIP'],
+    ['delivered SHIP'],
+    ['definite text SHIP with one verdict and no work', { verdictCount: 1, resultCredit: false }],
+    ['definite text SHIP with two verdicts and no work', { verdictCount: 2 }],
+    ['definite text SHIP after observed work', { verdictCount: 1, workOffset: -1 }],
+    ['definite text SHIP at the last observed work time', { verdictCount: 2, workOffset: 0, resultCredit: false }],
+  ]) {
     await t.test(legacy, async t => {
-      const textOnly = legacy === 'definite text SHIP'
+      const textOnly = legacy.startsWith('definite text SHIP')
       const delivered = legacy === 'delivered SHIP'
       const f = await checkedVisualReview(t, { path: textOnly ? null : reviewPath })
       const { h, request } = f
@@ -4805,7 +4814,14 @@ test('2133 exception 5 a first follow-up preserves restored visual verification'
       delete restored.solver.visualReviewRequired
       result.verdict = 'SHIP'
       result.reviewer = { id: 'reviewer', name: 'reviewer', model: refOf(reviewerModel) }
-      restored.verdicts.push({ verdict: 'SHIP', at: Date.now() + 10 })
+      const shipAt = Date.now() + 10
+      if (verdictCount !== undefined) {
+        restored.verdicts = verdictCount === 2 ? [{ verdict: 'SHIP', at: shipAt - 2 }] : []
+        delete restored.firstWorkAt
+        delete restored.lastWorkAt
+        if (workOffset !== undefined) restored.lastWorkAt = shipAt + workOffset
+      }
+      restored.verdicts.push({ verdict: 'SHIP', at: shipAt })
       if (legacy === 'unverified images') {
         result.verdict = 'unverified'
         result.unverified = 'images'
@@ -4826,7 +4842,7 @@ test('2133 exception 5 a first follow-up preserves restored visual verification'
       }
       assert.equal(f.track().solver.review, undefined)
       h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request })
-      assert.equal(f.track().last?.result, textOnly, 'only definite text can keep legacy result credit')
+      assert.equal(f.track().last?.result, resultCredit ?? textOnly, 'legacy RESULT credit follows the restored verdict history')
       assert.equal(f.track().delivered === true, textOnly)
       assert.equal(f.track().solver.visualReviewRequired === true, !textOnly)
       if (textOnly) return

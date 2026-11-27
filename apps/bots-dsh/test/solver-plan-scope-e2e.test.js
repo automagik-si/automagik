@@ -55,11 +55,14 @@ async function joinedSolver(t) {
     permissionPresets: { current: () => 'full' },
     workingDirectory: { ensure: async () => folder, get: () => folder },
   } })
+  const teamWorkspace = { id: 'fixture-workspace', path: folder }
+  ctx.workspaceRegistry = new Map([[teamWorkspace.id, teamWorkspace]])
   Object.assign(ctx, { sessions: { get: id => id === chat.session.id ? chat.session : undefined, list: () => [chat.session] } })
   apply(ctx, { home })
   t.after(() => ctx.dispose())
   const rt = ctx.provided.get('omniTeam')
   await rt.load()
+  rt.state.workspaceId = teamWorkspace.id
   const reviewer = rt.state.bots.reviewer = { id: 'reviewer', name: 'Reviewer', role: 'Helper', createdAt: 1 }
   const bot = rt.state.bots.solver = {
     id: 'solver', name: 'Solver', role: 'Solver', reviewerId: reviewer.id, model: 'acp-claude/fake-large', createdAt: 1,
@@ -147,8 +150,11 @@ test('#2134 K9 joined synthetic Solver keeps the Session on verdict and delivers
   assert.equal(world.events('set-mode').at(-1)?.modeId, 'default')
 })
 
-for (const [variant, label, refusal] of [
+for (const [variant, label, refusal, quote] of [
   ['bash', 'allows streamed Bash after the designated plan verdict'],
+  ['cd-plain', 'allows streamed Bash with a plain leading cd after the designated plan verdict', undefined, ''],
+  ['cd-single', 'allows streamed Bash with a single-quoted leading cd after the designated plan verdict', undefined, "'"],
+  ['cd-double', 'allows streamed Bash with a double-quoted leading cd after the designated plan verdict', undefined, '"'],
   ['write', 'allows streamed Write after the designated plan verdict'],
   ['changed', 'refuses a changed streamed Bash argument', /permission question no longer matches this call/],
   ['outside', 'confines a streamed Read to the Solver folder', /only inside its folder/],
@@ -175,8 +181,13 @@ for (const [variant, label, refusal] of [
     const [permission, ...duplicates] = world.events('fixture-stream-permission')
     assert.ok(permission, 'the fake requested permission')
     assert.deepEqual(duplicates, [])
+    const command = quote === undefined ? 'fixture-stream-check' : `cd ${quote}${folder}${quote} && fixture-stream-check`
     assert.deepEqual(firstSeen.map(args => [args.id, args.input]), [[permission.toolCallId,
-      variant === 'write' || variant === 'outside' ? { file_path: path } : { command: 'fixture-stream-check' }]])
+      variant === 'write' || variant === 'outside' ? { file_path: path } : { command }]])
+    if (quote !== undefined) {
+      assert.equal(firstSeen[0].title, command)
+      assert.deepEqual(permission.input, { command: 'fixture-stream-check', description: 'Synthetic streamed operation' })
+    }
     assert.equal(dialogs(), 0)
     const result = chat.history.at(-2)?.content?.[0]?.text ?? ''
     assert.equal(permission.answer, refusal ? 'no' : 'yes', result)
@@ -213,11 +224,14 @@ async function teamOf(t, places, world, { provider = CLAUDE, workspace = places.
     acpAgents, agents, workingDirectory: { get: () => workspace, ensure: async () => workspace },
     permissionPresets: { current: () => 'full' },
   } })
+  const teamWorkspace = { id: 'fixture-workspace', path: places.workspace }
+  ctx.workspaceRegistry = new Map([[teamWorkspace.id, teamWorkspace]])
   ctx.sessions = { get: id => sessions.get(id), list: () => [...sessions.values()] }
   apply(ctx, { home: places.team })
   t.after(() => ctx.dispose())
   const rt = ctx.provided.get('omniTeam')
   await rt.load()
+  rt.state.workspaceId = teamWorkspace.id
   const reviewer = rt.state.bots.reviewer = { id: 'reviewer', name: 'Fixture reviewer', createdAt: 1 }
   const bot = rt.state.bots.solver = { id: 'solver', name: 'Fixture Solver', role: 'Solver', workDir: workspace, reviewGuard: true,
     reviewerId: reviewer.id, model: `${provider}/fake-large`, nativeTools: true, nativeToolsAgent: provider, createdAt: 1 }

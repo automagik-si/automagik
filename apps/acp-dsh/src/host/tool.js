@@ -4,6 +4,8 @@
 // the tool/call and tool/result rows itself, as for any tool. The body runs nothing: it waits
 // for the agent's call to finish, and when the agent asks permission for it, asks DSH's
 // approval service and hands the agent the answer.
+import { realpathSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { contentImages, contentText, isTerminal } from './acp.js'
@@ -44,14 +46,39 @@ function compatibleCall(captured, current) {
 const plainInput = input => input !== null && typeof input === 'object'
   && [Object.prototype, null].includes(Object.getPrototypeOf(input))
 
+// Claude's completed Bash input can omit a streamed cd to its working directory.
+const LEADING_CD = /^cd (?:'([^']+)'|"([^"\\$`!]+)"|([^\s'"\\$`&;|<>()*?[\]{}!]+)) && /
+
+function isWorkspacePath(path, workspace) {
+  // A same-directory alias can still change Bash's logical PWD.
+  return path === workspace && typeof path === 'string' && isAbsolute(path) && !/[\x00-\x1f\x7f]/.test(path)
+    // Shell cd can resolve .. logically before following symlinks.
+    && !path.split(process.platform === 'win32' ? /[\\/]/ : '/').includes('..')
+    && realpathSync.native(path) === workspace
+}
+
+function stripsWorkspaceCd(before, after, launch) {
+  const workspace = launch?.workspace
+  if (workspace === undefined || typeof before.command !== 'string'
+    || typeof after.command !== 'string' || after.command === '') return false
+  const prefix = LEADING_CD.exec(before.command)
+  return prefix !== null && before.command.slice(prefix[0].length) === after.command
+    && isWorkspacePath(launch.workspaceArgument, workspace)
+    && isWorkspacePath(prefix[1] ?? prefix[2] ?? prefix[3], workspace)
+    && [before, after].every(input => ['cwd', 'workdir'].every(key =>
+      !Object.hasOwn(input, key) || isWorkspacePath(input[key], workspace)))
+}
+
 // The first mirror can precede additional input fields and presentation details.
-function refinesCall(earlier, completed) {
+function refinesCall(earlier, completed, launch) {
   if (earlier.id !== completed.id || earlier.kind !== completed.kind
     || (earlier.parent !== undefined && earlier.parent !== completed.parent)) return false
   const { input: before } = earlier
   const { input: after } = completed
   return isDeepStrictEqual(before, after) || (plainInput(before) && plainInput(after)
-    && Reflect.ownKeys(before).every(key => Object.hasOwn(after, key) && isDeepStrictEqual(before[key], after[key])))
+    && Reflect.ownKeys(before).every(key => Object.hasOwn(after, key)
+      && (isDeepStrictEqual(before[key], after[key])
+        || (key === 'command' && completed.kind === 'execute' && stripsWorkspaceCd(before, after, launch)))))
 }
 
 const diffsOf = content => (Array.isArray(content) ? content : [])
@@ -306,9 +333,14 @@ export function mirrorTool(host) {
           try {
             const fromQuestion = snapshotOf(question.call)
             const fromTool = snapshotOf(target)
+            const direct = !nested && dispatched === undefined && captured.parent === undefined
+              && fromQuestion.parent === undefined && fromTool.parent === undefined
+            const nativeBash = live.native === true && live.provider === 'acp-claude' && structuredName === 'Bash'
+              && target.mcp !== true && target.mcpServer === undefined
+            const launch = direct && nativeBash ? live : undefined
             return compatibleCall(captured, fromQuestion) && compatibleCall(captured, fromTool)
               && compatibleCall(fromQuestion, fromTool)
-              && (nested || refinesCall(args, captured) && refinesCall(exec.arguments, captured))
+              && (nested || refinesCall(args, captured, launch) && refinesCall(exec.arguments, captured, launch))
           } catch { return false }
         }
         const decisionFor = () => {

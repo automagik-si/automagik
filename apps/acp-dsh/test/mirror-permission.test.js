@@ -8,6 +8,9 @@
 // is run with `log`), the mirror is admitted by a step's resolved tool set, and the permission
 // service reads Auto only while Auto review's `registerAuto` is live.
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applyAutoReview } from '@deepseek-ai/dsh-experimental-auto-review'
@@ -1397,6 +1400,61 @@ test('#2134 binds direct streamed permission to both earlier records and the com
     })
   }
 })
+
+for (const [label, fixture] of [
+  ['allows a plain workspace literal', { allow: true }],
+  ['allows a single-quoted workspace literal', { allow: true, quote: "'", sameDirectory: true }],
+  ['allows a double-quoted workspace literal', { allow: true, quote: '"' }],
+  ['refuses another directory in the first mirror', { otherDirectory: true }],
+  ['refuses a same-physical workspace symlink alias', { workspaceAlias: true }],
+  ['refuses a changed tail in the execution record', { executionTail: 'fixture-other-check' }],
+  ['refuses a semicolon separator', { separator: ' ; ' }],
+  ['refuses a non-execute kind', { kind: 'other' }],
+  ['refuses an unrelated command', { completedCommand: 'fixture-unrelated' }],
+  ['refuses a conflicting cwd', { conflictingCwd: true }],
+  ['refuses an unproved workdir', { workdir: 'relative-fixture' }],
+  ['refuses another tool identity', { toolName: 'SyntheticExecute' }],
+]) {
+  test(`#2134 leading cd ${label}`, async t => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'mirror-cd-')))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    const { quote = '', allow = false, kind = 'execute', toolName = 'Bash', separator = ' && ' } = fixture
+    const workspace = join(root, quote ? 'fixture workspace' : 'workspace')
+    mkdirSync(workspace)
+    let directory = workspace
+    if (fixture.workspaceAlias) {
+      directory = join(root, 'workspace-alias')
+      symlinkSync(workspace, directory, 'junction')
+      assert.equal(realpathSync.native(directory), workspace)
+    }
+    const guarded = []
+    const h = guardedMirror(t, { marked: false, questionGuard: request => {
+      guarded.push(request.args.input)
+      return { decision: 'allow' }
+    } })
+    h.live.workspace = workspace
+    h.live.workspaceArgument = workspace
+    const tail = 'fixture-stream-check'
+    const command = (directory, suffix = tail) => `cd ${quote}${directory}${quote}${separator}${suffix}`
+    const partial = { command: command(fixture.otherDirectory ? root : directory),
+      ...(fixture.sameDirectory ? { cwd: workspace } : {}) }
+    const completed = { ...partial, command: fixture.completedCommand ?? tail, description: 'Synthetic Bash fixture',
+      ...(fixture.sameDirectory ? { workdir: workspace } : {}),
+      ...(fixture.conflictingCwd ? { cwd: root } : {}),
+      ...(fixture.workdir ? { workdir: fixture.workdir } : {}) }
+    await h.update('parent', { kind, status: 'pending', title: partial.command, rawInput: partial,
+      _meta: { claudeCode: { toolName } },
+    })
+    const args = callArguments(h.run.tools.get('parent'))
+    const executionArgs = { ...args, input: { ...partial, command: command(directory, fixture.executionTail) } }
+    await h.update('parent', { title: completed.command, rawInput: completed })
+    const question = h.question('parent', { rawInput: completed })
+    const result = await h.execute(args, executionArgs)
+    assert.deepEqual(await soon(question), picked(allow ? 'yes' : 'no'))
+    assert.deepEqual(guarded, allow ? [completed] : [])
+    if (!allow) assert.match(result.text, /permission question no longer matches this call/)
+  })
+}
 
 test('#2134 K6 AW-R6 one-shot decisions use the live child and its independent guard', async t => {
   for (const [variant, expected] of [['in-folder', 'yes'], ['attempt-hold', 'no'], ['changed', 'no'], ['lasting-only', 'no']]) {

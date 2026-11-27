@@ -1266,10 +1266,13 @@ export function install(rt) {
       && entry.verdict === 'SHIP' && entry.request === track.solver.request && entry.reviewerId === bot.reviewerId
       && entry.legacyTextRevision === track.solver.revision)
     const resultAt = resultProof(proof, track.solver, bot.reviewerId) ? proof.at
-      : legacyTextShip ? legacyShipEntry(track)?.at : legacyFollowup?.at
-    track.last = { ...deliveryMark(track, review, Date.now(), {
+      : legacyTextShip ? legacyShipEntry(track)?.at : undefined
+    const mark = deliveryMark(track, review, Date.now(), {
       pending, planAt: planOpenAt(bot, track, { legacy: false }), resultAt,
-    }), ...(track.outcome.done
+    })
+    // The first follow-up to a restored text-only SHIP keeps the old RESULT timing and count rules.
+    if (legacyFollowup && review === 'bot') mark.result = deliveryMark(track, review, mark.at).result
+    track.last = { ...mark, ...(track.outcome.done
       ? { done: true, reviewer: track.outcome.reviewer, resultExchangeId: track.outcome.exchangeId,
           ...(legacyTextShip ? { result: true } : {}) }
       : imagesUnverified ? { result: false } : {}) }

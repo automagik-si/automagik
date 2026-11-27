@@ -555,7 +555,7 @@ const implementation = {
       return { stopReason: 'end_turn' }
     }
     const streamDir = process.env.FAKE_ACP_STREAM_DIR
-    const streamCase = /^plan-scope-stream (bash|write|changed|outside)$/.exec(current)?.[1]
+    const streamCase = /^plan-scope-stream (bash|cd-plain|cd-single|cd-double|write|changed|outside)$/.exec(current)?.[1]
     if (streamDir && streamCase) {
       const isWrite = streamCase === 'write'
       const isRead = streamCase === 'outside'
@@ -565,18 +565,23 @@ const implementation = {
       const marker = 'Synthetic streamed operation'
       const firstInput = isWrite || isRead ? { file_path: path } : { command: 'fixture-stream-check' }
       const input = isWrite ? { ...firstInput, content: marker } : { ...firstInput, description: marker }
+      const quote = { 'cd-plain': '', 'cd-single': "'", 'cd-double': '"' }[streamCase]
+      if (quote !== undefined) firstInput.command = `cd ${quote}${session.cwd}${quote} && ${input.command}`
       if (streamCase === 'changed') input.command = 'fixture-stream-changed'
       const toolCallId = `fixture-stream-${session.turns}`
       const toolCall = {
-        toolCallId, kind, title: `Streamed ${toolName} fixture`, status: 'pending',
+        toolCallId, kind, title: quote === undefined ? `Streamed ${toolName} fixture` : firstInput.command, status: 'pending',
         _meta: { claudeCode: { toolName } },
       }
       await update({ sessionUpdate: 'tool_call', ...toolCall, rawInput: firstInput })
       await waitForFile(join(streamDir, 'mirror-recorded'))
       if (session.cancelled) return { stopReason: 'cancelled' }
-      await update({ sessionUpdate: 'tool_call_update', toolCallId, rawInput: input })
+      const completed = { ...toolCall, rawInput: input, ...(quote === undefined ? {} : { title: input.command }) }
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, rawInput: input,
+        ...(quote === undefined ? {} : { title: completed.title }),
+      })
       const { outcome } = await conn.requestPermission({
-        sessionId, toolCall: { ...toolCall, rawInput: input,
+        sessionId, toolCall: { ...completed,
           ...(isWrite ? { content: [{ type: 'diff', path, oldText: null, newText: marker }] } : {}),
         }, options: [
           { kind: 'allow_once', optionId: 'yes', name: 'Allow' },
@@ -584,7 +589,7 @@ const implementation = {
         ],
       })
       const answer = outcome.optionId ?? outcome.outcome
-      trace({ event: 'fixture-stream-permission', sessionId, toolCallId, answer })
+      trace({ event: 'fixture-stream-permission', sessionId, toolCallId, answer, input: completed.rawInput })
       let text = 'No operation ran.'
       if (answer === 'yes') {
         // Simulate the operation on fixture data. The Bash command is never executed.

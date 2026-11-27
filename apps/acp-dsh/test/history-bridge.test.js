@@ -137,7 +137,7 @@ function omp(t) {
   let role = true
   let skills = false
   h.adapter.dshTools = () => tools
-  h.service.botIdentity(() => ({ name: 'Bot', needsDshTools: role }))
+  h.service.botIdentity(() => ({ name: 'Bot', needsDshTools: role, solverPolicy: { state: 'none' } }))
   h.services.tools = { definitions: () => definitions }
   h.services.omniTeam = { skillCalls: { available: () => skills, catalog: () => undefined, project: options => options, admit() {} } }
   return { ...h, tools: value => { tools = value }, role: value => { role = value }, skills: value => { skills = value } }
@@ -173,7 +173,9 @@ function agyHistory(t, nativeTools, options) {
     sessions.set(opened.session.id, opened.session)
     return opened
   }
-  h.service.botIdentity(() => ({ name: 'Fixture Bot', needsDshTools: true, nativeTools, nativeToolsAgent: AGY }))
+  h.service.botIdentity(() => ({
+    name: 'Fixture Bot', needsDshTools: true, nativeTools, nativeToolsAgent: AGY, solverPolicy: { state: 'none' },
+  }))
   h.executed = []
   h.controls.body = () => 'synthetic marker [secret:fixture]'
   h.services.tools = {
@@ -1412,7 +1414,7 @@ test(`${noCardCase} restack: restricted Antigravity ON replacement does not list
 for (const provider of [CLAUDE, 'acp-codex', OMP]) {
   test(`${noCardCase} card-free control: ${provider}`, agyTest, async t => {
     const team = await approvalTeam(t, { provider, level: 'manual' })
-    const w = provider === CLAUDE ? nativeWorld(t) : provider === OMP ? omp(t)
+    const w = provider === CLAUDE ? nativeWorld(t, { identity: () => ({ solverPolicy: { state: 'none' } }) }) : provider === OMP ? omp(t)
       : codexWorld(t, { identity: () => ({ name: 'Fixture Bot' }), dshTools: true })
     if (provider === OMP) w.skills(true)
     w.services.approval.request = team.approval.request
@@ -1921,7 +1923,8 @@ test('round 2: revocation during the pinned spill policy leaves only ordinary sp
 
 for (const provider of [CLAUDE, 'acp-codex']) {
   test(`round 2: ${provider} full-bridge history keeps one approval and the same agent Session`, async t => {
-    const w = provider === CLAUDE ? nativeWorld(t) : codexWorld(t, { identity: () => ({ name: 'Fake Bot' }), dshTools: true })
+    const w = provider === CLAUDE ? nativeWorld(t, { identity: () => ({ solverPolicy: { state: 'none' } }) })
+      : codexWorld(t, { identity: () => ({ name: 'Fake Bot' }), dshTools: true })
     w.services.tools.definitions = () => definitions
     w.services.tools.executable = name => definitions.find(tool => tool.name === name)
     const ask = t.mock.method(w.services.approval, 'request')
@@ -2275,7 +2278,7 @@ test('fresh fork after withdrawal of the last Automatic skill', async t => {
   let automatic = true
   const unavailable = 'This fake Automatic skill was withdrawn.'
   h.adapter.dshTools = () => true
-  h.service.botIdentity(() => ({ name: 'Fake Bot', needsDshTools: false }))
+  h.service.botIdentity(() => ({ name: 'Fake Bot', needsDshTools: false, solverPolicy: { state: 'none' } }))
   h.services.omniTeam = { skillCalls: {
     available: () => automatic, unavailable, catalog: () => undefined, project: options => options,
     load: () => undefined, admit() {},
