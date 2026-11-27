@@ -170,11 +170,24 @@ const offersOf = session => ({
   ...modesOf(session),
 })
 
+// FAKE_ACP_FAST=<configId>: a speed option shaped as the installed adapters send it without
+// boolean config options (codex-acp 2.12.1 `fast-mode`, claude-agent-acp 0.113.0 `fast`):
+// category `speed`, a select of `off` / `on`, offered only on FAKE_ACP_FAST_MODELS (default
+// fake-large). FAKE_ACP_FAST_REFUSE=1 answers `on` with `off` still current, as an account
+// that may not use it. Each prompt traces the speed in effect (`prompt-speed`).
+const FAST_ID = process.env.FAKE_ACP_FAST
+const FAST_MODELS = (process.env.FAKE_ACP_FAST_MODELS ?? 'fake-large').split(',').filter(Boolean)
+const fastOffered = session => FAST_ID !== undefined && FAST_MODELS.includes(session.model)
+
 function configOptions(session) {
   const model = MODELS.find(entry => entry.value === session.model)
   const options = [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model.value, options: MODELS.map(({ value, name, description }) => ({ value, name, ...(description ? { description } : {}) })) }]
   if (model.efforts.length > 0) {
     options.push({ id: 'effort', name: 'Effort', category: 'thought_level', type: 'select', currentValue: session.effort ?? 'default', options: [...DEFAULT_ROW, ...model.efforts.map(value => ({ value, name: value[0].toUpperCase() + value.slice(1) }))] })
+  }
+  if (fastOffered(session)) {
+    options.push({ id: FAST_ID, name: 'Fast mode', category: 'speed', type: 'select', currentValue: session.fast ? 'on' : 'off',
+      options: [{ value: 'off', name: 'Off' }, { value: 'on', name: 'On' }] })
   }
   return options
 }
@@ -570,7 +583,10 @@ const implementation = {
     if (!OFFERS || !session) throw RequestError.invalidParams(undefined, `Unknown config option: ${configId}`)
     const option = configOptions(session).find(entry => entry.id === configId)
     if (!option?.options.some(entry => entry.value === value)) throw RequestError.invalidParams(undefined, `Invalid value for config option ${configId}: ${value}`)
-    if (configId === 'model') {
+    trace({ event: 'set-config', sessionId, configId, value })
+    if (FAST_ID !== undefined && configId === FAST_ID) {
+      session.fast = value === 'on' && process.env.FAKE_ACP_FAST_REFUSE !== '1'
+    } else if (configId === 'model') {
       const model = MODELS.find(entry => entry.value === value)
       session.model = value
       // A new model keeps the effort when it offers it, else takes its own.
@@ -602,6 +618,8 @@ const implementation = {
       !block.text.startsWith('Your skills (load with load_skill):'))?.text ?? ''
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }), ...(DISK_PROBE && { sentOnDisk: sentOnDisk() }) })
+    // What a turn would be served at: fast only on a model that offers it, as codex-acp's serviceTier.
+    if (FAST_ID !== undefined) trace({ event: 'prompt-speed', sessionId, model: session.model, fast: session.fast === true && fastOffered(session) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
     keep(sessionId, session)
     // Native context only this session holds (continuity.test.js): never in DSH's transcript.

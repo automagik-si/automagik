@@ -656,7 +656,7 @@ export function aside(providers, ctx, sideModel = () => SIDE_MODEL, redact = tex
  * @param {(id: string) => string | undefined} [ownEffort]
  * @param {{ signal?: AbortSignal, standIns?: string[], pin?: string, wire?: string, bindModel?: boolean }} [options]
  */
-export async function choose(run, model, effort, ownEffort, { signal, standIns = [], pin, wire, bindModel = false } = {}) {
+export async function choose(run, model, effort, ownEffort, { signal, standIns = [], pin, wire, bindModel = false, speed } = {}) {
   const option = run.option('model')
   const offered = valuesOf(option).map(choice => choice.value)
   const ownModel = offered.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : run.startModel
@@ -681,7 +681,54 @@ export async function choose(run, model, effort, ownEffort, { signal, standIns =
       if (levels.includes(own)) await run.setOption('thought_level', own, { signal })
     }
   }
+  // Last: the speed options are the chosen model's, as its efforts are.
+  await chooseSpeed(run, substituted ? undefined : speed, { signal })
   if (substituted) return { model }
+}
+
+/**
+ * Put the agent on the Bot's speed, after its model and effort. Agents offer it per model as a
+ * config option of category `speed` (codex-acp's `fast-mode`, claude-agent-acp's `fast`), a select
+ * of `off` / `on` because this client advertises no boolean config options. `fast` where the
+ * model offers none, or where the agent keeps it off, fails the turn, as an effort it does not
+ * offer does: a turn never runs at another speed than the person chose. `standard` sets `off`.
+ * With no choice (`undefined`) nothing is asked of an agent this client never set, and one it set
+ * gets back the value the session had before, so a cleared choice does not stay.
+ * @param {AgentRun} run
+ * @param {'fast' | 'standard' | undefined} speed
+ * @param {{ signal?: AbortSignal }} [options]
+ */
+export async function chooseSpeed(run, speed, { signal } = {}) {
+  const option = run.option('speed')
+  const saved = run.speedBefore
+  const before = saved !== undefined && saved.sessionId === run.sessionId ? saved.value : undefined
+  if (speed !== 'fast' && speed !== 'standard') {
+    if (option !== undefined && before !== undefined && option.currentValue !== before
+      && valuesOf(option).some(choice => choice.value === before)) await run.setOption('speed', before, { signal })
+    return
+  }
+  if (option === undefined) {
+    if (speed === 'fast') throw Object.assign(new Error('it offers no Fast mode for this model'), { speed })
+    return
+  }
+  const value = speed === 'fast' ? 'on' : 'off'
+  if (before === undefined) run.speedBefore = { sessionId: run.sessionId, value: option.currentValue }
+  try {
+    await run.setOption('speed', value, { signal })
+  } catch (error) {
+    if (isUnanswered(error) || isStopped(error)) throw error
+    throw Object.assign(new Error(error?.message ?? String(error), { cause: error }), { speed })
+  }
+  const now = run.option('speed')?.currentValue
+  if (now !== value) throw Object.assign(new Error(`it kept Fast mode ${now ?? 'off'}`), { speed })
+}
+
+/** The speed the Bot chose for exactly this provider and model, else none (a different model's never carries over). */
+export function speedFor(identity, provider, model) {
+  let chosen
+  try { chosen = identity?.speed } catch { return undefined }
+  if (chosen?.model !== `${provider}/${model}`) return undefined
+  return chosen.value === 'fast' || chosen.value === 'standard' ? chosen.value : undefined
 }
 
 const EFFORT_LADDER = new Map(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((id, rank) => [id, rank]))
@@ -2794,7 +2841,8 @@ export class AcpAdapter extends LlmAdapter {
         substitution = await choose(
           live.run, options.model, options.reasoningEffort,
           id => agent.catalog?.ownEffort(id),
-          { signal: options.signal, standIns, bindModel: true, pin: pin?.id, wire },
+          { signal: options.signal, standIns, bindModel: true, pin: pin?.id, wire,
+            speed: takesIdentity ? speedFor(botIdentity, options.provider, options.model) : undefined },
         )
       } catch (error) {
         if (archived()) return yield finish('stop')
@@ -2806,7 +2854,9 @@ export class AcpAdapter extends LlmAdapter {
         if (left !== undefined) return yield left
         const at = options.reasoningEffort ? ` at ${options.reasoningEffort} effort` : ''
         const reason = error?.message ?? error
-        const why = `${agent.name} would not take ${options.model}${at}: ${reason}`
+        const why = error?.speed === 'fast' ? `${agent.name} would not run ${options.model} in Fast mode: ${reason}`
+          : error?.speed === 'standard' ? `${agent.name} would not run ${options.model} at Standard speed: ${reason}`
+          : `${agent.name} would not take ${options.model}${at}: ${reason}`
         return yield finish('error', why)
       }
       if (archived()) return yield finish('stop')

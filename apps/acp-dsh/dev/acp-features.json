@@ -171,7 +171,7 @@
     },
     "client-capability:session.configOptions.boolean": {
       "status": "not-advertised",
-      "reason": "as client-capability:session.configOptions: this client reads only the model and effort select options (acp.js takeOptions) and has no control for a boolean option"
+      "reason": "as client-capability:session.configOptions: this client reads only the model, effort and speed select options (acp.js takeOptions, adapter.js choose and chooseSpeed) and has no control for a boolean option: both pinned adapters offer speed as an off / on select without it"
     },
     "client-capability:session.cursors": {
       "status": "not-advertised",
