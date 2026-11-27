@@ -11092,6 +11092,20 @@ var ZH2 = {
   // Model menu
   Default: "默认",
   "Thinking level": "思考强度",
+  "Providers": "服务商",
+  "Favorites": "收藏",
+  "Search models": "搜索模型",
+  "Search models...": "搜索模型…",
+  "No models match your search.": "没有匹配的模型。",
+  "No favorites yet. Star a model to keep it here.": "还没有收藏。给模型加星即可放在这里。",
+  "Remove {model} from favorites": "从收藏中移除 {model}",
+  "Add {model} to favorites": "将 {model} 加入收藏",
+  "Reasoning": "推理",
+  "No effort levels": "没有推理强度可选",
+  "Response speed": "响应速度",
+  "Pick this model first, then its speed.": "先选择这个模型，再选择它的速度。",
+  "Fast": "快速",
+  "Standard": "标准",
   "Model: {model}": "模型：{model}",
   "instead of {model}": "替代 {model}",
   "Running instead of {model}": "正在运行，替代 {model}",
@@ -16042,6 +16056,21 @@ function SparkIcon() {
     "svg",
     { width: 16, height: 16, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinejoin: "round", "aria-hidden": true },
     (0, import_react2.createElement)("path", { d: "M10 3l1.6 4.4L16 9l-4.4 1.6L10 15l-1.6-4.4L4 9l4.4-1.6z" })
+  );
+}
+var STAR = "M10 3l2.1 4.3 4.7.7-3.4 3.3.8 4.7L10 13.8 5.8 16l.8-4.7L3.2 8l4.7-.7z";
+function StarIcon({ filled = false } = {}) {
+  return (0, import_react2.createElement)(
+    "svg",
+    { width: 15, height: 15, viewBox: "0 0 20 20", fill: filled ? "currentColor" : "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinejoin: "round", "aria-hidden": true },
+    (0, import_react2.createElement)("path", { d: STAR })
+  );
+}
+function BoltIcon() {
+  return (0, import_react2.createElement)(
+    "svg",
+    { width: 13, height: 13, viewBox: "0 0 20 20", fill: "currentColor", "aria-hidden": true },
+    (0, import_react2.createElement)("path", { d: "M11.6 1.8 4.2 11.2h5.1l-1 7 7.5-9.6h-5.2z" })
   );
 }
 

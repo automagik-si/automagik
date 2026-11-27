@@ -47,6 +47,7 @@ __export(icons_exports, {
   ArrowDownIcon: () => ArrowDownIcon,
   ArrowUpIcon: () => ArrowUpIcon,
   AtIcon: () => AtIcon,
+  BoltIcon: () => BoltIcon,
   CalendarIcon: () => CalendarIcon,
   ChannelsIcon: () => ChannelsIcon,
   ChatsIcon: () => ChatsIcon,
@@ -102,6 +103,7 @@ __export(icons_exports, {
   SlidersIcon: () => SlidersIcon,
   SmileIcon: () => SmileIcon,
   SparkIcon: () => SparkIcon,
+  StarIcon: () => StarIcon,
   StarLineIcon: () => StarLineIcon,
   SwitchIcon: () => SwitchIcon,
   TasksIcon: () => TasksIcon,
@@ -268,6 +270,21 @@ function SparkIcon() {
     "svg",
     { width: 16, height: 16, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinejoin: "round", "aria-hidden": true },
     (0, import_react.createElement)("path", { d: "M10 3l1.6 4.4L16 9l-4.4 1.6L10 15l-1.6-4.4L4 9l4.4-1.6z" })
+  );
+}
+var STAR = "M10 3l2.1 4.3 4.7.7-3.4 3.3.8 4.7L10 13.8 5.8 16l.8-4.7L3.2 8l4.7-.7z";
+function StarIcon({ filled = false } = {}) {
+  return (0, import_react.createElement)(
+    "svg",
+    { width: 15, height: 15, viewBox: "0 0 20 20", fill: filled ? "currentColor" : "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinejoin: "round", "aria-hidden": true },
+    (0, import_react.createElement)("path", { d: STAR })
+  );
+}
+function BoltIcon() {
+  return (0, import_react.createElement)(
+    "svg",
+    { width: 13, height: 13, viewBox: "0 0 20 20", fill: "currentColor", "aria-hidden": true },
+    (0, import_react.createElement)("path", { d: "M11.6 1.8 4.2 11.2h5.1l-1 7 7.5-9.6h-5.2z" })
   );
 }
 
@@ -2395,6 +2412,20 @@ var ZH2 = {
   // Model menu
   Default: "默认",
   "Thinking level": "思考强度",
+  "Providers": "服务商",
+  "Favorites": "收藏",
+  "Search models": "搜索模型",
+  "Search models...": "搜索模型…",
+  "No models match your search.": "没有匹配的模型。",
+  "No favorites yet. Star a model to keep it here.": "还没有收藏。给模型加星即可放在这里。",
+  "Remove {model} from favorites": "从收藏中移除 {model}",
+  "Add {model} to favorites": "将 {model} 加入收藏",
+  "Reasoning": "推理",
+  "No effort levels": "没有推理强度可选",
+  "Response speed": "响应速度",
+  "Pick this model first, then its speed.": "先选择这个模型，再选择它的速度。",
+  "Fast": "快速",
+  "Standard": "标准",
   "Model: {model}": "模型：{model}",
   "instead of {model}": "替代 {model}",
   "Running instead of {model}": "正在运行，替代 {model}",
@@ -7029,6 +7060,56 @@ function runStatsOf(values) {
   return shown2;
 }
 
+// src/client/model-picker-t3.js
+var MODEL_KEY_PREFIX = "model:";
+function modelPickerModelKey(instanceId, slug2) {
+  return `${MODEL_KEY_PREFIX}${instanceId.length}:${instanceId}${slug2}`;
+}
+function parseModelPickerModelKey(key) {
+  if (typeof key !== "string" || !key.startsWith(MODEL_KEY_PREFIX)) return null;
+  const encoded = key.slice(MODEL_KEY_PREFIX.length);
+  const separatorIndex = encoded.indexOf(":");
+  if (separatorIndex === -1) return null;
+  const instanceIdLengthText = encoded.slice(0, separatorIndex);
+  if (!/^\d+$/.test(instanceIdLengthText)) return null;
+  const instanceIdLength = Number(instanceIdLengthText);
+  const value = encoded.slice(separatorIndex + 1);
+  if (!Number.isSafeInteger(instanceIdLength) || instanceIdLength > value.length) return null;
+  return { instanceId: value.slice(0, instanceIdLength), slug: value.slice(instanceIdLength) };
+}
+var FAVORITES = "favorites";
+function adjacentModelPickerProvider({ tabs, selected, direction }) {
+  const providers = [FAVORITES, ...tabs.filter((tab) => !tab.disabled).map((tab) => tab.id)];
+  const index = providers.indexOf(selected);
+  return providers[index < 0 ? direction === 1 ? 0 : providers.length - 1 : (index + direction + providers.length) % providers.length];
+}
+function modelJumpIndex(event, mac) {
+  if (event.altKey || event.shiftKey || (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey)) return -1;
+  return /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : -1;
+}
+var modelJumpLabel = (index, mac) => index < 9 ? `${mac ? "⌘" : "Ctrl+"}${index + 1}` : null;
+var isMacPlatform = () => /Mac|iPhone|iPad|iPod/.test(globalThis.navigator?.platform ?? "");
+function moveBetweenRows(event, column) {
+  const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
+  if (!arrow && (event.key.length !== 1 || event.key.trim() === "" || event.ctrlKey || event.altKey || event.metaKey || event.isComposing)) return false;
+  if (!column?.contains(event.target)) return false;
+  const rows2 = Array.from(column.querySelectorAll("[data-effort-row]:not(:disabled)"));
+  const index = rows2.findIndex((row2) => row2 === column.ownerDocument.activeElement);
+  const next = arrow ? rows2[Math.min(rows2.length - 1, Math.max(0, index + (event.key === "ArrowDown" ? 1 : -1)))] : [...rows2.slice(index + 1), ...rows2.slice(0, index + 1)].find((row2) => row2.dataset.effortLevel?.toLowerCase().startsWith(event.key.toLowerCase()));
+  if (!next) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  next.focus();
+  next.scrollIntoView?.({ block: "nearest" });
+  return true;
+}
+function matchesModelSearch(query, fields) {
+  const words = String(query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true;
+  const haystack = fields.filter(Boolean).join(" ").toLowerCase();
+  return words.every((word2) => haystack.includes(word2));
+}
+
 // src/client/inks.js
 var INKS = {
   deepseek: ["#0891B2", "#22D3EE"],
@@ -7938,7 +8019,7 @@ function DrawnMark({ bot, look, size = 36, state: state2 = "idle", live = false,
   const box = shapeOf(look.shape).size;
   return (0, import_react8.createElement)("span", common, (0, import_react8.createElement)("svg", { viewBox: `0 0 ${box} ${box}`, dangerouslySetInnerHTML: { __html: characterMarkup(look.shape, look.color).replaceAll(MASK_ID, maskId.current) } }));
 }
-function StarIcon({ size = 8 }) {
+function StarIcon2({ size = 8 }) {
   return (0, import_react8.createElement)(
     "svg",
     { width: size, height: size, viewBox: "0 0 10 10", "aria-hidden": true },
@@ -7946,7 +8027,7 @@ function StarIcon({ size = 8 }) {
   );
 }
 function AdminStar() {
-  return (0, import_react8.createElement)("span", { className: "bt-admin-star", role: "img", "aria-label": t("Admin") }, (0, import_react8.createElement)(StarIcon, { size: 7 }));
+  return (0, import_react8.createElement)("span", { className: "bt-admin-star", role: "img", "aria-label": t("Admin") }, (0, import_react8.createElement)(StarIcon2, { size: 7 }));
 }
 function MainStar() {
   return (0, import_react8.createElement)(
@@ -8004,7 +8085,7 @@ function BotAvatar({ bot, look, size, state: state2 = "idle", count, main, admin
       (0, import_react8.createElement)("svg", { viewBox: "0 0 12 12", "aria-hidden": true }, (0, import_react8.createElement)("circle", { cx: 6, cy: 6, r: 4.2, fill: "none", stroke: "currentColor", strokeWidth: 1.6 }), (0, import_react8.createElement)("path", { d: "M3.4 3.4l5.2 5.2", stroke: "currentColor", strokeWidth: 1.6 }))
     ) : null,
     badgeKind === "alert" ? (0, import_react8.createElement)("span", { className: "bt-badge bt-badge-alert", "aria-label": count > 0 ? count === 1 ? t("1 approval waiting") : t("{count} approvals waiting", { count }) : t("Waiting for your answer"), role: "img" }, count > 0 ? count > 9 ? "9+" : String(count) : "?") : null,
-    badgeKind === "admin" ? (0, import_react8.createElement)("span", { className: "bt-badge bt-badge-admin", "aria-label": t("Admin"), role: "img" }, (0, import_react8.createElement)(StarIcon)) : null,
+    badgeKind === "admin" ? (0, import_react8.createElement)("span", { className: "bt-badge bt-badge-admin", "aria-label": t("Admin"), role: "img" }, (0, import_react8.createElement)(StarIcon2)) : null,
     badgeKind === "main" ? (0, import_react8.createElement)("span", { className: "bt-badge bt-badge-main", "aria-label": t("Main Bot"), role: "img" }, (0, import_react8.createElement)(MainStar)) : null
   );
 }
@@ -11003,7 +11084,7 @@ function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2,
 }
 var menuRows = (node) => [...node.querySelectorAll('[role^="menuitem"]:not(:disabled)')];
 var Caret = () => (0, import_react17.createElement)("svg", { className: "bt-model-caret", width: 12, height: 12, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, (0, import_react17.createElement)("path", { d: "M5.5 8l4.5 4.5L14.5 8" }));
-function useAnchoredMenu({ onEscape, minWidth = 240, holdOnScroll = false } = {}) {
+function useAnchoredMenu({ onEscape, minWidth = 240, holdOnScroll = false, clamp = false } = {}) {
   const [anchor, setAnchor] = (0, import_react17.useState)(null);
   const [place, setPlace] = (0, import_react17.useState)(null);
   const [shownPlace, leaving] = useLinger(place, MENU_EXIT_MS);
@@ -11053,7 +11134,7 @@ function useAnchoredMenu({ onEscape, minWidth = 240, holdOnScroll = false } = {}
   (0, import_react17.useLayoutEffect)(() => {
     if (anchor === null || !button2.current) return;
     const rect = button2.current.getBoundingClientRect();
-    const width = Math.max(minWidth, rect.width);
+    const width = clamp ? Math.min(Math.max(minWidth, rect.width), window.innerWidth - 16) : Math.max(minWidth, rect.width);
     const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
     const below = viewBottom() - rect.bottom;
     setPlace(below >= 260 || below >= rect.top ? { left, width, top: rect.bottom + 4, maxHeight: below - 16, "--bt-origin": "top right" } : { left, width, bottom: viewBottom() - rect.top + 4, maxHeight: rect.top - 16, "--bt-origin": "bottom right" });
@@ -11092,9 +11173,278 @@ function RouteConfirm({ bot, roster, current, target, ask, onCancel, onConfirm }
     )
   );
 }
+function pickerTabs(bot, roster, current) {
+  const models = roster.models ?? [];
+  const tabs = [];
+  for (const route of routesFor(bot, roster)) {
+    if (route === "native") tabs.push({ id: "native", route, name: routeName("native"), models: nativeModels(models, current !== void 0 && modelRoute(roster, current).route === "native" ? current : void 0) });
+    else if (route === "acp") {
+      for (const agent of acpAgents(models)) {
+        tabs.push({ id: agent.provider, route, provider: agent.provider, name: agent.name, models: agent.pending ? [] : agent.models, ...agent.pending ? { disabled: true, why: t("Not available yet") } : {} });
+      }
+    } else if (route === "hermes-remote") tabs.push({ id: "hermes-remote", route, name: routeName(route), models: models.filter((model) => providerOf(model) === "hermes-remote") });
+    else if (route === "herdr") tabs.push({ id: "herdr", route, name: routeName("herdr"), models: [], disabled: true, why: t("Not available yet") });
+  }
+  return [...tabs.filter((tab) => !tab.disabled), ...tabs.filter((tab) => tab.disabled)];
+}
+var tabOfRef = (tabs, ref) => typeof ref !== "string" ? void 0 : tabs.find((tab) => tab.models.some((model) => model.ref === ref))?.id;
+var FAVORITES_KEY = "bt-model-favorites";
+function readFavorites() {
+  try {
+    const list = JSON.parse(globalThis.localStorage?.getItem(FAVORITES_KEY) ?? "[]");
+    return Array.isArray(list) ? list.filter((ref) => typeof ref === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function writeFavorites(list) {
+  try {
+    globalThis.localStorage?.setItem(FAVORITES_KEY, JSON.stringify(list));
+  } catch {
+  }
+}
+function pickerRows({ tabs, tab, query, favorites }) {
+  const searching = String(query ?? "").trim() !== "";
+  const open = tabs.filter((entry) => !entry.disabled);
+  const pool = searching || tab === FAVORITES ? open : open.filter((entry) => entry.id === tab);
+  const rows2 = [];
+  for (const entry of pool) {
+    const picked = entry.models.filter((model) => model.ref !== void 0 && (tab !== FAVORITES || searching || favorites.includes(model.ref)) && (!searching || matchesModelSearch(query, [modelLabel(model), model.name, model.ref, model.providerName, entry.name])));
+    if (picked.length === 0) continue;
+    const groups = entry.route === "native" ? groupModels(picked) : [[entry.name, picked]];
+    for (const [label, list] of groups) {
+      if (groups.length > 1 || searching || tab === FAVORITES) rows2.push({ heading: label, key: `h:${entry.id}:${label}` });
+      for (const model of list) rows2.push({ key: modelPickerModelKey(entry.id, model.ref), model, tab: entry });
+    }
+  }
+  return rows2;
+}
+var BoltMark = () => (0, import_react17.createElement)("span", { className: "bt-mp-bolt", "aria-hidden": true }, (0, import_react17.createElement)(BoltIcon));
+var TabMark = ({ tab, size = 18 }) => tab.route === "acp" ? (0, import_react17.createElement)(AgentMark, { id: tab.provider, name: tab.name, size }) : tab.route === "hermes-remote" ? (0, import_react17.createElement)(HermesMark, { size }) : (0, import_react17.createElement)(ROUTE_ICON[tab.route] ?? ConnectorIcon, { size });
+function levelRows(reasoning) {
+  const efforts = reasoning?.efforts ?? [];
+  if (efforts.length === 0) return [];
+  const own3 = efforts.some((effort) => effort.id === reasoning.defaultEffort) ? reasoning.defaultEffort : void 0;
+  return [
+    ...own3 === void 0 ? [{ effort: void 0, label: t("Default"), isDefault: true }] : [],
+    ...efforts.map((effort) => effort.id === own3 ? { effort: void 0, label: effort.name ?? effort.id, isDefault: true, id: effort.id } : { effort: effort.id, label: effort.name ?? effort.id, id: effort.id })
+  ];
+}
+var DOCK_START = Object.freeze({ tab: void 0, query: "", highlight: void 0, shown: void 0 });
+var DOCK_WIDTH = 600;
+var coarsePointer = () => {
+  try {
+    return globalThis.matchMedia?.("(pointer: coarse)")?.matches === true;
+  } catch {
+    return false;
+  }
+};
+var nextFrame = (run3) => {
+  if (typeof globalThis.requestAnimationFrame === "function") globalThis.requestAnimationFrame(run3);
+  else run3();
+};
+var speedCache = /* @__PURE__ */ new Map();
+function askSpeed(ref, actions) {
+  if (typeof ref !== "string" || typeof actions?.speed !== "function") return Promise.resolve(null);
+  return Promise.resolve().then(() => actions.speed(ref)).then((value) => {
+    const offered = value?.offered === true ? true : value?.offered === false ? false : null;
+    speedCache.set(ref, offered);
+    return offered;
+  }, () => null);
+}
+var speedOffered = (ref) => speedCache.get(ref) ?? null;
+function DockedPicker({ bot, tabs, state: state2, rows: rows2, current, shown: shown2, reasoning, picked, speed, favorites, mac, onTab, onQuery, onHighlight, onRowPick, onFavorite, onLevel, onSpeed, onRemote, onManage, onKeyDown, remoteConfigured }) {
+  const tab = tabs.find((entry) => entry.id === state2.tab);
+  const searching = state2.query.trim() !== "";
+  const modelRows = rows2.filter((row2) => row2.model);
+  const highlighted = modelRows[state2.highlight]?.key;
+  const shownModel = shown2 === void 0 ? void 0 : tabs.flatMap((entry) => entry.models).find((model) => model.ref === shown2);
+  const levels = levelRows(reasoning);
+  const shownLevel = (shown2 === current ? picked : void 0) ?? (reasoning?.efforts?.some((effort) => effort.id === reasoning.defaultEffort) ? reasoning.defaultEffort : void 0);
+  const selectedLevel = levels.findIndex((row2) => row2.id === shownLevel || row2.id === void 0 && shownLevel === void 0);
+  const speedChosen = bot.speed?.model === shown2 && bot.model === shown2 ? bot.speed.value : void 0;
+  const speedLocked = bot.model !== shown2;
+  let jump = 0;
+  return (0, import_react17.createElement)(
+    "div",
+    { className: "bt-mp", "data-model-picker-content": "", onKeyDown },
+    (0, import_react17.createElement)(
+      "div",
+      { className: "bt-mp-body" },
+      (0, import_react17.createElement)(
+        "div",
+        { className: "bt-mp-picker" },
+        (0, import_react17.createElement)(
+          "div",
+          { className: "bt-mp-rail", "data-model-picker-sidebar": "", role: "toolbar", "aria-orientation": "vertical", "aria-label": t("Providers") },
+          (0, import_react17.createElement)(
+            "button",
+            { type: "button", className: "bt-mp-tab", "data-model-picker-provider": FAVORITES, "aria-pressed": state2.tab === FAVORITES, "aria-label": t("Favorites"), title: t("Favorites"), tabIndex: state2.tab === FAVORITES ? 0 : -1, onClick: () => onTab(FAVORITES) },
+            (0, import_react17.createElement)(StarIcon, { filled: true })
+          ),
+          (0, import_react17.createElement)("div", { className: "bt-mp-rail-sep", "aria-hidden": true }),
+          tabs.map((entry) => (0, import_react17.createElement)("button", {
+            key: entry.id,
+            type: "button",
+            className: "bt-mp-tab",
+            "data-model-picker-provider": entry.id,
+            "data-route": entry.route,
+            "aria-pressed": state2.tab === entry.id,
+            disabled: entry.disabled || void 0,
+            tabIndex: state2.tab === entry.id ? 0 : -1,
+            "aria-label": entry.why ? `${entry.name} · ${entry.why}` : entry.name,
+            title: entry.why ? `${entry.name} · ${entry.why}` : entry.name,
+            "data-current": tabOfRef(tabs, current) === entry.id ? "" : void 0,
+            onClick: () => entry.route === "hermes-remote" && onRemote && !remoteConfigured ? onRemote() : onTab(entry.id)
+          }, (0, import_react17.createElement)(TabMark, { tab: entry }))),
+          onManage ? (0, import_react17.createElement)("button", { type: "button", className: "bt-mp-tab bt-mp-manage", tabIndex: -1, "aria-label": t("Models and providers…"), title: t("Models and providers…"), onClick: onManage }, (0, import_react17.createElement)(SlidersIcon)) : null
+        ),
+        (0, import_react17.createElement)(
+          "div",
+          { className: "bt-mp-main" },
+          (0, import_react17.createElement)(
+            "label",
+            { className: "bt-mp-search" },
+            (0, import_react17.createElement)(SearchIcon),
+            (0, import_react17.createElement)("input", {
+              type: "text",
+              role: "combobox",
+              "aria-expanded": true,
+              "aria-controls": `bt-mp-list-${bot.id}`,
+              "aria-autocomplete": "list",
+              "aria-activedescendant": highlighted ? `bt-mp-${bot.id}-${state2.highlight}` : void 0,
+              "aria-label": t("Search models"),
+              placeholder: t("Search models..."),
+              value: state2.query,
+              spellCheck: false,
+              autoComplete: "off",
+              "data-model-picker-search": "",
+              onChange: (event) => onQuery(event.target.value)
+            })
+          ),
+          (0, import_react17.createElement)(
+            "div",
+            { className: "bt-mp-list", id: `bt-mp-list-${bot.id}`, role: "listbox", "aria-label": searching ? t("Models") : tab?.name ?? t("Favorites") },
+            !searching && tab?.route === "hermes-remote" ? (0, import_react17.createElement)("div", { className: "bt-mp-note" }, t("Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.")) : null,
+            modelRows.length > 0 ? null : (0, import_react17.createElement)(
+              "div",
+              { className: "bt-mp-empty" },
+              searching ? t("No models match your search.") : state2.tab === FAVORITES ? t("No favorites yet. Star a model to keep it here.") : tab?.route === "hermes-remote" ? remoteConfigured ? t("No models are known for this connection yet. Manage the connection to list them.") : t("Off by default. Set up Remote Hermes in Bot settings.") : t("No models are set up for this route yet.")
+            ),
+            rows2.map((row2) => {
+              if (row2.heading) return (0, import_react17.createElement)("div", { key: row2.key, className: "bt-mp-heading", role: "presentation" }, row2.heading);
+              const index = jump++;
+              const { model } = row2;
+              const refused = ownToolsRefused(bot, model);
+              const why = refused ? t(OWN_TOOLS_MENU_HINT) : modelUnavailableText(model);
+              const on = model.ref === current;
+              const star = favorites.includes(model.ref);
+              const label = modelJumpLabel(index, mac);
+              const name = modelLabel(model);
+              return (0, import_react17.createElement)(
+                "div",
+                {
+                  key: row2.key,
+                  id: `bt-mp-${bot.id}-${index}`,
+                  role: "option",
+                  className: "bt-mp-row",
+                  "aria-selected": on,
+                  "aria-disabled": why ? true : void 0,
+                  "data-highlighted": index === state2.highlight ? "" : void 0,
+                  "data-shown": model.ref === shown2 ? "" : void 0,
+                  "data-unavailable": why ? "" : void 0,
+                  "data-model-ref": model.ref,
+                  title: refused ? t(OWN_TOOLS_MODEL_TEXT) : model.ref,
+                  "aria-label": why ? `${name} · ${why}` : void 0,
+                  onMouseMove: () => {
+                    if (index !== state2.highlight) onHighlight(index);
+                  },
+                  onClick: () => onRowPick(row2)
+                },
+                (0, import_react17.createElement)("span", { className: "bt-mp-row-mark" }, (0, import_react17.createElement)(TabMark, { tab: row2.tab, size: 16 })),
+                (0, import_react17.createElement)("span", { className: "bt-mp-row-name" }, name),
+                on ? (0, import_react17.createElement)("span", { className: "bt-mp-row-check", "aria-hidden": true }, (0, import_react17.createElement)(CheckIcon)) : null,
+                why ? (0, import_react17.createElement)("span", { className: "bt-mp-row-hint" }, why) : model.ref === bot.defaultModel ? (0, import_react17.createElement)("span", { className: "bt-mp-row-hint" }, t("Default")) : null,
+                (0, import_react17.createElement)("button", {
+                  type: "button",
+                  className: "bt-mp-star",
+                  tabIndex: -1,
+                  "aria-pressed": star,
+                  "data-on": star ? "" : void 0,
+                  "aria-label": star ? t("Remove {model} from favorites", { model: name }) : t("Add {model} to favorites", { model: name }),
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    onFavorite(model.ref);
+                  }
+                }, (0, import_react17.createElement)(StarIcon, { filled: star })),
+                label ? (0, import_react17.createElement)("kbd", { className: "bt-mp-kbd" }, label) : null
+              );
+            }),
+            !searching && tab?.route === "hermes-remote" && onRemote && remoteConfigured ? (0, import_react17.createElement)("button", { type: "button", className: "bt-mp-manage-row", "data-manage-connection": "", onClick: () => onRemote(true) }, (0, import_react17.createElement)(SlidersIcon), t("Manage connection…")) : null
+          )
+        )
+      ),
+      (0, import_react17.createElement)(
+        "div",
+        { className: "bt-mp-effort", "data-model-picker-effort": "" },
+        (0, import_react17.createElement)(
+          "div",
+          { className: "bt-mp-effort-head" },
+          (0, import_react17.createElement)("span", null, t("Reasoning")),
+          (0, import_react17.createElement)("span", { className: "bt-mp-effort-model" }, shownModel ? modelLabel(shownModel) : "")
+        ),
+        (0, import_react17.createElement)(
+          "div",
+          { className: "bt-mp-effort-rows", role: "radiogroup", "aria-label": t("Reasoning") },
+          shownModel === void 0 || reasoning === void 0 ? null : levels.length === 0 ? (0, import_react17.createElement)("div", { className: "bt-mp-effort-none" }, t("No effort levels")) : levels.map((row2, index) => {
+            const checked = index === selectedLevel;
+            return (0, import_react17.createElement)(
+              "button",
+              {
+                key: row2.id ?? "default",
+                type: "button",
+                role: "radio",
+                className: "bt-mp-level",
+                "aria-checked": checked,
+                "data-effort-row": "",
+                "data-effort-level": row2.label,
+                tabIndex: (selectedLevel === -1 ? index === 0 : checked) ? 0 : -1,
+                onClick: () => onLevel(shownModel, row2.effort)
+              },
+              (0, import_react17.createElement)("span", { className: "bt-mp-level-name" }, row2.label),
+              checked ? (0, import_react17.createElement)("span", { className: "bt-mp-level-check", "aria-hidden": true }, (0, import_react17.createElement)(CheckIcon)) : row2.isDefault && row2.id !== void 0 ? (0, import_react17.createElement)("span", { className: "bt-mp-level-default" }, t("Default")) : null
+            );
+          })
+        )
+      )
+    ),
+    speed !== true ? null : (0, import_react17.createElement)(
+      "div",
+      { className: "bt-mp-foot" },
+      (0, import_react17.createElement)(
+        "div",
+        { className: "bt-mp-speed", role: "radiogroup", "aria-label": t("Response speed"), title: speedLocked ? t("Pick this model first, then its speed.") : void 0 },
+        ["standard", "fast"].map((value) => (0, import_react17.createElement)("button", {
+          key: value,
+          type: "button",
+          role: "radio",
+          className: "bt-mp-segment",
+          "aria-checked": speedChosen === value,
+          "data-checked": speedChosen === value ? "" : void 0,
+          "data-speed": value,
+          disabled: speedLocked || void 0,
+          onClick: () => onSpeed(speedChosen === value ? null : value)
+        }, value === "fast" ? (0, import_react17.createElement)(BoltMark) : null, value === "fast" ? t("Fast") : t("Standard")))
+      )
+    )
+  );
+}
 function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = false, chat = false, bar = false, running: running2 = false, onPick, onPickEffort, saved = onPick === void 0, withEfforts = true }) {
   const solver = isSolver(bot);
+  const docked = bar && !link && withEfforts && onPick === void 0;
   const [view, setView] = (0, import_react17.useState)(MENU_ROOT);
+  const [dock, setDock] = (0, import_react17.useState)(DOCK_START);
+  const [favoriteList, setFavoriteList] = (0, import_react17.useState)(void 0);
   const [hermes, setHermes] = (0, import_react17.useState)(false);
   const remote = (0, import_react17.useRef)({ generation: 0, active: false, mounted: true });
   const owner = (0, import_react17.useRef)(bot.id);
@@ -11117,6 +11467,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
       setConfirm(void 0);
       return true;
     }
+    if (docked) return false;
     if (view.step === "routes") return false;
     keys.current = true;
     if (view.step === "levels") setView({ step: "models", route: view.route, ...view.provider ? { provider: view.provider } : {} });
@@ -11124,7 +11475,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     else setView(MENU_ROOT);
     return true;
   };
-  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300, holdOnScroll: confirm?.ask === "running" });
+  const { isOpen, shownPlace, leaving, button: button2, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: docked ? DOCK_WIDTH : 300, clamp: docked, holdOnScroll: confirm?.ask === "running" });
   const live = (0, import_react17.useRef)(false);
   live.current = isOpen;
   const switching = (0, import_react17.useSyncExternalStore)(actions?.subscribeWork ?? noWork, () => typeof actions?.modelStateOf?.(bot.id)?.switching?.to === "string");
@@ -11164,6 +11515,11 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
   }, [isOpen, view, roster.models, current, solver]);
   (0, import_react17.useEffect)(() => {
     const node = menu.current;
+    if (docked && isOpen && node && confirm === void 0) {
+      keys.current = false;
+      if (!coarsePointer()) node.querySelector("[data-model-picker-search]")?.focus();
+      return;
+    }
     if (!isOpen || !node || !keys.current) return;
     keys.current = false;
     const rows2 = menuRows(node);
@@ -11180,6 +11536,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     }
     keys.current = event?.detail === 0;
     setView(MENU_ROOT);
+    setDock(DOCK_START);
     setConfirm(void 0);
     setKeyFor(void 0);
     void actions?.refreshModels?.();
@@ -11273,6 +11630,10 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
       return;
     }
     if (offModel(model)) return;
+    if (docked) {
+      pickDocked(model);
+      return;
+    }
     if (!withEfforts) {
       commit(model, void 0);
       return;
@@ -11297,9 +11658,163 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
       }
       routeChange = true;
     }
-    finish();
+    if (!docked || routeChange) finish();
     void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {
     });
+  };
+  const focusLevels = () => nextFrame(() => {
+    const column = menu.current?.querySelector("[data-model-picker-effort]");
+    (column?.querySelector('[data-effort-row][aria-checked="true"]') ?? column?.querySelector("[data-effort-row]"))?.focus();
+  });
+  const focusSearch = () => menu.current?.querySelector("[data-model-picker-search]")?.focus();
+  const showLevels = (ref) => {
+    const model = (roster.models ?? []).find((entry) => entry.ref === ref);
+    if (model !== void 0 && knownEfforts(model) === void 0) void askEfforts(ref, actions).then(() => {
+      if (live.current) {
+        setAsked((count) => count + 1);
+        focusLevels();
+      }
+    });
+    else focusLevels();
+  };
+  const pickDocked = (model) => {
+    if (switching) return;
+    if (model.ref === current && bot.model) {
+      setDock((state2) => ({ ...state2, shown: void 0 }));
+      showLevels(model.ref);
+      return;
+    }
+    let routeChange = recovery(model.ref);
+    if (!routeChange && crossing(model.ref)) {
+      const ask = askFor(model.ref);
+      if (ask !== null) {
+        setConfirm({ ref: model.ref, effort: void 0, ask });
+        return;
+      }
+      routeChange = true;
+    }
+    if (routeChange) {
+      finish();
+      void Promise.resolve(pickModel(model.ref, void 0, { routeChange })).catch(() => {
+      });
+      return;
+    }
+    setDock((state2) => ({ ...state2, shown: model.ref }));
+    showLevels(model.ref);
+    void Promise.resolve(pickModel(model.ref, void 0)).then(
+      (done) => {
+        if (done === false) setDock((state2) => state2.shown === model.ref ? { ...state2, shown: void 0 } : state2);
+      },
+      () => setDock((state2) => state2.shown === model.ref ? { ...state2, shown: void 0 } : state2)
+    );
+  };
+  const favorites = docked ? favoriteList ?? readFavorites() : [];
+  const solverRoster2 = solver ? { ...roster, models: (roster.models ?? []).filter(solverModel) } : roster;
+  const tabs = docked ? pickerTabs(bot, solverRoster2, current) : [];
+  const startTab = () => tabOfRef(tabs, current) ?? (favorites.some((ref) => tabOfRef(tabs, ref) !== void 0) ? FAVORITES : tabs.find((entry) => !entry.disabled)?.id ?? FAVORITES);
+  const dockTab = dock.tab ?? startTab();
+  const dockRows = docked ? pickerRows({ tabs, tab: dockTab, query: dock.query, favorites }) : [];
+  const dockModels = dockRows.filter((row2) => row2.model);
+  const atCurrent = Math.max(0, dockModels.findIndex((row2) => row2.model.ref === current));
+  const dockState = { ...dock, tab: dockTab, highlight: Math.min(dock.highlight ?? atCurrent, Math.max(0, dockModels.length - 1)) };
+  const shownRef = dock.shown !== void 0 && dock.shown !== current ? dock.shown : current;
+  const shownServed = (roster.models ?? []).find((entry) => entry.ref === shownRef);
+  const shownReasoning = shownRef === void 0 ? void 0 : shownRef === current ? reasoning ?? knownEfforts(shownServed) : knownEfforts(shownServed);
+  const fastOn = bot.model !== void 0 && bot.model === current && bot.speed?.model === current && bot.speed?.value === "fast" && speedOffered(current) === true;
+  (0, import_react17.useEffect)(() => {
+    if (!bar) return void 0;
+    let on = true;
+    const refs = [...new Set([current, docked && isOpen ? shownRef : void 0].filter((ref) => typeof ref === "string"))];
+    for (const ref of refs) void askSpeed(ref, actions).then(() => {
+      if (on) setAsked((count) => count + 1);
+    });
+    if (docked && isOpen && shownServed !== void 0 && knownEfforts(shownServed) === void 0) {
+      void askEfforts(shownRef, actions).then(() => {
+        if (on) setAsked((count) => count + 1);
+      });
+    }
+    return () => {
+      on = false;
+    };
+  }, [bar, docked, isOpen, current, shownRef, opening]);
+  const dockTo = (tab) => {
+    const rows2 = pickerRows({ tabs, tab, query: "", favorites }).filter((row2) => row2.model);
+    setDock((state2) => ({ ...state2, tab, query: "", highlight: Math.max(0, rows2.findIndex((row2) => row2.model.ref === current)) }));
+  };
+  const toggleFavorite = (ref) => {
+    const next = favorites.includes(ref) ? favorites.filter((entry) => entry !== ref) : [...favorites, ref];
+    writeFavorites(next);
+    setFavoriteList(next);
+  };
+  const pickSpeed = (value) => {
+    if (switching || bot.model === void 0 || bot.model !== shownRef) return;
+    void Promise.resolve(run3(actions.updateBot(bot.id, { speed: value }))).catch(() => {
+    });
+  };
+  const mac = isMacPlatform();
+  const onDockKey = (event) => {
+    const jumpTo = modelJumpIndex(event, mac);
+    if (jumpTo >= 0) {
+      const row2 = dockModels[jumpTo];
+      if (row2 !== void 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        onModel(row2.model, row2.tab.route);
+      }
+      return;
+    }
+    const target = event.target;
+    const plain = !event.altKey && !event.ctrlKey && !event.metaKey;
+    if (target?.matches?.("[data-model-picker-search]")) {
+      if (event.isComposing || event.keyCode === 229) return;
+      const move2 = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+      if (move2 !== 0 && plain) {
+        event.preventDefault();
+        if (dockModels.length > 0) setDock((state2) => ({ ...state2, highlight: Math.min(dockModels.length - 1, Math.max(0, dockState.highlight + move2)) }));
+        return;
+      }
+      const highlighted = dockModels[dockState.highlight];
+      if (event.key === "Enter" && highlighted !== void 0) {
+        event.preventDefault();
+        onModel(highlighted.model, highlighted.tab.route);
+        return;
+      }
+      if (event.key === "ArrowRight" && plain && !event.shiftKey && target.selectionStart === dockState.query.length) {
+        event.preventDefault();
+        if (highlighted !== void 0 && highlighted.model.ref !== shownRef) onModel(highlighted.model, highlighted.tab.route);
+        else focusLevels();
+        return;
+      }
+      if (plain && (event.key === "ArrowLeft" && !event.shiftKey && dockState.query.length === 0 || event.key === "Tab" && event.shiftKey)) {
+        event.preventDefault();
+        menu.current?.querySelector('[data-model-picker-provider][aria-pressed="true"]:not(:disabled)')?.focus();
+      }
+      return;
+    }
+    if (target?.closest?.("[data-model-picker-sidebar]")) {
+      const move2 = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+      if (move2 !== 0 && plain) {
+        event.preventDefault();
+        const next = adjacentModelPickerProvider({ tabs, selected: dockTab, direction: move2 });
+        dockTo(next);
+        nextFrame(() => menu.current?.querySelector(`[data-model-picker-provider="${next}"]`)?.focus());
+        return;
+      }
+      if (plain && (event.key === "ArrowRight" || event.key === "Tab" && !event.shiftKey)) {
+        event.preventDefault();
+        focusSearch();
+      }
+      return;
+    }
+    const column = menu.current?.querySelector("[data-model-picker-effort]");
+    if (column?.contains(target)) {
+      if (event.key === "ArrowLeft" && plain) {
+        event.preventDefault();
+        focusSearch();
+        return;
+      }
+      moveBetweenRows(event, column);
+    }
   };
   const onKeyDown = (event) => {
     const rows2 = menuRows(event.currentTarget);
@@ -11415,7 +11930,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
         "data-route": triggerRoute?.route,
         "aria-haspopup": "menu",
         "aria-expanded": isOpen,
-        "aria-label": t("Model: {model}", { model: shownRunning?.name ?? shown2?.name ?? t("none") }) + (runningTitle === void 0 ? "" : `. ${runningTitle}`),
+        "aria-label": t("Model: {model}", { model: shownRunning?.name ?? shown2?.name ?? t("none") }) + (bar && fastOn && shownRunning === void 0 ? `, ${t("Fast")}` : "") + (runningTitle === void 0 ? "" : `. ${runningTitle}`),
         title: runningTitle,
         "data-missing": shown2 !== void 0 && shown2.unavailable && models.length > 0 ? "" : void 0,
         onClick: toggle
@@ -11426,6 +11941,7 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
         triggerRoute === void 0 ? null : (0, import_react17.createElement)("span", { className: "bt-model-bar-route", "aria-hidden": true }, (0, import_react17.createElement)(ROUTE_ICON[triggerRoute.route] ?? ConnectorIcon, { size: 14 })),
         (0, import_react17.createElement)("span", { className: "bt-model-bar-name" }, shownRunning?.name ?? shown2?.name ?? t("Choose a model")),
         triggerEffort === void 0 ? null : (0, import_react17.createElement)("span", { className: "bt-model-bar-effort" }, triggerEffort),
+        fastOn && shownRunning === void 0 ? (0, import_react17.createElement)("span", { className: "bt-model-bar-fast", "data-fast": "" }, (0, import_react17.createElement)(BoltMark)) : null,
         shownRunning === void 0 ? null : (0, import_react17.createElement)("span", { className: "bt-model-bar-effort", "data-running-instead": "" }, t("instead of {model}", { model: shown2?.name ?? current }))
       ) : (0, import_react17.createElement)(
         "span",
@@ -11437,8 +11953,43 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
     ),
     shownPlace ? (0, import_react_dom3.createPortal)((0, import_react17.createElement)(
       "div",
-      { ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== void 0 ? " bt-menu-up" : ""}`, role: "menu", "aria-label": t("Model for {name}", { name: bot.name }), "aria-disabled": switching || void 0, style: shownPlace, "data-leaving": leaving || void 0, onKeyDown },
-      confirmView ?? (0, import_react17.createElement)(ModelSteps, {
+      {
+        ref: menu,
+        className: `bt-menu bt-model-menu${shownPlace.bottom !== void 0 ? " bt-menu-up" : ""}`,
+        role: docked ? "dialog" : "menu",
+        "aria-label": t("Model for {name}", { name: bot.name }),
+        "aria-disabled": switching || void 0,
+        style: shownPlace,
+        "data-leaving": leaving || void 0,
+        "data-docked": docked ? "" : void 0,
+        onKeyDown: docked ? confirm === void 0 && keyFor === void 0 ? onDockKey : void 0 : onKeyDown
+      },
+      docked && confirmView ? (0, import_react17.createElement)("div", { className: "bt-mp-confirm" }, confirmView) : confirmView ?? (docked ? DockedPicker({
+        bot: { ...bot, defaultModel: roster.defaultModel },
+        tabs,
+        state: dockState,
+        rows: dockRows,
+        current,
+        shown: shownRef,
+        reasoning: shownReasoning,
+        picked,
+        speed: speedOffered(shownRef),
+        favorites,
+        mac,
+        remoteConfigured: roster.prefs?.hermesRemote?.enabled === true && Boolean(roster.prefs?.hermesRemote?.profile),
+        onTab: dockTo,
+        onQuery: (query) => setDock((state2) => ({ ...state2, query, highlight: 0 })),
+        onHighlight: (index) => setDock((state2) => ({ ...state2, highlight: index })),
+        onRowPick: (row2) => onModel(row2.model, row2.tab.route),
+        onFavorite: toggleFavorite,
+        onLevel,
+        onSpeed: pickSpeed,
+        onRemote: openRemote,
+        onManage: manage ? () => {
+          finish();
+          manage();
+        } : void 0
+      }) : null) ?? (0, import_react17.createElement)(ModelSteps, {
         roster: solver ? { ...roster, models: models.filter(solverModel) } : roster,
         bot,
         view,
@@ -11820,6 +12371,75 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 @keyframes bt-model-in{from{opacity:0;transform:translateY(6px)}}
 .bt-model-spin{flex:none;width:14px;height:14px;border-radius:50%;border:1.5px solid var(--bt-line-2);border-top-color:var(--bt-ink-2);animation:bt-model-spin .7s linear infinite}
 @keyframes bt-model-spin{to{transform:rotate(360deg)}}
+/* The composer's picker, laid out as T3 Code's (model-picker-t3.js): rail, search and list,
+   reasoning column, speed footer. One fixed height, so a model with more levels never resizes
+   it; a short window shrinks it and keeps the footer; below 640px the column goes under the list. */
+.bt-model-menu[data-docked]{padding:0;gap:0;overflow:hidden}
+.bt-mp{display:flex;flex-direction:column;min-height:0;flex:1 1 auto;font-size:13px;line-height:18px}
+.bt-mp-body{display:flex;height:346px;min-height:0;flex:0 1 auto}
+.bt-mp-picker{display:flex;flex:1 1 auto;min-width:0;min-height:0}
+.bt-mp-rail{flex:none;width:44px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px;box-sizing:border-box;overflow-y:auto;scrollbar-width:none;background:var(--bt-tag-bg)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab{position:relative;flex:none;width:34px;height:34px;min-height:34px;padding:0;justify-content:center;border-radius:8px;color:var(--bt-ink-2)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab svg{width:18px;height:18px;margin:0}
+.bt-model-menu .bt-mp-rail .bt-mp-tab[aria-pressed=true]{background:var(--bt-active);color:var(--bt-ink)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab[aria-pressed=true]::after{content:"";position:absolute;right:-5px;top:7px;width:3px;height:20px;border-radius:2px;background:var(--bt-accent)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab:disabled{opacity:.42;cursor:default;background:none}
+.bt-model-menu .bt-mp-rail .bt-mp-tab[data-model-picker-provider=favorites]{color:var(--bt-ink)}
+.bt-mp-rail-sep{flex:none;width:24px;height:1px;margin:2px 0;background:var(--bt-line-2)}
+.bt-model-menu .bt-mp-rail .bt-mp-manage{margin-top:auto;color:var(--bt-ink-3)}
+.bt-mp-main{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;border-left:1px solid var(--bt-line)}
+.bt-mp-search{flex:none;display:flex;align-items:center;gap:8px;margin:10px 12px 0;height:33px;padding-bottom:6px;border-bottom:1px solid var(--bt-line-2);color:var(--bt-ink-3);box-sizing:border-box}
+.bt-mp-search:focus-within{border-bottom-color:var(--bt-accent)}
+.bt-mp-search svg{flex:none}
+.bt-mp-search input{flex:1;min-width:0;border:0;outline:0;background:none;padding:0;font:inherit;font-size:14px;line-height:20px;color:var(--bt-ink)}
+.bt-mp-search input::placeholder{color:var(--bt-ink-3)}
+.bt-mp-list{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:8px 8px 6px;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin}
+.bt-mp-heading{flex:none;padding:6px 8px 2px;font-size:11px;line-height:14px;font-weight:500;color:var(--bt-ink-3)}
+.bt-mp-row{flex:none;display:flex;align-items:center;gap:8px;min-height:32px;padding:0 6px 0 8px;border-radius:6px;cursor:pointer;color:var(--bt-ink);box-sizing:border-box}
+.bt-mp-row[data-highlighted]{background:var(--bt-hover)}
+.bt-mp-row[data-unavailable]{color:var(--bt-ink-3)}
+.bt-mp-row-mark{flex:none;display:inline-flex;width:16px;height:16px;align-items:center;justify-content:center;color:var(--bt-ink-2)}
+.bt-mp-row-mark svg{width:16px;height:16px}
+.bt-mp-row-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.bt-mp-row-check{flex:none;display:inline-flex;color:var(--bt-ink-2)}
+.bt-mp-row-check svg{width:14px;height:14px}
+.bt-mp-row-hint{flex:none;margin-left:auto;font-size:11px;line-height:14px;color:var(--bt-ink-3);white-space:nowrap}
+.bt-model-menu .bt-mp-row .bt-mp-star{flex:none;width:24px;height:24px;min-height:24px;padding:0;margin-left:auto;justify-content:center;border-radius:6px;color:var(--bt-ink-3);opacity:0}
+.bt-mp-row-hint+.bt-mp-star{margin-left:0}
+.bt-model-menu .bt-mp-row .bt-mp-star svg{width:14px;height:14px;margin:0}
+.bt-mp-row[data-highlighted] .bt-mp-star,.bt-mp-row:hover .bt-mp-star,.bt-mp-star[data-on]{opacity:1}
+.bt-model-menu .bt-mp-row .bt-mp-star[data-on]{color:var(--bt-accent)}
+.bt-mp-kbd{flex:none;min-width:24px;padding:2px 5px;border-radius:5px;background:var(--bt-tag-bg);color:var(--bt-ink-3);font:inherit;font-size:11px;line-height:14px;text-align:center;font-variant-numeric:tabular-nums}
+.bt-mp-note{flex:none;padding:6px 8px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
+.bt-mp-empty{flex:none;padding:8px;color:var(--bt-ink-2)}
+.bt-model-menu .bt-mp-manage-row{flex:none;margin-top:4px;color:var(--bt-ink-2)}
+.bt-mp-effort{flex:none;width:192px;display:flex;flex-direction:column;min-height:0;border-left:1px solid var(--bt-line);background:var(--bt-tag-bg)}
+.bt-mp-effort-head{flex:none;display:flex;align-items:center;gap:8px;margin:10px 12px 0;height:33px;padding-bottom:6px;border-bottom:1px solid var(--bt-line-2);color:var(--bt-ink-2);box-sizing:border-box}
+.bt-mp-effort-model{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--bt-ink-3)}
+.bt-mp-effort-rows{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:8px 8px 6px;display:flex;flex-direction:column;gap:2px}
+.bt-model-menu .bt-mp-level{flex:none;min-height:32px;padding:0 8px;gap:8px}
+.bt-mp-level-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bt-mp-level-check{flex:none;display:inline-flex;color:var(--bt-ink)}
+.bt-mp-level-check svg{width:14px;height:14px}
+.bt-mp-level-default{flex:none;font-size:11px;line-height:14px;color:var(--bt-ink-3)}
+.bt-mp-effort-none{padding:6px 8px;color:var(--bt-ink-3)}
+.bt-mp-foot{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid var(--bt-line);background:var(--bt-tag-bg)}
+.bt-mp-speed{display:flex;padding:2px;border-radius:8px;background:var(--bt-tag-bg)}
+.bt-model-menu .bt-mp-speed .bt-mp-segment{width:auto;min-height:24px;height:24px;padding:0 8px;gap:4px;border-radius:6px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
+.bt-model-menu .bt-mp-speed .bt-mp-segment[data-checked]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 0 0 .5px var(--bt-line-2)}
+.bt-model-menu .bt-mp-speed .bt-mp-segment:disabled{opacity:.5;cursor:default}
+.bt-mp-bolt{display:inline-flex;color:inherit}
+.bt-mp-bolt svg,.bt-model-menu .bt-mp-segment .bt-mp-bolt svg{width:13px;height:13px;margin:0}
+.bt-model-bar-fast{display:inline-flex;flex:none;color:var(--bt-ink-3)}
+.bt-mp-confirm{padding:10px}
+.bt-model-menu .bt-mp :is(button,[role=option]):focus-visible,.bt-mp-search input:focus-visible{outline:2px solid var(--bt-accent);outline-offset:-2px}
+.bt-mp-search input:focus-visible{outline:0}
+@media (max-width:639px){
+  .bt-mp-body{flex-direction:column;height:auto}
+  .bt-mp-picker{height:300px;flex:0 1 auto}
+  .bt-mp-effort{width:auto;height:200px;border-left:0;border-top:1px solid var(--bt-line)}
+  .bt-mp-kbd{display:none}
+}
 @media (prefers-reduced-motion:reduce){.bt-model-dock{animation:none}.bt-model-step{animation:none}.bt-model-spin{animation-duration:2s}.bt-model-caret{transition:none}.bt-model-tick svg{animation:none}}
 `;
 
@@ -51657,6 +52277,9 @@ function applyOwner(ctx, { gated = false } = {}) {
     };
   }, "ds-bot: web self-update");
 }
+/*! Ported from T3 Code (https://github.com/pingdotgg/t3code) at 0b6b173244314899ff1a26524e56994adce88c8d,
+ * apps/web/src/components/chat/{modelPickerKeys.ts,ModelPickerContent.tsx,ComposerModelEffort.tsx}.
+ * @license MIT. Copyright (c) 2026 T3 Tools Inc. Full text in apps/bots-dsh/NOTICE. */
 return Object.defineProperty({ ...module.exports }, Symbol.toStringTag, { value: 'Module' })
   },
 })

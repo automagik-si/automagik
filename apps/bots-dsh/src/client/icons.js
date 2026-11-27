@@ -136,3 +136,13 @@ export function SparkIcon() {
   return h('svg', { width: 16, height: 16, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinejoin: 'round', 'aria-hidden': true },
     h('path', { d: 'M10 3l1.6 4.4L16 9l-4.4 1.6L10 15l-1.6-4.4L4 9l4.4-1.6z' }))
 }
+// The model picker's favorite star (outlined, or filled when on) and the Fast bolt.
+const STAR = 'M10 3l2.1 4.3 4.7.7-3.4 3.3.8 4.7L10 13.8 5.8 16l.8-4.7L3.2 8l4.7-.7z'
+export function StarIcon({ filled = false } = {}) {
+  return h('svg', { width: 15, height: 15, viewBox: '0 0 20 20', fill: filled ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinejoin: 'round', 'aria-hidden': true },
+    h('path', { d: STAR }))
+}
+export function BoltIcon() {
+  return h('svg', { width: 13, height: 13, viewBox: '0 0 20 20', fill: 'currentColor', 'aria-hidden': true },
+    h('path', { d: 'M11.6 1.8 4.2 11.2h5.1l-1 7 7.5-9.6h-5.2z' }))
+}
