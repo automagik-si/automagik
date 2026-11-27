@@ -7,6 +7,11 @@ import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { Session } from '@deepseek-ai/dsh-session'
 import { AcpAdapter } from '../../src/host/adapter.js'
 import { Backchannel } from '../../src/host/backchannel.js'
+import { writeReceipt } from '../../scripts/acp-receipts.mjs'
+
+const SDK = JSON.parse(readFileSync(new URL('../../node_modules/@agentclientprotocol/sdk/package.json', import.meta.url), 'utf8')).version
+/** A synthetic receipt for the fake agent's route (acp-receipts.mjs), when ACP_RECEIPT_DIR is set. */
+export const synthetic = phases => writeReceipt(process.env.ACP_RECEIPT_DIR, { route: 'acp-fake', scenario: 'synthetic-replay', sdk: SDK, platform: `${process.platform}-${process.arch}`, node: process.version, phases })
 
 export const FAKE = join(import.meta.dirname, '..', '..', 'dev', 'fake-agent.mjs')
 export const ROUTE = 'acp-fake'

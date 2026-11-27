@@ -1,8 +1,145 @@
 {
   "sdk": "2.12.0",
   "adapters": {
-    "@agentclientprotocol/claude-agent-acp": "0.111.0",
-    "@agentclientprotocol/codex-acp": "2.11.0"
+    "@agentclientprotocol/claude-agent-acp": "0.113.0",
+    "@agentclientprotocol/codex-acp": "2.12.1"
   },
-  "passed": "2026-11-24"
+  "passed": "2026-11-27",
+  "receipts": [
+    {
+      "route": "acp-claude",
+      "scenario": "real-unprompted",
+      "adapter": {
+        "name": "@agentclientprotocol/claude-agent-acp",
+        "version": "0.113.0"
+      },
+      "cli": {
+        "version": "2.1.332 (Claude Code)"
+      },
+      "platform": "darwin-arm64",
+      "node": "v24.13.1",
+      "phases": {
+        "initialize": "passed",
+        "session": "passed",
+        "reattach": "refused",
+        "prompt": "unverified",
+        "toolApproval": "unverified",
+        "stop": "unverified",
+        "recovery": "unverified",
+        "continuity": "unverified",
+        "plan": "unverified",
+        "usage": "unverified"
+      },
+      "advertised": {
+        "protocolVersion": 1,
+        "agentInfo": "@agentclientprotocol/claude-agent-acp 0.113.0",
+        "loadSession": true,
+        "sessionCapabilities": [
+          "additionalDirectories",
+          "close",
+          "delete",
+          "fork",
+          "list",
+          "options",
+          "resume",
+          "status",
+          "systemPrompt",
+          "title"
+        ],
+        "promptCapabilities": [
+          "embeddedContext",
+          "image"
+        ],
+        "authMethods": [],
+        "reattachDetail": "fresh -32002; fresh bridge listed true"
+      }
+    },
+    {
+      "route": "acp-codex",
+      "scenario": "real-unprompted",
+      "adapter": {
+        "name": "@agentclientprotocol/codex-acp",
+        "version": "2.12.1"
+      },
+      "cli": {
+        "version": "codex-cli 0.170.0"
+      },
+      "platform": "darwin-arm64",
+      "node": "v24.13.1",
+      "phases": {
+        "initialize": "passed",
+        "session": "auth-required",
+        "reattach": "unverified",
+        "prompt": "unverified",
+        "toolApproval": "unverified",
+        "stop": "unverified",
+        "recovery": "unverified",
+        "continuity": "unverified",
+        "plan": "unverified",
+        "usage": "unverified"
+      },
+      "advertised": {
+        "protocolVersion": 1,
+        "agentInfo": "@agentclientprotocol/codex-acp 2.12.1",
+        "loadSession": true,
+        "sessionCapabilities": [
+          "additionalDirectories",
+          "close",
+          "delete",
+          "fork",
+          "list",
+          "options",
+          "resume",
+          "systemPrompt",
+          "title"
+        ],
+        "promptCapabilities": [
+          "embeddedContext",
+          "image"
+        ],
+        "authMethods": [
+          "api-key",
+          "chat-gpt"
+        ]
+      }
+    },
+    {
+      "route": "acp-fake",
+      "scenario": "synthetic-replay",
+      "platform": "darwin-arm64",
+      "node": "v24.13.1",
+      "phases": {
+        "initialize": "passed",
+        "session": "passed",
+        "reattach": "passed",
+        "prompt": "passed",
+        "toolApproval": "unverified",
+        "stop": "unverified",
+        "recovery": "unverified",
+        "continuity": "passed",
+        "plan": "passed",
+        "usage": "passed"
+      },
+      "advertised": {}
+    },
+    {
+      "route": "acp-scripted",
+      "scenario": "synthetic-replay",
+      "platform": "darwin-arm64",
+      "node": "v24.13.1",
+      "phases": {
+        "initialize": "passed",
+        "session": "passed",
+        "reattach": "unverified",
+        "prompt": "passed",
+        "toolApproval": "passed",
+        "stop": "passed",
+        "recovery": "passed",
+        "continuity": "unverified",
+        "plan": "unverified",
+        "usage": "unverified"
+      },
+      "advertised": {}
+    }
+  ]
 }

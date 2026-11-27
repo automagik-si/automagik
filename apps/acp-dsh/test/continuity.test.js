@@ -7,7 +7,7 @@ import { rmSync } from 'node:fs'
 import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { NATIVE_RECORD, decide, latestNative } from '../src/host/continuity.js'
-import { ROUTE, answer, of, turn, user, withFixture } from './fixtures/continuity-world.js'
+import { ROUTE, answer, of, synthetic, turn, user, withFixture } from './fixtures/continuity-world.js'
 
 for (const how of ['resume', 'load']) {
   test(`a restart takes back the native session by ${how}: the agent remembers what only it was told, and nothing is replayed`, async () => {
@@ -39,6 +39,7 @@ for (const how of ['resume', 'load']) {
         assert.equal(h.counts.approvals, 0)
       }
       assert.ok(h.logs.some(line => line.includes(`native session ${how === 'load' ? 'loaded' : 'resumed'}`)), h.logs.join('\n'))
+      synthetic({ initialize: 'passed', session: 'passed', reattach: 'passed', prompt: 'passed', continuity: 'passed' })
     })
   })
 }

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { PLAN_RECORD, USAGE_RECORD, plansFromLog, usageFromLog } from '../src/host/continuity.js'
 import { CLIENT_CAPABILITIES, Plans, contextOf, planOf, promptUsageOf, todosOf } from '../src/host/features.js'
-import { of, turn, withFixture } from './fixtures/continuity-world.js'
+import { of, synthetic, turn, withFixture } from './fixtures/continuity-world.js'
 
 // The log as a reopened chat reads it: written out and parsed back.
 const reopened = session => JSON.parse(JSON.stringify(session.snapshotEvents()))
@@ -33,6 +33,7 @@ test('a multi-update plan stays in place live and reopens to the same state; lat
     assert.deepEqual(plansFromLog(reopened(h.session)), expected)
     const todos = events.filter(event => event.type === 'todo/write').at(-1).data.todos
     assert.deepEqual(todos, [{ content: 'read the code', status: 'completed' }, { content: 'write the fix', status: 'completed' }])
+    synthetic({ plan: 'passed' })
   })
 })
 
@@ -77,6 +78,7 @@ test('usage: context occupancy is the latest report, a prompt\'s usage is record
     // Read twice, or with a record duplicated, a prompt counts once.
     const events = reopened(h.session)
     assert.equal(usageFromLog([...events, ...events]).length, 3)
+    synthetic({ usage: 'passed' })
   })
 })
 
