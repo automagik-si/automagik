@@ -16,7 +16,7 @@ import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
 import { usageLimitOf } from './usage-limit.js'
 import { pinOf, pinWire } from './model-identity.js'
-import { observeTerminal } from './terminal-evidence.js'
+import { observeTerminal, vetoClaudeTerminalIdentity } from './terminal-evidence.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -30,6 +30,10 @@ export const RETIRED_MAX = 1024
 // 12 MiB this plugin keeps (image.js) would end the turn as a dead agent instead of the "too
 // large" answer. The cap stays, four times wider.
 const MAX_MESSAGE_BYTES = 128 * 1024 * 1024
+
+export function clientCapabilitiesFor(provider) {
+  return provider === 'acp-claude' ? { _meta: { terminal_output: true } } : {}
+}
 
 /**
  * The structured tool name a call carries, when the adapter sends one: Claude Code puts it at
@@ -319,7 +323,9 @@ export class AgentRun {
     const stream = ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout), { maxMessageBytes: MAX_MESSAGE_BYTES })
     this.conn = connect(this, stream)
     const ready = (async () => {
-      this.init = await this.conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+      this.init = await this.conn.initialize({
+        protocolVersion: PROTOCOL_VERSION, clientCapabilities: clientCapabilitiesFor(this.spec.provider),
+      })
       // The agent answers the version it will speak: the one asked for, or its own latest when
       // it does not support that one. Going on over another version would read its messages
       // with the wrong shapes, so the session stops here with what to do about it.
@@ -935,6 +941,7 @@ export class AgentRun {
       }
     }
     const observedAt = isTool ? performance.now() : undefined
+    let firstSight = false
     switch (update?.sessionUpdate) {
       case 'agent_message_chunk': {
         const text = contentText(update.content)
@@ -951,6 +958,7 @@ export class AgentRun {
         break
       }
       case 'tool_call':
+        firstSight = !this.tools.has(update.toolCallId)
         this.confirmPromptDelivery()
         if (this.seeTool(update, observedAt, sessionId) === undefined) return
         break
@@ -972,7 +980,9 @@ export class AgentRun {
     }
     if (isTool && isToolId(sessionId) && sessionId === this.sessionId) {
       const tool = this.tools.get(update.toolCallId)
-      if (tool !== undefined) observeTerminal(tool, update, sessionId, observedAt)
+      if (tool !== undefined) observeTerminal(tool, update, sessionId, observedAt, {
+        claude: this.spec.provider === 'acp-claude', firstSight,
+      })
     }
   }
 
@@ -1132,8 +1142,9 @@ export class AgentRun {
     return false
   }
 
-  changeTool(tool, update, sessionId) {
+  changeTool(tool, update, sessionId, permission) {
     if (!this.checkSkillClaim(tool, update) && (tool.skillOperation !== undefined || this.spec.refuseTools === true)) return false
+    if (permission !== undefined) vetoClaudeTerminalIdentity(tool, update, permission)
     // A command's output, for a client with no terminal of its own (Zed's terminal_output
     // extension, which codex-acp sends): kept as the call's output.
     const chunk = update._meta?.terminal_output?.data
@@ -1240,7 +1251,9 @@ export class AgentRun {
     if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
     const { title, ...details } = params.toolCall ?? {}
-    if (tool.retired !== true && identity !== 'conflict') this.changeTool(tool, { ...details, status: undefined }, params.sessionId)
+    if (tool.retired !== true && identity !== 'conflict') {
+      this.changeTool(tool, { ...details, status: undefined }, params.sessionId, params)
+    }
     const agyHistory = agyClaim === HISTORY_TOOL_NAME && tool.originPrompt === this.historySignal &&
       !tool.retired && !tool.skillConflict && !tool.unanswerable && !tool.mirrored && tool.refused === undefined
     if (agyHistory) {

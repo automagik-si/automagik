@@ -4,14 +4,13 @@
 // the tool/call and tool/result rows itself, as for any tool. The body runs nothing: it waits
 // for the agent's call to finish, and when the agent asks permission for it, asks DSH's
 // approval service and hands the agent the answer.
-import { realpathSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { contentImages, contentText, isTerminal } from './acp.js'
 import { agentImageOf, isImageCall, isPng, KEPT_TEXT } from './agent-image.js'
 import { openStepOf } from './backchannel.js'
 import { terminalResult } from './terminal-evidence.js'
+import { claudeNativeBash, stripsWorkspaceCd } from './workspace-cd.js'
 
 export const TOOL_NAME = 'acp_tool'
 const DSH_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'fetch', 'other'])
@@ -45,29 +44,6 @@ function compatibleCall(captured, current) {
 
 const plainInput = input => input !== null && typeof input === 'object'
   && [Object.prototype, null].includes(Object.getPrototypeOf(input))
-
-// Claude's completed Bash input can omit a streamed cd to its working directory.
-const LEADING_CD = /^cd (?:'([^']+)'|"([^"\\$`!]+)"|([^\s'"\\$`&;|<>()*?[\]{}!]+)) && /
-
-function isWorkspacePath(path, workspace) {
-  // A same-directory alias can still change Bash's logical PWD.
-  return path === workspace && typeof path === 'string' && isAbsolute(path) && !/[\x00-\x1f\x7f]/.test(path)
-    // Shell cd can resolve .. logically before following symlinks.
-    && !path.split(process.platform === 'win32' ? /[\\/]/ : '/').includes('..')
-    && realpathSync.native(path) === workspace
-}
-
-function stripsWorkspaceCd(before, after, launch) {
-  const workspace = launch?.workspace
-  if (workspace === undefined || typeof before.command !== 'string'
-    || typeof after.command !== 'string' || after.command === '') return false
-  const prefix = LEADING_CD.exec(before.command)
-  return prefix !== null && before.command.slice(prefix[0].length) === after.command
-    && isWorkspacePath(launch.workspaceArgument, workspace)
-    && isWorkspacePath(prefix[1] ?? prefix[2] ?? prefix[3], workspace)
-    && [before, after].every(input => ['cwd', 'workdir'].every(key =>
-      !Object.hasOwn(input, key) || isWorkspacePath(input[key], workspace)))
-}
 
 // The first mirror can precede additional input fields and presentation details.
 function refinesCall(earlier, completed, launch) {
@@ -335,9 +311,7 @@ export function mirrorTool(host) {
             const fromTool = snapshotOf(target)
             const direct = !nested && dispatched === undefined && captured.parent === undefined
               && fromQuestion.parent === undefined && fromTool.parent === undefined
-            const nativeBash = live.native === true && live.provider === 'acp-claude' && structuredName === 'Bash'
-              && target.mcp !== true && target.mcpServer === undefined
-            const launch = direct && nativeBash ? live : undefined
+            const launch = direct && claudeNativeBash(live, target) ? live : undefined
             return compatibleCall(captured, fromQuestion) && compatibleCall(captured, fromTool)
               && compatibleCall(fromQuestion, fromTool)
               && (nested || refinesCall(args, captured, launch) && refinesCall(exec.arguments, captured, launch))
@@ -498,10 +472,13 @@ export function mirrorTool(host) {
         const ownedAtRelease = ownedOnEntry && ownsTool()
         if (marked && !ownedAtRelease) delete observation.refused
         if (!image && tool.kind === 'execute') {
-          Object.assign(result, terminalResult(live, tool, args, exec))
+          const launch = ownedAtRelease && dispatched === undefined && !marked
+            && tool.parent === undefined && args.parent === undefined && exec.arguments?.parent === undefined
+            && claudeNativeBash(live, tool) ? live : undefined
+          Object.assign(result, terminalResult(live, tool, args, exec, launch))
           const evidence = tool.terminalEvidence
           if (ownedAtRelease && typeof run.sessionId === 'string' && run.sessionId !== ''
-            && evidence?.sessionId === run.sessionId && !evidence.reason && !tool.retired) {
+            && evidence?.sessionId === run.sessionId && !evidence.reason && evidence.refinedCommand === undefined && !tool.retired) {
             if (!commandOf(args.input) && typeof evidence.command === 'string'
               && evidence.command !== '' && evidence.command === commandOf(tool.rawInput)) {
               result.command = evidence.command

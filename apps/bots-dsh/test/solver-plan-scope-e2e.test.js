@@ -22,7 +22,7 @@ import { apply } from '../index.js'
 import { reviewMarkText } from '../src/client/solver-draft.js'
 import { fakeContext } from './fake-ctx.js'
 
-async function joinedSolver(t) {
+async function joinedSolver(t, runTool) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'solver-scope-e2e-')))
   const folder = join(root, 'workspace')
   const home = join(root, 'team')
@@ -38,6 +38,7 @@ async function joinedSolver(t) {
   let questionGuard
   const world = nativeWorld(t, {
     managed: false, hidden: true,
+    runTool,
     policyState: id => world.identityReaders.readState?.(id),
     questionGuard: request => questionGuard?.(request),
     env: { FAKE_ACP_MODES: 'auto,default,bypassPermissions',
@@ -196,6 +197,106 @@ for (const [variant, label, refusal, quote] of [
     if (variant === 'outside') assert.equal(readFileSync(path, 'utf8'), outside)
     else if (refusal) assert.equal(existsSync(path), false)
     else assert.equal(readFileSync(path, 'utf8'), 'Synthetic streamed operation')
+  })
+}
+
+for (const variant of ['verbatim', 'cd-strip', 'changed-tail', 'other-folder', 'text-only']) {
+  test(`#2153 Claude Solver native Bash check ${variant}`, { timeout: 18_000 }, async t => {
+    const executions = []
+    const { root, folder, world, chat, ctx, rt, bot, request, designate, verdict } =
+      await joinedSolver(t, async (args, exec) => {
+        exec.name = 'acp_tool'
+        const entry = { exec, args }
+        executions.push(entry)
+        const result = await ctx.listeners.get('tools/execute')[0](exec, async () => ({
+          isError: false, value: await world.adapter.tool.execute(exec.arguments, exec),
+        }))
+        entry.result = result
+        return result.value
+      })
+    await verdict('PLAN SHIP', 'plan')
+    assert.match(await rt.solverProgress(bot, true, { action: 'start', request, run: 'check', checks: ['fixture'] }), /Recorded\./)
+    const progress = () => bot.reviewTrack.solver
+    assert.equal(progress().pending.evidence, undefined)
+
+    const firstSeen = []
+    const stream = world.adapter.stream
+    t.mock.method(world.adapter, 'stream', async function* (...params) {
+      for await (const chunk of stream.apply(this, params)) {
+        if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+          firstSeen.push(chunk.block)
+          writeFileSync(join(root, 'mirror-recorded'), '')
+        }
+        yield chunk
+      }
+    })
+    try {
+      await chat.turn(person(`plan-scope-claude-check ${variant}`))
+    } finally {
+      assert.equal(firstSeen.length, 1, 'the first Claude Bash surface reached the mirror')
+    }
+    assert.deepEqual(world.events('claude-check-timeout'), [])
+    const [permission, ...duplicates] = world.events('claude-check-permission')
+    assert.ok(permission, 'the fake requested permission for the surfaced call')
+    assert.deepEqual(duplicates, [])
+    assert.equal(executions.length, 1, 'one acp_tool invocation through Bots')
+    const [{ args, exec, result }] = executions
+    assert.equal(exec.agent.session, chat.session)
+    assert.equal(exec.arguments, args)
+    assert.equal(exec.callId, firstSeen[0].id)
+    assert.deepEqual(args, JSON.parse(firstSeen[0].arguments))
+    assert.equal(permission.toolCallId, args.id)
+    assert.equal(result.isError, false)
+    const { terminalOutcome, terminalStart, text } = result.value
+    const evidence = progress().pending.evidence
+    const check = () => rt.solverProgress(bot, true, { action: 'checks', request, run: 'check',
+      results: [{ check: 'fixture', pass: true }] })
+    const finish = () => rt.reviewTurnEnd(bot.id, { completed: true, wroteText: true, request, model: 'acp-claude/fake-large' })
+    const refused = variant === 'changed-tail' || variant === 'other-folder'
+    const ran = world.events('claude-check-ran')
+    assert.equal(permission.answer, refused ? 'no' : 'yes', text)
+    assert.deepEqual(ran.map(row => row.toolCallId), refused ? [] : [args.id])
+    if (refused || variant === 'text-only') {
+      if (refused) assert.match(text, /permission question no longer matches this call|only inside its folder/)
+      else {
+        const { clientCapabilitiesFor } = await import('../../acp-dsh/src/host/acp.js')
+        assert.deepEqual(world.events('initialize').at(-1)?.clientCapabilities,
+          typeof clientCapabilitiesFor === 'function' ? { _meta: { terminal_output: true } } : {})
+        assert.equal(terminalOutcome.reason, 'Trusted ACP terminal exit data is missing.')
+        assert.equal(evidence?.reason, terminalOutcome.reason)
+      }
+      assert.equal(terminalOutcome?.exitCode, undefined)
+      assert.equal(terminalStart, undefined)
+      assert.equal(evidence?.pass, undefined)
+      assert.match(await check(), /No verified passing evidence/)
+      finish()
+      assert.notEqual(bot.reviewTrack?.last?.done, true)
+      return
+    }
+
+    assert.equal(terminalOutcome?.reason, undefined, terminalOutcome?.reason)
+    assert.deepEqual(terminalOutcome, {
+      sessionId: chat.session.id, callId: exec.callId, toolCallId: args.id, terminalId: args.id, cwd: folder, exitCode: 0,
+    })
+    assert.equal(result.value.text, '1\n')
+    assert.ok(Number.isFinite(terminalStart?.observedAt))
+    assert.equal(terminalStart.startedAt, terminalStart.observedAt)
+    assert.equal(evidence?.call, `${chat.session.id}:acp:${args.id}`)
+    assert.equal(progress().pending.call, evidence.call)
+    assert.equal(evidence?.pass, true, evidence?.reason)
+    assert.equal(evidence.reason, undefined)
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'spawn-env.json'), 'utf8')), { maintainProjectDir: '1' })
+    assert.match(await check(), /Recorded\./)
+    assert.deepEqual(progress().passed, ['fixture'])
+    assert.deepEqual(progress().runs.check.evidence, evidence)
+    await designate('result', 'result')
+    await verdict('RESULT SHIP', 'result')
+    finish()
+    const mark = bot.reviewTrack.last
+    assert.equal(mark?.resultExchangeId, 'result')
+    assert.equal(mark?.done, true)
+    assert.equal(reviewMarkText({ ...bot, reviewMark: mark }, { byId: rt.state.bots }),
+      'Plan and result reviewed by Reviewer.\nDone: every check passed and Reviewer approved.')
   })
 }
 

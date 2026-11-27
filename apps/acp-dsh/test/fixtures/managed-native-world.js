@@ -28,7 +28,7 @@ export function holdNativeStartup(t, w) {
   return { entered: entered.promise, release: release.resolve }
 }
 
-export function nativeWorld(t, { identity, hidden, managed = true, env, policyState, questionGuard, codexPatch } = {}) {
+export function nativeWorld(t, { identity, hidden, managed = true, env, policyState, questionGuard, codexPatch, runTool } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-managed-native-'))
   const path = join(dir, 'trace.ndjson')
   const agents = new Map()
@@ -101,7 +101,8 @@ export function nativeWorld(t, { identity, hidden, managed = true, env, policySt
         if (calls.length === 0) return chunks
         for (const call of calls) {
           const args = JSON.parse(call.arguments)
-          const result = await adapter.tool.execute(args, { agent, callId: call.id, arguments: args, signal: new AbortController().signal })
+          const exec = { agent, callId: call.id, arguments: args, signal: new AbortController().signal }
+          const result = await (runTool ? runTool(args, exec) : adapter.tool.execute(args, exec))
           history.push({ role: 'tool', toolCallId: call.id, source: { kind: 'tool', callId: call.id }, content: [{ type: 'text', text: result.text }] })
         }
       }

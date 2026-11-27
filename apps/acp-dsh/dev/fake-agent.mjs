@@ -91,7 +91,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { delimiter, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { serveAgent } from './serve-agent.mjs'
@@ -118,6 +118,13 @@ const trace = (entry) => {
 const MODES = (process.env.FAKE_ACP_MODES ?? '').split(',').filter(Boolean)
 const SESSION_MODELS = process.env.FAKE_ACP_SESSION_MODELS === '1'
 trace({ event: 'start', args: process.argv.slice(2) })
+const streamDir = process.env.FAKE_ACP_STREAM_DIR
+if (streamDir !== undefined) {
+  writeFileSync(join(streamDir, 'spawn-env.json'), JSON.stringify({
+    maintainProjectDir: process.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR ?? null,
+  }))
+}
+let clientCapabilities
 const AUTH_METHODS = (process.env.FAKE_ACP_AUTH_METHODS ?? '').split(',').filter(Boolean)
 const SIGNED_IN = () => join(process.env.HOME ?? '', '.gemini', 'fake-signed-in')
 if (process.env.FAKE_ACP_ENV_FILE !== undefined) {
@@ -274,10 +281,14 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwA
 // The methods this agent never hears are dropped off the wire, before anything can answer them.
 const DEAF_TO = new Set((process.env.FAKE_ACP_DEAF_TO ?? '').split(',').filter(Boolean))
 function hearing(stream) {
-  if (DEAF_TO.size === 0) return stream
+  if (DEAF_TO.size === 0 && streamDir === undefined) return stream
   const heard = new TransformStream({
     transform(message, controller) {
       if (DEAF_TO.has(message?.method)) return trace({ event: 'unheard', method: message.method })
+      // Record the request on the wire before the SDK fills in false capability defaults.
+      if (streamDir !== undefined && message?.method === 'initialize') {
+        trace({ event: 'initialize', clientCapabilities: message.params?.clientCapabilities })
+      }
       controller.enqueue(message)
     },
   })
@@ -338,7 +349,8 @@ function newSession(sessionId, cwd) {
 }
 
 const implementation = {
-  async initialize() {
+  async initialize(params) {
+    clientCapabilities = params.clientCapabilities
     // FAKE_ACP_PROTOCOL answers another protocol version, as an adapter built for a later ACP does.
     const protocolVersion = process.env.FAKE_ACP_PROTOCOL === undefined ? PROTOCOL_VERSION : Number(process.env.FAKE_ACP_PROTOCOL)
     const agentCapabilities = {
@@ -554,7 +566,58 @@ const implementation = {
       })
       return { stopReason: 'end_turn' }
     }
-    const streamDir = process.env.FAKE_ACP_STREAM_DIR
+    const check = /^plan-scope-claude-check (verbatim|cd-strip|changed-tail|other-folder|text-only)$/.exec(current)?.[1]
+    if (streamDir && check) {
+      const toolCallId = `fixture-claude-check-${session.turns}`
+      const terminal = check !== 'text-only' && clientCapabilities?._meta?.terminal_output === true
+      const content = terminal ? [{ type: 'terminal', terminalId: toolCallId }] : []
+      const toolCall = {
+        toolCallId, kind: 'execute', title: 'Terminal', status: 'pending', content,
+        _meta: {
+          claudeCode: { toolName: 'Bash' },
+          ...(terminal ? { terminal_info: { terminal_id: toolCallId } } : {}),
+        },
+      }
+      const command = 'fixture-check'
+      const folder = check === 'other-folder' ? dirname(process.env.FAKE_ACP_FIXTURE_OTHER) : session.cwd
+      const first = check === 'cd-strip' || check === 'other-folder' ? `cd '${folder}' && ${command}` : command
+      await update({ sessionUpdate: 'tool_call', ...toolCall, rawInput: {} })
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, title: first, rawInput: { command: first } })
+      try {
+        await waitForFile(join(streamDir, 'mirror-recorded'))
+      } catch (error) {
+        trace({ event: 'claude-check-timeout', sessionId, toolCallId })
+        throw error
+      }
+      if (session.cancelled) return { stopReason: 'cancelled' }
+      const rawInput = { command: check === 'changed-tail' ? 'fixture-check-other' : command, description: 'Fixture check' }
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, rawInput, title: rawInput.command })
+      const { outcome } = await conn.requestPermission({
+        sessionId, toolCall: { ...toolCall, title: rawInput.command, rawInput }, options: [
+          { kind: 'allow_once', optionId: 'yes', name: 'Allow' },
+          { kind: 'reject_once', optionId: 'no', name: 'Reject' },
+        ],
+      })
+      const answer = outcome.optionId ?? outcome.outcome
+      trace({ event: 'claude-check-permission', sessionId, toolCallId, answer })
+      const status = answer === 'yes' ? 'completed' : 'failed'
+      const data = answer === 'yes' ? '1\n' : 'No check ran.'
+      if (answer === 'yes') trace({ event: 'claude-check-ran', sessionId, toolCallId })
+      if (terminal) {
+        await update({ sessionUpdate: 'tool_call_update', toolCallId,
+          _meta: { terminal_output: { terminal_id: toolCallId, data } },
+        })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status,
+          _meta: { terminal_exit: { terminal_id: toolCallId, exit_code: answer === 'yes' ? 0 : null, signal: null } },
+        })
+      } else {
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status,
+          content: [{ type: 'content', content: { type: 'text', text: `\`\`\`console\n${data}\n\`\`\`` } }],
+        })
+      }
+      return { stopReason: 'end_turn' }
+    }
+
     const streamCase = /^plan-scope-stream (bash|cd-plain|cd-single|cd-double|write|changed|outside)$/.exec(current)?.[1]
     if (streamDir && streamCase) {
       const isWrite = streamCase === 'write'
