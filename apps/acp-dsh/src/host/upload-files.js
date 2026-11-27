@@ -13,30 +13,34 @@ export function uploadLeaf(ref, kind) {
     !/[\\/]/.test(name) && !name.includes('\0') ? name : 'file'
 }
 
-async function directory(path, create = false) {
+async function directory(path, create = false, remember) {
+  let made = false
   if (create) {
-    try { await mkdir(path, { mode: 0o700 }) } catch (error) {
+    try { await mkdir(path, { mode: 0o700 }); made = true } catch (error) {
       if (error.code !== 'EEXIST') throw error
     }
   }
-  const stat = await lstat(path)
+  const stat = await lstat(path, { bigint: true })
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Unsafe upload directory.')
+  if (made) remember?.(path, stat)
   return path
 }
 
-export async function ensureUploadsFolder(cwd) {
+export async function ensureUploadsFolder(cwd, remember) {
   if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw new Error('No chat working folder.')
   cwd = resolve(cwd)
   await directory(cwd)
-  const parent = await directory(join(cwd, '.automagik'), true)
-  const folder = await directory(join(parent, 'uploads'), true)
+  const parent = await directory(join(cwd, '.automagik'), true, remember)
+  const folder = await directory(join(parent, 'uploads'), true, remember)
+  const path = join(folder, '.gitignore')
   let ignore
   try {
-    ignore = await open(join(folder, '.gitignore'), 'wx', 0o600)
+    ignore = await open(path, 'wx', 0o600)
     await ignore.writeFile('*\n')
+    if (remember) remember(path, await ignore.stat({ bigint: true }))
   } catch (error) {
     if (error.code !== 'EEXIST') throw error
-    const stat = await lstat(join(folder, '.gitignore'))
+    const stat = await lstat(path)
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe upload ignore file.')
   } finally { await ignore?.close() }
   return folder
@@ -58,7 +62,7 @@ async function abortable(work, signal) {
 async function existing(path, ref, signal) {
   signal?.throwIfAborted()
   let stat
-  try { stat = await lstat(path) } catch (error) {
+  try { stat = await lstat(path, { bigint: true }) } catch (error) {
     if (error.code === 'ENOENT') return false
     throw error
   }
@@ -68,8 +72,11 @@ async function existing(path, ref, signal) {
   }
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0))
   try {
-    stat = await file.stat()
-    if (!stat.isFile() || stat.size !== ref.bytes || stat.nlink > 1) {
+    const opened = await file.stat({ bigint: true })
+    // Path stats confirm identity and change metadata. Only the descriptor supplies the size.
+    const sameVersion = a => a.isFile() && a.dev === opened.dev && a.ino === opened.ino
+      && a.mode === opened.mode && a.mtimeNs === opened.mtimeNs && a.ctimeNs === opened.ctimeNs
+    if (!opened.isFile() || opened.nlink !== 1n || !sameVersion(stat) || opened.size !== BigInt(ref.bytes)) {
       throw new Error('The upload copy already exists with different bytes.')
     }
     const hash = createHash('sha256')
@@ -77,11 +84,15 @@ async function existing(path, ref, signal) {
       signal?.throwIfAborted()
       hash.update(chunk)
     }
-    if (`sha256:${hash.digest('hex')}` !== ref.attachmentId) {
+    const digestMatches = `sha256:${hash.digest('hex')}` === ref.attachmentId
+    const after = digestMatches && await file.stat({ bigint: true })
+    const stable = after && sameVersion(after) && after.nlink === 1n && after.size === opened.size
+    const current = stable && await lstat(path, { bigint: true })
+    if (!current || !sameVersion(current) || current.nlink !== 1n) {
       throw new Error('The upload copy already exists with different bytes.')
     }
+    return opened
   } finally { await file.close() }
-  return true
 }
 
 async function checkFolder(cwd, folder, ref) {
@@ -92,7 +103,7 @@ async function checkFolder(cwd, folder, ref) {
 
 // The entry must still be the file this call wrote and verified, not a substitute.
 async function same(path, written) {
-  const stat = await lstat(path)
+  const stat = await lstat(path, { bigint: true })
   if (!stat.isFile() || stat.ino !== written.ino || stat.dev !== written.dev) {
     throw new Error('The upload copy changed before it was published.')
   }
@@ -112,8 +123,8 @@ export async function copyUpload(options) {
   try { return await writeCopy(options) } catch (error) { return { error } }
 }
 
-async function writeCopy({ cwd, ref, kind, attachments, signal }) {
-  let temp, file, iterator, written, created
+async function writeCopy({ cwd, ref, kind, attachments, signal, remember }) {
+  let temp, file, iterator, written, created, published
   try {
     signal?.throwIfAborted()
     if (!/^sha256:[a-f0-9]{64}$/.test(ref?.attachmentId) ||
@@ -124,8 +135,8 @@ async function writeCopy({ cwd, ref, kind, attachments, signal }) {
     // The chat folder itself may be a link (a workspace on another disk); only the folders
     // created below it must be real directories.
     if (typeof cwd === 'string' && isAbsolute(cwd)) cwd = await realpath(resolve(cwd))
-    const root = await ensureUploadsFolder(cwd)
-    const folder = await directory(join(root, ref.attachmentId.slice(7)), true)
+    const root = await ensureUploadsFolder(cwd, remember)
+    const folder = await directory(join(root, ref.attachmentId.slice(7)), true, remember)
     const path = join(folder, uploadLeaf(ref, kind))
     if (await existing(path, ref, signal)) {
       signal?.throwIfAborted()
@@ -162,7 +173,7 @@ async function writeCopy({ cwd, ref, kind, attachments, signal }) {
       throw new Error('Upload integrity verification failed.')
     }
     await file.chmod(0o444)
-    written = await file.stat()
+    written = await file.stat({ bigint: true })
     await file.close()
     file = undefined
     signal?.throwIfAborted()
@@ -181,6 +192,7 @@ async function writeCopy({ cwd, ref, kind, attachments, signal }) {
         await link(temp, path)
         linked = true
         await same(path, written)
+        published = path
       } catch (error) {
         // Remove only the entry this call published; never a file someone else made.
         if (linked) await removeOwn(path, created)
@@ -196,5 +208,9 @@ async function writeCopy({ cwd, ref, kind, attachments, signal }) {
     if (iterator?.return) Promise.resolve().then(() => iterator.return()).catch(() => {})
     await file?.close()
     if (temp) await removeOwn(temp, created)
+    if (published && remember) {
+      const stat = await existing(published, ref, signal).catch(() => undefined)
+      if (stat && stat.dev === written.dev && stat.ino === written.ino) remember(published, stat)
+    }
   }
 }

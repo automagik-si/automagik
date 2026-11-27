@@ -1,6 +1,6 @@
 // Team tools: the roster, bot-to-bot messages, group chat settings and posts, and the
 // question and view cards. Group rounds and reading chats are in groups.js.
-import { skillTool } from './skill-library-call.js'
+import { SKILL_TOOL, skillTool } from './skill-library-call.js'
 import { randomUUID } from 'node:crypto'
 import { createEditInput } from './image-input.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -21,6 +21,18 @@ import { registerTrustedTool } from './tool-registrations.js'
 import { deniesAcpTool } from '../shared/own-tools.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
+
+export function questionOptions(options) {
+  return (Array.isArray(options) ? options : [])
+    .map(option => (typeof option === 'string' ? { label: option } : option ?? {}))
+    .map(option => ({
+      label: String(option.label ?? '').trim(),
+      ...(option.description ? { description: String(option.description).trim() } : {}),
+    }))
+    .filter(option => option.label !== '')
+    .slice(0, 6)
+}
+
 // A message_bot call that sent nothing answers with this object rather than a string, so
 // the chat can tell a refusal from a delivery without reading the words. `text` is what
 // the Bot reads; `sent` and `reason` are the presentation signal. A delivery keeps its
@@ -46,6 +58,26 @@ const messageOutput = {
     : { sent: value.sent === true, reason: value.reason }),
 }
 const refusedMessage = reason => ({ text: reason, sent: false, reason })
+
+async function reviewPictureReceipt(rt, agent, sessionId) {
+  const unknown = 'Pictures count only if the reviewer\'s answering turn receives them. Otherwise the RESULT stays unverified.'
+  let route
+  try {
+    route = typeof agent.model?.current === 'function' ? agent.model.current() : agent.session?.requestHeader?.()?.config
+  } catch { return unknown }
+  const { provider, model } = route ?? {}
+  if (typeof provider !== 'string' || provider === '') return unknown
+  const unseen = 'The reviewer cannot see pictures on this route. A RESULT SHIP will stay unverified if its answering turn cannot see the pictures.'
+  if (!provider.startsWith('acp-')) {
+    return await rt.readsImagesStrict?.(provider, model) ? '' : unseen
+  }
+  let capability
+  try { capability = rt.ctx.get?.('acpAgents')?.promptImageCapability?.(sessionId, provider) } catch {}
+  if (capability === true) return 'The reviewer\'s ACP agent accepts pictures on this route. A RESULT SHIP stays unverified if its answering turn does not receive them.'
+  if (capability === false) return unseen
+  return unknown
+}
+
 export const GROUP_REF = { type: 'string', required: true, description: 'Exact group chat name from list_bots' }
 const BLOCKING_QUESTION_TOOL = 'ask_user_question'
 // A Bot's own chat runs DSH's goal: the loop the team asked for is this one, and
@@ -261,7 +293,7 @@ export function install(rt) {
     parameters: {
       to: { type: 'string', required: true, description: 'Bot ID or exact Bot name from list_bots' },
       message: { type: 'string', required: true, description: 'Self-contained message; the other Bot cannot see this conversation' },
-      images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along, each by its name, sha256 or saved path as your own chat shows it; the other Bot gets its own copy. Only pictures you were given.' },
+      images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along by name, sha256 or saved path as your own chat shows it. In a designated RESULT review you can also give the paths of image files inside your result folder.' },
       reply_to: {
         type: 'string',
         enum: ['me', 'user', 'none'],
@@ -309,10 +341,12 @@ export function install(rt) {
       let text = absoluteLinks(String(args.message), rt.sessionFolder?.(exec.agent?.session ?? exec.agent))
       const room = rt.roomOf(rt.groupOwners.get(exec.agent?.id)?.roomId)
       const images = []
+      const resultReview = args.solver_review === 'result'
+      const editInput = createEditInput({ rt, ctx })
       if (Array.isArray(args.images) && args.images.length > 0) {
         if (room !== undefined || rt.groupOwners.has(exec.agent?.session?.id ?? exec.agent?.id)) return refusedMessage('Not sent: forward pictures from your own chat.')
-        for (const selector of args.images) {
-          try { images.push(await createEditInput({ rt, ctx }).findPicture(exec, selector, exec.signal)) } catch (error) {
+        for (const selector of resultReview ? [] : args.images) {
+          try { images.push(await editInput.findPicture(exec, selector, exec.signal)) } catch (error) {
             return refusedMessage(`${JSON.stringify(selector)}: ${error.message}`)
           }
         }
@@ -329,6 +363,7 @@ export function install(rt) {
           when: designating || args.when === 'queue' ? 'queue' : 'now',
           ...(designating ? { solver_review: args.solver_review, solver_request: args.solver_request } : {}),
           ...(images.length > 0 ? { images: images.map(ref => ref.attachmentId).sort() } : {}),
+          ...(resultReview && args.images?.length > 0 ? { images: [...args.images].sort() } : {}),
         },
       })
       // What the caller gets for a request that was admitted before.
@@ -361,11 +396,14 @@ export function install(rt) {
       if (rt.upstreamOf(works).has(target.id)) {
         return refusedMessage(`Not sent: ${target.name} is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back. Finish the work and end your turn; to ask ${target.name} something, end your turn with the question.`)
       }
-      const send = async () => {
-        if (images.length > 0 && rt.isPrivate(sender.id)) {
-          await rt.approvePictureForward(exec, { sender, target, images })
+      const authorizePictures = async pictures => {
+        if (pictures.length > 0 && rt.isPrivate(sender.id)) {
+          await rt.approvePictureForward(exec, { sender, target, images: pictures })
           exec.signal?.throwIfAborted()
         }
+      }
+      const send = async () => {
+        if (!resultReview) await authorizePictures(images)
         const work = toUser || noReply ? undefined : works[0]
         const chat = rt.chatOf(target.id)
         const agent = await rt.resolveAgent(chat)
@@ -381,6 +419,9 @@ export function install(rt) {
         if (designating) {
           long = await rt.solverReview(sender, target, true, {
             kind: args.solver_review, request: args.solver_request, exchangeId: reviewExchange, agent: exec.agent,
+            ...(resultReview ? { pictures: { selectors: args.images, signal: exec.signal,
+              find: selector => editInput.findPicture(exec, selector, exec.signal, { requireExhaustion: true }),
+              authorize: authorizePictures } } : {}),
             prepare: (kind, checks, commands) => {
               const stage = kind.toUpperCase()
               const evidence = commands ? `\nAgreed check commands: ${JSON.stringify(commands)}` : ''
@@ -395,6 +436,9 @@ export function install(rt) {
         // Nothing went out, so a named request must not take this as a delivered
         // receipt: admitRequest drops the pending record instead, and a retry can send.
         if (long === undefined) { if (request !== undefined) request.unsent = true; return refusedMessage(tooLong(text)) }
+        if (long.images) images.push(...long.images)
+        const currentReview = () => !exec.signal?.aborted && rt.chatOf(target.id) === chat
+          && rt.resultReviewCurrent(sender, target, args.solver_request, reviewExchange)
         const joins = before !== undefined && agent.inbox?.remove?.(earlier.message.id) === true
         if (before !== undefined && !joins) long = await rt.attachLong(text, `Message from ${sender.name}.txt`) ?? long
         const working = rt.live.get(chat)?.turn !== undefined
@@ -405,13 +449,21 @@ export function install(rt) {
         const mergedNoReply = noReply && (joins ? earlierNoReply : true)
         if (joins) rt.forgetDelivery?.(exchangeId)
         try {
+          if (resultReview && !currentReview()) throw refusal('The Solver request changed before the review could be sent.')
           // A request that owes a reply needs its work, also when it grew out of an
           // earlier no-reply message that had none.
           if (!toUser && !mergedNoReply && state.works?.[exchangeId] === undefined) {
             rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work,
               ...(designating ? { name: `solver-review-${args.solver_review}` } : {}) })
           }
-          await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(mergedNoReply ? { noReply: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
+          const delivered = await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, resultReview, ...(joins ? { merged: true } : {}), ...(mergedNoReply ? { noReply: true } : {}), ...(toUser ? { audience: 'user' } : {}) },
+            resultReview ? { shouldSend: currentReview } : undefined)
+          if (resultReview && delivered === undefined) {
+            if (request !== undefined) request.unsent = true
+            rt.forgetDelivery?.(exchangeId)
+            rt.dropWork(exchangeId)
+            throw refusal('The Solver request changed before the review could be sent.')
+          }
         } catch (error) {
           // The delivery stays noted for the next start while its Bot exists
           // (resume.js), and the resent request still answers up the tree, so the
@@ -436,6 +488,8 @@ export function install(rt) {
                 : `Delivered to ${target.name}. Its reply will arrive later as a new message; do not wait for it.`
         const asker = work !== undefined && rt.ownsWork(sender.id, work) ? rt.botOf(state.works[work].from)?.name : undefined
         const notes = [
+          long.reviewNotice,
+          long.reviewComplete ? await reviewPictureReceipt(rt, agent, chat) : '',
           joins ? `${target.name} had not read your earlier message yet, so this one was added to it, ${mergedNoReply ? 'and it reads them together.' : 'and it answers both at once.'}` : '',
           status === 'idle' ? '' : `${target.name} now: ${status}.`,
           asker ? `When you have handed on everything, end your turn: each reply brings you back to this work, and your answer goes to ${asker} once all of it is back.` : '',
@@ -963,14 +1017,7 @@ export function install(rt) {
       const id = exec.agent?.id
       if (rt.groupOwners.has(id)) return 'Question cards only work in your own chat. In a group, ask in your message instead.'
       if (!rt.chatOwners.has(id)) return `Only Bots on the team can use ask_user. Use ${BLOCKING_QUESTION_TOOL} if it is available in this session, or ask the user in your reply.`
-      const options = (Array.isArray(args.options) ? args.options : [])
-        .map(option => (typeof option === 'string' ? { label: option } : option ?? {}))
-        .map(option => ({
-          label: String(option.label ?? '').trim(),
-          ...(option.description ? { description: String(option.description).trim() } : {}),
-        }))
-        .filter(option => option.label !== '')
-        .slice(0, 6)
+      const options = questionOptions(args.options)
       if (options.length === 0) return 'Give at least one option.'
       const card = {
         id: randomUUID(),
@@ -1176,7 +1223,7 @@ export function install(rt) {
   const syncScopedTools = () => {
     // unscope() deletes as it goes, which a Map keys iterator takes in stride.
     for (const id of scoped.keys()) {
-      if (!rt.isBotSession(id) && rt.roomOf(id) === undefined) unscope(id)
+      if (!rt.isBotSession(id) && rt.roomOf(id) === undefined && !scoped.get(id)?.skill) unscope(id)
     }
     // A reload lifts the scope of Agents that are still live, and an adopted
     // file can newly own one that already runs: scope each live Agent the team
@@ -1189,7 +1236,7 @@ export function install(rt) {
   // A wanted Session whose Agent cannot take scoped tools yet is warned about
   // once; held.tools stays unset, so the next step's check tries again.
   const registerless = new WeakSet()
-  const packageToolCollision = name => [...scoped.values()].some(held => !held.relay
+  const packageToolCollision = name => [...scoped.values()].some(held => !held.relay && !held.skill
     && !held.packageNames?.includes(name) && ctx.tools?.get?.(name, held.agent) !== undefined)
   const syncPackageTools = (agent, held) => {
     const role = rt.roleRuntime?.tools?.(agent, held.packageKey)
@@ -1228,7 +1275,8 @@ export function install(rt) {
     const id = agent.session?.id
     const owns = rt.isBotSession(id)
     const relayOnly = !owns && rt.roomOf(id) !== undefined
-    const wanted = owns || relayOnly
+    const skillOnly = !owns && !relayOnly && rt.skillCalls?.workerAvailable?.(id, agent) === true
+    const wanted = owns || relayOnly || skillOnly
     let held = scoped.get(id)
     // The local-agent tools (the CLI permission bridge) join the scope only of
     // a Bot whose route is a local agent; they are not in rt.teamTools. A Bot
@@ -1238,18 +1286,20 @@ export function install(rt) {
     // A Session that left the team, a scope of the wrong kind, a fresh Agent
     // for one Session, or a Bot that changed between a local route and a model
     // all start over; a wanted scope is registered again below.
-    if (held !== undefined && (!wanted || held.agent !== agent || held.relay !== relayOnly || (held.tools === true && held.local !== localBot))) {
+    if (held !== undefined && (!wanted || held.agent !== agent || held.relay !== relayOnly ||
+        (held.skill === true) !== skillOnly || (held.tools === true && held.local !== localBot))) {
       unscope(id)
       held = undefined
     }
     if (!wanted) return
+    const definitions = [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]
+      .filter(def => (!relayOnly || def.name === 'group_relay') && (!skillOnly || def.name === SKILL_TOOL))
     // A live Agent can be scoped while the modules that add tools are still installing:
     // loading the plugin again walks the live Agents from the load the memory module
     // starts, and the tools added after it (memory, secrets, connectors) would never
     // join that scope. Register what it is missing, so the next request is whole.
     if (held?.tools === true) {
-      for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
-        if (relayOnly && def.name !== 'group_relay') continue
+      for (const def of definitions) {
         if (def.name === 'solver_progress' && !rt.chatOwners.has(id)) continue
         if (held.added?.has(def.name) === true) continue
         try {
@@ -1284,8 +1334,7 @@ export function install(rt) {
     const disposers = []
     const failed = []
     const registered = []
-    for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
-      if (relayOnly && def.name !== 'group_relay') continue
+    for (const def of definitions) {
       if (def.name === 'solver_progress' && !rt.chatOwners.has(id)) continue
       try {
         const dispose = registerTrustedTool(agent.ctx.tools, def)
@@ -1304,6 +1353,7 @@ export function install(rt) {
     held ??= { relay: relayOnly, tools: false, restricted: false, filtered: false, disposers: [], unlisted: new Set() }
     held.agent = agent
     held.relay = relayOnly
+    held.skill = skillOnly
     held.tools = true
     held.local = localBot
     held.disposers.push(...disposers)
@@ -1347,7 +1397,7 @@ export function install(rt) {
     if (rt.teamTools.some(tool => tool.name === def.name)) return
     rt.teamTools.push(def)
     for (const held of scoped.values()) {
-      if (held.relay || typeof held.agent?.ctx?.tools?.register !== 'function') continue
+      if (held.relay || held.skill || typeof held.agent?.ctx?.tools?.register !== 'function') continue
       try {
         const dispose = held.agent.ctx.tools.register(def)
         if (typeof dispose === 'function') held.disposers.push(dispose)
@@ -1410,9 +1460,17 @@ export function install(rt) {
       } catch { /* the executor guard still refuses the call */ }
     }
   }
+  const dropUnavailableWorkerTools = () => {
+    for (const [id, held] of scoped) {
+      if (held.skill && rt.skillCalls?.workerAvailable(id, held.agent) !== true) unscope(id)
+    }
+  }
   const reapplyToolMasks = () => {
+    // Local tools bypass DSH masks. Lift the definition as soon as a
+    // profile filter changes so the ACP bridge observes the same surface.
+    dropUnavailableWorkerTools()
     for (const held of scoped.values()) {
-      if (held.agent === undefined) continue
+      if (held.agent === undefined || held.skill) continue
       try { maskConnectorTools(held.agent, held) } catch (error) { rt.warn('omni-ui: connector mask failed: %s', error) }
       try { maskRoleTools(held.agent, held) } catch (error) { rt.warn('omni-ui: role mask failed: %s', error) }
     }
@@ -1477,6 +1535,22 @@ export function install(rt) {
     maskConnectorTools(agent, held)
     maskRoleTools(agent, held)
   }
+  rt.syncWorkerSkillTool = shareBotTools
+  rt.dropUnavailableWorkerTools = dropUnavailableWorkerTools
+  rt.workerSkillInStep = id => {
+    const held = scoped.get(id)
+    return held?.stepTools?.view(held.agent).has(SKILL_TOOL) === true
+  }
+  rt.canUseWorkerSkillTool = id => {
+    const held = scoped.get(id)
+    const agent = held?.agent
+    if (!held?.skill || !held.added?.has(SKILL_TOOL) || rt.skillCalls?.workerAvailable(id, agent) !== true) return false
+    const agents = ctx.get?.('agents')
+    if (typeof agents?.get === 'function' && agents.get(id) !== agent) return false
+    const tools = ctx.get?.('tools') ?? ctx.tools
+    return typeof tools?.executable !== 'function' ||
+      tools.executable(SKILL_TOOL, agent) === rt.teamTools.find(def => def.name === SKILL_TOOL)
+  }
   ctx.on('tools/change', () => reapplyToolMasks())
   // A new Bot, part, or group Session gets its Agent before ds-bot records it, so the
   // recording path resolves it again once the session is known as a Bot's; meanwhile
@@ -1529,6 +1603,7 @@ export function install(rt) {
     }
     let assembled = await next()
     const held = scoped.get(agent.session?.id)
+    if (held?.skill) held.stepTools = context.toolSet
     if (held?.removedPackages?.size && Array.isArray(assembled.tools)) {
       assembled = { ...assembled, tools: assembled.tools.filter(tool => !held.removedPackages.has(tool.name)) }
       held.removedPackages.clear()

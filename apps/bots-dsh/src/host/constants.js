@@ -69,6 +69,7 @@ export const HANDOFF_ACK = 'Noted. I have my handoff note and carry on from here
 export const LATE_ANSWER = '[Late answer: the user had already given up waiting for this work; its result was settled then.]\n\n'
 // An answer from a question card, in the shape DSH's own late question replies use.
 export const REPLY_KIND = 'user-question-reply'
+export const COMPUTER_HANDOFF_OFF = 'Computer use is off for you.'
 // DSH's snapshot of a referenced conversation, logged right after the user's message
 // that cites it.
 export const REFERENCE_KIND = 'session-reference'

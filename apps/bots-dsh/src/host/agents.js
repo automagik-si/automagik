@@ -1177,14 +1177,17 @@ export function install(rt) {
   }
   async function startTaskWithAdmission(args, admission) {
     const launch = taskLaunch(args.from, admission)
+    // DSH's turn loop reads every input's source: the instructions arrive as the user's.
+    const instructions = createUserMessage({ content: [{ type: 'text', text: args.text }], source: { kind: 'user' } })
     let started
     try {
       const live = await settleTaskAllocation(launch, async () => {
-        const child = await prepareTask(args, (sessionId) => { started = rt.startingSession?.(sessionId) }, launch, admission)
+        const child = await prepareTask(args, instructions.id,
+          (sessionId) => { started = rt.startingSession?.(sessionId) }, launch, admission)
         launch.check()
         if (admission !== undefined && !admission.applied(launch.sessionId, child.session)) throw refusal(LEVEL_UNPROVEN)
-        // DSH's turn loop reads every input's source: the instructions arrive as the user's.
-        child.followup(createUserMessage({ content: [{ type: 'text', text: args.text }], source: { kind: 'user' } }))
+        rt.syncWorkerSkillTool?.(child)
+        child.followup(instructions)
         return child
       })
       const { sessionId } = launch
@@ -1199,12 +1202,14 @@ export function install(rt) {
       started?.()
     }
   }
-  async function prepareTask({ title, from, cwd, agentPreset, roomId, reportRoomId, readScopeSource = rt.callerSessionId?.() }, starting, launch, admission) {
+  async function prepareTask({ title, from, cwd, agentPreset, roomId, reportRoomId, readScopeSource = rt.callerSessionId?.() },
+    instructionsId, starting, launch, admission) {
     launch.check()
     // Read before the first await: the tool call this runs in may return before the rest.
     const opener = from === undefined ? undefined : rt.callerLevel?.()
     const autoOpener = rt.autoOpener?.()
     const levelTaskId = rt.callerTask?.()
+    const skills = rt.skillCalls?.snapshot(rt.callerSessionId?.(), from, instructionsId)
     const parent = levelTaskId === undefined ? undefined : state.tasks?.[levelTaskId]
     if (levelTaskId !== undefined) rt.assertTaskDepth(levelTaskId)
     const levelRoomId = roomId || from === undefined ? undefined : rt.callerGroup?.() ?? parent?.levelRoomId ?? parent?.roomId
@@ -1227,7 +1232,8 @@ export function install(rt) {
     // Until its start is decided: a re-apply DSH asks for meanwhile must not lower the task
     // in place of the refusal a saved level that is no longer offered gets (permissions.js).
     starting(sessionId)
-    const task = tasks()[sessionId] = { title: String(title).slice(0, AGENT_SESSION_TITLE_MAX), from, at: Date.now(), status: 'working', ...(roomId ? { roomId } : {}), ...(reportRoom !== undefined && !roomId ? { reportRoomId: reportRoom.id } : {}), ...(levelRoomId ? { levelRoomId } : {}), ...(levelTaskId ? { levelTaskId } : {}) }
+    if (tasks()[sessionId] !== undefined) throw refusal('This Session already has a task.')
+    const task = tasks()[sessionId] = { title: String(title).slice(0, AGENT_SESSION_TITLE_MAX), from, at: Date.now(), status: 'working', ...(roomId ? { roomId } : {}), ...(reportRoom !== undefined && !roomId ? { reportRoomId: reportRoom.id } : {}), ...(levelRoomId ? { levelRoomId } : {}), ...(levelTaskId ? { levelTaskId } : {}), ...skills }
     launch.task = task
     if (admission === undefined) rt.capTaskByOpener?.(task, opener)
     else Object.assign(task, { botBound: true, permissionCap: admission.snapshot.opener, openerRank: admission.snapshot.openerRank })
@@ -1280,7 +1286,7 @@ export function install(rt) {
       && tasks()[id].status !== 'working' && !needed.has(id))
       .map(id => [id, rt.taskLevelOf(id)])
     for (const [id] of forgotten) delete tasks()[id]
-    await rt.save()
+    await rt.save(skills === undefined ? undefined : { required: true, durable: true })
     for (const [id, ranAt] of forgotten) {
       await rt.forgetTaskPermission(id, ranAt)
         .catch(error => rt.warn('ds-bot: the old task %s keeps its permission, the default was not applied: %s', id, error?.message ?? error))

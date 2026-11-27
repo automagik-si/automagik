@@ -1,6 +1,6 @@
 {
   "name": "@automagik/bots-dsh",
-  "version": "3.175.12",
+  "version": "3.177.0",
   "description": "Omni for DeepSeek Harness: a team of long-lived Bots with Omni as the Main Bot; its channels and canvases come with @automagik/omni-channels-dsh and @automagik/omni-canvas-dsh",
   "keywords": [
     "dsh-plugin",
@@ -73,6 +73,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-attachment-local": "*",
     "@deepseek-ai/dsh-fs-local": "*",
     "@deepseek-ai/dsh-fs-patch": "*",
     "@deepseek-ai/dsh-fs-sandbox": "*",
@@ -88,6 +89,9 @@
     "@deepseek-ai/dsh-web": "*"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-attachment-local": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-fs-local": {
       "optional": true
     },

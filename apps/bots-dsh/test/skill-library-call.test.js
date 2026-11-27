@@ -357,3 +357,32 @@ test('call-only skills stay absent until explicitly called and never load autono
   assert.deepEqual(latest.filter(row => row.role === 'tool').at(-1).content, [])
   assert.ok(latest.some(row => row.role === 'tool' && row.content[0]?.text === x.content))
 })
+
+test('2083 follows only established skill lineage and stops on missing, cyclic or deep headers', () => {
+  const sessions = new Map()
+  const add = (id, parentSession) => sessions.set(id, { header: { id, origin: 'subagent', parentSession } })
+  add('child', 'chat')
+  add('task-child', 'task')
+  add('stray', 'other')
+  add('cycle-a', 'cycle-b')
+  add('cycle-b', 'cycle-a')
+  for (let i = 1; i <= 33; i++) add(`depth-${i}`, i === 1 ? 'chat' : `depth-${i - 1}`)
+  const rt = {
+    ctx: { on() {}, sessions: { get: id => sessions.get(id) } },
+    selfOf: id => id === 'chat' ? 'bot-a' : undefined,
+    botOf: id => id === 'bot-a' ? { id } : undefined,
+    skillLibrary: { active: () => [x, privateSkill] },
+    canUseWorkerSkillTool: () => true,
+    state: { tasks: { task: { skillsOwner: 'bot-a', skillsInstructionsId: 'initial-id', skills: [x] } } },
+  }
+  install(rt)
+  assert.equal(rt.skillCalls.load('child', 'marker')?.text, x.content)
+  assert.ok(rt.skillCalls.catalog('child').text.includes(privateSkill.description))
+  assert.equal(rt.skillCalls.load('task-child', 'marker')?.text, x.content)
+  assert.equal(rt.skillCalls.load('task-child', privateSkill.name), undefined)
+  assert.ok(rt.skillCalls.catalog('depth-32').text.includes(x.description))
+  for (const id of ['stray', 'cycle-a', 'depth-33', 'other']) {
+    assert.equal(rt.skillCalls.catalog(id).text, '')
+    assert.equal(rt.skillCalls.load(id, x.name), undefined)
+  }
+})

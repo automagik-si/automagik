@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22); RFC 0030's 2026-11-23 amendment (#2061) carries a Bot's own chat across a harness change with a handoff and read_own_chat, and adds the one-tool dsh-history bridge for agents without the bridge) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22); RFC 0030's 2026-11-23 amendment (#2061) carries a Bot's own chat across a harness change with a handoff and read_own_chat, and adds the one-tool dsh-history bridge for agents without the bridge; amended 2026-11-26 (#2061 D2d: history shares the existing dsh bridge)) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -533,6 +533,13 @@ picked route; the new agent reads the chat with `read_own_chat`, over the `dsh` 
 agent whose bridge is off (omp, Antigravity), over `dsh-history`, a bridge that lists and runs only
 that tool.
 
+**2026-11-26 amendment (#2061 D2d).** omp and Antigravity share the existing `dsh` bridge for
+`load_skill` and `read_own_chat`. Its restricted allowlist can contain either tool as eligibility
+permits. Antigravity offers history with Native tools ON. Antigravity's history read is authorized
+on the bridge's own request (One dialog per call), by the Bot's level. With Native tools OFF, history stays
+silently unavailable and the handoff note still reaches the fresh part. Hermes keeps
+`needs-new-conversation` under RFC 0030.
+
 **Off an agent, onto an API model (the Bot team).** For route writers that remain, including
 the native Session picker and fallback selection, the Bot team measures the chat against
 the destination's own switch threshold before DSH's guard runs, computed as
@@ -855,6 +862,13 @@ with exact pathname identity/bytes/nonce revalidation, permits removal. No heart
 ownership. Live legacy registrations cannot distinguish PID reuse and remain conservative;
 legacy markers that lack login-tree evidence are retained.
 Launches capture an account generation so delayed work cannot start under a later account.
+
+**Fresh chat sign-in (#2113).** Claude Code and Codex start in an empty, unselected vendor
+home without copying or linking credentials. Cancellation or failed authentication discards
+that home after the attempt's processes stop and preserves the selected home and its Sessions.
+After confirmed authentication, the Bot selects the attempt home and removes the previously
+selected home after its processes stop. This removal applies to the two homes involved in the
+fresh chat attempt. Reset's retention rules still apply to Reset.
 
 **Crash recovery and owner Reset.** Automatic app-crash recovery is Unix-only and requires the
 recorded login group's exit proof. Windows app death leaves its login record blocked, even if

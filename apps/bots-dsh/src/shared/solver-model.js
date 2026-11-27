@@ -27,11 +27,19 @@ export const RESULT_UNVERIFIED = Object.freeze({
   held: MODEL_UNVERIFIED,
   same: 'The reviewer used the same model as the Solver.',
   verdict: 'The reviewer did not give a strict verdict.',
+  images: 'The result has pictures and the reviewer could not see them.',
 })
 
 export const unverifiedReason = reason => typeof reason === 'string' && Object.hasOwn(RESULT_UNVERIFIED, reason) ? reason : undefined
-export const unverifiedNotice = reason => unverifiedReason(reason)
-  ? `[Automagik: RESULT review is unverified. ${RESULT_UNVERIFIED[reason]} Keep this request unmarked Done.`
+export const RESULT_IMAGES_UNVERIFIED = Object.freeze({
+  unseen: RESULT_UNVERIFIED.images,
+  lost: 'The reviewer’s answering turn lost the result pictures. Ask for a fresh RESULT review with the pictures.',
+  missing: 'The result pictures were not all carried. Ask for a fresh RESULT review with the pictures.',
+})
+export const unverifiedText = (reason, imagesWhy) => reason === 'images' && Object.hasOwn(RESULT_IMAGES_UNVERIFIED, imagesWhy)
+  ? RESULT_IMAGES_UNVERIFIED[imagesWhy] : RESULT_UNVERIFIED[reason]
+export const unverifiedNotice = (reason, imagesWhy) => unverifiedReason(reason)
+  ? `[Automagik: RESULT review is unverified. ${unverifiedText(reason, imagesWhy)} Keep this request unmarked Done.`
     + (reason === 'held' ? ' Ask the designated reviewer once more on the same checked work.]' : ']')
   : undefined
 
@@ -39,7 +47,7 @@ export const unverifiedNotice = reason => unverifiedReason(reason)
 // records and rebuild the block only while the matching request still owns it.
 export function originalReviewContent(message) {
   const { content, source } = message
-  const notice = unverifiedNotice(source?.reviewFeedback)
+  const notice = unverifiedNotice(source?.reviewFeedback, source?.reviewImagesWhy)
   const tail = content?.at(-1)
   return notice && tail?.type === 'text' && tail.text === notice ? content.slice(0, -1) : content
 }

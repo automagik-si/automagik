@@ -2,7 +2,7 @@
 // triggered, the waiters and inboxes of group rounds, and routing a finished turn's reply.
 //
 // Turn tracking: which turns were triggered by another Bot, and what they said.
-import { originalReviewContent } from '../shared/solver-model.js'
+import { chosenIdentity, originalReviewContent } from '../shared/solver-model.js'
 import { requestedSkills } from './skill-library-call.js'
 import { chatPersonParts, personParts } from './skill-message.js'
 import { randomUUID } from 'node:crypto'
@@ -13,6 +13,7 @@ import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
 import { rawTextOf, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
+import { BRIDGE_ACTIVITY_RECORD, bridgeOriginOf, toolEventOf } from '../shared/tool-activity.js'
 import { reminderText } from './schedules.js'
 import { modelOf, replyModel } from './solver-progress.js'
 
@@ -139,7 +140,7 @@ function sendAnswer(rt, id, source, text, long, shouldSend, model, review, solve
   // The verdict uses the selected reviewer's own reply. Notices and child results
   // still travel with the answer and receipt, without supplying verdict evidence.
   const onReplyRecorded = rt.reviewVerdict?.(fromId, source.senderSessionId, source.senderRoomId, review?.reviewText,
-    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine, solverEvents, review?.legacyHeld)
+    answered?.at, reply, reply === undefined ? undefined : model, review?.firstLine, solverEvents, review?.legacyHeld, review?.generation)
   const durableResult = onReplyRecorded?.ready !== undefined
   if (durableResult) closingReviews.add(answered)
   const generation = rt.teamGeneration?.()
@@ -588,6 +589,18 @@ export function install(rt) {
   const noting = (id, turn) => rt.handoffNoteTurn?.(id, turn) === true || rt.writingNote?.(id) === true
   // The round counter: a group Session's events keep its round's waiter alive and mark work.
   const countsInRound = id => rt.groupOwners.has(id) && !noting(id, live.get(id)?.turn)
+  const writeRoomTool = (id, source, event) => {
+    const activity = toolEventOf(event)
+    if (activity) {
+      try { rt.roomToolActivity?.(id, source, activity) }
+      catch { rt.warn('Group tool activity could not be recorded') }
+    }
+  }
+  const recordRoomTool = (id, entry, event, turn) => {
+    if (entry.roomToolSource && Number.isSafeInteger(turn) && entry.turn === turn && countsInRound(id)) {
+      writeRoomTool(id, entry.roomToolSource, event)
+    }
+  }
 
   // The group hears what the member says while it works. A text with a tool call goes
   // on at once; one without may be the turn's last, so it waits for the next text or the
@@ -914,7 +927,7 @@ export function install(rt) {
       return
     }
     const entry = liveOf(id)
-    if (countsInRound(id)) rt.touchRoomTurn?.(id)
+    if (event.type !== BRIDGE_ACTIVITY_RECORD && countsInRound(id)) rt.touchRoomTurn?.(id)
     switch (event.type) {
       case 'subagent/catalog': {
         const childId = event.data?.childId
@@ -925,6 +938,7 @@ export function install(rt) {
       case 'tool/call': {
         const name = String(event.data?.name ?? '')
         startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''), session, event)
+        recordRoomTool(id, entry, event, event.data?.turn)
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (name !== PROGRAM_TOOL) {
           entry.toolCount = (entry.toolCount ?? 0) + 1
@@ -934,9 +948,16 @@ export function install(rt) {
       }
       case 'tool/ptc-dispatch-start': {
         const name = String(event.data?.name ?? '')
+        recordRoomTool(id, entry, event, entry.calls?.get(event.data?.rootCallId)?.turn)
         startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}))
         entry.toolCount = (entry.toolCount ?? 0) + 1
         if (countsInRound(id)) rt.workRoomTurn?.(id, name)
+        break
+      }
+      case BRIDGE_ACTIVITY_RECORD: {
+        const origin = bridgeOriginOf(event)
+        const source = entry.roomToolSources?.get(origin?.turn)
+        if (source && source.exchangeId === origin.exchangeId) writeRoomTool(id, source, event)
         break
       }
       case 'tool/ptc-dispatch':
@@ -969,6 +990,7 @@ export function install(rt) {
         entry.texts = []
         entry.rawTexts = []
         entry.textModels = []
+        entry.textGenerations = []
         entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
@@ -979,6 +1001,7 @@ export function install(rt) {
         entry.switched = false
         entry.answers = false
         entry.opened = false
+        entry.roomToolSource = undefined
         entry.reviewReplyRequest = undefined
         entry.consumedResult = undefined
         entry.joined = []
@@ -1000,6 +1023,7 @@ export function install(rt) {
           entry.texts = carry.texts
           entry.rawTexts = carry.rawTexts
           entry.textModels = carry.textModels
+          entry.textGenerations = carry.textGenerations
           entry.firstLine = carry.firstLine
           entry.shown = carry.shown
           entry.answers = carry.answers
@@ -1053,6 +1077,14 @@ export function install(rt) {
         // still claims it as today, a later one only joins it.
         const opened = entry.opened === true
         if (entry.turn !== undefined && !bare(source) && opensTurn(event.data)) {
+          if (!opened && source?.kind === SOURCE_KIND && source.role === 'room') {
+            entry.roomToolSource = source
+            if (Number.isSafeInteger(entry.turn) && countsInRound(id)) {
+              const sources = entry.roomToolSources ??= new Map()
+              if (!sources.has(entry.turn)) sources.set(entry.turn, source)
+              if (sources.size > 400) sources.delete(sources.keys().next().value)
+            }
+          }
           entry.opened = true
         }
         if (entry.turn !== undefined && opensTurn(event.data)) {
@@ -1256,7 +1288,8 @@ export function install(rt) {
         }
         break
       case 'assistant/message': {
-        const content = event.data?.message?.content
+        const generation = rt.generationForReply?.(session, event)
+        const { source, content } = event.data?.message ?? {}
         const raw = rawTextOf(content)
         const text = raw.trim()
         const called = Array.isArray(content) && content.some(block => block?.type === 'tool-call')
@@ -1266,7 +1299,9 @@ export function install(rt) {
           entry.texts.push(absoluteLinks(text, rt.sessionFolder?.(session)))
           entry.rawTexts.push(raw)
           entry.textModels ??= []
-          entry.textModels.push(modelOf(session))
+          entry.textModels.push(source?.kind === 'model' ? chosenIdentity(source.provider, source.model) : modelOf(session))
+          entry.textGenerations ??= []
+          entry.textGenerations.push(generation)
           if (entry.turn !== undefined) showSteps(id, entry, called ? entry.texts.length : entry.texts.length - 1)
         }
         entry.lastText = text
@@ -1290,7 +1325,8 @@ export function install(rt) {
         const noteTurn = rt.handoffNoteTurn?.(id, entry.turn ?? event.data?.turn) === true
         if (steerCut) {
           entry.carry = { info: entry.info, joined: entry.joined ?? [], later: entry.later ?? [], texts: entry.texts.slice(0, cut.texts), shown: entry.shown, answers: entry.answers, toolCount: entry.toolCount ?? 0,
-            rawTexts: entry.rawTexts.slice(0, cut.texts), textModels: entry.textModels?.slice(0, cut.texts) ?? [], firstLine: cut.texts > 0 ? entry.firstLine : undefined }
+            rawTexts: entry.rawTexts.slice(0, cut.texts), textModels: entry.textModels?.slice(0, cut.texts) ?? [],
+            textGenerations: entry.textGenerations?.slice(0, cut.texts) ?? [], firstLine: cut.texts > 0 ? entry.firstLine : undefined }
         }
         const info = entry.info
         const joined = entry.joined ?? []
@@ -1304,6 +1340,7 @@ export function install(rt) {
         // Exact stage verdicts use the reviewer's own first line, before reply formatting.
         const reviewFirstLine = entry.shown === 0 ? entry.firstLine ?? '' : ''
         const textModels = entry.textModels?.slice(entry.shown) ?? []
+        const textGenerations = entry.textGenerations?.slice(entry.shown) ?? []
         const toolCount = entry.toolCount ?? 0
         const suppressedSubagent = entry.suppressedSubagent === true
         // A turn stopped for a switch goes on in the next part, which answers instead.
@@ -1317,9 +1354,11 @@ export function install(rt) {
         entry.turn = undefined
         entry.adoptedTurn = undefined
         entry.info = undefined
+        entry.roomToolSource = undefined
         entry.texts = []
         entry.rawTexts = []
         entry.textModels = []
+        entry.textGenerations = []
         entry.firstLine = undefined
         entry.shown = 0
         entry.step = undefined
@@ -1405,6 +1444,7 @@ export function install(rt) {
         const model = reason?.kind === 'completed' ? modelOf(session) : undefined
         const name = rt.botOf(rt.selfOf(id))?.name ?? 'The other Bot'
         const answerModel = reason?.kind === 'completed' ? replyModel(rawTexts, textModels, reviewFirstLine, name) : undefined
+        const generation = reason?.kind === 'completed' ? replyModel(rawTexts, textGenerations, reviewFirstLine, name) : undefined
         if (owner !== undefined && !retry) {
           const request = entry.reviewReplyRequest ?? (info === undefined || info.role === 'continue' ? entry.solverRequest : undefined)
           const mark = request => rt.reviewTurnEnd?.(owner, {
@@ -1433,7 +1473,7 @@ export function install(rt) {
           return reply
         }
         const reply = { text: replyText(), reviewText: rawTexts.join('\n\n'),
-          firstLine: reviewFirstLine, model: answerModel }
+          firstLine: reviewFirstLine, model: answerModel, generation }
         const groupReply = () => rt.withRoomSteps?.(held, reply.text) ?? reply.text
         // Whoever the turn answers gets the same three-way rule: a failure notice,
         // the turn's text (or a stopped-before-answer line), or nothing.

@@ -6,6 +6,7 @@ import { AUTOMATIC_SKILL_MODE } from '../shared/skill-mode.js'
 import { routeOf } from '../shared/routes.js'
 import { reservedCommandOf } from '../shared/reserved-commands.js'
 import { SKILL_ACTIVITY_RECORD } from '../shared/skill-activity.js'
+import { MAX_SESSION_LINEAGE_DEPTH } from './bot-sessions.js'
 import { GROUP_MEMORY_SOURCE, MEMORY_RECALL_SOURCE, MEMORY_UPDATE_SOURCE } from './memory-copy.js'
 import { freezeLoopRequest } from './secrets.js'
 import { skillName } from './skill-library-rules.js'
@@ -15,8 +16,90 @@ export { SKILL_TOOL } from './skill-message.js'
 
 const GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)|\b(?:use the skill|use a skill)\s+([a-z0-9-]+)\b|使用技能\s*([a-z0-9-]+)/gi
 const acp = provider => routeOf(provider).connectedBy === 'acp'
-const ownerOf = (rt, id) => rt.selfOf(id)
-const activeOf = (rt, id) => rt.skillLibrary?.active(ownerOf(rt, id)) ?? []
+function skillOwner(rt, sessionId, session) {
+  const lineage = []
+  const seen = new Set()
+  const { ctx } = rt
+  let id = sessionId
+  try {
+    while (typeof id === 'string' && lineage.length <= MAX_SESSION_LINEAGE_DEPTH && !seen.has(id)) {
+      seen.add(id)
+      const task = rt.state?.tasks?.[id]
+      if (typeof task?.skillsOwner === 'string' && Array.isArray(task.skills) &&
+          typeof task.skillsInstructionsId === 'string' && rt.botOf(task.skillsOwner)) {
+        return { botId: task.skillsOwner, task, lineage, root: id, kind: lineage.length ? 'subagent' : 'task' }
+      }
+      const botId = rt.selfOf(id)
+      if (rt.botOf(botId)) {
+        if (lineage.length && !keepsGroupMembership(rt, id, botId)) return
+        return { botId, lineage, root: id, kind: lineage.length ? 'subagent' : 'own' }
+      }
+      // ACP can replay a retained Session after DSH detaches it from the registry.
+      const header = id === sessionId && session !== undefined ? session.header
+        : (ctx.sessions ?? ctx.get?.('sessions'))?.get?.(id)?.header
+      if (header?.origin !== 'subagent') return
+      lineage.push(id)
+      id = header.parentSession
+    }
+  } catch { /* An unavailable lineage cannot establish ownership. */ }
+}
+
+function keepsGroupMembership(rt, sessionId, botId) {
+  const group = rt.groupOwners?.get(sessionId)
+  return group === undefined || rt.roomOf(group.roomId)?.members?.includes(botId) === true
+}
+
+function hasCurrentRoot(rt, owner) {
+  return (owner.task !== undefined || rt.isBotSession?.(owner.root) === true) &&
+    keepsGroupMembership(rt, owner.root, owner.botId)
+}
+
+function nestedDelegationId(session) {
+  const { header, inheritedEventCount } = session
+  if (header.origin !== 'subagent' || !(header.delegationDepth > 1) ||
+      typeof header.parentSession !== 'string' || !Number.isInteger(inheritedEventCount)) return
+  // DSH writes the descriptor before it queues the initial delegated prompt.
+  // Only that child-owned input is proven when live ancestry is unavailable.
+  let described = false
+  for (let seq = inheritedEventCount; seq < session.seq; seq++) {
+    const event = session.eventAt?.(seq)
+    if (!event || session.isOwnSeq?.(seq) !== true) return
+    if (event.type === 'subagent/descriptor') described = true
+    if (event.type !== 'user/message' || event.data.source?.kind !== 'user') continue
+    if (described && event.surfaceOp === 'append') return event.data.id
+    return
+  }
+}
+
+function recordsOf(rt, owner, { worker = false } = {}) {
+  if (owner === undefined) return []
+  const task = owner.task
+  const records = rt.skillLibrary?.active(owner.botId, { worker: worker || task !== undefined }) ?? []
+  if (task === undefined) return records
+  const pins = new Map(task.skills.map(pin => [pin.name, pin]))
+  return records.flatMap(record => {
+    const pin = pins.get(record.name)
+    if (!pin || pin.hash !== record.hash || pin.assignment !== record.assignment || pin.revision !== record.revision ||
+        (pin.mode === AUTOMATIC_SKILL_MODE && record.mode !== AUTOMATIC_SKILL_MODE)) return []
+    return [{ ...record, mode: pin.mode }]
+  })
+}
+
+function permitsWorkerLoad(rt, owner, agent) {
+  if (owner.task?.skillsLoadBlocked === true || rt.teamCurrent?.() === false) return false
+  const { ctx } = rt
+  const agents = ctx.get?.('agents') ?? ctx.agents
+  const tools = ctx.get?.('tools') ?? ctx.tools
+  if (rt.botOf(owner.botId)?.denyTools?.includes(SKILL_TOOL)) return false
+  for (const id of [...owner.lineage, owner.root]) {
+    if (rt.levelHeld?.(id)) return false
+    const live = (agent?.session?.id ?? agent?.id) === id ? agent : agents?.get?.(id)
+    // DSH exempts own-scope tools from restrict(). A worker registration
+    // must still respect the intersection of its profile and Session masks.
+    if (live && tools?.layers?.chainLayers?.(live).some(layer => !layer.admits(SKILL_TOOL))) return false
+  }
+  return true
+}
 const automaticOf = records => records.filter(record => record.mode === AUTOMATIC_SKILL_MODE)
 const keyOf = records => records.map(({ name, hash }) => `${name}:${hash}`).join(',')
 const catalogOf = records => records.length === 0 ? '' : [
@@ -342,8 +425,8 @@ function sessionLedger(session) {
       }
     } else if (event.type === 'tool/result') state.rows.set(event.data.message.id, { seq: event.seq, turn: event.data.turn })
     else if (event.type === DELIVERY_RECORD && Array.isArray(event.data)) {
-      for (const id of event.data) state.delivered.add(id)
-    } else if (event.type === SKILL_ACTIVITY_RECORD) state.activity.add(event.data?.id)
+      if (session.isOwnSeq?.(event.seq) !== false) for (const id of event.data) state.delivered.add(id)
+    } else if (event.type === SKILL_ACTIVITY_RECORD && session.isOwnSeq?.(event.seq) !== false) state.activity.add(event.data?.id)
   }
   return state
 }
@@ -382,8 +465,10 @@ export function skillPart(botId, skill, use = 'person') {
 }
 
 export function loadSkill(rt, sessionId, name) {
-  const skill = automaticOf(activeOf(rt, sessionId)).find(record => record.name === name)
-  return skill && skillPart(ownerOf(rt, sessionId), skill, 'load')
+  const owner = skillOwner(rt, sessionId)
+  if (owner?.kind !== 'own' && rt.canUseWorkerSkillTool?.(sessionId) !== true) return
+  const skill = automaticOf(recordsOf(rt, owner)).find(record => record.name === name)
+  return skill && skillPart(owner.botId, skill, 'load')
 }
 
 export function skillTool(rt) {
@@ -426,17 +511,29 @@ function systemIndexBeforeCall(messages, callIndex) {
 
 export function install(rt) {
   const { ctx } = rt
-  const sessionOf = id => ctx.get?.('sessions')?.get?.(id) ?? ctx.get?.('agents')?.get?.(id)?.session
+  const sessionOf = id => (ctx.get?.('sessions') ?? ctx.sessions)?.get?.(id) ?? ctx.get?.('agents')?.get?.(id)?.session
   const auxiliaryRequest = options => options.purpose !== undefined || rt.ownRequest?.(options) === true
+  const availableRecords = sessionId => {
+    const owner = skillOwner(rt, sessionId)
+    if (owner?.kind === 'own' || rt.canUseWorkerSkillTool?.(sessionId) === true) return automaticOf(recordsOf(rt, owner))
+    return []
+  }
 
   function project(options, { catalog = true, turnStart, historyOnly = false,
-    session = sessionOf(options.sessionId), auxiliary = auxiliaryRequest(options),
+    session: capturedSession, auxiliary = auxiliaryRequest(options),
     personCalls = catalog ? new WeakSet() : undefined } = {}) {
     const messages = options.messages
     if (!Array.isArray(messages)) return options
-    const botId = ownerOf(rt, options.sessionId)
+    const { sessionId } = options
+    const matches = typeof sessionId === 'string' && capturedSession?.id === sessionId && capturedSession.header?.id === sessionId
+    const session = capturedSession === undefined ? sessionOf(sessionId) : matches ? capturedSession : undefined
+    const owner = capturedSession === undefined || matches ? skillOwner(rt, sessionId, capturedSession) : undefined
+    const detachedDelegation = historyOnly && matches && owner === undefined ? nestedDelegationId(session) : undefined
+    const botId = owner?.botId
     const bot = rt.botOf(botId)
-    const records = auxiliary ? [] : activeOf(rt, options.sessionId)
+    const worker = owner !== undefined && owner.kind !== 'own'
+    const permitted = !worker || rt.canUseWorkerSkillTool?.(options.sessionId) === true
+    const records = auxiliary ? [] : recordsOf(rt, owner)
     const automatic = automaticOf(records)
     const current = new Map(records.map(record => [record.name, record]))
     const state = sessionLedger(session)
@@ -454,8 +551,21 @@ export function install(rt) {
       const load = row.role === 'tool' && skillCalls.has(row.toolCallId)
       const { automagikSkillParts, automagikSkillOriginalText, skillRoom, skillRoomLines, skillRequests, ...source } = row.source ?? {}
       const legacyRefusal = state?.refused.get(row.id)
+      const logged = state?.rows.get(row.id)
       let ordinary = projectLegacyContent(row.content, legacyRefusal)
       if (skillRoomLines?.length) ordinary = projectRoomContent(ordinary, skillRoomLines, current)
+      // DSH gives delegated prompts a user source. Both provider input and
+      // ACP replay omit gestures on the child's own Bot-authored rows.
+      const delegated = owner?.kind === 'subagent' && (!logged || session?.isOwnSeq?.(logged.seq) !== false) ||
+        detachedDelegation !== undefined && row.id === detachedDelegation
+      if (delegated && row.source?.kind === 'user') {
+        const names = new Set(requestedSkills(ordinary).map(({ name }) => name))
+        if (names.size > 0) {
+          ordinary = ordinary.map(part => part.type === 'text' && !marker(part)
+            ? { ...part, text: withoutInactiveGestures(part.text, names, emptySet) } : part)
+          if (onlyGesture(ordinary)) { changed = true; return [] }
+        }
+      }
       const parts = Array.isArray(automagikSkillParts)
         ? [...ordinary, ...automagikSkillParts.filter(marker)] : ordinary
       const content = parts?.filter(part => {
@@ -464,9 +574,10 @@ export function install(rt) {
         if (auxiliary || ref.catalog === true) return false
         if (bot === undefined || ref.botId !== botId) return false
         if (state?.delivered.has(receipt(row, part, ref))) return true
+        if (logged && session?.isOwnSeq?.(logged.seq) === false) return false
+        if (ref.use === 'load' && !permitted) return false
         if (state?.incompleteTurn || historyOnly || index < retry || row.source?.resumed === true || row.source?.retried === true) return false
         const fresh = row.role === 'tool' ? index > lastAnswer : index >= start
-        const logged = state?.rows.get(row.id)
         if (!fresh || (logged && (state.turn === undefined || logged.turn !== state.turn ||
           (state.attempt?.turn === logged.turn && state.attempt.seq > logged.seq)))) return false
         const skill = current.get(ref.name)
@@ -487,7 +598,9 @@ export function install(rt) {
       return [{ ...row, content, ...(refused && { isError: true }),
         ...(privateSource ? { source } : {}) }]
     })
-    if (catalog && bot && automatic.length) {
+    const advertised = !worker || options.tools?.some(tool => tool.name === SKILL_TOOL ||
+      (tool.name === RUN_CODE_NAME && rt.workerSkillInStep?.(options.sessionId) === true))
+    if (catalog && bot && automatic.length && permitted && advertised) {
       // Add the current section to the request's system prompt without recording a
       // catalog in the conversation.
       const part = {
@@ -509,12 +622,14 @@ export function install(rt) {
       }
       changed = true
     }
-    return changed ? { ...options, messages: result } : options
+    const tools = worker && !permitted && options.tools?.some(tool => tool.name === SKILL_TOOL)
+      ? options.tools.filter(tool => tool.name !== SKILL_TOOL) : undefined
+    return changed || tools ? { ...options, messages: result, ...(tools && { tools }) } : options
   }
 
   function recordActivity(session, state, id, ref, position) {
     try {
-      if (!position || !skillName(ref.name) || state.activity.has(id) || ref.botId !== ownerOf(rt, session.id)) return
+      if (!position || !skillName(ref.name) || state.activity.has(id) || ref.botId !== skillOwner(rt, session.id)?.botId) return
       const { turn, step, source, eventSeq } = position
       if (eventSeq === undefined && (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step))) return
       const room = rt.skillRoomActivity?.(session.id, ref.botId, source)
@@ -566,7 +681,24 @@ export function install(rt) {
   }
 
   rt.skillCalls = {
-    available: sessionId => automaticOf(activeOf(rt, sessionId)).length > 0,
+    snapshot(sessionId, botId, instructionsId) {
+      const owner = skillOwner(rt, sessionId)
+      if (owner === undefined || owner.botId !== botId || rt.teamCurrent?.() === false ||
+          !hasCurrentRoot(rt, owner)) return
+      return {
+        skillsOwner: owner.botId,
+        skillsInstructionsId: instructionsId,
+        skills: recordsOf(rt, owner, { worker: true }).map(({ name, mode, hash, assignment, revision }) =>
+          ({ name, mode, hash, assignment, revision })),
+        ...(!permitsWorkerLoad(rt, owner) && { skillsLoadBlocked: true }),
+      }
+    },
+    workerAvailable(sessionId, agent) {
+      const owner = skillOwner(rt, sessionId)
+      return owner !== undefined && owner.kind !== 'own' && hasCurrentRoot(rt, owner) && permitsWorkerLoad(rt, owner, agent) &&
+        automaticOf(recordsOf(rt, owner)).length > 0
+    },
+    available: sessionId => availableRecords(sessionId).length > 0,
     noticeAgyUnavailable(session) {
       if (!session) return
       try {
@@ -580,7 +712,7 @@ export function install(rt) {
     load: (sessionId, name) => loadSkill(rt, sessionId, name),
     unavailable: SKILL_UNAVAILABLE,
     catalog(sessionId) {
-      const records = automaticOf(activeOf(rt, sessionId))
+      const records = availableRecords(sessionId)
       return { key: keyOf(records), text: catalogOf(records) }
     },
     project, admit,
@@ -611,8 +743,10 @@ export function install(rt) {
     const decision = await next()
     if (signal.aborted || decision?.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
     await rt.load()
-    const botId = ownerOf(rt, agent.id)
-    if (!rt.botOf(botId) || signal.aborted) return decision
+    const owner = skillOwner(rt, agent.id)
+    const botId = owner?.botId
+    if (owner === undefined || signal.aborted) return decision
+    if (owner.kind === 'subagent') return decision
     const original = new Map(messages.map(row => [row.id, row]))
     const served = new Set(decision.messages.filter(row => row.source?.kind === 'skill-invocation')
       .map(row => row.source.name))
@@ -620,7 +754,7 @@ export function install(rt) {
     const rows = decision.messages.map(row => ({ row, input: original.get(row.id) }))
     const pending = []
     for (const { row, input } of rows) {
-      if (!input || input.source?.automagikSkillParsed ||
+      if (!input || input.id === owner.task?.skillsInstructionsId || input.source?.automagikSkillParsed ||
           !['user', 'bot'].includes(input.source?.kind)) continue
       const requests = input.source.kind === 'user' ? requestedSkills(input.content) :
         input.source.role === 'room' && Array.isArray(input.source.skillRequests)
@@ -640,7 +774,7 @@ export function install(rt) {
     }
     if (signal.aborted) return decision
 
-    const records = new Map(activeOf(rt, agent.id).map(record => [record.name, record]))
+    const records = new Map(recordsOf(rt, skillOwner(rt, agent.id)).map(record => [record.name, record]))
     const modified = new Map()
     const hostOnly = new Set()
     for (const { row, requests } of pending) {

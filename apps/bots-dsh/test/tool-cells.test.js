@@ -306,7 +306,7 @@ test('cards and replies still show when the program\'s own call head left the lo
 test('each sub-call shows its own state, not its program\'s', () => {
   const created = call('create_bot', 'program:ptc:1', { args: { name: 'Writer' } })
   assert.match(shown(program([created], { running: true })), /Created.*Writer/)
-  assert.equal(shown(program([{ ...call('create_bot', 'program:ptc:1', { args: { name: 'Writer' }, running: true }) }])), '')
+  assert.equal(shown(program([{ ...call('create_bot', 'program:ptc:1', { args: { name: 'Writer' }, running: true }) }])), 'Tool: create_bot')
   const failed = call('message_bot', 'program:ptc:1', { args: { to: 'Writer' }, isError: true })
   assert.match(shown(program([failed])), /Couldn't message Writer/)
   assert.match(shown(program([call('message_bot', 'program:ptc:1', { args: { to: 'Writer' } })], { isError: true })), /^Messaged/)
@@ -346,10 +346,10 @@ test('a message_bot refusal with no reason and pruned content never says "Messag
   assert.match(shown(call('message_bot', 'sent', { args: { to: 'Writer' }, content: 'Delivered to Writer.', meta: { sent: true } })), /Messaged.*Writer/)
 })
 
-test('a program with no known sub-call draws nothing, as before', () => {
+test('a program draws each sub-call and leaves an empty mark when it has none', () => {
   assert.ok(emptied(ToolCell(props(program([])))))
-  assert.ok(emptied(ToolCell(props(program([call('bash', 'program:ptc:1'), call('read_file', 'program:ptc:2')])))))
-  assert.ok(emptied(ToolCell(props(call('bash', 'direct')))))
+  assert.equal(shown(program([call('bash', 'program:ptc:1'), call('read_file', 'program:ptc:2')])), 'Tool: bashTool: read_file')
+  assert.equal(shown(call('bash', 'direct')), 'Tool: bash')
   effects = []
 })
 
@@ -372,8 +372,7 @@ test('every call that draws nothing leaves only the empty mark, so its seat can 
       [JSON.stringify(['view', 'view-1'])]: 1,
     },
   }
-  // A card the user is holding in the dock, an unfinished call, a name that
-  // resolves to nobody, an answerless reply: each marks itself, at any depth.
+  // A card the user is holding in the dock stays in the dock, at any depth.
   for (const root of [
     call('ask_user', 'q-call'),
     call('ask_user', 'answered-call'),
@@ -382,6 +381,13 @@ test('every call that draws nothing leaves only the empty mark, so its seat can 
     call('request_secret', 's-call', { args: { name: 'DEMO_TOKEN' } }),
     call('request_secret', 'unknown-call', { args: { name: 'DEMO_TOKEN' }, running: true }),
     call('browser_handoff', 'h-call'),
+    call('group_relay', 'relay-call', { content: '[]' }),
+  ]) {
+    assert.ok(onlyMarks(ToolCell(props(root, { roster, held }))), `${root.name ?? root.call?.name} ${root.callId} leaves only marks`)
+    assert.ok(onlyMarks(ToolCell(props(program([{ ...root, callId: root.callId }]), { roster, held }))), `${root.callId} in a program leaves only marks`)
+    effects = []
+  }
+  for (const root of [
     call('create_bot', 'c-call', { args: { name: 'Nobody' } }),
     call('update_bot', 'u-call', { args: { name: 'Nobody', bot: 'Nobody' } }),
     call('delete_bot', 'd-call', { args: { bot: 'Writer' }, running: true }),
@@ -390,18 +396,18 @@ test('every call that draws nothing leaves only the empty mark, so its seat can 
     call('ask_user_question', 'aq-call', { args: { questions: [{ question: 'Ship it?' }] }, running: true }),
     call('ask_user_question', 'aq-none', { args: { questions: [{ question: 'Ship it?' }] }, content: '{}' }),
     call('remember', 'm-call', { running: true }),
-    call('group_relay', 'relay-call', { content: '[]' }),
   ]) {
-    assert.ok(onlyMarks(ToolCell(props(root, { roster, held }))), `${root.name ?? root.call?.name} ${root.callId} leaves only marks`)
-    assert.ok(onlyMarks(ToolCell(props(program([{ ...root, callId: root.callId }]), { roster, held }))), `${root.callId} in a program leaves only marks`)
+    const label = 'Tool: ' + (root.name || root.call.name)
+    assert.equal(shown(root, { roster, held }), label)
+    assert.equal(shown(program([root]), { roster, held }), label)
     effects = []
   }
 })
 
-test('a card another plugin registered that draws nothing leaves the empty mark', () => {
+test('a card another plugin registered can fall back to an activity row', () => {
   const off = toolCards.register('omni_quiet', ({ done }) => (done ? h('div', { className: 'bt-event' }, 'Called') : null))
   try {
-    assert.ok(onlyMarks(ToolCell(props(call('omni_quiet', 'o-1', { running: true })))))
+    assert.equal(shown(call('omni_quiet', 'o-1', { running: true })), 'Tool: tool')
     assert.equal(shown(call('omni_quiet', 'o-1')), 'Called')
     assert.ok(!emptied(ToolCell(props(call('omni_quiet', 'o-1')))))
   } finally {
@@ -1236,8 +1242,10 @@ test('an agent\'s image call draws the image card: Omni paints, then the image, 
   // Another agent's call that answered with an image draws once it ends; its other calls do not.
   const other = { id: 'c-1', title: 'Render chart', kind: 'other', input: {} }
   assert.ok(find(show(call('acp_tool', 'acp_2', { args: other, content: 'Image generated and saved as /team/images/img-abcdef12.png.' })), node => node.type === 'figure'))
-  assert.equal(shown(call('acp_tool', 'acp_3', { args: other, running: true })), '')
-  assert.equal(shown(call('acp_tool', 'acp_4', { args: { ...other, title: 'Run ls' }, content: 'images/img-abcdef12.png' })), '')
+  assert.equal(shown(call('acp_tool', 'acp_3', { args: other, running: true })), 'Tool: tool')
+  const plain = show(call('acp_tool', 'acp_4', { args: { ...other, title: 'Run ls' }, content: 'images/img-abcdef12.png' }))
+  assert.equal(text(plain), 'Tool: tool')
+  assert.equal(find(plain, node => node.type === 'figure' || node.type === 'img'), undefined)
 })
 
 test('a finished image that does not load says it is gone, and Omni stops painting', () => {
@@ -1453,9 +1461,9 @@ test('a refused bash call draws the reason once, on its first call in that Sessi
   assert.equal(text(lines[0]), '2 steps did not run: the sandbox blocked it')
   assert.equal(lines[0].props.role, 'status')
   assert.equal(lines[0].props.title, 'sandbox')
-  // The later call, and a call with no stop, draw nothing but the empty mark.
-  assert.ok(onlyMarks(draw('y', [entry])))
-  assert.ok(onlyMarks(draw('x', [])))
+  // Activity on the other calls leaves the single refusal line on its original call.
+  assert.equal(text(draw('y', [entry])), 'Tool: bash')
+  assert.equal(text(draw('x', [])), 'Tool: bash')
   effects = []
 })
 

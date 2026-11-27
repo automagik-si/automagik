@@ -5,11 +5,21 @@ import { CHARACTERS, DEFAULT_COLORS, DEFAULT_SHAPES, SOLVER_SHAPES } from '../sr
 import { createPayload } from '../src/client/bot-draft.js'
 import {
   SOLVER_LOOKS, avatarOfLook, createSolver, mayHaveBeenCreated, newBotBlock, reviewerChoices, reviewerName, reviewerPayload,
-  reviewMarkText, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
+  reviewMarkText, solverAutoView, solverCandidate, solverLook, solverPayload, solverStartModel, uncertain,
   guardLevelOf, reviewGuardText, reviewGuardView,
 } from '../src/client/solver-draft.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../src/shared/review-guard.js'
 import { REVIEWER_INSTRUCTIONS } from '../src/shared/solver-method.js'
+
+test('2133 Test 10 Details reports why a visual RESULT was unverified', () => {
+  const bot = { role: 'Solver', solverStatus: { unverified: 'images' } }
+  const line = () => solverAutoView(bot, {}, 'ask').lines[0]
+  assert.equal(line(), 'RESULT review unverified. The result has pictures and the reviewer could not see them.')
+  bot.solverStatus.imagesWhy = 'lost'
+  assert.match(line(), /answering turn lost the result pictures/)
+  bot.solverStatus.imagesWhy = 'missing'
+  assert.match(line(), /result pictures were not all carried/)
+})
 
 const CLAUDE = 'acp-claude/default'
 const CODEX = 'acp-codex/gpt-5.6'
@@ -205,6 +215,17 @@ test('the review mark line: plan missing, result missing, both present, both mis
   // SR3-8: a mark stays shown after the Bot's description changes (update_bot { role }).
   assert.equal(reviewMarkText({ role: 'Helper', reviewerId: 'r1', reviewMark: { review: 'bot', plan: false, result: true } }, roster),
     'Plan unreviewed: Ada reviewer gave no verdict before the work started.')
+})
+
+test('#2131 an unverified delivery says the result was not verified', () => {
+  const roster = { byId: { r1: { id: 'r1', name: 'Ada reviewer' } } }
+  const bot = { id: 's1', role: 'Solver', reviewerId: 'r1', reviewMark: { review: 'bot', plan: true, result: false } }
+  const withOutcome = outcome => ({ ...bot, solverStatus: { outcome } })
+  assert.equal(reviewMarkText(withOutcome({ reason: 'checks' }), roster).split('\n')[1],
+    'Result not verified, so not marked done: current passing results are missing for agreed checks.')
+  const done = { ...withOutcome({ done: true }), reviewMark: { ...bot.reviewMark, result: true, done: true } }
+  assert.doesNotMatch(reviewMarkText(done, roster), /not verified/i)
+  assert.doesNotMatch(reviewMarkText(withOutcome({ reason: 'review' }), roster), /not verified/i)
 })
 
 // #2056 D1.5: the Review guard rides the Solver's own create-bot, only with a reviewer Bot.

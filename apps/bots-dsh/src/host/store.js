@@ -100,15 +100,19 @@ export function install(rt) {
   // Other notes kept beside the team (resume.js's inflight.json) end their last write before
   // the lock is released at stop (rt.holdLockUntil).
   const lockWaits = new Set()
-  // mtime and size of the state.json this host last read or wrote.
+  // The identity and version of the state.json this host last read or wrote.
   let seen = ''
+  let publishing
   // Bumped each time the in-memory state is replaced from the file, so a queued
   // save cannot write a snapshot taken of the state it replaced.
   let lockEpoch = 0
+  const fileStamp = path => {
+    const { dev, ino, mtimeNs, size } = statSync(path, { bigint: true })
+    return `${dev}:${ino}:${mtimeNs}:${size}`
+  }
   const stamp = () => {
     try {
-      const { mtimeMs, size } = statSync(statePath)
-      return `${mtimeMs}:${size}`
+      return fileStamp(statePath)
     } catch {
       return ''
     }
@@ -133,6 +137,18 @@ export function install(rt) {
   const lockGained = () => {
     for (const fn of gainedListeners) {
       try { fn() } catch (error) { warn('ds-bot: a lock listener failed: %s', error) }
+    }
+  }
+  const adoptedListeners = new Set()
+  const onAdopted = fn => {
+    adoptedListeners.add(fn)
+    return () => adoptedListeners.delete(fn)
+  }
+  const teamAdopted = () => {
+    // A corrupt roster with a complete backup adopts a writable empty view.
+    if (readOnly() !== undefined || !rt.holdsLock() || !teamCurrent()) return
+    for (const fn of adoptedListeners) {
+      try { fn() } catch (error) { warn('ds-bot: an adoption listener failed: %s', error) }
     }
   }
   const claimLock = () => {
@@ -656,8 +672,10 @@ export function install(rt) {
   const saveMigration = async required => {
     try {
       await save({ required })
+      return true
     } catch (error) {
       warn('omni-ui: saving the migrated Bot team failed: %s', error)
+      return false
     }
   }
 
@@ -713,8 +731,13 @@ export function install(rt) {
       return repaired || retiredSeed
     })
     writing = run.catch(() => {})
-    const tracked = run.then(required => required ? saveMigration(true) : undefined)
-      .finally(() => { if (adopting === tracked) adopting = undefined })
+    let adopted = false
+    const tracked = run.then(async required => { adopted = !required || await saveMigration(true) })
+      .finally(() => {
+        if (adopting !== tracked) return
+        adopting = undefined
+        if (adopted) teamAdopted()
+      })
     adopting = tracked
     return tracked
   }
@@ -764,9 +787,11 @@ export function install(rt) {
       return
     }
     if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) {
+      const wasStuck = stuck !== undefined
       const { repaired, retiredSeed } = adopt(readFileState())
       if (retiredSeed) await save({ required: true })
-      else if (repaired && holder === undefined) await saveMigration(true)
+      else if (repaired && holder === undefined && !await saveMigration(true)) return
+      if (wasStuck) teamAdopted()
     }
   }
 
@@ -988,10 +1013,18 @@ export function install(rt) {
         }
         const checked = ensureCommit()
         if (checked !== undefined) await checked
-        await replaceFile(temp, statePath, ensureCommit)
-        // Even if the directory sync fails, this rename was ours. A later save
-        // can retry durability without mistaking the new stamp for an outside edit.
-        seen = stamp()
+        // The file can become visible before rename resolves. Recognize only
+        // the exact file this host is publishing, including during that gap.
+        const nextStamp = fileStamp(temp)
+        publishing = nextStamp
+        try {
+          await replaceFile(temp, statePath, ensureCommit)
+          // Keep our published stamp even if directory sync later fails or
+          // another file has already replaced the one we published.
+          seen = nextStamp
+        } finally {
+          publishing = undefined
+        }
         savedRecovery = recovery
         if (flush) {
           pendingDurability = undefined
@@ -1236,7 +1269,11 @@ export function install(rt) {
   // or was saved since: false before the first load, and after a file that could not be
   // read or was set aside as corrupt. It reads memory only.
   const teamLoaded = () => teamRead
-  const teamCurrent = () => adopting === undefined && stamp() === seen
+  const teamCurrent = () => {
+    if (adopting !== undefined) return false
+    const current = stamp()
+    return current === seen || current === publishing
+  }
 
   const savedListeners = new Set()
   const onSaved = (listener) => {
@@ -1261,7 +1298,7 @@ export function install(rt) {
     // The first read distinguishes an absent roster from a saved empty team.
     teamHealth: () => teamPresentAtLoad !== null && teamRead && stuck === undefined && !aside
       ? { present: teamPresentAtLoad, revision: state.revision, bots: Object.keys(state.bots).length } : null,
-    teamCurrent, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
+    teamCurrent, own, onSaved, onLockGained, onAdopted, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,

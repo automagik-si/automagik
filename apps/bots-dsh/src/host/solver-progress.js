@@ -1,13 +1,17 @@
 import { chosenIdentity, chosenIdentityOf } from '../shared/solver-model.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readlinkSync, realpathSync, statfsSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readlinkSync, readSync, realpathSync, statfsSync } from 'node:fs'
+import { extname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { SOLVER_FIX_LIMIT, SOLVER_REPLAN_LIMIT, isSolverBot, isWrittenSolverMethod, solverAutoOn } from '../shared/solver-method.js'
 import { guardVerdictMatch } from '../shared/review-guard.js'
 import { normalizeCheckCommand } from './solver-check-command.js'
 
 const MAX_CHECKS = 20
 const MAX_RESULT_ENTRIES = 20_000
+const MAX_IMAGE_BASE = 1_000
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'])
+const png = Buffer.from('89504e470d0a1a0a', 'hex')
+const jpeg = Buffer.from('ffd8ff', 'hex')
 const FD_ROOT = '/proc/self/fd'
 const PROC_SUPER_MAGIC = 0x9fa0
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -46,6 +50,10 @@ export function cleanProgress(value) {
   const passRuns = Object.fromEntries(Object.entries(record(value.passRuns) ? value.passRuns : {})
     .filter(([check, run]) => passed.includes(check) && id(run)))
   const limit = value.limit
+  const base = value.imageBase
+  const imageBase = base?.v === 1 && (base.indeterminate === true || (Array.isArray(base.keys)
+    && base.keys.length <= MAX_IMAGE_BASE && base.keys.every(key => typeof key === 'string' && /^[a-f0-9]{16}$/.test(key))))
+    ? base : undefined
   return {
     request, origin, attempts, passed, passRuns,
     ...(snapshot ? { snapshot } : {}),
@@ -59,6 +67,8 @@ export function cleanProgress(value) {
       && value.pending.checks.every(check => plan.checks.includes(check)) ? { pending: value.pending } : {}),
     ...(record(limit) && count(limit.at) && (limit.kind === 'replan' || (limit.kind === 'fix' && id(limit.check))) ? { limit } : {}),
     ...(record(value.review) ? { review: value.review } : {}),
+    ...(imageBase ? { imageBase } : {}),
+    ...(value.visualReviewRequired === true ? { visualReviewRequired: true } : {}),
   }
 }
 
@@ -93,6 +103,8 @@ const entryStat = path => lstatSync(path, { bigint: true })
 const directoryStat = fd => fstatSync(fd, { bigint: true })
 const sameEntry = (a, b) => a.dev === b.dev && a.ino === b.ino && a.mode === b.mode
 const sameVersion = (a, b) => sameEntry(a, b) && a.ctimeNs === b.ctimeNs
+const sameFile = (a, b) => b.isFile() && b.nlink === 1n && sameVersion(a, b)
+  && a.size === b.size && a.mtimeNs === b.mtimeNs
 const changedDuringRead = 'It changed while it was read.'
 const tooManyEntries = 'It has more than 20,000 entries.'
 const snapshotError = reason => Object.assign(new Error(reason), { reason })
@@ -107,14 +119,164 @@ function hasDescriptorPaths() {
   }
 }
 
-export function inspectResult(folder) {
+const fdPath = fd => join(FD_ROOT, String(fd))
+const openDirectory = path => openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+
+export function resultImageType(bytes, { gif = false } = {}) {
+  if (bytes.subarray(0, 8).equals(png)) return 'image/png'
+  if (bytes.subarray(0, 3).equals(jpeg)) return 'image/jpeg'
+  if (bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
+  if (gif && ['GIF87a', 'GIF89a'].includes(bytes.toString('ascii', 0, 6))) return 'image/gif'
+}
+
+const managedPart = part => part.toLowerCase() === '.automagik'
+
+function canReadResultEntry(parts, botId, { absolute = false, directory = false, teamWorkspace } = {}) {
+  if (parts.some(part => part.toLowerCase() === '.git')) return false
+  if (parts.some((part, i) => part.toLowerCase() === 'objects'
+    && /^[a-f0-9]{2}$/i.test(parts[i + 1]) && /^(?:[a-f0-9]{62}|[a-f0-9]{64})$/i.test(parts[i + 2]))) return false
+  const workspace = teamWorkspace ? partsOf(teamWorkspace) : []
+  // Skip only the team's own workspace ancestry. A managed folder inside it
+  // still belongs to the Solver that owns it.
+  const ancestry = workspace.at(-2) === 'bots' && parts.findIndex(managedPart) === workspace.length - 3
+    && workspace.every((part, index) => parts[index] === part) ? parts.slice(workspace.length) : parts
+  const managed = ancestry.findIndex(managedPart)
+  if (managed === -1) return true
+  if ((!absolute && managed !== 0) || ancestry.slice(managed + 1).some(managedPart)) return false
+  const [area, owner, child] = ancestry.slice(managed + 1)
+  return area === 'bots' && owner === botId && (child === undefined ? directory : child.toLowerCase() !== 'uploads')
+}
+
+function checkedRead(path, stat, bytes, signal, deadline) {
+  const checkTime = () => {
+    signal?.throwIfAborted()
+    if (performance.now() > deadline) throw snapshotError('The result file was not read in time.')
+  }
+  checkTime()
+  if (!stat.isFile() || stat.nlink !== 1n) throw snapshotError('The result file must be regular and have one link.')
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+  try {
+    if (!sameFile(stat, directoryStat(fd))) throw snapshotError(changedDuringRead)
+    const data = Buffer.alloc(bytes)
+    for (let offset = 0; offset < data.length;) {
+      checkTime()
+      const count = readSync(fd, data, offset, Math.min(64 * 1024, data.length - offset), offset)
+      if (count === 0) throw snapshotError(changedDuringRead)
+      offset += count
+    }
+    checkTime()
+    if (!sameFile(stat, directoryStat(fd)) || !sameFile(stat, entryStat(path))) throw snapshotError(changedDuringRead)
+    return data
+  } finally {
+    closeSync(fd)
+  }
+}
+
+const partsOf = path => path.split(sep === '\\' ? /[\\/]/ : '/')
+const cleanPart = part => part !== '' && part !== '.' && part !== '..' && !part.includes('\0')
+  && (sep !== '\\' || (!/[<>:"|?*]/.test(part) && !/[ .]$/.test(part)))
+
+const resultRootAllowed = (root, { botId, allowPath, teamWorkspace }) =>
+  canReadResultEntry(partsOf(root), botId, { absolute: true, directory: true, teamWorkspace })
+  && allowPath?.(root) !== false
+
+function resultEntryAllowed(root, parts, { botId, allowPath, teamWorkspace }) {
+  const path = join(root, ...parts)
+  return canReadResultEntry(parts, botId) && canReadResultEntry(partsOf(path), botId, { absolute: true, teamWorkspace })
+    && allowPath?.(path) !== false
+}
+
+export function resultPicturePathsAllowed(folder, paths, scope) {
+  if (paths.length === 0) return true
+  try {
+    if (!isAbsolute(folder) || !entryStat(folder).isDirectory()) return false
+    const root = realpathSync.native(folder)
+    return resultRootAllowed(root, scope) && paths.every(path => {
+      const parts = partsOf(path)
+      return parts.every(cleanPart) && resultEntryAllowed(root, parts, scope)
+    })
+  } catch {
+    return false
+  }
+}
+
+export function readResultFile(folder, selector, { maxBytes, signal, ...scope }) {
+  if (!folder || !isAbsolute(folder) || typeof selector !== 'string') throw snapshotError('The Solver has no usable result path.')
+  const absolute = isAbsolute(selector)
+  if (!partsOf(absolute ? selector.slice(parse(selector).root.length) : selector).every(cleanPart)) {
+    throw snapshotError('Use a path inside the result folder without empty, dot, or parent components.')
+  }
+  const selectedRoot = resolve(folder)
+  const rootStat = entryStat(selectedRoot)
+  if (!rootStat.isDirectory()) throw snapshotError(rootStat.isSymbolicLink()
+    ? 'The result root is a symbolic link.' : 'The result root is not a directory.')
+  const root = realpathSync.native(selectedRoot)
+  let name = selector
+  if (absolute) {
+    name = relative(selectedRoot, selector)
+    if (isAbsolute(name) || !partsOf(name).every(cleanPart)) name = relative(root, selector)
+  }
+  const parts = partsOf(name)
+  if (isAbsolute(name) || !parts.every(cleanPart)) throw snapshotError('Use a path inside the result folder.')
+  if (!resultRootAllowed(root, scope) || !resultEntryAllowed(root, parts, scope)) {
+    throw snapshotError('The result picture is in a protected folder.')
+  }
+  const confined = hasDescriptorPaths()
+  if (!confined && process.platform === 'linux') throw snapshotError('Confined result reads are unavailable.')
+  const held = []
+  const deadline = performance.now() + 10_000
+  let parent = parse(root).root
+  let parentPath = parent
+  const rootComponents = partsOf(root.slice(parent.length)).filter(Boolean)
+  try {
+    for (const component of ['', ...rootComponents, ...parts.slice(0, -1)]) {
+      parent = join(parent, component)
+      parentPath = join(parentPath, component)
+      const stat = entryStat(parent)
+      if (!stat.isDirectory()) throw snapshotError('A result directory is a symbolic link or is not a directory.')
+      if (parentPath === root && !sameVersion(rootStat, stat)) throw snapshotError(changedDuringRead)
+      const entry = { path: parent, stat }
+      held.push(entry)
+      if (confined) {
+        entry.fd = openDirectory(parent)
+        if (!sameVersion(stat, directoryStat(entry.fd))) throw snapshotError(changedDuringRead)
+        parent = fdPath(entry.fd)
+      }
+    }
+    const leaf = join(parent, parts.at(-1))
+    const stat = entryStat(leaf)
+    if (stat.isSymbolicLink()) throw snapshotError('The result picture is a symbolic link.')
+    if (stat.size < 1n || stat.size > BigInt(maxBytes)) throw snapshotError('The result picture is empty or exceeds 12 MiB.')
+    const bytes = checkedRead(leaf, stat, Number(stat.size), signal, deadline)
+    for (const { path, stat, fd } of held) {
+      const current = entryStat(path)
+      if (!current.isDirectory() || !sameEntry(stat, current)
+        || (fd !== undefined && !sameEntry(stat, directoryStat(fd)))) throw snapshotError(changedDuringRead)
+    }
+    if (!sameVersion(rootStat, entryStat(selectedRoot))) throw snapshotError(changedDuringRead)
+    return { bytes, path: name }
+  } finally {
+    for (const { fd } of held.reverse()) if (fd !== undefined) closeSync(fd)
+  }
+}
+
+export function imageBaseline(result) {
+  const manifest = result.manifest
+  return !manifest || manifest.indeterminate || manifest.entries.length > MAX_IMAGE_BASE
+    ? { v: 1, indeterminate: true }
+    : { v: 1, keys: manifest.entries.map(entry => entry.key.slice(0, 16)).sort() }
+}
+
+export function inspectResult(folder, { manifest = false, managedEntry, signal, ...scope } = {}) {
   if (typeof folder !== 'string' || !isAbsolute(folder)) return { reason: 'The Solver has no usable result folder.' }
   const selectedRoot = resolve(folder)
   let root = selectedRoot
   const hash = createHash('sha256')
   let remaining = MAX_RESULT_ENTRIES - 1
-  const openDirectory = path => openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-  const fdPath = fd => join(FD_ROOT, String(fd))
+  const images = []
+  let discover = false
+  let indeterminate = false
+  const deadline = performance.now() + 10_000
   const shown = path => JSON.stringify(relative(root, path) || '.').slice(0, 200)
   let location = root
   let descriptorPaths
@@ -145,16 +307,31 @@ export function inspectResult(folder) {
         // the identity checks. Reject observed changes before looking up any child names.
         if (fd === undefined && !sameVersion(stat, entryStat(path))) throw snapshotError(changedDuringRead)
         children.sort()
-        for (const child of children) visit(join(directoryPath, child), join(locationOfEntry, child), child)
+        const tracked = children.filter(child => visit(join(directoryPath, child), join(locationOfEntry, child), child))
         location = locationOfEntry
         if (!sameVersion(stat, entryStat(path))) throw snapshotError(changedDuringRead)
-        hash.update(JSON.stringify([...identity, children]))
+        if (!isRoot && tracked.length === 0 && managedEntry?.(location, stat)) return false
+        hash.update(JSON.stringify([...identity, tracked]))
       } finally {
         if (fd !== undefined) closeSync(fd)
       }
     } else if (stat.isFile()) {
+      if (managedEntry?.(locationOfEntry, stat)) return false
       const changes = [stat.size, stat.mtimeNs, stat.ctimeNs].map(String)
       hash.update(JSON.stringify([...identity, ...changes]))
+      const pathInResult = relative(root, locationOfEntry)
+      if (discover && resultEntryAllowed(root, partsOf(pathInResult), scope)) {
+        try {
+          const extension = IMAGE_EXTENSIONS.has(extname(name).toLowerCase())
+          if (!descriptorPaths && process.platform === 'linux') throw snapshotError('Confined result reads are unavailable.')
+          if (extension || resultImageType(checkedRead(path, stat, Number(stat.size < 12n ? stat.size : 12n), signal, deadline), { gif: true })) {
+            const key = createHash('sha256').update(JSON.stringify([pathInResult, ...identity.slice(1, 3), ...changes])).digest('hex')
+            images.push({ path: pathInResult, key })
+          }
+        } catch {
+          indeterminate = true
+        }
+      }
     } else if (stat.isSymbolicLink()) {
       const target = readlinkSync(path, { encoding: 'buffer' }).toString('hex')
       if (!sameVersion(stat, entryStat(path))) throw snapshotError(changedDuringRead)
@@ -163,6 +340,7 @@ export function inspectResult(folder) {
     } else {
       throw snapshotError(`It contains a device, pipe or socket at ${shown(location)}.`)
     }
+    return true
   }
   const parents = []
   try {
@@ -170,6 +348,8 @@ export function inspectResult(folder) {
     if (!rootStat.isDirectory()) return { reason: rootStat.isSymbolicLink()
       ? 'The result root is a symbolic link.' : 'The result root is not a directory.' }
     root = realpathSync.native(selectedRoot)
+    discover = manifest && resultRootAllowed(root, scope)
+    if (manifest && !discover) indeterminate = true
     location = root
     descriptorPaths = hasDescriptorPaths()
     let walkRoot = root
@@ -193,7 +373,7 @@ export function inspectResult(folder) {
       if (!sameEntry(entryStat(path), directoryStat(fd))) throw snapshotError(changedDuringRead)
     }
     if (selectedRoot !== root && !sameVersion(rootStat, entryStat(selectedRoot))) throw snapshotError(changedDuringRead)
-    return { snapshot: hash.digest('hex') }
+    return { snapshot: hash.digest('hex'), ...(manifest ? { manifest: { entries: images, indeterminate } } : {}) }
   } catch (error) {
     return { reason: error.reason ?? (error.code
       ? `An entry at ${shown(location)} could not be read (${error.code}).` : 'It could not be read.') }
@@ -202,7 +382,7 @@ export function inspectResult(folder) {
   }
 }
 
-export const resultSnapshot = folder => inspectResult(folder).snapshot
+export const resultSnapshot = (folder, options) => inspectResult(folder, options).snapshot
 
 export function modelOf(session) {
   try {
@@ -249,15 +429,18 @@ function passes(progress, snapshot) {
     && progress.snapshot === snapshot && includesAll(progress.plan.checks, progress.passed)
 }
 
-export function solverOutcome(bot, track, review, pending, model, snapshot) {
+export function solverOutcome(bot, track, review, pending, model, snapshot, visualKind) {
   const progress = track.solver
   const limit = activeSolverLimit(bot, track)
   if (limit) return { reason: 'limit', limit: { kind: limit.kind, ...(limit.check ? { check: limit.check } : {}) } }
   if (!progress || !passes(progress, snapshot)) return notDone('checks')
+  if (progress.visualReviewRequired) return notDone('review')
   const result = progress.review
   if (legacyResultReview(result) || review !== 'bot' || pending || result?.revision !== progress.revision || result.verdict !== 'SHIP'
     || chosenIdentityOf(result.solverModel) !== model || result.reviewer?.id !== bot.reviewerId
     || !result.reviewer.model || chosenIdentityOf(result.reviewer.model) === model) return notDone('review')
+  if (result.images?.v === 1 ? result.images.definite !== true || (result.images.kind !== 'text' && result.visualOk !== true)
+    : visualKind !== undefined && visualKind !== 'text') return notDone('review')
   return { done: true, reviewer: result.reviewer, exchangeId: result.exchangeId }
 }
 
@@ -274,7 +457,7 @@ export function designateReview(progress, { kind, exchangeId, reviewerId, model,
   progress.review = { exchangeId, reviewerId, revision: progress.revision, solverModel: model }
 }
 
-export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, model, receipt, legacyHeld) {
+export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, model, receipt, legacyHeld, visual) {
   if (!progress || typeof exchangeId !== 'string') return
   const plan = progress.plan
   if (plan?.review?.exchangeId === exchangeId && plan.review.reviewerId === reviewer.id) {
@@ -287,16 +470,24 @@ export function recordSolverVerdict(progress, exchangeId, reviewer, verdict, mod
     const comparable = solverIdentity && reviewerIdentity
     const independent = comparable && reviewerIdentity !== solverIdentity
     const veto = verdict === 'FIX-FIRST' || verdict === 'BLOCKED'
+    const imagesWhy = visual?.ok === true ? undefined : visual?.why
+      ?? (result.images?.v === 1 && result.images.kind !== 'text' ? 'missing' : undefined)
     const reason = legacyHeld && !comparable ? 'held'
       : veto ? undefined
-        : !comparable ? 'model' : !independent ? 'same' : verdict === undefined ? 'verdict' : undefined
-    const { unverified: _previous, reviewer: _reviewer, receipt: _receipt, ...designated } = result
+        : imagesWhy ? 'images' : !comparable ? 'model' : !independent ? 'same' : verdict === undefined ? 'verdict' : undefined
+    const { unverified: _previous, reviewer: _reviewer, receipt: _receipt, imagesWhy: _why, visualOk: _visual, ...designated } = result
     progress.review = {
       ...designated,
       verdict: reason && !veto ? 'unverified' : verdict,
       ...(independent ? { reviewer: { id: reviewer.id, name: reviewer.name, model: reviewerIdentity } } : {}),
       ...(reason ? { unverified: reason } : {}),
+      ...(reason === 'images' ? { imagesWhy } : {}),
+      ...(reason === undefined && verdict === 'SHIP' && visual?.ok === true ? { visualOk: true } : {}),
       ...(receipt ? { receipt } : {}),
+    }
+    if (result.images?.v !== 1 && reason === 'images') progress.visualReviewRequired = true
+    if (result.images?.v === 1 && result.images.kind !== 'text' && progress.review.visualOk === true) {
+      delete progress.visualReviewRequired
     }
     return reason
   } else if (result?.verdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict)) {
@@ -308,7 +499,15 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   const progress = track.solver
   const limit = activeSolverLimit(bot, track)
   const recorded = `Recorded. ${Math.max(0, SOLVER_REPLAN_LIMIT - progress.replans)} re-plans left in Normal.`
-  const { action, run, checks } = args
+  const idFormat = 'An ID is 1 to 80 characters: letters, digits, "_", ".", ":" or "-", starting with a letter or digit; case does not matter.'
+  const key = value => typeof value === 'string' ? value.replace(/[A-Z]/g, letter => letter.toLowerCase()) : value
+  const { action } = args
+  const run = key(args.run)
+  const checks = Array.isArray(args.checks) ? args.checks.map(key) : args.checks
+  const results = Array.isArray(args.results)
+    ? args.results.map(item => record(item) ? { ...item, check: key(item.check) } : item) : args.results
+  const commands = Array.isArray(args.commands)
+    ? args.commands.map(item => record(item) ? { ...item, check: key(item.check) } : item) : args.commands
   if (action === 'auto') {
     if (progress.origin === 'bot') return { text: 'Only the person can turn Auto on, and this request came from a Bot.' }
     if (!authorizedAuto) return { text: "Auto needs the person's own words asking for it: quote them exactly." }
@@ -321,12 +520,12 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   }
   if (action === 'checks' && id(run) && Object.hasOwn(progress.runs, run)) {
     const prior = progress.runs[run]
-    if (JSON.stringify(args.results) !== (prior?.reported ?? prior)) return { text: 'This run ID already has different results.' }
-    if (!prior?.unverified && Array.isArray(args.results) && args.results.every(item => item?.pass === true)) {
+    if (JSON.stringify(results) !== (prior?.reported ?? prior)) return { text: 'This run ID already has different results.' }
+    if (!prior?.unverified && Array.isArray(results) && results.every(item => item?.pass === true)) {
       const snapshot = prior?.evidence?.snapshot
       // A legacy report without per-check ownership cannot establish a current replay.
       if (prior?.revision !== progress.revision || !snapshot || snapshot !== progress.snapshot
-        || args.results.some(({ check }) => progress.passRuns[check] !== run) || snapshot !== snapshotOf?.()) {
+        || results.some(({ check }) => progress.passRuns[check] !== run) || snapshot !== snapshotOf?.()) {
         return { text: 'This passing report is stale. Start a new run on the current result.' }
       }
     }
@@ -335,25 +534,25 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   if (limit) return { text: limitText(limit) }
   if (running) return { text: 'Wait for the current work to finish before updating Solver progress.' }
   if (action === 'plan') {
-    if (!listOfIds(checks)) return { text: 'Register 1 to 20 distinct, stable check IDs.' }
+    if (!listOfIds(checks)) return { text: `Register 1 to 20 distinct, stable check IDs. ${idFormat}` }
     if (progress.pending) return { text: 'Record the open run before replacing the plan.' }
-    const commands = checkCommands(args.commands, checks)
-    if (args.commands !== undefined && !commands) return { text: 'Give one command for each agreed check ID.' }
+    const byCheck = checkCommands(commands, checks)
+    if (commands !== undefined && !byCheck) return { text: 'Give one command for each agreed check ID.' }
     if (progress.plan && !progress.plan.superseded) {
-      const sameCommands = checks.every(check => commands?.[check] === progress.plan.commands?.[check])
+      const sameCommands = checks.every(check => byCheck?.[check] === progress.plan.commands?.[check])
       return { text: includesAll(progress.plan.checks, checks) && sameCommands
         ? recorded : 'Record a re-plan before replacing the agreed checks or commands.' }
     }
     // Keep the agreed text for the reviewer and DSH's exact command comparison.
-    for (const [check, command] of Object.entries(commands ?? {})) {
+    for (const [check, command] of Object.entries(byCheck ?? {})) {
       const { reason } = normalizeCheckCommand(command)
       if (reason) return { text: `Cannot register check ${JSON.stringify(check)}. ${reason}` }
     }
     if (new Set([...Object.keys(progress.attempts), ...checks]).size > MAX_CHECKS) return { text: 'Use at most 20 check IDs per request.' }
-    progress.plan = { revision: progress.revision, checks: [...checks], ...(commands ? { commands } : {}) }
+    progress.plan = { revision: progress.revision, checks: [...checks], ...(byCheck ? { commands: byCheck } : {}) }
     return { changed: true, text: recorded }
   }
-  if (!id(run)) return { text: 'Provide a stable run ID.' }
+  if (!id(run)) return { text: `Provide a stable run ID. ${idFormat}` }
   if (action === 'start') {
     if (!progress.plan || progress.plan.superseded || !listOfIds(checks) || !checks.every(check => progress.plan.checks.includes(check))) {
       return { text: 'Start a run with the IDs of its checks from the current plan.' }
@@ -384,7 +583,6 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   } else if (action === 'checks') {
     const pending = progress.pending
     if (!pending || pending.run !== run || running) return { text: 'Report the outcome of the current run after its checks finish.' }
-    const results = args.results
     if (!Array.isArray(results) || !results.every(item => record(item) && typeof item.pass === 'boolean')
       || !includesAll(pending.checks, results.map(item => item.check))) {
       return { text: 'Report one Boolean outcome for every check in this run.' }
@@ -427,7 +625,7 @@ export function recordProgress(bot, track, args, { now, authorizedAuto, running,
   } else {
     return { text: 'Unknown progress action.' }
   }
-  const fixes = action === 'checks' ? checksLeft(progress, args.results) : ''
+  const fixes = action === 'checks' ? checksLeft(progress, results) : ''
   return { changed: true, text: progress.limit ? limitText(progress.limit) : recorded + fixes }
 }
 

@@ -344,6 +344,7 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
     // sign-in at once. A refused sign-out starts none.
     switchAccount: async (agent) => {
       setSigningOut(null)
+      if (agent.atomicAccountSwitch === true) return act(agent.id, 'acp-switch-account', { id: agent.id }, signInWords)
       if (!await act(agent.id, 'acp-sign-out', { id: agent.id })) return false
       return act(agent.id, 'acp-sign-in', { id: agent.id }, signInWords)
     },

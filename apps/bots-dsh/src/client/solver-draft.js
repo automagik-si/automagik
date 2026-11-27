@@ -8,7 +8,7 @@ import { dateLocale, t } from './i18n.js'
 import { AUTO, AUTO_ROW, markOf } from '../shared/permission-levels.js'
 import { REVIEWER_INSTRUCTIONS, SOLVER_DESCRIPTION, SOLVER_ROLE_ID, isSolverBot, solverInstructions } from '../shared/solver-method.js'
 import { packageAttachment, ROLES_OFF_REASON, rolesOn, sameRolePin } from '../shared/roles.js'
-import { RESULT_UNVERIFIED, chosenIdentityOf, unverifiedReason } from '../shared/solver-model.js'
+import { chosenIdentityOf, unverifiedReason, unverifiedText } from '../shared/solver-model.js'
 import { REVIEW_GUARD_COPY, reviewGuardReach } from '../shared/review-guard.js'
 
 // The Solver's character slot: avatar objects as the host's cleanAvatar keeps them, `{ shape }`
@@ -176,7 +176,7 @@ export function reviewMarkText(bot, roster) {
   const outcome = bot.solverStatus?.outcome
   const name = mark.reviewer?.name ?? roster?.byId?.[bot.reviewerId]?.name ?? t('its reviewer')
   const completion = mark.done === true ? t('Done: every check passed and {name} approved.', { name })
-    : outcome?.reason === 'checks' ? t('Not marked done: current passing results are missing for agreed checks.')
+    : outcome?.reason === 'checks' ? t('Result not verified, so not marked done: current passing results are missing for agreed checks.')
       : outcome?.reason === 'review' ? t('Not marked done: {name} has not independently approved the current result.', { name })
         : null
   return completion ? `${reviewed}\n${completion}` : reviewed
@@ -206,7 +206,7 @@ export function solverAutoView(bot, roster, level) {
   const request = bot.solverStatus?.auto
   const reason = unverifiedReason(bot.solverStatus?.unverified)
   const lines = [
-    ...(reason ? [t('RESULT review unverified. {reason}', { reason: t(RESULT_UNVERIFIED[reason]) })] : []),
+    ...(reason ? [t('RESULT review unverified. {reason}', { reason: t(unverifiedText(reason, bot.solverStatus?.imagesWhy)) })] : []),
     ...(typeof request === 'boolean' ? [request ? t('Auto is on for this request.') : t('This request follows the saved Auto setting.')] : []),
     ...(limit ? [limit.kind === 'fix' ? t('Waiting for your answer after the attempt limit for {check}.', { check: limit.check })
       : t('Waiting for your answer after the re-plan limit.')] : []),

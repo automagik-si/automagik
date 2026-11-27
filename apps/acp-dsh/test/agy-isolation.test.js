@@ -81,7 +81,7 @@ const homeOf = (cliHome) => {
   return join(cliHome, 'homes', 'antigravity', readFileSync(pointer, 'utf8'))
 }
 
-function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, hermes = false, external = true, prepare } = {}) {
+function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, hermes = false, external = true, prepare, onRoutes } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-agy-iso-'))
   prepare?.(dir)
   const cliHome = join(dir, 'acp', 'cli-homes')
@@ -116,7 +116,7 @@ function world(t, { platform = 'linux', agentEnv = {}, config = {}, deps = {}, h
         registered.adapter = adapter
         routes.now = [...providers]
         const handle = () => { routes.now = [] }
-        handle.replace = (next) => { routes.now = [...next] }
+        handle.replace = (next) => { routes.now = [...next]; onRoutes?.() }
         return handle
       },
       listProviders: () => routes.now.map(id => ({ id, name: id })),
@@ -1153,4 +1153,97 @@ test('I17: once a link is taken, a message carrying the address it ends on match
   await w.signedIn()
   // The attempt ended: the state is still recognised.
   assert.equal(w.service.loginTextMatches(callback), true)
+})
+
+test('fresh Antigravity switch retires the eligible home before it shows its own link', unixOnly, async t => {
+  plant(t)
+  const w = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' } })
+  await w.service.refresh()
+  const prior = w.home()
+  await assert.rejects(w.service.accountSwitch(ID), { code: 'acp-account/unavailable' })
+  assert.equal(w.home(), prior)
+  const started = await w.service.accountSwitch(ID, { fresh: true, label: 'chat' })
+  const waiting = await until(() => {
+    const view = w.service.loginStatus(ID, started.attemptId)
+    return view.status === 'waiting' && view
+  }, 'the fresh link')
+  assert.equal(waiting.openedBy, 'chat')
+  assert.notEqual(w.home(), prior)
+  assert.equal(w.service.loginCurrent(ID).attemptId, started.attemptId)
+  await assert.rejects(w.service.accountSwitch('acp-claude', { fresh: true }), { code: 'acp-account/busy' })
+  assert.equal(w.service.loginCurrent(ID).attemptId, started.attemptId)
+  w.service.loginCancel(ID, started.attemptId)
+  await until(() => w.service.loginActive() === 0, 'cancelled Antigravity attempt to settle')
+  assert.equal((await w.row()).signedIn, false)
+})
+
+test('fresh Antigravity switch checks Windows, disabled and unavailable before retiring the home', unixOnly, async t => {
+  plant(t)
+  for (const [options, code, message] of [
+    [{ platform: 'win32' }, 'acp-account/unavailable', 'Sign out is not available on Windows. Sign out in Antigravity itself.'],
+    [{ config: { antigravity: false } }, 'acp-sign-in/off', 'Turn Antigravity on first.'],
+    [{ external: false }, 'acp-sign-in/missing', 'Install Antigravity first.'],
+  ]) {
+    const w = world(t, options)
+    const home = w.home()
+    await assert.rejects(w.service.accountSwitch(ID, { fresh: true, label: 'chat' }), { code, message })
+    assert.equal(w.home(), home)
+    assert.equal(w.service.loginCurrent(ID), undefined)
+    assert.equal(w.logoutCalls.length, 0)
+    assert.equal(w.traces().some(({ event }) => event === 'authenticate' || event === 'logout'), false)
+  }
+})
+
+test('ordinary native sign-in keeps its attempt when chat requests another login', unixOnly, async t => {
+  plant(t)
+  const w = world(t, { agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' } })
+  await w.service.signInNative(ID)
+  const initial = await until(() => w.service.loginCurrent(ID)?.url && w.service.loginCurrent(ID), 'the Settings link')
+  const home = w.home()
+  await assert.rejects(w.service.accountSwitch(ID, { fresh: true }), { code: 'acp-account/busy' })
+  await assert.rejects(w.service.accountSwitch('acp-codex', { fresh: true }), { code: 'acp-account/busy' })
+  assert.equal(w.service.loginCurrent(ID).attemptId, initial.attemptId)
+  assert.equal(w.home(), home)
+  w.service.loginCancel(ID, initial.attemptId)
+  await until(() => w.service.loginActive() === 0, 'cancelled Settings attempt to settle')
+})
+
+test('round 2 finding 6: Settings keeps admission between retirement and sign-in, and Windows keeps its refusal', unixOnly, async t => {
+  plant(t)
+  await t.test('Settings switch owns the gap', async t => {
+    let chat
+    let old
+    const compete = () => {
+      chat ??= w.service.accountSwitch(ID, { fresh: true, label: 'competing chat' }).catch(error => error)
+    }
+    const w = world(t, {
+      agentEnv: { FAKE_ACP_AUTH_LISTEN: '1' },
+      onRoutes() {
+        if (old && w.home() !== old && w.service.accountSwitchNative) queueMicrotask(compete)
+      },
+    })
+    old = w.home()
+    if (w.service.accountSwitchNative) await w.service.accountSwitchNative(ID)
+    else {
+      await w.service.accountSignOutNative(ID)
+      compete()
+      await w.service.signInNative(ID).catch(() => {})
+    }
+    assert.notEqual(w.home(), old)
+    assert.ok(chat, 'the competitor tried after the old home was retired')
+    assert.equal((await chat).code, 'acp-account/busy')
+    const waiting = await until(() => w.service.loginCurrent(ID)?.url && w.service.loginCurrent(ID), 'the Settings link')
+    assert.notEqual(waiting.openedBy, 'competing chat')
+    w.service.loginCancel(ID, waiting.attemptId)
+    await until(() => w.service.loginActive() === 0, 'the Settings attempt settled')
+  })
+  await t.test('Windows refuses before busy', async t => {
+    const w = world(t, { platform: 'win32' })
+    const pending = w.service.signInNative('acp-claude').catch(error => error)
+    await assert.rejects(w.service.accountSwitch(ID, { fresh: true }), {
+      code: 'acp-account/unavailable',
+      message: 'Sign out is not available on Windows. Sign out in Antigravity itself.',
+    })
+    await pending
+  })
 })

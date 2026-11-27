@@ -6,7 +6,7 @@
 // (tool.js), so DSH shows the card and asks for approval. The next step drains what the agent
 // said since. DSH keeps the Session, its history and the sidebar.
 import { CLAUDE_PINS, pinOf, pinWire } from './model-identity.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -24,14 +24,14 @@ import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
 import { CATALOG_MAX_AGE_MS, ensureCatalog, keptModel, modelPart, NATIVE_OFF_UNAVAILABLE, NATIVE_OFF_UNVERIFIABLE } from './codex-native.js'
 import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
-import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
+import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, HISTORY_TOOL_NAME, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import {
-  agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, NOTICE_KIND, renderMessage,
+  agentRoute, answered, boundaryNotice, CONTEXT_KINDS, isHandoff, lastProviderOf, missedBy, NOTICE_KIND, renderMessage,
   replayBlocks, turnStart, unreadHandoff,
 } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
-import { callArguments, entered, levelOf, mirrorTool, reviewed, TOOL_NAME } from './tool.js'
+import { callArguments, entered, levelOf, mirrorTool, nestedPermissionMatches, reviewed, TOOL_NAME } from './tool.js'
 import { guardSession } from './write-guard.js'
 import { checkUploadSize, prepareUpload } from './upload-content.js'
 
@@ -41,6 +41,7 @@ export const CANCEL_WAIT_MS = 5000
 // A bridge that never listed its tools fails the turn: codex-acp skips a server whose name the
 // person's own Codex config defines, and a Session must not run with half a tool set.
 const SKILL_BRIDGE_PROVIDERS = new Set(['acp-claude', 'acp-codex', 'acp-antigravity', 'acp-omp'])
+const sameTools = (left, right) => left?.size === right.size && [...right].every(name => left.has(name))
 const BRIDGE_READY_MS = 15_000
 const BRIDGE_READY_POLL_MS = 25
 // The MCP bridge script, spawned by the adapter as a child of its own.
@@ -82,6 +83,11 @@ const bridgeRow = message => (
   (message?.role === 'assistant' && message?.source?.synthetic === SYNTHETIC_KIND)
   || (message?.role === 'developer' && message?.source?.kind === SYNTHETIC_KIND)
 )
+
+// Context notes, including the Bot team's fallback clock, can land at any step (#2130).
+const BOT_CONTEXT_KINDS = new Set(['ds-bot-time-context'])
+const contextRow = message => message?.role === 'user'
+  && (CONTEXT_KINDS.has(message.source?.kind) || BOT_CONTEXT_KINDS.has(message.source?.kind))
 
 const permitsNative = level => level?.sandbox === 'workspace-write' || level?.sandbox === 'danger-full-access'
 const OMP_TOOLS_OFF_TEXT = 'omp tried to use a tool while native tools are off, so this answer stopped.'
@@ -350,13 +356,43 @@ function isFileHandle(text, ref) {
 
 // Legacy fallback rows still supply text, never fresh image authority. Retry and handoff
 // rows likewise cannot replay an earlier accepted image. Undefined keeps the text path exact.
+function teamService(ctx) {
+  try { return ctx.get?.('omniTeam') } catch { return undefined }
+}
+
+function designatedImages(row, saved, session, ctx) {
+  const source = row.source
+  if (source?.kind !== 'bot' || source.form !== 'relay' || source.role !== 'request' || source.resultReview?.v !== 1
+    || isHandoff(row) || source.resumed || source.resumedByUpdate || source.retried || source.resume
+    || !isDeepStrictEqual(source, saved?.source) || !Array.isArray(saved?.content) || !Array.isArray(row.content)) return
+  try {
+    const ids = teamService(ctx)?.resultReviewImages?.(session.id, source.exchangeId)
+    if (!Array.isArray(ids)) return
+    const images = blocks => blocks.filter(block => block?.type === 'image' && !block.offloaded && ids.includes(block.attachment?.attachmentId))
+    const projected = images(row.content)
+    if (projected.length === 0 || !isDeepStrictEqual(images(saved.content), projected)) return
+    return { ids: [...ids], blocks: projected }
+  } catch { return undefined }
+}
+
+const reviewRunKeys = new WeakMap()
+function reviewRunKey(run) {
+  if (!reviewRunKeys.has(run)) reviewRunKeys.set(run, randomUUID())
+  return reviewRunKeys.get(run)
+}
+
 function uploadBlocks(messages, redact, session, ctx) {
   const selected = promptRows(messages).rows
   const durable = session?.deriveMessages?.() ?? []
   const files = new Set()
   const relays = new Set()
+  const reviews = new Map()
   const rows = selected.map(row => {
     const saved = row.id ? durable.find(message => message.id === row.id) : undefined
+    if (row.source?.resultReview?.v === 1 && selected.findLast(message => message.source?.exchangeId === row.source.exchangeId) === row) {
+      const review = designatedImages(row, saved, session, ctx)
+      if (review) reviews.set(row, review)
+    }
     const verified = roomUploads(row, saved, session, ctx)
     if (verified.length > 0) {
       const content = Array.isArray(row.content)
@@ -402,11 +438,14 @@ function uploadBlocks(messages, redact, session, ctx) {
   const genuine = row => relays.has(row) ||
     (row.source?.kind === 'user' && !isHandoff(row))
   const upload = block => block?.type === 'image' || files.has(block)
-  if (!rows.some(row => genuine(row) && Array.isArray(row.content) &&
+  if (!reviews.size && !rows.some(row => genuine(row) && Array.isArray(row.content) &&
       row.content.some(upload))) return undefined
   const blocks = []
   for (const row of rows) {
-    const parts = genuine(row) && Array.isArray(row.content)
+    const review = reviews.get(row)
+    const parts = review ? row.content.map(block => block?.type === 'text' || review.blocks.includes(block)
+      ? block : { type: 'text', text: textOf([block]) })
+      : genuine(row) && Array.isArray(row.content)
       ? row.content.filter(block => upload(block) || block?.type === 'text')
       : [{ type: 'text', text: isHandoff(row) ? redact(textOf(row.content)) : textOf(row.content) }]
     if (!parts.some(block => upload(block) || block.text)) continue
@@ -416,7 +455,7 @@ function uploadBlocks(messages, redact, session, ctx) {
       blocks.push({ ...parts[i] })
     }
   }
-  return { blocks, roomIds: [...relays].map(row => row.source.uploads.roomId) }
+  return { blocks, roomIds: [...relays].map(row => row.source.uploads.roomId), reviews }
 }
 
 /** Where a Session title on an agent's chat goes when DSH's default model is an agent too. */
@@ -626,6 +665,9 @@ function withOfferedEfforts(entry, models) {
 }
 
 export class AcpAdapter extends LlmAdapter {
+  // Strict dispatches outlive replacement of a Session's live ACP run.
+  #nestedPermissions = new Map()
+
   /**
    * @param {import('@deepseek-ai/cordis').Context} ctx
    * @param {Map<string, { name: string, catalog: import('./catalog.js').Catalog, installed?(): boolean, spawn(): { command: string, args?: string[], env?: Record<string, string> } }>} agents
@@ -693,6 +735,9 @@ export class AcpAdapter extends LlmAdapter {
     this.tool = mirrorTool({
       sessionFiles: (...args) => this.sessionFiles.ask(...args),
       runOf: sessionId => this.live.get(sessionId),
+      ownsSession: (sessionId, live, agent, session) => live.dshAgent === agent
+        && this.ctx.agents?.get?.(sessionId) === agent && this.ctx.sessions?.get?.(sessionId) === session,
+      nestedPermissionOf: callId => this.#nestedPermissions.get(callId),
       cancelled: (sessionId, live) => this.reap(sessionId, live),
       bridgeApprovals: (sessionId, position, signal) =>
         this.backchannel?.awaitApprovals?.(sessionId, position, signal),
@@ -740,6 +785,10 @@ export class AcpAdapter extends LlmAdapter {
       if (starting !== undefined && starting.session === session) {
         this.invalidateStart(session.id, starting)
       }
+      const live = this.live.get(session?.id)
+      if (live?.session === session && live?.bridge?.only?.has(HISTORY_TOOL_NAME)) {
+        this.endSession(session.id, undefined, undefined, candidate => candidate === live)
+      }
     })
     for (const agent of this.ctx.agents?.list?.() ?? []) this.registerMirror(agent)
     // A mirror call DSH refuses before its body (a gate, a failed review, the person's no, a
@@ -780,18 +829,23 @@ export class AcpAdapter extends LlmAdapter {
    * open. At Auto this is what puts the call through DSH's review gate: the reviewer answers a
    * real execution, and the mirror body answers the agent's question. The call's rows are
    * written in that step; the agent's queued update later finds `cardExecuted` and draws no
-   * second card. A failure leaves the question unanswered for the direct ask that follows.
+   * second card. Guarded waits carry the exact pending question through the executor.
+   * The caller handles a dispatch failure for that question.
    * @returns {Promise<boolean>} whether the nested question got its answer
    */
-  async runNested(live, nested, exec) {
+  async runNested(live, nested, exec, boundQuestion) {
     const session = exec.agent?.session
     const position = openStepOf(session)
     const tools = this.ctx.get?.('tools')
     const question = nested.permission
     if (session === undefined || position === undefined || tools?.execute === undefined
       || exec.toolSet === undefined || question === undefined) return false
+    const run = live.run
+    const args = boundQuestion?.call ? callArguments(boundQuestion.call) : callArguments(nested)
+    if (boundQuestion && (this.live.get(session.id) !== live || run.tools.get(nested.id) !== nested
+      || !nestedPermissionMatches(nested, boundQuestion, args))) return false
     const id = `acp_${randomUUID()}`
-    const raw = JSON.stringify(callArguments(nested))
+    const raw = JSON.stringify(args)
     let hide
     try {
       hide = advertise(session, position, routeOf(session), { id, name: TOOL_NAME, raw }, message => this.warn(message))
@@ -803,6 +857,9 @@ export class AcpAdapter extends LlmAdapter {
     nested.cardExecuted = id
     live.calls.add(id)
     live.toolIds.set(id, nested.id)
+    if (boundQuestion) {
+      this.#nestedPermissions.set(id, { live, session, run, tool: nested, question: boundQuestion, args })
+    }
     try {
       await tools.execute({
         calls: [{ id, name: TOOL_NAME, arguments: raw }],
@@ -814,10 +871,13 @@ export class AcpAdapter extends LlmAdapter {
     } catch (error) {
       this.warn(`a nested call was not recorded: ${error?.message ?? error}`)
     } finally {
+      this.#nestedPermissions.delete(id)
       hide()
       live.calls.delete(id)
       live.toolIds.delete(id)
-      if (nested.permission === question) nested.cardExecuted = undefined
+      if (nested.cardExecuted === id && nested.permission !== undefined && (boundQuestion || nested.permission === question)) {
+        nested.cardExecuted = undefined
+      }
     }
     return nested.permission !== question
   }
@@ -829,6 +889,8 @@ export class AcpAdapter extends LlmAdapter {
    */
   refusedFirst(exec) {
     try {
+      // The waiting mirror settles the captured question if its strict dispatch never enters.
+      if (exec?.name === TOOL_NAME && this.#nestedPermissions.has(exec.callId)) return
       if (exec?.name === TOOL_NAME && exec.parent === undefined) {
         const live = this.live.get(exec.agent?.session?.id)
         live?.pendingMirrors?.delete(exec.callId)
@@ -888,6 +950,58 @@ export class AcpAdapter extends LlmAdapter {
   roleToolsInDsh(sessionId) {
     if (typeof sessionId !== 'string' || sessionId === '') return false
     try { return this.botIdentity(sessionId)?.needsDshTools === true } catch { return false }
+  }
+
+  historyWanted(agent, sessionId, provider, agyOff = false) {
+    return this.backchannel !== undefined && agent?.bridge === false &&
+      SKILL_BRIDGE_PROVIDERS.has(provider) && !agyOff &&
+      this.dshTools() !== false && this.roleToolsInDsh(sessionId)
+  }
+
+  canMountSkills(sessionId, provider) {
+    return this.backchannel !== undefined && SKILL_BRIDGE_PROVIDERS.has(provider) &&
+      this.ctx.get?.('omniTeam')?.skillCalls?.available(sessionId) === true
+  }
+
+  restrictedTools(agent, sessionId, provider, agyOff = false, agySkills = false, previous) {
+    const only = new Set()
+    const history = this.historyWanted(agent, sessionId, provider, agyOff) && typeof this.ctx.get?.('tools')?.definitions === 'function'
+    // A retained Skills-only session must still answer a call from its old catalog with
+    // Skills' checked unavailable result. A history bridge always recomputes both entries.
+    const keepSkillRefusal = !history && previous?.size === 1 && previous.has('load_skill')
+    const skills = this.canMountSkills(sessionId, provider)
+    if (agyOff ? agySkills && skills : skills || keepSkillRefusal) only.add('load_skill')
+    if (history) only.add(HISTORY_TOOL_NAME)
+    return only
+  }
+
+  mintBridge(live, dshAgent, only, name = live.name, skillRefusal = false, canList) {
+    const { provider, providerRow } = live
+    const session = dshAgent?.session
+    const sessionId = session?.id
+    const agyOff = provider === 'acp-antigravity' && live.nativeOff === true
+    const historyLive = (requireRegisteredSession = false) => live.open === true && live.run?.busy === true &&
+      live.held === undefined && !live.archived &&
+      this.live.get(sessionId) === live && live.bridge === record && this.agents.get(provider) === providerRow &&
+      this.ctx.agents?.get?.(sessionId) === dshAgent && dshAgent.session === session &&
+      (typeof this.ctx.sessions?.get === 'function' ? this.ctx.sessions.get(sessionId) === session : !requireRegisteredSession) &&
+      this.historyWanted(providerRow, sessionId, provider, provider === 'acp-antigravity' && live.nativeOff === true)
+    const record = this.backchannel.mint({
+      sessionId, agent: dshAgent, name, only, skillRefusal, canList, native: live.twinsOff === true,
+      promptRunning: () => live.open === true && live.run?.busy === true,
+      promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
+      ...(only?.has(HISTORY_TOOL_NAME) && {
+        historyPrompt: () => live.run?.historySignal,
+        restrictedCall: (callId, name, prompt, claim) => historyLive()
+          ? live.run.restrictedCall(callId, name, prompt, claim) : undefined,
+        ...(provider === 'acp-antigravity' && !agyOff && {
+          restrictedRequest: (name, prompt) => name === HISTORY_TOOL_NAME && prompt !== undefined &&
+            !prompt.aborted && historyLive(true) && prompt === live.run.historySignal,
+          restrictedClaim: (callId, operation) => live.run.restrictedClaim(callId, operation),
+        }),
+      }),
+    })
+    return record
   }
 
   bridgeOn(agent, sessionId) {
@@ -1212,6 +1326,19 @@ export class AcpAdapter extends LlmAdapter {
     return live?.own === true && live.run.busy === true
   }
 
+  /** Read the prompt advertisement of this Session's initialized ACP run. */
+  promptImageCapability(sessionId, provider) {
+    const live = this.live.get(sessionId)
+    if (!live?.initialized || live.provider !== provider || !live.run.alive || live.archived || live.held !== undefined) {
+      return undefined
+    }
+    const agent = this.ctx.agents?.get?.(sessionId)
+    if (agent !== live.dshAgent || agent?.session !== live.session || live.providerRow !== this.agents.get(provider)) {
+      return undefined
+    }
+    return live.run.init?.agentCapabilities?.promptCapabilities?.image === true
+  }
+
   /**
    * Whether a gate holds this Session now: the sentence to answer the step with, or undefined.
    * Every gate is asked; any refusal wins, the first to arrive. A gate lets the Session go only
@@ -1387,18 +1514,23 @@ export class AcpAdapter extends LlmAdapter {
    */
   async refork(agent, live, dshAgent, signal, { renew = false, checkAccount } = {}) {
     const { bridge: previous, run } = live
-    const next = previous === undefined ? undefined : this.backchannel.mint({
-      sessionId: dshAgent?.session?.id,
-      agent: dshAgent,
-      name: agent.name,
-      promptRunning: () => live.open === true && live.run?.busy === true,
-      promptSkillRefusals: () => live.open && live.run?.busy ? live.run.promptSkillRefusals : undefined,
-      native: live.twinsOff === true,
-      skillOnly: previous?.skillOnly === true,
-      canList: checkAccount,
-    })
+    const sessionId = dshAgent?.session?.id
+    const agyOff = live.provider === 'acp-antigravity' && live.nativeOff === true
+    const only = previous !== undefined && previous.only === undefined ? undefined
+      : this.restrictedTools(agent, sessionId, live.provider, agyOff, live.agySkillsVersion !== undefined)
+    // A request from the old Skills catalog still needs its checked refusal.
+    // The replacement lists only current tools, so it may have an empty bridge.
+    const skillRefusal = only?.size === 0 && !agyOff && (previous?.skillOnly === true || previous?.skillRefusal === true)
+    const next = only?.size === 0 && !skillRefusal ? undefined
+      : this.mintBridge(live, dshAgent, only, agent.name, skillRefusal, checkAccount)
     live.bridge = next
     live.checkReforkAccount = checkAccount
+    if (run.spec !== undefined) {
+      run.spec.skillBridge = next !== undefined && SKILL_BRIDGE_PROVIDERS.has(live.provider)
+      run.spec.skillTools = next?.only
+      run.spec.skillRefusal = next?.skillRefusal
+      run.spec.agyHistoryRequest = next?.restrictedRequest !== undefined
+    }
     // The source is done running tools before the fork starts.
     if (previous) this.backchannel.revoke(previous)
     try {
@@ -1416,7 +1548,6 @@ export class AcpAdapter extends LlmAdapter {
       if (next) this.backchannel.revoke(next)
       this.timers.clearTimeout(live.reaper)
       run.dispose()
-      const sessionId = dshAgent?.session?.id
       if (this.live.get(sessionId) === live) this.live.delete(sessionId)
       if (previous !== undefined) this.backchannel.revoke(previous)
       throw error
@@ -1494,6 +1625,11 @@ export class AcpAdapter extends LlmAdapter {
       this.invalidateStart(session.id, starting)
     }
     const liveSession = live?.dshAgent?.session
+    if (live?.session === session && live?.bridge?.only?.has(HISTORY_TOOL_NAME) &&
+        typeof provider === 'string' && provider !== live.provider) {
+      this.endSession(session.id, undefined, undefined, candidate => candidate === live)
+      return
+    }
     if (live === undefined || (liveSession !== undefined && liveSession !== session)) return
     // Off is the old path, byte for byte: the agent session is kept across a turn on another
     // provider, so switching back resumes the same ACP session. The default is per agent.
@@ -1621,6 +1757,8 @@ export class AcpAdapter extends LlmAdapter {
   // exit (`starting`), whichever way it leaves: a refusal, a failure, a stop, its end.
   async *stream(options) {
     const { sessionId, signal } = options
+    const review = teamService(this.ctx)
+    const attempt = review?.reviewAttempt?.(sessionId)
     const fileOwner = this.sessionFiles.owners.get(sessionId)
     // Latch durable membership at admission, before the first await. Undo can remove
     // the id before this step resumes, but only a fresh entry may start afterward.
@@ -1647,8 +1785,16 @@ export class AcpAdapter extends LlmAdapter {
     signal?.addEventListener('abort', stopFiles, { once: true })
     if (signal?.aborted) stopFiles()
     try {
-      yield* this.step(options, entry)
+      for await (const chunk of this.step(options, entry)) {
+        if (chunk.type === 'finish') {
+          const completed = !['error', 'aborted'].includes(chunk.reason?.kind) && !signal?.aborted
+          review?.reviewGenerationOutput?.(entry.reviewGeneration, { completed, attempt })
+          entry.reviewCompleted = completed
+        }
+        yield chunk
+      }
     } finally {
+      if (!entry.reviewCompleted) review?.reviewGenerationOutput?.(entry.reviewGeneration, { completed: false })
       signal?.removeEventListener('abort', stopFiles)
       if (!entry.archived && entry.fileStartup && this.starting.get(sessionId) === entry
           && entry.fileOwner?.grant && this.sessionFiles.owners.get(sessionId) === entry.fileOwner
@@ -1748,7 +1894,7 @@ export class AcpAdapter extends LlmAdapter {
     if (archived()) return yield finish('stop')
     agent = this.agents.get(options.provider)
     if (agent === undefined) return yield finish('error', `No ACP agent is set up as ${options.provider}`, 'NO_ADAPTER')
-    const followsTool = options.messages.findLast(message => !bridgeRow(message))?.role === 'tool'
+    const followsTool = options.messages.findLast(message => !bridgeRow(message) && !contextRow(message))?.role === 'tool'
     if (!ownsStart()) {
       // A disposed agent can still report a known account or connector refusal for its turn.
       if (!followsTool && this.starting.get(sessionId) === entry && (held === undefined || entry.agentDisposed)) {
@@ -1776,11 +1922,11 @@ export class AcpAdapter extends LlmAdapter {
     // The step after a mirror call's result continues the agent's turn. The bridge writes result
     // rows of its own (a DSH tool call's result, or the row that closes a call still open when
     // its step ended, #957). Its advertisement can also follow the mirror result (#1293).
-    // Look back through tool messages and bridge rows for the mirror result.
+    // Look back through tool messages, bridge rows and context notes for the mirror result.
     const mirrorAnswered = (() => {
       for (let i = options.messages.length - 1; i >= 0; i--) {
         const message = options.messages[i]
-        if (bridgeRow(message)) continue
+        if (bridgeRow(message) || contextRow(message)) continue
         if (message?.role !== 'tool') return false
         if (live?.calls.has(message.toolCallId)) return true
       }
@@ -1819,9 +1965,9 @@ export class AcpAdapter extends LlmAdapter {
       const agy = options.provider === 'acp-antigravity'
       const skillCatalog = state => supportsSkillBridge && (!agy || state.nativeOff !== true || state.agySkillsVersion !== undefined)
         ? skills?.catalog(sessionId) : undefined
-      const canMountSkills = () => this.backchannel !== undefined && supportsSkillBridge &&
-        skills?.available(sessionId) === true
+      const canMountSkills = () => this.canMountSkills(sessionId, options.provider)
       const agySkillsWanted = () => canMountSkills() ? agent.agySkillsVersion?.() : undefined
+      const restrictedTools = (agyOff, agySkills, previous) => this.restrictedTools(agent, sessionId, options.provider, agyOff, agySkills, previous)
       const inputStart = turnStart(options.messages)
       const history = options.messages.slice(0, inputStart)
       const session = dshAgent?.session
@@ -1940,19 +2086,21 @@ export class AcpAdapter extends LlmAdapter {
       const asks = hardAsks(native, turnLevel)
       const agyOffLive = agy && live?.provider === options.provider && live.nativeOff === true
       const wantedAgyVersion = agyOffLive ? agySkillsWanted() : undefined
-      const wantsSkills = agyOffLive ? wantedAgyVersion !== undefined : canMountSkills()
+      const wantedOnly = restrictedTools(agyOffLive, wantedAgyVersion !== undefined, live?.bridge?.only)
       const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true)
-        && (this.bridgeOn(agent, sessionId) || wantsSkills)
-      const needsSkillBridge = live?.bridge === undefined && wantsSkills
+        && (this.bridgeOn(agent, sessionId) || wantedOnly.size > 0)
+      const toolsChanged = live?.bridge === undefined ? wantedOnly.size > 0
+        : live.bridge.only !== undefined && !sameTools(live.bridge.only, wantedOnly)
       // Antigravity OFF selects its exact tool list at process launch. When
       // eligibility or executable proof changes, replace the child and replay delivered history.
       const relaunchForSkills = agyOffLive && live.agySkillsVersion !== wantedAgyVersion
+      const historyBridge = live?.bridge?.only?.has(HISTORY_TOOL_NAME) === true
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       // A new tool set or role needs a new agent session.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
-        || (live.run.promptEnded === undefined && (live.dshAgent !== dshAgent
-          || (live.providerRow !== undefined && live.providerRow !== agent)))
-        || bridgeGone || needsSkillBridge || relaunchForSkills || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
+        || ((historyBridge || live.run.promptEnded === undefined) && (live.dshAgent !== dshAgent
+          || (historyBridge && live.session !== session) || (live.providerRow !== undefined && live.providerRow !== agent)))
+        || bridgeGone || toolsChanged || relaunchForSkills || live.asks !== asks || (live.native === true) !== native || roleChanged || upgrade)
       if (remade) {
         if (roleChanged) {
           try {
@@ -2044,7 +2192,7 @@ export class AcpAdapter extends LlmAdapter {
         const state = {
           fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox,
           provider: options.provider, providerRow: agent, name: agent.name, asks, native, twinsOff: false,
-          run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent,
+          run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent, session,
           bridge: undefined, replay: undefined, owed: undefined, drifted: false,
           roleDigest: role.digest, roleTurn: turn,
         }
@@ -2128,8 +2276,8 @@ export class AcpAdapter extends LlmAdapter {
                 }
             checkStart()
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
-            // omp's launch spec is synchronous and it has no bridge to prepare.
-            // Keep its policy decision and actual spawn in the same event-loop turn.
+            // omp's launch spec is synchronous. Its argv decision is checked again after
+            // preparing any restricted bridge, immediately before the child starts.
             const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, agySkillsVersion, offRecheck, ...spec } = omp ? launch : await launch
             checkStart()
             state.agySkillsVersion = agySkillsVersion
@@ -2172,14 +2320,14 @@ export class AcpAdapter extends LlmAdapter {
             const decision = this.bridgeDecision(agent, sessionId, codexOff)
             const bridged = decision.on
             state.bridgeDefault = decision.setting === undefined ? bridged : undefined
-            const skillOnly = !bridged && (agyOff ? agySkills : canMountSkills())
+            const only = bridged ? undefined : restrictedTools(agyOff, agySkills)
             launchEligible = () => {
               const current = this.bridgeDecision(agent, sessionId, codexOff)
               return current.on === bridged && current.setting === decision.setting
-                && (agyOff ? !agySkills || canMountSkills() : skillOnly === (!bridged && canMountSkills()))
+                && (bridged || sameTools(only, restrictedTools(agyOff, agySkills)))
                 && (!fileOwner || this.sessionFiles.valid(fileOwner))
             }
-            if ((bridged || skillOnly) && !agySkills) {
+            if ((bridged || only.size > 0) && !agySkills) {
               await this.backchannel.listen()
               checkStart()
               checkArgsMode()
@@ -2207,12 +2355,7 @@ export class AcpAdapter extends LlmAdapter {
             state.twinsOff = twinsOff
             checkStart()
             if (!launchEligible()) throw START_CHANGED
-            if (bridged || skillOnly) {
-              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name,
-                promptRunning: () => state.open === true && state.run?.busy === true,
-                promptSkillRefusals: () => state.open && state.run?.busy ? state.run.promptSkillRefusals : undefined,
-                native: twinsOff, skillOnly })
-            }
+            if (bridged || only.size > 0) state.bridge = this.mintBridge(state, dshAgent, only)
             this.diagnostics?.started(sessionId, this, agent, state)
             const run = new AgentRun({
               ...spec,
@@ -2236,6 +2379,8 @@ export class AcpAdapter extends LlmAdapter {
                   : spawnAsks ? { sessionMeta: agent.hardAsk() } : {}),
               dshTools: bridged,
               skillBridge: state.bridge !== undefined && SKILL_BRIDGE_PROVIDERS.has(options.provider),
+              skillTools: state.bridge?.only,
+              agyHistoryRequest: state.bridge?.restrictedRequest !== undefined,
               ...(omp && nativeOff === true ? {
                 refuseTools: true,
                 onForbiddenTool: () => {
@@ -2287,10 +2432,12 @@ export class AcpAdapter extends LlmAdapter {
             await starting
             if (state.archived) throw ARCHIVED
             checkStart()
+            if (!launchEligible()) throw START_CHANGED
             // DSH's `default` for Codex is the model a process with its own tools started on. An
             // OFF process reads a catalog without the kept models, so it never says.
             if (codexRow && !codexOff && typeof run.startModel === 'string') this.startModels.set(agent, run.startModel)
             if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined)) throw new Error('Image permission changed during startup.')
+            state.initialized = true
             try { agent.proven?.() } catch {}
             break
           } catch (error) {
@@ -2607,7 +2754,11 @@ export class AcpAdapter extends LlmAdapter {
         live.run === uploadRun && uploadRun.alive && uploadRun.sessionId === uploadSession &&
         live.dshAgent === dshAgent && this.ctx.agents?.get(sessionId) === dshAgent &&
         this.agents.get(options.provider) === agent &&
-        uploads.roomIds.every(roomId => ownsRoomUploads(this.ctx, dshAgent?.session, roomId))
+        uploads.roomIds.every(roomId => ownsRoomUploads(this.ctx, dshAgent?.session, roomId)) &&
+        [...uploads.reviews].every(([row, review]) => {
+          const durable = dshAgent?.session?.deriveMessages?.().find(message => message.id === row.id)
+          return isDeepStrictEqual(designatedImages(row, durable, dshAgent?.session, this.ctx), review)
+        })
       )
       const uploadStopped = () => options.signal?.aborted ? STOPPED()
         : finish('error', entry.held ?? live.held ?? 'Uploaded image turn changed before the prompt. Send again.', 'acp_upload_content')
@@ -2620,6 +2771,7 @@ export class AcpAdapter extends LlmAdapter {
             blocks: uploads.blocks, replay: live.replay, run: uploadRun,
             attachments: this.ctx.get?.('attachments'), cwd: dshAgent?.session?.header?.cwd,
             warn: message => this.warn(message),
+            remember: teamService(this.ctx)?.rememberReviewUpload,
             signal: options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal,
             timers: this.timers,
             valid: () => { if (!uploadValid()) throw new Error('Uploaded image turn changed before the prompt. Send again.') },
@@ -2801,8 +2953,13 @@ export class AcpAdapter extends LlmAdapter {
       }
       if (startChanged() || live.held !== undefined || this.live.get(sessionId) !== live || options.signal?.aborted
           || launchEligible?.() === false) return yield* stopChanged()
+      if (live.run.spec?.dshTools !== true &&
+          !sameTools(live.bridge?.only ?? new Set(), restrictedTools(agy && live.nativeOff === true, live.agySkillsVersion !== undefined, live.bridge?.only))) {
+        return yield* stopChanged()
+      }
       const promptRefusal = firstPromptRefusal()
       if (promptRefusal !== undefined) return yield promptRefusal
+      if (!uploadValid()) return yield uploadStopped()
       started()
       live.replay = undefined
       live.owed = undefined
@@ -2817,10 +2974,26 @@ export class AcpAdapter extends LlmAdapter {
       live.confinedReason = undefined
       live.toolIds?.clear()
       live.skillCatalog = catalog?.text ? catalog.key : undefined
-      live.run.prompt(prompt, () => skills?.admit({ ...send, messages: promptRows(current).rows }, session)).catch(() => {})
+      const review = teamService(this.ctx)
+      const rows = promptRows(current).rows
+      const verified = new Set(uploads?.reviews.size ? prompt.filter(block => block.type === 'image')
+        .map(block => `sha256:${createHash('sha256').update(Buffer.from(block.data, 'base64')).digest('hex')}`) : [])
+      const admitted = new Map([...(uploads?.reviews ?? [])].map(([row, review]) => [row.id, review.blocks]))
+      live.reviewGeneration = review?.beginReviewGeneration?.({
+        sessionId, messages: rows, runKey: reviewRunKey(live.run), provider: options.provider, model: options.model,
+        nativeIds: (row, carried) => (admitted.get(row.id) ?? [])
+          .map(block => block.attachment.attachmentId).filter(id => carried.includes(id) && verified.has(id)),
+      })
+      const generation = live.reviewGeneration
+      entry.reviewGeneration = generation
+      live.run.prompt(prompt, () => {
+        review?.reviewGenerationOutput?.(generation, { confirmed: true })
+        skills?.admit({ ...send, messages: rows }, session)
+      }, options.signal).catch(() => review?.reviewGenerationOutput?.(generation, { confirmed: false }))
       // The notice belongs to this prompt, including any step after a mirror result.
       if (substitution !== undefined) live.substitution = { ...substitution, signal: options.signal }
     }
+    entry.reviewGeneration ??= live.reviewGeneration
     // The turn stays open until its end is drained here: the agent may finish it before DSH
     // asks for the step after a tool result.
     for (;;) {
@@ -2866,7 +3039,7 @@ export class AcpAdapter extends LlmAdapter {
         // left to the bridge too; its own tools keep their cards.
         // `ToolSearch` is the adapter's own deferred-tool loader (it stays with `tools: []`); it
         // is not a DSH tool and gets no card or dialog either.
-        const skip = tool.skillBridge === true || (live.bridge?.skillOnly !== true && (
+        const skip = tool.skillBridge === true || tool.restrictedIdentity === true || (live.bridge?.only === undefined && (
           tool.drift === true || tool.structuredName === 'ToolSearch'
           || (!tool.skillConflict && (tool.bridge === true || (agent.refresh === 'fork' && tool.mcp === true)))))
         if (live.bridge !== undefined && skip) {

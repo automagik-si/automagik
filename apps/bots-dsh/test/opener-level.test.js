@@ -56,6 +56,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, runs, services = {}
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-opener-level-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify({ ...TEAM, bots: { m1: { ...TEAM.bots.m1, ...bots.m1 }, b2: { ...TEAM.bots.b2, ...bots.b2 } }, rooms: { r1: { ...TEAM.rooms.r1, ...room } }, ...(tasks ? { tasks } : {}), ...(runs ? { subscriptionRuns: runs } : {}) }))
   const log = []
+  const instructions = new Map()
   const open = new Set()
   const presetOf = new Map()
   const service = {
@@ -102,7 +103,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, runs, services = {}
           for (const listener of ctx.listeners.get('session/created') ?? []) void Promise.resolve(listener(session)).catch(() => {})
         }
         await new Promise(resolve => setTimeout(resolve, 1))
-        return { agent: { session, followup() {} } }
+        return { agent: { session, followup(message) { instructions.set(sessionId, message.id) } } }
       },
       selectModel: async () => {},
     },
@@ -132,7 +133,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, runs, services = {}
   const wish = (from = 'm1', extra = {}) => rt.startTask({ title: 'Wish', text: 'Do it', from, ...extra })
   // A task started from `sessionId`'s tool call.
   const from = (sessionId, ...args) => toolCall(sessionId, () => wish(...args))
-  return { ctx, rt, service, call, presets, toolCall, wish, from, log, made: () => sessions }
+  return { ctx, rt, service, call, presets, toolCall, wish, from, log, instructions, made: () => sessions }
 }
 
 // An in-memory stand-in for DSH 0.2.2's schedule service: typed timing, target-based
@@ -194,7 +195,16 @@ const create = (h, sessionId = 'm1', args = {}) => {
   return h.toolCall(sessionId, () => h.ctx.registeredTools.get('create_bot').execute({ name: 'Ada', role: 'Help', instructions: 'Help', ...args }, execOf(sessionId)), 'create_bot')
 }
 const newBot = h => Object.values(h.rt.state.bots).find(bot => !['m1', 'b2'].includes(bot.id))
-const noCapKeys = ['at', 'from', 'status', 'title']
+function assertOwnedTask({ rt, instructions }, id, cap = {}) {
+  const task = rt.state.tasks[id]
+  assert.match(task.skillsInstructionsId, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+  assert.equal(task.skillsInstructionsId, instructions.get(id))
+  assert.ok(Number.isFinite(task.at))
+  assert.deepEqual(task, {
+    at: task.at, from: 'm1', status: 'working', title: 'Wish', ...cap,
+    skills: [], skillsInstructionsId: instructions.get(id), skillsOwner: 'm1',
+  })
+}
 const arm = (schedule, target, actor) => schedule.create({ title: 'Nightly', prompt: 'Check', timing: { kind: 'every', every_seconds: 3600 }, target }, actor)
 function recordDelivery(schedule, id, sessionId) {
   const entry = schedule.tasks.get(id)
@@ -262,16 +272,16 @@ test('an unrankable opener gives the narrowest offered and only saves a narrower
     const id = await h.toolCall('m1', () => h.wish())
     await setTo(h.presets, id, [read ? 'read-only' : WRITE])
     if (read) assert.equal(h.rt.state.tasks[id].permissionCap, 'read-only')
-    else assert.deepEqual(Object.keys(h.rt.state.tasks[id]).sort(), noCapKeys)
+    assertOwnedTask(h, id, read ? { permissionCap: 'read-only' } : {})
   }
 })
 
-test('an opener no narrower leaves the record unchanged and follows later Bot levels', async (t) => {
+test('an opener no narrower saves no cap and follows later Bot levels', async (t) => {
   const h = team(t, { bots: { m1: { permission: WRITE } }, custom: READ })
   await h.rt.load()
   h.service.set({ id: 'm1' }, WRITE)
   const id = await h.toolCall('m1', () => h.wish())
-  assert.deepEqual(Object.keys(h.rt.state.tasks[id]).sort(), noCapKeys)
+  assertOwnedTask(h, id)
   assert.equal((await h.call('update-bot', { id: 'm1', permission: FULL })).ok, true)
   await last(h.presets, id, FULL)
 })

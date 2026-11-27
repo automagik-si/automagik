@@ -180,6 +180,23 @@ async function world(t, model = 'deepseek/v4') {
   const run = (patch = {}) => pre({ ...exec, ...patch }, () => 'ran')
   return { ...w, session, events, replies, requests, failures, stops, exec, request, approve, decide, run, noSandbox: () => { sandbox = false } }
 }
+
+test('D2d no-card amendment: Antigravity Bot Auto judges a marked bridge read and leaves escalations to the person', async t => {
+  const w = await world(t, 'acp-antigravity/default')
+  const callId = 'history-call'
+  const toolName = 'read_own_chat'
+  w.events.push({ type: 'tool/call', data: { callId, name: toolName, arguments: '{"query":"fixture"}' } })
+  const request = flags => ({ ...w.request(), callId, toolName, reason: 'Antigravity: read_own_chat', bridgeCall: flags })
+  assert.equal(await w.rt.autoDecide(request({ personDecides: true })), 'allowed-once')
+  w.replies.push('{"decision":"deny","reason":"fixture refusal"}')
+  const refused = request({ personDecides: true })
+  assert.equal(await w.rt.autoDecide(refused), 'rejected')
+  assert.deepEqual(refused.bridgeCall.judged, { reason: 'fixture refusal' })
+  assert.equal(await w.rt.autoDecide(request({ personDecides: true, escalated: true })), undefined)
+  assert.equal(await w.rt.autoDecide(request({})), undefined)
+  assert.equal(w.requests.length, 2)
+})
+
 test('judge grants exactly one matching DSH escalation', async t => {
   const w = await world(t)
   assert.equal(await w.run(), 'ran')

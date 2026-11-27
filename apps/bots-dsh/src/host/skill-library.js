@@ -39,6 +39,9 @@ const FOLDER_OWNER = 'Only the owner of this computer can read a folder on it. U
 const PREVIEW_TTL = 15 * 60 * 1000
 const PREVIEW_LIMIT = 4
 const HOLD_PREEXISTING_TYPED = true
+const SNAPSHOT_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.json$/
+const SNAPSHOT_TEMP = /^\.[A-Za-z0-9_-]+\.json\.[0-9a-f-]{36}\.tmp$/
+const REVOKED = Symbol('worker snapshots revoked')
 export const SKILL_REVIEW_KEY = 'skill-review.key'
 export const SKILL_IMPORT_MARK = 'skill-library-imported'
 const own = (table, key) => table && Object.hasOwn(table, key) ? table[key] : undefined
@@ -170,6 +173,12 @@ function assignments(list, skills) {
 }
 
 const asList = active => [...active].map(([name, mode]) => ({ name, mode }))
+const assignmentKeys = list => new Map((Array.isArray(list) ? list : [])
+  .filter(item => typeof item?.assignment === 'string').map(item => [item.name, item.assignment]))
+const storedAssignments = (active, keys) => asList(active).map(row => keys.has(row.name)
+  ? { ...row, assignment: keys.get(row.name) } : row)
+const activeAssignments = (data, skills, id) =>
+  asList(assignments(own(data.active, id), skills)).filter(({ name }) => !skills.get(name).held)
 
 function documentOf(name, body) {
   if (![undefined, 'text', 'file'].includes(body.source)) throw reject(FILE_FORMAT)
@@ -225,15 +234,23 @@ const safeDir = info => info?.isDirectory() && privateMode(info) && owned(info)
 const sameInode = (a, b) => a?.dev === b?.dev && a?.ino === b?.ino
 const fileStamp = info => info && [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs].join(':')
 
-export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = {}) {
+export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, platform = process.platform } = {}) {
   const root = join(rt.home, 'skill-library')
   const path = join(root, 'library.json')
   const auditPath = join(root, 'audit.jsonl')
   const keyPath = join(rt.home, SKILL_REVIEW_KEY)
   const importMark = join(rt.home, SKILL_IMPORT_MARK)
+  const workerSkills = join(rt.home, 'skills')
+  const workerSnapshots = join(workerSkills, '.bots')
+  const readFlags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+  const windows = platform === 'win32'
   const confirmationKey = randomBytes(32)
   let queue = Promise.resolve()
   let cache
+  let published
+  let pending = false
+  let publicationWarnings = new Set()
+  const rememberedNames = new Set()
   const botRemovals = new Map()
   const saves = new Map()
   const previewJobs = new Map()
@@ -335,7 +352,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       ...(held === REVIEW_NEEDED || held === CONFIRM ? { reviewHash: check.hash } : {}) }
   }
 
-  function snapshot(fresh = false) {
+  function readSnapshot(fresh = false) {
     const rootInfo = directory()
     const info = rootInfo && stat(path)
     const stamp = fileStamp(info)
@@ -364,6 +381,279 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       .map(([name, record]) => [name, checkedRecord(name, record, data, key)]))
     cache = { data, stamp, trust, generation, skills }
     return cache
+  }
+
+  const publicationKey = ({ stamp, trust, generation }) => JSON.stringify([stamp, trust, generation])
+
+  function snapshot(fresh = false) {
+    try {
+      const result = readSnapshot(fresh)
+      if (publicationKey(result) !== published) queuePublish()
+      return result
+    } catch (error) {
+      if (published !== REVOKED) queuePublish()
+      throw error
+    }
+  }
+
+  function snapshotDirectory(create, authority) {
+    const inspect = path => {
+      const info = stat(path)
+      if (info && (!info.isDirectory() || !owned(info) || (!windows && !privateMode(info)))) {
+        throw new Error('The worker snapshot folder is unavailable')
+      }
+      return info
+    }
+    const ensure = (path, check) => {
+      const info = inspect(path)
+      if (info || !create) return info
+      check()
+      try { fs.mkdirSync(path, { mode: 0o700 }) } catch (error) {
+        if (error.code !== 'EEXIST') throw error
+      }
+      const created = inspect(path)
+      if (!created) throw new Error('The worker snapshot folder disappeared during creation')
+      return created
+    }
+    const parent = ensure(workerSkills, authority)
+    if (!parent) return
+    const checkParent = () => {
+      if (!sameInode(parent, inspect(workerSkills))) throw notWritable()
+      authority()
+    }
+    const dir = ensure(workerSnapshots, checkParent)
+    if (!dir) return
+    return () => {
+      checkParent()
+      if (!sameInode(dir, inspect(workerSnapshots))) throw notWritable()
+      authority()
+    }
+  }
+
+  const singleRegular = info => info?.isFile() && owned(info) && info.nlink === 1
+  const readOnlyFile = info => !(info.mode & 0o200)
+  const snapshotFile = info => singleRegular(info) && (windows ? readOnlyFile(info) : (info.mode & 0o777) === 0o444)
+
+  function matchesSnapshot(path, info, bytes) {
+    if (!snapshotFile(info) || info.size !== bytes.length) return false
+    let fd
+    try {
+      fd = fs.openSync(path, readFlags)
+      const opened = fs.fstatSync(fd)
+      if (!snapshotFile(opened) || !sameInode(info, opened)) return false
+      const sameBytes = bytes.equals(fs.readFileSync(fd))
+      const live = stat(path)
+      return sameBytes && snapshotFile(live) && fileStamp(live) === fileStamp(opened)
+    } catch { return false }
+    finally { if (fd !== undefined) fs.closeSync(fd) }
+  }
+
+  function verifyEntry(path, expected, check) {
+    const current = stat(path)
+    if (!sameInode(expected, current)) throw new Error('A worker snapshot entry changed')
+    check()
+    return current
+  }
+
+  function makeSnapshotWritable(path, info, check) {
+    const fd = fs.openSync(path, readFlags)
+    try {
+      const opened = fs.fstatSync(fd)
+      if (!singleRegular(opened) || !sameInode(info, opened) ||
+          !singleRegular(verifyEntry(path, opened, check))) throw new Error('A worker snapshot entry changed')
+      fs.fchmodSync(fd, 0o644)
+      const changed = fs.fstatSync(fd)
+      if (readOnlyFile(changed)) throw new Error('A worker snapshot is still read-only')
+    } finally { fs.closeSync(fd) }
+  }
+
+  function removeSnapshot(path, info, check) {
+    const live = verifyEntry(path, info, check)
+    if (!live) return
+    if (!live.isFile() && !live.isSymbolicLink()) throw new Error('A worker snapshot entry is neither a file nor a link')
+    if (windows && live.isFile() && readOnlyFile(live)) {
+      // libuv may clear the read-only attribute while unlinking on Windows.
+      if (!singleRegular(live)) throw new Error('Cannot safely remove a read-only worker snapshot with an unverified inode')
+      makeSnapshotWritable(path, live, check)
+      const changed = verifyEntry(path, live, check)
+      if (!singleRegular(changed) || readOnlyFile(changed)) throw new Error('A worker snapshot entry changed')
+    }
+    fs.unlinkSync(path)
+  }
+
+  async function replaceSnapshot(name, bytes, check) {
+    check()
+    const path = join(workerSnapshots, name)
+    const before = stat(path)
+    if (matchesSnapshot(path, before, bytes)) return
+    const temp = join(workerSnapshots, `.${name}.${randomUUID()}.tmp`)
+    let created
+    let revoke = true
+    try {
+      check()
+      const fd = fs.openSync(temp, 'wx', 0o600)
+      try {
+        created = fs.fstatSync(fd)
+        if (!singleRegular(created) || !singleRegular(verifyEntry(temp, created, check))) {
+          throw new Error('A worker snapshot temp entry changed')
+        }
+        fs.writeFileSync(fd, bytes)
+        if (!singleRegular(fs.fstatSync(fd)) || !singleRegular(verifyEntry(temp, created, check))) {
+          throw new Error('A worker snapshot temp entry changed')
+        }
+        fs.fchmodSync(fd, 0o444)
+      } finally { fs.closeSync(fd) }
+      const verify = () => {
+        if (!snapshotFile(verifyEntry(temp, created, check))) throw new Error('A worker snapshot temp entry changed')
+        verifyEntry(path, before, check)
+      }
+      const live = verifyEntry(path, before, check)
+      if (windows && singleRegular(live) && readOnlyFile(live)) {
+        revoke = false
+        makeSnapshotWritable(path, live, check)
+        revoke = true
+      }
+      await replaceFile(temp, path, verify, { platform, rename: (from, to) => {
+        verify()
+        fs.renameSync(from, to)
+      } })
+    } catch (error) {
+      if (revoke) removeSnapshot(path, before, check)
+      throw error
+    } finally {
+      if (created && stat(temp)) removeSnapshot(temp, created, check)
+    }
+  }
+
+  function snapshotNamesAreCaseSensitive(name, check) {
+    const stem = join(workerSnapshots, `.${name}.${randomUUID()}`)
+    const temp = stem + '.tmp'
+    let created
+    try {
+      check()
+      const fd = fs.openSync(temp, 'wx', 0o600)
+      try {
+        const info = fs.fstatSync(fd)
+        if (!info.ino || !singleRegular(info)) throw new Error('A worker snapshot probe has no verified identity')
+        created = info
+        const alternate = stat(stem + '.TMP')
+        if (!singleRegular(verifyEntry(temp, created, check)) ||
+            (alternate && (!singleRegular(alternate) || !sameInode(created, alternate)))) {
+          throw new Error('A worker snapshot probe entry changed')
+        }
+        return alternate === undefined
+      } finally { fs.closeSync(fd) }
+    } finally {
+      if (created) removeSnapshot(temp, created, check)
+    }
+  }
+
+  async function publishWorkerSnapshots(generation) {
+    published = undefined
+    const authority = () => {
+      authorizedGeneration(generation)
+      if (rt.holdsLock?.() === false) throw notWritable()
+    }
+    const warnings = new Set()
+    const warn = error => {
+      const reason = error.code ?? error.message
+      if (!warnings.has(reason) && !publicationWarnings.has(reason)) rt.warn?.('Worker skill snapshots: %s', error)
+      warnings.add(reason)
+    }
+    try {
+      authority()
+      let input
+      try { input = readSnapshot(true) } catch (error) { warn(error) }
+      const rosterNames = Object.keys(rt.state?.bots ?? {}).map(id => id + '.json').filter(name => SNAPSHOT_NAME.test(name))
+      const wanted = new Map()
+      if (input) {
+        const { data, skills } = input
+        for (const id of Object.keys(data.active)) {
+          if (!rt.botOf(id)) continue
+          const entries = activeAssignments(data, skills, id).map(({ name, mode }) => {
+            const { hash, description } = skills.get(name)
+            return { name, mode, hash, ...(mode === AUTOMATIC_SKILL_MODE ? { description } : {}) }
+          })
+          if (!entries.length) continue
+          const name = id + '.json'
+          if (!SNAPSHOT_NAME.test(name)) {
+            warn(new Error('A Bot ID cannot be used as a worker snapshot filename'))
+            continue
+          }
+          wanted.set(name, Buffer.from(JSON.stringify({ version: 1, botId: id, skills: entries }, null, 2) + '\n'))
+        }
+      }
+      const check = snapshotDirectory(wanted.size > 0, authority)
+      let failed = false
+      const recordFailure = error => {
+        if (error.code === 'bot/read-only') throw error
+        failed = true
+        warn(error)
+      }
+      if (check) {
+        check()
+        let names
+        try {
+          names = new Set(fs.readdirSync(workerSnapshots).filter(name => SNAPSHOT_NAME.test(name) || SNAPSHOT_TEMP.test(name)))
+          rememberedNames.clear()
+          for (const name of names) if (SNAPSHOT_NAME.test(name)) rememberedNames.add(name)
+        } catch (error) {
+          recordFailure(error)
+          // A search-only directory can still allow revocation by name.
+          names = new Set([...rememberedNames, ...rosterNames])
+          for (const id of Object.keys(input?.data.active ?? {})) {
+            const name = id + '.json'
+            if (SNAPSHOT_NAME.test(name)) names.add(name)
+          }
+        }
+        const byFoldedName = new Map()
+        for (const name of rosterNames) {
+          const folded = name.toLowerCase()
+          const group = byFoldedName.get(folded)
+          if (group) group.push(name)
+          else byFoldedName.set(folded, [name])
+        }
+        const collisions = [...byFoldedName.values()].filter(group => group.length > 1)
+        const probe = collisions.flat().find(name => wanted.has(name))
+        let distinct = false
+        if (probe) {
+          try { distinct = snapshotNamesAreCaseSensitive(probe, check) } catch (error) { recordFailure(error) }
+          if (!distinct) warn(new Error('Worker snapshot filenames are ambiguous in this directory'))
+        }
+        for (const group of collisions) {
+          for (const name of group) {
+            if (!distinct) wanted.delete(name)
+            names.add(name)
+          }
+        }
+        for (const name of names) {
+          if (wanted.has(name)) continue
+          if (SNAPSHOT_NAME.test(name)) rememberedNames.add(name)
+          const path = join(workerSnapshots, name)
+          try {
+            removeSnapshot(path, stat(path), check)
+            rememberedNames.delete(name)
+          } catch (error) { recordFailure(error) }
+        }
+        for (const [name, bytes] of wanted) {
+          rememberedNames.add(name)
+          try { await replaceSnapshot(name, bytes, check) } catch (error) { recordFailure(error) }
+        }
+      }
+      authority()
+      if (!failed) published = input ? publicationKey(input) : REVOKED
+    } catch (error) {
+      if (error.code !== 'bot/read-only') warn(error)
+    } finally { publicationWarnings = warnings }
+  }
+
+  function queuePublish() {
+    if (pending) return
+    pending = true
+    void serial(async () => {
+      try { await rt.load?.() } finally { pending = false }
+      await publishWorkerSnapshots(rt.teamGeneration())
+    }).catch(error => rt.warn?.('Worker skill snapshots could not load the team: %s', error))
   }
 
   function audit(action, body, caller, outcome, reason) {
@@ -397,16 +687,23 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       if (!sameInode(rootInfo, directory()) || fileStamp(stat(path)) !== before) throw notWritable()
     }
     const temp = join(root, `library-${randomUUID()}.tmp`)
+    let attempted = false
     try {
       fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
       if (durable) await syncFile(temp)
       verify()
+      attempted = true
       await replaceFile(temp, path, verify, { rename: fs.renameSync })
       if (durable) await syncDirectory(root)
     } finally {
-      if (sameInode(rootInfo, directory())) fs.rmSync(temp, { force: true })
-      cache = undefined
+      try {
+        if (sameInode(rootInfo, directory())) fs.rmSync(temp, { force: true })
+      } finally {
+        cache = undefined
+        if (attempted) await publishWorkerSnapshots(generation)
+      }
     }
+    rt.dropUnavailableWorkerTools?.()
   }
 
   function reviewReceipt(check, reviewDigest, findingsDigest, identity, generation) {
@@ -519,8 +816,9 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     return { refused: true, message: decision.message, findings, review, truncated, counts }
   }
 
-  async function writeSkill(document, name, source, previous, decision, key, data, generation, stamp) {
+  async function writeSkill(document, name, source, decision, key, { data, stamp, skills }, generation) {
     const { check, parsed, frontmatter, entries } = document
+    const previous = own(data.skills, name)
     const now = Date.now()
     const record = {
       name, description: parsed.description, content: parsed.body, source, createdAt: previous?.createdAt ?? now,
@@ -530,6 +828,12 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       ...(frontmatter === undefined ? {} : { frontmatter }),
       review: decision.review, reviewSeal: attestation(key, decision.review),
     }
+    // A new or re-accepted revision cannot revive a worker's earlier pin,
+    // even if the person later restores the original bytes.
+    const eligible = skills.get(name)
+    const workerRevision = eligible && !eligible.held && eligible.hash === check.hash
+      ? previous?.workerRevision : randomUUID()
+    if (workerRevision !== undefined) record.workerRevision = workerRevision
     if (treeSource(source.kind)) {
       record.revision = randomUUID()
       record.files = entries.filter(entry => entry.path !== SKILL_MD)
@@ -619,7 +923,8 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
         throw reject(PREVIEW_EXPIRED, 'bot/refused')
       }
       const { name, source } = preview
-      const { data, stamp, skills } = snapshot(true)
+      const current = snapshot(true)
+      const { data, skills } = current
       const previous = own(data.skills, name)
       if (preview.edit ? !previous || replacementBaseline(previous, skills.get(name)) !== preview.baseline : previous) {
         previews.delete(body.token)
@@ -642,7 +947,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       if (decision.decision !== 'accept' && (decision.decision !== 'confirm' || !equalMac(body.confirm, decision.receipt))) {
         return saveView(decision, treeReportFindings(check, decision))
       }
-      const result = await writeSkill(document, name, source, previous, decision, key, data, generation, stamp)
+      const result = await writeSkill(document, name, source, decision, key, current, generation)
       previews.delete(body.token)
       audit('skill-library-save', { name }, identity, 'allowed', 'review-done')
       return result
@@ -664,10 +969,11 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
 
       return await serial(async () => {
         authorizedGeneration(generation)
-        const { data, stamp } = snapshot(true)
+        const current = snapshot(true)
+        const { data } = current
         if (JSON.stringify(own(data.skills, name)) !== JSON.stringify(first.previous)) throw reject(CHANGED, 'bot/refused')
         const document = prepareSave(data, body)
-        const { previous, bytes, check, source } = document
+        const { bytes, check, source } = document
         if (!bytes.equals(first.bytes) || check.hash !== first.check.hash) throw reject(CHANGED, 'bot/refused')
         const key = hostKey()
         const decision = decisionOf(check, cachedReview(data, check.hash, key), blockFor(data, check.hash, key), identity, generation)
@@ -676,7 +982,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
           audit(action, body, identity, decision.decision === 'confirm' ? 'pending' : 'refused', decision.why ?? 'confirmation')
           return saveView(decision)
         }
-        const result = await writeSkill(document, name, source, previous, decision, key, data, generation, stamp)
+        const result = await writeSkill(document, name, source, decision, key, current, generation)
         audit(action, body, identity, 'allowed', 'review-done')
         return result
       })
@@ -738,15 +1044,16 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
     return { pending: true }
   }
 
-  function active(botId) {
+  function active(botId, { worker = false } = {}) {
     if (typeof botId !== 'string' || !rt.botOf(botId) || rt.teamCurrent?.() === false) return []
     try {
       const { data, skills } = snapshot()
-      return asList(assignments(own(data.active, botId), skills))
-        .filter(({ name }) => !skills.get(name).held)
+      const keys = worker ? assignmentKeys(own(data.active, botId)) : undefined
+      return activeAssignments(data, skills, botId)
         .map(({ name, mode }) => {
           const { tree, scripts, references, ...record } = skills.get(name)
-          return { ...record, mode }
+          return { ...record, mode,
+            ...(worker && { assignment: keys.get(name) ?? null, revision: own(data.skills, name)?.workerRevision ?? null }) }
         })
     } catch { return [] }
   }
@@ -789,11 +1096,13 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
           delete data.skills[name]
           for (const [key, list] of Object.entries(data.active)) {
             const active = assignments(list, skills)
-            if (active.delete(name)) data.active[key] = asList(active)
+            if (active.delete(name)) data.active[key] = storedAssignments(active, assignmentKeys(list))
           }
         } else if (action === 'bot-skill-add' || action === 'bot-skill-remove' || action === 'bot-skill-mode') {
           if (typeof id !== 'string' || !rt.botOf(id) || !skills.has(name)) throw reject('Unknown Bot or skill', 'bot/not-found')
-          const active = assignments(own(data.active, id), skills)
+          const list = own(data.active, id)
+          const active = assignments(list, skills)
+          const keys = assignmentKeys(list)
           const editing = action === 'bot-skill-mode'
           if (editing && !active.has(name)) throw reject('This skill is not active on this Bot.', 'bot/not-found')
           if (action === 'bot-skill-remove') active.delete(name)
@@ -803,13 +1112,16 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
             const record = skills.get(name)
             if (record.held) throw reject(`${name} is held: ${record.held} Open it on the Skills screen and save it again.`)
             const prior = active.get(name)
-            if (prior === undefined || editing) active.set(name, mode)
+            if (prior === undefined || editing) {
+              active.set(name, mode)
+              if (prior === undefined || (prior === AUTOMATIC_SKILL_MODE && mode !== prior)) keys.set(name, randomUUID())
+            }
             const automatic = [...active].filter(([skill, use]) => use === AUTOMATIC_SKILL_MODE && !skills.get(skill).held)
             if (prior !== AUTOMATIC_SKILL_MODE && active.get(name) === AUTOMATIC_SKILL_MODE && automatic.length >= 5) {
               result.warning = 'Many active skills use more of the model’s context.'
             }
           }
-          Object.defineProperty(data.active, id, { value: asList(active), enumerable: true, configurable: true, writable: true })
+          Object.defineProperty(data.active, id, { value: storedAssignments(active, keys), enumerable: true, configurable: true, writable: true })
         } else throw reject('Unknown Skills action')
         if (!result.needsConfirm) await write(data, generation, stamp)
         audit(action, body, identity, result.needsConfirm ? 'pending' : 'allowed', result.needsConfirm ? 'confirmation' : null)
@@ -859,6 +1171,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
   rt.holdLockUntil?.(() => queue)
   rt.skillLibrary = {
     endpoint, active, duringBotDeletion, reviewSkill,
+    settled: () => queue.then(() => {}),
     async clearOrphan(id) {
       const generation = rt.teamGeneration()
       await botRemovals.get(id)?.catch(() => {})
@@ -868,4 +1181,9 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED } = 
       return serial(() => audit(action, body, caller, 'refused', 'owner-only'))
     },
   }
+  const unsubscribers = [rt.onSaved?.(queuePublish), rt.onLockGained?.(queuePublish), rt.onAdopted?.(queuePublish)]
+  rt.ctx?.effect?.(() => () => {
+    for (const unsubscribe of unsubscribers) unsubscribe?.()
+  }, 'omni-ui: worker skill snapshots')
+  queuePublish()
 }

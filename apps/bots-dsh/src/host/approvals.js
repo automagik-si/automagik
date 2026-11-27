@@ -40,6 +40,8 @@ const TOLD_MAX = 1000
 // person is asked only about what changes something.
 export const TEAM_LOOKUPS = new Set(['list_bots', 'list_bot_models', 'list_capabilities', 'read_own_chat', 'read_group_chat', 'recall', 'show_settings', 'propose_bot_change'])
 export const teamToolOf = name => String(name ?? '').replace(/^mcp__dsh__/, '')
+export const personDecides = request => request?.bridgeCall?.personDecides === true
+export const teamLookup = request => TEAM_LOOKUPS.has(teamToolOf(request?.toolName)) && !personDecides(request)
 
 const SOLVER_PROGRESS = 'solver_progress'
 // A live ACP call can span a Bots reinstall. Keep its receipt on DSH's Session,
@@ -262,7 +264,7 @@ export function install(rt) {
 
   // Ahead of DSH's own answerer, which would hold a hidden Session's request unseen.
   ctx.on('approval/request', (request, next) => {
-    if (TEAM_LOOKUPS.has(teamToolOf(request.toolName))) return 'allowed-once'
+    if (teamLookup(request)) return 'allowed-once'
     const sessionId = request.agent?.session?.id ?? request.agent?.id
     const owner = sessionId === undefined ? undefined : rt.groupOwners.get(sessionId)
     const task = sessionId === undefined ? undefined : runningTask(sessionId)
@@ -291,7 +293,7 @@ export function install(rt) {
     // tool, reason and fully shown target. Each one is still answered on its own.
     // A reason past what the entry keeps could differ unseen: such an ask stays on its own.
     const whole = String(request.reason ?? '').length <= 500 && !/[\u0000-\u001f\u007f]/.test(String(request.reason ?? ''))
-    const target = entry.tool === 'keep_working' || !whole ? undefined : rt.callCapability?.(sessionId, request.callId, entry.tool)
+    const target = entry.tool === 'keep_working' || !whole || personDecides(request) ? undefined : rt.callCapability?.(sessionId, request.callId, entry.tool)
     const folder = target === undefined ? undefined : rt.sessionFolder?.(request.agent?.session ?? request.agent)
     if (typeof folder === 'string' && folder !== '') {
       const keyTarget = entry.tool === 'acp_tool' ? target
@@ -302,7 +304,7 @@ export function install(rt) {
     }
     if (owner === undefined && chat === undefined && task !== undefined
       && runOwner === undefined && entry.capabilityKey === undefined
-      && whole && entry.tool !== 'keep_working') {
+      && whole && entry.tool !== 'keep_working' && !personDecides(request)) {
       const projection = grantInternals(rt)?.projection(sessionId, request.callId,
         entry.tool, request)
       if (projection) Object.assign(entry, projection)

@@ -10,7 +10,7 @@ import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { batchSafe } from './batch-spawn.js'
 import { HOME_ENV, releaseRun, trackRun } from './cli-homes.js'
-import { AGY_SKILL_TOOL, BRIDGE_NAME, isBridgeName, mcpName } from './names.js'
+import { agyBridgeName, BRIDGE_NAME, HISTORY_TOOL_NAME, isBridgeName, mcpName, ompBridgeName } from './names.js'
 import { processBirth } from './process-identity.js'
 import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
   from './process-tree.js'
@@ -43,30 +43,56 @@ export function structuredNameOf(update) {
   return undefined
 }
 
-const SKILL_OPERATION = mcpName(BRIDGE_NAME, 'load_skill')
+const SKILL_OPERATIONS = ['load_skill', HISTORY_TOOL_NAME]
 
-function skillIdentity(tool, update, provider) {
+function skillIdentity(spec, tool, update) {
+  if (!spec.skillBridge) return undefined
+  const { provider, skillTools } = spec
   const agy = provider === 'acp-antigravity'
-  const exact = name => name === SKILL_OPERATION || (agy && name === AGY_SKILL_TOOL)
-  const names = [tool.structuredName, update?.name, update?._meta?.claudeCode?.toolName]
+  const exact = (name, op) => name === mcpName(BRIDGE_NAME, op) ||
+    (agy && name === agyBridgeName(op)) || (provider === 'acp-omp' && name === ompBridgeName(op))
+  const names = [update?.name, update?._meta?.claudeCode?.toolName]
     .filter(name => typeof name === 'string' && name !== '')
-  const { server, serverName, tool: operation, toolName } = update?.rawInput ?? {}
-  const raw = server === BRIDGE_NAME && operation === 'load_skill'
-  const named = names.some(exact)
-  const claimsSkill = named || raw || tool.skillBridge === true
-  const disagrees = !names.every(exact) ||
-    (typeof server === 'string' && server !== BRIDGE_NAME) ||
-    (typeof serverName === 'string' && serverName !== BRIDGE_NAME) ||
-    (typeof operation === 'string' && operation !== 'load_skill') ||
-    (agy && typeof toolName === 'string' && toolName !== 'load_skill')
-  if (tool.skillConflict === true || (claimsSkill && disagrees)) return 'conflict'
+  const { server, serverName, tool: rawTool, toolName } = update?.rawInput ?? {}
+  const pair = op => server === BRIDGE_NAME && rawTool === op
+  const agyPair = op => pair(op) || (serverName === BRIDGE_NAME && toolName === op)
+  const op = tool.skillOperation ?? SKILL_OPERATIONS.find(op => names.some(name => exact(name, op)) ||
+    pair(op) || (agy && agyPair(op)))
+  // History on a full bridge has the same routing as other ordinary DSH tools.
+  if (op === undefined || (op === HISTORY_TOOL_NAME && skillTools === undefined)) return undefined
+  const disagrees = !names.every(name => exact(name, op)) ||
+    (tool.skillOperation === undefined && tool.structuredName !== undefined && !exact(tool.structuredName, op)) ||
+    (server !== undefined && server !== BRIDGE_NAME) ||
+    (serverName !== undefined && serverName !== BRIDGE_NAME) ||
+    (rawTool !== undefined && rawTool !== op) ||
+    (toolName !== undefined && toolName !== op)
+  const refusal = op === 'load_skill' && spec.skillRefusal === true
+  if (disagrees || (skillTools !== undefined && !skillTools.has(op) && !refusal)) return 'conflict'
   // Codex's MCP updates omit the name. Its adapter labels this RPC as MCP and
   // supplies the server and operation outside the tool's own arguments.
   // Antigravity's flat MCP name can collide with a different server/tool pair.
   // Require the exact pair alongside that spelling, or a previously verified call.
-  const agyPair = raw || (serverName === BRIDGE_NAME && toolName === 'load_skill')
-  if (names.includes(SKILL_OPERATION) || (named && agy && agyPair) ||
-      (raw && update?._meta?.is_mcp_tool_call === true) || tool.skillBridge === true) return 'verified'
+  if (tool.skillOperation !== undefined || names.includes(mcpName(BRIDGE_NAME, op)) ||
+      (provider === 'acp-omp' && names.includes(ompBridgeName(op))) ||
+      (agy && names.includes(agyBridgeName(op)) && agyPair(op)) ||
+      (op === 'load_skill' && pair(op) && update?._meta?.is_mcp_tool_call === true)) return op
+}
+
+const verifiedSkill = identity => identity !== undefined && identity !== 'conflict'
+
+const AGY_HISTORY_NAME = agyBridgeName(HISTORY_TOOL_NAME)
+const AGY_HISTORY_TITLE = `Run ${AGY_HISTORY_NAME}`
+
+function agyHistoryClaim(spec, tool, update, title = update.title) {
+  if (spec.agyHistoryRequest !== true || !spec.skillTools?.has(HISTORY_TOOL_NAME) || title !== AGY_HISTORY_TITLE) return
+  const names = [update.name, update._meta?.claudeCode?.toolName, tool.structuredName]
+  const conflicts = raw => (raw?.server !== undefined && raw.server !== BRIDGE_NAME) ||
+    (raw?.serverName !== undefined && raw.serverName !== BRIDGE_NAME) ||
+    (raw?.tool !== undefined && raw.tool !== HISTORY_TOOL_NAME) ||
+    (raw?.toolName !== undefined && raw.toolName !== HISTORY_TOOL_NAME)
+  if (names.some(name => name !== undefined && name !== AGY_HISTORY_NAME) ||
+      conflicts(update.rawInput) || conflicts(tool.rawInput) || skillIdentity(spec, tool, update) === 'conflict') return 'conflict'
+  return HISTORY_TOOL_NAME
 }
 
 /**
@@ -156,7 +182,7 @@ export function contentImages(content) {
 // Saved image paths still scrub later replies; the image bytes and other output can go.
 function retiredTool(tool) {
   const record = { id: tool.id, retired: true, unanswerable: true }
-  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'skillConflict', 'drift', 'refused', 'mirrored']) {
+  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'skillOperation', 'skillBridge', 'skillConflict', 'restrictedIdentity', 'drift', 'refused', 'mirrored']) {
     if (tool[key] !== undefined) record[key] = tool[key]
   }
   record.listeners = new Set()
@@ -522,7 +548,7 @@ export class AgentRun {
     })
   }
 
-  prompt(prompt, onDelivered) {
+  prompt(prompt, onDelivered, signal) {
     if (this.busy) throw new Error(`${this.spec.name} is still answering`)
     this.queue = []
     this.promptSkillRefusals = new Set()
@@ -530,6 +556,9 @@ export class AgentRun {
     this.promptEnded = false
     this.forbiddenToolSeen = false
     this.cancelled = false
+    this.historyPrompt = this.spec.skillTools?.has(HISTORY_TOOL_NAME) ? new AbortController() : undefined
+    const history = this.historyPrompt?.signal
+    this.historySignal = history && signal ? AbortSignal.any([history, signal]) : history
     this.onPromptDelivered = onDelivered
     // The calls of the prompts before this one are over for DSH too: their cards ran in turns
     // that have ended, and a call already known never gets a second card. A question for one
@@ -544,11 +573,12 @@ export class AgentRun {
       this.retired.add(id)
     }
     this.turn = new Set()
-    // An update for a call more than 1024 calls old is treated as new; no session restart.
+    // An update for an ordinary call more than 1024 calls old is treated as new.
     while (this.retired.size > RETIRED_MAX) {
       const id = this.retired.values().next().value
       this.retired.delete(id)
-      this.tools.delete(id)
+      // A restricted call ID must not regain authority when its ordinary history ages out.
+      if (!this.tools.get(id)?.restrictedIdentity) this.tools.delete(id)
     }
     this.holdOn()
     const carried = this.identityPreamble !== undefined
@@ -580,6 +610,8 @@ export class AgentRun {
   }
 
   endPrompt(event) {
+    this.historyPrompt?.abort()
+    this.historySignal = undefined
     this.onPromptDelivered = undefined
     this.prompting = undefined
     // From here to the next prompt, a call seen for the first time gets no card (seeTool).
@@ -708,18 +740,36 @@ export class AgentRun {
   async cancel() {
     if (!this.busy || this.sessionId === undefined) return
     this.cancelled = true
+    this.historyPrompt?.abort()
     await this.held(() => this.conn.cancel({ sessionId: this.sessionId })).catch(() => {})
+  }
+
+  stopTreeSnapshot() {
+    const child = this.child
+    const deps = snapshotBudget(this.treeDeps)
+    if (!this.grouped || !supportsTree(deps.platform ?? process.platform)
+      || child?.exitCode !== null || child?.signalCode !== null) return undefined
+    if (!this.birth) this.birth = processBirth(child.pid, deps)
+    return descendants(child.pid, this.birth, deps)
+  }
+
+  chatStopEvidence() {
+    // The same tree snapshot will be used when adoption disposes this run. When the
+    // platform cannot prove all survivors, only a completed live stop can clear it.
+    const snapshot = this.chatStopSnapshot ??= this.stopTreeSnapshot()
+    if (snapshot?.complete !== true) return undefined
+    const group = this.child.pid
+    return { group, detached: snapshot.records.filter(record => record.pgid !== group)
+      .map(({ pid, birth }) => ({ pid, birth })) }
   }
 
   dispose() {
     if (this.disposed === true) return
     this.disposed = true
+    this.historyPrompt?.abort()
     const child = this.child
-    const deps = snapshotBudget(this.treeDeps)
-    if (this.grouped && supportsTree(deps.platform ?? process.platform)
-      && child?.exitCode === null && child?.signalCode === null) {
-      if (!this.birth) this.birth = processBirth(child.pid, deps)
-      const snapshot = descendants(child.pid, this.birth, deps)
+    const snapshot = this.chatStopSnapshot ??= this.stopTreeSnapshot()
+    if (snapshot) {
       this.detached = snapshot.records.filter(record => record.pgid !== child.pid)
       if (!snapshot.complete) {
         try {
@@ -872,7 +922,13 @@ export class AgentRun {
         this.ignored('a tool update', update)
         return
       }
-      if (this.tools.get(update.toolCallId)?.retired === true) return
+      const known = this.tools.get(update.toolCallId)
+      if (known?.retired === true) {
+        if (this.checkSkillClaim(known, update) && known.skillOperation !== undefined && update.status !== undefined) {
+          known.status = update.status
+        }
+        return
+      }
     }
     const observedAt = isTool ? performance.now() : undefined
     switch (update?.sessionUpdate) {
@@ -892,11 +948,11 @@ export class AgentRun {
       }
       case 'tool_call':
         this.confirmPromptDelivery()
-        this.seeTool(update, observedAt)
+        if (this.seeTool(update, observedAt, sessionId) === undefined) return
         break
       case 'tool_call_update': {
-        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update, observedAt)
-        if (tool !== undefined) this.changeTool(tool, update)
+        const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update, observedAt, sessionId)
+        if (tool !== undefined && !this.changeTool(tool, update, sessionId)) return
         break
       }
       case 'config_option_update':
@@ -916,32 +972,40 @@ export class AgentRun {
     }
   }
 
-  seeTool(update, observedAt = performance.now()) {
+  seeTool(update, observedAt = performance.now(), sessionId) {
     if (!isToolId(update?.toolCallId)) {
       this.ignored('a tool update', update)
       return undefined
     }
     const known = this.tools.get(update.toolCallId)
-    if (known) {
-      if (known.retired !== true) this.changeTool(known, update)
-      return known
+    if (known) return known.retired === true || this.changeTool(known, update, sessionId) ? known : undefined
+    const identity = skillIdentity(this.spec, {}, update)
+    if (this.spec.refuseTools === true && !verifiedSkill(identity)) {
+      if (identity === 'conflict') this.retireRestrictedCall(update.toolCallId, update.status)
+      this.forbidTool(update)
+      return undefined
     }
-    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity({}, update, this.spec.provider) === 'verified')) {
-      if (!this.forbiddenToolSeen) {
-        this.forbiddenToolSeen = true
-        this.spec.onForbiddenTool?.(update)
-      }
+    const agyClaim = this.currentHistoryPrompt(sessionId) ? agyHistoryClaim(this.spec, {}, update) : undefined
+    if (agyClaim === 'conflict') {
+      this.retireRestrictedCall(update.toolCallId, update.status)
       return undefined
     }
     if (this.reviews?.last) this.reviews.after = true
     const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now(), observedAt }
+    if (this.historySignal !== undefined && isToolId(sessionId) && sessionId === this.sessionId) {
+      tool.originPrompt = this.historySignal
+    }
+    if (agyClaim === HISTORY_TOOL_NAME) {
+      tool.agyHistoryClaim = true
+      tool.restrictedIdentity = true
+    }
     // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
     const parent = parentToolOf(update)
     if (parent !== undefined && parent !== tool.id) tool.parent = parent
     // First seen after its prompt ended: its event lands behind the prompt's end, where no step
     // reads it, and the next prompt drops it. No card will ever ask its question.
     if (this.promptEnded === true) tool.unanswerable = true
-    this.markCall(tool, update)
+    this.markCall(tool, update, sessionId)
     // Drift known at first sight, before its event is queued: the adapter reads the same mark
     // when it takes the event and makes no card for it. Drift found later is marked there
     // if the event is still queued; an existing card keeps its question for its body to ask.
@@ -961,11 +1025,22 @@ export class AgentRun {
   }
 
   /** What an update says the call is: its structured name, whether it is MCP, the bridge's. */
-  markCall(tool, update) {
+  markCall(tool, update, sessionId) {
     if (this.spec.skillBridge) {
-      const identity = skillIdentity(tool, update, this.spec.provider)
-      tool.skillConflict = identity === 'conflict'
-      tool.skillBridge = identity === 'verified'
+      const identity = skillIdentity(this.spec, tool, update)
+      tool.skillConflict ||= identity === 'conflict'
+      tool.skillBridge = !tool.skillConflict && verifiedSkill(identity)
+      if (this.spec.skillTools?.has(HISTORY_TOOL_NAME) && (tool.skillBridge || tool.skillConflict)) {
+        tool.restrictedIdentity = true
+      }
+      if (tool.skillBridge && tool.skillOperation === undefined) {
+        tool.skillOperation = identity
+        if (tool.originPrompt !== undefined && tool.originPrompt === this.historySignal && sessionId === this.sessionId) {
+          tool.skillPrompt = tool.originPrompt
+          tool.skillSession = sessionId
+          tool.skillAbort = new AbortController()
+        }
+      }
     }
     const name = structuredNameOf(update)
     if (name !== undefined) tool.structuredName = name
@@ -983,7 +1058,78 @@ export class AgentRun {
     }
   }
 
-  changeTool(tool, update) {
+  forbidTool(update) {
+    if (this.forbiddenToolSeen) return
+    this.forbiddenToolSeen = true
+    this.spec.onForbiddenTool?.(update)
+  }
+
+  retireRestrictedCall(id, status) {
+    if (!this.spec.skillTools?.has(HISTORY_TOOL_NAME)) return
+    const known = this.tools.get(id)
+    if (known !== undefined) {
+      known.restrictedIdentity = true
+      known.unanswerable = true
+      this.conflictSkill(known)
+      return
+    }
+    this.tools.set(id, {
+      id, skillConflict: true, skillBridge: false, restrictedIdentity: true, unanswerable: true,
+      status: status ?? 'pending', listeners: new Set(),
+    })
+    this.turn.add(id)
+  }
+
+  restrictedCall(callId, operation, prompt, { refused = false } = {}) {
+    if (!isToolId(callId) || prompt === undefined || prompt.aborted || prompt !== this.historySignal) return
+    if (refused) {
+      this.retireRestrictedCall(callId)
+      return
+    }
+    const tool = this.tools.get(callId)
+    if (tool?.skillPrompt !== prompt || tool.skillSession !== this.sessionId || tool.retired || tool.skillConflict) return
+    if (tool.skillOperation !== operation) {
+      this.conflictSkill(tool)
+      return
+    }
+    return tool
+  }
+
+  restrictedClaim(callId, operation) {
+    const tool = this.tools.get(callId)
+    if (tool === undefined) return 'unknown'
+    if (tool.retired === true) return 'retired'
+    if (operation !== undefined && tool.skillOperation !== undefined && tool.skillOperation !== operation) {
+      this.conflictSkill(tool)
+    }
+    return tool.skillConflict === true ? 'conflict' : 'live'
+  }
+
+  currentHistoryPrompt(sessionId) {
+    return this.busy && !this.cancelled && !this.disposed && isToolId(sessionId) && sessionId === this.sessionId &&
+      this.historySignal !== undefined && !this.historySignal.aborted
+  }
+
+  conflictSkill(tool) {
+    tool.skillConflict = true
+    tool.skillBridge = false
+    tool.skillAbort?.abort()
+  }
+
+  checkSkillClaim(tool, update, notify = true) {
+    const agyTitle = tool.agyHistoryClaim === true ? AGY_HISTORY_TITLE : update.title ?? tool.title
+    if (agyHistoryClaim(this.spec, tool, update, agyTitle) === 'conflict') {
+      this.retireRestrictedCall(tool.id, update.status)
+      return false
+    }
+    if (skillIdentity(this.spec, tool, update) !== 'conflict') return true
+    this.conflictSkill(tool)
+    if (notify && this.spec.refuseTools === true) this.forbidTool(update)
+    return false
+  }
+
+  changeTool(tool, update, sessionId) {
+    if (!this.checkSkillClaim(tool, update) && (tool.skillOperation !== undefined || this.spec.refuseTools === true)) return false
     // A command's output, for a client with no terminal of its own (Zed's terminal_output
     // extension, which codex-acp sends): kept as the call's output.
     const chunk = update._meta?.terminal_output?.data
@@ -1005,8 +1151,9 @@ export class AgentRun {
       this.reviews.last = status
       this.reviews.after = false
     }
-    this.markCall(tool, update)
+    this.markCall(tool, update, sessionId)
     for (const listener of tool.listeners) listener()
+    return true
   }
 
   /**
@@ -1065,19 +1212,44 @@ export class AgentRun {
    */
   onPermission(params, signal) {
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
-    const known = this.tools.get(params.toolCall?.toolCallId)
-    if (this.spec.refuseTools === true && !(this.spec.skillBridge && skillIdentity(known ?? {}, params.toolCall, this.spec.provider) === 'verified')) {
-      if (known && known.retired !== true) this.markCall(known, params.toolCall)
+    const { toolCall } = params
+    const known = this.tools.get(toolCall.toolCallId)
+    const identity = skillIdentity(this.spec, known ?? {}, toolCall)
+    if (known) this.checkSkillClaim(known, toolCall, false)
+    if (this.spec.refuseTools === true && (known?.skillConflict || !verifiedSkill(identity))) {
+      // Status-only requests carry no new operation claim.
+      const { server, serverName, tool, toolName } = toolCall.rawInput ?? {}
+      const explicitOperation = structuredNameOf(toolCall) !== undefined ||
+        (isToolId(server) && isToolId(tool)) || (isToolId(serverName) && isToolId(toolName))
+      if ((!known && identity === 'conflict') ||
+          (explicitOperation && this.sessionId !== undefined && params.sessionId === this.sessionId)) {
+        this.retireRestrictedCall(toolCall.toolCallId, toolCall.status)
+      }
       return Promise.resolve(refusal('rejected', params.options ?? []))
     }
-    const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall })
+    const agyClaim = this.currentHistoryPrompt(params.sessionId) ? agyHistoryClaim(this.spec, known ?? {}, toolCall) : undefined
+    if (agyClaim === 'conflict') {
+      this.retireRestrictedCall(toolCall.toolCallId, toolCall.status)
+      return Promise.resolve(refusal('rejected', params.options ?? []))
+    }
+    const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall }, undefined, params.sessionId)
     if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
     const { title, ...details } = params.toolCall ?? {}
-    if (tool.retired !== true) this.changeTool(tool, { ...details, status: undefined })
+    if (tool.retired !== true && identity !== 'conflict') this.changeTool(tool, { ...details, status: undefined }, params.sessionId)
+    const agyHistory = agyClaim === HISTORY_TOOL_NAME && tool.originPrompt === this.historySignal &&
+      !tool.retired && !tool.skillConflict && !tool.unanswerable && !tool.mirrored && tool.refused === undefined
+    if (agyHistory) {
+      tool.agyHistoryClaim = true
+      tool.restrictedIdentity = true
+    }
+    if (tool.restrictedIdentity && !agyHistory && (!this.busy || this.cancelled || this.disposed ||
+        params.sessionId !== this.sessionId || !this.restrictedCall(tool.id, tool.skillOperation, this.historySignal))) {
+      return Promise.resolve(CANCELLED)
+    }
     // The queued tool event is read after this synchronous handler: mark standalone approvals
     // before the adapter can turn one into a mirror card.
-    if (params._meta?.is_mcp_tool_approval === true) {
+    if (identity !== 'conflict' && params._meta?.is_mcp_tool_approval === true) {
       tool.mcp = true
       if (typeof params.toolCall?.rawInput?.serverName === 'string') tool.mcpServer = params.toolCall.rawInput.serverName
     }
@@ -1090,7 +1262,9 @@ export class AgentRun {
     // which would let the agent record a standing rule nobody approved (RFC 0039). The ACP
     // request raises no DSH dialog. The bridge's own `approval/request` is the one dialog the
     // person sees (RFC 0003, amendment, "One dialog per call").
-    if (tool.skillBridge === true || (!tool.skillConflict && this.spec.dshTools === true && tool.bridge === true)) {
+    // Antigravity's flat name can collide with a user-added MCP server (#2125). With no
+    // wire link, this ACP answer grants no bridge read. The actual bridge request is checked.
+    if (agyHistory || tool.skillBridge === true || (!tool.skillConflict && this.spec.dshTools === true && tool.bridge === true)) {
       const once = (params.options ?? []).find(option => option.kind === 'allow_once')
       return Promise.resolve(once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }

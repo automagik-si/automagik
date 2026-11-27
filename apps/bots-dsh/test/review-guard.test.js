@@ -1085,3 +1085,122 @@ test('the owner view says since when a guarded Solver waits; the caller view nev
   assert.equal(view.reviewGuardWaitingSince, undefined)
   assert.equal(CALLER_BOT_KEYS.includes('reviewGuardWaitingSince'), false)
 })
+
+async function markedBench(t, level, { model = 'acp-claude/default', nativeTools = true, missingSession = false } = {}) {
+  const h = bench(t)
+  const { rt, ctx } = h
+  const bot = await h.solver({ reviewerId: (await h.reviewer()).id })
+  Object.assign(bot, { model, nativeTools, nativeToolsAgent: model.split('/')[0] })
+  rt.state.nativeToolsLocksRetired = true
+  rt.chatOwners.set(bot.id, bot.id)
+  ctx.provided.set('permissionPresets', { current: () => {
+    if (level === 'throw') throw new Error('preset unreadable')
+    return level
+  } })
+  ctx.provided.set('sandboxPolicy', { defaultMode: 'danger-full-access' })
+  rt.sessionWide = () => level === 'full'
+  h.person(bot.id, 'Do work.')
+  const session = missingSession ? undefined : { id: bot.id }
+  const exec = {
+    name: 'acp_tool', callId: 'acp-2132', agent: { id: bot.id, session },
+    arguments: { kind: 'execute', title: 'Run echo TITLE-MARK-2132', input: { command: 'echo CMD-MARK-2132' } },
+  }
+  return { ...h, bot, exec }
+}
+
+for (const [testId, level] of [['T1', 'full'], ['T2', 'auto'], ['T4a', 'manual']]) {
+  test('#2132 ' + testId + ' routes the guarded Claude mirror by its Session level', async t => {
+    const { exec, guard, stops } = await markedBench(t, level)
+    let calls = 0
+    assert.equal(await guard(exec, async () => {
+      calls += 1
+      assert.match(exec.reviewGuardUnheld.reason, HELD)
+      exec.reviewGuardUnheld.ran = true
+      return 'ran'
+    }), 'ran')
+    assert.equal(calls, 1)
+    assert.equal(stops.at(-1).why, 'guard')
+    assert.equal(stops.at(-1).ran, true)
+    assert.match(stopLineEn(stops.at(-1)), /^acp_tool ran unheld:/)
+  })
+}
+
+test('#2132 T3 a mirror that rejected the agent question records did not run', async t => {
+  const { exec, guard, stops } = await markedBench(t, 'full')
+  await guard(exec, async () => { exec.reviewGuardUnheld.refused = true })
+  assert.equal(stops.at(-1).mayHaveRun, undefined)
+  assert.equal(stopLineEn(stops.at(-1)), `acp_tool did not run: ${WHY_EN.guard}`)
+})
+
+for (const [label, level, settings] of [
+  ['T4 native tools off', 'full', { nativeTools: false }],
+  ['T4 Codex', 'full', { model: 'acp-codex/default' }],
+  ['T5 missing Session', 'full', { missingSession: true }],
+  ['T5 unreadable preset', 'throw', {}],
+]) {
+  test('#2132 ' + label + ' preserves the guard refusal', async t => {
+    const { exec, guard, stops } = await markedBench(t, level, settings)
+    await assert.rejects(guard(exec), HELD)
+    assert.equal(stops.at(-1).mayHaveRun, true)
+  })
+}
+
+test('#2132 T4 the Full-access mirror exception leaves DSH shell calls held', async t => {
+  const { guard, exec } = await markedBench(t, 'full')
+  await assert.rejects(guard({ ...exec, name: 'bash', arguments: { command: 'echo test' } }), HELD)
+})
+
+for (const [label, level] of [['T6a', 'full'], ['T6', 'manual']]) {
+  test('#2132 ' + label + ' attempt holds qualify only at level reach', async t => {
+    const { guard, exec, stops, rt, bot } = await markedBench(t, level)
+    rt.reviewWork = () => assert.fail('marked mirror dated the review')
+    rt.solverBeforeWork = () => assert.fail('marked mirror bound a check run')
+    for (const why of ['limit', 'solver-run', 'solver-progress']) {
+      const check = 'check'
+      const plan = { revision: 0, checks: [check], accepted: true, commands: { [check]: exec.arguments.input.command } }
+      const solver = { request: 'req', origin: 'person', attempts: {}, plan }
+      if (why === 'limit') solver.limit = { kind: 'fix', check, at: 1 }
+      if (why === 'solver-progress') solver.pending = { checks: [check], run: 'pending', call: 'another-call' }
+      bot.reviewTrack = { requested: true, requestAt: 1, planVerdictAt: 2, solver }
+      const before = JSON.stringify(bot.reviewTrack)
+      const call = { ...exec }
+      const run = () => guard(call, async () => {
+        call.reviewGuardUnheld.ran = true
+        return 'mirror-result'
+      })
+      if (level === 'full') assert.equal(await run(), 'mirror-result')
+      else await assert.rejects(run)
+      assert.equal(stops.at(-1).why, why)
+      assert.equal(stops.at(-1).mayHaveRun, level === 'full' ? undefined : true)
+      assert.equal(stops.at(-1).ran, level === 'full' ? true : undefined)
+      assert.equal(JSON.stringify(bot.reviewTrack), before)
+    }
+  })
+}
+
+test('#2132 T13 a mirror return without a confirmed completion stays uncertain', async t => {
+  const { exec, guard, stops } = await markedBench(t, 'full')
+  assert.equal(await guard(exec, async () => 'mirror result'), 'mirror result')
+  assert.equal(stops.at(-1).ran, undefined)
+  assert.equal(stops.at(-1).mayHaveRun, true)
+  assert.match(stopLineEn(stops.at(-1)), /^acp_tool may already have run/)
+})
+
+test('#2132 T14 the confirmed run leaves the title and command inside the mirror', async t => {
+  const { rt, bot, exec, guard, stops } = await markedBench(t, 'full')
+  const failures = []
+  rt.noteFailure = failure => failures.push(failure)
+  await guard(exec, async () => {
+    assert.match(exec.reviewGuardUnheld.reason, /TITLE-MARK-2132/)
+    exec.reviewGuardUnheld.ran = true
+  })
+  assert.deepEqual(stops.at(-1), { why: 'guard', tool: 'acp_tool', callId: exec.callId, text: WHY_EN.guard, ran: true })
+  assert.equal(failures.length, 1)
+  assert.match(failures[0].text, /^A step ran unheld:/)
+  const [entry] = rt.stopsView()
+  assert.equal(entry.ran, true)
+  assert.match(rt.stopLineOfTurn(bot.id, 1), /^acp_tool ran unheld:/)
+  for (const value of [stops, failures, rt.stopsView(), rt.stopsIn(bot.id, 0), rt.stopLineOfTurn(bot.id, 1)]) {
+    assert.doesNotMatch(JSON.stringify(value), /TITLE-MARK-2132|CMD-MARK-2132/)
+  }
+})

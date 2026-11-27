@@ -181,13 +181,13 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
   // The sign-in row of a Bot's chat (cli-login.js): an explicit entry opens that Bot's chat and
   // its row; `ref` is the model the person chose, applied by the host once signed in.
   // `attemptId` is a Switch account's own attempt (#2064): the row reads that one.
-  const openCliLogin = (botId, provider, ref, attemptId) => {
+  const openCliLogin = (botId, provider, ref, attemptId, { fresh } = {}) => {
     const bot = cliLoginBotOf(roster.getSnapshot(), botId)
     const manager = loginState?.()
     if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false
     openSession?.(bot.id)
     void manager.open({ botId: bot.id, provider, ref: signInProviderOf(ref) === provider ? ref : undefined,
-      ...(typeof attemptId === 'string' ? { attemptId } : {}) })
+      ...(typeof attemptId === 'string' ? { attemptId } : {}), ...(fresh === true ? { fresh } : {}) })
     return true
   }
   const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra })
@@ -398,7 +398,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       return recovered
     },
     cliLoginStart: (botId, provider, model) => call('cli-login-start', loginPayload(botId, provider, model === undefined ? {} : { model })),
-    cliLoginCurrent: (botId, provider) => call('cli-login-current', loginPayload(botId, provider)),
+    cliLoginCurrent: (botId, provider, { fresh } = {}) => call('cli-login-current', loginPayload(botId, provider, fresh === true ? { fresh } : {})),
     cliLoginStatus: (botId, provider, attemptId, signal) => call('cli-login-status', loginPayload(botId, provider, { attemptId }), signal),
     cliLoginAnswer: (botId, provider, attemptId, value) => call('cli-login-answer', loginPayload(botId, provider, { attemptId, value })),
     cliLoginCancel: (botId, provider, attemptId) => call('cli-login-cancel', loginPayload(botId, provider, { attemptId })),
@@ -411,7 +411,10 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     }),
     cliLoginRelease: (claimId, rev) => call('cli-login-release', { claimId, rev }),
     cliLoginReleaseMachine: machineId => call('cli-login-release', { machineId }),
-    cliLoginSwitch: (botId, provider) => call('cli-login-switch', loginPayload(botId, provider)),
+    cliLoginSwitch: (botId, provider, { keep, fresh } = {}, { confirmed, model } = {}) => call('cli-login-switch', loginPayload(botId, provider, {
+      ...(keep === undefined ? {} : { keep }), ...(fresh === true ? { fresh } : {}),
+      ...(confirmed === false ? { withoutWarning: true } : {}), ...(model ? { model } : {}),
+    })),
     cliLoginReset: (botId, provider) => call('cli-login-reset', loginPayload(botId, provider)),
     cliLoginSignOut: (botId, provider) => call('cli-login-signout',
       loginPayload(botId, provider)),

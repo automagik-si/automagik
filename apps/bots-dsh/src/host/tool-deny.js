@@ -29,6 +29,7 @@ import { changesWorkingFolder } from './folders.js'
 import { refusal } from './refusal.js'
 import { teamToolOf } from './approvals.js'
 import { solverTracked } from './solver-progress.js'
+import { WHY_EN } from './stops.js'
 import { solverCallId } from './review-guard.js'
 
 /** The most names one Bot may deny. */
@@ -544,7 +545,28 @@ export function install(rt) {
       if (solverTracked(bot)) {
         const { sessionId, base, own, definition, held, call } = reviewGuardOf(exec, bot, name)
         if (held !== undefined) {
-          rt.noteStop?.(sessionId, { why: held.why, tool: name, callId: exec.callId, text: held.text, mayHaveRun: name === 'acp_tool' }, exec.agent)
+          const detail = { why: held.why, tool: name, callId: exec.callId, text: held.text }
+          const reach = name === 'acp_tool' ? rt.reviewGuardReachOf?.(bot, exec.agent) : undefined
+          const reviewHold = held.why === 'guard' || held.why === 'guard-request'
+          const attemptHold = ['limit', 'solver-run', 'solver-progress'].includes(held.why)
+          if ((reviewHold && reach === 'asks') || ((reviewHold || attemptHold) && reach === 'level')) {
+            const observation = exec.reviewGuardUnheld = { reason: held.text }
+            let result
+            try {
+              result = await (rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next))
+            } catch (error) {
+              rt.noteStop?.(sessionId, { ...detail, mayHaveRun: true }, exec.agent)
+              throw error
+            }
+            if (observation.ran === true) {
+              rt.noteStop?.(sessionId, { ...detail, text: WHY_EN[held.why], ran: true }, exec.agent)
+            } else {
+              rt.noteStop?.(sessionId, observation.refused === true ? detail : { ...detail, mayHaveRun: true }, exec.agent)
+            }
+            if (observation.mismatch === true) throw refusal(held.text)
+            return result
+          }
+          rt.noteStop?.(sessionId, { ...detail, mayHaveRun: name === 'acp_tool' }, exec.agent)
           throw refusal(held.text)
         }
         const observed = own ? rt.solverCall?.(bot, name, exec.arguments, definition, base) : undefined

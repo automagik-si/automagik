@@ -13,6 +13,8 @@
 // It connects every `mcpServers` entry of `session/new` itself, as both real adapters do, so the
 // plugin's bridge is exercised over real stdio. With FAKE_ACP_SKIP_MCP=1 it connects none, as
 // codex-acp does when the person's own Codex config already defines that server name.
+// FAKE_ACP_OMP_DISCOVER=1 opens a separate discover probe before the real MCP attachment.
+// "history-lookup omp <query>" reads the Bot's chat as omp, with no ACP permission request.
 //
 // FAKE_ACP_DEAF_TO lists ACP methods (comma separated, as on the wire: `initialize`,
 // `session/new`, `session/set_config_option`, `session/set_mode`, `session/fork`,
@@ -104,6 +106,7 @@ const START_MODEL = MODELS.find(entry => entry.value === process.env.FAKE_ACP_ST
 const OFFERS = process.env.FAKE_ACP_NO_OPTIONS !== '1'
 const DEFAULT_ROW = process.env.FAKE_ACP_NO_DEFAULT_EFFORT === '1' ? [] : [{ value: 'default', name: 'Default' }]
 const SKIP_MCP = process.env.FAKE_ACP_SKIP_MCP === '1'
+const OMP_DISCOVER = process.env.FAKE_ACP_OMP_DISCOVER === '1'
 const AUTH = process.env.FAKE_ACP_AUTH
 // A test can read what the client asked for (its servers, a fork, a close) from this file.
 const TRACE = process.env.FAKE_ACP_TRACE
@@ -150,12 +153,13 @@ function configOptions(session) {
 // One MCP server as an agent's adapter would use it: newline-delimited JSON-RPC over its stdio.
 // A `tools/list_changed` notification makes it re-list, as Claude Code's adapter does (Codex
 // ignores it, which is why the plugin forks there instead); the trace keeps the order observable.
-function connect(server, sessionId) {
+function connect(server, sessionId, { probe = false } = {}) {
   const env = { ...process.env, ...Object.fromEntries((server.env ?? []).map(({ name, value }) => [name, value])) }
   const child = spawn(server.command, server.args ?? [], { env, stdio: ['pipe', 'pipe', 'pipe'] })
   child.stdin.on('error', () => {})
   let seq = 0
   const pending = new Map()
+  const cancelled = new Set()
   let failure
   const exited = new Promise(resolve => {
     const end = error => {
@@ -184,6 +188,7 @@ function connect(server, sessionId) {
         continue
       }
       if (message.id === undefined) continue
+      if (cancelled.delete(message.id)) trace({ event: 'mcp-cancelled-reply', sessionId, message })
       const waiter = pending.get(message.id)
       if (waiter === undefined) continue
       pending.delete(message.id)
@@ -191,15 +196,33 @@ function connect(server, sessionId) {
       else waiter.reject(new Error(message.error.message))
     }
   })
-  const request = (method, params) => new Promise((resolve, reject) => {
+  const request = (method, params, signal) => new Promise((resolve, reject) => {
     if (failure !== undefined) return reject(failure)
+    if (signal?.aborted) return reject(signal.reason)
     const id = ++seq
-    pending.set(id, { resolve, reject })
+    const abort = () => {
+      pending.delete(id)
+      cancelled.add(id)
+      notify('notifications/cancelled', { requestId: id })
+      trace({ event: 'mcp-call-cancelled', sessionId })
+      reject(signal.reason)
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    pending.set(id, {
+      resolve: result => { signal?.removeEventListener('abort', abort); resolve(result) },
+      reject: error => { signal?.removeEventListener('abort', abort); reject(error) },
+    })
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
   })
   const notify = (method, params) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`)
   const ready = (async () => {
+    if (probe) {
+      try { await request('server/discover', {}) } catch (error) {
+        trace({ event: 'mcp-discover', sessionId, server: server.name, error: error.message })
+      }
+    }
     await request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-agent', version: '1' } })
+    if (probe) return []
     notify('notifications/initialized', {})
     const listed = await request('tools/list', {})
     return Array.isArray(listed?.tools) ? listed.tools : []
@@ -229,6 +252,10 @@ async function attach(session, servers, sessionId) {
   if (SKIP_MCP) return
   for (const server of servers ?? []) {
     if (server.name === 'dsh') session.dshServer = server
+    if (OMP_DISCOVER && server.name === 'dsh') {
+      const probe = connect(server, sessionId, { probe: true })
+      try { await probe.tools } finally { await probe.stop() }
+    }
     // The adapter's first `tools/list` for this session, before its `session/new` (or fork)
     // answer: the delivery 6 probes read this order from the trace.
     await attachServer(session, server, sessionId)
@@ -472,6 +499,7 @@ const implementation = {
     const session = sessions.get(sessionId)
     if (session) {
       session.cancelled = true
+      session.historyRequest?.abort()
       session.wake?.()
     }
   },
@@ -485,6 +513,69 @@ const implementation = {
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    if (/\b(?:guard-nested|late-command|no-command)\b/.test(said)) {
+      const waitForFile = async file => {
+        const deadline = Date.now() + 8_000
+        while (!existsSync(file) && !session.cancelled) {
+          if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${file}`)
+          await new Promise(resolve => setTimeout(resolve, 10))
+        }
+      }
+      const complete = (toolCallId, text, args = {}) => update({
+        sessionUpdate: 'tool_call_update', toolCallId, status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text } }], ...args,
+      })
+      if (/\bguard-nested\b/.test(said)) {
+        const parent = 'guard-parent'
+        await update({ sessionUpdate: 'tool_call', toolCallId: parent, title: 'Run parent', kind: 'execute',
+          status: 'in_progress', rawInput: { command: 'touch nested-parent' } })
+        writeFileSync('nested-parent', '')
+        trace({ event: 'own-tool-ran', sessionId, toolCallId: parent, mode: session.mode })
+        await waitForFile('.guard-parent-open')
+        if (session.cancelled) return { stopReason: 'cancelled' }
+        for (const [id, name, rawInput] of [
+          ['guard-held', 'Bash', { command: 'touch held-child' }],
+          ['guard-sibling', 'Read', { file_path: 'notes.txt' }],
+          ['guard-mutated', 'Read', { file_path: 'notes.txt' }],
+        ]) {
+          const kind = name === 'Bash' ? 'execute' : 'read'
+          const toolCall = { toolCallId: id, kind, rawInput }
+          const details = { claudeCode: { toolName: name, parentToolUseId: id === 'guard-mutated' ? 'guard-sibling' : parent } }
+          await update({ sessionUpdate: 'tool_call', ...toolCall, title: name, status: 'pending', _meta: details })
+          const pending = conn.requestPermission({ sessionId, toolCall,
+            options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+          })
+          if (id === 'guard-mutated') {
+            await waitForFile('.guard-child-open')
+            await update({ sessionUpdate: 'tool_call_update', toolCallId: id, rawInput: { file_path: 'different.txt' } })
+          }
+          const { outcome } = await pending
+          const answer = outcome.optionId ?? outcome.outcome
+          if (answer === 'yes') {
+            if (name === 'Bash') writeFileSync('held-child', '')
+            trace({ event: 'native-tool-ran', sessionId, toolCallId: id, name })
+            if (id !== 'guard-sibling') await complete(id, 'nested result')
+          } else {
+            trace({ event: 'native-tool-refused', sessionId, toolCallId: id, name, answer })
+            await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'failed' })
+          }
+        }
+        await complete('guard-sibling', 'nested result')
+        await complete(parent, 'parent result')
+      } else {
+        const toolCallId = 'guard-terminal'
+        await update({ sessionUpdate: 'tool_call', toolCallId, title: 'Terminal command', kind: 'execute', status: 'in_progress' })
+        await waitForFile('.guard-terminal-open')
+        if (session.cancelled) return { stopReason: 'cancelled' }
+        if (/\blate-command\b/.test(said)) {
+          await update({ sessionUpdate: 'tool_call_update', toolCallId, rawInput: { command: 'touch late-2132' } })
+          writeFileSync('late-2132', '')
+        }
+        trace({ event: 'own-tool-ran', sessionId, toolCallId, mode: session.mode })
+        await complete(toolCallId, 'terminal result')
+      }
+      return { stopReason: 'end_turn' }
+    }
     if (session.listed) {
       // Antigravity resolves the OFF profile against the component registry. Listing a
       // session server is insufficient: only eagerly loaded tools become components.
@@ -679,14 +770,87 @@ const implementation = {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` MCP permission: ${outcome}.` } })
       return { stopReason: 'end_turn' }
     }
+    const history = /^history-lookup omp (\S+)/m.exec(current)
+    if (history !== null) {
+      const name = 'read_own_chat'
+      const toolCallId = `history-${session.turns}`
+      const connection = session.mcp.get('dsh')
+      let text = 'the bridge is not connected'
+      if (connection !== undefined) {
+        await update({ sessionUpdate: 'tool_call', toolCallId, name: 'mcp__dsh_read_own_chat', title: 'Read own chat', status: 'in_progress' })
+        try {
+          const answer = await connection.request('tools/call', { name, arguments: { query: history[1] }, _meta: { callId: toolCallId } })
+          trace({ event: 'mcp-history-result', sessionId, toolCallId, answer })
+          text = (answer.content ?? []).map(block => block.text ?? '').join('\n')
+          await update({ sessionUpdate: 'tool_call_update', toolCallId, status: answer.isError ? 'failed' : 'completed' })
+        } catch (error) {
+          text = `bridge failed: ${error?.message ?? error}`
+        }
+      }
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+      return { stopReason: 'end_turn' }
+    }
+    const agyReal = /^agy-real(-parallel)? (\[.*\])$/m.exec(current)
+    if (agyReal !== null) {
+      const connection = session.mcp.get('dsh')
+      const parallel = agyReal[1] !== undefined
+      const runStep = async (step, index) => {
+        const { query, meta, operation = 'read_own_chat', conflicting, retry, permission = true, includeQuery } = step
+        const toolCallId = `agy-real-${session.turns}-${index}`
+        if (permission) {
+          // Title, kind and summary reflect the observed ACP shape. The name value and
+          // every MCP id variant below are synthetic. The optional query was seen in 5a.
+          const name = conflicting ? `mcp_other_${operation}` : `mcp_dsh_${operation}`
+          const toolCall = { toolCallId, name, title: `Run mcp_dsh_${operation}`, kind: 'other', status: 'pending',
+            rawInput: operation === 'read_own_chat' ? { toolSummary: 'Read this chat', ...(includeQuery && { query }) }
+              : { server: 'dsh', tool: operation } }
+          await update({ sessionUpdate: 'tool_call', ...toolCall })
+          const { outcome } = await conn.requestPermission({ sessionId, toolCall, options: [
+            { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
+            { optionId: 'agy-reject', name: 'Reject', kind: 'reject_once' },
+          ] })
+          trace({ event: 'permission-answer', answer: outcome })
+          // The conflict control deliberately probes the bridge even after ACP refusal.
+          if (!conflicting && outcome.optionId !== 'agy-allow') return false
+        }
+        const callId = meta === 'matching' ? toolCallId : meta
+        const controller = new AbortController()
+        session.historyRequest = controller
+        try {
+          for (let attempt = 0; attempt < (retry ? 2 : 1); attempt++) {
+            const answer = await connection.request('tools/call', { name: operation, arguments: parallel ? { query } : { query, name: query },
+              ...(callId !== undefined && { _meta: { callId } }) }, controller.signal)
+            trace({ event: 'agy-real-result', sessionId, toolCallId, query, operation, answer })
+            const text = (answer.content ?? []).map(block => block.text ?? '').join('\n')
+            if (text) await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) throw error
+          return true
+        } finally {
+          session.historyRequest = undefined
+        }
+        if (permission) await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed' })
+      }
+      const steps = JSON.parse(agyReal[2])
+      if (parallel) {
+        if ((await Promise.all(steps.map(runStep))).some(Boolean)) return { stopReason: 'cancelled' }
+      } else {
+        for (const [index, step] of steps.entries()) {
+          if (await runStep(step, index)) return { stopReason: 'cancelled' }
+        }
+      }
+      return { stopReason: 'end_turn' }
+    }
     // codex-acp's own shapes (#1564 PR B), each checked before the generic "bridge" trigger.
-    const codexBridge = /\b(agy-bridge) (\S+)(?: (\{.*\}))?/.exec(current)
+    const codexBridge = /\b(agy-bridge(?:-without-id)?) (\S+)(?: (\{.*\}))?/.exec(current)
       ?? /\b(codex-bridge) (\S+)(?: (\{.*\}))?/.exec(said)
     if (codexBridge !== null) {
       const [, style, name, raw] = codexBridge
       const args = raw === undefined ? {} : JSON.parse(raw)
       const toolCallId = `codex-bridge-${session.turns}`
-      if (style === 'agy-bridge') {
+      const agyBridge = style !== 'codex-bridge'
+      if (agyBridge) {
         const toolCall = { toolCallId, name: `mcp_dsh_${name}`, title: `mcp_dsh_${name}`, kind: 'execute',
           rawInput: { server: 'dsh', tool: name, arguments: args } }
         await update({ sessionUpdate: 'tool_call', ...toolCall, status: 'pending' })
@@ -703,7 +867,12 @@ const implementation = {
       const connection = session.mcp.get('dsh')
       if (connection !== undefined) {
         try {
-          const answer = await connection.request('tools/call', { name, arguments: args })
+          const history = agyBridge && name === 'read_own_chat'
+          const answer = await connection.request('tools/call', {
+            name, arguments: args,
+            ...(history && style === 'agy-bridge' && { _meta: { callId: toolCallId } }),
+          })
+          if (history) trace({ event: 'mcp-history-result', sessionId, toolCallId, answer })
           text = (answer.content ?? []).map(block => block.text ?? '').join('\n') || '(no text)'
         } catch (error) {
           text = `bridge failed: ${error?.message ?? error}`

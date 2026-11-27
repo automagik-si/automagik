@@ -4,7 +4,7 @@
 // service, as in permissions.test.js; a tool call is the `tools/execute` waterfall DSH
 // runs around a tool's body.
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -38,6 +38,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, custom = {}, defaul
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-caller-group-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify({ ...TEAM, bots: { m1: { ...TEAM.bots.m1, ...bots.m1 }, b2: { ...TEAM.bots.b2, ...bots.b2 } }, rooms: { r1: { ...TEAM.rooms.r1, ...room } }, ...(tasks ? { tasks } : {}) }))
   const log = []
+  const instructions = new Map()
   const open = new Set()
   const presetOf = new Map()
   const service = {
@@ -81,7 +82,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, custom = {}, defaul
           for (const listener of ctx.listeners.get('session/created') ?? []) void listener(session)
         }
         await new Promise(resolve => setTimeout(resolve, 1))
-        return { agent: { session, followup() {} } }
+        return { agent: { session, followup(message) { instructions.set(sessionId, message.id) } } }
       },
       selectModel: async () => {},
     },
@@ -110,7 +111,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, custom = {}, defaul
   }
   // As Genie's grant_wish does: no roomId.
   const wish = (from = 'm1', extra = {}) => rt.startTask({ title: 'Wish', text: 'Do it', from, ...extra })
-  return { ctx, rt, service, call, presets, settle, toolCall, wish, log }
+  return { ctx, rt, home, service, call, presets, settle, toolCall, wish, log, instructions }
 }
 
 test('a task started from a group Session without a roomId runs no wider than that group', async (t) => {
@@ -155,8 +156,8 @@ test('a wider group never widens the task: it runs at its Bot\'s level', async (
   assert.deepEqual(free.presets(own), [FULL])
 })
 
-test('outside a group tool call a task is as before, and its record gains nothing', async (t) => {
-  const { rt, call, presets, settle, toolCall, wish } = team(t, { bots: { m1: { permission: FULL } }, room: { permission: WRITE } })
+test('outside a group tool call only the verified Bot opener adds private skill provenance', async (t) => {
+  const { rt, home, call, presets, settle, toolCall, wish, instructions } = team(t, { bots: { m1: { permission: FULL } }, room: { permission: WRITE } })
   await call('state', {})
   // No tool call at all.
   const direct = await wish()
@@ -166,8 +167,20 @@ test('outside a group tool call a task is as before, and its record gains nothin
   await settle()
   for (const task of [direct, ownChat, stranger]) {
     assert.deepEqual(presets(task), [FULL], task)
+  }
+  for (const task of [direct, stranger]) {
     assert.deepEqual(Object.keys(rt.state.tasks[task]).sort(), ['at', 'from', 'status', 'title'], task)
   }
+  const own = rt.state.tasks[ownChat]
+  assert.match(own.skillsInstructionsId, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+  assert.equal(own.skillsInstructionsId, instructions.get(ownChat))
+  assert.ok(Number.isFinite(own.at))
+  const card = { at: own.at, from: 'm1', status: 'working', title: 'Wish' }
+  assert.deepEqual(own, { ...card, skills: [], skillsInstructionsId: instructions.get(ownChat), skillsOwner: 'm1' })
+  assert.deepEqual(JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).tasks[ownChat], own)
+  const roster = await call('state', {})
+  assert.equal(roster.ok, true)
+  assert.deepEqual(roster.value.tasks[ownChat], card)
 })
 
 test('an explicit roomId wins over the group of the call', async (t) => {

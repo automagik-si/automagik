@@ -6,6 +6,9 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { ApprovalService, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { install, STOP_WHYS, STOP_KEEP_MS, STOPS_MAX, CALLS_MAX, WHY_EN, stopLineEn } from '../src/host/stops.js'
 import { install as extend } from '../src/host/extend.js'
+import { DICTIONARY, installLocale } from '../src/client/i18n.js'
+import { stopLine } from '../src/client/stops.js'
+import { ptBrLocale } from './fixtures/pt-br-locale.js'
 
 function bench({ policy = 'ask', overrideOf, headers = {} } = {}) {
   const handlers = new Map()
@@ -257,4 +260,38 @@ test('the review guard stops: their lines, and a child stop noted on the parent\
   own.emit('ada-chat', 'turn/start', { turn: 1 })
   own.rt.noteStop('ada-chat', { why: 'guard-request', tool: 'write', callId: 'n2' })
   assert.equal(own.rt.stopLineOfTurn('ada-chat', 1), `write did not run: ${WHY_EN['guard-request']}`)
+})
+
+test('#2132 T7 confirmed runs have their own aggregate and localized wording', () => {
+  const { rt, failures } = bench({ headers: { child: { origin: 'subagent', parentSession: 'ada-chat' } } })
+  const detail = { tool: 'acp_tool', why: 'guard', text: WHY_EN.guard, ran: true }
+  rt.noteStop('child', { ...detail, callId: 'a' })
+  assert.equal(rt.takeUnasked('child'), undefined)
+  const [single] = rt.stopsView()
+  rt.noteStop('child', { ...detail, callId: 'b' })
+  rt.noteStop('child', { ...detail, ran: undefined, callId: 'c' })
+  const [multiple, refused] = rt.stopsView()
+  assert.equal(multiple.count, 2)
+  assert.equal(refused.count, 1)
+  assert.equal(refused.ran, undefined)
+  assert.equal(rt.takeUnasked('child').items[0].callId, 'c')
+  assert.match(failures[0].text, /^A step ran unheld: /)
+  assert.equal(stopLineEn(single), `acp_tool ran unheld: nothing asked before it ran (${WHY_EN.guard})`)
+  assert.equal(stopLineEn(multiple), `2 steps ran unheld: nothing asked before they ran (${WHY_EN.guard})`)
+  assert.equal(stopLine(single), stopLineEn(single))
+  assert.equal(stopLine(multiple), stopLineEn(multiple))
+  const pt = installLocale(ptBrLocale())
+  try {
+    assert.match(stopLine(single), /^acp_tool foi executada sem bloqueio:/)
+    assert.match(stopLine(multiple), /^2 etapas foram executadas sem bloqueio:/)
+  } finally { pt() }
+  const zh = installLocale({
+    register() {},
+    bind: () => (key, params) => (DICTIONARY.zh[key] ?? key).replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match),
+    getLocale: () => ({ active: 'zh' }),
+  })
+  try {
+    assert.match(stopLine(single), /^acp_tool 已执行/)
+    assert.match(stopLine(multiple), /^2 个步骤已执行/)
+  } finally { zh() }
 })

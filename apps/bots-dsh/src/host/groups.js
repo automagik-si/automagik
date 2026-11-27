@@ -28,6 +28,7 @@ import { join } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { GROUP_LINE_READ, LATE_ANSWER, ROOM_IDLE_RELAY_LIMIT, ROOM_REPLY_TIMEOUT_MS, ROOM_STEP_GAP_MS, ROOM_WORK_GRACE_MS, SLOW_TEAM_TOOLS, SOURCE_KIND, TEAM_TOOLS, TEXT_KEPT } from './constants.js'
+import { TOOL_ACTIVITY } from '../shared/tool-activity.js'
 import { escapeRegExp, headOf, splitRef, textOf } from './text.js'
 import { credentialShapes } from './redact.js'
 import { viaOf } from '../shared/im-platforms.js'
@@ -76,7 +77,7 @@ export const isIdleRelayText = (text, everyone, priorBodies) => {
 // Rows only the group chat draws: members read who is at work from the round itself.
 // 'switched': a member's conversation here followed its agent switch (parts.js); the member
 // itself reads that in its handoff.
-const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched', SKILL_NOTICE, SKILL_ACTIVITY])
+const SHOWN_ONLY = new Set(['working', 'approval', 'permission-stop', 'switched', SKILL_NOTICE, SKILL_ACTIVITY, TOOL_ACTIVITY])
 const memberLine = record => record !== undefined && !SHOWN_ONLY.has(record.kind)
 
 // A member's own lines are already in its Session, so only the others' are news.
@@ -459,7 +460,23 @@ export function install(rt) {
     }
     const rows = []
     const shown = new Set()
+    const toolScopes = new Map()
+    const toolAnchors = new Set()
+    const scopeKey = record => JSON.stringify([record.exchangeId, record.sessionId, record.botId])
     for (const record of records) {
+      if (record.event === 'anchor') toolAnchors.add(record.id)
+      if (record.kind === SKILL_ACTIVITY && record.event === 'scope') toolScopes.set(scopeKey(record), record)
+      if (record.kind === TOOL_ACTIVITY) {
+        if (record.event !== 'call' || anchor === undefined || record.anchor !== anchor || !toolAnchors.has(anchor) ||
+          toolScopes.get(scopeKey(record))?.anchor !== anchor || !room?.members.includes(record.botId) ||
+          rt.isPrivate?.(record.botId)) continue
+        const receipt = JSON.stringify([TOOL_ACTIVITY, scopeKey(record), record.id])
+        if (shown.has(receipt)) continue
+        shown.add(receipt)
+        const { callSeq, label, name, target, botId, time } = record
+        rows.push({ kind: TOOL_ACTIVITY, id: receipt, callSeq, label, name, ...(target !== undefined && { target }), botId, time })
+        continue
+      }
       if (record.kind === SKILL_ACTIVITY) {
         if (record.event !== 'load') continue
         const receipt = JSON.stringify([record.exchangeId, record.id])
@@ -485,6 +502,25 @@ export function install(rt) {
       const revision = activityRevisions.get(room)
       return revision === undefined ? [] : [[room.id, revision]]
     })),
+    roomToolActivity(sessionId, source, activity) {
+      const owner = rt.groupOwners.get(sessionId)
+      if (source?.kind !== SOURCE_KIND || source.role !== 'room' || typeof source.exchangeId !== 'string' ||
+        owner === undefined || owner.roomId !== source.roomId) return
+      const { botId, roomId } = owner
+      const room = rt.roomOf(roomId)
+      if (!room?.members.includes(botId) || rt.isPrivate?.(botId)) return
+      const book = bookOf(roomId)
+      const records = rt.ledger.records(book)
+      const scope = records.findLast(record => record.kind === SKILL_ACTIVITY && record.event === 'scope' &&
+        record.exchangeId === source.exchangeId && record.sessionId === sessionId && record.botId === botId)
+      if (scope?.anchor === undefined || !records.some(record => record.event === 'anchor' && record.id === scope.anchor) ||
+        records.some(record => record.kind === TOOL_ACTIVITY && record.exchangeId === source.exchangeId &&
+          record.botId === botId && record.sessionId === sessionId && record.id === activity.id)) return
+      const { kind, id, seq: callSeq, label, name, target, time } = activity
+      rt.ledger.append(book, { kind, event: 'call', id, label, name, ...(target === undefined ? {} : { target }),
+        botId, sessionId, exchangeId: source.exchangeId, anchor: scope.anchor, callSeq, time })
+      activityRevisions.set(room, randomUUID())
+    },
     skillRoomActivity(sessionId, botId, source) {
       const owner = rt.groupOwners.get(sessionId)
       if (source?.kind !== SOURCE_KIND || source.role !== 'room' || typeof source.exchangeId !== 'string' ||

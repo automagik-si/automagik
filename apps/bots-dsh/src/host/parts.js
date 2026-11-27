@@ -17,6 +17,7 @@ import { grantModelFields, withGrantHold } from './grants.js'
 // read_own_chat searches every part, the condensed messages included.
 import { chatPersonParts, personParts, SKILL_NOTICE } from './skill-message.js'
 import { skillActivityOf } from '../shared/skill-activity.js'
+import { BRIDGE_ACTIVITY_RECORD, bridgeOriginOf, toolEventOf } from '../shared/tool-activity.js'
 import { legacySkillHistory, projectRoomContent } from './skill-library-call.js'
 import { NO_BOT_RUNNER, noBotRunner } from './bot-runner.js'
 import { assembleLlmStream } from './models.js'
@@ -24,7 +25,7 @@ import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { openTurnAt } from './btw.js'
-import { HANDOFF_ACK, HISTORY_TIMEOUT_MS, REPLY_KIND, SOURCE_KIND, SWITCH_CUT } from './constants.js'
+import { COMPUTER_HANDOFF_OFF, HANDOFF_ACK, HISTORY_TIMEOUT_MS, REPLY_KIND, SOURCE_KIND, SWITCH_CUT } from './constants.js'
 import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.js'
 import { CHECKPOINT_PROMPT, STEWARD_SYSTEM, checkpointCount, checkpointTail, checkpointTailNote, checkpointText, linesFor, parseDecision, stewardRequest } from './steward.js'
 import { RESUME_DELAY_MS } from './resume.js'
@@ -39,6 +40,7 @@ import { hasSolverSetup } from '../shared/solver-agent.js'
 import { ACP_NAME, CROSSING_DEADLINE_MS, commandCapableAgent, crossesHarness, isHermesRoute, routeOfRef, shellHoldText } from '../shared/routes.js'
 import { assertSolverAgent } from './solver-agent.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
+import { questionOptions } from './tools.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { readableRoute } from './session-route.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -3612,12 +3614,50 @@ export function install(rt) {
   // Earlier parts of a Bot's own chat, newest page first, for the chat to show above
   // the current part as one conversation.
   const EARLIER_PAGE = 60
-  function displayItems(partId, events, session, seedTurn, activity = false) {
+  function hasUsableQuestionOptions(args) {
+    try { return questionOptions(args?.options).length > 0 } catch { return false }
+  }
+
+  async function refusedComputerHandoffs(address, events, signal) {
+    const computerOff = content => content?.length === 1 && content[0]?.type === 'text' && content[0].text === COMPUTER_HANDOFF_OFF
+    const bySeq = new Map(events.map(event => [event.seq, event]))
+    const dispatches = new Map()
+    const refusals = new Map()
+    for (const event of events) {
+      const { type, data, seq, time } = event
+      if (type === 'turn/start') dispatches.clear()
+      if (data?.name === 'computer_handoff' && type === 'tool/ptc-dispatch-start') {
+        dispatches.set(data.subCallId, event)
+      } else if (data?.name === 'computer_handoff' && type === 'tool/ptc-dispatch' && computerOff(data.content)) {
+        const call = dispatches.get(data.subCallId)
+        if (call && call.data.parentCallId === data.parentCallId) refusals.set(call.seq, call)
+        else refusals.set(seq, { ...event, type: 'tool/ptc-dispatch-start' })
+      } else if (type === 'tool/result' && computerOff(data?.message?.content)) {
+        const callSeq = event.sourceEventSeqs?.[0]
+        if (!Number.isSafeInteger(callSeq) || callSeq < 0 || callSeq >= seq) continue
+        const onPage = bySeq.get(callSeq)
+        // At a page cut the result owns the row. Read its referenced call to
+        // distinguish the handoff refusal from identical text produced by another tool.
+        const call = onPage ?? (await ctx.sessionController.page({ address, beforeSeq: callSeq + 1, maxMessages: 1 }, signal)).records.at(-1)?.event
+        if (call?.seq !== callSeq || call.type !== 'tool/call' || call.data?.name !== 'computer_handoff' ||
+            call.data.callId !== data.message.toolCallId || call.data.turn !== data.turn) continue
+        refusals.set(onPage ? callSeq : seq, onPage ?? { ...call, seq, time })
+      }
+    }
+    return refusals
+  }
+
+  function displayItems(partId, events, session, seedTurn, activity = false, handoffRefusals) {
     const hidden = new Set(state.exchangeTurns[partId] ?? [])
+    const showTools = activity && !rt.roomOf(partId) && !(rt.pastOwners.get(partId)?.roomId && !rt.pastOwners.get(partId)?.botId)
+    const seenTools = new Set()
     // Call ids of the page's group_relay calls; their tool/result events carry the
     // round's replies. A result without its call on the page (the page cut between
     // them) draws nothing rather than guessing.
     const relayCalls = new Set()
+    const relayResults = new Set((showTools ? events : []).filter(event => event.type === 'tool/result' &&
+      (relayRange(textOf(event.data?.message?.content)) || parseReplies(textOf(event.data?.message?.content)).replies.length))
+      .map(event => event.data?.message?.toolCallId))
     const items = []
     // The turn/start still in effect. A steered or queued user message stays in
     // it; only another turn/start moves on. A later page does not repeat the
@@ -3628,6 +3668,15 @@ export function install(rt) {
       if (typeof event.seq === 'number' && Number.isInteger(event.seq)) item.seq = event.seq
       if (turn !== undefined) item.turn = turn
       items.push(item)
+    }
+    const showTool = (event, owningTurn) => {
+      if (!showTools || !Number.isSafeInteger(owningTurn) || hidden.has(owningTurn)) return
+      const row = toolEventOf(event)
+      const key = row && JSON.stringify([owningTurn, row.id])
+      if (row && !seenTools.has(key)) {
+        seenTools.add(key)
+        items.push({ ...row, turn: owningTurn })
+      }
     }
     for (const event of events) {
       if (activity) {
@@ -3641,6 +3690,14 @@ export function install(rt) {
         if (typeof event.data?.turn === 'number' && Number.isInteger(event.data.turn)) turn = event.data.turn
         continue
       }
+      if (event.type === 'turn/end' && Number.isSafeInteger(event.data?.turn)) turn = event.data.turn
+      const refusedHandoff = handoffRefusals?.get(event.seq)
+      if (refusedHandoff !== undefined) showTool(refusedHandoff, refusedHandoff.data.turn ?? turn)
+      if (event.type === BRIDGE_ACTIVITY_RECORD) {
+        const origin = bridgeOriginOf(event)
+        if (origin?.exchangeId === null) showTool(event, origin.turn)
+        continue
+      }
       if (event.type === 'assistant/message') {
         if (hidden.has(event.data?.turn)) continue
         // One entry per text block: the chat shows each block in a bubble of its own.
@@ -3650,30 +3707,39 @@ export function install(rt) {
         }
         continue
       }
-      if (event.type === 'tool/call') {
+      if (event.type === 'tool/call' || event.type === 'tool/ptc-dispatch-start') {
+        const dispatch = event.type === 'tool/ptc-dispatch-start'
+        const callId = (dispatch ? event.data?.subCallId : event.data?.callId) ?? null
+        const named = event.data?.name
+        const owningTurn = dispatch ? turn : event.data?.turn ?? turn
         // A group_relay call's result is paired back to it by call id — the tool
         // name is on the call, never on the result.
-        if (event.data?.name === 'group_relay') relayCalls.add(event.data?.callId)
+        if (!dispatch && named === 'group_relay') relayCalls.add(event.data?.callId)
+        // The handoff's reply carries its card. Confirmed refusals use the rows above.
+        if (named === 'browser_handoff' || named === 'computer_handoff') continue
         // Hidden turns and refused calls never showed a display card. Closed cards
         // stay at the call that asked them, including in a hidden Bot-to-Bot turn.
-        const named = event.data?.name
         if (named === 'show_view' || named === 'ask_user') {
           let args = event.data?.arguments
           if (typeof args === 'string') { try { args = JSON.parse(args) } catch { args = undefined } }
-          const callId = event.data?.callId ?? null
           const closed = callId === null ? undefined : rt.own(rt.own(state.closedCards, partId), callId)
           if (named === 'ask_user') {
+            // The reply message carries an answered card, even on a different page.
             if (closed !== undefined) items.push({ kind: 'closed', closed, question: { question: String(args?.question ?? ''), ...(args?.detail ? { detail: String(args.detail) } : {}), options: Array.isArray(args?.options) ? args.options : [], multiSelect: args?.multiSelect === true }, callId, time: event.time })
+            else if (showTools && !hasUsableQuestionOptions(args)) showTool(event, owningTurn)
             continue
           }
           const view = normalizeView(args?.view)
           const shown = checkShownView(args?.title, view)
+          // A valid interactive view with no closed card can be carried by its reply.
           if (shown.error === undefined && !shown.interactive && args?.await_reply !== true) {
-            if (!hidden.has(event.data?.turn ?? turn)) items.push({ kind: 'view', title: shown.title, view, callId, time: event.time })
+            if (!hidden.has(owningTurn)) items.push({ kind: 'view', title: shown.title, view, callId, time: event.time })
           } else if (shown.error === undefined && closed !== undefined) {
             items.push({ kind: 'closed', closed, title: shown.title, view, callId, time: event.time })
+          } else if (shown.error !== undefined || (args?.await_reply ?? shown.interactive) !== shown.interactive) {
+            showTool(event, owningTurn)
           }
-        }
+        } else if (dispatch || named !== 'group_relay' || !relayResults.has(event.data?.callId)) showTool(event, owningTurn)
         continue
       }
       if (event.type === 'tool/result') {
@@ -3738,11 +3804,12 @@ export function install(rt) {
   async function partPage(parts, index, cursor, steps = false) {
     const part = parts[index]
     const signal = AbortSignal.timeout(HISTORY_TIMEOUT_MS)
+    const address = { kind: 'session', sessionId: part.sessionId }
     // An archived earlier part may have no live agent left; its stored events
     // still page fine, so resolve failure only drops the live-session cap.
     const agent = await rt.resolveAgent(part.sessionId).catch(() => undefined)
     const page = await ctx.sessionController.page({
-      address: { kind: 'session', sessionId: part.sessionId },
+      address,
       ...(agent ? { throughSeq: Number(agent.session.seq) - 1 } : {}),
       ...(Number.isInteger(cursor?.beforeSeq) ? { beforeSeq: cursor.beforeSeq } : {}),
       maxMessages: EARLIER_PAGE,
@@ -3755,7 +3822,7 @@ export function install(rt) {
       let before = events[0]?.seq
       while (Number.isInteger(before) && seedTurn === undefined) {
         const back = await ctx.sessionController.page({
-          address: { kind: 'session', sessionId: part.sessionId },
+          address,
           beforeSeq: before,
           maxMessages: EARLIER_PAGE,
         }, signal)
@@ -3769,7 +3836,8 @@ export function install(rt) {
         before = back.records[0]?.event?.seq
       }
     }
-    const items = displayItems(part.sessionId, events, agent?.session, seedTurn, true)
+    const handoffRefusals = await refusedComputerHandoffs(address, events, signal)
+    const items = displayItems(part.sessionId, events, agent?.session, seedTurn, true, handoffRefusals)
     const more = page.hasMore && events.length > 0
     // The line above a part's first message marks where it began, and names the agent an
     // agent switch moved the chat to (the segment of the part before it carries `switchedTo`).

@@ -229,7 +229,15 @@ test('Limits + Auto switch moves designated PLAN and RESULT claims by exchange a
       const progress = b.bot.reviewTrack.solver
       const designation = { exchangeId: 'review-work', reviewerId: 'reviewer' }
       progress.plan = { revision: 0, checks: ['test'], ...(phase === 'plan' ? { review: designation } : {}) }
-      if (phase === 'result') progress.review = { ...designation, revision: 0, solverModel: 'deepseek/v4' }
+      if (phase === 'result') {
+        const workspace = mkdtempSync(join(tmpdir(), 'switch-text-result-'))
+        t.after(() => rmSync(workspace, { recursive: true, force: true }))
+        b.bot.workDir = workspace
+        progress.plan.accepted = true
+        progress.passed = ['test']
+        progress.snapshot = resultSnapshot(workspace)
+        progress.review = { ...designation, revision: 0, solverModel: 'deepseek/v4' }
+      }
       const work = { from: 'b1', to: 'reviewer', at: Date.now() }
       assert.equal(b.rt.designatedReplyRequest('b1', 'reviewer', 'review-work', work), progress.request)
       const source = { kind: SOURCE_KIND, role: 'reply', exchangeId: 'review-reply', replyTo: 'review-work',
@@ -256,6 +264,41 @@ test('Limits + Auto switch moves designated PLAN and RESULT claims by exchange a
       assert.equal(b.bot.reviewTrack.delivered, true)
     })
   }
+})
+
+test('Limits + Auto switch holds a legacy RESULT without a passing snapshot', async t => {
+  const b = bench()
+  const workspace = mkdtempSync(join(tmpdir(), 'switch-legacy-result-'))
+  t.after(() => rmSync(workspace, { recursive: true, force: true }))
+  t.after(() => b.ctx.dispose())
+  b.rt.state.bots.reviewer = { id: 'reviewer', name: 'Reviewer' }
+  Object.assign(b.bot, { role: SOLVER_DESCRIPTION, reviewerId: 'reviewer', workDir: workspace })
+  installReviewMark(b.rt)
+  b.rt.reviewCreated(b.bot, 'Review this change.')
+  const progress = b.bot.reviewTrack.solver
+  progress.plan = { revision: 0, checks: ['test'], accepted: true }
+  progress.passed = ['test']
+  progress.review = { exchangeId: 'review-work', reviewerId: 'reviewer', revision: 0, solverModel: 'deepseek/v4' }
+  const source = { kind: SOURCE_KIND, role: 'reply', exchangeId: 'review-reply', replyTo: 'review-work',
+    senderSessionId: 'reviewer', reviewReceipt: 'host-receipt' }
+  b.rt.reviewVerdict('reviewer', 'b1', undefined, 'SHIP', Date.now(), source, 'other/independent')()
+  const message = { id: 'original-inbox-id', content: [{ type: 'text', text: 'SHIP' }], source }
+  const fresh = await switchWithReview(b, { message, carried: true })
+  const input = fresh.inbox.nextTurn.find(row => row.source?.exchangeId === source.exchangeId)
+  assert.equal(input?.source.reviewFeedback, 'images')
+  assert.equal(input.source.reviewImagesWhy, 'missing')
+  b.ctx.emit('agent/inbox/claimed', { agent: fresh, message: input, turn: 4 })
+  const { request, consumedResult } = b.rt.takeReviewReply(fresh.id, input, 4)
+  assert.equal(request, progress.request)
+  b.rt.reviewTurnEnd('b1', { completed: true, wroteText: true, model: 'deepseek/v4', request, consumedResult })
+  const track = b.bot.reviewTrack
+  assert.equal(track.solver.request, request)
+  assert.equal(track.requested, true)
+  assert.notEqual(track.delivered, true)
+  assert.equal(track.solver.review.verdict, 'unverified')
+  assert.deepEqual(track.verdicts, [])
+  assert.equal(track.last?.result, false)
+  assert.equal(track.last?.done, undefined)
 })
 
 test('Limits + Auto switch continues a consumed RESULT on its original request once', async t => {

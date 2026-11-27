@@ -4,7 +4,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { judgeOf, OWN_MODE_MARKS } from '../shared/permission-levels.js'
 import { personParts, SKILL_TOOL } from './skill-message.js'
-import { TEAM_LOOKUPS, teamToolOf } from './approvals.js'
+import { personDecides, teamLookup, teamToolOf } from './approvals.js'
 import { changesWorkingFolder } from './folders.js'
 import { splitRef, textOf } from './text.js'
 
@@ -679,6 +679,9 @@ export function install(rt) {
     } else if (own && request.toolName !== 'acp_tool' && request.bridgeCall?.agentAsked === false && ctx.get?.('acpAgents')?.ownModeIn?.(session.id) === true) {
       if (!call || call.name !== request.toolName) return undefined
       step = { ...current, args: argsOf(call) }
+    } else if (judgeOf(owner.mark) === 'team' && personDecides(request) && request.bridgeCall.escalated !== true
+      && request.toolName !== 'acp_tool' && call?.name === request.toolName) {
+      step = { ...current, args: argsOf(call) }
     } else return undefined
     return autoJudge({ ...owner.args, bot: owner.bot, judge: 'team', step, signal: request.signal, credential }).then(verdict => {
       verdict.audit.kept = valid(owner) && !request.signal?.aborted && (!own || ctx.get?.('acpAgents')?.ownModeIn?.(session.id) === true)
@@ -721,7 +724,7 @@ export function install(rt) {
  */
 export function installAhead(rt) {
   rt.ctx.on('approval/request', (request, next) => {
-    if (TEAM_LOOKUPS.has(teamToolOf(request.toolName))) return next()
+    if (teamLookup(request)) return next()
     let decided
     try { decided = rt.autoDecide?.(request) } catch {}
     if (decided === undefined) return next()
