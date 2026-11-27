@@ -2139,8 +2139,8 @@ export class AcpAdapter extends LlmAdapter {
         && currentLevel?.full !== true
       const claudeRules = (identity, enabled, currentLevel, bridged) => {
         const hard = hardAsks(enabled, currentLevel, bridged)
-        const builtIn = !((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)
-        if (options.provider !== 'acp-claude' || !builtIn || identity?.solver !== true) {
+        if (options.provider !== 'acp-claude' || identity?.solver !== true
+          || ((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)) {
           return { key: hard, meta: hard ? agent.hardAsk() : {} }
         }
         const deny = claudeDenyRules(identity.confineDeny)

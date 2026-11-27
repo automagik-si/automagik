@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
-import { CLAUDE, holdNativeStartup, nativeWorld, person } from './fixtures/managed-native-world.js'
+import { CLAUDE, holdNativeStartup, nativeWorld as createNativeWorld, person } from './fixtures/managed-native-world.js'
+
+const ordinaryPolicy = { solverPolicy: { state: 'none' } }
+
+function nativeWorld(t, { identity, ...options } = {}) {
+  const w = createNativeWorld(t, {
+    ...options,
+    identity: (id, request) => request?.policy ? ordinaryPolicy : identity?.(id),
+  })
+  w.adapter.policyState = w.identityReaders.readState
+  return w
+}
 
 const notice = 'The tools setting changed; send again.'
 const textOf = chunks => chunks.filter(chunk => chunk.type === 'block-end' && chunk.block.type === 'text').map(chunk => chunk.block.text).join('')
@@ -27,7 +38,9 @@ for (const [kind, identity] of [
       assert.equal(launch.systemPrompt, undefined)
       assert.equal(w.identityReaders.everRegistered(), false)
       assert.deepEqual(w.events('prompt'), [], 'the ON PID has no prompt before registration')
-      w.identityReaders.register(id => id === chat.session.id ? identity : undefined)
+      w.identityReaders.register((id, request) => {
+        if (id === chat.session.id) return request?.policy ? ordinaryPolicy : identity
+      })
       assert.equal(w.identityReaders.everRegistered(), true)
       assert.equal(w.identityReaders.read(chat.session.id), identity)
       assert.deepEqual(w.events('prompt'), [], 'registration sends no prompt while startup is held')

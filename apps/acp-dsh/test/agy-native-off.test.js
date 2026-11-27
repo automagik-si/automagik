@@ -25,10 +25,14 @@ const unchecked = logs => logs.filter(line => line === `acp-dsh: ${AGY_UNCHECKED
 const failure = chunks => chunks.at(-1).reason.failure?.message
 const offRefusal = text => (process.platform === 'win32' ? text : `${text} ${AGY_FRESH_TEXT}`)
 
+function registerOrdinary(h, readDisplay) {
+  h.service.botIdentity((id, options) => options?.policy ? { solverPolicy: { state: 'none' } } : readDisplay?.(id))
+}
+
 // One OFF turn on a fresh world, after the catalog probe: what it answered and what it started.
 async function offTurn(t, marker, { log, before, options } = {}) {
   const h = agyWorld(t, options)
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   await h.service.inspect(AGY)
   if (log !== undefined) h.setLog(log)
   before?.(h)
@@ -57,7 +61,7 @@ test('1: OFF starts agy with our agent and settings folder, written in its own h
 for (const [label, identity] of [['no Bot team', undefined], ['a Bot saved ON for Antigravity', nativeOn]]) {
   test(`2: ${label} starts plain agy acp and writes nothing`, unixOnly, async t => {
     const h = agyWorld(t)
-    if (identity) h.service.botIdentity(identity)
+    if (identity) registerOrdinary(h, identity)
     await h.service.inspect(AGY)
     const chunks = await h.chat().turn('plain on-control')
     assert.equal(chunks.at(-1).reason.kind, 'stop')
@@ -88,7 +92,7 @@ test('3: a file that cannot be written fails the start before any child', unixOn
 
 test('3b: the OFF files go to the home the child runs in, not the one selected later', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   await h.service.inspect(AGY)
   const other = join(h.dir, 'generation-a')
   t.mock.method(CliHomes.prototype, 'home', () => other)
@@ -104,7 +108,7 @@ test('3b: the OFF files go to the home the child runs in, not the one selected l
 
 test('3b: a child environment whose HOME is not its isolated home refuses before any child', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   await h.service.inspect(AGY)
   const environment = CliHomes.prototype.environment
   t.mock.method(CliHomes.prototype, 'environment', function (...args) {
@@ -119,7 +123,7 @@ test('3b: a child environment whose HOME is not its isolated home refuses before
 for (const kind of ['tool_call', 'tool_call_update']) {
   test(`4: OFF ends the answer at a first ${kind} with Antigravity's own sentence`, unixOnly, async t => {
     const h = agyWorld(t)
-    h.service.botIdentity(offBot)
+    registerOrdinary(h, offBot)
     const chat = h.chat()
     const chunks = await chat.turn(`omp-first-${kind}`)
     assert.deepEqual(h.conversation(`omp-first-${kind}`).args, AGY_OFF_ARGS)
@@ -132,7 +136,7 @@ for (const kind of ['tool_call', 'tool_call_update']) {
 
 test('4: OFF refuses an ask without a DSH dialog', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   const chunks = await h.chat().turn('omp-permission-first')
   const conversation = h.conversation('omp-permission-first')
   assert.deepEqual(conversation.args, AGY_OFF_ARGS)
@@ -143,7 +147,7 @@ test('4: OFF refuses an ask without a DSH dialog', unixOnly, async t => {
 
 test('5: Read only retires a live ON agy child and the next turn starts OFF', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(nativeOn)
+  registerOrdinary(h, nativeOn)
   const chat = h.chat()
   const marker = 'hang before-read-only'
   const turn = chat.turn(marker)
@@ -168,7 +172,7 @@ test('5: Read only retires a live ON agy child and the next turn starts OFF', un
 
 test('6: an ON saved for omp does not start agy ON', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(() => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: 'acp-omp' }))
+  registerOrdinary(h, () => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: 'acp-omp' }))
   await h.chat().turn('plain omp-tag')
   assert.deepEqual(h.conversation('omp-tag').args, AGY_OFF_ARGS)
 })
@@ -176,7 +180,7 @@ test('6: an ON saved for omp does not start agy ON', unixOnly, async t => {
 test('7: endOmpSession ends a live ON agy child and leaves an OFF one', unixOnly, async t => {
   const h = agyWorld(t)
   let identity = nativeOn()
-  h.service.botIdentity(() => identity)
+  registerOrdinary(h, () => identity)
   const on = h.chat('on-chat')
   await on.turn('plain on-child')
   const onRun = h.adapter.live.get('on-chat').run
@@ -344,7 +348,7 @@ test('8: the prune removes only old regular files with agy\'s log name, and neve
 // turn's check, however old (#1564 AK-1). Once it has ended, its old log goes like any other.
 test('8: the prune keeps the day-old log of a live kept OFF child, and its next turn still checks it', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   const idle = h.chat('idle')
   await idle.turn('plain idle-first')
   const first = h.conversation('idle-first')
@@ -467,7 +471,7 @@ test('8: a file swapped in between the folder read and the open is refused (unit
 
 test('8b: a failure line after the first turn ends the kept child before the next prompt', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   const chat = h.chat()
   await chat.turn('plain recheck-first')
   const first = h.conversation('recheck-first')
@@ -491,7 +495,7 @@ test('8b: a failure line after the first turn ends the kept child before the nex
 
 test('8b: a kept clean child is checked again and answers', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   const chat = h.chat()
   await chat.turn('plain kept-first')
   const chunks = await chat.turn('plain kept-second')
@@ -501,7 +505,7 @@ test('8b: a kept clean child is checked again and answers', unixOnly, async t =>
 
 test('9: another agy version starts OFF and warns once; Details names the checked one', unixOnly, async t => {
   const h = agyWorld(t, { version: '9.9.9' })
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   const first = await h.chat('one').turn('plain version-one')
   const second = await h.chat('two').turn('plain version-two')
   assert.equal(first.at(-1).reason.kind, 'stop')
@@ -514,7 +518,7 @@ test('9: another agy version starts OFF and warns once; Details names the checke
 
 test('9: the checked agy version gives no version warning and does not prove Skills availability', unixOnly, async t => {
   const h = agyWorld(t, { version: AGY_OFF_CHECKED })
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   await h.chat().turn('plain version-checked')
   assert.deepEqual(h.logs.filter(line => line.includes('runs with native tools off')), [])
   assert.deepEqual(h.service.nativeOffNotes(AGY), { skillsUnavailable: true })
@@ -531,7 +535,7 @@ test('9: an ON start records the version too and never throws for it', unixOnly,
 
 test('10: with a Bot team, a Session with no Bot identity is chat only; with none, as today', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(() => undefined)
+  registerOrdinary(h)
   const chunks = await h.chat('workspace').turn('omp-first-tool_call workspace')
   assert.deepEqual(h.conversation('workspace').args, AGY_OFF_ARGS)
   assert.deepEqual(textBlocks(chunks), [AGY_TOOLS_OFF_TEXT])
@@ -559,7 +563,7 @@ for (const [what, make] of [
   for (const [name, text] of [['hooks.json', AGY_HOOKS_TEXT], ['plugins', AGY_PLUGINS_TEXT]]) {
     test(`12: ${name} as ${what} in agy's home refuses OFF before any child`, unixOnly, async t => {
       const h = agyWorld(t)
-      h.service.botIdentity(offBot)
+      registerOrdinary(h, offBot)
       await h.service.inspect(AGY)
       const config = join(h.home(), '.gemini', 'config')
       mkdirSync(config, { recursive: true })
@@ -578,7 +582,7 @@ for (const [what, make] of [
 
 test('12: with neither extension, OFF starts and Details reports Skills availability', unixOnly, async t => {
   const h = agyWorld(t)
-  h.service.botIdentity(offBot)
+  registerOrdinary(h, offBot)
   await h.service.inspect(AGY)
   assert.deepEqual(h.service.nativeOffNotes(AGY), { skillsUnavailable: true })
   const chunks = await h.chat().turn('plain no-extensions')

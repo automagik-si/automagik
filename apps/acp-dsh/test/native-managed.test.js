@@ -3,12 +3,23 @@ import { test } from 'node:test'
 import { createAssistantMessage, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { createIdentityReaders } from '../src/host/identity.js'
 import { turnStart } from '../src/host/switch.js'
-import { CLAUDE, nativeWorld, person } from './fixtures/managed-native-world.js'
+import { CLAUDE, nativeWorld as createNativeWorld, person } from './fixtures/managed-native-world.js'
+
+const ordinaryPolicy = { solverPolicy: { state: 'none' } }
+
+function nativeWorld(t, { identity, ...options } = {}) {
+  const w = createNativeWorld(t, {
+    ...options,
+    identity: (id, request) => request?.policy ? ordinaryPolicy : identity?.(id),
+  })
+  w.adapter.policyState = w.identityReaders.readState
+  return w
+}
 
 test('a team registration keeps the hidden setting out even after the reader is removed', () => {
   const readers = createIdentityReaders(() => {})
   assert.equal(readers.everRegistered?.(), false)
-  const dispose = readers.register(() => undefined)
+  const dispose = readers.register((_id, request) => request?.policy ? ordinaryPolicy : undefined)
   assert.equal(readers.everRegistered?.(), true)
   dispose()
   assert.equal(readers.everRegistered?.(), true)
@@ -22,9 +33,24 @@ for (const hidden of [true, { Ada: true }]) {
   })
 }
 
-test('the managed hidden setting stays ignored when the identity reader throws', async t => {
-  const w = nativeWorld(t, { hidden: true, identity() { throw new Error('test reader failure') } })
-  await w.chat('ada').turn('hi')
+const throwingReader = () => { throw new Error('test reader failure') }
+
+test('a throwing policy reader refuses before starting a child even with the hidden setting ON', async t => {
+  const w = nativeWorld(t, { hidden: true, managed: false })
+  w.identityReaders.register(throwingReader)
+  const chunks = await w.chat('ada').turn('hi')
+  assert.deepEqual(chunks.at(-1).reason, {
+    kind: 'error',
+    failure: { code: 'ACP_AGENT', message: "The Bot team could not confirm this Session's rules, so nothing was sent. Send your message again." },
+  })
+  assert.deepEqual(w.events('start'), [])
+  assert.deepEqual(w.events('prompt'), [])
+})
+
+test('the managed hidden setting stays ignored when only the display reader throws', async t => {
+  const w = nativeWorld(t, { hidden: true, identity: throwingReader })
+  const chunks = await w.chat('ada').turn('hi')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
   w.assertToolset(0, false)
 })
 
@@ -61,8 +87,10 @@ test('a live ON process is remade OFF when the identity turns the switch off whi
 // E7-e: a Session with no Bot identity on a team host stays OFF (B-8).
 test('a Session with no Bot identity stays OFF while the Bot is ON', async t => {
   const w = nativeWorld(t, { identity: id => id === 'subagent-child' ? undefined : enabledIdentity() })
-  await w.chat('subagent-child').turn('a subagent task')
-  await w.chat('direct').turn('owner')
+  const parent = w.chat('direct')
+  const child = w.chat('subagent-child', { header: { origin: 'subagent', parentSession: parent.session.id, delegationDepth: 1 } })
+  await child.turn('a subagent task')
+  await parent.turn('owner')
   assert.deepEqual(flags(w), [true, false])
 })
 
