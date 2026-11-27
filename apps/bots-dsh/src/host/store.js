@@ -135,6 +135,18 @@ export function install(rt) {
       try { fn() } catch (error) { warn('ds-bot: a lock listener failed: %s', error) }
     }
   }
+  const adoptedListeners = new Set()
+  const onAdopted = fn => {
+    adoptedListeners.add(fn)
+    return () => adoptedListeners.delete(fn)
+  }
+  const teamAdopted = () => {
+    // A corrupt roster with a complete backup adopts a writable empty view.
+    if (readOnly() !== undefined || !rt.holdsLock() || !teamCurrent()) return
+    for (const fn of adoptedListeners) {
+      try { fn() } catch (error) { warn('ds-bot: an adoption listener failed: %s', error) }
+    }
+  }
   const claimLock = () => {
     if (lockBroken) return
     try {
@@ -656,8 +668,10 @@ export function install(rt) {
   const saveMigration = async required => {
     try {
       await save({ required })
+      return true
     } catch (error) {
       warn('omni-ui: saving the migrated Bot team failed: %s', error)
+      return false
     }
   }
 
@@ -713,8 +727,13 @@ export function install(rt) {
       return repaired || retiredSeed
     })
     writing = run.catch(() => {})
-    const tracked = run.then(required => required ? saveMigration(true) : undefined)
-      .finally(() => { if (adopting === tracked) adopting = undefined })
+    let adopted = false
+    const tracked = run.then(async required => { adopted = !required || await saveMigration(true) })
+      .finally(() => {
+        if (adopting !== tracked) return
+        adopting = undefined
+        if (adopted) teamAdopted()
+      })
     adopting = tracked
     return tracked
   }
@@ -764,9 +783,11 @@ export function install(rt) {
       return
     }
     if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) {
+      const wasStuck = stuck !== undefined
       const { repaired, retiredSeed } = adopt(readFileState())
       if (retiredSeed) await save({ required: true })
-      else if (repaired && holder === undefined) await saveMigration(true)
+      else if (repaired && holder === undefined && !await saveMigration(true)) return
+      if (wasStuck) teamAdopted()
     }
   }
 
@@ -1261,7 +1282,7 @@ export function install(rt) {
     // The first read distinguishes an absent roster from a saved empty team.
     teamHealth: () => teamPresentAtLoad !== null && teamRead && stuck === undefined && !aside
       ? { present: teamPresentAtLoad, revision: state.revision, bots: Object.keys(state.bots).length } : null,
-    teamCurrent, own, onSaved, onLockGained, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
+    teamCurrent, own, onSaved, onLockGained, onAdopted, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
     chatOwners, groupOwners, roomOwners, pastOwners, taskOwners, indexSessions,
     groupSessionsOf, dropGroupSession, retireGroupSession, findBot, findRooms, isAdminOf,
