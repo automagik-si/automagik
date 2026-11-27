@@ -19,6 +19,7 @@ import { ROLE_MAX } from '../shared/bot-profile.js'
 import { isGuardGroupRefusal, refusal } from './refusal.js'
 import { registerTrustedTool } from './tool-registrations.js'
 import { deniesAcpTool } from '../shared/own-tools.js'
+import { REVIEW_AFTER_CHECKS, verdictFirstLine } from '../shared/solver-method.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 
@@ -425,7 +426,7 @@ export function install(rt) {
             prepare: (kind, checks, commands) => {
               const stage = kind.toUpperCase()
               const evidence = commands ? `\nAgreed check commands: ${JSON.stringify(commands)}` : ''
-              const choices = `First line: exactly one of \`${stage} SHIP\`, \`${stage} FIX-FIRST\`, or \`${stage} BLOCKED\`.`
+              const choices = `${verdictFirstLine(`exactly one of \`${stage} SHIP\`, \`${stage} FIX-FIRST\`, or \`${stage} BLOCKED\` alone`)} ${REVIEW_AFTER_CHECKS}`
               text = `Designated Solver ${kind} review. ${choices}\nAgreed check IDs: ${checks.join(', ')}.${evidence}\n\n${text}`
               return rt.attachLong(text, `Message from ${sender.name}.txt`)
             },

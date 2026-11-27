@@ -946,8 +946,8 @@ test('T4 the installed Pocket listener opens ordinary cards, with Solver progres
   assert.match(auto.text, /needs the person's own words/)
 })
 
-async function reviewReplyFixture(t, averageCommand = 'node --test average.test.mjs', ids = ['average-test', 'diff-check']) {
-  const h = await setup(t, { reviewGuard: true }, 2)
+async function reviewReplyFixture(t, averageCommand = 'node --test average.test.mjs', ids = ['average-test', 'diff-check'], solver = {}) {
+  const h = await setup(t, { reviewGuard: true, ...solver }, 2)
   const request = await requestOf(h)
   assert.ok(request, 'turn 2 has an active request')
   assert.match(await plan(h, request, ids, [
@@ -961,8 +961,8 @@ async function reviewReplyFixture(t, averageCommand = 'node --test average.test.
     deliveries.push({ message, sent })
     return sent
   }
-  const review = async (kind, images) => {
-    await h.tool('message_bot', { to: 'reviewer', message: `Review the ${kind}.`,
+  const review = async (kind, images, message = `Review the ${kind}.`) => {
+    await h.tool('message_bot', { to: 'reviewer', message,
       solver_review: kind, solver_request: request, reply_to: 'me', ...(images ? { images } : {}) })
     return deliveries.at(-1).message.exchangeId
   }
@@ -1590,31 +1590,27 @@ const claudeBashInput = JSON.parse(readFileSync(new URL(
   '../src/host/live-chat/fixtures/claude.jsonl', import.meta.url), 'utf8').split('\n')[3])
   .message.content.find(block => block.type === 'tool_use' && block.name === 'Bash').input
 
-async function claudeReviewFixture(t, ids) {
-  const fixture = await reviewReplyFixture(t, undefined, ids)
+async function claudeReviewFixture(t, ids, solver) {
+  const fixture = await reviewReplyFixture(t, undefined, ids, solver)
   const { h, review, openReply, deliveries } = fixture
   const { cwd, mirrorUpdates } = await nativeMirror(t, h, 'acp-claude')
   const headers = []
-  const answer = async (kind, turn, text) => {
-    const exchangeId = await review(kind)
+  const answer = async (kind, turn, text, message) => {
+    const exchangeId = await review(kind, undefined, message)
     const input = h.agentOf('reviewer').message
     assert.equal(input.source.exchangeId, exchangeId)
-    headers.push([kind.toUpperCase(), input.content.map(part => part.text).join('\n')])
+    const delivered = input.content.map(part => part.text).join('\n')
+    headers.push([kind.toUpperCase(), delivered])
     h.finish('solver', `Waiting for ${kind} review.`)
     h.event('reviewer', 'turn/start', { turn: turn - 1 })
     h.takeInput('reviewer', input)
-    h.finish('reviewer', text)
+    h.finish('reviewer', typeof text === 'function' ? text(delivered) : text)
     const reply = deliveries.at(-1)
     assert.equal(reply.message.replyTo, exchangeId)
     assert.ok(reply.message.reviewReceipt)
     await openReply(turn, reply)
     return exchangeId
   }
-  return { ...fixture, cwd, mirrorUpdates, headers, answer }
-}
-
-async function claudeSolverToDone(t, ids = ['average-test', 'diff-check']) {
-  const { h, request, track, cwd, mirrorUpdates, headers, answer } = await claudeReviewFixture(t, ids)
   const bash = id => {
     const toolCallId = `toolu_${id}`
     const command = 'cat average.mjs'
@@ -1627,6 +1623,17 @@ async function claudeSolverToDone(t, ids = ['average-test', 'diff-check']) {
       content: [{ type: 'content', content: { type: 'text', text: 'export const average = xs => xs.reduce((a, b) => a + b, 0) / xs.length' } }], _meta,
     })
   }
+  return { ...fixture, cwd, bash, headers, answer }
+}
+
+const reviewHeaders = {
+  PLAN: 'Designated Solver plan review. First line: exactly one of `PLAN SHIP`, `PLAN FIX-FIRST`, or `PLAN BLOCKED` alone; nothing before it. Write no text while you check, not even a progress note: write your reply once, when the review is done.',
+  RESULT: 'Designated Solver result review. First line: exactly one of `RESULT SHIP`, `RESULT FIX-FIRST`, or `RESULT BLOCKED` alone; nothing before it. Write no text while you check, not even a progress note: write your reply once, when the review is done.',
+}
+const deliveredReviewHeader = text => text.split('\n').find(line => line.startsWith('Designated Solver '))
+
+async function claudeSolverToDone(t, ids = ['average-test', 'diff-check']) {
+  const { h, request, track, cwd, bash, headers, answer } = await claudeReviewFixture(t, ids)
   writeFileSync(join(cwd, 'average.mjs'), 'export const average = xs => xs.reduce((a, b) => a + b, 0) / xs.length\n')
   const held = await bash('before_plan')
   assert.equal(held.isError, true)
@@ -1676,12 +1683,86 @@ async function claudeSolverToDone(t, ids = ['average-test', 'diff-check']) {
   assert.equal(track().last.resultExchangeId, result)
   assert.equal(track().delivered, true)
   for (const [stage, header] of headers) {
-    assert.match(header, new RegExp(`First line: exactly one of \`${stage} SHIP\`, \`${stage} FIX-FIRST\`, or \`${stage} BLOCKED\`\\.`))
+    assert.equal(deliveredReviewHeader(header), reviewHeaders[stage])
   }
   return { h, track }
 }
 
 test('stage verdicts take a Claude native Solver through replan, admitted work and Done', claudeSolverToDone)
+
+test('#2156 the designated PLAN and RESULT review headers require the verdict line first', async t => {
+  const { h, request, cwd, headers, answer } = await claudeReviewFixture(t)
+  await answer('plan', 3, 'PLAN SHIP\nThe plan matches the request.')
+  assert.equal(deliveredReviewHeader(headers[0][1]), reviewHeaders.PLAN)
+  writeFileSync(join(cwd, 'average.mjs'), 'export const average = xs => xs.reduce((a, b) => a + b, 0) / xs.length\n')
+  for (const [check, command] of [['average-test', 'node --test average.test.mjs'], ['diff-check', 'git diff --check']]) {
+    assert.match(await checked(h, request, check, { check, command }), /^Recorded\./)
+  }
+  await answer('result', 4, 'RESULT SHIP\nBoth checks pass.')
+  assert.equal(deliveredReviewHeader(headers[1][1]), reviewHeaders.RESULT)
+})
+
+test('#2156 a fake reviewer that follows the verdict-first header takes a Claude native Solver to Done', async t => {
+  const { h, request, track, cwd, bash, headers, answer } = await claudeReviewFixture(t, undefined, {
+    instructions: solverInstructions({ reviewer: 'reviewer' }),
+  })
+  const instructions = h.rt.roleRuntime.instructionsFor('solver', h.rt.botOf('solver'))
+  const rules = /Start every review message with these rules: "([^"]*)"/.exec(instructions)?.[1]
+  assert.ok(rules, 'the generated Solver method carries quoted review rules')
+  t.diagnostic(`Quoted Solver rules: ${rules}`)
+  const body = `${rules}\nRequest: Add average.mjs and its test.\nPlan: write average.mjs; check average-test.`
+  const reply = (stage, evidence) => delivered => {
+    if (deliveredReviewHeader(delivered) === reviewHeaders[stage]
+      && delivered.includes("First line: the header's line, else SHIP, FIX-FIRST or BLOCKED; nothing before it.")) {
+      return `${stage} SHIP\n${evidence}`
+    }
+    return 'I will check the plan first.\nPLAN SHIP'
+  }
+
+  await answer('plan', 3, reply('PLAN', 'The plan matches the request.'), body)
+  assert.equal(track().solver.plan.accepted, true, 'the PLAN review is accepted')
+  assert.ok(track().planVerdictAt)
+  writeFileSync(join(cwd, 'average.mjs'), 'export const average = xs => xs.reduce((a, b) => a + b, 0) / xs.length\n')
+  assert.equal((await bash('after_plan')).isError, false)
+  const checks = [['average-test', 'node --test average.test.mjs'], ['diff-check', 'git diff --check']]
+  for (const [check, command] of checks) {
+    assert.match(await checked(h, request, check, { check, command }), /^Recorded\./)
+  }
+  assert.deepEqual(track().solver.passed, checks.map(([check]) => check))
+  const result = await answer('result', 4, reply('RESULT', 'Both checks pass.'),
+    `${rules}\nRequest: Add average.mjs and its test.\nResult: average.mjs is ready and both checks pass.`)
+  assert.equal(track().solver.review.exchangeId, result)
+  assert.equal(track().solver.review.verdict, 'SHIP')
+  h.finish('solver', 'Delivered after independent result review.')
+  assert.equal(track().last?.done, true)
+  assert.equal(track().delivered, true)
+  for (const [stage, delivered] of headers) {
+    assert.equal(deliveredReviewHeader(delivered), reviewHeaders[stage])
+    assert.ok(delivered.includes(rules))
+  }
+})
+
+test('#2156 control: a progress message before the PLAN verdict records no verdict and keeps work held', async t => {
+  const { h, review, track, bash, deliveries, openReply } = await claudeReviewFixture(t)
+  const exchange = await review('plan')
+  h.finish('solver', 'Waiting for plan review.')
+  h.event('reviewer', 'turn/start', { turn: 2 })
+  h.takeInput('reviewer', h.agentOf('reviewer').message)
+  h.event('reviewer', 'assistant/message', { message: { content: content('I will check the plan first.') } })
+  h.finish('reviewer', 'PLAN SHIP\nThe plan matches the request.')
+  const reply = deliveries.at(-1)
+  await openReply(3, reply)
+
+  assert.equal(reply.message.replyTo, exchange)
+  assert.ok(reply.message.reviewReceipt)
+  assert.equal(track().solver.plan.review.exchangeId, exchange)
+  assert.equal(track().solver.plan.review.verdict, 'unverified')
+  assert.equal(track().solver.plan.accepted, false)
+  assert.equal(track().planVerdictAt, undefined)
+  const held = await bash('after_unverified_plan')
+  assert.equal(held.isError, true)
+  assert.match(held.content[0].text, /review guard holds work/)
+})
 
 function solverDeliveryText(h) {
   const bot = h.rt.botOf('solver')
