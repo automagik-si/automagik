@@ -282,6 +282,8 @@ test('#2079 fake link preview and manual Check reach Cancel, Apply and delivery'
   await turn('LINK-BODY-2')
 
   f.rt.state.prefs.backgroundModel = 'fixture-native/unavailable'
+  // #2160: the lead Bot's model is the fallback reviewer; make it unavailable too.
+  f.rt.state.bots[botId].model = 'fixture-native/unavailable'
   await f.rt.save()
   upstream = skillMd('LINK-BODY-4')
   const unavailableBefore = observed()
@@ -292,6 +294,7 @@ test('#2079 fake link preview and manual Check reach Cancel, Apply and delivery'
   assert.deepEqual(observed(), [unavailableBefore[0] + 1, unavailableBefore[1]])
 
   f.rt.state.prefs.backgroundModel = backgroundModel
+  f.rt.state.bots[botId].model = backgroundModel
   await f.rt.save()
   answer = CLEAN_REVIEW
   folder = folderRoutes(revisionB, [['SKILL.md', skillMd('FOLDER-BODY-2', folderName)], script])
