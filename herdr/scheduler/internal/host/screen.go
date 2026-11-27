@@ -64,6 +64,34 @@ func dialogLine(screen string) string {
 	return ""
 }
 
+// A silent agent may print arbitrary text. Look for a selected choice and a
+// key hint before treating its output as an interactive startup dialog.
+func startupDialogLine(screen, prompt string) string {
+	lines := strings.Split(screen, "\n")
+	hint, selected := false, false
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := cleanLine(lines[i])
+		if keyHint(line) {
+			hint = true
+			continue
+		}
+		text := strings.TrimSpace(strings.TrimLeft(line, "❯›>"))
+		if optionLine.MatchString(line) {
+			selected = selected || hint && text != line
+			continue
+		}
+		if selected && promptWord.MatchString(text) {
+			// A prompt can be echoed with a leading glyph and soft line wraps.
+			promptText := strings.Join(strings.Fields(cleanLine(prompt)), " ")
+			if strings.Contains(promptText, strings.Join(strings.Fields(text), " ")) {
+				return ""
+			}
+			return clipPrompt(text)
+		}
+	}
+	return ""
+}
+
 // cleanLine removes escapes and control characters, trims the result, and
 // takes off the box edge a dialog's question can sit inside.
 func cleanLine(line string) string {

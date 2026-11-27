@@ -46,8 +46,7 @@ type hcHost struct {
 	ops   hcOps
 	home  string
 	knobs knobs
-	// clock measures the blocked grace. nil is time.Now; the tests advance it
-	// instead of sleeping out a real grace.
+	// Tests advance the clock for blocked grace and startup inspections.
 	clock func() time.Time
 	// notes belong to runs on different panes, which can finish together.
 	notesMu sync.Mutex
@@ -57,6 +56,11 @@ type hcHost struct {
 	roster func(path string) ([]byte, error)
 	amFn   func(args, extraEnv []string) (string, error)
 }
+
+const (
+	startupDialogWindow = 2 * time.Minute
+	startupDialogHold   = 10 * time.Second
+)
 
 // Note returns the run's note and forgets it.
 func (h *hcHost) Note(s Session) string {
@@ -143,6 +147,7 @@ func (h *hcHost) Do(s Session, a config.Automation, timeout time.Duration) error
 func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration) error {
 	h.Note(s)
 	started := time.Now()
+	startupStarted := h.now()
 	deadline := started.Add(timeout)
 	turn, working := 0, false
 	sawWork := func() {
@@ -164,8 +169,7 @@ func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration)
 	}
 	grace := a.BlockedGrace()
 	failFast := !a.WaitsOutBlocked()
-	var blockedSince time.Time
-	var inspected time.Time
+	var blockedSince, inspected, dialogSince time.Time
 	previousDialog := ""
 	for {
 		remaining := time.Until(deadline)
@@ -230,29 +234,30 @@ func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration)
 		if time.Until(deadline) <= 0 {
 			continue
 		}
-		// Silence alone says nothing about whether the prompt landed. Only a
-		// dialog seen twice can fail the run before its timeout, and a fresh
-		// status after the read can say the agent got past it in between.
-		if (!working || failFast && w.Status == "blocked") && time.Since(inspected) >= h.knobs.statusPoll {
-			inspected = time.Now()
-			screen, _ := h.ops.Read(s.PaneID)
-			line := dialogLine(screen)
+		// Only use screen evidence during startup. Once work starts, the
+		// agent's blocked status and its configured grace govern the failure.
+		now := h.now()
+		if !working && now.Sub(inspected) >= h.knobs.statusPoll {
+			inspected = now
+			line := ""
+			if failFast && now.Sub(startupStarted) < startupDialogWindow {
+				if screen, err := h.ops.Read(s.PaneID); err == nil {
+					line = startupDialogLine(screen, a.Prompt)
+				}
+			}
 			switch h.agentState(s) {
 			case "working":
 				sawWork()
-			case "done":
-				// Let the next wait confirm the turn's outcome.
-			default:
-				if line != "" && line == previousDialog {
-					if working {
-						return dialogError(line)
-					}
-					return fmt.Errorf("the agent never started working: %w", dialogError(line))
-				}
+			case "done", "error":
+				line = "" // Let the next wait confirm the turn's outcome.
 			}
-			previousDialog = line
-		} else if working && w.Status != "blocked" {
-			previousDialog = ""
+			if line != previousDialog {
+				previousDialog, dialogSince = line, now
+			}
+			if !working && line != "" && now.Sub(dialogSince) >= startupDialogHold &&
+				time.Until(deadline) > 0 {
+				return fmt.Errorf("the agent never started working: %w", dialogError(line))
+			}
 		}
 		if w.Ended {
 			// blocked, or idle before the prompt landed: wait answers at once

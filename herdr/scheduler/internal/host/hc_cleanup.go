@@ -62,6 +62,8 @@ func (h *hcHost) Previous(a config.Automation, known []Session) ([]Session, erro
 		if !runTerminal(t, address, a.Name) {
 			continue
 		}
+		// A terminal without a mode label may belong to a shared space,
+		// even if this automation now runs in a space of its own.
 		s := Session{WorkspaceID: space, TabID: tab, PaneID: address,
 			TerminalID: hcIdentity(t), Workspace: config.Workspace(t.Labels["automation.workspace"])}
 		for _, old := range candidates[address] {
@@ -69,18 +71,8 @@ func (h *hcHost) Previous(a config.Automation, known []Session) ([]Session, erro
 				old.TerminalID != "" && old.TerminalID != s.TerminalID {
 				continue
 			}
-			if s.Workspace == "" {
-				s.Workspace = old.Workspace
-			}
 			s.CleanupPending = old.CleanupPending
 			break
-		}
-		if s.Workspace == "" {
-			// Older terminals only have the space, tab and automation labels.
-			s.Workspace = a.Workspace
-			if space == a.WorkspaceID {
-				s.Workspace = config.WorkspaceExisting
-			}
 		}
 		if t.State == "live" || s.CleanupPending {
 			previous = append(previous, s)

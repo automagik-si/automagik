@@ -34,8 +34,9 @@ type fakeHC struct {
 	runErr     error
 	delay      time.Duration // per Wait
 	onWait     func()        // lets a test advance its clock
-	onKill     func()        // lets a test change the space at the read/act boundary
-	calls      []string      // kill and rm, with their address
+	onGet      func(string)
+	onKill     func()   // lets a test change the space at the read/act boundary
+	calls      []string // kill and rm, with their address
 	readCalls  int
 	killErr    error
 	sent       []string // hc send's texts, in order
@@ -98,6 +99,9 @@ func (f *fakeHC) Wait(string, time.Duration) (hc.Wait, error) {
 }
 
 func (f *fakeHC) Get(address string) (hc.Terminal, error) {
+	if f.onGet != nil {
+		f.onGet(address)
+	}
 	if f.gets != nil {
 		if t, ok := f.gets[address]; ok {
 			return t, nil
@@ -537,19 +541,17 @@ func TestHCCloseExistingListFailureLeavesTheTabOpen(t *testing.T) {
 
 // A dialog is not work: the run must fail at the grace with the line the
 // runner will record before removing its terminal.
-func TestHCDoFailsAtOnceOnALongBlockedDialog(t *testing.T) {
+func TestHCDoFailsWhenReportedBlockOutlastsGrace(t *testing.T) {
 	clock := time.Unix(0, 0)
 	blocked := hc.Wait{Ended: true, Reason: "status", Status: "blocked", Turn: 1}
+	waited := 0
 	f := &fakeHC{
-		waits:  []hc.Wait{blocked, blocked, blocked, blocked},
-		onWait: func() { clock = clock.Add(time.Minute) },
-		screen: "╭──────────────────────────╮\n" +
-			"│ Bash command             │\n" +
-			"╰──────────────────────────╯\n" +
-			"Do you want to proceed?\n" +
-			"❯ 1. Yes\n" +
-			"  2. No\n" +
-			"Esc to cancel\n",
+		waits: []hc.Wait{blocked, blocked, blocked, blocked},
+		onWait: func() {
+			waited++
+			clock = clock.Add(time.Minute)
+		},
+		screen: "Waiting for a login\n",
 	}
 	h := newHCTest(f)
 	h.clock = func() time.Time { return clock }
@@ -557,14 +559,11 @@ func TestHCDoFailsAtOnceOnALongBlockedDialog(t *testing.T) {
 	a.BlockedGraceMinutes = 2
 
 	err := h.Do(Session{PaneID: "t7"}, a, 200*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "blocked on a dialog: Do you want to proceed?") {
+	if err == nil || err.Error() != "blocked on a dialog: Waiting for a login" {
 		t.Fatalf("want the dialog line reported, got %v", err)
 	}
-	if strings.Contains(err.Error(), "still working") {
-		t.Fatalf("waited for the timeout instead of failing at the grace: %v", err)
-	}
-	if f.readCalls != 2 {
-		t.Errorf("read the screen %d times, want twice", f.readCalls)
+	if waited != 4 || f.readCalls != 1 {
+		t.Fatalf("took %d waits and %d reads, want 4 waits and 1 read", waited, f.readCalls)
 	}
 	if got := strings.Join(f.calls, "|"); got != "" {
 		t.Fatalf("the wait must return before cleanup, got %q", got)
@@ -627,13 +626,19 @@ func automationTerminal(address, name, space, tab, state string) hc.Terminal {
 func TestHCPreviousFindsLabelledRunsAndRetriesFailedRemoval(t *testing.T) {
 	a := hcAutomation()
 	f := &fakeHC{
-		terminals: []string{"t1", "t2", "peer/t3", "t4"},
+		terminals: []string{"t1", "t2", "peer/t3", "t4", "t6"},
 		gets: map[string]hc.Terminal{
-			"t1": automationTerminal("t1", a.Name, "sp1", "tb1", "live"),
-			"t2": automationTerminal("t2", a.Name, "sp2", "tb2", "live"),
-			"t4": automationTerminal("t4", "another", "sp4", "tb4", "live"),
-			"t5": automationTerminal("t5", a.Name, "sp5", "tb5", "finished"),
-			"t6": automationTerminal("t6", a.Name, "sp6", "tb6", "finished"),
+			"t1":      automationTerminal("t1", a.Name, "sp1", "tb1", "live"),
+			"t2":      automationTerminal("t2", a.Name, "sp2", "tb2", "live"),
+			"peer/t3": automationTerminal("peer/t3", a.Name, "sp3", "tb3", "live"),
+			"t4":      automationTerminal("t4", "another", "sp4", "tb4", "live"),
+			"t5":      automationTerminal("t5", a.Name, "sp5", "tb5", "finished"),
+			"t6":      automationTerminal("t6", a.Name, "sp6", "tb6", "finished"),
+		},
+		onGet: func(address string) {
+			if address == "peer/t3" {
+				t.Fatal("looked up a remote terminal during local cleanup")
+			}
 		},
 	}
 	known := []Session{
@@ -681,17 +686,31 @@ func TestHCRemoveKeepsSharedLastTabBeforeEndingAgent(t *testing.T) {
 }
 
 func TestHCRemoveRefusesReusedAddressAfterKill(t *testing.T) {
-	a := hcAutomation()
-	s := Session{PaneID: "t1", WorkspaceID: "sp1", TabID: "tb1", Workspace: config.WorkspaceRoot}
-	f := &fakeHC{gets: map[string]hc.Terminal{
-		"t1": automationTerminal("t1", a.Name, "sp1", "tb1", "live"),
-	}}
-	f.onKill = func() {
-		f.gets["t1"] = automationTerminal("t1", a.Name, "sp1", "a different tab", "finished")
-	}
-	err := newHCTest(f).Remove(s, a)
-	if err == nil || !strings.Contains(err.Error(), "identity changed") ||
-		strings.Join(f.calls, ",") != "kill t1" {
-		t.Fatalf("err = %v, calls = %v", err, f.calls)
+	for _, tc := range []struct {
+		name   string
+		change func(*hc.Terminal)
+	}{
+		{"creation", func(term *hc.Terminal) { term.CreatedMS++ }},
+		{"tab", func(term *hc.Terminal) { term.Labels["herdr.tab"] = "tb2" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := hcAutomation()
+			s := Session{
+				PaneID: "t1", WorkspaceID: "sp1", TabID: "tb1", Workspace: config.WorkspaceRoot,
+			}
+			f := &fakeHC{gets: map[string]hc.Terminal{
+				"t1": automationTerminal("t1", a.Name, "sp1", "tb1", "live"),
+			}}
+			f.onKill = func() {
+				replacement := automationTerminal("t1", a.Name, "sp1", "tb1", "finished")
+				tc.change(&replacement)
+				f.gets["t1"] = replacement
+			}
+			err := newHCTest(f).Remove(s, a)
+			if err == nil || err.Error() != "terminal identity changed after kill" ||
+				strings.Join(f.calls, ",") != "kill t1" {
+				t.Fatalf("err = %v, calls = %v", err, f.calls)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package host
 import (
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"time"
@@ -34,7 +35,10 @@ func (h *live) Previous(a config.Automation, known []Session) ([]Session, error)
 		if !listed {
 			list, err := o.PaneList()
 			if err != nil {
-				return nil, err
+				log.Printf("%s: skipping earlier terminal cleanup in Herdr session %q: list panes: %v",
+					a.Name, s.HerdrSession, err)
+				panes[s.HerdrSession] = nil
+				continue
 			}
 			byID = make(map[string]herdr.PaneInfo, len(list))
 			for _, pane := range list {

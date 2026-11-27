@@ -864,6 +864,54 @@ func TestRunSavesFailureScreenBeforeRemovingTerminal(t *testing.T) {
 	if err := New(h).Run(automation(), history.TriggerCron); err == nil || !removed {
 		t.Fatalf("run error = %v, removed = %t", err, removed)
 	}
+	rec := runs(t)[0]
+	if rec.Cleanup != "removed terminal of failed run" || rec.CleanupPending ||
+		rec.Status != history.StatusFailed || rec.Screen != "final line on the screen" {
+		t.Fatalf("history after successful removal = %+v", rec)
+	}
+}
+
+func TestRunLeavesBotTargetsAndCancelledRunsAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+		status       history.Status
+		err          error
+	}{
+		{"bot target", "bot:b-6jrz4bmxml", history.StatusFailed, errors.New("bot failed")},
+		{"cancelled", "", history.StatusCancelled, host.ErrCancelled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
+			a := automation()
+			a.Target = tc.target
+			if err := history.Append(history.Record{
+				RunID: "earlier", Automation: a.Name, PaneID: "t8", Target: tc.target,
+				Status: tc.status,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			h := terminalHost{fakeHost: &fakeHost{
+				provision: func(config.Automation) (host.Session, error) {
+					return host.Session{PaneID: "t9", Target: tc.target}, nil
+				},
+				do: func(host.Session, config.Automation, time.Duration) error { return tc.err },
+			}, previous: func(_ config.Automation, known []host.Session) ([]host.Session, error) {
+				if len(known) != 0 {
+					t.Errorf("offered a protected terminal for cleanup: %+v", known)
+				}
+				return known, nil
+			}, remove: func(s host.Session, _ config.Automation) error {
+				t.Fatalf("removed protected terminal %s", s.PaneID)
+				return nil
+			}}
+			if err := New(h).Run(a, history.TriggerCron); !errors.Is(err, tc.err) {
+				t.Fatalf("run error = %v, want %v", err, tc.err)
+			}
+			if rec := runs(t)[0]; rec.Status != tc.status || rec.Cleanup != "" {
+				t.Fatalf("run history = %+v", rec)
+			}
+		})
+	}
 }
 
 func TestRunReapsPreviousTerminalBeforeProvision(t *testing.T) {
