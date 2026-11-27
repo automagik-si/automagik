@@ -22,7 +22,9 @@ limit.
   output and removal errors can occur if the backend is unavailable. If the
   history write fails, removal waits for a later occurrence. Existing failure
   toasts retain their one-line reason (ADR 0007).
-  History files are private to the scheduler's user.
+  New history files are private to the scheduler's user. A warning records
+  any failure to tighten an existing file's permissions, and appending
+  continues.
 - hc ends the terminal and removes its core record. Herdr closes the pane the
   run opened. In a shared space, removal first checks that another pane or tab
   can keep the space open. If the run has the sole pane in the last tab, a
@@ -35,12 +37,19 @@ limit.
 - Before provisioning, an occurrence reconciles earlier run terminals for its
   automation. hc can also discover orphaned terminals by their automation
   label, checking the terminal folder and any scheduler install label.
+  Folder and install mismatches appear in one log line per occurrence with
+  the terminal addresses and reasons. The install label is a random ID
+  stored in the state directory in an owner-only file. If the scheduler
+  cannot read or create the ID, it leaves the install label off new terminals
+  and reconciles them using the same checks as other unlabelled terminals.
   Recovery updates the earlier run when history identifies it and
   creates a recovery record otherwise. A refusal or failed removal holds up
   provisioning until the next occurrence can reconcile it. A nonblocking
   automation lock across scheduler processes preserves dropping an occurrence
   when a scheduler is actively running it. An unavailable Herdr pane list
-  records a cleanup skip in the affected runs' history and allows provisioning.
+  allows provisioning and records one `cleanup_skip` summary on the current
+  occurrence with the number of earlier runs skipped. Earlier runs keep
+  their existing cleanup state.
 - Before the first turn, an interactive question with a selected option and a
   key hint can fail the run early if held for ten seconds within the first two
   minutes. hc also inspects a silent startup. The configured grace governs

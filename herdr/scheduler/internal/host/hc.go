@@ -2,7 +2,6 @@ package host
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -60,11 +59,67 @@ type hcHost struct {
 	amFn   func(args, extraEnv []string) (string, error)
 }
 
-const installLabel = "automation.install"
+const (
+	installLabel   = "automation.install"
+	installIDBytes = 16
+)
 
 func schedulerInstallID() string {
-	paths := cleanPath(config.Path()) + "\x00" + cleanPath(config.StateDir())
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(paths)))
+	id, err := loadInstallID(config.StateDir())
+	if err != nil {
+		log.Printf("scheduler install identity unavailable: %v", err)
+	}
+	return id
+}
+
+func loadInstallID(dir string) (string, error) {
+	path := filepath.Join(dir, "install-id")
+	id, err := readInstallID(path)
+	if !errors.Is(err, os.ErrNotExist) {
+		return id, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	temp, err := os.CreateTemp(dir, ".install-id-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(temp.Name())
+	var random [installIDBytes]byte
+	rand.Read(random[:])
+	id = hex.EncodeToString(random[:])
+	_, writeErr := temp.WriteString(id)
+	if err := errors.Join(writeErr, temp.Close()); err != nil {
+		return "", err
+	}
+	// A concurrent scheduler can win the link, but can only see a complete ID.
+	if err := os.Link(temp.Name(), path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return readInstallID(path)
+		}
+		return "", err
+	}
+	return id, nil
+}
+
+func readInstallID(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 ||
+		info.Size() != 2*installIDBytes {
+		return "", fmt.Errorf("invalid or non-private install identity file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if _, err := hex.DecodeString(string(data)); err != nil {
+		return "", fmt.Errorf("invalid install identity")
+	}
+	return string(data), nil
 }
 
 const (
@@ -119,7 +174,10 @@ func (h *hcHost) Provision(a config.Automation) (Session, error) {
 	// is called after its folder and nests under its repo. The tab ID also
 	// identifies this run if hc later reuses its terminal address.
 	labels := map[string]string{"herdr.space": space, "herdr.tab": tab, "automation": a.Name,
-		"automation.workspace": string(a.Workspace), installLabel: h.installID()}
+		"automation.workspace": string(a.Workspace)}
+	if id := h.installID(); id != "" {
+		labels[installLabel] = id
+	}
 	address, err := h.ops.Run(cwd, labels, argv)
 	s := Session{WorkspaceID: space, PaneID: address, TabID: tab, Workspace: a.Workspace}
 	if err != nil {

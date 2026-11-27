@@ -66,7 +66,8 @@ func ownsTerminal(s host.Session) bool {
 	return s.PaneID != "" && (s.Target == "" || strings.HasPrefix(s.Target, "worker:"))
 }
 
-func (r *Runner) removePrevious(terminals host.RunTerminals, a config.Automation, trigger history.Trigger) error {
+func (r *Runner) removePrevious(terminals host.RunTerminals, a config.Automation, id string,
+	trigger history.Trigger) error {
 	runs, err := history.Runs(a.Name, 0)
 	if err != nil {
 		return fmt.Errorf("read earlier runs: %w", err)
@@ -90,7 +91,15 @@ func (r *Runner) removePrevious(terminals host.RunTerminals, a config.Automation
 		return fmt.Errorf("find earlier terminals: %w", err)
 	}
 	var removalErrors error
+	skipped, firstSkip := 0, ""
 	for _, s := range previous {
+		if s.CleanupSkip != "" {
+			if skipped == 0 {
+				firstSkip = s.CleanupSkip
+			}
+			skipped++
+			continue
+		}
 		rec := runRecord(history.NewID(a.Name, "recovered"), a.Name, trigger, history.StatusRunning, s)
 		for _, old := range runs {
 			if s.HistoryID != "" && s.HistoryID != old.RunID {
@@ -104,19 +113,18 @@ func (r *Runner) removePrevious(terminals host.RunTerminals, a config.Automation
 				break
 			}
 		}
-		if s.CleanupSkip != "" {
-			rec.Seen = false
-			rec.Cleanup, rec.CleanupPending = s.CleanupSkip, true
-			if err := history.Append(rec); err != nil {
-				log.Printf("history append failed: %v", err)
-			}
-			continue
-		}
 		announce := rec.Status == history.StatusRunning
 		if announce {
 			rec.Status, rec.Error = history.StatusFailed, "previous run left a live terminal"
 		}
 		removalErrors = errors.Join(removalErrors, r.removeTerminal(terminals, a, s, rec, "earlier run", announce))
+	}
+	if skipped > 0 {
+		rec := runRecord(id, a.Name, trigger, history.StatusScheduled, host.Session{})
+		rec.CleanupSkip = fmt.Sprintf("earlier runs skipped: %d (%s)", skipped, firstSkip)
+		if err := history.Append(rec); err != nil {
+			log.Printf("history append failed: %v", err)
+		}
 	}
 	return removalErrors
 }

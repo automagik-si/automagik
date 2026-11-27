@@ -929,13 +929,81 @@ exit 1
 	if err := New(h).Run(a, history.TriggerCron); err != nil || !provisioned {
 		t.Fatalf("provisioned = %v, run error = %v", provisioned, err)
 	}
-	for _, rec := range runs(t) {
-		if rec.RunID == earlier.RunID && rec.Status == earlier.Status && rec.At.Equal(earlier.At) &&
-			rec.CleanupPending && strings.Contains(rec.Cleanup, "connection refused") {
-			return
+	records := runs(t)
+	if len(records) != 2 {
+		t.Fatalf("want two runs, got %d", len(records))
+	}
+	if rec := records[0]; rec.Status != history.StatusDone ||
+		!strings.Contains(rec.CleanupSkip, "earlier runs skipped: 1") ||
+		!strings.Contains(rec.CleanupSkip, "connection refused") {
+		t.Fatalf("current run has no recorded cleanup skip: %+v", rec)
+	}
+	if rec := records[1]; rec.RunID != earlier.RunID || rec.Status != earlier.Status ||
+		!rec.At.Equal(earlier.At) || rec.CleanupPending || rec.Cleanup != "" {
+		t.Fatalf("earlier run changed during the pane list failure: %+v", rec)
+	}
+}
+
+func TestPersistentPaneListFailureBoundsHistoryGrowth(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", dir)
+	bin := filepath.Join(dir, "fake-herdr")
+	script := "#!/bin/sh\n" +
+		"[ \"$*\" = \"--session missing pane list\" ] || exit 64\n" +
+		"echo 'connection refused' >&2\nexit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN_PATH", bin)
+	provisioned := 0
+	h := terminalHost{fakeHost: &fakeHost{
+		provision: func(config.Automation) (host.Session, error) {
+			provisioned++
+			return host.Session{
+				PaneID:      fmt.Sprintf("w1:p%d", provisioned),
+				WorkspaceID: "w1", HerdrSession: "missing",
+			}, nil
+		},
+	}, previous: host.New().(host.RunTerminals).Previous,
+		remove: func(host.Session, config.Automation) error {
+			t.Fatal("removed a pane in an unavailable session")
+			return nil
+		},
+	}
+	r := New(h)
+	lines := 0
+	const occurrences = 8
+	for i := 1; i <= occurrences; i++ {
+		if err := r.Run(automation(), history.TriggerCron); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "history.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		total := strings.Count(string(raw), "\n")
+		want := 3
+		if i > 1 {
+			want++
+		}
+		if added := total - lines; added != want {
+			t.Errorf("occurrence %d added %d lines, want %d", i, added, want)
+		}
+		lines = total
+	}
+	if provisioned != occurrences {
+		t.Fatalf("provisioned = %d, want %d", provisioned, occurrences)
+	}
+	for i, rec := range runs(t) {
+		if rec.CleanupPending {
+			t.Errorf("pane list failure marked run %s as pending removal", rec.RunID)
+		}
+		skipped := occurrences - i - 1
+		want := fmt.Sprintf("earlier runs skipped: %d (", skipped)
+		if skipped > 0 && !strings.HasPrefix(rec.CleanupSkip, want) {
+			t.Errorf("cleanup summary for %s = %q, want prefix %q", rec.RunID, rec.CleanupSkip, want)
 		}
 	}
-	t.Fatal("the earlier run has no recorded cleanup skip")
 }
 
 func TestRunLeavesBotTargetsAndCancelledRunsAlone(t *testing.T) {

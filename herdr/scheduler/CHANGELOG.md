@@ -9,8 +9,11 @@ What changed for someone using the plugin. Dates are release dates.
   reconciles earlier run terminals before launching. hc checks the terminal's
   folder and install label, and retries transient wait errors until the run
   deadline. A startup dialog must persist for ten seconds to fail early. After
-  the first turn starts, the configured grace applies. History is private to
-  the scheduler's user and records skipped cleanup when Herdr cannot list panes.
+  the first turn starts, the configured grace applies. A private state file
+  keeps the hc install label stable across restarts. Logs name terminals with
+  folder or install mismatches. If Herdr cannot list panes, the current run
+  records how many earlier cleanups were skipped. History appends continue
+  with a warning if an existing file's permissions cannot be tightened.
   The scheduler preserves shared spaces and keeps the run's worktree (ADR 0015).
 - `target:` hands a prompt to a bot (`bot:<id>`) or to a worker of one
   (`worker:<id>`) instead of opening a fresh session: the bot's own terminal is

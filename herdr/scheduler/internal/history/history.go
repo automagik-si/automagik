@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -78,6 +79,8 @@ type Record struct {
 	Cleanup string `json:"cleanup,omitempty"`
 	// CleanupPending lets a later occurrence retry incomplete removal.
 	CleanupPending bool `json:"cleanup_pending,omitempty"`
+	// CleanupSkip records when this occurrence could not inspect earlier runs.
+	CleanupSkip string `json:"cleanup_skip,omitempty"`
 	// Target is the automation's target when the run was handed to a bot or a
 	// worker instead of a terminal of its own (#498); PaneID is that terminal.
 	Target       string `json:"target,omitempty"`
@@ -121,7 +124,7 @@ func Append(r Record) error {
 	}
 	defer f.Close()
 	if err := f.Chmod(0o600); err != nil {
-		return err
+		log.Printf("could not restrict history permissions: %v", err)
 	}
 	line, err := json.Marshal(r)
 	if err != nil {
@@ -168,6 +171,9 @@ func Runs(automation string, limit int) ([]Record, error) {
 			r.Started = r.At
 		} else {
 			r.Started, r.Seen = prev.Started, prev.Seen
+			if r.CleanupSkip == "" {
+				r.CleanupSkip = prev.CleanupSkip
+			}
 		}
 		if r.PaneID != "" {
 			r.TerminalObserved = r.At

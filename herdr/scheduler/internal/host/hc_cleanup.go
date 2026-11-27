@@ -3,6 +3,7 @@ package host
 import (
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -43,6 +44,12 @@ func (h *hcHost) Previous(a config.Automation, known []Session) ([]Session, erro
 	}
 	seen := make(map[string]bool)
 	install := h.installID()
+	var mismatches []string
+	defer func() {
+		if len(mismatches) > 0 {
+			log.Printf("%s: skipped terminal cleanup: %s", a.Name, strings.Join(mismatches, ", "))
+		}
+	}()
 	var previous []Session
 	for _, address := range addresses {
 		if !localAddress(address) || seen[address] {
@@ -56,15 +63,23 @@ func (h *hcHost) Previous(a config.Automation, known []Session) ([]Session, erro
 		if err != nil {
 			return nil, err
 		}
-		if s, ok := previousWorker(t, a.Name, candidates[address]); ok &&
-			matchesInstall(t, install) && h.inRunFolder(a, t.Cwd) {
-			previous = append(previous, s)
+		worker, isWorker := previousWorker(t, a.Name, candidates[address])
+		if !isWorker && !runTerminal(t, address, a.Name) {
+			continue
+		}
+		if !matchesInstall(t, install) {
+			mismatches = append(mismatches, address+": install mismatch")
+			continue
+		}
+		if !h.inRunFolder(a, t.Cwd) {
+			mismatches = append(mismatches, address+": folder mismatch")
+			continue
+		}
+		if isWorker {
+			previous = append(previous, worker)
 			continue
 		}
 		space, tab := t.Labels["herdr.space"], t.Labels["herdr.tab"]
-		if !runTerminal(t, address, a.Name) || !matchesInstall(t, install) || !h.inRunFolder(a, t.Cwd) {
-			continue
-		}
 		s := Session{WorkspaceID: space, TabID: tab, PaneID: address,
 			TerminalID: hcIdentity(t), Workspace: config.Workspace(t.Labels["automation.workspace"])}
 		for _, old := range candidates[address] {

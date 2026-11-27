@@ -97,7 +97,7 @@ func (r *Runner) Run(a config.Automation, trigger history.Trigger) error {
 		}
 		if err == nil {
 			defer release()
-			err = r.removePrevious(terminals, a, trigger)
+			err = r.removePrevious(terminals, a, id, trigger)
 		}
 		if err != nil {
 			r.record(id, a.Name, trigger, history.StatusFailed, host.Session{}, err.Error())
