@@ -12,17 +12,17 @@ import { ROUTE, answer, of, synthetic, turn, user, withFixture } from './fixture
 for (const how of ['resume', 'load']) {
   test(`a restart takes back the native session by ${how}: the agent remembers what only it was told, and nothing is replayed`, async () => {
     await withFixture(how, { env: how === 'resume' ? { FAKE_ACP_RESUME: '1' } : { FAKE_ACP_LOAD: '1' } }, async (h) => {
-      await turn(h, 'remember m-42')
+      await turn(h, 'native-remember m-42')
       const first = of(h, 'new-session')[0].sessionId
       const before = of(h, 'bridge-credential')[0].digest
       h.restart()
-      const after = await turn(h, 'recall')
+      const after = await turn(h, 'native-recall')
       assert.equal(after.finish.reason.kind, 'stop')
       assert.match(after.said, /I remember: m-42 \(turn 2\)/)
       assert.equal(of(h, 'new-session').length, 1, 'no new session after the restart')
       assert.deepEqual(of(h, `${how}-session`).map(event => [event.sessionId, event.servers]), [[first, ['dsh']]])
       const prompt = of(h, 'prompt').at(-1).text
-      assert.equal(prompt, 'recall', 'the chat is not replayed to a session that holds it')
+      assert.equal(prompt, 'native-recall', 'the chat is not replayed to a session that holds it')
       // A fresh bridge credential for the reattached session, never the old one.
       const credentials = of(h, 'bridge-credential').map(event => event.digest)
       assert.equal(credentials.length, 2)
@@ -70,9 +70,9 @@ const replayed = h => /The chat so far, before this new Fake agent session:/.tes
 
 test('an agent that does not advertise resume or load gets a new session and the chat replayed', async () => {
   await withFixture('unadvertised', {}, async (h) => {
-    await turn(h, 'remember m-1')
+    await turn(h, 'native-remember m-1')
     h.restart()
-    const after = await turn(h, 'recall')
+    const after = await turn(h, 'native-recall')
     assert.match(after.said, /I remember: nothing/)
     assert.equal(of(h, 'new-session').length, 2)
     assert.ok(replayed(h))
@@ -82,9 +82,9 @@ test('an agent that does not advertise resume or load gets a new session and the
 
 test('a route that is not qualified never asks to resume, whatever the agent advertises', async () => {
   await withFixture('unqualified', { env: { FAKE_ACP_RESUME: '1' }, route: null }, async (h) => {
-    await turn(h, 'remember m-2')
+    await turn(h, 'native-remember m-2')
     h.restart()
-    await turn(h, 'recall')
+    await turn(h, 'native-recall')
     assert.equal(of(h, 'resume-session').length, 0)
     assert.equal(of(h, 'new-session').length, 2)
     assert.ok(replayed(h))
@@ -95,10 +95,10 @@ test('a route that is not qualified never asks to resume, whatever the agent adv
 test('a changed account, a changed Bot policy or an old chat with no binding starts fresh', async () => {
   let account = 'account-a'
   await withFixture('account', { env: { FAKE_ACP_RESUME: '1' }, account: () => account }, async (h) => {
-    await turn(h, 'remember m-3')
+    await turn(h, 'native-remember m-3')
     account = 'account-b'
     h.restart()
-    const after = await turn(h, 'recall')
+    const after = await turn(h, 'native-recall')
     assert.match(after.said, /nothing/)
     assert.equal(of(h, 'resume-session').length, 0)
     assert.ok(h.logs.some(line => line.includes('(binding-changed)')))
@@ -110,7 +110,7 @@ test('a changed account, a changed Bot policy or an old chat with no binding sta
   await withFixture('old-chat', { env: { FAKE_ACP_RESUME: '1' } }, async (h) => {
     // Answers from before this version: no native-session record anywhere in the log.
     h.messages.push(user('earlier'), answer('earlier answer'))
-    await turn(h, 'recall')
+    await turn(h, 'native-recall')
     assert.equal(of(h, 'resume-session').length, 0)
     assert.ok(h.logs.some(line => line.includes('(no-binding)')))
     assert.ok(replayed(h))
@@ -119,10 +119,10 @@ test('a changed account, a changed Bot policy or an old chat with no binding sta
 
 test('a stale native id is refused by the agent: a new session on the same process, with the chat replayed', async () => {
   await withFixture('stale', { env: { FAKE_ACP_RESUME: '1' } }, async (h) => {
-    await turn(h, 'remember m-4')
+    await turn(h, 'native-remember m-4')
     rmSync(h.state)
     h.restart()
-    const after = await turn(h, 'recall')
+    const after = await turn(h, 'native-recall')
     assert.equal(after.finish.reason.kind, 'stop')
     assert.deepEqual(of(h, 'resume-session').map(event => event.found), [false])
     assert.equal(of(h, 'start').length, 2, 'the refusal is answered on the same process')
@@ -137,9 +137,9 @@ for (const [name, env, startMs] of [
 ]) {
   test(`${name} ends that process: a fresh one starts with a new bridge and the chat replayed`, async () => {
     await withFixture(name.split(' ').at(-1), { env, startMs }, async (h) => {
-      await turn(h, 'remember m-5')
+      await turn(h, 'native-remember m-5')
       h.restart()
-      const after = await turn(h, 'recall')
+      const after = await turn(h, 'native-recall')
       assert.equal(after.finish.reason.kind, 'stop', JSON.stringify(after.finish))
       assert.equal(of(h, 'resume-session').length, 1, 'asked once, never again on the fresh process')
       assert.equal(of(h, 'new-session').length, 2)
@@ -152,12 +152,12 @@ for (const [name, env, startMs] of [
 
 test('a prompt the agent may have acted on is never sent again after the restart', async () => {
   await withFixture('uncertain', { env: { FAKE_ACP_RESUME: '1' } }, async (h) => {
-    await turn(h, 'remember m-6')
+    await turn(h, 'native-remember m-6')
     const cut = await turn(h, 'exit-mid-prompt now')
     assert.notEqual(cut.finish.reason.kind, 'stop')
     assert.equal(latestNative(h.session, ROUTE)?.state, 'sent', 'the binding says the dispatch is uncertain')
     h.restart()
-    const after = await turn(h, 'recall')
+    const after = await turn(h, 'native-recall')
     assert.match(after.said, /m-6/)
     const prompt = of(h, 'prompt').at(-1).text
     assert.equal(prompt.includes('exit-mid-prompt'), false, prompt)
@@ -169,10 +169,10 @@ test('a prompt the agent may have acted on is never sent again after the restart
 
 test('a Stop during the reattachment ends the turn as a Stop and leaves the binding for next time', async () => {
   await withFixture('stop', { env: { FAKE_ACP_RESUME: '1', FAKE_ACP_RESUME_HANG: '1' } }, async (h) => {
-    await turn(h, 'remember m-7')
+    await turn(h, 'native-remember m-7')
     h.restart()
     const stop = new AbortController()
-    h.messages.push(user('recall'))
+    h.messages.push(user('native-recall'))
     const chunks = []
     const stream = h.adapter.stream(markAgentLoopRequest({ provider: ROUTE, model: 'default', sessionId: 's1', messages: h.messages, signal: stop.signal }))
     setTimeout(() => stop.abort(), 300)

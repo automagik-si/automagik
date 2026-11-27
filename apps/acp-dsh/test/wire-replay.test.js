@@ -175,6 +175,11 @@ test('Stop while the approval is open: the question is withdrawn, the agent is c
   })
   const messages = []
   await turn(h, messages, 'make the report', stop.signal).catch(() => {})
+  // The agent writes its trace after the answer reaches it: wait for those frames, bounded.
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline && !(h.wire().some(frame => frame.in === 'permission-answer') && h.wire().some(frame => frame.in === 'session/cancel'))) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
   const wire = normalizeWire(h.wire())
   const answered = wire.find(frame => frame.in === 'permission-answer')
   assert.deepEqual(answered, { in: 'permission-answer', outcome: 'cancelled' })

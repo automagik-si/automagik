@@ -311,7 +311,7 @@ const stream = hearing(ndJsonStream(Writable.toWeb(process.stdout), Readable.toW
 const sessions = new Map()
 let created = 0
 // Native continuity (continuity.test.js): FAKE_ACP_STATE names a JSON file that keeps each
-// session's native context (its turns and what it was told to `remember`) across processes, as
+// session's native context (its turns and what it was told to `native-remember`) across processes, as
 // a CLI's own session store does. FAKE_ACP_RESUME=1 advertises `session/resume`, FAKE_ACP_LOAD=1
 // `session/load` (which replays the session's history first: a message, a finished call, a
 // permission request, a plan and a usage update, the way a loaded CLI session would).
@@ -583,14 +583,14 @@ const implementation = {
     const update = u => conn.sessionUpdate({ sessionId, update: u })
     keep(sessionId, session)
     // Native context only this session holds (continuity.test.js): never in DSH's transcript.
-    const remember = /\bremember (\S+)/.exec(current)
+    const remember = /\bnative-remember (\S+)/.exec(current)
     if (remember !== null) {
       ;(session.markers ??= []).push(remember[1])
       keep(sessionId, session)
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `noted (turn ${session.turns})` } })
       return { stopReason: 'end_turn' }
     }
-    if (/\brecall\b/.test(current)) {
+    if (/\bnative-recall\b/.test(current)) {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `I remember: ${(session.markers ?? []).join(',') || 'nothing'} (turn ${session.turns})` } })
       return { stopReason: 'end_turn' }
     }

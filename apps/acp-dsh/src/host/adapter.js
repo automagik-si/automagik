@@ -2469,7 +2469,7 @@ export class AcpAdapter extends LlmAdapter {
               ...(reattach.sessionId === undefined ? {} : { continuity: { sessionId: reattach.sessionId, methods: reattach.methods } }),
               onUnreadPlan: update => this.warn(`${agent.name} sent a plan this app does not read (${String(update?.plan?.type ?? update?.sessionUpdate).slice(0, 40)}); it is not shown`),
               onPromptSettled: (ordinal, settled) => {
-                if (state.run !== run || !settled) return
+                if (state.run !== run || !settled || agent.continuity === undefined) return
                 writeNative(dshAgent?.session, { provider: options.provider, nativeSessionId: run.sessionId, digest: state.binding, state: 'idle', ordinal }, message => this.warn(message))
               },
               provider: options.provider,
@@ -3171,7 +3171,8 @@ export class AcpAdapter extends LlmAdapter {
       live.toolIds?.clear()
       live.skillCatalog = catalog?.text ? catalog.key : undefined
       // Written before the prompt is: from here a restart cannot tell whether the agent acted.
-      writeNative(session, { provider: options.provider, nativeSessionId: live.run.sessionId, digest: live.binding, state: 'sent', ordinal: live.run.prompts + 1 }, message => this.warn(message))
+      // Only a route that can take its session back keeps a binding in the chat.
+      if (agent.continuity !== undefined) writeNative(session, { provider: options.provider, nativeSessionId: live.run.sessionId, digest: live.binding, state: 'sent', ordinal: live.run.prompts + 1 }, message => this.warn(message))
       const review = teamService(this.ctx)
       const rows = promptRows(current).rows
       const verified = new Set(uploads?.reviews.size ? prompt.filter(block => block.type === 'image')
