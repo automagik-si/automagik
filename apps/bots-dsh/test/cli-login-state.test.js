@@ -685,3 +685,114 @@ test('openCliLogin hands a switch\'s attempt to the row; without one the call is
   assert.deepEqual(opened, [{ botId: 'a', provider: 'acp-codex', ref: undefined, attemptId: SWITCH_ID },
     { botId: 'a', provider: 'acp-codex', ref: undefined }, { botId: 'a', provider: 'acp-codex', ref: undefined }])
 })
+
+test('fresh chat entry replaces idle ordinary rows, and ordinary entry keeps its model and account', async () => {
+  const { actions, calls } = fakeHost()
+  const provider = 'acp-claude'
+  const model = `${provider}/picked`
+  const account = { kind: 'account', email: 'old@example.test' }
+  const login = createCliLogin({ actions })
+  actions.cliLoginCurrent = async (botId, id, { fresh } = {}) => fresh
+    ? { id, attempt: null, signedIn: true }
+    : { id, attempt: null, account }
+  actions.cliLoginConfirm = async (...args) => {
+    calls.push(['confirm', ...args])
+    return { id: provider, status: 'ready' }
+  }
+  const row = () => login.getSnapshot().rows.a
+  try {
+    await login.open({ botId: 'a', provider, ref: model })
+    assert.equal(row().stage, 'account')
+    await login.open({ botId: 'a', provider, fresh: true })
+    assert.equal(row().stage, 'offer')
+    assert.equal(row().confirm, true)
+    assert.equal(row().account, undefined)
+    assert.deepEqual(calls, [])
+
+    await login.open({ botId: 'a', provider })
+    assert.equal(row().stage, 'account')
+    assert.equal(row().fresh, undefined)
+    assert.equal(row().ref, model)
+    assert.deepEqual(row().account, account)
+
+    await login.open({ botId: 'a', provider, fresh: true })
+    login.dismiss('a')
+    assert.equal(row(), undefined)
+    assert.deepEqual(calls, [], 'Cancel at the question makes no host mutation')
+  } finally { login.dispose() }
+})
+
+test('fresh intent always reaches switch admission despite stale or unknown cached status', async () => {
+  const clock = manualTimers()
+  const provider = 'acp-codex'
+  for (const signedIn of [false, undefined]) {
+    const { actions, calls } = fakeHost(clock.now)
+    const login = createCliLogin({ actions, timers: clock.timers, now: clock.now })
+    actions.cliLoginCurrent = async () => ({ id: provider, attempt: null, signedIn })
+    const start = actions.cliLoginStart
+    actions.cliLoginStart = async () => assert.fail('a stale status must never select ordinary Start')
+    actions.cliLoginSwitch = (botId, id, options) => {
+      calls.push(['switch', botId, id, options])
+      return start(botId, id)
+    }
+    try {
+      await login.open({ botId: 'a', provider })
+      await login.open({ botId: 'a', provider, fresh: true })
+      assert.equal(login.getSnapshot().rows.a.fresh, true)
+      if (signedIn === false) await login.start('a')
+      else await login.switchFresh('a')
+      assert.deepEqual(calls[0], ['switch', 'a', provider, { fresh: true, keep: true }])
+      assert.equal(login.getSnapshot().rows.a.attempt.userCode, 'ABCD-1234')
+    } finally { login.dispose() }
+  }
+})
+
+test('fresh chat joins an already active attempt without starting or switching', async () => {
+  const clock = manualTimers()
+  const { actions, calls } = fakeHost(clock.now)
+  const login = createCliLogin({ actions, timers: clock.timers, now: clock.now })
+  const provider = 'acp-claude'
+  try {
+    await login.open({ botId: 'a', provider })
+    await login.start('a')
+    await login.open({ botId: 'b', provider, fresh: true })
+    const { a, b } = login.getSnapshot().rows
+    assert.equal(b.stage, 'attempt')
+    assert.equal(b.attempt.attemptId, a.attempt.attemptId)
+    assert.equal(calls.filter(([name]) => name === 'start').length, 1)
+  } finally { login.dispose() }
+})
+
+test('round 2 finding 4: a lost fresh attempt result does not confirm either kind of existing account', async () => {
+  for (const consent of ['given', 'needed']) {
+    const clock = manualTimers()
+    const { actions, host, names } = fakeHost(clock.now)
+    const provider = 'acp-codex'
+    const login = createCliLogin({ actions, timers: clock.timers, now: clock.now, pollMs: 100 })
+    try {
+      const current = actions.cliLoginCurrent
+      const connections = actions.cliLoginConnections
+      actions.cliLoginCurrent = async (...args) => {
+        const result = await current(...args)
+        return consent === 'needed' && !result.attempt ? { ...result, account: { kind: 'account' } } : result
+      }
+      actions.cliLoginConnections = async () => {
+        const result = await connections()
+        result.connections[provider].consent = consent
+        return result
+      }
+      const attempt = await actions.cliLoginStart('a', provider)
+      Object.assign(host.attempt, { fresh: true, chatFresh: true })
+      await login.restore('a')
+      assert.equal(login.getSnapshot().rows.a.attempt.attemptId, attempt.attemptId)
+      host.attempt = null
+      host.signedIn = true
+      host.endedError = Object.assign(new Error('The sign-in has ended.'), { code: 'bot/login-ended' })
+      await clock.advance(100)
+      assert.equal(login.getSnapshot().rows.a.stage, 'failed', consent)
+      assert.equal(login.getSnapshot().rows.a.fresh, true)
+      assert.match(login.getSnapshot().rows.a.message, /expired/i)
+      assert.equal(names().includes('connections'), false)
+    } finally { login.dispose() }
+  }
+})

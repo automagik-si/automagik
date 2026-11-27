@@ -270,9 +270,18 @@ function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef 
     seat.scrollIntoView?.({ block: 'nearest' })
     manager.revealed(bot.id, row.reveal)
   }, [row.reveal])
+  const switchQuestion = (onContinue, onCancel, error) => h(Fragment, null,
+    h('p', null, t('This stops running Bot work for this account. Continue?')),
+    error,
+    h('div', { className: 'bt-cli-actions' },
+      h('button', { type: 'button', className: 'bt-q-submit', disabled: row.busy, onClick: onContinue }, t('Continue')),
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: row.busy, onClick: onCancel }, t('Cancel'))))
   const body = (() => {
     switch (row.stage) {
-      case 'offer': return h(Fragment, null,
+      case 'offer': return row.fresh && row.confirm
+        ? switchQuestion(() => void manager.switchFresh(bot.id), () => manager.dismiss(bot.id),
+          row.error ? h('p', { className: 'bt-cli-error', role: 'alert' }, hostText(row.error)) : null)
+        : h(Fragment, null,
         h('p', null, t('To use {name} in this Bot, sign in to your account.', { name })),
         row.error ? h('p', { className: 'bt-cli-error', role: 'alert' }, hostText(row.error)) : null,
         h('div', { className: 'bt-cli-actions' },
@@ -313,12 +322,7 @@ function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef 
         const close = h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t('Close'))
         // A failed Switch account (#2064). Still signed in: Try again asks, then switches again.
         if (row.switched && row.stillSignedIn && row.confirm) {
-          return h(Fragment, null,
-            h('p', null, t('This stops running Bot work for this account. Continue?')),
-            error,
-            h('div', { className: 'bt-cli-actions' },
-              h('button', { type: 'button', className: 'bt-q-submit', disabled: row.busy, onClick: () => void manager.switchAgain(bot.id) }, t('Continue')),
-              h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: row.busy, onClick: () => manager.keepAttempt(bot.id) }, t('Cancel'))))
+          return switchQuestion(() => void manager.switchAgain(bot.id), () => manager.keepAttempt(bot.id), error)
         }
         if (row.switched && row.stillSignedIn) {
           return h(Fragment, null, message, error,

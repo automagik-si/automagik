@@ -54,7 +54,8 @@ import { AnsweredReply, WidgetDock, WIDGET_CSS } from './widget-cell.js'
 import { HandoffDock, HANDOFF_CSS } from './handoff-card.js'
 import { AppAccessDock, ComputerHandoffDock, ComputerIndicator, COMPUTER_CSS } from './computer.js'
 import { headerNavigation, installHeaderNavigation } from './header-navigation.js'
-import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, registerSkillActivity, SkillActivityCell, SkillNoticeCell, TurnTailCell, ToolCell } from './cells.js'
+import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, registerSkillActivity, SkillActivityCell, SkillNoticeCell, TurnTailCell, OrderedToolCell, registerToolActivity, ToolActivityCell } from './cells.js'
+import { TOOL_ACTIVITY } from '../shared/tool-activity.js'
 import { SKILL_ACTIVITY } from '../shared/skill-activity.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
@@ -1424,7 +1425,9 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => registerSkillActivity(ctx),
     () => shadow('conversation.chat.node', { key: SKILL_ACTIVITY, priority: BOT_PRIORITY, locale: 'chat', inject: face }, SkillActivityCell),
     () => shadow('conversation.chat.node', { key: 'turn-trigger', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TriggerCell),
-    () => shadow('conversation.chat.node', { key: 'tool-call', priority: BOT_PRIORITY, locale: 'chat', inject: face }, ToolCell),
+    () => registerToolActivity(ctx),
+    () => shadow('conversation.chat.node', { key: TOOL_ACTIVITY, priority: BOT_PRIORITY, locale: 'chat', inject: face }, ToolActivityCell),
+    () => shadow('conversation.chat.node', { key: 'tool-call', priority: BOT_PRIORITY, locale: 'chat', inject: face }, OrderedToolCell),
     () => simpleOnly(() => shadow('conversation.chat.node', { key: 'turn-process', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TurnProcessCell)),
     // A failed turn shows what the user can do about it instead of the provider's raw text.
     () => shadow('conversation.chat.node', { key: 'turn-error', priority: BOT_PRIORITY, locale: 'chat', inject: face }, FailureCell),

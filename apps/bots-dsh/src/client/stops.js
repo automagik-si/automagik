@@ -24,6 +24,10 @@ export function whyText(why) {
 
 export function stopLine(entry) {
   const why = whyText(entry.why)
+  if (entry.ran === true) {
+    return entry.count > 1 ? t('{count} steps ran unheld: nothing asked before they ran ({why})', { count: entry.count, why })
+      : t('{tool} ran unheld: nothing asked before it ran ({why})', { tool: entry.tool, why })
+  }
   if (entry.mayHaveRun === true) {
     return entry.count > 1 ? t('{count} steps may already have run ({why})', { count: entry.count, why })
       : t('{tool} may already have run ({why})', { tool: entry.tool, why })

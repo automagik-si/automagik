@@ -8,6 +8,7 @@
 // one-time upgrade turns it on (store.js).
 import { guardGroupRefusal, refusal } from './refusal.js'
 import { guardGroupText } from '../shared/guard-groups.js'
+import { reviewGuardReach } from '../shared/review-guard.js'
 import { teamToolOf } from './approvals.js'
 import { cleanTrack, isNotesWrite } from './review-mark.js'
 import { activeSolverLimit, limitWhat, solverTracked } from './solver-progress.js'
@@ -105,6 +106,18 @@ function trimmedCommand(input) {
 }
 
 export function install(rt) {
+  function reviewGuardReachOf(bot, agent) {
+    try {
+      const session = agent?.session
+      const presets = rt.ctx.get('permissionPresets')
+      if (typeof session?.id !== 'string' || session.id === '' || typeof presets?.current !== 'function') return 'hard'
+      const level = presets.current(session) === 'auto' ? 'auto'
+        : rt.sessionWide(agent.id ?? session.id, session) === true ? 'full' : 'ask'
+      return reviewGuardReach({ ...bot, nativeToolsBlock: rt.nativeToolsBlock?.(bot) }, level)
+    } catch {
+      return 'hard'
+    }
+  }
   const guardChanges = new Map()
   const reviewGuardOn = id => rt.botOf(id)?.reviewGuard === true
   const groupsOf = id => Object.values(rt.state.rooms).filter(room => room.members.includes(id))
@@ -383,7 +396,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    reviewGuardHolds, reviewGuardAsk, setReviewGuard, reviewGuardViewOf,
+    reviewGuardHolds, reviewGuardReachOf, reviewGuardAsk, setReviewGuard, reviewGuardViewOf,
     reviewGuardOn, groupsOf, checkGuardGroupJoin, taskLaunchHold, setSolverAuto, solverCall,
   })
 }

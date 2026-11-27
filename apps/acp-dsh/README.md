@@ -554,10 +554,19 @@ resolved absolute path. With all installations stopped, remove that file to hand
 root to the next installation that starts.
 
 `authScope: 'isolated'` identifies the service and Claude/Codex status rows. `accountSignOut(id)`
-and `accountSwitch(id, { label? })` use the Bot environment. They block admission, stop
+and `accountSwitch(id, { label?, keep?, fresh? })` use the Bot environment. They block admission, stop
 starting/live chat, model-probe, image and login processes, wait for termination, then ask the
 CLI to log out and verify it is signed out. What the native macOS job checks about credential
 stores is in *Credential stores on macOS (#869)* below. Switch starts a new isolated login afterward.
+The isolated service advertises `freshChatLogin: true`. A chat consumer checks this before
+sending `{ fresh: true, keep: true }` for Claude Code or Codex. Admission pauses new work.
+The attempt starts with empty storage. On confirmed success the Bot adopts that home, ends
+work on the prior home and deletes it after the old processes stop. Cancellation or failed
+authentication discards the attempt home after its process exits and resumes the original
+sessions. OS credential stores shared across homes can still affect the original account.
+For Antigravity, explicit `fresh: true` retires the home and opens a sign-in,
+on platforms that support its Settings sign-out. The active attempt holds admission against
+competing chat and Settings account changes until settlement.
 Generation checks prevent work delayed across a switch from starting on the next account.
 `imageAccess()` includes `accountGeneration` when ready; callers pass that ticket to
 `generateImage({ accountGeneration, ... })` so even a switch between those two calls refuses

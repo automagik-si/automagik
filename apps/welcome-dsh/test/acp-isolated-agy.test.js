@@ -751,3 +751,31 @@ test('the expired and the no-link sentences are the chat\'s, byte for byte', () 
     for (const KEY of KEYS) assert.equal(seen.tables.en[KEY], KEY)
   } finally { dispose() }
 })
+
+test('Settings sends one account switch to an ACP host with atomic Antigravity admission', async () => {
+  const calls = []
+  let row = agy({ signedIn: true })
+  const fake = host({
+    status: async () => ({ agents: [row] }),
+    accountSwitchNative: async id => {
+      calls.push(id)
+      row = agy({ signingIn: true })
+    },
+    accountSignOutNative: () => assert.fail('the switch does not use a separate sign-out call'),
+    signInNative: () => assert.fail('the switch does not use a separate sign-in call'),
+  })
+  const status = await fake.handle('acp', {})
+  assert.equal(status.ok, true)
+  assert.equal(status.value.agents[0].atomicAccountSwitch, true)
+  const endpoints = []
+  const switching = withHooks(() => ui.useAcp(async (endpoint, payload) => {
+    endpoints.push(endpoint)
+    const response = await fake.handle(endpoint, payload)
+    if (!response.ok) throw new Error(response.error.message)
+    return response.value
+  }), [])
+  assert.equal(await switching.switchAccount(status.value.agents[0]), true)
+  assert.deepEqual(calls, ['acp-antigravity'])
+  assert.deepEqual(endpoints, ['acp-switch-account'])
+  assert.equal(needsViewer('acp-switch-account'), true)
+})

@@ -81,8 +81,12 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   // while the Bot itself runs and would otherwise only preview its own turn.
   const blockedTask = useWork ? useWork(work => (work.approvals ?? []).some(entry => entry.taskId !== undefined && entry.botId === id)) : false
   const blockedLine = blockedTask ? t('A task needs your approval') : ''
-  const stopped = useWork ? useWork(work => openStops(work).some(entry => entry.botId === id)) : false
-  const stoppedLine = stopped ? t('A step stopped on a permission') : ''
+  const stopped = useWork ? useWork(work => {
+    const stops = openStops(work).filter(entry => entry.botId === id)
+    if (stops.length === 0) return undefined
+    return stops.every(entry => entry.ran === true) ? 'ran' : 'stopped'
+  }) : undefined
+  const stoppedLine = stopped === 'ran' ? t('A step ran unheld') : stopped === 'stopped' ? t('A step stopped on a permission') : ''
   const alert = roster.questions?.[part] !== undefined || approval
   const doing = useActivity(map => map[id])
   // Work in a group runs in a Session of its own, so the Bot's chat stays idle meanwhile.

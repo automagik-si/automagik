@@ -21,6 +21,18 @@ import { registerTrustedTool } from './tool-registrations.js'
 import { deniesAcpTool } from '../shared/own-tools.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
+
+export function questionOptions(options) {
+  return (Array.isArray(options) ? options : [])
+    .map(option => (typeof option === 'string' ? { label: option } : option ?? {}))
+    .map(option => ({
+      label: String(option.label ?? '').trim(),
+      ...(option.description ? { description: String(option.description).trim() } : {}),
+    }))
+    .filter(option => option.label !== '')
+    .slice(0, 6)
+}
+
 // A message_bot call that sent nothing answers with this object rather than a string, so
 // the chat can tell a refusal from a delivery without reading the words. `text` is what
 // the Bot reads; `sent` and `reason` are the presentation signal. A delivery keeps its
@@ -963,14 +975,7 @@ export function install(rt) {
       const id = exec.agent?.id
       if (rt.groupOwners.has(id)) return 'Question cards only work in your own chat. In a group, ask in your message instead.'
       if (!rt.chatOwners.has(id)) return `Only Bots on the team can use ask_user. Use ${BLOCKING_QUESTION_TOOL} if it is available in this session, or ask the user in your reply.`
-      const options = (Array.isArray(args.options) ? args.options : [])
-        .map(option => (typeof option === 'string' ? { label: option } : option ?? {}))
-        .map(option => ({
-          label: String(option.label ?? '').trim(),
-          ...(option.description ? { description: String(option.description).trim() } : {}),
-        }))
-        .filter(option => option.label !== '')
-        .slice(0, 6)
+      const options = questionOptions(args.options)
       if (options.length === 0) return 'Give at least one option.'
       const card = {
         id: randomUUID(),

@@ -24,6 +24,7 @@ import { turnReasoning, thinkingStep, opensReply, stepActivity } from './turn-re
 import { parseReplies, relayRange, stackReplies } from '../shared/group-replies.js'
 import { SKILL_NOTICE } from '../host/skill-message.js'
 import { SKILL_ACTIVITY, SKILL_ACTIVITY_RECORD, skillActivityOf } from '../shared/skill-activity.js'
+import { BRIDGE_ACTIVITY_RECORD, TOOL_ACTIVITY, bridgeOriginOf, toolActivityOf, toolEventOf } from '../shared/tool-activity.js'
 import { FOLD_AT, FOLD_HUGE, NEVER, stripLongNote, useFold } from './fold.js'
 import { noHover, useViewport, viewBottom } from './motion.js'
 import { heldCardKey } from './sources.js'
@@ -348,6 +349,77 @@ function ActivityRows({ lines, bot }) {
 }
 
 export const SkillActivityRow = ({ name, bot }) => h(ActivityRows, { lines: [t('Skill: {name}', { name })], bot })
+
+export function ToolActivityRow({ label, name, target, bot }) {
+  const line = label === 'plugin' ? t('Plugin: {name}', { name }) : t('Tool: {name}', { name })
+  return h(ActivityRows, { lines: [target ? line + ' · `' + target + '`' : line], bot })
+}
+
+export function registerToolActivity(ctx) {
+  const register = definition => ctx.uiConversation?.events?.register?.(definition)
+  const callKey = (turn, id) => JSON.stringify(['call', turn, id])
+  const toCall = ({ event, location }, turn) => {
+    const { callId, subCallId, parentCallId, name, arguments: args } = event.data
+    return { turn, seq: event.seq, location, root: { phase: 'start', callId: subCallId ?? callId, parentCallId,
+      name, argsRaw: typeof args === 'string' ? args : JSON.stringify(args), turn, subCalls: [] } }
+  }
+  const dispatch = event => typeof event.data?.subCallId === 'string'
+    ? { id: JSON.stringify(['dispatch', event.data.subCallId]), role: event.type.endsWith('-start') ? 'start' : 'update' }
+    : null
+  const offRows = register({
+    kind: TOOL_ACTIVITY,
+    target: 'chat',
+    match: {
+      [BRIDGE_ACTIVITY_RECORD]: event => bridgeOriginOf(event)?.exchangeId === null && toolEventOf(event)
+        ? { id: callKey(event.data.turn, event.data.callId), role: 'start' } : null,
+      'tool/call': event => typeof event.data?.callId === 'string'
+        ? { id: callKey(event.data.turn, event.data.callId), role: 'start' } : null,
+      'tool/result': event => {
+        const id = event.data?.message?.toolCallId ?? event.data?.message?.source?.callId
+        return typeof id === 'string' ? { id: callKey(event.data.turn, id), role: 'update' } : null
+      },
+      'tool/ptc-dispatch-start': dispatch,
+      'tool/ptc-dispatch': dispatch,
+    },
+    start: (_context, match) => {
+      const { event, location } = match
+      const turn = event.data?.turn ?? location.turn?.turn
+      if (event.type === BRIDGE_ACTIVITY_RECORD) {
+        // A late receipt can land outside its own turn. Keep the event anchor without
+        // inheriting the turn tree at the position where the receipt was written.
+        return { turn, seq: event.seq, location: { kind: 'session' }, activity: toolEventOf(event) }
+      }
+      return toCall(match, turn)
+    },
+    update({ state }, match) {
+      const { event, location } = match
+      if (event.type === 'tool/call' && state.activity) return toCall(match, event.data.turn ?? location.turn?.turn)
+      if (!state.root || state.root.kind === 'tool-result') return state
+      const { parentCallId, message, error, meta } = event.data
+      if (event.type === 'tool/ptc-dispatch' && parentCallId !== state.root.parentCallId) return state
+      if (event.type !== 'tool/result' && event.type !== 'tool/ptc-dispatch') return state
+      const { content, isError } = message ?? event.data
+      return { ...state, root: { ...state.root, kind: 'tool-result', content, isError, error, meta } }
+    },
+    buildViewNode({ key, id, start, state, current }) {
+      if (!start || !state) return null
+      const visible = Number.isSafeInteger(state.turn) && (state.root || state.activity)
+      if (!visible && !current.get('chat')) return null
+      return { key, id, kind: TOOL_ACTIVITY, target: 'chat', anchorSeq: state.seq,
+        location: state.location, ...(state.root && { groupTree: 'turn' }), visibility: visible ? 'visible' : 'hidden', data: state }
+    },
+  })
+  return () => offRows?.()
+}
+
+export function ToolActivityCell({ node, sessionId, useRoster, ...props }) {
+  const { turn, activity, root } = node.data
+  const hidden = useRoster(roster => Boolean(roster.roomsById[sessionId]) || isHiddenTurn(roster, sessionId, turn))
+  if (root) return h(ToolCell, { ...props, node: { ...node, data: { root } }, sessionId, useRoster, activityDispatch: true })
+  return hidden || !activity ? h(CellEmpty) : h(ToolActivityRow, activity)
+}
+
+export const OrderedToolCell = props => h(ToolCell, { ...props, orderedDispatch: true })
 
 export function registerSkillActivity(ctx) {
   return ctx.uiConversation?.events?.register?.({
@@ -682,6 +754,7 @@ function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDel
     case 'user': return h(EarlierUser, { key, row, actions })
     case SKILL_NOTICE: return h(SkillNotice, { key, text: row.text })
     case SKILL_ACTIVITY: return h(SkillActivityRow, { key, name: row.name })
+    case TOOL_ACTIVITY: return h(ToolActivityRow, { ...row, key })
     case 'answer': return h(AnsweredReply, { key, node: { data: row } })
     // A question or view card closed without an answer on it.
     case 'closed': return row.view === undefined
@@ -1099,6 +1172,7 @@ function useLiveNote(actions, sessionId, id, entry) {
 function RelayEvent({ reply, bot, roster, sessionId, actions }) {
   if (reply.kind === SKILL_NOTICE) return h(SkillNotice, { text: reply.text })
   if (reply.kind === SKILL_ACTIVITY) return h(SkillActivityRow, { bot, name: reply.skill })
+  if (reply.kind === TOOL_ACTIVITY) return h(ToolActivityRow, { ...reply, bot })
   if (reply.kind === 'permission-stop') {
     return h('div', { className: 'bt-event bt-event-error', role: 'status', title: reply.why },
       t('{name} stopped on a permission: {why}', { name: bot.name, why: whyText(reply.why) }))
@@ -1170,15 +1244,16 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
     if (done) return undefined
     let stop = false
     let timer
-    let seen = ''
+    let seen
     const tick = async () => {
       const result = await actions.roomProgress(sessionId)
       if (stop) return
       const own = result?.find(item => item.callId === callId)
       const entry = own ?? result?.[0]
-      const replies = Array.isArray(entry?.replies) ? entry.replies.filter(reply => own !== undefined || reply?.kind !== SKILL_ACTIVITY) : []
+      const replies = Array.isArray(entry?.replies) ? entry.replies.filter(reply => own !== undefined ||
+        (reply?.kind !== SKILL_ACTIVITY && reply?.kind !== TOOL_ACTIVITY)) : []
       const key = entry ? JSON.stringify([replies, entry.speaking]) : ''
-      if (entry && key !== seen) { seen = key; setLive({ replies, speaking: [entry.speaking ?? []].flat() }) }
+      if (key !== seen) { seen = key; setLive({ replies, speaking: [entry?.speaking ?? []].flat() }) }
       timer = setTimeout(tick, document.hidden ? 5000 : 1000)
     }
     void tick()
@@ -1253,7 +1328,8 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
           h('span', { className: 'bt-event-ico', 'aria-hidden': true }, h(GoalIcon)), goalEventText(reply))
       }
       if (reply.kind !== undefined) {
-        return h(RelayEvent, { key: `${reply.botId ?? reply.kind}-${index}`, reply, bot, roster, sessionId, actions })
+        const key = reply.kind === TOOL_ACTIVITY ? reply.id : `${reply.botId ?? reply.kind}-${index}`
+        return h(RelayEvent, { key, reply, bot, roster, sessionId, actions })
       }
       return h(GroupMessage, { key: `${reply.botId}-${index}`, bot, texts, room, roster, actions, msgKey: callId ? `${sessionId}:${callId}:${index}` : undefined, useUi, time, duration })
     }),
@@ -1267,11 +1343,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
     }))
 }
 
-// The calls ToolCell draws. A PTC program (`run_code`) dispatches the real tools as
-// its sub-calls, so a call draws by its own name wherever it sits in the tree.
-// Another Omni plugin's tools draw when they register a card (extend.js).
 const isComputerCall = name => name === 'cua' || name?.startsWith('cua_driver_native__') === true
-const DRAWN = new Set(['start_task', 'mcp__dsh__start_task', 'message_bot', 'stop_bot', 'create_bot', 'update_bot', 'delete_bot', 'group_relay', 'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'request_secret', 'request_connector', 'mail_send', 'ask_user_question', 'show_view', 'show_settings', 'propose_bot_change', 'browser_handoff', 'read_group_chat', 'remember', 'forget', 'generate_image'])
 // Calls whose card a dock above the composer carries when the call is not drawn.
 const CARDS = new Set(['ask_user', 'request_secret', 'request_connector', 'mail_send', 'show_view', 'browser_handoff', 'computer_handoff'])
 // An image an agent makes with its own tool draws as the image card (image-cell.js).
@@ -1304,7 +1376,7 @@ function useShownCards(actions, sessionId, callIds) {
   }, [sessionId, key])
 }
 
-function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks }) {
+function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks }, fallback) {
   const tool = toolName(call)
   const done = call.kind === 'tool-result'
   const { text: arg, value: argValue } = toolArgs(call)
@@ -1405,9 +1477,9 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
     case 'show_view':
       return h(WidgetCell, { sessionId, callId: call.callId, args: { text: arg, value: argValue }, done, isError: call.isError, roster, actions, heldCards })
     case 'show_settings':
-      return h(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions })
+      return h(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions, fallback })
     case 'propose_bot_change':
-      return h(ProposalCall, { done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions })
+      return h(ProposalCall, { done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions, fallback })
     case 'generate_image':
       // The chat's own Bot paints (image-cell.js painterOf); a group chat has none, so the mark does.
       return h(ImageCell, { bot: self, callId: call.callId, prompt: arg('prompt'), size: arg('size'), done, content: done ? contentText(call.content) : '', isError: call.isError, onAsk: askHere })
@@ -1455,7 +1527,7 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
 // Solver stops still draw in a hidden turn.
 const GUARD_WHYS = new Set(['guard', 'guard-request', 'guard-launch', 'limit'])
 
-export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions }) {
+export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus, useHeldCards, useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer, actions, orderedDispatch = false, activityDispatch = false }) {
   const roster = useRoster(value => value)
   const heldCards = useHeldCards?.(state => state[sessionId])
   const root = node.data.root
@@ -1479,25 +1551,33 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
   // or view card the user dismissed or answered by message, which settles here.
   const calls = hidden ? all.filter(call => closedCard(call) || guardOnly(call)) : all
   const readRefused = call => call.isError === true && call.error?.code === READ_SCOPE_CODE
-  const drawn = calls.filter(call => readRefused(call) || DRAWN.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.renderer(toolName(call)) || agentImage(call) || stops.has(call.callId))
+  // Committed calls have their own event anchors. The DSH node still carries the running
+  // tail phrase, the preparing cards and result-only cards from an incomplete history window.
+  const atThisNode = calls.filter(call => !orderedDispatch || call.phase === 'preparing' ||
+    (call.kind === 'tool-result' ? call.callTime == null : !Number.isSafeInteger(turn)))
   // The newest call still running names the work, so a program reads as the tool it is in.
   const running = root.kind === 'tool-result' ? undefined : calls.findLast(call => call.kind !== 'tool-result' && !guardOnly(call))
-  const note = running ? toolActivity(toolName(running), toolArgs(running).text, findBot, roster.byId[sessionId]) : null
+  const note = running && !activityDispatch ? toolActivity(toolName(running), toolArgs(running).text, findBot, roster.byId[sessionId]) : null
   // A running tool shows only as the activity row's phrase.
   useLiveNote(actions, sessionId, `tool:${root.callId ?? node.key}`, note)
-  useShownCards(actions, sessionId, drawn.filter(call => !guardOnly(call) && (CARDS.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.asks(toolName(call))) && call.callId).map(call => call.callId))
-  if (drawn.length === 0) return h(CellEmpty)
+  useShownCards(actions, sessionId, atThisNode.filter(call => !guardOnly(call) && (CARDS.has(toolName(call)) || isComputerCall(toolName(call)) || toolCards.asks(toolName(call))) && call.callId).map(call => call.callId))
+  if (atThisNode.length === 0) return h(CellEmpty)
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } }
-  return h(Fragment, null, drawn.map((call, index) => {
+  return h(Fragment, null, atThisNode.map((call, index) => {
     const stop = stops.get(call.callId)
     if (guardOnly(call)) return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status', title: stop.why }, stop.line)
     if (readRefused(call)) {
       return h('div', { key: call.callId ?? index, className: 'bt-event bt-event-error', role: 'status' },
         call.error.reason ?? contentText(call.content))
     }
-    // A call that draws nothing leaves the empty mark: one of this plugin's own, or a
-    // card another plugin registered (extend.js) that returned nothing.
-    return h(Fragment, { key: call.callId ?? index }, renderCall(call, env) ?? h(CellEmpty),
+    const name = toolName(call)
+    const allowFallback = !hidden && !roster.roomsById[sessionId] && call.phase !== 'preparing' &&
+      !orderedDispatch && !CARDS.has(name) && !toolCards.asks(name) && !stop
+    const activity = allowFallback ? toolActivityOf({ name, arguments: call.argsRaw ?? call.call?.argsRaw }) : undefined
+    const fallback = activity && h(ToolActivityRow, activity)
+    const card = renderCall(call, env, fallback)
+    const content = fallback && (!card || card.type === CellEmpty) ? fallback : card ?? h(CellEmpty)
+    return h(Fragment, { key: call.callId ?? index }, content,
       stop ? h('div', { className: 'bt-event bt-event-error', role: 'status', title: stop.why }, stop.line) : null)
   }))
 }

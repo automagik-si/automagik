@@ -18,7 +18,7 @@ import { ToolsService } from '@deepseek-ai/dsh-tools'
 import * as native from '@deepseek-ai/dsh-tool-executor-native'
 import { AgentRun } from '../src/host/acp.js'
 import { AcpAdapter } from '../src/host/adapter.js'
-import { callArguments, TOOL_NAME } from '../src/host/tool.js'
+import { callArguments, entered, TOOL_NAME } from '../src/host/tool.js'
 
 const PROVIDER = 'acp-fake'
 const ALLOW = '{"risk":"low","decision":"allow"}'
@@ -1315,5 +1315,214 @@ for (const [name, prepare] of [
     assert.deepEqual(await soon(c.call.permission), picked('no'))
     assert.deepEqual(c.refusals, [['remote-call', false]])
     assert.equal(w.asked.length, 0)
+  })
+}
+
+function guardedMirror(t, { provider = 'acp-claude', native = true, marked = true, auto = false } = {}) {
+  const session = Session.create('guarded-mirror')
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  const level = auto ? 'auto' : 'danger-full-access'
+  const agent = { session }
+  const ctx = {
+    agents: new Map([[session.id, agent]]),
+    sessions: new Map([[session.id, session]]),
+    get(name) {
+      return {
+        approval: { effectivePolicy: () => 'never' },
+        sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access' }) },
+        permissionPresets: { current: () => level },
+      }[name]
+    },
+  }
+  const adapter = new AcpAdapter(ctx, new Map())
+  t.after(() => adapter.dispose())
+  const run = new AgentRun({ name: 'Guarded ACP', provider })
+  run.sessionId = 'guarded-acp'
+  const live = { name: 'Guarded ACP', run, native, dshAgent: agent, calls: new Set(['mirror']), toolIds: new Map([['mirror', 'parent']]) }
+  adapter.live.set(session.id, live)
+  const exec = { name: TOOL_NAME, callId: 'mirror', agent, signal: t.signal,
+    ...(marked ? { reviewGuardUnheld: { reason: 'Held by the guard' } } : {}) }
+  async function update(toolCallId, details, sessionId = run.sessionId) {
+    return await run.onUpdate({ sessionUpdate: 'tool_call_update', toolCallId, ...details }, sessionId)
+  }
+  const question = (id, extra = {}) => run.onPermission({
+    sessionId: run.sessionId, toolCall: { toolCallId: id, ...extra }, options: OPTIONS,
+  }, t.signal)
+  const prepare = async (status = 'in_progress') => {
+    await update('parent', { kind: 'execute', status, title: 'Parent', rawInput: { command: 'echo parent' } })
+    return run.tools.get('parent')
+  }
+  const execute = args => adapter.tool.execute(args ?? callArguments(run.tools.get('parent')), exec)
+  return { adapter, run, live, exec, update, question, prepare, execute }
+}
+
+test('#2132 T8 a marked mirror answers its own Full-access question with the guard refusal', async t => {
+  const h = guardedMirror(t)
+  await h.prepare('pending')
+  const answer = h.question('parent')
+  const result = await h.execute()
+  assert.deepEqual(await answer, picked('no'))
+  assert.equal(result.text, h.exec.reviewGuardUnheld.reason)
+  assert.equal(h.exec.reviewGuardUnheld.refused, true)
+  assert.equal(h.exec.reviewGuardUnheld.ran, undefined)
+})
+
+test('#2132 T9 an unmarked mirror keeps the Full-access allow-once answer', async t => {
+  const h = guardedMirror(t, { marked: false })
+  await h.prepare('pending')
+  const answer = h.question('parent')
+  await h.execute()
+  assert.deepEqual(await answer, picked('yes'))
+})
+
+for (const [label, marked, auto] of [['T10a', true, false], ['T10c Full', false, false], ['T10c Auto', false, true]]) {
+  test('#2132 ' + label + ' nested questions follow the waiting mirror policy', async t => {
+    const h = guardedMirror(t, { marked, auto })
+    const parent = await h.prepare()
+    h.run.prompting = new Promise(() => {})
+    await h.update('child', { kind: 'read', title: 'Read notes', status: 'pending', rawInput: { file_path: 'notes' } })
+    const pending = h.question('child')
+    let dispatches = 0
+    h.adapter.runNested = (_, child, _exec, bound) => {
+      dispatches += 1
+      if (marked) {
+        assert.equal(bound, child.permission)
+        return false
+      }
+      child.permission.answer(picked('yes'))
+      return true
+    }
+    const result = h.execute()
+    assert.deepEqual(await soon(pending), picked(marked ? 'no' : 'yes'))
+    assert.equal(dispatches, marked || auto ? 1 : 0)
+    await h.update(parent.id, { status: 'completed' })
+    await result
+    h.run.prompting = undefined
+  })
+}
+
+test('#2132 T10b the session-file question keeps its cancellation and result', async t => {
+  const h = guardedMirror(t)
+  const tool = await h.prepare('pending')
+  h.live.sessionFileEnabled = true
+  const expected = 'The synthetic session-file result.'
+  h.adapter.sessionFiles.ask = async () => expected
+  const answer = h.question(tool.id, { name: 'request_permissions' })
+  const result = await h.execute()
+  assert.deepEqual(await answer, CANCELLED)
+  assert.equal(tool.sessionFileResult, expected)
+  assert.equal(result.text, expected)
+  assert.equal(h.exec.reviewGuardUnheld.refused, undefined)
+})
+
+for (const [label, settings] of [['provider mismatch', { provider: 'acp-codex' }], ['native mismatch', { native: false }]]) {
+  test('#2132 T11 ' + label + ' leaves the prior refusal path in charge', async t => {
+    const h = guardedMirror(t, settings)
+    await h.prepare('pending')
+    const answer = h.question('parent')
+    const result = await h.execute()
+    assert.equal(entered.has(h.exec), false)
+    assert.equal(h.exec.reviewGuardUnheld.mismatch, true)
+    assert.equal(result.status, 'failed')
+    h.adapter.refusedFirst(h.exec)
+    assert.deepEqual(await answer, picked('no'))
+  })
+}
+
+for (const [label, change, completion] of [
+  ['attributed completion', () => {}, 'bound'],
+  ['missing ACP Session', () => {}, 'missing'],
+  ['other ACP Session', () => {}, 'other'],
+  ['different call', h => { h.live.toolIds.set('mirror', 'another-call') }, 'bound'],
+  ['retired', (_h, tool) => { tool.retired = true }, 'bound'],
+  ['missing call', (h, tool) => { h.run.tools.delete(tool.id) }, undefined],
+  ['ended', (_h, tool) => { tool.ended = true }, 'bound'],
+  ['cancelled', h => { h.run.cancelled = true }, 'bound'],
+  ['not busy', () => {}, undefined],
+  ['failed', () => {}, 'failed'],
+]) {
+  test('#2132 T13 ' + label + ' requires attributed completed execution', async t => {
+    const h = guardedMirror(t)
+    const tool = await h.prepare()
+    const args = callArguments(tool)
+    if (completion === 'missing') {
+      await h.run.onUpdate({ sessionUpdate: 'tool_call_update', toolCallId: tool.id, status: 'completed' })
+    } else if (completion) {
+      await h.update(tool.id, { status: completion === 'failed' ? 'failed' : 'completed' }, completion === 'other' ? 'other-session' : undefined)
+    }
+    change(h, tool)
+    await h.execute(args)
+    assert.equal(h.exec.reviewGuardUnheld.ran, label === 'attributed completion' ? true : undefined)
+  })
+}
+
+test('#2132 AZ-R3 unmarked mirrors omit a late command when the mapping does not own it', async t => {
+  const h = guardedMirror(t, { marked: false })
+  await h.update('parent', { kind: 'execute', status: 'in_progress', title: 'Parent' })
+  const args = callArguments(h.run.tools.get('parent'))
+  await h.update('parent', { status: 'completed', rawInput: { command: 'echo owned' } })
+  h.live.toolIds.set('mirror', 'other-call')
+  assert.equal((await h.execute(args)).command, undefined)
+})
+
+for (const release of ['current live', 'replacement live at body entry', 'replacement live at pre-body refusal', 'replacement question']) {
+  test('#2132 source dispatch ' + release, async t => {
+    const h = guardedMirror(t)
+    const parent = await h.prepare()
+    h.exec.toolSet = {}
+    h.run.prompting = new Promise(() => {})
+    await h.update('child', { kind: 'read', title: 'Read notes', status: 'pending', rawInput: { path: 'notes.txt' } })
+    const child = h.run.tools.get('child')
+    const original = h.question(child.id)
+    const get = h.adapter.ctx.get
+    let replacement
+    let dispatched = false
+    h.adapter.ctx.get = name => name === 'tools' ? { execute: async ({ calls: [call], agent, signal }) => {
+      dispatched = true
+      h.run.prompting = undefined
+      const args = JSON.parse(call.arguments)
+      const exec = { name: call.name, callId: call.id, arguments: args, agent, signal }
+      if (release.startsWith('replacement live')) {
+        const run = new AgentRun({ name: 'Replacement ACP', provider: 'acp-claude' })
+        const tool = run.seeTool({ toolCallId: child.id, kind: args.kind, title: args.title, status: 'pending', rawInput: args.input })
+        h.adapter.live.set(agent.session.id, {
+          name: run.spec.name, native: true, dshAgent: agent, run,
+          calls: new Set([call.id]), toolIds: new Map([[call.id, tool.id]]),
+        })
+        replacement = run.onPermission({ toolCall: { toolCallId: tool.id }, options: OPTIONS }, signal)
+      } else if (release === 'replacement question') {
+        replacement = h.question(child.id)
+      }
+      try {
+        if (release === 'replacement live at pre-body refusal') h.adapter.refusedFirst(exec)
+        else await h.adapter.tool.execute(args, exec)
+      } finally {
+        await h.update(parent.id, { status: 'completed' })
+      }
+    } } : get(name)
+    await h.execute()
+    assert.equal(dispatched, true)
+    if (replacement) assert.equal(await soon(replacement), 'still waiting', 'the replacement question is untouched')
+    const answer = release === 'current live' ? picked('yes') : release === 'replacement question' ? CANCELLED : picked('no')
+    assert.deepEqual(await original, answer)
+  })
+}
+
+for (const owner of ['current', 'different live Agent', 'different registered Agent', 'missing registered Session']) {
+  test('#2132 source ownership ' + owner + ' at release', async t => {
+    const h = guardedMirror(t)
+    const { agent } = h.exec
+    await h.update('parent', { kind: 'execute', status: 'in_progress', title: 'Parent' })
+    const args = callArguments(h.run.tools.get('parent'))
+    await h.update('parent', { status: 'completed', rawInput: { command: 'echo synthetic-owner' } })
+    h.adapter.backchannel = { awaitApprovals() {
+      if (owner === 'different live Agent') h.live.dshAgent = { session: agent.session }
+      if (owner === 'different registered Agent') h.adapter.ctx.agents.set(agent.session.id, { session: agent.session })
+      if (owner === 'missing registered Session') h.adapter.ctx.sessions.delete(agent.session.id)
+    } }
+    const result = await h.execute(args)
+    assert.equal(result.command, owner === 'current' ? 'echo synthetic-owner' : undefined)
+    assert.equal(h.exec.reviewGuardUnheld.ran, owner === 'current' ? true : undefined)
   })
 }

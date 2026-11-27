@@ -13,6 +13,7 @@ import { cleanText } from './diagnostics.js'
 import { absoluteLinks } from './links.js'
 import { rawTextOf, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
+import { BRIDGE_ACTIVITY_RECORD, bridgeOriginOf, toolEventOf } from '../shared/tool-activity.js'
 import { reminderText } from './schedules.js'
 import { modelOf, replyModel } from './solver-progress.js'
 
@@ -588,6 +589,18 @@ export function install(rt) {
   const noting = (id, turn) => rt.handoffNoteTurn?.(id, turn) === true || rt.writingNote?.(id) === true
   // The round counter: a group Session's events keep its round's waiter alive and mark work.
   const countsInRound = id => rt.groupOwners.has(id) && !noting(id, live.get(id)?.turn)
+  const writeRoomTool = (id, source, event) => {
+    const activity = toolEventOf(event)
+    if (activity) {
+      try { rt.roomToolActivity?.(id, source, activity) }
+      catch { rt.warn('Group tool activity could not be recorded') }
+    }
+  }
+  const recordRoomTool = (id, entry, event, turn) => {
+    if (entry.roomToolSource && Number.isSafeInteger(turn) && entry.turn === turn && countsInRound(id)) {
+      writeRoomTool(id, entry.roomToolSource, event)
+    }
+  }
 
   // The group hears what the member says while it works. A text with a tool call goes
   // on at once; one without may be the turn's last, so it waits for the next text or the
@@ -914,7 +927,7 @@ export function install(rt) {
       return
     }
     const entry = liveOf(id)
-    if (countsInRound(id)) rt.touchRoomTurn?.(id)
+    if (event.type !== BRIDGE_ACTIVITY_RECORD && countsInRound(id)) rt.touchRoomTurn?.(id)
     switch (event.type) {
       case 'subagent/catalog': {
         const childId = event.data?.childId
@@ -925,6 +938,7 @@ export function install(rt) {
       case 'tool/call': {
         const name = String(event.data?.name ?? '')
         startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''), session, event)
+        recordRoomTool(id, entry, event, event.data?.turn)
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (name !== PROGRAM_TOOL) {
           entry.toolCount = (entry.toolCount ?? 0) + 1
@@ -934,9 +948,16 @@ export function install(rt) {
       }
       case 'tool/ptc-dispatch-start': {
         const name = String(event.data?.name ?? '')
+        recordRoomTool(id, entry, event, entry.calls?.get(event.data?.rootCallId)?.turn)
         startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}))
         entry.toolCount = (entry.toolCount ?? 0) + 1
         if (countsInRound(id)) rt.workRoomTurn?.(id, name)
+        break
+      }
+      case BRIDGE_ACTIVITY_RECORD: {
+        const origin = bridgeOriginOf(event)
+        const source = entry.roomToolSources?.get(origin?.turn)
+        if (source && source.exchangeId === origin.exchangeId) writeRoomTool(id, source, event)
         break
       }
       case 'tool/ptc-dispatch':
@@ -979,6 +1000,7 @@ export function install(rt) {
         entry.switched = false
         entry.answers = false
         entry.opened = false
+        entry.roomToolSource = undefined
         entry.reviewReplyRequest = undefined
         entry.consumedResult = undefined
         entry.joined = []
@@ -1053,6 +1075,14 @@ export function install(rt) {
         // still claims it as today, a later one only joins it.
         const opened = entry.opened === true
         if (entry.turn !== undefined && !bare(source) && opensTurn(event.data)) {
+          if (!opened && source?.kind === SOURCE_KIND && source.role === 'room') {
+            entry.roomToolSource = source
+            if (Number.isSafeInteger(entry.turn) && countsInRound(id)) {
+              const sources = entry.roomToolSources ??= new Map()
+              if (!sources.has(entry.turn)) sources.set(entry.turn, source)
+              if (sources.size > 400) sources.delete(sources.keys().next().value)
+            }
+          }
           entry.opened = true
         }
         if (entry.turn !== undefined && opensTurn(event.data)) {
@@ -1317,6 +1347,7 @@ export function install(rt) {
         entry.turn = undefined
         entry.adoptedTurn = undefined
         entry.info = undefined
+        entry.roomToolSource = undefined
         entry.texts = []
         entry.rawTexts = []
         entry.textModels = []

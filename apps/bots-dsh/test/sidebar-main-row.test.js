@@ -54,7 +54,7 @@ const find = (node, match, found = []) => {
 }
 const named = name => node => node.type?.name === name
 
-function sidebar({ wide = true, unread = false, actions = {}, team = roster } = {}) {
+function sidebar({ wide = true, unread = false, actions = {}, team = roster, stops = [] } = {}) {
   const tree = TeamSidebar({
     wide, actions,
     useRoster: pick => pick(team), useUi: pick => pick({ unread: {} }), useRegistry: pick => pick({}),
@@ -62,7 +62,7 @@ function sidebar({ wide = true, unread = false, actions = {}, team = roster } = 
     useSessionStatus: pick => pick(new Map(unread ? [['pip', { completionUnread: true }]] : [])),
     useSessionRetainInfo: (_id, pick) => pick(undefined),
     useActivity: pick => pick({}),
-    useWork: pick => pick({ approvals: [], rooms: {}, waiting: {} }),
+    useWork: pick => pick({ approvals: [], rooms: {}, waiting: {}, stops }),
   })
   const rows = find(tree, named('BotRow'))
   // A row renders by calling it with its props, as React would.
@@ -253,5 +253,18 @@ test('both sidebar variants use the exact package name and hide it with roles of
     assert.deepEqual(tags(row), expected)
     const [legacy] = sidebar({ wide: false, team: live }).rows
     assert.deepEqual(tags(legacy.type({ ...legacy.props, wide: true })), expected)
+  }
+})
+
+test('#2132 the sidebar preview and accessible label describe confirmed runs', () => {
+  const ran = { botId: 'pip', open: true, ran: true }
+  const mixed = [{ ...ran, ran: undefined }, ran]
+  for (const [stops, expected] of [[[ran], 'A step ran unheld'], [mixed, 'A step stopped on a permission']]) {
+    const { rows } = sidebar({ wide: false, stops })
+    const pip = rows.find(row => row.props.bot.id === 'pip')
+    const row = pip.type({ ...pip.props, wide: true })
+    const [button] = find(row, node => node.type === 'button' && node.props['aria-label']?.includes('Pip'))
+    assert.ok(button.props['aria-label'].includes(expected))
+    assert.ok(find(button, node => node.type === 'span' && node.props.children?.includes(expected)).length)
   }
 })

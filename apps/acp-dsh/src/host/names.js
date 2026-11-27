@@ -2,7 +2,10 @@
 // back-channel and the adapter cannot drift apart on them (RFC 0003, amendment, "The bridge").
 // The server name is a contract: a Claude Code allow rule reads `mcp__dsh__*`.
 export const BRIDGE_NAME = 'dsh'
-export const AGY_SKILL_TOOL = `mcp_${BRIDGE_NAME}_load_skill`
+export const HISTORY_TOOL_NAME = 'read_own_chat'
+export const agyBridgeName = tool => `mcp_${BRIDGE_NAME}_${tool}`
+export const ompBridgeName = tool => `mcp__${BRIDGE_NAME}_${tool}`
+export const AGY_SKILL_TOOL = agyBridgeName('load_skill')
 export const CREDENTIAL_ENV = 'DSH_BRIDGE_CREDENTIAL'
 export const URL_ENV = 'DSH_BRIDGE_URL'
 // The source marker of the tool-call block every bridge call adds as its v4 advertisement. It
