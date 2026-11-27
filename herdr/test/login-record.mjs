@@ -461,8 +461,10 @@ export function loginRecordTests(cli) {
   test("#1509 final helper login check precedes attaching the new parent and killing the old tree", () => {
     const source = readFileSync(cli, "utf8");
     const since = (name) => source.slice(source.indexOf(`async function ${name}(`)).split("\n}")[0];
-    assert.match(since("restartResolved"), /const beforeMove = managedTree \? \(\) => checkHelperLogins\(plans\) : undefined;/);
-    assert.match(since("restartResolved"), /attachMoved\(bot, held.binding, seat.terminal, created, key, beforeMove\)[\s\S]+managedTree \? await hcKill\(old.address\)/);
+    const restart = since("restartResolved");
+    assert.match(restart, /const beforeMove = managedTree \? \(\) => checkHelperLogins\(plans\) : undefined;/);
+    assert.match(restart, /await attachMoved\(bot, held\.binding, seat\.terminal, created, key, beforeMove\);[\s\S]+const treeKill = managedTree \? await killTree\(\) : null;/);
+    assert.match(restart, /const killTree = async \(\) => \{\s*await captureHelperSkills\(plans, old, \{ project, bot, view \}\);\s*return hcKill\(old\.address\);\s*\};/);
     assert.match(since("attachMoved"), /beforeWrite\?\.\(\);\s*write\(rows\);/);
     assert.match(since("commitAdoption"), /beforeWrite\?\.\(\);\s*appendAttach\(path, rows\);/);
   });
