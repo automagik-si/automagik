@@ -986,3 +986,16 @@ test('Skills data stays out of serialized judge, title and MCP inputs', async t 
     chat: [person], group: ['Normal group message'], refusal: false,
   })
 })
+
+test('#2079 the MCP agent cannot Check a skill link or reach the resolver', async t => {
+  const dns = (await import('node:dns')).default
+  const resolver = t.mock.method(dns.promises, 'lookup', () => assert.fail('A Bot reached the link resolver'))
+  const f = await fixture(t)
+  const result = await f.tool('skill-library-save', { update: 'check', name: 'link-notes', operation: 'a'.repeat(32) })
+  assert.equal(result.error.code, -32602)
+  assert.equal(resolver.mock.callCount(), 0)
+  const audit = await readFile(join(f.home, 'skill-library', 'audit.jsonl'), 'utf8')
+  const row = audit.trim().split('\n').map(JSON.parse).find(item => item.action === 'skill-library-save')
+  assert.equal(row.caller, 'agent')
+  assert.equal(row.outcome, 'refused')
+})

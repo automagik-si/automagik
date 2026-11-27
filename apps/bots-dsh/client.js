@@ -595,6 +595,57 @@ var ZH2 = {
   "From file": "文件",
   "From folder": "文件夹",
   "From archive": "压缩包",
+  "From link": "链接",
+  "Link": "链接",
+  "Check for update": "检查更新",
+  "Up to date · checked {time}": "已是最新版本 · 检查于 {time}",
+  "Fetched {time}": "获取于 {time}",
+  "Used by: {bots}": "使用此技能的 Bot：{bots}",
+  "New endpoints": "新增端点",
+  "Removed endpoints": "移除的端点",
+  "New scripts": "新增脚本",
+  "Removed scripts": "移除的脚本",
+  "Declared key names": "声明的密钥名称",
+  "New key names": "新增密钥名称",
+  "Removed key names": "移除的密钥名称",
+  "Content hash": "内容哈希",
+  "The saved version could not be verified; Apply replaces it with the checked new content.": "无法验证已保存的版本。应用更新会用已检查的新内容替换它。",
+  "Review the warnings, then apply again to confirm.": "请查看警告，然后再次点击“应用”确认。",
+  "This result is no longer available. Check for update again.": "此结果已不可用。请重新检查更新。",
+  "This result is no longer available. Save the skill again.": "此结果已不可用。请重新保存技能。",
+  "Only a skill made from a link can check for updates.": "只有从链接创建的技能才能检查更新。",
+  "A skill made from a link changes only through Check for update.": "从链接创建的技能只能通过检查更新进行修改。",
+  "The linked SKILL.md needs a one-line description of up to 200 characters.": "链接中的 SKILL.md 需要一行不超过 200 个字符的描述。",
+  "Another link is being fetched. Wait for it to finish.": "正在获取另一个链接。请稍候。",
+  "The skill changed while it was checked. Check for update again.": "检查更新时技能已更改。请重新检查。",
+  "The skill changed since the check. Check for update again.": "自上次检查以来技能已更改。请重新检查更新。",
+  "The linked SKILL.md now names the skill {name}. Create it as a new skill from the link.": "链接中的 SKILL.md 现在指定技能 {name}。请从该链接创建新技能。",
+  "Paste an https:// link.": "请粘贴 https:// 链接。",
+  "This link carries a user name, password or token. Use a public link without them.": "此链接含有用户名、密码或令牌。请使用不包含这些信息的公开链接。",
+  "Only links on the standard https port are accepted.": "只接受使用标准 HTTPS 端口的链接。",
+  "The link did not answer within 10 seconds.": "链接在 10 秒内没有响应。",
+  "Fetching the link took longer than 60 seconds.": "获取链接用时超过 60 秒。",
+  "The link's content is larger than 5 MiB.": "链接内容超过 5 MiB。",
+  "Only public links work here; download the skill and use File or Folder.": "这里只支持公开链接。请下载技能并使用文件或文件夹。",
+  "Nothing public was found at this link. If it is private, download the skill and use File or Folder.": "此链接没有公开内容。如果它是私有链接，请下载技能并使用文件或文件夹。",
+  "The link's server answered with an error (HTTP {status}). Try again later.": "链接服务器返回错误（HTTP {status}）。请稍后重试。",
+  "The link could not be reached.": "无法访问此链接。",
+  "This link opens a web page, not a skill. Copy the skill's text and use Text.": "此链接会打开网页。请复制技能正文并使用文本。",
+  "This link is not a SKILL.md, a .zip or a .tar.gz.": "此链接不是 SKILL.md、.zip 或 .tar.gz。",
+  "Links with query parameters (after ?) are not accepted. Remove them, or download the skill and use File or Folder.": "不接受带有查询参数（? 之后的内容）的链接。请移除参数，或下载技能后使用文件或文件夹。",
+  "The link's redirect could not be followed.": "无法跟随链接的重定向。",
+  "The link redirects too many times.": "链接重定向次数过多。",
+  "The link sends to a signed or temporary download. Download the skill and use File or Folder.": "此链接转到签名下载或临时下载。请下载技能并使用文件或文件夹。",
+  "This GitHub repository moved or was renamed. Paste its current link.": "这个 GitHub 仓库已移动或重命名。请粘贴当前链接。",
+  "GitHub's limit for public requests from this network is used up. Try again in about {minutes} minutes, or download the skill and use File or Folder.": "当前网络已达到 GitHub 的公开请求上限。请等待约 {minutes} 分钟后重试，或下载技能并使用文件或文件夹。",
+  "GitHub's limit for public requests from this network is used up. Try again later, or download the skill and use File or Folder.": "当前网络已达到 GitHub 的公开请求上限。请稍后重试，或下载技能并使用文件或文件夹。",
+  "The GitHub folder holds a link, a submodule or an entry of an unknown type; skills hold regular files only.": "这个 GitHub 文件夹包含链接、子模块或未知类型的条目。技能只支持普通文件。",
+  "This GitHub link needs too many steps to read. Link a shallower folder, or download the skill and use File.": "读取此 GitHub 链接需要太多步骤。请使用层级较浅的文件夹链接，或下载技能并使用文件。",
+  "GitHub's answer did not match the commit it names. Try again.": "GitHub 的响应与指定提交不符。请重试。",
+  "This GitHub link names no file or folder. Link to a SKILL.md, a folder or a repository.": "此 GitHub 链接没有指定文件或文件夹。请链接到 SKILL.md、文件夹或仓库。",
+  "This link's branch or tag cannot be resolved to one commit safely. Use GitHub's permanent link (with the commit SHA).": "无法安全地将此链接的分支或标签解析为唯一提交。请使用包含提交 SHA 的 GitHub 永久链接。",
+  "This link points to this computer, a local network or a cloud metadata address. Only public addresses are fetched.": "此链接指向本机、本地网络或云元数据地址。只会获取公开地址的内容。",
+  "Use a link with a host name that has an IPv4 address. Numeric addresses and IPv6-only hosts are not accepted yet.": "请使用有 IPv4 地址的主机名链接。暂不支持数字地址或仅支持 IPv6 的主机。",
   "Replace from file": "从文件替换",
   "Replace from folder": "从文件夹替换",
   "Scripts and references are stored with this skill but are not yet available to Bots. A Bot receives only the SKILL.md text.": "脚本和参考文件已随此技能保存，但 Bot 暂时还不能使用。Bot 只会收到 SKILL.md 的正文。",
@@ -4653,6 +4704,9 @@ function t(key, params) {
   return bound ? bound(key, params) : fill2(key, params);
 }
 var HOST_TEMPLATES = [
+  "The linked SKILL.md now names the skill {name}. Create it as a new skill from the link.",
+  "The link's server answered with an error (HTTP {status}). Try again later.",
+  "GitHub's limit for public requests from this network is used up. Try again in about {minutes} minutes, or download the skill and use File or Folder.",
   GUARD_GROUP_COPY.join,
   GUARD_GROUP_COPY.inGroup,
   "{name} cannot use start_task: its review guard is on. Do the work in your own chat, or ask the person to turn the review guard off in {name}'s Details.",
@@ -5550,6 +5604,10 @@ function useTreePreview({ item, preview, actions, saved }) {
   };
   const request = async (input) => {
     const result = await actions.saveSkill({ ...input, preview: true, ...item ? { edit: true, name: item.name } : {} });
+    if (result.expired) {
+      setError(expiredResult(result.kind));
+      return;
+    }
     setView(result);
     setTyping(false);
   };
@@ -5571,9 +5629,11 @@ function useTreePreview({ item, preview, actions, saved }) {
       if (path3) await request({ source: "folder", path: path3 });
     }),
     usePath: () => run3(() => request({ source: "folder", path: path2 })),
+    fromLink: (url) => run3(() => request({ source: "link", url })),
     confirmStored: (report) => run3(async () => {
       const result = await actions.saveSkill({ name: item.name, edit: true, reviewHash: item.reviewHash, confirm: report.needsConfirm });
-      if (result.refused || result.needsConfirm) setView(result);
+      if (result.expired) setError(expiredResult(result.kind));
+      else if (result.refused || result.needsConfirm) setView(result);
       else await saved();
     }),
     save: () => run3(async () => {
@@ -5582,6 +5642,10 @@ function useTreePreview({ item, preview, actions, saved }) {
         name: view.name,
         ...view.needsConfirm ? { confirm: view.needsConfirm } : {}
       });
+      if (result.expired) {
+        setError(expiredResult(result.kind));
+        return;
+      }
       if (result.refused || result.needsConfirm) setView({ ...view, ...result, ...result.refused ? { token: void 0 } : {} });
       else await saved();
     })
@@ -5611,6 +5675,8 @@ function TreePreview({ tree, onClose, readOnly }) {
       (0, import_react2.createElement)("strong", null, view.name),
       (0, import_react2.createElement)("span", { className: "bt-set-hint" }, view.description)
     ),
+    view.source?.kind === "link" ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, sourceLine(view.source)) : null,
+    view.keyNames?.length ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, t("Declared key names"), " · ", view.keyNames.join(", ")) : null,
     (0, import_react2.createElement)(TreeDetails, { view }),
     (0, import_react2.createElement)(TreeDiff, { diff: view.diff }),
     view.refused || view.findings?.length ? (0, import_react2.createElement)(SkillReport, { report: view }) : null,
@@ -5625,6 +5691,106 @@ function TreePreview({ tree, onClose, readOnly }) {
         disabled: readOnly || busy,
         onClick: tree.save
       }, t("Save")) : null
+    )
+  );
+}
+function expiredResult(kind) {
+  return kind === "check" || kind === "apply" ? t("This result is no longer available. Check for update again.") : t("This result is no longer available. Save the skill again.");
+}
+function sourceLine({ host, ref, revision }) {
+  return [host, ref, ref === null ? t("Content hash") + " " + revision.slice(7, 19) : revision.slice(0, 12)].filter(Boolean).join(" · ");
+}
+function LinkDetails({ item, report, actions, onClose, saved, readOnly }) {
+  const tree = useTreePreview({ item, actions, saved });
+  const current = tree.view ?? report;
+  return (0, import_react2.createElement)(
+    "div",
+    { className: "bt-set-card bt-task-form" },
+    (0, import_react2.createElement)("strong", null, item.name),
+    (0, import_react2.createElement)("p", { className: "bt-set-hint" }, sourceLine(item.source)),
+    item.held ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, hostText(item.held)) : null,
+    !item.held && item.content ? (0, import_react2.createElement)("pre", { className: "bt-set-hint" }, item.content) : null,
+    current ? (0, import_react2.createElement)(SkillReport, { report: current }) : null,
+    tree.error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, tree.error) : null,
+    (0, import_react2.createElement)(
+      "div",
+      { className: "bt-set-row bt-task-foot" },
+      (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onClose }, t("Cancel")),
+      current?.needsConfirm && item.reviewHash ? (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-send bt-soft-sm",
+        disabled: readOnly || tree.busy,
+        onClick: () => tree.confirmStored(current)
+      }, t("Save")) : null
+    )
+  );
+}
+function LinkUpdate({ report, actions, onClose, saved, readOnly }) {
+  const [view, setView] = (0, import_react2.useState)(report);
+  const [busy, setBusy] = (0, import_react2.useState)(false);
+  const [error, setError] = (0, import_react2.useState)("");
+  const apply2 = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await actions.saveSkill({
+        update: "apply",
+        token: view.token,
+        name: view.name,
+        ...view.needsConfirm ? { confirm: view.needsConfirm } : {}
+      });
+      if (result.saved) await saved();
+      else if (result.expired) {
+        setError(expiredResult(result.kind ?? "apply"));
+        setView({ ...view, token: void 0 });
+      } else setView({ ...view, ...result, ...result.refused ? { token: void 0 } : {} });
+    } catch (failure) {
+      setError(hostText(failure.message));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const use = (label, rows2, show2) => rows2?.length ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, t(label), " · ", rows2.map(show2).join(", ")) : null;
+  return (0, import_react2.createElement)(
+    "div",
+    { className: "bt-set-card bt-task-form" },
+    (0, import_react2.createElement)("strong", null, view.name),
+    view.previousSource && view.source ? (0, import_react2.createElement)(
+      "p",
+      { className: "bt-set-hint" },
+      sourceLine(view.previousSource),
+      " → ",
+      sourceLine(view.source)
+    ) : null,
+    use("New endpoints", view.endpoints?.new, (entry) => entry.origin ?? entry.host),
+    use("Removed endpoints", view.endpoints?.gone, (entry) => entry.origin ?? entry.host),
+    use("New scripts", view.scriptChanges?.new, (entry) => entry.path),
+    use("Removed scripts", view.scriptChanges?.gone, (entry) => entry.path),
+    use("New key names", view.keyNames?.new, (key) => key),
+    use("Removed key names", view.keyNames?.gone, (key) => key),
+    view.usedBy?.length ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, t("Used by: {bots}", { bots: view.usedBy.map((bot) => bot.name).join(", ") })) : null,
+    view.diff?.held ? (0, import_react2.createElement)(
+      "p",
+      { className: "bt-set-hint" },
+      t("The saved version could not be verified; Apply replaces it with the checked new content.")
+    ) : null,
+    view.diff?.held ? (0, import_react2.createElement)(TreeDetails, { view }) : null,
+    (0, import_react2.createElement)(TreeDiff, { diff: view.diff?.held ? { ...view.diff, held: false } : view.diff }),
+    view.refused || view.findings?.length ? (0, import_react2.createElement)(SkillReport, {
+      report: view,
+      title: view.needsConfirm ? t("Review the warnings, then apply again to confirm.") : void 0
+    }) : null,
+    error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
+    (0, import_react2.createElement)(
+      "div",
+      { className: "bt-set-row bt-task-foot" },
+      (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: onClose }, t("Cancel")),
+      view.token && !view.refused ? (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-send bt-soft-sm",
+        disabled: readOnly || busy,
+        onClick: apply2
+      }, t("Apply")) : null
     )
   );
 }
@@ -5697,6 +5863,7 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
   const [checking, setChecking] = (0, import_react2.useState)(false);
   const [warning, setWarning] = (0, import_react2.useState)(() => report ?? (item?.held && item.check?.verdict === "warn" ? item.check : null));
   const [error, setError] = (0, import_react2.useState)("");
+  const [link, setLink] = (0, import_react2.useState)("");
   const fileInput = (0, import_react2.useRef)(null);
   const tree = useTreePreview({ actions, saved });
   const set2 = (key, value) => {
@@ -5735,7 +5902,8 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
         edit: !!item,
         ...warning?.needsConfirm ? { confirm: warning.needsConfirm } : {}
       });
-      if (result.needsConfirm || result.refused) setWarning(result);
+      if (result.expired) setError(expiredResult(result.kind));
+      else if (result.needsConfirm || result.refused) setWarning(result);
       else await saved();
     } catch (failure) {
       setError(hostText(failure.message));
@@ -5745,11 +5913,28 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
     }
   };
   if (tree.view) return (0, import_react2.createElement)(TreePreview, { tree, onClose, readOnly });
+  const linking = !item && draft.source === "link";
+  const submitLink = (event) => {
+    event?.preventDefault();
+    if (!disabled && link.trim()) return tree.fromLink(link.trim());
+  };
   return (0, import_react2.createElement)(
     "form",
-    { className: "bt-set-card bt-task-form", onSubmit: submit },
-    (0, import_react2.createElement)(Field, { label: t("Name"), value: draft.name, disabled: disabled || !!item, maxLength: 32, onChange: (value) => set2("name", value) }),
-    (0, import_react2.createElement)(Field, { label: t("One-line description"), value: draft.description, disabled, maxLength: 200, onChange: (value) => set2("description", value) }),
+    { className: "bt-set-card bt-task-form", onSubmit: linking ? submitLink : submit },
+    linking ? null : (0, import_react2.createElement)(Field, {
+      label: t("Name"),
+      value: draft.name,
+      disabled: disabled || !!item,
+      maxLength: 32,
+      onChange: (value) => set2("name", value)
+    }),
+    linking ? null : (0, import_react2.createElement)(Field, {
+      label: t("One-line description"),
+      value: draft.description,
+      disabled,
+      maxLength: 200,
+      onChange: (value) => set2("description", value)
+    }),
     (0, import_react2.createElement)(
       "div",
       { className: "bt-set-row" },
@@ -5776,11 +5961,19 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
         disabled,
         onClick: tree.fromFolder
       }, t("From folder")) : null,
+      !item ? (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled,
+        "aria-pressed": linking,
+        onClick: () => set2("source", "link")
+      }, t("From link")) : null,
       (0, import_react2.createElement)("input", { ref: fileInput, type: "file", accept: `.md,.markdown,.txt${item ? "" : "," + archiveAccept}`, hidden: true, disabled, onChange: choose }),
       draft.source === "file" ? (0, import_react2.createElement)("span", { className: "bt-set-hint" }, draft.fileName) : null
     ),
     (0, import_react2.createElement)(FolderPath, { tree, disabled }),
-    draft.fileBytes === void 0 ? (0, import_react2.createElement)(Field, {
+    linking ? (0, import_react2.createElement)(Field, { label: t("Link"), value: link, disabled, maxLength: 2048, onChange: setLink }) : null,
+    !linking && draft.fileBytes === void 0 ? (0, import_react2.createElement)(Field, {
       label: t("Skill instructions"),
       value: draft.content,
       disabled,
@@ -5794,7 +5987,12 @@ function SkillForm({ item, initial, actions, onClose, saved, readOnly, report })
       "div",
       { className: "bt-set-row bt-task-foot" },
       (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onClose }, t("Cancel")),
-      (0, import_react2.createElement)("button", { type: "submit", className: "bt-send bt-soft-sm", disabled }, item ? t("Save changes") : t("Save"))
+      linking ? (0, import_react2.createElement)("button", {
+        type: "button",
+        className: "bt-send bt-soft-sm",
+        disabled: disabled || !link.trim(),
+        onClick: submitLink
+      }, t("Preview")) : (0, import_react2.createElement)("button", { type: "submit", className: "bt-send bt-soft-sm", disabled }, item ? t("Save changes") : t("Save"))
     )
   );
 }
@@ -5808,8 +6006,13 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
   const [confirmDelete, setConfirmDelete] = (0, import_react2.useState)(null);
   const [busy, setBusy] = (0, import_react2.useState)(false);
   const [rowReview, setRowReview] = (0, import_react2.useState)(null);
+  const [checkedLinks, setCheckedLinks] = (0, import_react2.useState)({});
+  const checkingLink = (0, import_react2.useRef)(null);
   const [recovered, setRecovered] = (0, import_react2.useState)([]);
   const [recovering, setRecovering] = (0, import_react2.useState)(() => Boolean(actions.resumeSkillSaves));
+  const stopCheck = () => checkingLink.current?.abort();
+  (0, import_react2.useEffect)(() => stopCheck, [actions]);
+  const rememberCheck = (name, report) => setCheckedLinks((current) => ({ ...current, [name]: report.checkedAt }));
   (0, import_react2.useEffect)(() => {
     if (!actions.resumeSkillSaves) return;
     const controller = new window.AbortController();
@@ -5818,9 +6021,20 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
     void (async () => {
       try {
         const results = await actions.resumeSkillSaves(signal);
+        if (signal.aborted) return;
         const completed = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
         const forms = [];
         for (const { form: initial, ...report } of completed) {
+          if (report.stale) continue;
+          if (report.expired) {
+            setError(expiredResult(report.kind));
+            continue;
+          }
+          if (initial?.kind === "check" || initial?.kind === "apply") {
+            if (report.upToDate) rememberCheck(initial.target, report);
+            else if (!report.saved) forms.push({ update: report });
+            continue;
+          }
           if (report.preview) {
             forms.push({ preview: report });
             continue;
@@ -5864,7 +6078,8 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
         return;
       }
       const result = await actions.saveSkill({ name: skill.name, edit: true, reviewHash: item.reviewHash });
-      if (result.needsConfirm) setForm({ item, report: result });
+      if (result.expired) setError(expiredResult(result.kind));
+      else if (result.needsConfirm) setForm({ item, report: result });
       else if (result.refused) {
         setRowReview({ name: skill.name, report: result });
         await refresh();
@@ -5873,9 +6088,29 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
       setRowReview((current) => current?.report ? current : null);
     }
   });
+  const checkLink = (skill) => change(async () => {
+    const controller = new window.AbortController();
+    const { signal } = controller;
+    checkingLink.current = controller;
+    setCheckedLinks((current) => ({ ...current, [skill.name]: void 0 }));
+    try {
+      const result = await actions.saveSkill({ update: "check", name: skill.name }, signal);
+      if (signal.aborted) return;
+      if (result.expired) setError(expiredResult(result.kind ?? "check"));
+      else if (result.upToDate) rememberCheck(skill.name, result);
+      else setForm({ update: result });
+      await refresh(signal);
+    } catch (failure) {
+      if (!signal.aborted) throw failure;
+    } finally {
+      if (checkingLink.current === controller) checkingLink.current = null;
+    }
+  });
   const disabled = readOnly || busy || recovering;
-  const activeForm = form ?? recovered.find((entry) => entry.initial || entry.preview);
+  const activeForm = form ?? recovered.find((entry) => entry.initial || entry.preview || entry.update);
+  const activeType = activeForm?.update ? LinkUpdate : activeForm?.item?.source?.kind === "link" ? LinkDetails : activeForm?.preview || treeSkill(activeForm?.item) ? TreeForm : SkillForm;
   const closeForm = () => {
+    stopCheck();
     if (form) setForm(null);
     else setRecovered((current) => current.filter((entry) => entry !== activeForm));
   };
@@ -5885,19 +6120,22 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
     (0, import_react2.createElement)(
       "header",
       { className: "bt-set-row" },
-      (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", "aria-label": t("Back"), onClick: onBack }, (0, import_react2.createElement)(ChevronLeftIcon)),
+      (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", "aria-label": t("Back"), onClick: () => {
+        stopCheck();
+        onBack();
+      } }, (0, import_react2.createElement)(ChevronLeftIcon)),
       (0, import_react2.createElement)("h1", { className: "bt-section-title" }, t("Skills")),
       (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled, onClick: () => setForm({}) }, t("New skill"))
     ),
     error ? (0, import_react2.createElement)("p", { className: "bt-danger bt-set-hint", role: "alert" }, error) : null,
-    recovered.filter((entry) => !entry.initial && !entry.preview).map(({ report }, index) => (0, import_react2.createElement)(SkillReport, { key: index, report })),
+    recovered.filter((entry) => entry.report && !entry.initial).map(({ report }, index) => (0, import_react2.createElement)(SkillReport, { key: index, report })),
     activeForm ? (0, import_react2.createElement)(
-      activeForm.preview || treeSkill(activeForm.item) ? TreeForm : SkillForm,
+      activeType,
       {
-        key: activeForm.preview?.token ?? (activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? ""),
+        key: activeForm.update?.token ?? activeForm.update?.hash ?? activeForm.preview?.token ?? (activeForm.initial ? activeForm.report.needsConfirm : activeForm.item?.name ?? ""),
         item: activeForm.item,
         initial: activeForm.initial,
-        report: activeForm.report,
+        report: activeForm.update ?? activeForm.report,
         preview: activeForm.preview,
         actions,
         readOnly,
@@ -5911,6 +6149,8 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
     library.skills.length ? (0, import_react2.createElement)("div", { className: "bt-set-card" }, library.skills.map((skill) => {
       const result = skill.held ? hostText(skill.held) : skill.check?.verdict === "warn" ? t("Warnings") : t("Verified");
       const checked = skill.check?.ranAt ? t("Checked {time}", { time: new Date(skill.check.ranAt).toLocaleString() }) : null;
+      const linked = skill.source?.kind === "link";
+      const checkedAt = Object.hasOwn(checkedLinks, skill.name) ? checkedLinks[skill.name] : void 0;
       return (0, import_react2.createElement)(
         "div",
         { key: skill.name, className: "bt-connector bt-connector-head" },
@@ -5924,7 +6164,8 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
               folder: "From folder",
               archive: "From archive",
               file: "From file",
-              text: "From text"
+              text: "From text",
+              link: "From link"
             }[skill.source?.kind] ?? "From text"),
             result,
             skill.scripts?.length ? t("Scripts: {count}", { count: skill.scripts.length }) : null,
@@ -5932,6 +6173,18 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
             skill.review?.status === "done" ? t("Reviewed by a model") : null,
             checked
           ].filter(Boolean).join(" · ")),
+          linked ? (0, import_react2.createElement)(
+            "p",
+            { className: "bt-set-hint" },
+            sourceLine(skill.source),
+            " · ",
+            t("Fetched {time}", { time: new Date(skill.source.fetchedAt).toLocaleString() })
+          ) : null,
+          checkedAt !== void 0 ? (0, import_react2.createElement)(
+            "p",
+            { className: "bt-set-hint", role: "status" },
+            t("Up to date · checked {time}", { time: new Date(checkedAt).toLocaleString() })
+          ) : null,
           skill.tree?.length > 1 ? (0, import_react2.createElement)("p", { className: "bt-set-hint" }, treeNote()) : null,
           rowReview?.name === skill.name ? rowReview.report ? SkillReport({ report: rowReview.report }) : (0, import_react2.createElement)("span", { className: "bt-set-hint", role: "status" }, t("Checking the skill…")) : null
         ),
@@ -5944,17 +6197,24 @@ function OwnerSkillsScreen({ actions, readOnly, onBack }) {
             disabled,
             onClick: () => void reviewStored(skill)
           }, t("Review skill")) : null,
-          (0, import_react2.createElement)("button", {
+          skill.checkable ? (0, import_react2.createElement)("button", {
+            type: "button",
+            className: "bt-soft bt-soft-sm",
+            disabled,
+            onClick: () => checkLink(skill)
+          }, t("Check for update")) : null,
+          !linked || !skill.held ? (0, import_react2.createElement)("button", {
             type: "button",
             className: "bt-soft bt-soft-sm",
             disabled,
             onClick: () => void change(async () => setForm({ item: await actions.getSkill(skill.name) }))
-          }, t("Edit")),
+          }, t("Edit")) : null,
           (0, import_react2.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled, onClick: () => {
             if (confirmDelete !== skill.name) return setConfirmDelete(skill.name);
             void change(async () => {
               await actions.deleteSkill(skill.name);
               setConfirmDelete(null);
+              setCheckedLinks((current) => ({ ...current, [skill.name]: void 0 }));
               await refresh();
             });
           } }, confirmDelete === skill.name ? t("Click again to delete.") : t("Delete"))
@@ -16626,7 +16886,7 @@ var AVATAR_LIBRARY_CSS = `
 var import_react34 = require("react");
 var import_react_dom5 = require("react-dom");
 var SORTS = [["popular", "Most liked"], ["new", "Newest"], ["views", "Most viewed"], ["random", "Surprise me"]];
-var sourceLine = { builtin: "Automagik", team: "Kept by this team", codex: "From Codex" };
+var sourceLine2 = { builtin: "Automagik", team: "Kept by this team", codex: "From Codex" };
 var capitalize = (word2) => word2[0].toUpperCase() + word2.slice(1);
 var slug = (text2) => String(text2 ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "bot";
 var PICK_MS = 900;
@@ -16784,7 +17044,7 @@ function CharacterSelect({ bot, actions, run: run3, onClose, avatarImage: avatar
   }, [solver]);
   const ours = (0, import_react34.useMemo)(() => automagikRoster({ unfold }), [unfold]);
   const solvers = solver ? solverRoster() : [];
-  const yours = local.map((pet) => ({ key: `pet:${pet.source}:${pet.id}`, kind: "pet", pet, name: pet.name, line: sourceLine[pet.source] ?? pet.source }));
+  const yours = local.map((pet) => ({ key: `pet:${pet.source}:${pet.id}`, kind: "pet", pet, name: pet.name, line: sourceLine2[pet.source] ?? pet.source }));
   const theirs = market.market.pets.map((pet) => ({ key: `market:${pet.id}`, kind: "market", pet, name: pet.name, line: pet.by ? t("by {name}", { name: pet.by }) : "codex-pets.net" }));
   const photo = look.image ? [{ key: "photo", kind: "photo", image: look.image, name: t("Photo"), line: t("Uploaded") }] : [];
   const photos = library.filter((entry) => entry.image !== look.image).map((entry) => ({ key: `library:${entry.id}`, kind: "library", image: entry.image, name: entry.name || t("Photo"), line: t("Your photos") }));
@@ -24865,7 +25125,8 @@ function teamActions({
       throw error;
     }
   }
-  async function saveSkill(skill) {
+  async function saveSkill(skill, signal) {
+    signal?.throwIfAborted();
     const viewerGuard = requestViewer("skill-library-save");
     const scope = skillScope();
     const input = skill.reviewHash === void 0 ? skill : Object.fromEntries(
@@ -24874,6 +25135,7 @@ function teamActions({
     const key = JSON.stringify(input);
     const existing = storedSaves(scope);
     const digest = skillStorage && globalThis.crypto.subtle ? hex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)))) : void 0;
+    signal?.throwIfAborted();
     let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find((entry) => entry.digest === digest));
     if (!job) {
       job = { id: hex(globalThis.crypto.getRandomValues(new Uint8Array(16))), digest, started: false };
@@ -24881,11 +25143,11 @@ function teamActions({
     }
     skillSaves.set(key, job);
     try {
-      const result = await finishSave(scope, job, input, void 0, viewerGuard);
+      const result = await finishSave(scope, job, input, signal, viewerGuard);
       skillSaves.delete(key);
       return result;
     } catch (error) {
-      if (!unfinishedSave(error)) skillSaves.delete(key);
+      if (!signal?.aborted && !unfinishedSave(error)) skillSaves.delete(key);
       throw error;
     }
   }
@@ -25367,7 +25629,8 @@ function teamActions({
     imLoginWait: (payload) => call2("im-login-wait", payload),
     skillLibrary: (signal) => call2("skill-library", {}, signal),
     getSkill: (name, signal) => call2("skill-library-get", { name }, signal),
-    saveSkill: (skill) => after(saveSkill(skill)),
+    // The panel-scoped Check refreshes its own rows. Hand it the result before a team pull can delay delivery.
+    saveSkill: (skill, signal) => signal ? saveSkill(skill, signal) : after(saveSkill(skill)),
     resumeSkillSaves,
     deleteSkill: (name) => after(call2("skill-library-delete", { name })),
     setBotSkill: (id, name, attached, mode) => after(call2(attached ? "bot-skill-add" : "bot-skill-remove", { id, name, mode })),

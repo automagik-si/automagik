@@ -571,3 +571,390 @@ test('#2078 correction a token claim refused by a durable block audits once', as
   assert.equal(calls.length, reviewed)
   assertRefusalAudit(f, before, [text, rootMember.data, archive.fileBytes, f.home])
 })
+
+function linkFixture(t) {
+  const f = fixture(t)
+  const url = 'https://automagik-si.example/link-notes/SKILL.md'
+  let upstream = 'LINK-BODY-1'
+  let serial = 0
+  let fetches = 0
+  let reviews = 0
+  let sourceName = 'link-notes'
+  let description = 'Write a short note.'
+  let answer = CLEAN_REVIEW
+  let openGate
+  let reviewGate
+  install(f.rt, { linkTransport: {
+    resolve: async () => [{ address: '140.82.112.3', family: 4 }],
+    async open(actual) {
+      assert.equal(actual.href, url)
+      fetches++
+      if (openGate) await openGate
+      if (upstream === null) throw new Error('Synthetic offline fixture')
+      const bytes = Buffer.from(`---\nname: ${sourceName}\ndescription: ${description}\n---\n${upstream}\n`)
+      const { Readable } = await import('node:stream')
+      return Object.assign(Readable.from([bytes]), { statusCode: 200, headers: {} })
+    },
+  } })
+  f.rt.assembleLlm = async request => {
+    assert.deepEqual(request.tools, [])
+    reviews++
+    if (reviewGate) await reviewGate
+    return assembledReview(answer)
+  }
+  const save = input => f.call('skill-library-save', input)
+  const start = async input => {
+    const operation = (++serial).toString(16).padStart(32, '0')
+    const result = await save({ ...input, operation })
+    assert.deepEqual(result, { pending: true })
+    return operation
+  }
+  const poll = async (operation, recover = false) => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const result = await save({ operation, poll: true, recover })
+      if (!result.pending) return result
+      await delay(5)
+    }
+    assert.fail('Pending skill operation did not finish')
+  }
+  const run = async input => poll(await start(input))
+  const name = 'link-notes'
+  const previewInput = { preview: true, source: 'link', url }
+  const check = { update: 'check', name }
+  const applyUpdate = (token, confirm) => ({ update: 'apply', name, token, ...(confirm ? { confirm } : {}) })
+  const seed = async () => {
+    const preview = await run(previewInput)
+    assert.match(preview.token ?? '', /^[a-f0-9]{32}$/, JSON.stringify(preview))
+    assert.equal(preview.needsConfirm, undefined)
+    assert.deepEqual(await run({ token: preview.token, name }), { saved: true })
+    await f.call('bot-skill-add', { id: 'a', name })
+    return preview
+  }
+  const data = () => JSON.parse(readFileSync(f.path, 'utf8'))
+  const mutate = fn => {
+    const value = data()
+    fn(value)
+    writeFileSync(f.path, JSON.stringify(value))
+  }
+  const block = async (hash, area = 'prompt-injection') => {
+    const { createHash, createHmac } = await import('node:crypto')
+    const findings = [{ file: 'SKILL.md', line: 1, severity: 'low', area, reason: 'Synthetic durable finding.' }]
+    const digest = createHash('sha256').update(JSON.stringify(findings)).digest('hex')
+    const seal = createHmac('sha256', readFileSync(join(f.home, 'skill-review.key')))
+      .update(JSON.stringify(['injection-v1', hash, digest])).digest('hex')
+    mutate(value => { (value.reviewBlocks ??= {})[hash] = { findings, seal } })
+  }
+  return { ...f, url, name, previewInput, check, applyUpdate, seed, start, poll, run, data, mutate, block,
+    counts: () => [fetches, reviews], upstream: value => { upstream = value }, sourceName: value => { sourceName = value },
+    description: value => { description = value }, answer: value => { answer = value },
+    delayOpen: gate => { openGate = gate }, delayReview: gate => { reviewGate = gate } }
+}
+
+const linkFinding = (area = 'other') => JSON.stringify({
+  findings: [{ file: 'SKILL.md', line: 1, severity: 'low', area, reason: 'Synthetic reviewer finding.' }], overflow: false,
+})
+
+test('#2079 link Check and Apply bind the source, complete diff and latest receipt', async t => {
+  const f = linkFixture(t)
+  const preview = await f.seed()
+  assert.deepEqual(f.counts(), [1, 1])
+  const original = f.data()
+  const prior = original.skills[f.name]
+  assert.equal(prior.hash, preview.hash)
+  assert.deepEqual(Object.keys(prior.source).sort(), ['fetchedAt', 'host', 'kind', 'ref', 'revision', 'url'])
+  assert.equal(prior.source.url, f.url)
+  assert.match(prior.source.revision, /^sha256:[a-f0-9]{64}$/)
+  assert.equal(statSync(f.path).mode & 0o777, 0o600)
+  const before = readFileSync(f.path, 'utf8')
+  const stamp = statSync(f.path).mtimeMs
+  const unchanged = await f.run(f.check)
+  assert.equal(unchanged.upToDate, true)
+  assert.equal(typeof unchanged.checkedAt, 'number')
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+  assert.equal(statSync(f.path).mtimeMs, stamp)
+  f.answer(linkFinding())
+  f.upstream('LINK-BODY-2 at https://api.changed.example/')
+  const changed = await f.run(f.check)
+  assert.deepEqual(changed.diff.files.changed.map(file => file.path), ['SKILL.md'])
+  assert.deepEqual(changed.findings.map(finding => finding.rule ?? finding.area), ['endpoint', 'endpoint', 'other'])
+  assert.deepEqual(changed.diff.findings.new, changed.findings)
+  assert.equal(changed.endpoints.new[0].host, 'api.changed.example')
+  assert.deepEqual(changed.usedBy.map(bot => bot.id), ['a'])
+  assert.match(changed.needsConfirm, /^[a-f0-9]{64}$/)
+  assert.deepEqual(f.data().skills, original.skills)
+  assert.deepEqual(f.data().active, original.active)
+  assert.match(f.rt.skillLibrary.active('a')[0].content, /LINK-BODY-1/)
+  const change = f.applyUpdate(changed.token, changed.needsConfirm)
+  await assert.rejects(f.call('skill-library-save', change, { role: 'member', id: 'member' }), /Only the person/)
+  assert.match(readFileSync(f.audit, 'utf8'), /"reason":"owner-only"/)
+  const again = await f.run(f.check)
+  assert.deepEqual(f.counts(), [4, 2])
+  assert.equal(again.needsConfirm, changed.needsConfirm)
+  const noReceipt = await f.run(f.applyUpdate(again.token))
+  assert.equal(noReceipt.needsConfirm, again.needsConfirm)
+  f.rt.skillReviewModel = async () => undefined
+  assert.deepEqual(await f.run(f.applyUpdate(again.token, again.needsConfirm)), { saved: true })
+  assert.deepEqual(f.counts(), [4, 2])
+  assert.equal(f.data().skills[f.name].source.revision, changed.source.revision)
+  assert.notEqual(f.data().skills[f.name].hash, prior.hash)
+  assert.deepEqual(f.data().active, original.active)
+  assert.match(f.rt.skillLibrary.active('a')[0].content, /LINK-BODY-2/)
+  await assert.rejects(f.run(change), /changed since the check/)
+  f.sourceName('different-notes')
+  await assert.rejects(f.run(f.check), /now names the skill different-notes/)
+  f.sourceName(f.name)
+  f.upstream(null)
+  await assert.rejects(f.run(f.check), /could not be reached/)
+  f.upstream('LINK-BODY-2 at https://api.changed.example/')
+  assert.equal((await f.run(f.check)).upToDate, true)
+})
+
+test('#2079 link preview requires admission and mandatory model review before minting a token', async t => {
+  const f = linkFixture(t)
+  await assert.rejects(f.call('skill-library-save', f.previewInput), /Invalid Skills save operation/)
+  f.description('a'.repeat(201))
+  await assert.rejects(f.run(f.previewInput), /one-line description of up to 200/)
+  assert.deepEqual(f.counts(), [1, 0])
+  f.description('Write a short note.')
+  f.sourceName('help')
+  await assert.rejects(f.run(f.previewInput), /reserved.*\/help/)
+  assert.deepEqual(f.counts(), [2, 0])
+  f.sourceName(f.name)
+  f.answer(linkFinding('prompt-injection'))
+  const injection = await f.run(f.previewInput)
+  assert.equal(injection.refused, true)
+  assert.match(injection.message, /prompt injection/)
+  assert.equal(injection.findings[0].injection, true)
+  assert.equal(injection.token, undefined)
+  f.upstream('LINK-BODY-2')
+  f.rt.skillReviewModel = async () => undefined
+  const unavailable = await f.run(f.previewInput)
+  assert.equal(unavailable.refused, true)
+  assert.match(unavailable.message, /no background model/)
+  assert.equal(unavailable.token, undefined)
+  assert.deepEqual(f.counts(), [4, 1])
+  assert.deepEqual(f.data().skills, {})
+})
+
+test('#2079 live durable injection refusal wins over changed findings on both claims', async t => {
+  const f = linkFixture(t)
+  f.answer(linkFinding())
+  const preview = await f.run(f.previewInput)
+  await f.block(preview.hash)
+  const noCreate = await f.run({ token: preview.token, name: f.name, confirm: preview.needsConfirm })
+  assert.match(noCreate.message, /prompt injection/)
+  assert.ok(noCreate.findings.some(finding => finding.injection))
+  assert.deepEqual(f.data().skills, {})
+  f.answer(CLEAN_REVIEW)
+  f.upstream('LINK-BODY-2')
+  await f.seed()
+  const prior = f.data()
+  f.answer(linkFinding())
+  f.upstream('LINK-BODY-3')
+  const change = await f.run(f.check)
+  await f.block(change.hash)
+  const counts = f.counts()
+  const prevented = await f.run(f.applyUpdate(change.token, change.needsConfirm))
+  assert.equal(prevented.refused, true)
+  assert.match(prevented.message, /prompt injection/)
+  assert.ok(prevented.findings.some(finding => finding.injection))
+  assert.deepEqual(f.counts(), counts)
+  assert.deepEqual(f.data().skills, prior.skills)
+  assert.deepEqual(f.data().active, prior.active)
+  assert.match(f.rt.skillLibrary.active('a')[0].content, /LINK-BODY-2/)
+  await assert.rejects(f.run(f.applyUpdate(change.token, change.needsConfirm)), /preview expired/i)
+})
+
+test('#2079 Check exposes valid metadata on holds and never trusts a damaged old hash', async t => {
+  const f = linkFixture(t)
+  await f.seed()
+  const prior = f.data().skills[f.name]
+  f.mutate(value => { value.skills[f.name].content = 'DAMAGED OLD CONTENT'; value.reviews = {} })
+  for (const projection of [(await f.call('skill-library')).skills[0], await f.call('skill-library-get', { name: f.name })]) {
+    assert.equal(projection.checkable, true)
+    assert.deepEqual(projection.source, prior.source)
+    assert.equal(projection.hash, undefined)
+    assert.equal(projection.description, undefined)
+    assert.equal(projection.content, undefined)
+    assert.equal(projection.reviewHash, undefined)
+  }
+  const checked = await f.run(f.check)
+  assert.notEqual(checked.upToDate, true)
+  assert.equal(checked.diff.held, true)
+  assert.equal(checked.diff.files, undefined)
+  assert.deepEqual(f.counts(), [2, 2])
+  assert.deepEqual(await f.run(f.applyUpdate(checked.token)), { saved: true })
+  f.mutate(value => { value.skills[f.name].source.url = f.url.replace('https://', 'https://faux@') })
+  const invalid = (await f.call('skill-library')).skills[0]
+  assert.equal(invalid.checkable, undefined)
+  assert.equal(invalid.source, undefined)
+  await assert.rejects(f.run(f.check), /Only a skill made from a link/)
+  assert.deepEqual(f.counts(), [2, 2])
+  assert.deepEqual(await f.call('skill-library-delete', { name: f.name }), { saved: true })
+})
+
+test('#2079 a foreign review seal holds the link and stored-byte re-accept never fetches', async t => {
+  const f = linkFixture(t)
+  await f.seed()
+  f.mutate(value => { delete value.skills[f.name].reviewSeal; value.reviews = {} })
+  const stored = await f.call('skill-library-get', { name: f.name })
+  assert.match(stored.held, /has not reviewed/)
+  assert.ok(stored.reviewHash)
+  const equal = await f.run(f.check)
+  assert.equal(equal.upToDate, true)
+  assert.equal(equal.reviewHash, stored.reviewHash)
+  assert.equal(equal.held, stored.held)
+  assert.deepEqual(await f.run({ name: f.name, edit: true, reviewHash: stored.reviewHash }), { saved: true })
+  assert.deepEqual(f.counts(), [2, 2])
+  assert.deepEqual(f.data().skills[f.name].source, stored.source)
+})
+
+test('#2079 F1a recovers verified injection-held checks and refuses stale tokens', async t => {
+  const f = linkFixture(t)
+  await f.seed()
+  const prior = f.data().skills[f.name]
+  await f.block(prior.hash)
+  const row = await f.call('skill-library-get', { name: f.name })
+  assert.match(row.held, /prompt injection/)
+  assert.equal(row.checkable, true)
+  assert.equal(row.hash, undefined)
+  assert.equal(row.reviewHash, undefined)
+  await assert.rejects(f.run({ name: f.name, edit: true, reviewHash: prior.hash }), /stored files/)
+  const heldId = await f.start(f.check)
+  const held = await f.poll(heldId)
+  const beforeRecover = f.counts()
+  assert.deepEqual(await f.poll(heldId, true), { ...held, form: { kind: 'check', target: f.name }, stale: false })
+  assert.deepEqual(f.counts(), beforeRecover)
+  assert.equal(held.upToDate, true)
+  assert.equal(held.held, row.held)
+  assert.equal(held.reviewHash, undefined)
+
+  f.upstream('LINK-BODY-RECOVERY')
+  const opened = Promise.withResolvers()
+  const reviewed = Promise.withResolvers()
+  f.delayOpen(opened.promise)
+  f.delayReview(reviewed.promise)
+  const priorCounts = f.counts()
+  const checkId = await f.start(f.check)
+  assert.deepEqual(await f.call('skill-library-save', { operation: checkId, poll: true, recover: true }), { pending: true })
+  opened.resolve()
+  for (let attempt = 0; attempt < 200 && f.counts()[1] === priorCounts[1]; attempt++) await delay(5)
+  assert.deepEqual(f.counts(), [priorCounts[0] + 1, priorCounts[1] + 1])
+  assert.deepEqual(await f.call('skill-library-save', { operation: checkId, poll: true, recover: true }), { pending: true })
+  reviewed.resolve()
+  const changed = await f.poll(checkId)
+  assert.match(changed.token, /^[a-f0-9]{32}$/)
+  assert.equal(changed.needsConfirm, undefined)
+  const before = f.counts()
+  assert.deepEqual(await f.poll(checkId, true), { ...changed, form: { kind: 'check', target: f.name }, stale: false })
+  assert.deepEqual(f.counts(), before)
+  f.upstream('LINK-BODY-STALE')
+  const staleId = await f.start(f.check)
+  const stale = await f.poll(staleId)
+  const apply = f.applyUpdate(changed.token)
+  const applyId = await f.start(apply)
+  assert.deepEqual(await f.poll(applyId), { saved: true })
+  const committed = readFileSync(f.path, 'utf8')
+  assert.deepEqual(await f.call('skill-library-save', { ...apply, operation: applyId }), { saved: true })
+  assert.equal(readFileSync(f.path, 'utf8'), committed)
+  const now = f.counts()
+  assert.deepEqual(await f.poll(staleId, true), { ...stale, form: { kind: 'check', target: f.name }, stale: true })
+  assert.deepEqual(f.counts(), now)
+  await assert.rejects(f.run(f.applyUpdate(stale.token)), /changed since the check/)
+  assert.equal(readFileSync(f.path, 'utf8'), committed)
+  assert.ok(f.data().reviewBlocks[prior.hash].seal)
+  f.upstream('LINK-BODY-RECOVERY')
+  assert.equal((await f.run(f.check)).upToDate, true)
+  assert.deepEqual(f.counts(), [now[0] + 1, now[1]])
+})
+
+test('#2079 F4 tombstones expire and evict payloads without repeating work', async t => {
+  const f = linkFixture(t)
+  t.mock.timers.enable({ apis: ['Date'], now: 1_790_000_000_000 })
+  await f.seed()
+  f.upstream('LINK-BODY-2')
+  const id = await f.start(f.check)
+  assert.ok((await f.poll(id)).token)
+  const before = readFileSync(f.path, 'utf8')
+  const counts = f.counts()
+  t.mock.timers.tick(15 * 60_000 + 1)
+  const expired = { expired: true, kind: 'check' }
+  assert.deepEqual(await f.poll(id, true), expired)
+  assert.deepEqual(await f.call('skill-library-save', { ...f.check, operation: id }), expired)
+  await assert.rejects(f.call('skill-library-save', { ...f.check, name: 'other', operation: id }), /stored files/)
+  await assert.rejects(f.call('skill-library-save', { poll: true, operation: id }, { role: 'owner', id: 'other' }), /no longer available/)
+  assert.deepEqual(f.counts(), counts)
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+  const ids = []
+  for (let index = 0; index < 17; index++) {
+    ids.push(await f.start(f.check))
+    await f.poll(ids.at(-1))
+  }
+  assert.deepEqual(await f.poll(ids[0], true), expired)
+  assert.deepEqual(await f.call('skill-library-save', { ...f.check, operation: ids[0] }), expired)
+  assert.ok((await f.poll(ids[1], true)).token)
+  assert.deepEqual(f.counts(), [counts[0] + 17, counts[1]])
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+})
+
+test('#2079 source dispatch and expiry classify an overlapping request as the same Check', async t => {
+  const f = linkFixture(t)
+  t.mock.timers.enable({ apis: ['Date'], now: 1_790_000_000_000 })
+  await f.seed()
+  f.upstream('LINK-BODY-2')
+  const input = { ...f.check, preview: true, source: 'archive' }
+  const operation = await f.start(input)
+  const checked = await f.poll(operation)
+  assert.ok(checked.token)
+  const retry = () => f.call('skill-library-save', { ...input, operation })
+  assert.deepEqual(await retry(), checked)
+  assert.deepEqual(f.counts(), [2, 2])
+  const before = readFileSync(f.path, 'utf8')
+  t.mock.timers.tick(15 * 60_000 + 1)
+  const expired = { expired: true, kind: 'check' }
+  assert.deepEqual(await retry(), expired)
+  assert.deepEqual(await f.poll(operation, true), expired)
+  assert.deepEqual(f.counts(), [2, 2])
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+})
+
+test('#2079 source preview claims stay stale after a conflicting name is deleted', async t => {
+  const f = linkFixture(t)
+  const operation = await f.start(f.previewInput)
+  const initial = await f.poll(operation)
+  assert.ok(initial.token)
+  assert.equal((await f.poll(operation, true)).stale, false)
+  assert.deepEqual(await f.save({ name: f.name }), { saved: true })
+  assert.equal((await f.poll(operation, true)).stale, true)
+  await f.call('skill-library-delete', { name: f.name })
+  const before = readFileSync(f.path, 'utf8')
+  const counts = f.counts()
+  const recovered = await f.poll(operation, true)
+  const claim = f.run({ token: initial.token, name: f.name })
+  await assert.rejects(claim, /changed since the preview/)
+  assert.equal(recovered.stale, true)
+  assert.deepEqual(f.counts(), counts)
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+})
+
+test('#2079 source Apply refuses a receipt superseded by another sealed nonblocking review', async t => {
+  const f = linkFixture(t)
+  await f.seed()
+  f.upstream('LINK-BODY-2')
+  f.answer(linkFinding())
+  const original = await f.run(f.check)
+  assert.match(original.needsConfirm, /^[a-f0-9]{64}$/)
+  f.mutate(value => { delete value.reviews[original.hash] })
+  f.answer(linkFinding().replace('Synthetic reviewer finding.', 'Different synthetic finding.'))
+  const replacement = await f.run(f.check)
+  assert.equal(replacement.hash, original.hash)
+  assert.match(replacement.needsConfirm, /^[a-f0-9]{64}$/)
+  assert.notEqual(replacement.needsConfirm, original.needsConfirm)
+  assert.notDeepEqual(replacement.review.findings, original.review.findings)
+  const counts = f.counts()
+  const before = readFileSync(f.path, 'utf8')
+  await assert.rejects(f.run(f.applyUpdate(original.token, original.needsConfirm)), /preview expired/)
+  assert.deepEqual(f.counts(), counts)
+  assert.equal(readFileSync(f.path, 'utf8'), before)
+  assert.match(f.rt.skillLibrary.active('a')[0].content, /LINK-BODY-1/)
+})
