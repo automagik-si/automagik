@@ -3496,6 +3496,9 @@ test("restart rechecks the local old pane after its replacement is ready", (t) =
   const r = s.cli(["restart", "Genie", "--fresh", "--json"]);
   assert.equal(r.code, 0, r.err);
   assert.equal(r.json().terminal, "t100");
+  assert.ok(r.json().warnings.includes(
+    "t5 wasn't ended (hc kill: couldn't confirm it is still the same live terminal); "
+    + "end it with hc kill t5."));
   const calls = s.calls();
   assert.equal(at(calls, "kill", "t5"), -1);
   const recheck = calls.findLastIndex(([op, pane]) => op === "get" && pane === "t5");
@@ -4391,6 +4394,26 @@ test("restart --tree: hc run failing for helper 2 of 3: helpers 1 and 3 run agai
     assert.ok(checks.length > 1, `${old} stays through readiness checks for ${next}`);
   }
   onePanePerSession(s);
+});
+
+test("restart --tree keeps a separately killed helper listed when its rerun fails", (t) => {
+  const { s } = treeScene(t);
+  const state = s.hcState();
+  state.surviveParent = ["t8"];
+  state.failRun = ["rev-1"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /t8 \(rev-1\) wasn't run again: hc run failed \(hc: can't start rev-1\)/);
+  assert.match(r.err, /put the id where \*\*\* stands; hc get t8 shows it/);
+  const calls = s.calls();
+  const parentKill = at(calls, "kill", "t5"), helperKill = at(calls, "kill", "t8");
+  const helperRun = calls.findIndex((c) => c[0] === "run" && c.includes("rev-1"));
+  assert.ok(parentKill >= 0 && parentKill < helperKill && helperKill < helperRun);
+  const old = s.hcState().terminals.find((p) => p.address === "t8");
+  assert.equal(old?.state, "finished", "the helper's old terminal stays listed");
+  assert.equal(old.labels["revive.session"], SID2);
 });
 
 test("restart --tree failing with a gone folder on the project list: pruned, no note, the last stderr line stays the helper's (review Low 4)", (t) => {

@@ -464,9 +464,6 @@ export function loginRecordTests(cli) {
     const restart = since("restartResolved");
     assert.match(restart, /const beforeMove = managedTree \? \(\) => checkHelperLogins\(plans\) : undefined;/);
     assert.match(restart, /await attachMoved\(bot, held\.binding, seat\.terminal, created, key, beforeMove\);[\s\S]+const treeKill = managedTree \? await killTree\(\) : null;/);
-    const endOld = restart.slice(restart.indexOf("const endOld = async () => {"))
-      .split("\n  };")[0];
-    assert.match(endOld, /return hcKill\(old\.address, \{ before,/);
     assert.match(restart, /const killTree = async \(\) => \{\s*await captureHelperSkills\(plans, old, \{ project, bot, view \}\);\s*return endOld\(\);\s*\};/);
     assert.match(since("attachMoved"), /beforeWrite\?\.\(\);\s*write\(rows\);/);
     assert.match(since("commitAdoption"), /beforeWrite\?\.\(\);\s*appendAttach\(path, rows\);/);

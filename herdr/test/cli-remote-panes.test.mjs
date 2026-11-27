@@ -3093,6 +3093,18 @@ test("restart --machine rechecks the linked old pane before killing it", (t) => 
   assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
 });
 
+test("restart --machine leaves an old pane that finishes before the kill listed", (t) => {
+  const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
+  const s = scene(t, { terminals: [pane] });
+  assert.equal(s.cli(["attach", ATLAS, "vm/t8", ...s.on]).code, 0);
+  s.setState((state) => { state.terminals[0].exitAfterGets = 3; });
+  const r = s.cli(["restart", ATLAS, ...s.on, "--fresh", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().terminal, "t100");
+  assert.ok(!s.calls().some(([op, id]) => op === "kill" && id === "vm/t8"));
+  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8")?.state, "finished");
+});
+
 test("restart --machine --expect-pane: a pane given to another bot while the replacement starts is refused and that pane is never ended", (t) => {
   const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
   const s = scene(t, { terminals: [pane] });
