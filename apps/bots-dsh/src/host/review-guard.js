@@ -10,10 +10,16 @@ import { guardGroupRefusal, refusal } from './refusal.js'
 import { guardGroupText } from '../shared/guard-groups.js'
 import { reviewGuardReach } from '../shared/review-guard.js'
 import { teamToolOf } from './approvals.js'
-import { cleanTrack, isNotesWrite } from './review-mark.js'
+import { cleanTrack, isNotesWrite, planOpenAt } from './review-mark.js'
 import { activeSolverLimit, limitWhat, solverTracked } from './solver-progress.js'
 import { reachesShell } from './tool-deny.js'
 import { nativeCheckDirectory, normalizeCheckCommand } from './solver-check-command.js'
+import { isSolverBot, isWrittenSolverMethod } from '../shared/solver-method.js'
+import { solverReadPolicy } from './solver-confine.js'
+
+export const POLICY_UNAVAILABLE_TEXT = "The Bot team could not confirm this Session's rules, so nothing was sent. Send your message again."
+export const PLAN_GATE_RECLOSED_TEXT = "Work now waits for the reviewer's verdict on a new plan, so this answer stopped. Send your message again."
+export const actualSolver = bot => !!bot && (isSolverBot(bot) || isWrittenSolverMethod(bot.instructions))
 
 // The team tools (constants.js TEAM_TOOLS, each on exactly one list) open while the plan waits for
 // its verdict: they read the team, a chat or a memory, or ask the person. `update_bot` and
@@ -106,6 +112,24 @@ function trimmedCommand(input) {
 }
 
 export function install(rt) {
+  const planGateClosed = bot => actualSolver(bot) && bot.reviewGuard === true && planOpenAt(bot, bot.reviewTrack) === undefined
+  function withdrawPlanAuthority(bot) {
+    const acp = rt.ctx.get?.('acpAgents')
+    if (typeof acp?.endSession !== 'function') return
+    const chat = rt.chatOf?.(bot.id)
+    const end = id => {
+      try { acp.endSession(id, PLAN_GATE_RECLOSED_TEXT) } catch {}
+    }
+    if (typeof chat === 'string') end(chat)
+    let sessions
+    try { sessions = rt.ctx.sessions?.list?.() ?? [] } catch { return }
+    for (const session of sessions) {
+      if (typeof session?.id !== 'string' || session.id === chat) continue
+      const policy = rt.solverPolicyOf?.(session.id, { id: session.id, session })
+      if (policy?.state === 'solver' && policy.own && policy.bot === bot) end(session.id)
+    }
+  }
+
   function reviewGuardReachOf(bot, agent) {
     try {
       const session = agent?.session
@@ -113,7 +137,7 @@ export function install(rt) {
       if (typeof session?.id !== 'string' || session.id === '' || typeof presets?.current !== 'function') return 'hard'
       const level = presets.current(session) === 'auto' ? 'auto'
         : rt.sessionWide(agent.id ?? session.id, session) === true ? 'full' : 'ask'
-      return reviewGuardReach({ ...bot, nativeToolsBlock: rt.nativeToolsBlock?.(bot) }, level)
+      return reviewGuardReach({ ...bot, nativeToolsBlock: rt.nativeToolsBlock?.(bot) }, level, planGateClosed(bot))
     } catch {
       return 'hard'
     }
@@ -170,6 +194,10 @@ export function install(rt) {
    */
   function reviewGuardHolds(bot, own, name, args, definition, base, call) {
     if (!own || !solverTracked(bot)) return undefined
+    if (actualSolver(bot) && name === 'acp_tool') {
+      const { held } = solverReadPolicy(rt, bot, name, args, base, { agentConsumes: true }) ?? {}
+      if (held) return held
+    }
     const track = cleanTrack(bot.reviewTrack)
     const tool = name === 'acp_tool' && typeof args?.title === 'string' && args.title !== '' ? args.title : teamToolOf(name) || 'this tool'
     const { relevant, checkCommand, nativeCommand } = solverCall(bot, name, args, definition, base)
@@ -198,7 +226,7 @@ export function install(rt) {
       }
     }
     if (bot.reviewGuard !== true) return undefined
-    if (typeof track?.planVerdictAt === 'number') return undefined
+    if (actualSolver(bot) ? !planGateClosed(bot) : typeof track?.planVerdictAt === 'number') return undefined
     const held = heldCall(rt, bot, name, args, definition, base)
     if (held === undefined) return undefined
     const why = track?.openedBy === 'bot' ? 'guard-request' : 'guard'
@@ -208,7 +236,21 @@ export function install(rt) {
     }
     const who = quoted(reviewer.name)
     if (held === 'message') return { why, text: `${bot.name} can message only ${who} until ${who} answers the plan.` }
-    return { why, text: waiting(`${bot.name} cannot use ${tool} yet: its review guard holds work until ${who} answers the plan. Send the plan to ${who} with message_bot (reply_to "me"), end your turn, and wait for its verdict. Until then you can read, research, ask the person, and write notes to .solver/notes.md with the write tool.`) }
+    return { why, text: waiting(`${bot.name} cannot use ${tool} yet: its review guard holds work until ${who} answers the plan. Send the plan to ${who} with message_bot (solver_review "plan", solver_request set to the request ID, reply_to "me"), end your turn, and wait for its verdict. Until then you can read, research, ask the person, and write notes to .solver/notes.md with the write tool.`) }
+  }
+
+  function solverQuestionDecision({ agent, args, cwd, provider, callId }) {
+    const sessionId = agent?.session?.id ?? agent?.id
+    const policy = rt.solverPolicyOf?.(sessionId, agent)
+    if (policy?.state === 'unavailable') return { decision: 'refuse', text: POLICY_UNAVAILABLE_TEXT }
+    const bot = policy?.bot
+    if (!bot || !policy.own || !solverTracked(bot)) return undefined
+    const call = solverCallId(sessionId, 'acp_tool', args, callId)
+    const held = reviewGuardHolds(bot, true, 'acp_tool', args, undefined, cwd, call)
+    if (held) return { decision: 'refuse', text: held.text }
+    if (policy.state === 'solver' && provider === 'acp-claude' && ['read', 'search'].includes(args?.kind)) {
+      return { decision: 'allow' }
+    }
   }
 
   // An ACP agent's question that reaches the approval chain without passing the executor: a
@@ -363,6 +405,7 @@ export function install(rt) {
       }
       throw error
     }
+    if (before !== true && current() && actualSolver(bot)) withdrawPlanAuthority(bot)
     return bot
   }
 
@@ -391,13 +434,15 @@ export function install(rt) {
   const reviewGuardViewOf = (bot, track = bot?.reviewTrack) => {
     if (bot?.reviewGuard !== true) return {}
     const clean = cleanTrack(track)
-    if (clean?.requested !== true || clean.delivered === true || typeof clean.planVerdictAt === 'number') return {}
+    if (clean?.requested !== true || clean.delivered === true || (actualSolver(bot)
+      ? planOpenAt(bot, clean) !== undefined : typeof clean.planVerdictAt === 'number')) return {}
     return { reviewGuardWaitingSince: clean.requestAt }
   }
 
   Object.assign(rt, {
     reviewGuardHolds, reviewGuardReachOf, reviewGuardAsk, setReviewGuard, reviewGuardViewOf,
     reviewGuardOn, groupsOf, checkGuardGroupJoin, taskLaunchHold, setSolverAuto, solverCall,
+    planGateClosed, withdrawPlanAuthority, solverQuestionDecision, isActualSolver: actualSolver,
   })
 }
 

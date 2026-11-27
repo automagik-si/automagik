@@ -17,6 +17,29 @@ const kindOf = kind => (DSH_KINDS.has(kind) ? kind : 'other')
 const OUTPUT_LIMIT = 20_000
 const LASTING_ONLY = 'lasting-only'
 const CONFINED = 'confined'
+const STALE_QUESTION = 'The agent’s permission question no longer matches this call.'
+
+function managedCommand(live, tool, permission) {
+  const mode = live.run?.modes?.currentModeId
+  const input = permission?.call?.rawInput ?? tool.rawInput
+  const network = typeof permission?.title === 'string'
+    && /^(?:https?|socks5(?:tcp|udp)) network access to \S/i.test(permission.title)
+  return typeof mode === 'string' && /^permission-profile:automagik-(?:read|workspace|gate|image)-[0-9a-f]{32}$/.test(mode)
+    && permission?.startsCommand === true && tool.mcp !== true && !network
+    && input !== null && typeof input === 'object'
+    && [Object.prototype, null].includes(Object.getPrototypeOf(input))
+    && typeof input.command === 'string' && input.command.trim() !== '' && Object.hasOwn(input, 'command')
+    && Reflect.ownKeys(input).every(key => key === 'command' || key === 'cwd')
+    && permission.options.some(option => option.kind === 'allow_once' || option.kind === 'allow_always')
+}
+
+const snapshotOf = call => structuredClone(callArguments(call))
+function compatibleCall(captured, current) {
+  const { parent: capturedParent, ...before } = captured
+  const { parent: currentParent, ...after } = current
+  return (capturedParent === undefined || currentParent === undefined || capturedParent === currentParent)
+    && isDeepStrictEqual(before, after)
+}
 
 const diffsOf = content => (Array.isArray(content) ? content : [])
   .filter(item => item?.type === 'diff' && typeof item.path === 'string')
@@ -254,6 +277,68 @@ export function mirrorTool(host) {
         rejectDispatched()
         return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent’s permission question no longer matches this call.' }
       }
+      // Decisions apply to a captured question on the current child or direct tool. The DSH
+      // record still supplies the stricter dispatch binding when this is a nested mirror.
+      const capture = (target, question, nested = false) => {
+        let captured
+        try { captured = snapshotOf(question.call) } catch {}
+        const structuredName = question.call?.structuredName
+        const valid = () => {
+          if (!ownsTool() || run.tools.get(target.id) !== target || target.permission !== question
+            || exec.signal?.aborted || run.cancelled || run.disposed || question.signal?.aborted
+            || target.retired || target.ended || target.unanswerable || target.parentConflict
+            || typeof structuredName !== 'string' || structuredName === '' || question.call?.structuredName !== structuredName
+            || target.structuredName !== structuredName || captured?.id !== target.id) return false
+          if (dispatched && !nested && !matchesQuestion(question)) return false
+          try {
+            const fromQuestion = snapshotOf(question.call)
+            const fromTool = snapshotOf(target)
+            return compatibleCall(captured, fromQuestion) && compatibleCall(captured, fromTool)
+              && compatibleCall(fromQuestion, fromTool)
+              && (nested || compatibleCall(captured, args) && compatibleCall(captured, exec.arguments))
+          } catch { return false }
+        }
+        const decisionFor = () => {
+          try {
+            const decision = host.questionGuard?.({
+              agent, args: structuredClone(captured), name: structuredName, provider: live.provider,
+              cwd: live.workspace, callId: nested ? `${callId}:child:${target.id}` : callId,
+            })
+            if (decision && typeof decision.then === 'function') throw new Error('Expected a synchronous guard.')
+            return decision
+          } catch {
+            return { decision: 'refuse', text: 'The Bot team could not confirm this call’s rules.' }
+          }
+        }
+        const answer = (outcome, text, alreadyChecked = false) => {
+          if (outcome === 'allowed-once' && !alreadyChecked && valid()) {
+            const decision = decisionFor()
+            if (decision?.decision === 'refuse') return answer('rejected', decision.text, true)
+          }
+          const current = valid()
+          if (!current || outcome === 'allowed-once' && !question.options.some(option => option.kind === 'allow_once')) {
+            if (target.permission === question) target.refusedReason = STALE_QUESTION
+            question.answer(optionFor('rejected', question.options))
+            return
+          }
+          if (text) target.refusedReason = text
+          question.answer(optionFor(outcome, question.options))
+        }
+        const decide = () => {
+          if (typeof host.questionGuard !== 'function' || live.policyManaged !== true) return false
+          if (managedCommand(live, target, question)) return false
+          if (!valid()) {
+            answer('rejected', STALE_QUESTION)
+            return true
+          }
+          const decision = decisionFor()
+          if (decision?.decision === 'allow') answer('allowed-once', undefined, true)
+          else if (decision?.decision === 'refuse') answer('rejected', decision.text)
+          else return false
+          return true
+        }
+        return { answer, decide }
+      }
       if (marked && (run?.spec?.provider !== 'acp-claude' || live.native !== true || (tool && !ownedOnEntry))) {
         observation.mismatch = true
         return { title: args.title, kind: args.kind, status: 'failed', text: observation.reason }
@@ -301,6 +386,8 @@ export function mirrorTool(host) {
                 permission.answer(optionFor('rejected', permission.options))
                 continue
               }
+              const captured = capture(tool, permission)
+              if (captured.decide()) continue
               let outcome
               try {
                 outcome = await ask(host, live, tool, exec, permission)
@@ -309,13 +396,16 @@ export function mirrorTool(host) {
                 outcome = 'rejected'
               }
               const decision = dispatched && (outcome === 'unavailable' || !matchesQuestion(permission)) ? 'rejected' : outcome
-              permission.answer(optionFor(decision, permission.options))
+              if (live.policyManaged === true && decision === 'allowed-once') captured.answer(decision)
+              else permission.answer(optionFor(decision, permission.options))
               continue
             }
             if (isTerminal(tool) || !live.run.busy) break
             const nested = nestedQuestion(live, tool)
             if (nested !== undefined) {
               const question = nested.permission
+              const captured = capture(nested, question, true)
+              if (!marked && question.call?.structuredName !== 'request_permissions' && captured.decide()) continue
               if (dispatchNested) {
                 let answered
                 try { answered = await host.runNested?.(live, nested, exec, question) } catch {}
@@ -330,7 +420,9 @@ export function mirrorTool(host) {
               if (level.auto === true && typeof host.runNested === 'function'
                 && await host.runNested(live, nested, exec)) continue
               question.asked = true
-              question.answer(optionFor(await ask(host, live, nested, exec, question, { review: false }), question.options))
+              const outcome = await ask(host, live, nested, exec, question, { review: false })
+              if (live.policyManaged === true && outcome === 'allowed-once') captured.answer(outcome)
+              else question.answer(optionFor(outcome, question.options))
               continue
             }
             await changed(tool, exec.signal, live.native === true ? live.run : undefined)
@@ -508,22 +600,12 @@ async function ask(host, live, tool, exec, permission, { review = true } = {}) {
   tool.lastingReason = undefined
   tool.refusedReason = undefined
   const options = permission?.options ?? []
-  const mode = live.run?.modes?.currentModeId
-  const call = permission?.call
-  const rawInput = call?.rawInput ?? tool.rawInput
-  const network = typeof permission?.title === 'string'
-    && /^(?:https?|socks5(?:tcp|udp)) network access to \S/i.test(permission.title)
   // Codex keeps the managed profile's deny rule even after approving a command escalation.
   // codex-acp's standard renderer uses execute/pending for both new commands and write_stdin approvals.
-  if (typeof mode === 'string' && /^permission-profile:automagik-(?:read|workspace|image)-[0-9a-f]{32}$/.test(mode)
-    && permission?.startsCommand === true
-    && tool.mcp !== true && !network
-    && rawInput !== null && typeof rawInput === 'object'
-    && [Object.prototype, null].includes(Object.getPrototypeOf(rawInput))
-    && Object.hasOwn(rawInput, 'command') && typeof rawInput.command === 'string' && rawInput.command.trim() !== ''
-    && Reflect.ownKeys(rawInput).every(key => key === 'command' || key === 'cwd')
-    && options.some(option => option.kind === 'allow_once' || option.kind === 'allow_always')) {
-    tool.confinedReason = `${live.name} runs inside its own folder at this Bot's level, so an approval cannot run ${tool.title} outside it. Raise the Bot's level to Full access to run it.`.replace(/\s+/g, ' ').slice(0, 300)
+  if (managedCommand(live, tool, permission)) {
+    tool.confinedReason = live.appliedGate === true
+      ? `${live.name} stays read-only until the reviewer answers the plan. Send again after the verdict.`
+      : `${live.name} runs inside its own folder at this Bot's level, so an approval cannot run ${tool.title} outside it. Raise the Bot's level to Full access to run it.`.replace(/\s+/g, ' ').slice(0, 300)
     live.confinedReason = tool.confinedReason
     return CONFINED
   }

@@ -521,6 +521,47 @@ const implementation = {
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    if (process.env.FAKE_ACP_FIXTURE_MARKER && /^plan-scope-marker (inside|other)$/.test(current)) {
+      const inside = current.endsWith('inside')
+      const path = inside ? process.env.FAKE_ACP_FIXTURE_MARKER : process.env.FAKE_ACP_FIXTURE_OTHER
+      const toolCallId = `fixture-read-${session.turns}`
+      const toolCall = {
+        toolCallId, title: 'Read marker fixture', kind: 'read', status: 'pending',
+        rawInput: { file_path: path }, locations: [{ path }], _meta: { claudeCode: { toolName: 'Read' } },
+      }
+      await update({ sessionUpdate: 'tool_call', ...toolCall })
+      const { outcome } = await conn.requestPermission({
+        sessionId, toolCall, options: [
+          { kind: 'allow_once', optionId: 'yes', name: 'Allow' },
+          { kind: 'reject_once', optionId: 'no', name: 'Reject' },
+        ],
+      })
+      const answer = outcome.optionId ?? outcome.outcome
+      trace({ event: 'fixture-permission', sessionId, toolCallId, answer, path })
+      // The denied operand is deliberately inert even when testing against an older parent.
+      const observed = inside && answer === 'yes'
+      const text = observed ? readFileSync(path, 'utf8') : 'No marker read.'
+      if (observed) trace({ event: 'own-tool-ran', sessionId, toolCallId, mode: session.mode })
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, status: observed ? 'completed' : 'failed',
+        content: [{ type: 'content', content: { type: 'text', text } }],
+      })
+      return { stopReason: 'end_turn' }
+    }
+    if (process.env.FAKE_ACP_FIXTURE_MARKER && /^plan-scope-sandbox (inside|denied|released)$/.test(current)) {
+      const operation = current.split(' ').at(-1)
+      const inside = operation === 'inside'
+      const path = inside ? process.env.FAKE_ACP_FIXTURE_MARKER : process.env.FAKE_ACP_FIXTURE_OTHER
+      const toolCallId = `fixture-sandbox-${session.turns}`
+      const allowed = inside || operation === 'released' && session.mode === 'agent-full-access'
+      const tool = { toolCallId, kind: 'read', title: 'Read synthetic marker', rawInput: { file_path: path } }
+      await update({ sessionUpdate: 'tool_call', status: 'in_progress', ...tool })
+      trace({ event: 'fixture-sandbox', sessionId, toolCallId, path, allowed, mode: session.mode })
+      if (allowed) trace({ event: 'own-tool-ran', sessionId, toolCallId, mode: session.mode })
+      await update({ sessionUpdate: 'tool_call_update', status: allowed ? 'completed' : 'failed', ...tool,
+        content: [{ type: 'content', content: { type: 'text', text: allowed ? readFileSync(path, 'utf8') : 'Synthetic sandbox: Permission denied' } }],
+      })
+      return { stopReason: 'end_turn' }
+    }
     if (/\b(?:guard-nested|late-command|no-command)\b/.test(said)) {
       const waitForFile = async file => {
         const deadline = Date.now() + 8_000

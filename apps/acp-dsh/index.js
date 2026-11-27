@@ -20,7 +20,7 @@ import { homedir } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import z from '@deepseek-ai/schemastery'
 import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js'
-import { AcpAdapter, aside, BRIDGE_PATH, SIDE_MODEL } from './src/host/adapter.js'
+import { AcpAdapter, aside, BRIDGE_PATH, POLICY_UNAVAILABLE_TEXT, SIDE_MODEL } from './src/host/adapter.js'
 import { AgentRun, isUnanswered } from './src/host/acp.js'
 import { AGENTS, cliIdOf, findCommand, isNative, isolatedSignInHintOf, isSignInUrl, launchOf, signedInOf, signInHintOf } from './src/host/agents.js'
 import { answerAside, asideFailure, supportsAside } from './src/host/aside-run.js'
@@ -29,7 +29,7 @@ import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
 import { CliStore, CLI_CHECK_EVERY_MS } from './src/host/clis.js'
 import { CliHomes, HOME_ENV, runCount, stopRuns } from './src/host/cli-homes.js'
-import { canRunProfile, ensureChatProfiles } from './src/host/codex-chat-profiles.js'
+import { canRunProfile, createGateBinding, ensureChatProfiles, gateProfileOf } from './src/host/codex-chat-profiles.js'
 import { NATIVE_OFF_UNAVAILABLE, nativeOffLaunch } from './src/host/codex-native.js'
 import { CONSENT_FILE, ConsentStore } from './src/host/consent.js'
 import { adaptersHome, AdapterStore, CHECK_TICK_MS, homeRelativeText, redactInstallerOutput } from './src/host/install.js'
@@ -190,7 +190,7 @@ export function apply(ctx, config = {}, {
   loginSpawn, loginTimers, loginRecord, loginProbe, imageSetup, account = accountOf, evidenceOf = accountEvidenceOf,
   installation = process.env.DSH_HOME,
   cliHome: override, consentFile: accountFile,
-  logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile, agySkillsVersions,
+  logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile, gateProbeRun, agySkillsVersions,
   platform = process.platform,
   nativeSignInMs = 600_000, nativeLogoutMs = 30_000, nativeSignInLinkMs = 15_000,
   nativeSignInWindowMs = 240_000, nativeSignInCheckMs = 60_000,
@@ -267,6 +267,11 @@ export function apply(ctx, config = {}, {
   const turnGates = new Set()
   let ownAnswerer
   let ownContested = false
+  const questionGuards = new Set()
+  const signInRoots = () => [...new Set([
+    cliHome, homes?.acpHome && join(homes.acpHome, 'cli-homes'), process.env[HOME_ENV]?.trim(),
+    ...['.claude', '.claude.json', '.codex', '.gemini'].map(name => join(homedir(), name)),
+  ].filter(Boolean))]
   // DSH installs its SIGTERM/SIGINT handlers before plugins load. While the host stops, an ACP
   // prompt the agent cancels on its way down was cut by the restart, not stopped by the person
   // or by its own policy (adapter.js). A bare test process has no such handler, so it keeps
@@ -288,6 +293,11 @@ export function apply(ctx, config = {}, {
     images: () => imageKeeper,
     hostStopping: () => hostStopping.now,
     botIdentity: identityReaders.read,
+    policyState: identityReaders.readState,
+    questionGuard: request => {
+      if (questionGuards.size === 1) return questionGuards.values().next().value(request)
+      if (identityReaders.everRegistered()) return { decision: 'refuse', text: POLICY_UNAVAILABLE_TEXT }
+    },
     solverIdentity: id => {
       const identity = identityReaders.read(id)
       if (typeof identity?.solverLimitsPrompt === 'string') return { name: identity.name, solverLimitsPrompt: identity.solverLimitsPrompt }
@@ -728,6 +738,7 @@ export function apply(ctx, config = {}, {
           verify: profile => profileCheck(env.CODEX_PATH, profile, { cwd: env.CODEX_HOME, env }),
         })
         if (profileModes !== undefined) return { command, args, env, profileModes,
+          gateBinding: createGateBinding(env.CODEX_PATH, gateProfileOf(profileModes), env, cliHome, { run: gateProbeRun }),
           ...(context?.sessionFiles === undefined ? {} : sessionFileConfig(env, context.sessionFiles, profileModes)),
         }
         if (context?.sessionFiles?.files?.length) throw new Error('The restricted image profile is unavailable; no image prompt was sent.')
@@ -2524,6 +2535,12 @@ export function apply(ctx, config = {}, {
     },
     /** Read only the Bot that owns this Session. Returns this registration's disposer. */
     botIdentity: identityReaders.register,
+    signInRoots,
+    questionGuard(guard) {
+      if (typeof guard !== 'function') return () => {}
+      questionGuards.add(guard)
+      return () => { questionGuards.delete(guard) }
+    },
     modelIdentityOf: (provider, model) => adapter.modelIdentityOf(provider, model),
     resolveModelIdentity: (provider, model) => adapter.resolveModelIdentity(provider, model),
     /** The live ACP acknowledgement for the answering DSH turn. A canonical resolver also checks for conflicting reports. */

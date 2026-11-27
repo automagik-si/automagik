@@ -4,6 +4,7 @@ import { OMNI_KIND } from './roster.js'
 import { nativeAgentOf } from '../shared/native-tools.js'
 import { solverLimitsPart } from '../shared/solver-method.js'
 import { solverTracked } from './solver-progress.js'
+import { claudeDenyPaths, solverWorkspace } from './solver-confine.js'
 
 const TEAM_RULES = [
   '## How your Bot team works',
@@ -62,7 +63,22 @@ export function install(rt) {
         get: () => rt.nativeToolsEligible(sessionId) ? nativeAgentOf(bot) : undefined,
       },
     })
-    const off = sub.acpAgents?.botIdentity?.(sessionId => {
+    const off = sub.acpAgents?.botIdentity?.((sessionId, { policy = false } = {}) => {
+      const solverPolicy = () => rt.solverPolicyOf?.(sessionId) ?? { state: 'unavailable' }
+      const policyGetters = identity => Object.defineProperties(identity, {
+        solverPolicy: { get: solverPolicy },
+        solver: { get: () => solverPolicy().state === 'solver' },
+        guardedSolver: { get: () => solverPolicy().guarded === true },
+        planGate: { get: () => solverPolicy().gateClosed === true },
+        confineDeny: { get: () => {
+          const result = solverPolicy()
+          if (result.state === 'solver') return claudeDenyPaths(rt, result.bot)
+        } },
+        solverWorkspace: { get: () => {
+          const result = solverPolicy()
+          if (result.state === 'solver') return solverWorkspace(rt, result.bot)
+        } },
+      })
       const owner = rt.selfOf(sessionId)
       const bot = owner === undefined ? undefined : rt.botOf(owner)
       if (bot === undefined) {
@@ -70,7 +86,8 @@ export function install(rt) {
         // not the Bot's chat: it gets no name, role or instructions, so no identity text is sent.
         const scheduled = owner === undefined && rt.nativeToolsEligible !== undefined
           ? rt.botOf(rt.scheduledNativeOwner?.(sessionId)) : undefined
-        return scheduled === undefined ? undefined : nativeGetters({}, sessionId, scheduled)
+        if (scheduled !== undefined) return policyGetters(nativeGetters({}, sessionId, scheduled))
+        return policy || solverPolicy().state === 'solver' ? policyGetters({}) : undefined
       }
       const { name, role } = bot
       const instructions = rt.roleRuntime?.instructionsFor?.(sessionId, bot) ?? bot.instructions
@@ -87,14 +104,16 @@ export function install(rt) {
       // Identity also supplies the role on every turn. ACP asks for the switch
       // only when it creates a process.
       if (rt.nativeToolsEligible !== undefined) nativeGetters(identity, sessionId, bot)
-      return identity
+      return policyGetters(identity)
     })
     if (typeof off === 'function') {
+      const offQuestions = sub.acpAgents.questionGuard?.(request => rt.solverQuestionDecision?.(request))
       const providers = sub.acpAgents.rolePromptProviders
       const registered = Array.isArray(providers) ? Object.freeze([...providers]) : undefined
       rt.acpRolePromptProviders = registered
       sub.effect(() => () => {
         if (rt.acpRolePromptProviders === registered) rt.acpRolePromptProviders = undefined
+        offQuestions?.()
         off()
       }, 'ds-bot: ACP identity')
     }

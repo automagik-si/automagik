@@ -46,6 +46,23 @@ export function createIdentityReaders(warn) {
       readers.add(entry)
       return () => { readers.delete(entry) }
     },
+    readState(sessionId) {
+      if (!registered) return { ok: true }
+      try {
+        let identity
+        for (const { reader } of readers) {
+          const found = reader(sessionId, { policy: true })
+          if (found === undefined) continue
+          if (identity !== undefined) return { ok: false }
+          identity = found
+        }
+        const state = identity?.solverPolicy?.state
+        if (state === 'solver' || state === 'none') return { ok: true, identity }
+      } catch {
+        warn('a Bot policy reader failed')
+      }
+      return { ok: false }
+    },
     read(sessionId) {
       let identity
       for (const { reader } of readers) {

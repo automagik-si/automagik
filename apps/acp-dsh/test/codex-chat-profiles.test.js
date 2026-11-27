@@ -14,6 +14,7 @@ import { apply } from '../index.js'
 import { AcpAdapter } from '../src/host/adapter.js'
 import { AGENTS } from '../src/host/agents.js'
 import { canRunProfile, chatProfileModesFor, chatProfileModes, chatProfilesConfig, codexRuntimeRoot, ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
+import * as profiles from '../src/host/codex-chat-profiles.js'
 import { PermissionDiagnostics } from '../src/host/permission-diagnostics.js'
 
 const HEX = '0123456789abcdef0123456789abcdef'
@@ -57,8 +58,9 @@ test('chat config starts with the default and grants only the named roots', () =
   assert.ok(config.includes(BOTTOM))
   assert.ok(config.includes(`[permissions.automagik-read-${HEX}]\n`))
   assert.ok(config.includes(`[permissions.automagik-workspace-${HEX}]\n`))
-  assert.equal(config.split("':root' = 'deny'").length - 1, 3)
-  assert.equal(config.split("':minimal' = 'read'").length - 1, 2)
+  const previousTables = config.replace(/\[permissions\.automagik-gate-[^\n]+\n[^]*?(?=\[permissions\.automagik-image-)/, '')
+  assert.equal(previousTables.split("':root' = 'deny'").length - 1, 3)
+  assert.equal(previousTables.split("':minimal' = 'read'").length - 1, 2)
   assert.equal(config.split("':project_roots' = 'read'").length - 1, 2)
   const [read, write] = config.split(`[permissions.automagik-workspace-${HEX}]`)
   assert.ok(read.includes("':workspace_roots' = 'read'"))
@@ -67,6 +69,86 @@ test('chat config starts with the default and grants only the named roots', () =
   assert.equal(config.split("'/chat/codex/skills' = 'read'").length - 1, 2)
   assert.doesNotMatch(config, /network|config\.toml/)
   assert.equal(config.includes("'/chat/codex' ="), false)
+})
+
+test('#2134 K4a gate table grants only the workspace, minimal files and runtime', () => {
+  const config = chatProfilesConfig('/fake/chat', HEX, '/fake/runtime')
+  const match = config.match(new RegExp(`\\[permissions\\.automagik-gate-${HEX}\\.filesystem\\]\\n([^]*?)(?=\\[permissions\\.automagik-image-)`))
+  assert.ok(match, 'gate filesystem table immediately before image profile')
+  assert.deepEqual(match[1].trim().split('\n'), [
+    "':root' = 'deny'", "':minimal' = 'read'", "':workspace_roots' = 'read'", "'/fake/runtime' = 'read'",
+  ])
+  assert.deepEqual(Object.keys(PROFILE_MODES), ['read-only', 'workspace-write'])
+})
+
+test('#2134 K4b positive marker and conclusive denial through the same fake runner', t => {
+  const dir = directory(t)
+  const workspace = join(dir, 'workspace')
+  const protectedRoot = join(dir, 'protected')
+  mkdirSync(workspace)
+  mkdirSync(protectedRoot)
+  const control = join(workspace, 'marker')
+  const canary = join(protectedRoot, 'marker')
+  const inside = 'synthetic inside marker'
+  writeFileSync(control, inside)
+  writeFileSync(canary, 'synthetic distinct marker')
+  assert.equal(typeof profiles.gateProfileHolds, 'function', 'boundary check exists')
+  let mode = 'deny'
+  const calls = []
+  const run = (command, args, options) => {
+    calls.push({ command, args, options })
+    return args.at(-1) === control
+      ? { status: mode === 'no-control' ? 1 : 0, stdout: inside }
+      : mode === 'deny' ? { status: 1, stdout: '', stderr: `cat: ${canary}: Permission denied\n` }
+        : mode === 'missing' ? { status: 1, stdout: '', stderr: `cat: ${canary}: No such file or directory\n` }
+          : mode === 'timeout' ? { error: new Error('fake timeout'), status: null }
+            : { status: 0, stdout: 'fake outside result' }
+  }
+  const inspect = () => profiles.gateProfileHolds('/fake/codex', `permission-profile:automagik-gate-${HEX}`,
+    { cwd: workspace, env: { PATH: '/fake' }, control, canary, run })
+  assert.equal(inspect(), true)
+  assert.deepEqual(calls.map(call => [call.command, call.args.at(-1), call.options.cwd]),
+    [['/fake/codex', control, workspace], ['/fake/codex', canary, workspace]])
+  for (mode of ['no-control', 'missing', 'timeout', 'allowed']) assert.equal(inspect(), false, mode)
+})
+
+test('#2134 AW-R4 scope, full grant table and checked marker cleanup', t => {
+  const dir = directory(t)
+  const runtime = join(dir, 'runtime')
+  const workspace = join(dir, 'workspace')
+  const protectedRoot = join(dir, 'protected')
+  const home = join(dir, 'isolated')
+  for (const path of [runtime, workspace, protectedRoot, home]) mkdirSync(path)
+  const executable = join(runtime, 'fake-codex')
+  writeFileSync(executable, 'test executable placeholder')
+  const profile = `permission-profile:automagik-gate-${HEX}`
+  const config = join(home, 'config.toml')
+  const grants = chatProfilesConfig(home, HEX, runtime)
+  writeFileSync(config, grants)
+  assert.equal(typeof profiles.createGateBinding, 'function', 'workspace binding exists')
+  const seen = []
+  const bind = () => profiles.createGateBinding(executable, profile, { CODEX_HOME: home }, protectedRoot, {
+    run(_command, args) {
+      const marker = args.at(-1)
+      seen.push(marker)
+      if (marker.startsWith(workspace + '/')) return { status: 0, stdout: readFileSync(marker, 'utf8') }
+      return { status: 1, stdout: '', stderr: `cat: ${marker}: Permission denied\n` }
+    },
+  })
+  const binding = bind()
+  const scope = { cwd: workspace, protectedRoots: [protectedRoot], signInRoots: [protectedRoot] }
+  assert.equal(binding(workspace, scope), true)
+  assert.equal(seen.length, 2)
+  assert.ok(seen.every(marker => !existsSync(marker)))
+  assert.equal(binding(workspace, scope), true)
+  assert.equal(seen.length, 2)
+  assert.equal(binding(dir, scope), false)
+  assert.equal(binding(workspace), false)
+  assert.equal(binding(workspace, { ...scope, protectedRoots: [...scope.protectedRoots, join(workspace, 'private')] }), false)
+  writeFileSync(config, grants.replace('[permissions.automagik-image-', "'/fake/extra' = 'read'\n[permissions.automagik-image-"))
+  assert.equal(binding(workspace, scope), false, 'a changed config cannot authorize a running process')
+  assert.equal(bind()(workspace, scope), false, 'an appended grant at launch invalidates the proof before probing')
+  assert.equal(seen.length, 2)
 })
 
 for (const [home, key] of [

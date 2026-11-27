@@ -3565,6 +3565,7 @@ const ZH = {
   // New Solver (RFC 0048).
   'If the Solver role is not installed yet, Create installs it first.': '如果尚未安装 Solver 角色，点击创建会先安装它。',
   'Antigravity cannot be a Solver yet. Choose another agent for the Solver.': 'Antigravity 暂时不能用作 Solver。请为 Solver 选择其他智能体。',
+  'omp cannot be a Solver yet. Choose another agent for the Solver.': 'omp 暂时不能用作 Solver。请为 Solver 选择其他智能体。',
   'The Solver role could not be installed now, so this Solver uses the written method. The role is attached when it can be installed.': '目前无法安装 Solver 角色，因此此 Solver 使用书面方法。角色可安装时会自动附加。',
   'The Solver role could not be attached now, so this Solver uses the written method. The role is attached when it can be.': '目前无法附加 Solver 角色，因此此 Solver 使用书面方法。角色可附加时会自动附加。',
   'Roles are turned off for this team, so this Solver uses the written method.': '此团队已关闭角色，因此此 Solver 使用书面方法。',
@@ -3603,6 +3604,7 @@ const ZH = {
   "Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.": "只拦住 Claude Code 会先询问的步骤。它自己的允许规则、钩子和已保存的批准可能让某个步骤在守卫看到之前就运行，而该步骤仍可能显示为已拒绝。",
   "Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.": "在此级别不拦截：没有任何步骤会先询问。只有交付标记会显示未审阅的工作。",
   "Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.": "在此代理上不拦截：它自己的工具无需询问即可运行。只有交付标记会显示未审阅的工作。",
+  "Until {reviewer} answers the plan, Codex runs read-only inside this Bot's folder; then the chosen level applies.": "在 {reviewer} 回复方案之前，Codex 只能在此 Bot 的文件夹内以只读模式运行；之后将采用所选级别。",
   "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held.": "仅在此 Bot 自己的聊天及其在其中启动的子代理中生效。它开启新对话的计划任务和开启独立对话的 Omni 自动化运行不受约束。",
   "Its reviewer is no longer on the team: work stays held until you turn this off.": "它的审阅者已不在团队中：在你关闭此项之前，工作会一直被拦住。",
   "Off: {name} has no reviewer Bot on the team, so there is no verdict to wait for.": "已关闭：{name} 在团队中没有审阅 Bot，因此没有可等待的结论。",

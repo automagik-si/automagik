@@ -1,9 +1,9 @@
 // The Bot's isolated Codex home owns these profiles. A terminal home is never passed here.
 import { randomBytes, randomUUID } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { IMAGE_PROFILE_DESCRIPTION, IMAGE_PROFILE_GRANTS, toToml } from './image.js'
 
 export function chatProfileModesFor(hex) {
@@ -16,6 +16,11 @@ export function chatProfileModesFor(hex) {
 // setMode takes the first offered id; an older adapter keeps the legacy fallback.
 export function chatProfileModes(modes, profiles) {
   return modes?.flatMap(id => profiles[id] === undefined ? [id] : [profiles[id], id])
+}
+
+export function gateProfileOf(profiles) {
+  const suffix = /^permission-profile:automagik-read-([0-9a-f]{32})$/.exec(profiles?.['read-only'])?.[1]
+  if (suffix) return `permission-profile:automagik-gate-${suffix}`
 }
 
 const TOP = '# Automagik chat permissions (managed by Automagik)'
@@ -74,6 +79,107 @@ export function canRunProfile(codexPath, profile, { cwd, env, run = execFileSync
   return ok
 }
 
+export function gateProfileHolds(codexPath, profile, { cwd, env, canary, control, run = spawnSync }) {
+  try {
+    const marker = readFileSync(canary, 'utf8')
+    const inside = readFileSync(control, 'utf8')
+    if (!marker || !inside || marker === inside) return false
+    const read = path => run(codexPath, ['sandbox', '-P', profile.replace(/^permission-profile:/, ''),
+      '-C', cwd, '--', 'env', 'LC_ALL=C', 'cat', '--', path], {
+      cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000,
+    })
+    const positive = read(control)
+    if (positive.error || positive.signal || positive.status !== 0 || positive.stdout !== inside) return false
+    const negative = read(canary)
+    if (negative.error || negative.signal || negative.status !== 1 || negative.stdout !== '') return false
+    return String(negative.stderr).split('\n').some(line =>
+      line === `cat: ${canary}: Permission denied` || line === `cat: ${canary}: Operation not permitted`)
+  } catch { return false }
+}
+
+const contains = (root, path) => {
+  const part = relative(root, path)
+  return part !== '..' && !part.startsWith('..' + sep) && !isAbsolute(part)
+}
+
+export function createGateBinding(codexPath, profile, env, canaryRoot, { run } = {}) {
+  const fileIdentity = path => {
+    const { dev, ino, size, mtimeMs, ctimeMs } = statSync(path)
+    return JSON.stringify([dev, ino, size, mtimeMs, ctimeMs])
+  }
+  let launchExecutable, launchExecutableId, configPath, launchConfig, launchConfigId
+  try {
+    launchExecutable = realpathSync(codexPath)
+    launchExecutableId = fileIdentity(launchExecutable)
+    configPath = join(env.CODEX_HOME, 'config.toml')
+    launchConfig = readFileSync(configPath, 'utf8')
+    launchConfigId = fileIdentity(configPath)
+  } catch { return () => false }
+  const proofs = new Map()
+  return (effectiveCwd, scope, liveEnv = env) => {
+    let canaryDir, controlDir, canary, control
+    try {
+      if (liveEnv !== env || typeof effectiveCwd !== 'string' || !isAbsolute(effectiveCwd) || !scope || !profile) return false
+      const cwd = realpathSync(effectiveCwd)
+      if (cwd !== scope.cwd || !statSync(cwd).isDirectory() || !Array.isArray(scope.protectedRoots)
+        || !Array.isArray(scope.signInRoots)) return false
+      const executable = realpathSync(codexPath)
+      if (executable !== launchExecutable || fileIdentity(executable) !== launchExecutableId) return false
+      const runtime = codexRuntimeRoot(executable)
+      if (runtime === undefined || typeof canaryRoot !== 'string' || typeof env.CODEX_HOME !== 'string') return false
+      const protectedRoot = realpathSync(canaryRoot)
+      if (!scope.signInRoots.includes(protectedRoot)) return false
+      const roots = scope.protectedRoots
+      for (const root of roots) {
+        if (contains(cwd, root) || contains(runtime, root) || contains(root, runtime)) return false
+        if (contains(root, cwd) && (scope.signInRoots.includes(root) || !scope.team
+          || root === scope.team || !contains(root, scope.team) || !contains(scope.team, cwd))) return false
+      }
+      const config = readFileSync(configPath, 'utf8')
+      if (config !== launchConfig || fileIdentity(configPath) !== launchConfigId) return false
+      const expected = gateGrants(runtime)
+      const id = profile.slice('permission-profile:'.length)
+      const section = `permissions.${id}.filesystem`
+      const lines = config.split(/\r?\n/)
+      const headings = lines.map(line => keyOf(headerOf(line) ?? ''))
+      const start = headings.indexOf(section)
+      if (start < 0 || headings.lastIndexOf(section) !== start) return false
+      if (headings.some(header => header.startsWith(section + '.'))) return false
+      const end = headings.findIndex((header, index) => index > start && header !== '')
+      const actual = lines.slice(start + 1, end < 0 ? undefined : end).map(line => line.trim()).filter(Boolean)
+      const grants = Object.entries(expected).map(([key, value]) => `${toToml(key)} = ${toToml(value)}`)
+      if (actual.length !== grants.length || grants.some((grant, index) => grant !== actual[index])) return false
+      const workspace = statSync(cwd)
+      const key = JSON.stringify([cwd, workspace.dev, workspace.ino, roots, scope.signInRoots, scope.team, protectedRoot])
+      if (proofs.has(key)) return proofs.get(key)
+      canaryDir = mkdtempSync(join(protectedRoot, '.automagik-gate-'))
+      controlDir = mkdtempSync(join(cwd, '.automagik-gate-'))
+      const writeMarker = dir => {
+        const path = join(dir, 'marker')
+        writeFileSync(path, randomUUID(), { flag: 'wx', mode: 0o600 })
+        return path
+      }
+      canary = writeMarker(canaryDir)
+      control = writeMarker(controlDir)
+      const ok = gateProfileHolds(executable, profile, { cwd, env, canary, control, run })
+      proofs.set(key, ok)
+      return ok
+    } catch { return false } finally {
+      for (const marker of [canary, control]) if (marker) {
+        try { unlinkSync(marker) } catch {}
+      }
+      for (const dir of [canaryDir, controlDir]) if (dir) {
+        try { rmdirSync(dir) } catch {}
+      }
+    }
+  }
+}
+
+const gateGrants = runtime => ({
+  ':root': 'deny', ':minimal': 'read', ':workspace_roots': 'read',
+  ...(runtime === undefined ? {} : { [runtime]: 'read' }),
+})
+
 // One source for the restricted base, including the process-local exact-file profiles.
 export function restrictedChatGrants(codexHome, access, runtime) {
   const grants = { ':root': 'deny', ':minimal': 'read', ':workspace_roots': access, ':project_roots': 'read' }
@@ -93,6 +199,9 @@ function profilesConfig(codexHome, hex, runtime) {
     const grants = restrictedChatGrants(codexHome, access, runtime)
     for (const [key, value] of Object.entries(grants)) lines.push(`${toToml(key)} = ${toToml(value)}`)
   }
+  const gate = `automagik-gate-${hex}`
+  lines.push(`[permissions.${gate}]`, 'description = "Automagik Solver plan: read the Solver workspace"', `[permissions.${gate}.filesystem]`)
+  for (const [key, value] of Object.entries(gateGrants(runtime))) lines.push(`${toToml(key)} = ${toToml(value)}`)
   const id = `automagik-image-${hex}`
   lines.push(`[permissions.${id}]`, `description = ${toToml(IMAGE_PROFILE_DESCRIPTION)}`, `[permissions.${id}.filesystem]`)
   for (const [key, value] of Object.entries(IMAGE_PROFILE_GRANTS)) lines.push(`${toToml(key)} = ${toToml(value)}`)
@@ -107,7 +216,7 @@ export function chatProfilesConfig(codexHome, hex, runtime) {
 // Only the simple names we own matter here; accept quoted names after a Codex rewrite too.
 const keyOf = text => text.trim().replace(/["']([\w-]+)["']/g, '$1').replace(/\s*\.\s*/g, '.')
 const headerOf = line => line.trim().match(/^\s*\[\[?(.+?)\]\]?\s*(?:#.*)?$/)?.[1]
-const ours = key => /^permissions\.automagik-(read|workspace|image)-[0-9a-f]{32}(?:\.|$)/.test(key)
+const ours = key => /^permissions\.automagik-(read|workspace|gate|image)-[0-9a-f]{32}(?:\.|$)/.test(key)
 const reserved = key => key.startsWith('permissions.automagik-')
 
 function unmanaged(text) {

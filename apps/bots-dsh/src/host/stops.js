@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { approvalPolicyOf } from './approval-policy.js'
 
-export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request', 'guard-launch', 'limit', 'solver-run', 'solver-progress']
+export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'review', 'sandbox', 'rule', 'guard', 'guard-request', 'guard-launch', 'limit', 'solver-run', 'solver-progress', 'confine']
 export const STOP_KEEP_MS = 6 * 60 * 60 * 1000
 export const STOPS_MAX = 50
 export const CALLS_MAX = 20

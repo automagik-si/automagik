@@ -9,6 +9,7 @@ import { CLAUDE_PINS, pinOf, pinWire } from './model-identity.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import {
@@ -21,7 +22,7 @@ import { ACP_USAGE_LIMIT_CODES } from './usage-limit.js'
 import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
-import { chatProfileModes } from './codex-chat-profiles.js'
+import { chatProfileModes, gateProfileOf } from './codex-chat-profiles.js'
 import { CATALOG_MAX_AGE_MS, ensureCatalog, keptModel, modelPart, NATIVE_OFF_UNAVAILABLE, NATIVE_OFF_UNVERIFIABLE } from './codex-native.js'
 import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
 import { AGENT_INTERRUPTED, agyRunServerName, BRIDGE_NAME, CREDENTIAL_ENV, HISTORY_TOOL_NAME, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
@@ -72,6 +73,16 @@ const offUnavailableText = (reason, switchHere) => 'Codex could not turn its own
   ? "Turn native tools on in the Bot's Details, or update Automagik."
   : 'Switch its model, or update Automagik.')
 const NATIVE_CALL_TEXT = 'Codex used one of its own tools while they are off, so this answer stopped. Send your message again.'
+export const POLICY_UNAVAILABLE_TEXT = "The Bot team could not confirm this Session's rules, so nothing was sent. Send your message again."
+const PLAN_GATE_RECLOSED_TEXT = "Work now waits for the reviewer's verdict on a new plan, so this answer stopped. Send your message again."
+const gateProfileText = kept => "Codex stopped: until the plan has its reviewer's verdict, Codex must run read-only inside this Bot's folder, and that mode is not available here. "
+  + (kept ? 'This Codex model always keeps its own tools: choose another model or agent for this Bot in Details and send again.'
+    : "Turn off Codex's own tools for this Bot in Details and send again.")
+const CLAUDE_GATE_ASK = ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'WebFetch']
+const CLAUDE_READ_ASK = ['Read', 'Grep', 'Glob']
+const realWorkspace = path => {
+  try { return isAbsolute(path) ? realpathSync.native(path) : undefined } catch { return undefined }
+}
 
 // The exact disposer of the mirror-tool registration a Session agent carries. It lives on the
 // agent, never in this module: a plugin reload replaces the module and the adapter while the
@@ -677,7 +688,8 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, access, currentAccess, holds, ownMode = () => undefined, hostStopping = () => false,
+    botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, policyState, questionGuard,
+    access, currentAccess, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
@@ -717,6 +729,10 @@ export class AcpAdapter extends LlmAdapter {
     // booleans. Read at each turn's start by `nativeOn`.
     this.nativeTools = nativeTools
     this.botIdentity = botIdentity
+    this.policyState = policyState ?? (id => {
+      const identity = readIdentity(botIdentity, id)
+      return { ok: !teamManaged() || identity !== undefined, identity }
+    })
     this.solverIdentity = solverIdentity
     this.teamManaged = teamManaged
     this.backchannel = backchannel
@@ -733,6 +749,7 @@ export class AcpAdapter extends LlmAdapter {
       },
     })
     this.tool = mirrorTool({
+      questionGuard,
       sessionFiles: (...args) => this.sessionFiles.ask(...args),
       runOf: sessionId => this.live.get(sessionId),
       ownsSession: (sessionId, live, agent, session) => live.dshAgent === agent
@@ -1539,10 +1556,15 @@ export class AcpAdapter extends LlmAdapter {
     try {
       // An OFF Codex opens the replacement where its tools were checked.
       const cwd = live.checkedCwd ?? (renew ? run.spec.cwd : dshAgent?.session?.header?.cwd ?? homedir())
+      const effectiveWorkspace = (live.checkedCwd || (renew ? live.workspaceProvenance : dshAgent?.session?.header?.cwd))
+        ? realWorkspace(cwd) : undefined
       await run.held(() => run[renew ? 'renew' : 'fork']({
         cwd,
         mcpServers: next ? [this.bridgeServer(next)] : [],
       }), { ms: 0, signal })
+      live.workspace = effectiveWorkspace
+      live.workspaceArgument = cwd
+      live.workspaceProvenance = effectiveWorkspace !== undefined
     } catch (error) {
       // The fork may already have moved the run to a new ACP session (a bridge that never
       // listed). Nothing can resume that half state: revoke both credentials, end the run and
@@ -1992,6 +2014,16 @@ export class AcpAdapter extends LlmAdapter {
       if (archived()) return yield finish('stop')
       if (startChanged()) return yield* stopChanged()
       const takesIdentity = IDENTITY_PROVIDERS.includes(options.provider)
+      const readPolicy = () => {
+        if (options.provider === 'acp-hermes') return { ok: true }
+        try { return this.policyState(sessionId) ?? { ok: false } } catch { return { ok: false } }
+      }
+      const policy = readPolicy()
+      const stopPolicy = () => {
+        stopOwned(POLICY_UNAVAILABLE_TEXT, live)
+        return finish('error', POLICY_UNAVAILABLE_TEXT)
+      }
+      if (policy.ok !== true) return yield stopPolicy()
       const botIdentity = takesIdentity || options.provider === 'acp-omp' ? readIdentity(this.botIdentity, sessionId)
         : readIdentity(this.solverIdentity, sessionId)
       const identityRead = takesIdentity ? botIdentity : undefined
@@ -2025,7 +2057,7 @@ export class AcpAdapter extends LlmAdapter {
       let fileContext
       let keepsFiles = () => false
       if (codexOffAtStart && this.sessionFiles.owners.has(sessionId)) this.sessionFiles.clear(sessionId, { retire: false })
-      if (agent.sessionFiles === true && !codexOffAtStart) {
+      if (agent.sessionFiles === true && !codexOffAtStart && policy.identity?.planGate !== true) {
         const level = levelOf(this.ctx.get?.('approval'), dshAgent.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
         let strictChat = restrictedLevel(level)
         if (strictChat && level.sandbox === 'workspace-write' && agent.ownMode !== undefined) {
@@ -2086,7 +2118,24 @@ export class AcpAdapter extends LlmAdapter {
       const hardAsks = (enabled, currentLevel, bridged) => typeof agent.hardAsk === 'function'
         && !((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)
         && currentLevel?.full !== true
-      const asks = hardAsks(native, turnLevel)
+      const claudeRules = (identity, enabled, currentLevel, bridged) => {
+        const hard = hardAsks(enabled, currentLevel, bridged)
+        const builtIn = !((bridged ?? this.bridgeOn(agent, sessionId)) && agent.disableBuiltInTools === true && !enabled)
+        if (options.provider !== 'acp-claude' || !builtIn || identity?.solver !== true) {
+          return { key: hard, meta: hard ? agent.hardAsk() : {} }
+        }
+        const deny = identity.confineDeny
+        if (!Array.isArray(deny)) return undefined
+        const permissions = {
+          ask: [...(hard ? agent.hardAsk().claudeCode.options.settings.permissions.ask : []),
+            ...(identity.guardedSolver ? CLAUDE_GATE_ASK : []), ...CLAUDE_READ_ASK],
+          deny: deny.map(path => `Read(//${path.replace(/^[\\/]/, '').replaceAll('\\', '/')}${path.endsWith('/.claude.json') ? '' : '/**'})`),
+        }
+        return { key: JSON.stringify(permissions), meta: { claudeCode: { options: { settings: { permissions } } } } }
+      }
+      const desiredRules = claudeRules(policy.identity, native, turnLevel)
+      if (!desiredRules) return yield stopPolicy()
+      const asks = desiredRules.key
       const agyOffLive = agy && live?.provider === options.provider && live.nativeOff === true
       const wantedAgyVersion = agyOffLive ? agySkillsWanted() : undefined
       const wantedOnly = restrictedTools(agyOffLive, wantedAgyVersion !== undefined, live?.bridge?.only)
@@ -2281,7 +2330,7 @@ export class AcpAdapter extends LlmAdapter {
             const launch = agent.spawn(Object.keys(spawnContext).length === 0 ? undefined : spawnContext)
             // omp's launch spec is synchronous. Its argv decision is checked again after
             // preparing any restricted bridge, immediately before the child starts.
-            const { profileModes, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, agySkillsVersion, offRecheck, ...spec } = omp ? launch : await launch
+            const { profileModes, gateBinding, sessionFileMode, sessionFileEnabled, nativeOff: spawnedOff, checkedCwd, models, unverified, offCatalog, agyReady, agySkillsVersion, offRecheck, ...spec } = omp ? launch : await launch
             checkStart()
             state.agySkillsVersion = agySkillsVersion
             const agySkills = agySkillsVersion !== undefined
@@ -2312,6 +2361,7 @@ export class AcpAdapter extends LlmAdapter {
             // Antigravity OFF: its settings check before each later prompt (agy-off.js).
             state.offRecheck = offRecheck
             state.profileModes = profileModes
+            state.gateBinding = gateBinding
             state.sessionFileMode = sessionFileMode
             state.sessionFileEnabled = sessionFileEnabled === true
             if (fileContext?.files.length && (!sessionFileMode || !state.sessionFileEnabled)) throw new Error('The exact image profile is unavailable.')
@@ -2347,10 +2397,13 @@ export class AcpAdapter extends LlmAdapter {
               : native
             // ON before the spawn, no longer after it: no process starts, the next turn opens OFF.
             if (codexRow && preOn && spawnManaged && !spawnNative) return yield* stopped(NATIVE_TOOLS_CHANGED_TEXT)
-            const spawnAsks = spawnManaged ? hardAsks(spawnNative, spawnLevel, bridged) : asks
+            const spawnPolicy = readPolicy()
+            if (spawnPolicy.ok !== true) return yield stopPolicy()
+            const spawnRules = claudeRules(spawnPolicy.identity, spawnNative, spawnLevel, bridged)
+            if (spawnRules === undefined) return yield stopPolicy()
             state.native = codexRow ? !codexOff : spawnNative
             state.nativeManaged = spawnManaged
-            state.asks = spawnAsks
+            state.asks = spawnRules.key
             // A Bot whose team or role tools live in DSH gets DSH's extras by default on Codex.
             // An explicit `dshTools: true` keeps the whole preset, and so does an OFF Codex.
             const roleExtras = bridged && agent.disableBuiltInTools !== true && decision.setting !== true && this.roleToolsInDsh(sessionId)
@@ -2360,10 +2413,15 @@ export class AcpAdapter extends LlmAdapter {
             if (!launchEligible()) throw START_CHANGED
             if (bridged || only.size > 0) state.bridge = this.mintBridge(state, dshAgent, only)
             this.diagnostics?.started(sessionId, this, agent, state)
+            const requestedCwd = dshAgent?.session?.header?.cwd
+            const resolvedCwd = realWorkspace(requestedCwd)
+            state.workspace = resolvedCwd
+            state.workspaceArgument = requestedCwd
+            state.workspaceProvenance = resolvedCwd !== undefined
             const run = new AgentRun({
               ...spec,
               provider: options.provider,
-              cwd: dshAgent?.session?.header?.cwd
+              cwd: requestedCwd
                 ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME ?? homedir(),
               name: agent.name,
               botIdentity: () => text,
@@ -2376,10 +2434,10 @@ export class AcpAdapter extends LlmAdapter {
               // the hard ask rules unless the level is Full.
               ...(agySkills ? { sessionMeta: { antigravity: { eagerMcpServers: [state.bridge?.serverName ?? BRIDGE_NAME] } } }
                 : spawnNative && !codexRow
-                ? { sessionMeta: { ...(spawnAsks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
+                ? { sessionMeta: { ...spawnRules.meta, disableBuiltInTools: false } }
                 : bridged && agent.disableBuiltInTools === true
                   ? { sessionMeta: { disableBuiltInTools: true } }
-                  : spawnAsks ? { sessionMeta: agent.hardAsk() } : {}),
+                  : spawnRules.key ? { sessionMeta: spawnRules.meta } : {}),
               dshTools: bridged,
               skillBridge: state.bridge !== undefined && SKILL_BRIDGE_PROVIDERS.has(options.provider),
               skillTools: state.bridge?.only,
@@ -2685,14 +2743,37 @@ export class AcpAdapter extends LlmAdapter {
       const level = checkLevel ? this.readLevel(dshAgent?.session, true)
         : levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
       if (level === undefined) return yield* stopForNativeChange()
-      const originalModes = agent.modeFor?.(level)
+      const modePolicy = readPolicy()
+      if (modePolicy.ok !== true) return yield stopPolicy()
+      const gated = modePolicy.identity?.planGate === true
+      const gatedLevel = { ...level, full: false, auto: false, ...(codexRow ? { sandbox: 'read-only' } : {}) }
+      const originalModes = agent.modeFor?.(gated ? gatedLevel : level)
       const profiles = live.profileModes
       // An OFF Codex is put in its own read-only mode before every prompt (a fork included), as a
       // backstop against its own tools only: DSH's tools run in DSH, at the Session's level.
       const offModes = codexRow && live.nativeOff === true ? (profiles ? chatProfileModes(['read-only'], profiles) : ['read-only']) : undefined
-      const modes = offModes ?? (live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes(originalModes, profiles) : originalModes)
-      const strict = offModes ?? (live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes([originalModes?.at(-1)], profiles) : [originalModes?.at(-1)])
-      const possible = offModes === undefined && agent.ownMode !== undefined && level.sandbox === 'workspace-write' && level.policy === 'ask' && !level.full && !level.auto
+      const gateProfile = gateProfileOf(profiles)
+      const verifiedGate = (identity, selected = false) => {
+        try {
+          return offModes !== undefined || (live.workspaceProvenance === true && gateProfile
+            && live.run.modes?.availableModes?.some(mode => mode.id === gateProfile)
+            && (!selected || live.run.modes?.currentModeId === gateProfile)
+            && realWorkspace(live.workspaceArgument) === live.workspace
+            && realWorkspace(dshAgent?.session?.header?.cwd) === live.workspace
+            && live.gateBinding?.(live.workspace, identity?.solverWorkspace, live.run.spec.env) === true)
+        } catch { return false }
+      }
+      const codexGated = codexRow && gated && offModes === undefined
+      const stopProfile = () => {
+        const reason = gateProfileText(live.nativeKept === true)
+        stopOwned(reason, live)
+        return finish('error', reason)
+      }
+      if (codexGated && !verifiedGate(modePolicy.identity)) return yield stopProfile()
+      const fileMode = gated ? undefined : live.sessionFileMode
+      const modes = codexGated ? [gateProfile] : offModes ?? (fileMode ? [fileMode] : profiles ? chatProfileModes(originalModes, profiles) : originalModes)
+      const strict = codexGated ? [gateProfile] : offModes ?? (fileMode ? [fileMode] : profiles ? chatProfileModes([originalModes?.at(-1)], profiles) : [originalModes?.at(-1)])
+      const possible = !gated && offModes === undefined && agent.ownMode !== undefined && level.sandbox === 'workspace-write' && level.policy === 'ask' && !level.full && !level.auto
       const candidate = possible && live.run.modes?.availableModes?.some(mode => mode.id === agent.ownMode)
       let own = 'none'
       if (candidate) {
@@ -2727,7 +2808,8 @@ export class AcpAdapter extends LlmAdapter {
         if (possible && own !== 'yes') {
           if (live.ownSent === true || live.sessionFileMode) await live.run.setMode(strict, { signal: options.signal, force: true })
           else await live.run.setMode(modes, { signal: options.signal })
-        } else if (!possible) await live.run.setMode(modes, { signal: options.signal, force: Boolean(live.sessionFileMode) || offModes !== undefined })
+        } else if (!possible) await live.run.setMode(modes, { signal: options.signal, force: Boolean(fileMode) || offModes !== undefined || codexGated })
+        live.appliedGate = gated
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
         if (startChanged()) return yield* stopChanged()
@@ -2735,6 +2817,7 @@ export class AcpAdapter extends LlmAdapter {
         if (archived()) return yield finish('stop')
         if (live.held !== undefined) return yield* stopped(live.held)
         if (startChanged()) return yield* stopChanged()
+        if (codexGated) return yield stopProfile()
         refused = reforkRefusal()
         if (refused !== undefined) return yield refused
         const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
@@ -2963,12 +3046,49 @@ export class AcpAdapter extends LlmAdapter {
       }
       const promptRefusal = firstPromptRefusal()
       if (promptRefusal !== undefined) return yield promptRefusal
+      const livePolicy = readPolicy()
+      if (livePolicy.ok !== true) return yield stopPolicy()
+      const finalRules = claudeRules(livePolicy.identity, live.native, level, live.run.spec.dshTools)
+      const reclose = () => { entry.held = PLAN_GATE_RECLOSED_TEXT }
+      if ((livePolicy.identity?.solver === true || typeof live.asks === 'string')
+        && (!finalRules || finalRules.key !== live.asks)) {
+        reclose()
+        return yield* stopChanged()
+      }
+      if (livePolicy.identity?.planGate === true && live.appliedGate !== true) {
+        const run = live.run
+        const key = run.sessionId
+        const gatedModes = codexRow && offModes === undefined ? [gateProfile] : offModes ?? agent.modeFor?.(gatedLevel)
+        try {
+          if (codexRow && !verifiedGate(livePolicy.identity)) throw START_CHANGED
+          await run.setMode(gatedModes, { force: true, signal: options.signal })
+          const nextPolicy = readPolicy()
+          if (nextPolicy.ok !== true) return yield stopPolicy()
+          const nextRules = claudeRules(nextPolicy.identity, live.native, level, run.spec.dshTools)
+          if (nextPolicy.identity?.planGate !== true || nextRules?.key !== live.asks
+            || startChanged() || run !== live.run || key !== run.sessionId || options.signal?.aborted
+            || (codexRow && !verifiedGate(nextPolicy.identity, true))) throw START_CHANGED
+          live.appliedGate = true
+          own = 'none'
+        } catch {
+          reclose()
+          return yield* stopChanged()
+        }
+      }
+      const finalPolicy = readPolicy()
+      if (finalPolicy.ok !== true) return yield stopPolicy()
+      if (finalPolicy.identity?.planGate === true && live.appliedGate !== true) {
+        reclose()
+        return yield* stopChanged()
+      }
+      if (codexRow && live.appliedGate && !verifiedGate(finalPolicy.identity, true)) return yield stopProfile()
       if (!uploadValid()) return yield uploadStopped()
       started()
       live.replay = undefined
       live.owed = undefined
       live.drifted = false
       live.open = true
+      live.policyManaged = livePolicy.identity?.solver === true || finalPolicy.identity?.solver === true
       live.own = own === 'yes'
       // Ordinary strict sessions have no Auto record until an own-mode attempt or a late answer.
       this.diagnostics?.own(sessionId, live, live.ownSent === true || ['yes', 'late', 'changed', 'refused'].includes(own) ? { answer: own, taken: live.own } : undefined)

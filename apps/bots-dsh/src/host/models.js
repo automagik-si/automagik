@@ -5,7 +5,7 @@ import { grantModelFields, grantTeamModels, withGrantHold } from './grants.js'
 import { BlockAssembler, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { cliRoute, commandCapableAgent, leavesCli, piAiRoutes, routeOf } from '../shared/routes.js'
-import { hasSolverSetup, isAntigravityModel } from '../shared/solver-agent.js'
+import { hasSolverSetup, isUnofferedSolverModel } from '../shared/solver-agent.js'
 import { CHOOSE_CONCRETE, CHOOSE_DIFFERENT, chosenIdentityOf } from '../shared/solver-model.js'
 import { refusal } from './refusal.js'
 import { normalize, splitRef } from './text.js'
@@ -689,7 +689,7 @@ export function install(rt) {
   // for a Bot that waits; another model of the same CLI is still taken. `aside`: a call
   // beside the chat that runs no tool (memory.js) keeps the plain rule.
   const stayed = new Set()
-  const fallbackEntries = (entries, solver) => solver ? entries.filter(entry => !isAntigravityModel(entry.ref)) : entries
+  const fallbackEntries = (entries, solver) => solver ? entries.filter(entry => !isUnofferedSolverModel(entry.ref)) : entries
   function plainModelIn(bot, entries, captured) {
     if (entries.some(entry => entry.ref === bot.model)) return bot.model
     // A fallback is never one that needs a key.

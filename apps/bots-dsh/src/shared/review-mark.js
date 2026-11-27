@@ -98,15 +98,24 @@ export function verdictOf(text, stage, firstLine, { veto = false } = {}) {
  * @param {'bot'|'fresh'|'none'} review
  * @param {number} at - when the delivery ended.
  */
-export function deliveryMark(track, review, at, { pending = false } = {}) {
+export function deliveryMark(track, review, at, evidence = {}) {
   if (review !== 'bot') return { at, review }
-  // Delivered while its reviewer still had the work (the person asked first, SR3-3 (b)).
-  if (pending) return { ...deliveryMark(track, review, at), pending: true }
+  const { pending, planAt, resultAt } = evidence
+  const flags = pending ? { pending: true } : {}
   const verdicts = Array.isArray(track?.verdicts) ? track.verdicts : []
   const first = track?.firstWorkAt
   const last = track?.lastWorkAt ?? first
+  if (Object.hasOwn(evidence, 'planAt') || Object.hasOwn(evidence, 'resultAt')) {
+    const lastObservation = Math.max(last ?? -Infinity, track?.uncertainWorkAt ?? -Infinity)
+    return {
+      at, review,
+      plan: typeof planAt === 'number' && (typeof first !== 'number' || planAt < first),
+      result: typeof resultAt === 'number' && resultAt > lastObservation,
+      ...flags,
+    }
+  }
   const planBefore = first ?? last
   const plan = typeof planBefore === 'number' ? verdicts.some(entry => entry.at < planBefore) : verdicts.length >= 1
   const result = typeof last === 'number' ? verdicts.some(entry => entry.at > last) : verdicts.length >= 2
-  return { at, review, plan, result }
+  return { at, review, plan, result, ...flags }
 }

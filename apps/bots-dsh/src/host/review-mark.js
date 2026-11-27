@@ -82,7 +82,7 @@ export function isWorkCall(name, args, definition) {
 // The tools that write one file, and the argument naming it (private-bots.js).
 const ONE_FILE = { write: 'file_path', edit: 'file_path', str_replace_editor: 'path' }
 const PATH_KEYS = /^(file_path|filePath|file|path|paths)$/
-const pathsIn = (value, depth = 0) => depth > 4 || value === null || typeof value !== 'object' ? []
+export const pathsIn = (value, depth = 0) => depth > 4 || value === null || typeof value !== 'object' ? []
   : Object.entries(value).flatMap(([key, item]) => PATH_KEYS.test(key)
     ? (typeof item === 'string' ? [item] : Array.isArray(item) ? item.map(entry => (typeof entry === 'string' ? entry : '')) : [''])
     : pathsIn(item, depth + 1))
@@ -132,6 +132,23 @@ const isRecord = value => value !== null && typeof value === 'object' && !Array.
 const isTime = value => typeof value === 'number' && Number.isFinite(value)
 const matchesReview = (review, reviewerId, exchangeId) => typeof exchangeId === 'string'
   && review?.exchangeId === exchangeId && review.reviewerId === reviewerId
+const isReviewVerdict = verdict => ['SHIP', 'FIX-FIRST', 'BLOCKED'].includes(verdict)
+const planProof = (proof, solver, reviewerId) => isRecord(proof) && isTime(proof.at)
+  && typeof proof.request === 'string' && proof.request === solver?.request
+  && typeof proof.reviewerId === 'string' && proof.reviewerId === reviewerId && isReviewVerdict(proof.verdict)
+  && !solver.plan?.superseded && matchesReview(solver.plan?.review, reviewerId, proof.exchangeId)
+  && solver.plan.review.verdict === proof.verdict
+
+export function planOpenAt(bot, track, { legacy = true } = {}) {
+  if (!track?.requested) return undefined
+  const { solver } = track
+  if (planProof(track.planOpen, solver, bot?.reviewerId)) return track.planOpen.at
+  const plan = solver?.plan
+  if (legacy && !Object.hasOwn(track, 'planOpen') && isTime(track.planVerdictAt)
+    && !plan?.superseded && typeof bot?.reviewerId === 'string'
+    && matchesReview(plan?.review, bot.reviewerId, plan?.review?.exchangeId)
+    && isReviewVerdict(plan.review.verdict)) return track.planVerdictAt
+}
 const designatedReview = (progress, reviewerId, exchangeId) => [progress?.plan?.review, progress?.review]
   .some(review => matchesReview(review, reviewerId, exchangeId))
 
@@ -161,6 +178,10 @@ export function cleanTrack(track) {
     // The review guard (review-guard.js): when the request's plan got its verdict, and whether a
     // Bot's request opened it (and which Bot).
     ...(isTime(track.planVerdictAt) ? { planVerdictAt: track.planVerdictAt } : {}),
+    ...(Object.hasOwn(track, 'planOpen') ? {
+      planOpen: planProof(track.planOpen, solver, track.planOpen?.reviewerId) ? { ...track.planOpen } : null,
+    } : {}),
+    ...(isTime(track.uncertainWorkAt) ? { uncertainWorkAt: track.uncertainWorkAt } : {}),
     ...(track.brief === true ? { brief: true } : {}),
     ...(track.openedBy === 'bot' ? { openedBy: 'bot' } : {}),
     ...(typeof track.openerExchange === 'string' ? { openerExchange: track.openerExchange } : {}),
@@ -239,15 +260,22 @@ export function install(rt) {
     bot.reviewTrack = track ?? { requested: false, requestAt: bot.createdAt ?? 0, verdicts: [] }
     return bot.reviewTrack
   }
-  const open = (bot, at, origin = 'person') => {
-    unread.delete(bot)
+  const openedTrack = (bot, at, origin) => {
     const { last, outcome } = cleanTrack(bot.reviewTrack) ?? {}
-    bot.reviewTrack = { requested: true, requestAt: at, personAt: at, verdicts: [], solver: newProgress(origin),
-      ...(last ? { last } : {}), ...(outcome ? { outcome } : {}) }
+    const solver = newProgress(origin)
     // This baseline is an internal scan of the Solver's readable result region for its newly
     // opened request. Review sends additionally require designation and passing check authority.
-    bot.reviewTrack.solver.imageBase = imageBaseline(inspect(bot, { manifest: true }))
+    solver.imageBase = imageBaseline(inspect(bot, { manifest: true }))
+    return { requested: true, requestAt: at, personAt: at, verdicts: [], solver,
+      ...(last ? { last } : {}), ...(outcome ? { outcome } : {}) }
+  }
+  const forgetPrevious = bot => {
+    unread.delete(bot)
     autoInstructions.delete(bot)
+  }
+  const open = (bot, at, origin = 'person') => {
+    bot.reviewTrack = openedTrack(bot, at, origin)
+    forgetPrevious(bot)
   }
   const reviewOf = (bot) => {
     if (typeof bot.reviewerId !== 'string' || bot.reviewerId === '') return 'fresh'
@@ -311,6 +339,14 @@ export function install(rt) {
       bot.reviewTrack = track
     } else {
       if (question !== undefined) return
+      if (bot.reviewGuard === true && planOpenAt(bot, track) !== undefined && rt.planGateClosed?.(bot) === false) {
+        const next = openedTrack(bot, Date.now(), 'person')
+        if (noProgressTool && instruction) next.solver.auto = true
+        return saveProgress(bot, before, next.solver, next, () => {
+          forgetPrevious(bot)
+          remember(next)
+        }).then(() => next.solver.request)
+      }
       open(bot, Date.now())
       track = bot.reviewTrack
       if (noProgressTool && instruction) track.solver.auto = true
@@ -327,6 +363,7 @@ export function install(rt) {
       if (rt.botOf(bot.id) !== bot || bot.reviewTrack !== before) throw refusal('The Solver request changed. Read solver_progress status again.')
     }
     const queue = []
+    const wasOpen = rt.planGateClosed?.(bot) === false
     progressWrites.set(bot, queue)
     try {
       await rt.saveCopy(copy => {
@@ -341,6 +378,7 @@ export function install(rt) {
         afterWrite: () => {
           assertCurrent()
           bot.reviewTrack = next
+          if (wasOpen && rt.planGateClosed?.(bot)) rt.withdrawPlanAuthority?.(bot)
           onCommit?.()
         },
       })
@@ -663,18 +701,24 @@ export function install(rt) {
 
   // A call the executor let through, on a Session of `bot`; `own`: the Session is its own
   // chat or a subagent under it; `base`: the Session's folder.
-  function reviewWork(bot, own, name, args, definition, base) {
+  function reviewWork(bot, own, name, args, definition, base, options) {
     if (!own || !tracked(bot) || !isWorkCall(name, args, definition)) return
     const folder = bot.workDir ?? rt.teamFolder?.()
     const notes = isNotesWrite(name, args, folder, base ?? folder)
-    if (deferIngress(bot, () => reviewWork(bot, own, name, args, definition, base))) return
-    const track = trackOf(bot)
+    if (deferIngress(bot, () => reviewWork(bot, own, name, args, definition, base, options))) return
+    const { admit } = options ?? {}
+    if (admit?.bot && (admit.bot !== bot || rt.botOf(bot.id) !== bot)) return
+    const track = admit && isRecord(bot.reviewTrack) ? bot.reviewTrack : trackOf(bot)
     if (track.delivered === true) return
-    const at = Date.now()
+    if (admit && track.requestAt < admit.requestAt) return
+    const sameRequest = !admit || (track.requestAt === admit.requestAt && track.solver?.request === admit.request)
+    const overlaps = !!admit && (!sameRequest || track.solver?.revision !== admit.revision)
+    const at = sameRequest ? (isTime(options?.at) ? options.at : Date.now()) : track.requestAt
+    if (overlaps || options?.uncertain) track.uncertainWorkAt = Math.max(track.uncertainWorkAt ?? at, Date.now())
     // A write to exactly the notes file never dates the plan side (SR4-2), but it is still work
     // for the result: a verdict must follow it (SR5-1).
-    if (!notes) track.firstWorkAt ??= at
-    track.lastWorkAt = at
+    if (!notes) track.firstWorkAt = Math.min(track.firstWorkAt ?? at, at)
+    track.lastWorkAt = Math.max(track.lastWorkAt ?? at, at)
     save()
   }
 
@@ -859,6 +903,7 @@ export function install(rt) {
       const planVerdict = guardVerdictOf(text, reviewer?.name, stage, firstLine)
       if (verdict === undefined && planVerdict === undefined && reply === undefined) return
       let withholdShip = false
+      let designatedVerdict
       if (reviewer) {
         const result = current.solver?.review
         if (stage === 'result' && legacyResultReview(result) && result.verdict === undefined) {
@@ -866,8 +911,11 @@ export function install(rt) {
           if (original) current.solver = { ...current.solver, review: { ...result, solverModel: original } }
         }
         const strict = planVerdict === 'SHIP' && ['FIX-FIRST', 'BLOCKED'].includes(verdict) ? verdict : planVerdict
+        designatedVerdict = strict
+        const exchange = stage === undefined && current.solver?.plan?.review?.exchangeId === reply?.replyTo
+          ? undefined : reply?.replyTo
         const visual = stage === 'result' && strict === 'SHIP' ? visualVerdict(bot, current.solver, model, generation) : undefined
-        const reason = recordSolverVerdict(current.solver, reply?.replyTo, reviewer, strict, model, binding.receipt,
+        const reason = recordSolverVerdict(current.solver, exchange, reviewer, strict, model, binding.receipt,
           stage === 'result' && legacyHeld, visual)
         withholdShip = reason === 'held' || reason === 'same' || reason === 'images'
         if (stage === 'result') {
@@ -879,8 +927,15 @@ export function install(rt) {
       }
       const at = Date.now()
       if (planVerdict !== undefined && (!withholdShip || planVerdict !== 'SHIP')) current.planVerdictAt ??= at
+      if (stage === 'plan' && isReviewVerdict(designatedVerdict) && (!withholdShip || designatedVerdict !== 'SHIP')) {
+        const proof = { at, request, exchangeId: reply.replyTo, reviewerId: fromId, verdict: designatedVerdict }
+        if (planProof(proof, current.solver, fromId) && !planProof(current.planOpen, current.solver, fromId)) current.planOpen = proof
+      }
       if (verdict !== undefined && (!withholdShip || verdict !== 'SHIP')) {
-        current.verdicts = [...current.verdicts, { verdict, at }].slice(-VERDICTS_KEPT)
+        const provenance = stage === 'result'
+          ? { request, revision: current.solver.revision, exchangeId: reply.replyTo, reviewerId: fromId }
+          : {}
+        current.verdicts = [...current.verdicts, { verdict, at, ...(stage ? { stage } : {}), ...provenance }].slice(-VERDICTS_KEPT)
       }
       bot.reviewTrack = current
       if (decision) return rt.save({ durable: true, required: true })
@@ -1068,19 +1123,34 @@ export function install(rt) {
     const bot = rt.botOf(botId)
     if (!tracked(bot) || typeof senderId !== 'string' || senderId === botId) return
     if (deferIngress(bot, () => reviewBotRequest(botId, senderId, { noReply, exchangeId }))) return
-    const track = cleanTrack(bot.reviewTrack)
+    const before = bot.reviewTrack
+    const track = cleanTrack(before)
     const dates = noReply || senderId === bot.reviewerId
     if (track?.requested === true && track.delivered !== true) {
       if (dates || senderId === track.openerId) return
       const progress = track.solver
+      const wasOpen = bot.reviewGuard === true && planOpenAt(bot, track) !== undefined && rt.planGateClosed?.(bot) === false
+      const guardedOpen = bot.reviewGuard === true && (wasOpen
+        || (rt.isActualSolver?.(bot) === false && isTime(track.planVerdictAt)))
       if (progress?.plan || progress?.pending || progress?.review) {
         invalidateResult(progress)
         if (progress.plan) progress.plan = { checks: progress.plan.checks, revision: progress.plan.revision, superseded: true }
-        bot.reviewTrack = track
-        save()
       }
+      if (wasOpen) {
+        const next = openedTrack(bot, Date.now(), 'bot')
+        if (progress) next.solver = progress
+        if (isTime(track.personAt)) next.personAt = track.personAt
+        else delete next.personAt
+        next.openedBy = 'bot'
+        next.openerId = senderId
+        if (typeof exchangeId === 'string') next.openerExchange = exchangeId
+        return saveProgress(bot, before, next.solver, next, () => forgetPrevious(bot)).catch(error =>
+          rt.warn('omni-ui: Solver request could not be saved: %s', error))
+      }
+      if (progress?.plan || progress?.pending || progress?.review) bot.reviewTrack = track
       autoInstructions.delete(bot)
-      if (bot.reviewGuard !== true || !isTime(track.planVerdictAt)) {
+      if (!guardedOpen) {
+        save()
         return
       }
       open(bot, Date.now(), 'bot')
@@ -1089,6 +1159,12 @@ export function install(rt) {
       else delete bot.reviewTrack.personAt
     } else {
       if (dates) return
+      if (bot.reviewGuard === true && planOpenAt(bot, track) !== undefined && rt.planGateClosed?.(bot) === false) {
+        const next = { ...openedTrack(bot, Date.now(), 'bot'), openedBy: 'bot', openerId: senderId,
+          ...(typeof exchangeId === 'string' ? { openerExchange: exchangeId } : {}) }
+        return saveProgress(bot, before, next.solver, next, () => forgetPrevious(bot)).catch(error =>
+          rt.warn('omni-ui: Solver request could not be saved: %s', error))
+      }
       open(bot, Date.now(), 'bot')
     }
     bot.reviewTrack.openedBy = 'bot'
@@ -1137,8 +1213,14 @@ export function install(rt) {
     }
     track.outcome = solverOutcome(bot, track, review, pending, model, track.solver?.snapshot ? snapshotOf(bot) : undefined, visualKind)
     const imagesUnverified = track.solver?.visualReviewRequired === true || track.solver?.review?.unverified === 'images'
-    track.last = { ...deliveryMark(track, review, Date.now(), { pending }), ...(track.outcome.done
-      ? { done: true, reviewer: track.outcome.reviewer, plan: true, result: true, resultExchangeId: track.outcome.exchangeId }
+    const resultAt = track.verdicts.findLast(entry => entry.stage === 'result' && isReviewVerdict(entry.verdict)
+      && entry.request === track.solver?.request && entry.revision === track.solver?.revision
+      && entry.reviewerId === bot.reviewerId && matchesReview(result, entry.reviewerId, entry.exchangeId)
+      && result.revision === entry.revision && result.verdict === entry.verdict)?.at
+    track.last = { ...deliveryMark(track, review, Date.now(), {
+      pending, planAt: planOpenAt(bot, track, { legacy: false }), resultAt,
+    }), ...(track.outcome.done
+      ? { done: true, reviewer: track.outcome.reviewer, resultExchangeId: track.outcome.exchangeId }
       : imagesUnverified ? { result: false } : {}) }
     if (!imagesUnverified) track.delivered = true
     save()

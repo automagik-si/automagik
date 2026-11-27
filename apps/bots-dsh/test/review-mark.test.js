@@ -10,6 +10,8 @@ import { test } from 'node:test'
 import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { isNotesPath, isNotesWrite, isWorkCall } from '../src/host/review-mark.js'
+import { resultSnapshot } from '../src/host/solver-progress.js'
+import { reviewMarkText } from '../src/client/solver-draft.js'
 import { answerSender } from '../src/host/turns.js'
 import { guardVerdictOf } from '../src/shared/review-guard.js'
 import { deliveryMark, verdictOf } from '../src/shared/review-mark.js'
@@ -19,6 +21,92 @@ import { fakeContext } from './fake-ctx.js'
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 // Each step a few ms apart, so the order of work and verdicts is never a tie.
 const step = () => wait(3)
+
+test('#2134 K7a AW-R7 result credit belongs to the current exchange and revision', async t => {
+  for (const invalidate of [false, true]) {
+    await t.test(invalidate ? 'invalidated result' : 'current result', async t => {
+      const { rt, reviewer, solver } = bench(t)
+      const judge = await reviewer()
+      const bot = await solver({ reviewerId: judge.id })
+      let now = 100
+      t.mock.method(Date, 'now', () => ++now)
+      const request = await rt.reviewRequest(bot.id, { text: 'Fixture request' })
+      rt.reviewVerdict(judge.id, bot.id, undefined, 'SHIP', Date.now())
+      rt.reviewWork(bot, true, 'bash', { command: 'synthetic' })
+      bot.reviewTrack.solver.review = { revision: 0, exchangeId: 'result', reviewerId: judge.id, solverModel: 'acp-claude/fixture' }
+      await rt.reviewVerdict(judge.id, bot.id, undefined, 'RESULT SHIP', Date.now(),
+        { replyTo: 'result', reviewReceipt: 'fixture-receipt' }, 'acp-codex/fixture')
+      if (invalidate) {
+        bot.reviewTrack.solver.revision += 1
+        delete bot.reviewTrack.solver.review
+      }
+      rt.reviewTurnEnd(bot.id, { completed: true, wroteText: true, request, model: 'acp-claude/fixture' })
+      assert.equal(bot.reviewTrack.last.plan, false)
+      assert.equal(bot.reviewTrack.last.result, !invalidate)
+      assert.equal(bot.reviewTrack.last.done, undefined)
+    })
+  }
+})
+
+test('#2134 K7b AW-R7 settlement crossing a request or revision stays uncertain', async t => {
+  const { rt, solver } = bench(t)
+  const bot = await solver()
+  let now = 100
+  t.mock.method(Date, 'now', () => ++now)
+  await rt.reviewRequest(bot.id, { text: 'First fixture' })
+  const admit = () => ({
+    bot, requestAt: bot.reviewTrack.requestAt, request: bot.reviewTrack.solver.request,
+    revision: bot.reviewTrack.solver.revision, at: Date.now(),
+  })
+  const settle = token => rt.reviewWork(bot, true, 'acp_tool', { kind: 'execute', input: { command: 'synthetic' } },
+    undefined, undefined, { at: token.at, admit: token })
+  const a = admit()
+  bot.reviewTrack.delivered = true
+  await rt.reviewRequest(bot.id, { text: 'Second fixture' })
+  settle(a)
+  assert.equal(bot.reviewTrack.firstWorkAt, bot.reviewTrack.requestAt)
+  assert.ok(bot.reviewTrack.uncertainWorkAt > bot.reviewTrack.requestAt)
+  const b = admit()
+  bot.reviewTrack.solver.revision += 1
+  settle(b)
+  assert.ok(bot.reviewTrack.uncertainWorkAt > b.at)
+  assert.equal(bot.reviewTrack.solver.revision, 1)
+})
+
+test('#2134 K7d a verified Done result cannot supply the unreviewed plan flag', async t => {
+  const { rt, reviewer, solver, home } = bench(t)
+  const judge = await reviewer()
+  const bot = await solver({ reviewerId: judge.id })
+  bot.workDir = join(home, 'fixture-work')
+  mkdirSync(bot.workDir)
+  writeFileSync(join(bot.workDir, 'marker.txt'), 'synthetic result')
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => ++now)
+  const request = await rt.reviewRequest(bot.id)
+  const plan = { checks: ['marker'], revision: 0, review: { exchangeId: 'plan', reviewerId: judge.id } }
+  bot.reviewTrack.solver.plan = plan
+  rt.reviewWork(bot, true, 'bash', { command: 'inert observation' })
+  rt.reviewVerdict(judge.id, bot.id, undefined, 'PLAN SHIP', Date.now(),
+    { replyTo: 'plan', reviewReceipt: 'receipt-plan' }, 'acp-codex/reviewer')
+  const progress = bot.reviewTrack.solver
+  const snapshot = resultSnapshot(bot.workDir)
+  assert.ok(snapshot)
+  progress.snapshot = snapshot
+  progress.passed = ['marker']
+  progress.passRuns = { marker: 'verified' }
+  progress.runs = { verified: { revision: progress.revision, evidence: { snapshot } } }
+  progress.review = { exchangeId: 'result', reviewerId: judge.id, revision: progress.revision, solverModel: 'acp-claude/solver' }
+  await rt.reviewVerdict(judge.id, bot.id, undefined, 'RESULT SHIP', Date.now(),
+    { replyTo: 'result', reviewReceipt: 'receipt-result' }, 'acp-codex/reviewer')
+  rt.reviewTurnEnd(bot.id, { completed: true, wroteText: true, request, model: 'acp-claude/solver' })
+  const { last, outcome } = bot.reviewTrack
+  assert.equal(outcome.done, true)
+  assert.equal(last.done, true)
+  assert.equal(last.result, true)
+  assert.equal(last.plan, false)
+  assert.equal(reviewMarkText({ ...bot, reviewMark: last }, { byId: rt.state.bots }),
+    `Plan unreviewed: ${judge.name} gave no verdict before the work started.\nDone: every check passed and ${judge.name} approved.`)
+})
 
 function bench(t) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-review-mark-'))

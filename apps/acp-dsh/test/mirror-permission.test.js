@@ -1318,7 +1318,7 @@ for (const [name, prepare] of [
   })
 }
 
-function guardedMirror(t, { provider = 'acp-claude', native = true, marked = true, auto = false } = {}) {
+function guardedMirror(t, { provider = 'acp-claude', native = true, marked = true, auto = false, questionGuard } = {}) {
   const session = Session.create('guarded-mirror')
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 1 })
@@ -1335,27 +1335,62 @@ function guardedMirror(t, { provider = 'acp-claude', native = true, marked = tru
       }[name]
     },
   }
-  const adapter = new AcpAdapter(ctx, new Map())
+  const adapter = new AcpAdapter(ctx, new Map(), { questionGuard })
   t.after(() => adapter.dispose())
   const run = new AgentRun({ name: 'Guarded ACP', provider })
   run.sessionId = 'guarded-acp'
-  const live = { name: 'Guarded ACP', run, native, dshAgent: agent, calls: new Set(['mirror']), toolIds: new Map([['mirror', 'parent']]) }
+  const live = { name: 'Guarded ACP', run, native, dshAgent: agent, calls: new Set(['mirror']), toolIds: new Map([['mirror', 'parent']]),
+    ...(questionGuard ? { policyManaged: true, provider, workspace: '/synthetic' } : {}) }
   adapter.live.set(session.id, live)
   const exec = { name: TOOL_NAME, callId: 'mirror', agent, signal: t.signal,
     ...(marked ? { reviewGuardUnheld: { reason: 'Held by the guard' } } : {}) }
   async function update(toolCallId, details, sessionId = run.sessionId) {
     return await run.onUpdate({ sessionUpdate: 'tool_call_update', toolCallId, ...details }, sessionId)
   }
-  const question = (id, extra = {}) => run.onPermission({
-    sessionId: run.sessionId, toolCall: { toolCallId: id, ...extra }, options: OPTIONS,
+  const question = (id, extra = {}, options = OPTIONS) => run.onPermission({
+    sessionId: run.sessionId, toolCall: { toolCallId: id, ...extra }, options,
   }, t.signal)
   const prepare = async (status = 'in_progress') => {
     await update('parent', { kind: 'execute', status, title: 'Parent', rawInput: { command: 'echo parent' } })
     return run.tools.get('parent')
   }
-  const execute = args => adapter.tool.execute(args ?? callArguments(run.tools.get('parent')), exec)
+  const execute = args => {
+    const input = args ?? callArguments(run.tools.get('parent'))
+    exec.arguments = input
+    return adapter.tool.execute(input, exec)
+  }
   return { adapter, run, live, exec, update, question, prepare, execute }
 }
+
+test('#2134 K6 AW-R6 one-shot decisions use the live child and its independent guard', async t => {
+  for (const [variant, expected] of [['in-folder', 'yes'], ['attempt-hold', 'no'], ['changed', 'no'], ['lasting-only', 'no']]) {
+    await t.test(variant, async t => {
+      let checked = 0
+      const h = guardedMirror(t, { marked: false, questionGuard: request => {
+        checked++
+        assert.equal(request.args.id, 'child')
+        assert.equal(request.name, variant === 'attempt-hold' ? 'Bash' : 'Read')
+        if (variant === 'attempt-hold') return { decision: 'refuse', text: 'Synthetic attempt hold' }
+        if (variant === 'changed') h.run.tools.get('child').rawInput = { file_path: 'changed fixture' }
+        return { decision: 'allow' }
+      } })
+      await h.prepare()
+      h.run.prompting = new Promise(() => {})
+      const work = variant === 'attempt-hold'
+      await h.update('child', { kind: work ? 'execute' : 'read', title: 'Fixture question', status: 'pending',
+        rawInput: work ? { command: 'synthetic' } : { file_path: '/synthetic/marker' },
+        _meta: { claudeCode: { toolName: work ? 'Bash' : 'Read', parentToolUseId: 'parent' } },
+      })
+      const question = h.question('child', {}, variant === 'lasting-only' ? [ALLOW_ALWAYS, OPTIONS[1]] : OPTIONS)
+      h.adapter.runNested = () => assert.fail('a decided child does not dispatch again')
+      const result = h.execute()
+      assert.deepEqual(await soon(question), picked(expected))
+      await h.update('parent', { status: 'completed' })
+      await result
+      assert.equal(checked, 1)
+    })
+  }
+})
 
 test('#2132 T8 a marked mirror answers its own Full-access question with the guard refusal', async t => {
   const h = guardedMirror(t)

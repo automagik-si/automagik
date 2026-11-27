@@ -221,15 +221,21 @@ test('Skills registry: the guarded Solver can load its Automatic skill before a 
   assert.equal(rt.botOf(bot.id).reviewTrack.planVerdictAt, undefined)
 })
 
-test('G4: any verdict opens the request; a person\'s message mid-request does not hold it again; the next request does', async (t) => {
-  const { run, person, endTurn, reply, solver, reviewer } = bench(t)
+test('#2134 F5 G4 each designated plan verdict opens the request through a mid-request message and the next request recloses', async (t) => {
+  const { rt, run, person, endTurn, reply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
+  let sequence = 0
   for (const verdict of ['FIX-FIRST (plan)\nAdd a check.', 'SHIP', 'BLOCKED: I could not read the file.', 'Verdict: SHIP']) {
     person(bot.id, 'Next task.')
+    await rt.live.get(bot.id)?.solverRequest
     await step()
     await assert.rejects(run(bot, 'write', { file_path: 'a.md' }), HELD)
-    reply(ada.id, bot.id, verdict)
+    const request = bot.reviewTrack.solver.request
+    const exchangeId = `fixture-plan-${++sequence}`
+    assert.match(await rt.solverProgress(bot, true, { action: 'plan', request, checks: ['fixture'] }), /Recorded/)
+    await rt.solverReview(bot, ada, true, { kind: 'plan', request, exchangeId, prepare: async () => true })
+    await reply(ada.id, bot.id, verdict, { exchangeId })
     assert.equal(typeof bot.reviewTrack.planVerdictAt, 'number', verdict)
     assert.equal(await run(bot, 'write', { file_path: 'a.md' }), 'ran', verdict)
     await step()
@@ -239,6 +245,7 @@ test('G4: any verdict opens the request; a person\'s message mid-request does no
     assert.equal(bot.reviewTrack.delivered, true)
   }
   person(bot.id, 'One more thing.')
+  await rt.live.get(bot.id)?.solverRequest
   await assert.rejects(run(bot, 'write', { file_path: 'b.md' }), HELD)
 })
 
@@ -1153,15 +1160,20 @@ test('#2132 T4 the Full-access mirror exception leaves DSH shell calls held', as
 for (const [label, level] of [['T6a', 'full'], ['T6', 'manual']]) {
   test('#2132 ' + label + ' attempt holds qualify only at level reach', async t => {
     const { guard, exec, stops, rt, bot } = await markedBench(t, level)
-    rt.reviewWork = () => assert.fail('marked mirror dated the review')
+    const work = []
+    rt.reviewWork = (...args) => work.push(args)
     rt.solverBeforeWork = () => assert.fail('marked mirror bound a check run')
     for (const why of ['limit', 'solver-run', 'solver-progress']) {
       const check = 'check'
-      const plan = { revision: 0, checks: [check], accepted: true, commands: { [check]: exec.arguments.input.command } }
-      const solver = { request: 'req', origin: 'person', attempts: {}, plan }
-      if (why === 'limit') solver.limit = { kind: 'fix', check, at: 1 }
-      if (why === 'solver-progress') solver.pending = { checks: [check], run: 'pending', call: 'another-call' }
-      bot.reviewTrack = { requested: true, requestAt: 1, planVerdictAt: 2, solver }
+      const plan = { revision: 0, checks: [check], commands: { [check]: exec.arguments.input.command },
+        review: { exchangeId: 'plan-t6', reviewerId: bot.reviewerId } }
+      const solver = { request: 'req', origin: 'person', revision: 0, attempts: {}, plan }
+      bot.reviewTrack = { requested: true, requestAt: 1, verdicts: [], solver }
+      rt.reviewVerdict(bot.reviewerId, bot.id, undefined, 'PLAN SHIP', 2,
+        { replyTo: 'plan-t6', reviewReceipt: 'plan-t6-receipt' }, 'acp-codex/default')
+      const progress = bot.reviewTrack.solver
+      if (why === 'limit') progress.limit = { kind: 'fix', check, at: 1 }
+      if (why === 'solver-progress') progress.pending = { checks: [check], run: 'pending', call: 'another-call' }
       const before = JSON.stringify(bot.reviewTrack)
       const call = { ...exec }
       const run = () => guard(call, async () => {
@@ -1174,6 +1186,13 @@ for (const [label, level] of [['T6a', 'full'], ['T6', 'manual']]) {
       assert.equal(stops.at(-1).mayHaveRun, level === 'full' ? undefined : true)
       assert.equal(stops.at(-1).ran, level === 'full' ? true : undefined)
       assert.equal(JSON.stringify(bot.reviewTrack), before)
+      if (level === 'full') {
+        assert.equal(work.length, 1)
+        const [owner, own, name, args, , , options] = work.pop()
+        assert.deepEqual([owner, own, name, args], [bot, true, 'acp_tool', exec.arguments])
+        assert.equal(typeof options.at, 'number')
+        assert.deepEqual(options.admit, { bot, requestAt: 1, request: 'req', revision: 0, at: options.at })
+      } else assert.deepEqual(work, [])
     }
   })
 }
@@ -1203,4 +1222,126 @@ test('#2132 T14 the confirmed run leaves the title and command inside the mirror
   for (const value of [stops, failures, rt.stopsView(), rt.stopsIn(bot.id, 0), rt.stopLineOfTurn(bot.id, 1)]) {
     assert.doesNotMatch(JSON.stringify(value), /TITLE-MARK-2132|CMD-MARK-2132/)
   }
+})
+
+function designateFixture(bot, exchangeId) {
+  const track = bot.reviewTrack
+  track.solver.plan = { checks: ['fixture'], revision: track.solver.revision,
+    review: { exchangeId, reviewerId: bot.reviewerId } }
+}
+
+function openFixture(rt, bot, exchangeId, verdict = 'PLAN SHIP') {
+  rt.reviewVerdict(bot.reviewerId, bot.id, undefined, verdict, Date.now(),
+    { replyTo: exchangeId, reviewReceipt: `receipt-${exchangeId}` }, 'acp-codex/default')
+}
+
+test('#2134 F5 P1/P2 K1a/e ordinary and result replies leave the plan closed', async t => {
+  const { rt, bot, guard, exec } = await markedBench(t, 'manual', { nativeTools: false })
+  designateFixture(bot, 'current')
+  rt.reviewVerdict(bot.reviewerId, bot.id, undefined, 'SHIP', Date.now())
+  await assert.rejects(guard(exec), HELD)
+  bot.reviewTrack.solver.review = { revision: 0, exchangeId: 'result', reviewerId: bot.reviewerId,
+    solverModel: 'acp-claude/default' }
+  openFixture(rt, bot, 'result', 'RESULT SHIP')
+  await assert.rejects(guard(exec), HELD)
+  assert.equal(bot.reviewTrack.planOpen, undefined)
+})
+
+test('#2134 K1d designated SHIP, FIX-FIRST and BLOCKED retain plan authority', async t => {
+  for (const verdict of ['SHIP', 'FIX-FIRST', 'BLOCKED']) {
+    await t.test(verdict, async t => {
+      const { rt, bot, guard, exec } = await markedBench(t, 'manual', { nativeTools: false })
+      designateFixture(bot, 'current')
+      openFixture(rt, bot, 'current', `PLAN ${verdict}`)
+      assert.equal(await guard(exec), 'ran')
+      assert.deepEqual(bot.reviewTrack.planOpen, { at: bot.reviewTrack.planVerdictAt, request: bot.reviewTrack.solver.request,
+        exchangeId: 'current', reviewerId: bot.reviewerId, verdict })
+    })
+  }
+})
+
+test('#2134 K1c retained timestamp needs the current designated verdict', async t => {
+  for (const legacyVerdict of [undefined, 'SHIP']) {
+    await t.test(String(legacyVerdict), async t => {
+      const { bot, guard, exec } = await markedBench(t, 'manual', { nativeTools: false })
+      designateFixture(bot, 'current')
+      bot.reviewTrack.planVerdictAt = Date.now()
+      bot.reviewTrack.solver.plan.review.verdict = legacyVerdict
+      if (legacyVerdict) assert.equal(await guard(exec), 'ran')
+      else await assert.rejects(guard(exec), HELD)
+    })
+  }
+})
+
+test('#2134 AW-R1 K1b/f X1 designate B after A, await commit, and ignore A after reload', async t => {
+  const home = mkdtempSync(join(tmpdir(), 'solver-designation-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const a = bench(t, { home, keep: true })
+  const reviewer = await a.reviewer()
+  const bot = await a.solver({ reviewerId: reviewer.id })
+  a.person(bot.id, 'Check a synthetic plan.')
+  designateFixture(bot, 'plan-a')
+  const ended = []
+  a.ctx.provided.set('acpAgents', { endSession: (...args) => ended.push(args) })
+  openFixture(a.rt, bot, 'plan-a')
+  assert.equal(ended.length, 0, 'opening keeps the Session')
+  const designate = () => a.rt.solverReview(bot, reviewer, true, {
+    kind: 'plan', request: bot.reviewTrack.solver.request, exchangeId: 'plan-b', prepare: async () => true,
+  })
+  const saveCopy = a.rt.saveCopy
+  a.rt.saveCopy = async () => { throw new Error('fixture write failure') }
+  await assert.rejects(designate(), /fixture write failure/)
+  assert.equal(ended.length, 0)
+  assert.equal(await a.run(bot, 'write', { file_path: 'synthetic' }), 'ran')
+  a.rt.saveCopy = saveCopy
+  await designate()
+  assert.equal(ended.length, 1, 'committed replacement ends the agent Session')
+  assert.equal(ended[0][0], a.rt.chatOf(bot.id))
+  assert.match(ended[0][1], /new plan/)
+  await a.ctx.dispose()
+  const b = bench(t, { home, keep: true })
+  await b.rt.load()
+  const current = b.rt.botOf(bot.id)
+  openFixture(b.rt, current, 'plan-a')
+  await assert.rejects(b.run(current, 'write', { file_path: 'synthetic' }), HELD)
+  openFixture(b.rt, current, 'plan-b')
+  assert.equal(await b.run(current, 'write', { file_path: 'synthetic' }), 'ran')
+})
+
+test('#2134 AW-R8 closed plan refuses independent attempt holds without dating a run', async t => {
+  const { rt, bot, exec, guard, stops } = await markedBench(t, 'full')
+  designateFixture(bot, 'current')
+  bot.reviewTrack.solver.limit = { kind: 'fix', at: 1, check: 'fixture' }
+  rt.reviewWork = () => assert.fail('a refused mirror was dated')
+  await assert.rejects(guard(exec, () => assert.fail('the closed gate dispatched the held body')), /attempt limit/)
+  assert.equal(stops.at(-1).why, 'limit')
+})
+
+test('#2134 X1 K2b switching the guard on revokes a live Session only after save', async t => {
+  const { rt, ctx, reviewer, solver } = bench(t)
+  const judge = await reviewer()
+  const bot = await solver({ reviewerId: judge.id, reviewGuard: false })
+  const ended = []
+  ctx.provided.set('acpAgents', { endSession: (...args) => ended.push(args) })
+  const original = rt.save
+  rt.save = async () => { throw new Error('synthetic save failure') }
+  await assert.rejects(rt.setReviewGuard(bot.id, { reviewGuard: true }), /synthetic save failure/)
+  assert.equal(bot.reviewGuard, undefined)
+  assert.deepEqual(ended, [])
+  rt.save = original
+  await rt.setReviewGuard(bot.id, { reviewGuard: true })
+  assert.equal(ended.length, 1)
+  assert.equal(ended[0][0], rt.chatOf(bot.id))
+  assert.match(ended[0][1], /new plan/)
+})
+
+test('#2134 K7c unasked ACP read carries uncertainty without a work date', async t => {
+  const { bot, exec, guard, stops } = await markedBench(t, 'full')
+  const call = { ...exec, arguments: { id: 'read-fixture', kind: 'read', input: { file_path: '/synthetic/elsewhere/marker' } } }
+  assert.equal(await guard(call, () => 'synthetic status'), 'synthetic status')
+  assert.equal(stops.at(-1)?.why, 'confine')
+  assert.equal(stops.at(-1)?.mayHaveRun, true)
+  assert.equal(stops.at(-1)?.ran, undefined)
+  assert.equal(bot.reviewTrack.firstWorkAt, undefined)
+  assert.equal(bot.reviewTrack.lastWorkAt, undefined)
 })
