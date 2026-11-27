@@ -11,6 +11,8 @@ const REQUESTS = {
   logout: methods.agent.logout,
   newSession: session.new,
   forkSession: session.fork,
+  loadSession: session.load,
+  resumeSession: session.resume,
   closeSession: session.close,
   setSessionMode: session.setMode,
   setSessionConfigOption: session.setConfigOption,

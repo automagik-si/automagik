@@ -17,6 +17,10 @@ import {
   isAgentLoopRequest, offloadedImageText,
 } from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
+import { appendPluginRecord } from '@deepseek-ai/dsh-session'
+import { PLAN_RECORD, USAGE_RECORD, bindingOf, decide, latestNative, writeNative } from './continuity.js'
+import { bindingDigest, todosOf } from './features.js'
+import { HOME_ENV } from './cli-homes.js'
 import { AGY_NOT_LOADED_TEXT, AGY_TOOLS_OFF_TEXT } from './agy-off.js'
 import { ACP_USAGE_LIMIT_CODES } from './usage-limit.js'
 import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
@@ -709,9 +713,12 @@ export class AcpAdapter extends LlmAdapter {
     botIdentity = () => undefined, solverIdentity = () => undefined, teamManaged = () => false, policyState, questionGuard,
     access, currentAccess, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
-    fileDrainMs = 6000, timers = globalThis,
+    fileDrainMs = 6000, timers = globalThis, accountBinding = () => undefined,
   } = {}) {
     super()
+    // What names the signed-in account of a route, for a native session's binding
+    // (continuity.js): a digest, never the account itself. Undefined when not known.
+    this.accountBinding = accountBinding
     this.cancelWaitMs = cancelWaitMs
     this.timers = timers
     // Whether the host itself is stopping (index.js watches its SIGTERM/SIGINT): a prompt the
@@ -2438,8 +2445,33 @@ export class AcpAdapter extends LlmAdapter {
             state.workspace = resolvedCwd
             state.workspaceArgument = requestedCwd
             state.workspaceProvenance = resolvedCwd !== undefined
+            // Native cold continuity (continuity.js): the same agent coming back to a chat it
+            // already answered in takes back its own session when the route is qualified and
+            // nothing it was bound to changed. Never across providers or for a skills relaunch.
+            let accountKey
+            try { accountKey = this.accountBinding?.(options.provider) } catch {}
+            state.binding = bindingOf({
+              provider: options.provider, dshSessionId: sessionId, connector: launch?.version ?? spec.command,
+              home: spec.env?.[HOME_ENV] ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME, account: accountKey,
+              cwd: dshAgent?.session?.header?.cwd, identity: bindingDigest({ text: String(text ?? ''), role: String(role.digest ?? '') }),
+              policy: { bridged, native: state.native === true, nativeOff: nativeOff ?? null, asks: spawnRules.key, twinsOff: twinsOff === true, only: [...(only ?? [])].sort(), meta: agySkills ? 'agy-skills' : null },
+            })
+            const reattach = entry.noContinuity === true || crossing || relaunchForSkills || !replaying || !answered(history)
+              ? { skip: entry.noContinuity === true ? 'fallback' : 'not-a-restart' }
+              : decide({ route: agent.continuity, record: latestNative(dshAgent?.session, options.provider), digest: state.binding })
+            state.continuityTried = reattach.sessionId !== undefined
+            state.interrupted = reattach.interrupted === true
+            if (reattach.skip !== undefined && reattach.skip !== 'not-a-restart') {
+              try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} starts a new session (${reattach.skip})`) } catch {}
+            }
             const run = new AgentRun({
               ...spec,
+              ...(reattach.sessionId === undefined ? {} : { continuity: { sessionId: reattach.sessionId, methods: reattach.methods } }),
+              onUnreadPlan: update => this.warn(`${agent.name} sent a plan this app does not read (${String(update?.plan?.type ?? update?.sessionUpdate).slice(0, 40)}); it is not shown`),
+              onPromptSettled: (ordinal, settled) => {
+                if (state.run !== run || !settled) return
+                writeNative(dshAgent?.session, { provider: options.provider, nativeSessionId: run.sessionId, digest: state.binding, state: 'idle', ordinal }, message => this.warn(message))
+              },
               provider: options.provider,
               ...(state.solverCwdReset ? { env: { ...spec.env, CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: '1' } } : {}),
               cwd: requestedCwd
@@ -2516,6 +2548,10 @@ export class AcpAdapter extends LlmAdapter {
             if (state.archived) throw ARCHIVED
             checkStart()
             if (!launchEligible()) throw START_CHANGED
+            state.reattached = run.continuity?.outcome === 'resumed' || run.continuity?.outcome === 'loaded'
+            if (run.continuity !== undefined) {
+              try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} native session ${run.continuity.outcome}${run.continuity.reason ? ` (${run.continuity.reason})` : ''}${run.continuity.replayed === undefined ? '' : `, ${run.continuity.replayed} replayed updates and ${run.continuity.permissions} questions held back`}`) } catch {}
+            }
             // DSH's `default` for Codex is the model a process with its own tools started on. An
             // OFF process reads a catalog without the kept models, so it never says.
             if (codexRow && !codexOff && typeof run.startModel === 'string') this.startModels.set(agent, run.startModel)
@@ -2541,6 +2577,14 @@ export class AcpAdapter extends LlmAdapter {
             // Ended while it started (endSession): not a failed connector, so no rollback.
             if (state.held !== undefined || entry.held !== undefined) return yield* stopped(state.held ?? entry.held)
             if (error === START_CHANGED || startChanged()) return yield* stopChanged()
+            // A native session that did not come back (no answer, an exit, or a bridge it did not
+            // bind) is never asked again on this process: a fresh one starts with a new bridge
+            // and the chat replayed, the way it did before continuity. A Stop is a Stop.
+            if (state.continuityTried && entry.noContinuity !== true && options.signal?.aborted !== true && !isAuthRequired(error)) {
+              entry.noContinuity = true
+              try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} did not take back its native session (${error?.code ?? 'failed'}); starting a new one`) } catch {}
+              continue
+            }
             // A Stop while it started ends the turn as any Stop does; a start nobody answered
             // says where to look. Neither blames the connector's release: a CLI waiting for the
             // person hangs the same way on any release, so there is no rollback for them.
@@ -2604,6 +2648,9 @@ export class AcpAdapter extends LlmAdapter {
           live.owed = { from: this.agents.get(prior)?.name ?? 'DSH' }
           replaySource = history
           live.replay = replayOf(replaySource, live.owed)
+        } else if (live.reattached === true) {
+          // Its own native session came back (continuity.js): it holds the chat already, so
+          // nothing is replayed. A prompt it may have acted on is never sent again (below).
         } else if (replaying && answered(history)) {
           // A new session of the same agent in a chat that already has answers (a restart, a
           // session ended by a crossing or a flip, the first real turn of a Bot part whose
@@ -3003,7 +3050,10 @@ export class AcpAdapter extends LlmAdapter {
       const replay = live.replay === undefined || replaySource === undefined ? live.replay : replayOf(replaySource, live.owed)
       if (prepared !== undefined && (!isDeepStrictEqual(send.messages, beforeUploads.messages) ||
           !isDeepStrictEqual(replay ?? [], live.replay ?? []))) return yield uploadStopped()
-      const cutRows = prepared === undefined && fresh && (live.replay === undefined || live.owed?.handoff === true)
+      // A reattached session that was answering when the host stopped has those rows already:
+      // they are not sent again, only the note that the last turn may have partly run.
+      const uncertain = fresh && live.reattached === true && live.interrupted === true
+      const cutRows = prepared === undefined && fresh && !uncertain && (live.replay === undefined || live.owed?.handoff === true)
         ? cutUserRows(send.messages, dshAgent?.session) : []
       const cutIds = new Set(cutRows.map(row => row.id))
       const current = cutRows.length === 0 ? send.messages : send.messages.filter(row => !cutIds.has(row.id))
@@ -3011,6 +3061,7 @@ export class AcpAdapter extends LlmAdapter {
         ...replayOf(cutRows, { renewed: true }),
         { type: 'text', text: 'The previous turn was interrupted. Check any tool outcomes before repeating work.' },
       ]
+      if (uncertain) recovered.push({ type: 'text', text: 'The app restarted while you were answering the previous message, so that turn may have partly run. Check what it did before repeating any action.' })
       const prompt = prepared ?? [...(replay ?? []), ...recovered, ...promptOf(current, this.redact)]
       if (catalog?.text && live.skillCatalog !== catalog.key) {
         if (live.bridge === undefined) return yield finish('error', 'Send this turn again.', 'acp_bridge_missing')
@@ -3119,6 +3170,8 @@ export class AcpAdapter extends LlmAdapter {
       live.confinedReason = undefined
       live.toolIds?.clear()
       live.skillCatalog = catalog?.text ? catalog.key : undefined
+      // Written before the prompt is: from here a restart cannot tell whether the agent acted.
+      writeNative(session, { provider: options.provider, nativeSessionId: live.run.sessionId, digest: live.binding, state: 'sent', ordinal: live.run.prompts + 1 }, message => this.warn(message))
       const review = teamService(this.ctx)
       const rows = promptRows(current).rows
       const verified = new Set(uploads?.reviews.size ? prompt.filter(block => block.type === 'image')
@@ -3164,7 +3217,16 @@ export class AcpAdapter extends LlmAdapter {
       // Inbound text is logged as the agent said it: DSH does not redact at ingest, and neither
       // does this plugin. The redactor runs at each provider crossing instead — the replay out
       // (`replayBlocks`) and the transcript handed back to a native provider (`crossed`).
-      if (event.type === 'text') {
+      if (event.type === 'plan') {
+        // The agent's plan (features.js): its change is the chat's record (a reopened chat folds
+        // them), and DSH's own todo panel draws its checklist.
+        try {
+          appendPluginRecord(session, PLAN_RECORD, { provider: options.provider, nativeSessionId: live.run.sessionId, change: event.change })
+          session?.append?.('todo/write', { todos: todosOf(event.plans) })
+        } catch (error) {
+          this.warn(`${agent.name}'s plan was not written: ${error?.message ?? error}`)
+        }
+      } else if (event.type === 'text') {
         const text = links.push(event.text)
         if (text !== '') yield* blocks.add('text', text)
       } else if (event.type === 'thought') {
@@ -3213,6 +3275,13 @@ export class AcpAdapter extends LlmAdapter {
         yield* blocks.toolCall(id, TOOL_NAME, JSON.stringify(callArguments(tool)))
         return yield finish('tool-calls')
       } else if (event.type === 'end') {
+        // The usage the agent reported, as it reported it, once per prompt: never a DSH usage
+        // chunk, since the meter reads these CLIs' own logs (RFC 0018) and would count it twice.
+        const usage = live.run.promptUsage
+        live.run.promptUsage = undefined
+        if (usage !== undefined && (usage.completeness !== 'absent' || usage.context !== undefined)) {
+          try { appendPluginRecord(session, USAGE_RECORD, { provider: options.provider, runId: live.run.runId, ...usage }) } catch {}
+        }
         const wasOwn = live.own
         live.own = false
         const r = live.run.reviews

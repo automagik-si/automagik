@@ -88,7 +88,7 @@
 // `{ late: { ms, lines } }` appends more that long after the answer; no `lines` writes none;
 // `old`, `stampDaysBack`, `link` and `fifo` are described where it writes (agyLog).
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { delimiter, dirname, join } from 'node:path'
@@ -252,6 +252,9 @@ function connect(server, sessionId, { probe = false } = {}) {
 async function attachServer(session, server, sessionId) {
   const connection = connect(server, sessionId)
   session.mcp.set(server.name, connection)
+  // Which bridge credential this session holds, as a short digest (never the credential).
+  const credential = (server.env ?? []).find(entry => entry.name === 'DSH_BRIDGE_CREDENTIAL')?.value
+  if (credential !== undefined) trace({ event: 'bridge-credential', sessionId, digest: createHash('sha256').update(credential).digest('hex').slice(0, 12) })
   const tools = await connection.tools.catch(() => [])
   session.listed?.set(server.name, tools.map(tool => tool?.name))
   trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name),
@@ -307,6 +310,46 @@ if (process.env.FAKE_ACP_CHILD !== undefined) {
 const stream = hearing(ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)))
 const sessions = new Map()
 let created = 0
+// Native continuity (continuity.test.js): FAKE_ACP_STATE names a JSON file that keeps each
+// session's native context (its turns and what it was told to `remember`) across processes, as
+// a CLI's own session store does. FAKE_ACP_RESUME=1 advertises `session/resume`, FAKE_ACP_LOAD=1
+// `session/load` (which replays the session's history first: a message, a finished call, a
+// permission request, a plan and a usage update, the way a loaded CLI session would).
+// FAKE_ACP_RESUME_IGNORES_SERVERS=1 takes the session back with no MCP server at all, as Codex
+// is documented to ignore a new server list on resume. FAKE_ACP_RESUME_HANG=1 never answers.
+const STATE = process.env.FAKE_ACP_STATE
+const readState = () => { try { return JSON.parse(readFileSync(STATE, 'utf8')) } catch { return {} } }
+const keep = (sessionId, session) => {
+  if (STATE === undefined) return
+  const all = readState()
+  all[sessionId] = { turns: session.turns, markers: session.markers ?? [], cwd: session.cwd, servers: (session.servers ?? []).map(server => server.name), tools: session.tools ?? [] }
+  writeFileSync(STATE, JSON.stringify(all))
+}
+async function reattach(params, how) {
+  const stored = readState()[params.sessionId]
+  trace({ event: `${how}-session`, sessionId: params.sessionId, found: stored !== undefined, servers: (params.mcpServers ?? []).map(server => server.name) })
+  if (process.env.FAKE_ACP_RESUME_HANG === '1') await new Promise(() => {})
+  if (stored === undefined) throw RequestError.sessionNotFound(params.sessionId)
+  const session = newSession(params.sessionId, params.cwd)
+  session.turns = stored.turns
+  session.markers = stored.markers
+  if (how === 'load') {
+    const update = u => conn.sessionUpdate({ sessionId: params.sessionId, update: u })
+    await update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'an earlier question' } })
+    await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'an earlier answer' } })
+    await update({ sessionUpdate: 'tool_call', toolCallId: 'replayed-call', title: 'Run earlier', kind: 'execute', status: 'completed', rawInput: { command: 'touch replayed' } })
+    await update({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'replayed-plan', entries: [{ content: 'old step', priority: 'low', status: 'completed' }] } })
+    await update({ sessionUpdate: 'usage_update', used: 999, size: 1000 })
+    const asked = await conn.requestPermission({ sessionId: params.sessionId, toolCall: { toolCallId: 'replayed-call', title: 'Run earlier', kind: 'execute', rawInput: { command: 'touch replayed' } },
+      options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }] })
+    trace({ event: 'replayed-permission', outcome: asked.outcome.outcome })
+  }
+  if (process.env.FAKE_ACP_RESUME_IGNORES_SERVERS !== '1') await attach(session, params.mcpServers, params.sessionId)
+  session.servers = process.env.FAKE_ACP_RESUME_IGNORES_SERVERS === '1' ? [] : params.mcpServers ?? []
+  session.tools = [...(session.listed ?? new Map()).values()].flat()
+  keep(params.sessionId, session)
+  return offersOf(session)
+}
 
 // agy's own per-process log (FAKE_ACP_AGY_LOG, above).
 function agyLog() {
@@ -354,10 +397,13 @@ const implementation = {
     // FAKE_ACP_PROTOCOL answers another protocol version, as an adapter built for a later ACP does.
     const protocolVersion = process.env.FAKE_ACP_PROTOCOL === undefined ? PROTOCOL_VERSION : Number(process.env.FAKE_ACP_PROTOCOL)
     const agentCapabilities = {
-      loadSession: false,
-      ...(process.env.FAKE_ACP_SYSTEM_PROMPT === '1'
-        ? { sessionCapabilities: { systemPrompt: {} } } : {}),
+      loadSession: process.env.FAKE_ACP_LOAD === '1',
+      sessionCapabilities: {
+        ...(process.env.FAKE_ACP_SYSTEM_PROMPT === '1' ? { systemPrompt: {} } : {}),
+        ...(process.env.FAKE_ACP_RESUME === '1' ? { resume: {} } : {}),
+      },
     }
+    trace({ event: 'initialize', clientCapabilities: params?.clientCapabilities })
     if (process.env.FAKE_ACP_LOGOUT === '1') agentCapabilities.auth = { logout: {} }
     return {
       protocolVersion, agentCapabilities, authMethods: AUTH_METHODS.map(id => ({ id, name: id })),
@@ -428,7 +474,7 @@ const implementation = {
   async newSession(params) {
     if (AUTH === 'session') throw RequestError.authRequired(undefined, 'run the CLI\'s login first')
     if (AUTH === 'file' && !existsSync(SIGNED_IN())) throw RequestError.authRequired(undefined, 'sign in first')
-    const sessionId = `fake-${++created}`
+    const sessionId = STATE === undefined ? `fake-${++created}` : `fake-${randomBytes(4).toString('hex')}`
     trace({
       event: 'new-session', sessionId,
       ...(params._meta === undefined ? {} : { meta: params._meta }),
@@ -442,6 +488,8 @@ const implementation = {
       session.eager = new Set(registryMode === 'eager' ? params._meta?.antigravity?.eagerMcpServers : [])
     }
     await attach(session, params.mcpServers, sessionId)
+    session.servers = params.mcpServers ?? []
+    keep(sessionId, session)
     agyLog()
     trace({ event: 'new-answer', sessionId, at: Date.now() })
     return { sessionId, ...offersOf(session) }
@@ -533,6 +581,57 @@ const implementation = {
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    keep(sessionId, session)
+    // Native context only this session holds (continuity.test.js): never in DSH's transcript.
+    const remember = /\bremember (\S+)/.exec(current)
+    if (remember !== null) {
+      ;(session.markers ??= []).push(remember[1])
+      keep(sessionId, session)
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `noted (turn ${session.turns})` } })
+      return { stopReason: 'end_turn' }
+    }
+    if (/\brecall\b/.test(current)) {
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `I remember: ${(session.markers ?? []).join(',') || 'nothing'} (turn ${session.turns})` } })
+      return { stopReason: 'end_turn' }
+    }
+    // What the agent can reach through the DSH bridge now (continuity: a removed tool is gone).
+    if (/\blist-bridge\b/.test(current)) {
+      const connection = session.mcp.get('dsh')
+      let names = 'no bridge'
+      if (connection !== undefined) {
+        try { names = ((await connection.request('tools/list', {}))?.tools ?? []).map(tool => tool.name).sort().join(',') } catch (error) { names = `bridge failed: ${error?.message ?? error}` }
+      }
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `bridge tools: ${names}` } })
+      return { stopReason: 'end_turn' }
+    }
+    // Plans (plan-usage.test.js): two plans, an update in place, an unknown removal and a removal.
+    if (/\bplan-demo\b/.test(current)) {
+      const items = (status) => ({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'p1', entries: [
+        { content: 'read the code', priority: 'high', status: 'completed' }, { content: 'write the fix', priority: 'medium', status } ] } })
+      await update(items('in_progress'))
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Planning.' } })
+      await update({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'p2', markdown: '# Notes\nkeep it small' } })
+      await update(items('in_progress'))
+      await update({ sessionUpdate: 'plan_removed', planId: 'never-sent' })
+      await update(items('completed'))
+      if (/\bplan-demo-remove\b/.test(current)) await update({ sessionUpdate: 'plan_removed', planId: 'p2' })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' Done.' } })
+      return { stopReason: 'end_turn' }
+    }
+    if (/\busage-demo\b/.test(current)) {
+      await update({ sessionUpdate: 'usage_update', used: 1200, size: 200000, cost: { amount: 0.01, currency: 'USD' } })
+      await update({ sessionUpdate: 'usage_update', used: 1500, size: 200000 })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Counted.' } })
+      if (/\busage-demo-partial\b/.test(current)) return { stopReason: 'end_turn', usage: { totalTokens: 30, inputTokens: 20 } }
+      if (/\busage-demo-none\b/.test(current)) return { stopReason: 'end_turn' }
+      return { stopReason: 'end_turn', usage: { totalTokens: 30, inputTokens: 20, outputTokens: 10, cachedReadTokens: 5 } }
+    }
+    if (/\bexit-mid-prompt\b/.test(current)) {
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Starting.' } })
+      trace({ event: 'acted', sessionId })
+      setTimeout(() => process.exit(1), 20)
+      await new Promise(() => {})
+    }
     const waitForFile = async file => {
       const deadline = Date.now() + 8_000
       while (!existsSync(file) && !session.cancelled) {
@@ -1299,5 +1398,8 @@ if (MODES.length > 0) {
     return {}
   }
 }
+
+if (process.env.FAKE_ACP_LOAD === '1') implementation.loadSession = params => reattach(params, 'load')
+if (process.env.FAKE_ACP_RESUME === '1') implementation.resumeSession = params => reattach(params, 'resume')
 
 const conn = serveAgent(implementation, stream)
