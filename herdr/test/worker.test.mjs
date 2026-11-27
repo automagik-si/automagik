@@ -698,6 +698,25 @@ test("worker kill succeeds and gives one manual rm line when hc refuses removal"
   assert.equal(s.hcState().terminals.find((p) => p.address === terminal).state, "finished");
 });
 
+test("worker kill reports a live reply without claiming it ended", (t) => {
+  const s = scene(t);
+  const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
+  assert.equal(w.code, 0, w.err);
+  const { terminal } = w.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status = { state: "idle" };
+  state.killReply = { [terminal]: { address: terminal, state: "live" } };
+  state.afterKill = { terminal, patch: { state: "live", reason: null, finished_ms: null } };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.cli(["worker", "kill", terminal]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, new RegExp(`${terminal} is still running`));
+  assert.doesNotMatch(r.err, /hc rm/);
+  assert.doesNotMatch(r.out, /\bended\b/);
+  assert.equal(s.calls().some(([verb]) => verb === "rm"), false);
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === terminal)?.state, "live");
+});
+
 test("worker kill removes its cascading children and leaves already finished or outliving children", (t) => {
   const s = scene(t);
   const { terminal } = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
@@ -716,6 +735,107 @@ test("worker kill removes its cascading children and leaves already finished or 
   assert.deepEqual(removed, ["t502", "t501", terminal]);
   assert.deepEqual(s.hcState().terminals.filter((pane) => /^t50[1-5]$/.test(pane.address))
     .map((pane) => [pane.address, pane.state]), [["t503", "finished"], ["t504", "live"], ["t505", "live"]]);
+});
+
+test("worker kill does not inspect grandchildren under an outliving child", (t) => {
+  const s = scene(t);
+  const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
+  assert.equal(w.code, 0, w.err);
+  const { terminal } = w.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status = { state: "idle" };
+  state.terminals.push(
+    { ...term("t501", { cwd: s.project }), parent: terminal, die_with_parent: false },
+    { ...term("t502", { cwd: s.project }), parent: "t501", die_with_parent: true },
+  );
+  state.afterKill = { terminal: "t501", patch: {
+    state: "finished", reason: "killed", finished_ms: Date.now() + 60_000,
+  } };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.cli(["worker", "kill", terminal]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.calls().filter(([verb, address]) =>
+    verb === "get" && ["t501", "t502"].includes(address)).map(([, address]) => address), ["t501"]);
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === "t501")?.state, "finished");
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === "t502")?.state, "live");
+});
+
+test("worker kill keeps cascading bot seats and another bot's workers listed", (t) => {
+  const s = scene(t);
+  const start = (task, from) => {
+    const r = s.cli(["worker", task, "--branch", `fix/${task}`, "--json"], { from });
+    assert.equal(r.code, 0, r.err);
+    return r.json().terminal;
+  };
+  const terminal = start("parent", "t1");
+  const foreign = start("foreign", "t4");
+  const state = s.hcState();
+  const pane = (address) => state.terminals.find((x) => x.address === address);
+  pane(terminal).status = { state: "idle" };
+  // The attach ledger still binds t4; the workers ledger still records Captain's launch.
+  for (const address of ["t4", foreign]) {
+    Object.assign(pane(address), { parent: terminal, die_with_parent: true, labels: {} });
+  }
+  state.terminals.push({
+    ...term("t501", { cwd: s.project }), parent: terminal, die_with_parent: true,
+    labels: { [WORKER_OF_LABEL]: ID.cap },
+  });
+  const bindChild = (child, app) => {
+    bindIn({ app }, child.address, ID.main, child.cwd);
+    state.terminals.push({ ...child, parent: terminal, die_with_parent: true });
+  };
+  const separate = join(s.root, "separate-app");
+  bindChild({ ...term("t502", { cwd: s.project }),
+    argv: ["/usr/bin/env", `HERDR_APP_HOME=${separate}`, "claude"] }, separate);
+  const project = scratchProject(s.root, "child-project", { branch: "main", commit: true });
+  bindChild(term("t503", { cwd: project }), join(project, ".herdr/app-home"));
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.cli(["worker", "kill", terminal]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.calls().filter(([verb]) => verb === "rm").map(([, address]) => address),
+    [terminal]);
+  for (const address of ["t4", foreign, "t501", "t502", "t503"]) {
+    assert.equal(s.hcState().terminals.find((x) => x.address === address)?.state, "finished");
+    const notices = r.err.split("\n").filter((line) => line.includes(address));
+    assert.equal(notices.length, 1, r.err);
+    assert.match(notices[0], /left listed/);
+  }
+});
+
+function patchWorkerPaneCommand(s, terminal, patch) {
+  const file = join(s.root, "change-worker-pane.mjs");
+  writeFileSync(file, `import { readFileSync, writeFileSync } from "node:fs";
+const file = ${JSON.stringify(s.env.HC_FAKE_STATE)};
+const state = JSON.parse(readFileSync(file, "utf8"));
+Object.assign(state.terminals.find((pane) => pane.address === ${JSON.stringify(terminal)}),
+  ${JSON.stringify(patch)});
+writeFileSync(file, JSON.stringify(state));
+`);
+  return `"${process.execPath}" "${file}"`;
+}
+
+test("worker kill reads its target again after gathering cascading children", (t) => {
+  const s = scene(t);
+  const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
+  assert.equal(w.code, 0, w.err);
+  const { terminal } = w.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status = { state: "idle" };
+  state.terminals.push({ ...term("t501", { cwd: s.project }),
+    parent: terminal, die_with_parent: true });
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const change = patchWorkerPaneCommand(s, terminal, { labels: { [WORKER_OF_LABEL]: ID.cap } });
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1" = get ] && [ "$2" = t501 ]; then ${change}; fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["worker", "kill", terminal]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /is another bot's worker/);
+  assert.equal(s.calls().some(([verb]) => verb === "kill"), false);
+  const pane = s.hcState().terminals.find((x) => x.address === terminal);
+  assert.equal(pane.labels[WORKER_OF_LABEL], ID.cap);
+  assert.equal(pane.state, "live");
 });
 
 test("worker kill #1129: a plain hc run child is refused whatever its parent says, and a worker that changes before the kill is not ended", (t) => {
@@ -2883,7 +3003,11 @@ test("worker #1278 cause 1: a worker whose branch's PR merged is ended by the sw
   // Its turn is over (hc shows idle), but the terminal is still live, as a finished worker's is.
   const state = s.hcState();
   Object.assign(state.terminals.find((x) => x.address === w.terminal).status, { state: "idle" });
-  state.terminals.push({ ...term("t501", { cwd: w.worktree }), parent: w.terminal, die_with_parent: true });
+  state.terminals.push(
+    { ...term("t501", { cwd: w.worktree }), parent: w.terminal, die_with_parent: true },
+    { ...term("t502", { cwd: w.worktree }), parent: w.terminal, die_with_parent: true,
+      labels: { [WORKER_OF_LABEL]: ID.cap } },
+  );
   writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
   const head = git(w.worktree, "rev-parse", "HEAD").trim();
   writeFileSync(join(s.root, "gh.json"), JSON.stringify([{
@@ -2895,6 +3019,8 @@ test("worker #1278 cause 1: a worker whose branch's PR merged is ended by the sw
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(r.json().ended, [w.terminal], "the finished worker's terminal is ended");
   assert.equal(s.hcState().terminals.some((x) => [w.terminal, "t501"].includes(x.address)), false);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t502")?.state, "finished");
+  assert.match(r.err, /t502 was left listed because it belongs to a bot/);
   assert.equal(r.json().waiting, 1, "a worktree waits even after the terminal was removed in this sweep");
   assert.equal(s.cli(["reap", "--json"], { from: null }).json().waiting, 1, "the next sweep reads the finish time from the ledger");
   assert.ok(s.calls().some((c) => c[0] === "kill" && c[1] === w.terminal), "hc kill was called");
@@ -2912,6 +3038,112 @@ test("worker #1278 cause 1: a worker whose branch's PR merged is ended by the sw
     ? { ...row, at: new Date(Date.now() - 16 * 60_000).toISOString() } : row);
   writeFileSync(join(s.app, "automagik-herdr/workers.jsonl"), aged.map((row) => JSON.stringify(row)).join("\n") + "\n");
   assert.deepEqual(s.cli(["reap", "--json"], { from: null }).json().removed, [w.worktree]);
+});
+
+test("reap rechecks a merged worker after the forge replies", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
+  assert.equal(w.code, 0, w.err);
+  const { terminal } = w.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status = { state: "idle" };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  writeFileSync(join(s.root, "gh.json"), JSON.stringify([{
+    number: 9, state: "MERGED", mergedAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+  }]));
+  const change = patchWorkerPaneCommand(s, terminal, { status: { state: "working" } });
+  writeFileSync(join(s.root, "gh-hook.sh"), change + "\n");
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().ended, []);
+  assert.equal(s.calls().some(([verb]) => verb === "kill"), false);
+  const pane = s.hcState().terminals.find((x) => x.address === terminal);
+  assert.deepEqual([pane.state, pane.status.state], ["live", "working"]);
+});
+
+test("worker kill leaves its finish in hc when the ledger save fails, so reap waits", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
+  assert.equal(w.code, 0, w.err);
+  const { terminal, worktree } = w.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status = { state: "idle" };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  // The start row remains readable, but the ledger writer refuses to follow the link.
+  const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+  const readable = join(s.root, "readable-ledger.jsonl");
+  renameSync(ledger, readable);
+  symlinkSync(readable, ledger);
+  const r = s.cli(["worker", "kill", terminal]);
+  assert.equal(r.code, 0, r.err);
+  const reap = s.cli(["reap", "--json"], { from: null });
+  assert.equal(reap.code, 0, reap.err);
+  assert.equal(reap.json().waiting, 1, reap.out);
+  assert.equal(existsSync(worktree), true);
+  assert.equal(s.ledger().some((row) => row.event === "end"), false);
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === terminal)?.state, "finished");
+  assert.equal(s.calls().some(([verb]) => verb === "rm"), false);
+  assert.match(r.err, /left listed/);
+});
+
+test("reap waits on a recently removed terminal before marking its checkout gone", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
+  assert.equal(w.code, 0, w.err);
+  const { terminal, worktree } = w.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).status = { state: "idle" };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const killed = s.cli(["worker", "kill", terminal]);
+  assert.equal(killed.code, 0, killed.err);
+  assert.equal(s.hcState().terminals.some((pane) => pane.address === terminal), false);
+  git(s.project, "worktree", "remove", worktree);
+  const first = s.cli(["reap", "--json"], { from: null });
+  assert.equal(first.code, 0, first.err);
+  assert.deepEqual(first.json().gone, []);
+  assert.equal(first.json().waiting, 1);
+  assert.deepEqual(reapFile(s), []);
+  const old = new Date(Date.now() - 16 * 60_000).toISOString();
+  const rows = s.ledger().map((row) => row.event === "end" ? { ...row, at: old } : row);
+  writeFileSync(join(s.app, "automagik-herdr/workers.jsonl"),
+    rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const second = s.cli(["reap", "--json"], { from: null });
+  assert.equal(second.code, 0, second.err);
+  assert.deepEqual(second.json().gone, [worktree]);
+});
+
+test("reap rechecks the settling hold just before worktree removal", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
+  assert.equal(w.code, 0, w.err);
+  const { terminal, worktree } = w.json();
+  const start = s.ledger().find((row) => row.event === "start" && row.terminal === terminal);
+  const state = s.hcState();
+  state.terminals = state.terminals.filter((pane) => pane.address !== terminal);
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  // The initial sweep knows no finish. A record from another observer arrives under the lock.
+  const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+  const late = join(s.root, "late-end.jsonl");
+  writeFileSync(late, JSON.stringify(endRow({
+    kind: "worker", terminal, core: start.core, createdMs: start.created_ms, reason: "finished",
+  })) + "\n");
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1" = ls ] && [ "$2" != --all ] && [ -f "${late}" ]; then
+  cat "${late}" >> "${ledger}"
+  rm "${late}"
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().waiting, 1, r.out);
+  assert.deepEqual(r.json().removed, []);
+  assert.equal(existsSync(worktree), true);
+  assert.equal(s.ledger().some((row) => row.event === "end" && row.terminal === terminal), true);
 });
 
 test("worker #1278 cause 2: reap lists a worktree no worker row created, and never removes it", (t) => {

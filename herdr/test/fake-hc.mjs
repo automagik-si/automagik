@@ -575,7 +575,8 @@ switch (words[0]) {
       delete state.afterKill;
     }
     save();
-    out(t);
+    // Older hc can return fewer fields than the record available from get.
+    out(state.killReply?.[words[1]] ?? t);
     // A caller in the old terminal dies with it. A detached retirement process is outside it.
     if (process.env.HC_TERMINAL_ID && [t.address, t.name].includes(process.env.HC_TERMINAL_ID)) {
       const sid = spawnSync("ps", ["-o", "pgid=", "-p", String(process.ppid)], { encoding: "utf8" }).stdout?.trim();

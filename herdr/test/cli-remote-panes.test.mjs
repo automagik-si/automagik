@@ -3076,6 +3076,23 @@ for (const pinned of [true, false]) {
   });
 }
 
+test("restart --machine rechecks the linked old pane before killing it", (t) => {
+  const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
+  const s = scene(t, { terminals: [pane] });
+  assert.equal(s.cli(["attach", ATLAS, "vm/t8", ...s.on]).code, 0);
+  s.setState((state) => { state.failGetOnRun = ["vm/t8"]; });
+  const r = s.cli(["restart", ATLAS, ...s.on, "--fresh", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().terminal, "t100");
+  assert.equal(heldIn(foldAttach(s.rows()), ATLAS, CORE).terminal, "t100");
+  const calls = s.calls();
+  const replacement = calls.findLastIndex(([op, id]) => op === "get" && id === "vm/t100");
+  assert.ok(replacement > calls.findIndex(([op]) => op === "run"));
+  assert.ok(calls.slice(replacement + 1).some(([op, id]) => op === "get" && id === "vm/t8"));
+  assert.ok(!calls.some(([op, id]) => op === "kill" && id === "vm/t8"));
+  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
+});
+
 test("restart --machine --expect-pane: a pane given to another bot while the replacement starts is refused and that pane is never ended", (t) => {
   const pane = atlasPane({ status: { state: "idle", app: "hermes" } });
   const s = scene(t, { terminals: [pane] });

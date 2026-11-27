@@ -3475,6 +3475,36 @@ test("a bot restarting itself writes and prints everything before its old pane i
   assert.ok(ledgerOf(s).some((x) => x.terminal === "t100" && x.kind === "seat"));
 });
 
+test("self-restart retirement refuses a terminal whose launch changed after handoff", (t) => {
+  const s = restartScene(t);
+  const code = `import { retireSelfRestart } from ${JSON.stringify(new URL(
+    "../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).href)};
+    await retireSelfRestart("t5", 99, "fakecore0000", []);`;
+  const r = spawnSync(RUNTIME, ["--input-type=module", "-e", code], {
+    cwd: s.project, env: { ...s.env, HC_TERMINAL_ID: "t5" }, detached: true, encoding: "utf8",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(s.calls(), [["get", "t5", "--json"]]);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t5").state, "live");
+});
+
+test("restart rechecks the local old pane after its replacement is ready", (t) => {
+  const s = restartScene(t);
+  const state = s.hcState();
+  state.failGetOnRun = ["t5"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["restart", "Genie", "--fresh", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().terminal, "t100");
+  const calls = s.calls();
+  assert.equal(at(calls, "kill", "t5"), -1);
+  const recheck = calls.findLastIndex(([op, pane]) => op === "get" && pane === "t5");
+  const ready = calls.slice(at(calls, "run") + 1, recheck)
+    .filter(([op, pane]) => op === "get" && pane === "t100");
+  assert.ok(ready.length >= 2, "looked up t5 after replacement readiness checks");
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t5").state, "live");
+});
+
 test("restart: the bot attached elsewhere while the new pane came up: the new pane is ended, no rows written, the other binding kept", (t) => {
   const other = term("t9", { bot: null, cwd: "/elsewhere", created: 77 });
   const s = restartScene(t, { extra: [other] });
@@ -3868,6 +3898,21 @@ test("restart --tree leaves a helper that exits independently and reports one fa
   const warning = "t8 was left listed. Run hc rm t8";
   assert.deepEqual(r.json().warnings.filter((w) => w.includes("hc rm")), [warning]);
   assert.deepEqual(r.err.split("\n").filter((line) => line.includes("hc rm")), [`am: ${warning}`]);
+  assert.equal(at(s.calls(), "rm", "t7"), -1);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t7").state, "finished");
+});
+
+test("restart keeps an independently killed descendant without die_with_parent", (t) => {
+  const { s } = treeScene(t);
+  const state = s.hcState();
+  state.terminals.find((p) => p.address === "t7").die_with_parent = false;
+  state.afterKill = { terminal: "t7", patch: {
+    state: "finished", reason: "killed", finished_ms: Date.now() + 60_000,
+  } };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["restart", "Genie", "--force", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.ok(at(s.calls(), "rm", "t5") >= 0);
   assert.equal(at(s.calls(), "rm", "t7"), -1);
   assert.equal(s.hcState().terminals.find((p) => p.address === "t7").state, "finished");
 });
@@ -4334,8 +4379,17 @@ test("restart --tree: hc run failing for helper 2 of 3: helpers 1 and 3 run agai
   assert.equal(`${r.out}${r.err}`.includes(SID2), false, "no session id printed");
   assert.deepEqual(codexWords(agentWords(runs(s).at(-1))), ["codex", "-m", "gpt-a", ...CODEX_MODE, "resume", SID3], "helper 3 resumed by its id, in the launch mode");
   const state = s.hcState();
-  assert.deepEqual(["t5", "t7", "t8", "t10", "t100", "t101", "t102"].map((x) => state.terminals.find((y) => y.address === x)?.state),
-    [undefined, undefined, undefined, undefined, "live", "live", "live"], "the old pane and its helpers are removed");
+  const pane = (id) => state.terminals.find((y) => y.address === id);
+  assert.deepEqual(["t5", "t7", "t8", "t10", "t100", "t101", "t102"].map((id) => pane(id)?.state),
+    [undefined, undefined, "finished", undefined, "live", "live", "live"]);
+  assert.equal(pane("t8").labels["revive.session"], SID2, "hc get can recover the session");
+  const calls = s.calls();
+  for (const [old, next] of [["t7", "t101"], ["t10", "t102"]]) {
+    const removed = at(calls, "rm", old);
+    assert.ok(removed >= 0, `${old} is removed after its replacement starts`);
+    const checks = calls.slice(0, removed).filter(([op, id]) => op === "get" && id === next);
+    assert.ok(checks.length > 1, `${old} stays through readiness checks for ${next}`);
+  }
   onePanePerSession(s);
 });
 
@@ -8075,6 +8129,39 @@ exec "${process.execPath}" "${FAKE_HC}" "$@"
   assert.equal(at(s.calls(), "kill", "t7"), -1, "the pane at t7 now is not the helper: never killed");
   assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "live");
   assert.deepEqual(r.json().helpers.map((h) => [h.replaced, h.up]), [["t7", true], ["t8", true]]);
+});
+
+test("restart --tree rechecks a surviving helper just before its fallback kill", (t) => {
+  const { s } = treeScene(t);
+  const state = s.hcState();
+  state.surviveParent = ["t7"];
+  state.afterKill = { terminal: "t7", patch: { reuseAfterGets: 1, reuseCreated: 99 } };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const wait = join(s.root, "delay-first-helper-read");
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1 $2" = "kill t5" ]; then
+  "${process.execPath}" "${FAKE_HC}" "$@" || exit $?
+  touch "${wait}"
+  exit
+fi
+if [ "$1 $2" = "get t7" ] && [ -f "${wait}" ]; then
+  rm "${wait}"
+  "${process.execPath}" "${FAKE_HC}" "$@" || exit $?
+  sleep 5.1
+  exit
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.cli(["restart", "Genie", "--tree", "--fresh", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const calls = s.calls();
+  const killed = at(calls, "kill", "t5");
+  assert.ok(killed >= 0);
+  assert.equal(at(calls, "kill", "t7"), -1, "the new occupant of t7 must never be killed");
+  const reads = calls.slice(killed + 1).filter(([op, pane]) => op === "get" && pane === "t7");
+  assert.ok(reads.length > 1);
+  const t7 = s.hcState().terminals.find((p) => p.address === "t7");
+  assert.deepEqual([t7.state, t7.created_ms], ["live", 99]);
 });
 
 test("#1557 a managed Claude login can park without planning any replacement", (t) => {

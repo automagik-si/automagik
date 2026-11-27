@@ -499,31 +499,56 @@ async function hcReal(args, { timeout, prepareArgs } = {}) {
  * allows direct kills only from a project's main bot (#955). If an unvouched guard fails the
  * CLI's kill, explain how to resolve the version skew (#1728).
  */
-async function hcKill(terminal, {
-  timeout, before, kind, core, reason = "finished", children = [], record, say = (line) => report([line]),
+export async function hcKill(terminal, {
+  timeout, before, kind, core, reason = "finished", children = [], record, deferRemoval = false,
+  say = (line) => report([line]),
 } = {}) {
   const linked = terminal.includes("/");
   // A linked core's clock need not agree with ours. Use its live observation instead.
   if (linked && before === undefined) before = await retirementGet(terminal, timeout).catch(() => null);
   const started = Date.now();
   const file = realHcPath();
-  const r = await runProgram(hcExecutable(file), ["kill", terminal, "--json"], { timeout, env: localHcEnv() });
+  const r = await runProgram(hcExecutable(file), ["kill", terminal, "--json"],
+    { timeout, env: localHcEnv() });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   if (r.code === 0) {
-    const ended = terminalReply(r);
-    if (!ended || ended.state !== "finished") {
+    let ended = terminalReply(r);
+    if (ended?.state !== "live" && !hasFinishFacts(ended)) {
+      const get = await retirementGet(terminal, timeout).catch(() => null);
+      if (get?.address === (ended?.address ?? before?.address ?? terminal)
+          && (ended?.created_ms == null || ended.created_ms === get.created_ms)
+          && (before?.created_ms == null || before.created_ms === get.created_ms)
+          && (!ended?.state || ended.state === get.state)) {
+        ended = { ...get, reason: ended?.reason ?? get.reason,
+          finished_ms: ended?.finished_ms ?? get.finished_ms,
+          exit_code: ended?.exit_code ?? get.exit_code, signal: ended?.signal ?? get.signal };
+      }
+    }
+    if (ended?.state === "live") {
+      return { ...r, code: 1, stillRunning: true, stderr: `${terminal} is still running.` };
+    }
+    if (!hasFinishFacts(ended)) {
+      // Restart recorded a successful kill even on hc versions that omit the finish facts.
+      if (kind === "seat" && !linked) {
+        const unlogged = appendEnd(endRow({ kind, terminal, core: core ?? await rowCore(),
+          createdMs: before?.created_ms ?? ended?.created_ms, reason }));
+        if (unlogged) say(unlogged);
+      }
       say(leftListed(terminal));
       return r;
     }
-    const ownEnd = ended.reason === "killed" && Number.isSafeInteger(ended.finished_ms)
+    const ownEnd = ended.reason === "killed"
       && (!before || before.created_ms === ended.created_ms)
       && (!before?.address || before.address === ended.address)
       && (!before?.state || before.state === "live")
       && (linked ? before?.state === "live" : ended.finished_ms >= started);
     if (ownEnd) {
       const options = { timeout, core, reason, record, say };
-      await removeEndedChildren(children, linked ? ended.finished_ms : started, options);
-      await removeEndedPane(terminal, ended, { ...options, kind });
+      const endSince = linked ? ended.finished_ms : started;
+      const workerOf = kind === "worker" ? before?.labels?.[WORKER_OF_LABEL] : undefined;
+      await removeEndedChildren(children, endSince, { ...options, workerOf });
+      if (!deferRemoval) await removeEndedPane(terminal, ended, { ...options, kind });
+      return { ...r, endSince, endedPane: ended };
     }
     return r;
   }
@@ -551,6 +576,17 @@ async function retirementGet(terminal, timeout) {
 
 const leftListed = (terminal) => `${terminal} was left listed. Run hc rm ${terminal}`;
 
+function hasFinishFacts(pane) {
+  return pane?.state === "finished" && typeof pane.reason === "string"
+    && typeof pane.address === "string" && Number.isSafeInteger(pane.created_ms)
+    && Number.isSafeInteger(pane.finished_ms);
+}
+
+function killedSince(pane, since) {
+  return Number.isSafeInteger(since) && hasFinishFacts(pane) && pane.reason === "killed"
+    && pane.finished_ms >= since;
+}
+
 /** Children can take a moment to finish after the parent. Share one wait across the group. */
 async function removeEndedChildren(children, since, options) {
   const until = Date.now() + 5000;
@@ -560,14 +596,44 @@ async function removeEndedChildren(children, since, options) {
       if (get === undefined) options.say(`Couldn't verify ${child.address} finished. If it did, run hc rm ${child.address}`);
       if (!get || get.parent !== child.parent || get.created_ms !== child.created_ms) break;
       if (get.state === "finished") {
-        if (get.reason === "killed" && Number.isSafeInteger(get.finished_ms) && get.finished_ms >= since) {
-          await removeEndedPane(child.address, get, { ...options, kind: child.kind });
+        if (killedSince(get, since)) {
+          if (options.workerOf && await protectedWorkerChild(child, get, options)) {
+            options.say(`${child.address} was left listed because it belongs to a bot.`);
+          } else {
+            await removeEndedPane(child.address, get, { ...options, kind: child.kind });
+          }
         }
         break;
       }
       if (Date.now() >= until) break;
       await later(100);
     }
+  }
+}
+
+async function protectedWorkerChild(child, pane, { workerOf, core }) {
+  const foreign = (bot) => bot && bot !== workerOf;
+  if (child.kind === "seat" || child.bot || pane.labels?.[BOT_LABEL]
+      || foreign(child.workerOf) || foreign(pane.labels?.[WORKER_OF_LABEL])) return true;
+  const identity = { core, terminal: child.address, created_ms: child.created_ms };
+  const key = launchKey(identity);
+  const cwd = child.cwd ?? pane.cwd;
+  const project = typeof cwd === "string" && isAbsolute(cwd)
+    ? await keyOf(cwd).catch(() => cwd) : null;
+  const homes = new Set([appHome(), appHome({}), child.appHome, launchHomeOf(pane),
+    project && projectAppHomeOf(project)]);
+  try {
+    for (const dir of homes) {
+      if (!dir) continue;
+      const attached = foldAttach(readAttachFile(attachPath(dir)) ?? []).byKey;
+      if (attached.has(attachKey(identity))) return true;
+      if (key && workerLedgerRows(dir).some((row) => row?.event === "start" && row.kind === "worker"
+        && launchKey(row) === key && foreign(row.botId))) return true;
+    }
+    return false;
+  } catch {
+    // An unreadable ledger cannot establish that the descendant is ours.
+    return true;
   }
 }
 
@@ -601,7 +667,10 @@ export async function retireSelfRestart(terminal, createdMs, core, children) {
   const self = process.env.HC_TERMINAL_ID;
   if (!self || !sameLivePane(pane, terminal, createdMs) || ![terminal, pane.name].includes(self)) return;
   const r = await hcKill(terminal, { before: pane, kind: "seat", core, reason: "replaced", children });
-  if (r.code !== 0) report([`${terminal} wasn't ended. End it with hc kill ${terminal}.`]);
+  if (r.code !== 0) {
+    const warning = `${terminal} wasn't ended. End it with hc kill ${terminal}.`;
+    report([r.stillRunning ? r.stderr : warning]);
+  }
 }
 
 async function endSelfRestart(terminal, createdMs, core, children) {
@@ -3981,6 +4050,8 @@ function retirementChildren(root, panes, bindings) {
       seen.add(pane.address);
       parents.push(pane.address);
       children.push({ address: pane.address, parent, created_ms: pane.created_ms,
+        cwd: pane.cwd, appHome: launchHomeOf(pane),
+        bot: pane.labels?.[BOT_LABEL], workerOf: pane.labels?.[WORKER_OF_LABEL],
         kind: bindings?.get(pane.address)?.binding ? "seat" : undefined });
     }
   }
@@ -6658,6 +6729,7 @@ async function restartOnMachine(opts, project, bot, entry, observed) {
         warnings.push(w); report([w]);
         return "kept";
       } else if (before) {
+        if (!sameLivePane(before, old.address, held.binding.created_ms)) return "unconfirmed";
         const proof = await paneProof({ get: before, project });
         if (protectsChosenHome(proof)) {
           const w = chosenSeatRefusal(old.address, proof, "It was left as it is.");
@@ -7734,26 +7806,46 @@ async function treeIdle(old, plans, say, { force = false, revive = false } = {})
  * live, why }: `live` when it still runs (never run a second time then, nor offered by hand),
  * else hc can't say (unknown is never gone).
  */
-async function helperEnded(terminal, project, { createdMs, kind, core, say, children }, ms = 5000) {
+async function helperEnded(terminal, project, {
+  createdMs, parent, since, kind, core, say, children,
+}, ms = 5000) {
+  const finished = (get) => {
+    const pane = get?.address === terminal && get.parent === parent && get.created_ms === createdMs
+      && killedSince(get, since) ? get : null;
+    return { ended: true, pane };
+  };
+  const replaced = (get) => Number.isSafeInteger(createdMs) && get?.address === terminal
+    && Number.isSafeInteger(get.created_ms) && get.created_ms !== createdMs;
   const wait = async (limit) => {
     const until = Date.now() + limit;
     for (;;) {
       const now = await hcState(terminal);
-      if (now.state === "gone" || now.state === "finished") return { ended: true };
+      if (now.state === "gone") return { ended: true };
+      if (now.state === "finished") return finished(now.get);
       if (now.state === "unknown") return { ended: false, live: false, why: `${now.why}, so it may still run` };
-      if (Number.isSafeInteger(createdMs) && now.get?.address === terminal
-          && Number.isSafeInteger(now.get.created_ms) && now.get.created_ms !== createdMs) return { ended: true };
+      if (replaced(now.get)) return { ended: true };
       if (protectsChosenHome(await paneProof({ get: now.get, project }))) return { ended: true };
-      if (Date.now() >= until) return null;
+      if (Date.now() >= until) return { before: now.get };
       await later(100);
     }
   };
   const first = await wait(ms);
-  if (first) return first;
-  const k = await hcKill(terminal, { kind, core, reason: "replaced", say, children,
-    before: { created_ms: createdMs } });
+  if (!Object.hasOwn(first, "before")) return first;
+  const before = await retirementGet(terminal).catch(() => undefined);
+  if (!sameLivePane(before, terminal, createdMs)) {
+    if (before === undefined) {
+      return { ended: false, live: false, why: `couldn't verify ${terminal} before ending it` };
+    }
+    if (before === null || replaced(before)) return { ended: true };
+    if (before.state === "finished") return finished(before);
+    return { ended: false, live: true, why: "its launch identity couldn't be verified" };
+  }
+  const k = await hcKill(terminal, {
+    kind, core, reason: "replaced", say, children, before, deferRemoval: true,
+  });
+  if (k.endedPane) return { ended: true, pane: k.endedPane };
   const second = await wait(k.code === 0 ? ms : 0);
-  if (second) return second;
+  if (!Object.hasOwn(second, "before")) return second;
   return { ended: false, live: true, why: `it still runs after its parent ended${k.code === 0 ? ` and ${ms / 1000}s after hc kill ${terminal}` : ` (hc kill ${terminal} failed: ${(k.stderr || k.stdout).trim()})`}` };
 }
 
@@ -7808,7 +7900,7 @@ function helperCommand(p, warn = () => {}) {
  * go on. `say` takes the warnings. Resolves [{ name,
  * replaced, terminal, bot, agent, mode, session, up, note, error, by_hand, still_running }].
  */
-async function rerunHelpers(plans, parent, say, retiring) {
+async function rerunHelpers(plans, parent, say, retiring, old, since) {
   const out = plans.map((p) => ({ name: p.name, replaced: p.replaced, terminal: null, bot: p.binding?.bot ?? null, agent: p.agent ?? null,
     mode: p.mode ?? null, session: p.session ?? null, up: false, note: p.note ?? null, error: null, cause: null, by_hand: null, still_running: false }));
   for (const [i, p] of plans.entries()) {
@@ -7829,15 +7921,19 @@ async function rerunHelpers(plans, parent, say, retiring) {
       say(`${who} wasn't run again: ${why}. Its conversation is kept; to run it again by hand:\n  ${hand.line}\n  ${hand.notes.join("\n  ")}`);
     };
     const project = { key: p.binding?.project ?? p.worker?.project ?? await keyOf(p.cwd).catch(() => p.cwd) };
-    const end = await helperEnded(p.replaced, project, { createdMs: p.createdMs,
+    const kind = p.binding ? "seat" : p.worker ? "worker" : undefined;
+    const oldCore = p.binding?.core ?? p.worker?.core;
+    const end = await helperEnded(p.replaced, project, { createdMs: p.createdMs, parent: old, since,
       children: retirementChildren(p.replaced, retiring),
-      kind: p.binding ? "seat" : p.worker ? "worker" : undefined, core: p.binding?.core ?? p.worker?.core, say });
+      kind, core: oldCore, say });
     // Ended (its parent's kill took it, or its own): a logged launch's end row (RFC 0021 (f) 4).
     if (end.ended && (p.worker || p.binding)) {
       // Keyed as its own start row or binding keyed the launch, so the sweep sees it ended.
-      const unlogged = appendEnd(endRow({ kind: p.binding ? "seat" : "worker", terminal: p.replaced,
-        core: p.binding?.core ?? p.worker?.core ?? await rowCore(),
-        createdMs: p.binding?.created_ms ?? p.worker?.created_ms ?? p.createdMs, reason: "replaced" }));
+      const unlogged = appendEnd(endRow({
+        kind, terminal: p.replaced, core: oldCore ?? await rowCore(),
+        createdMs: p.binding?.created_ms ?? p.worker?.created_ms ?? p.createdMs, reason: "replaced",
+        hcReason: end.pane?.reason, at: end.pane?.finished_ms,
+        exitCode: end.pane?.exit_code, signal: end.pane?.signal }));
       if (unlogged) say(unlogged);
     }
     if (!end.ended) {
@@ -7948,6 +8044,9 @@ async function rerunHelpers(plans, parent, say, retiring) {
     if (p.session && (p.worker || p.binding)) {
       const unrow = appendLedger(sessionRow({ terminal: address, session: p.session, transcript: null, agent: p.agent, core, createdMs }));
       if (unrow) say(unrow);
+    }
+    if (end.pane) {
+      await removeEndedPane(p.replaced, end.pane, { kind, core: oldCore, reason: "replaced", say });
     }
   }
   return out;
@@ -10647,9 +10746,17 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
   let rerun = [];
   let oldEnded = false;
   const retiring = [...observed.values()].map(({ get }) => get);
-  const children = old ? retirementChildren(old.address, retiring, view.byTerminal) : [];
-  const endOld = () => hcKill(old.address, { before: old, kind: "seat", core: held.binding.core,
-    reason: "replaced", children, say });
+  const plannedHelpers = new Set(plans.map((plan) => plan.replaced));
+  const children = old ? retirementChildren(old.address, retiring, view.byTerminal)
+    .filter((child) => !plannedHelpers.has(child.address)) : [];
+  const endOld = async () => {
+    const before = await retirementGet(old.address).catch(() => null);
+    if (!sameLivePane(before, old.address, held.binding.created_ms ?? old.created_ms)) {
+      return { code: 1, stderr: "couldn't confirm it is still the same live terminal" };
+    }
+    return hcKill(old.address, { before, kind: "seat", core: held.binding.core,
+      reason: "replaced", children, say });
+  };
   if (old) {
     // The old pane ends only once the new one has kept its agent up: the space is never left empty.
     let up = await agentUp(seat.terminal, { project });
@@ -10729,7 +10836,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
       const k = treeKill ?? await killTree();
       if (k.code === 0) {
         oldEnded = true;
-        rerun = await rerunHelpers(plans, seat.terminal, say, retiring);
+        rerun = await rerunHelpers(plans, seat.terminal, say, retiring, old.address, k.endSince);
       } else {
         const why = `${old.address} wasn't ended (hc kill: ${(k.stderr || k.stdout).trim()}), so its helpers still run under it`;
         say(`${why}; none was run again. End it with hc kill ${old.address}, then restart them.`);

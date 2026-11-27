@@ -347,7 +347,11 @@ export function startProgramsTests(cli) {
     const result = JSON.parse(r.stdout);
     const after = JSON.parse(readFileSync(s.statePath, "utf8"));
     assert.equal(after.terminals.some((p) => p.address === "vm/t1"), false);
-    assert.equal(after.terminals.some((p) => p.address === "vm/t2"), false);
+    const oldHelper = after.terminals.find((p) => p.address === "vm/t2");
+    if (mode === "partial") {
+      assert.equal(oldHelper?.state, "finished");
+      assert.equal(oldHelper.labels["agent.session"], "helper-session");
+    } else assert.equal(oldHelper, undefined);
     const live = after.terminals.filter((p) => p.state === "live");
     assert.equal(live.length, mode === "tree" ? 2 : 1);
     const lead = live.find((p) => p.address === `vm/${result.terminal}`);
