@@ -206,6 +206,8 @@ above stays the **gate**: only its verdict decides block, warn or pass.
   and its other text files, each with its path, in path order, up to 256 KiB in all (beyond that
   the review says which files it did not read); binary files by path and size only. Never the
   gate's findings, another skill, the person's chats, memory, secrets, settings or any other file.
+  Instructions to the agent that will use the skill are content; only text that speaks to the reviewer or this review,
+  or tries to shape its verdict, is reported as prompt injection (a hard block).
 - **Where the content goes.** Only to the provider of that model, under the person's own key or
   sign-in, as any background job already sends its input. This is one of the two occasions when
   skill content reaches a model provider; the other is a Bot's use ("Storage and privacy"). Nothing
