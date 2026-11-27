@@ -17,6 +17,9 @@
 // goes agent.transcript, the hook's transcript_path, only when it is inside Claude's own
 // transcript folder (transcriptFolder.mjs); a pane labelled before that gets it at its next
 // prompt, with no second row. That part never fails the hook and never changes the briefing.
+// Last, whatever the briefing did (a worker's pane too): when the pane's own
+// automagik-herdr.needs-owner label is set, one line reminds the agent of it and of how to clear
+// it (#2059). The hook never clears it; no label, no extra output.
 // Apache-2.0.
 
 import { execFile } from "node:child_process";
@@ -30,7 +33,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { BOT_LABEL, BOTS_PATH, collectProjectMap, effectiveLead, parseBots, projectKeyOf } from "./model.js";
 import { UNANSWERED, paneOf, rowsOf, unwrapKeep, waitsOnPermission } from "./launchArgs.js";
 import { attachKey, attachPath, confirmBindings, foldAttach, modeProblem, readAttach, verdictOf } from "./attach.js";
-import { botOfBriefingFile, briefDecision, briefedPath, briefingText, directMembers, latestReport, launchBriefingText, textHash }
+import { botOfBriefingFile, briefDecision, briefedPath, briefingText, directMembers, latestReport, launchBriefingText, needsOwnerReminder, textHash }
   from "./briefingText.mjs";
 import { briefingFileOf, resumedSessionOf } from "./models.js";
 import { LEDGER_MODE, SESSION_LABEL, TRANSCRIPT_LABEL, ledgerLine, ledgerPath, readLedger, sessionChange, sessionRow }
@@ -462,6 +465,11 @@ if (import.meta.url === invoked) {
     clearTimeout(guard);
     process.stderr.write(`am briefing: ${String(e?.message ?? e).split("\n")[0]}\n`);
   }
+  // The reminder reads the pane's own labels already fetched above; any failure prints nothing.
+  try {
+    const line = needsOwnerReminder(await me);
+    if (line) process.stdout.write(`${line}\n`);
+  } catch { /* fail open */ }
   await joined;
   process.exitCode = 0;
 }

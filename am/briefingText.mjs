@@ -35,6 +35,21 @@ export const OWNER_QUESTION_LINE = "Waiting on the person: when you end your tur
   + `with \`hc label "$HC_TERMINAL_ID" ${NEEDS_OWNER_KEY}=\` as soon as you work again or the `
   + "question is withdrawn. If HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
 
+/**
+ * #2059: the per-turn hook's reminder of the pane's own Question chip, or "" when the label is
+ * unset. `me` is the pane's `hc get`. The hook only reminds: a turn from `hc send` is not the
+ * person answering, so it never clears the label. The text is one line, cut at 200 characters.
+ */
+export function needsOwnerReminder(me) {
+  const raw = me && typeof me === "object" ? me.labels?.[NEEDS_OWNER_KEY] : null;
+  if (typeof raw !== "string") return "";
+  const text = raw.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const shown = text.length > 200 ? `${text.slice(0, 199)}…` : text;
+  return `Your pane still carries the Question "${shown}". If this turn answers it or it no longer applies, `
+    + `clear it with \`hc label "$HC_TERMINAL_ID" ${NEEDS_OWNER_KEY}=\`.`;
+}
+
 /** #1556: what a seat with a context threshold does when `am restart --due` asks for its handoff. */
 export const HANDOFF_LINE = "When `am` asks for your handoff, write it to the path its message names "
   + "(what is in flight, what waits on whom, and your next three actions) and end your turn; you will be "

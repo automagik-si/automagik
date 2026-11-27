@@ -503,6 +503,49 @@ test("briefing.mjs: silent exits — no HC_TERMINAL_ID, no CLAUDE_PROJECT_DIR, n
   }
 });
 
+test("#2059 briefing.mjs: a set needs-owner label adds one reminder line, bot or worker, and is never cleared", async (t) => {
+  const { root, tree, brief } = await scratch(t);
+  const fx = JSON.parse(readFileSync(join(root, "hc.json"), "utf8"));
+  fx.terminals.t5.labels[NEEDS_OWNER_LABEL] = "Which release\nshould ship?";
+  fx.terminals.t1.labels[NEEDS_OWNER_LABEL] = "Ship now?";
+  writeFileSync(join(root, "hc.json"), JSON.stringify(fx));
+  const line = (q) => `Your pane still carries the Question "${q}". If this turn answers it or it no longer applies, clear it with \`hc label "$HC_TERMINAL_ID" ${NEEDS_OWNER_LABEL}=\`.\n`;
+  // A worker (no bot label, no project): only the reminder, one line.
+  const worker = await brief({ HC_TERMINAL_ID: "t5" });
+  assert.equal(worker.stdout, line("Which release should ship?"));
+  assert.equal(worker.stderr, "");
+  // A bot: its briefing, then the reminder.
+  const botOut = await brief({ HC_TERMINAL_ID: "t1", CLAUDE_PROJECT_DIR: tree });
+  assert.ok(botOut.stdout.endsWith(`\n${line("Ship now?")}`));
+  // Not cleared by the hook; a label set to nothing prints nothing more.
+  assert.equal(JSON.parse(readFileSync(join(root, "hc.json"), "utf8")).terminals.t5.labels[NEEDS_OWNER_LABEL], "Which release\nshould ship?");
+  fx.terminals.t5.labels[NEEDS_OWNER_LABEL] = "";
+  writeFileSync(join(root, "hc.json"), JSON.stringify(fx));
+  assert.equal((await brief({ HC_TERMINAL_ID: "t5" })).stdout, "");
+  // hc failing: fail open, nothing printed.
+  fx.terminals.t5.labels[NEEDS_OWNER_LABEL] = "Ship now?";
+  fx.fail = ["t5"];
+  writeFileSync(join(root, "hc.json"), JSON.stringify(fx));
+  assert.equal((await brief({ HC_TERMINAL_ID: "t5" })).stdout, "");
+});
+
+test("#2059 briefing.mjs: a worker's reminder is silent when hc is missing or hangs, and the call is cut by its own timeout", async (t) => {
+  const { root, brief } = await scratch(t);
+  const fx = JSON.parse(readFileSync(join(root, "hc.json"), "utf8"));
+  fx.terminals.t5.labels[NEEDS_OWNER_LABEL] = "Ship now?";
+  fx.slow = ["t5"];
+  writeFileSync(join(root, "hc.json"), JSON.stringify(fx));
+  const missing = await brief({ HC_TERMINAL_ID: "t5", PATH: `${NODE_DIR}:/usr/bin:/bin` });
+  assert.equal(missing.stdout, "");
+  const began = Date.now();
+  const hung = await brief({ HC_TERMINAL_ID: "t5", HERDR_BRIEFING_TIME_SCALE: "1" });
+  assert.equal(hung.stdout, "");
+  assert.equal(hung.stderr, "");
+  assert.ok(Date.now() - began < 5000, "well inside the hook's 10 s");
+  assert.match(readFileSync(join(root, "hc.json.slow"), "utf8"), /^hung get t5$/m);
+  assert.doesNotMatch(readFileSync(join(root, "hc.json.slow"), "utf8"), /^answered/m);
+});
+
 test("briefing.mjs: silent for a bot of a project with no bots.json, and for a planned bot's id", async (t) => {
   const { root, main, tree, brief } = await scratch(t);
   const other = scratchProject(root, "elsewhere");
