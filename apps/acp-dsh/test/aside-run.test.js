@@ -242,7 +242,11 @@ test('2160 review purpose admits Claude Code in a fresh tools-off session', asyn
   await world.service.accountConfirm(world.provider)
   assert.deepEqual(await reviewOutcome(world, { model: 'claude-sonnet-5-5' }),
     { text: 'Fixture response.', model: 'claude-sonnet-5-5' })
-  const opened = world.events().find(row => row.event === 'new')
+  const events = world.events()
+  const prompt = events.find(row => row.event === 'prompt'
+    && row.prompt.at(-1)?.text === 'Fixture review prompt.')
+  assert.ok(prompt, 'the Claude review prompt was dispatched')
+  const opened = events.find(row => row.event === 'new' && row.pid === prompt.pid)
   assert.deepEqual(opened.mcpServers, [])
   assert.deepEqual(opened.meta, { disableBuiltInTools: true, claudeCode: { options: { settingSources: [] } } })
 })
