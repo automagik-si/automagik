@@ -94,7 +94,7 @@ async function joinedSolver(t) {
 }
 
 test('#2134 K9 joined synthetic Solver keeps the Session on verdict and delivers a verified result', { timeout: 18_000 }, async t => {
-  const { folder, insidePath, outsidePath, inside, outside, world, chat, ctx, rt, reviewer, bot, request, designate, verdict, dialogs } =
+  const { folder, insidePath, outsidePath, inside, outside, world, chat, ctx, rt, bot, request, designate, verdict, dialogs } =
     await joinedSolver(t)
   const execute = (name, args, next) => ctx.listeners.get('tools/execute')[0]({
     name, arguments: args, agent: chat.agent, callId: 'fixture-check',
