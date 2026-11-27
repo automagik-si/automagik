@@ -228,10 +228,42 @@ test('a Stop during the reattachment ends the turn as a Stop and leaves the bind
   })
 })
 
+test('a cancellation the app did not request leaves the prompt uncertain', async () => {
+  await withFixture('agent-cancel', {}, async h => {
+    await turn(h, 'native-remember m-1')
+    await send(h, 'reviewer denies 0')
+    assert.equal(latestNative(h.session, ROUTE)?.state, 'sent')
+  })
+})
+
+test('a fresh connector can still roll back after a reattachment fails', async () => {
+  await withFixture('fallback-rollback', { env: { FAKE_ACP_RESUME: '1' } }, async h => {
+    await turn(h, 'native-remember m-1')
+    h.restart()
+    const spawn = h.spec.spawn
+    let starts = 0
+    let rollbacks = 0
+    h.spec.spawn = () => {
+      starts += 1
+      if (starts === 2) throw new Error('new connector failed to launch')
+      const launch = spawn()
+      if (starts === 1) launch.env.FAKE_ACP_RESUME_HANG = '1'
+      return launch
+    }
+    h.spec.startMs = 1200
+    h.spec.rollback = () => { rollbacks += 1; return true }
+    const after = await send(h, 'native-recall')
+    assert.equal(after.finish.reason.kind, 'stop')
+    assert.equal(rollbacks, 1)
+    assert.equal(starts, 3)
+  })
+})
+
 // An interrupted turn leaves no answer after the person's rows, so the next request carries
 // them again, after any rows sent since: only those the uncertain prompt carried are held back.
 test('an uncertain prompt of several rows is never sent again, across two crashes, and the rows after it are', async () => {
-  await withFixture('uncertain-rows', { env: { FAKE_ACP_RESUME: '1' } }, async (h) => {
+  let canSave = true
+  await withFixture('uncertain-rows', { env: { FAKE_ACP_RESUME: '1' }, flush: async () => canSave }, async (h) => {
     await turn(h, 'native-remember m-8')
     const cut = await send(h, 'exit-mid-prompt first-instruction', 'and-also second-instruction')
     assert.notEqual(cut.finish.reason.kind, 'stop')
@@ -240,6 +272,9 @@ test('an uncertain prompt of several rows is never sent again, across two crashe
     assert.deepEqual(sent.rows, h.messages.slice(-2).map(row => row.id), 'the record names exactly the rows that prompt carried')
     h.restart()
     // The retry after the restart: the same native session, the interrupted rows held back.
+    canSave = false
+    assert.equal((await send(h, 'retry after save')).finish.reason.kind, 'error')
+    canSave = true
     const second = await send(h, 'exit-mid-prompt third-instruction')
     assert.notEqual(second.finish.reason.kind, 'stop')
     let prompt = of(h, 'prompt').at(-1).text
@@ -247,7 +282,7 @@ test('an uncertain prompt of several rows is never sent again, across two crashe
     assert.match(prompt, /third-instruction/)
     assert.match(prompt, /may have partly run/)
     // That prompt crashed too: its record still names the first prompt's rows beside its own.
-    assert.deepEqual(latestNative(h.session, ROUTE).rows, h.messages.slice(-3).map(row => row.id))
+    assert.deepEqual(latestNative(h.session, ROUTE).rows, h.messages.slice(-4).map(row => row.id))
     h.restart()
     const after = await send(h, 'native-recall')
     assert.equal(after.finish.reason.kind, 'stop')

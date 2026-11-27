@@ -309,6 +309,14 @@ export const ELICITATION_DECLINE = 'Decline (send nothing)'
 const YES = 'Yes'
 const NO = 'No'
 
+// DSH returns the displayed label. Keep the original wire value for titled and truncated choices.
+function enumChoices(schema) {
+  const items = schema?.type === 'array' ? schema.items : schema
+  if (Array.isArray(items?.enum)) return items.enum.slice(0, 20).map(value => ({ label: line(value), value }))
+  const titled = schema?.type === 'array' ? items?.anyOf : items?.oneOf
+  if (Array.isArray(titled)) return titled.slice(0, 20).map(choice => ({ label: line(choice.title ?? choice.const), value: choice.const }))
+}
+
 /**
  * The questions DSH asks the person for one form elicitation, or undefined for one this client
  * does not ask (a URL elicitation: it would open a page; a form with no field it can ask). The
@@ -328,14 +336,17 @@ export function elicitationQuestions(request, agentName) {
     let options
     let multiSelect
     if (schema?.type === 'boolean') options = [{ label: YES }, { label: NO }]
-    else if (schema?.type === 'string' && Array.isArray(schema.enum)) options = schema.enum.slice(0, 20).map(value => ({ label: line(value) }))
-    else if (schema?.type === 'string' && Array.isArray(schema.oneOf)) options = schema.oneOf.slice(0, 20).map(choice => ({ label: line(choice?.title ?? choice?.const) }))
-    else if (schema?.type === 'array') {
-      const choices = schema.items?.enum ?? schema.items?.anyOf?.map(choice => choice?.title ?? choice?.const)
-      if (!Array.isArray(choices)) return undefined
-      options = choices.slice(0, 20).map(value => ({ label: line(value) }))
-      multiSelect = true
-    } else if (!['string', 'number', 'integer'].includes(schema?.type)) return undefined
+    else if (schema?.type === 'string' || schema?.type === 'array') {
+      const choices = enumChoices(schema)
+      if (choices) {
+        if (new Set(choices.map(choice => choice.label)).size !== choices.length) return undefined
+        options = choices.map(({ label }) => ({ label }))
+      }
+      if (schema.type === 'array') {
+        if (!options) return undefined
+        multiSelect = true
+      }
+    } else if (!['number', 'integer'].includes(schema?.type)) return undefined
     questions.push({ id: name, header, question: `${title}${required.has(name) ? '' : ' (optional)'}`, ...(detail === '' ? {} : { detail }), ...(options === undefined ? {} : { options }), ...(multiSelect ? { multiSelect } : {}) })
   }
   const first = questions[0]
@@ -356,15 +367,18 @@ export function elicitationAnswer(request, answer) {
     const typed = typeof item?.custom === 'string' ? item.custom.trim() : ''
     const picked = item?.selected ?? []
     let value
+    const choices = enumChoices(schema)
     if (schema?.type === 'boolean') value = picked[0] === YES ? true : picked[0] === NO ? false : undefined
-    else if (schema?.type === 'array') value = picked.length > 0 ? picked : undefined
+    else if (choices) {
+      const values = new Map(choices.map(choice => [choice.label, choice.value]))
+      const labels = picked.length ? picked : typed ? [typed] : []
+      if (labels.some(label => !values.has(label))) return { action: 'decline' }
+      if (labels.length) value = schema.type === 'array' ? labels.map(label => values.get(label)) : values.get(labels[0])
+    }
     else if (schema?.type === 'number' || schema?.type === 'integer') {
       const number = Number(typed || picked[0])
       value = typed === '' && picked.length === 0 ? undefined : Number.isFinite(number) && (schema.type === 'number' || Number.isInteger(number)) ? number : Number.NaN
       if (Number.isNaN(value)) return { action: 'decline' }
-    } else if (Array.isArray(schema?.oneOf)) {
-      const choice = schema.oneOf.find(option => line(option?.title ?? option?.const) === picked[0])
-      value = choice?.const ?? (typed === '' ? undefined : typed)
     } else value = picked[0] ?? (typed === '' ? undefined : typed)
     if (value !== undefined) content[name] = value
   }

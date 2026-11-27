@@ -690,7 +690,7 @@ export class AgentRun {
         }
         // Read by the adapter at this end, once per prompt: its native session and ordinal are
         // the key a replay or a reconnect cannot repeat.
-        try { this.spec.onPromptSettled?.(ordinal, true) } catch {}
+        try { this.spec.onPromptSettled?.(ordinal, result?.stopReason !== 'cancelled' || this.cancelled) } catch {}
         this.promptUsage = { nativeSessionId, ordinal, ...promptUsageOf(result?.usage, this.spec.provider), ...(this.context === undefined ? {} : { context: this.context }) }
         return this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' })
       },

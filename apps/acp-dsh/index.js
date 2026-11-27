@@ -323,7 +323,7 @@ export function apply(ctx, config = {}, {
     // whose account the person confirmed (or that was carried) has one. Any other state (signed
     // out, not read yet, another account waiting for its confirmation) binds nothing.
     accountBinding: id => (signIns.get(id) === true && currentAccountRefusal(id) === undefined
-      && (consentStates.get(id) === 'given' || consentStates.get(id) === 'carried') ? consents?.accountKey(id) : undefined),
+      && (consentStates.get(id) === 'given' || consentStates.get(id) === 'carried') ? consents?.accountKey(id, accountsSeen.get(id)) : undefined),
   })
   // What acted on each Session's permissions (permission-diagnostics.js): it only records.
   const diagnostics = new PermissionDiagnostics()
@@ -707,7 +707,7 @@ export function apply(ctx, config = {}, {
       },
     }),
     spawn: (context) => {
-      const { ready, command, args, env } = launch(spec, cli, id)
+      const { ready, command, args, env, version, key } = launch(spec, cli, id)
       if (!ready) {
         void install(spec)
         // Read after the try above: a record that still cannot be saved is this turn's reason.
@@ -761,7 +761,7 @@ export function apply(ctx, config = {}, {
             cwd, dir: codexOffDir, kept: spec.nativeKeptModels ?? [], signal: context.signal,
             log: line => info(ctx, line.replace(/^acp-dsh: /, '')),
           })
-          return { ...launched, profileModes }
+          return { ...launched, profileModes, version, key }
         })()
       }
       // The chat profiles of the Bot's isolated Codex home, for the session this process starts
@@ -771,7 +771,7 @@ export function apply(ctx, config = {}, {
           platform, codexPath: env.CODEX_PATH, log: line => warn(ctx, line),
           verify: profile => profileCheck(env.CODEX_PATH, profile, { cwd: env.CODEX_HOME, env }),
         })
-        if (profileModes !== undefined) return { command, args, env, profileModes,
+        if (profileModes !== undefined) return { command, args, env, version, key, profileModes,
           gateBinding: createGateBinding(env.CODEX_PATH, gateProfileOf(profileModes), env, cliHome, {
             managedClisHome: clisHome(), run: gateProbeRun,
           }),
@@ -779,7 +779,7 @@ export function apply(ctx, config = {}, {
         }
         if (context?.sessionFiles?.files?.length) throw new Error('The restricted image profile is unavailable; no image prompt was sent.')
       }
-      return { command, args, env }
+      return { command, args, env, version, key }
     },
   })
 

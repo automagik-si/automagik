@@ -245,11 +245,10 @@ export class ConsentStore {
    * account the person confirmed (or that was carried), or undefined when there is no word for
    * an account that names itself. Never the account's facets: only their digests, digested again.
    */
-  accountKey(id) {
-    if (!this.ids.includes(id)) return undefined
-    this.sync()
+  accountKey(id, account) {
+    if (!this.sameAccount(id, account)) return undefined
     const record = this.vendors[id]
-    if (!STATES.has(record?.consent) || record.account === undefined || Object.keys(record.account).length === 0) return undefined
+    if (!STATES.has(record.consent)) return undefined
     const facets = Object.keys(record.account).sort().map(facet => [facet, record.account[facet]])
     return createHmac('sha256', this.key).update(`account\n${JSON.stringify(facets)}`).digest('base64url')
   }

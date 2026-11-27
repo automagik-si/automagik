@@ -463,6 +463,15 @@ test('an elicitation is asked in DSH\'s question dialog and the person\'s answer
   assert.deepEqual(elicited(r), { in: 'elicitation-answer', action: 'accept', content: { target: 'staging', replicas: 3, notify: true } })
 })
 
+test('a titled multi-select sends the selected wire values', async t => {
+  const target = { type: 'array', items: { anyOf: [{ const: 'prod', title: 'Production' }, { const: 'stage', title: 'Staging' }] } }
+  const form = { ...FORM, requestedSchema: { type: 'object', properties: { target }, required: ['target'] } }
+  const r = await roundTrip(t, { ...APPROVED, turn: [{ elicit: form }, { end: 'end_turn' }] }, {
+    answerer: () => ({ answers: [{ id: 'target', selected: ['Production', 'Staging'] }] }),
+  })
+  assert.deepEqual(elicited(r)?.content, { target: ['prod', 'stage'] })
+})
+
 test('an elicitation the person declines, or nobody answers, sends nothing; a URL one is declined unasked', { timeout: 90_000 }, async (t) => {
   const declined = await roundTrip(t, ELICIT, { answerer: () => ({ answers: [{ id: 'target', selected: ['Decline (send nothing)'] }] }) })
   assert.deepEqual(elicited(declined), { in: 'elicitation-answer', action: 'decline' })

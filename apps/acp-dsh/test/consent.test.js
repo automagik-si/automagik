@@ -924,25 +924,47 @@ test('E1: withdrawal ends the old run and reconfirmation permits one fresh turn'
   assert.deepEqual(h.counts(), { starts: 2, mints: 1, renewals: [], forks: [], reforks: 0, prompts: 2 })
 })
 
+test('production launches name their connector build and bind only a currently identified account', async t => {
+  const h = harness(t, { signedIn: { claude: true, codex: true }, accounts: { claude: WORK, codex: CODEX_WORK } })
+  lateBins(h)
+  const adapter = h.registered.adapter
+  for (const id of ['acp-claude', 'acp-codex']) {
+    const { version, key } = await adapter.agents.get(id).spawn()
+    const cli = AGENTS[id].key
+    assert.equal(version, '1')
+    assert.ok(key.includes(h.bins[AGENTS[id].adapter].path))
+    await h.service.accountConfirm(id)
+    assert.match(adapter.accountBinding(id), /^[A-Za-z0-9_-]{43}$/)
+    h.accounts[cli] = undefined
+    await h.service.account(id, { fresh: true })
+    assert.equal(adapter.accountBinding(id), undefined)
+  }
+})
+
 test('a native session binds to the confirmed account: none before a word, another after another account', () => {
   const dir = mkdtempSync(join(tmpdir(), 'acp-consent-key-'))
   try {
     const store = new ConsentStore({ file: join(dir, 'accounts.json'), ids: ['acp-claude', 'acp-codex'] })
     const a = { facets: { kind: 'oauth', email: 'a@example.com' } }
     const b = { facets: { kind: 'oauth', email: 'b@example.com' } }
-    assert.equal(store.accountKey('acp-claude'), undefined, 'no word yet')
+    assert.equal(store.accountKey('acp-claude', a), undefined, 'no word yet')
     assert.equal(store.note('acp-claude', true, a), 'needed')
-    assert.equal(store.accountKey('acp-claude'), undefined, 'waiting for the person')
+    assert.equal(store.accountKey('acp-claude', a), undefined, 'waiting for the person')
     store.confirm('acp-claude', a)
-    const first = store.accountKey('acp-claude')
+    const first = store.accountKey('acp-claude', a)
     assert.match(first, /^[A-Za-z0-9_-]{43}$/)
     assert.equal(JSON.stringify(first).includes('example'), false, 'never the account itself')
     // Another process reading the same file gives the same key.
-    assert.equal(new ConsentStore({ file: join(dir, 'accounts.json'), ids: ['acp-claude', 'acp-codex'] }).accountKey('acp-claude'), first)
+    assert.equal(new ConsentStore({ file: join(dir, 'accounts.json'), ids: ['acp-claude', 'acp-codex'] }).accountKey('acp-claude', a), first)
+    assert.equal(store.accountKey('acp-claude'), undefined)
+    assert.equal(store.accountKey('acp-claude', b), undefined)
+    const keyOnly = { facets: { kind: 'key' } }
+    store.confirm('acp-codex', keyOnly)
+    assert.equal(store.accountKey('acp-codex', keyOnly), undefined)
     store.confirm('acp-claude', b)
-    assert.notEqual(store.accountKey('acp-claude'), first, 'another account, another binding')
+    assert.notEqual(store.accountKey('acp-claude', b), first, 'another account, another binding')
     assert.equal(store.accountKey('acp-other'), undefined)
     store.forget('acp-claude')
-    assert.equal(store.accountKey('acp-claude'), undefined)
+    assert.equal(store.accountKey('acp-claude', a), undefined)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })

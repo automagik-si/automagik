@@ -2359,7 +2359,8 @@ export class AcpAdapter extends LlmAdapter {
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
         // session start is tried once more on that one: the turn is not lost to a bad release.
-        for (let attempt = 0; ; attempt += 1) {
+        let rolledBack = false
+        for (;;) {
           try {
             // The chat profile modes belong to this process's home, read once at its start: a
             // later spawn or a replaced agent object never changes what a running session asks.
@@ -2506,7 +2507,7 @@ export class AcpAdapter extends LlmAdapter {
             // The connector is the build that runs (its version and what it runs, `key`, which
             // names the CLI too); the home is the Bot's own CLI home at its generation. A launch
             // that names neither (the terminal's own CLI) is unknown, and binds nothing.
-            const connector = typeof spec.key === 'string' ? `${spec.version ?? ''}\n${spec.key}` : undefined
+            const connector = spec.version && spec.key ? `${spec.version}\n${spec.key}` : undefined
             const cliHome = typeof spec.env?.[HOME_ENV] === 'string' ? `${spec.env[HOME_ENV]}\n${spec.env[GENERATION_ENV] ?? ''}\n${spec.env[VERSION_ENV] ?? ''}` : undefined
             state.binding = bindingOf({
               provider: options.provider, dshSessionId: sessionId, connector,
@@ -2705,15 +2706,16 @@ export class AcpAdapter extends LlmAdapter {
             if (offRefused) return yield finish('error', offText(error.reason ?? error.message ?? 'its check failed'), NATIVE_OFF_UNAVAILABLE)
             // A missing bridge is this computer's config, not the release: no rollback for it.
             let back = false
-            if (!fileContext?.files.length && attempt === 0 && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
+            if (!fileContext?.files.length && !rolledBack && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
               try { back = agent.rollback?.(error) === true } catch {}
             }
             if (back) {
+              rolledBack = true
               try { this.ctx.logger?.warn?.(`acp-dsh: ${agent.name} did not start on its newest connector (${error?.message ?? error}); trying the one before it`) } catch {}
               continue
             }
             let repairing = false
-            if (!fileContext?.files.length && attempt === 0 && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
+            if (!fileContext?.files.length && !rolledBack && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
               try { repairing = agent.repair?.(error) === true } catch {}
             }
             const repair = repairing ? ' Its connector looks damaged, so it is being reinstalled: send this again in a minute.' : ''
@@ -2986,7 +2988,7 @@ export class AcpAdapter extends LlmAdapter {
       const currentSkills = personCalls => skills?.project(options, { ...skillOptions, turnStart: inputStart, personCalls }) ?? options
       const beforeUploads = currentSkills()
       // The uncertain prompt's rows (below) carry no upload again either.
-      const heldBack = fresh && live.reattached === true && live.interrupted === true ? new Set(live.uncertainRows ?? []) : undefined
+      const heldBack = live.reattached === true && live.interrupted === true ? new Set(live.uncertainRows ?? []) : undefined
       const uploads = uploadBlocks(
         heldBack === undefined ? beforeUploads.messages : beforeUploads.messages.filter(row => !heldBack.has(row.id)), this.redact, dshAgent?.session, this.ctx)
       const uploadRun = live.run
@@ -3143,7 +3145,7 @@ export class AcpAdapter extends LlmAdapter {
       // A reattached session that was answering when the host stopped has those rows already:
       // they are not sent again (the 'sent' record names them), only the note that the last turn
       // may have partly run. The rows after them are this turn's and go as usual.
-      const uncertain = fresh && live.reattached === true && live.interrupted === true
+      const uncertain = live.reattached === true && live.interrupted === true
       const dropped = uncertain ? new Set(live.uncertainRows ?? []) : undefined
       const cutRows = prepared === undefined && fresh && !uncertain && (live.replay === undefined || live.owed?.handoff === true)
         ? cutUserRows(send.messages, dshAgent?.session) : []
@@ -3292,6 +3294,7 @@ export class AcpAdapter extends LlmAdapter {
       live.confinedReason = undefined
       live.toolIds?.clear()
       live.skillCatalog = catalog?.text ? catalog.key : undefined
+      live.interrupted = false
       live.uncertainRows = undefined
       const review = teamService(this.ctx)
       const rows = promptRows(current).rows
