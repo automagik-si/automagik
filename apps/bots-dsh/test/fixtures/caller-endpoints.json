@@ -299,6 +299,7 @@
       "self-update-start",
       "self-update-status",
       "set-prefs",
+      "speed",
       "team-workspace",
       "update-check",
       "update-install"

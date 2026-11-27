@@ -148,4 +148,4 @@ if (image) {
   }
 }
 
-process.exitCode = await runSupervisor({ ...options, fetch, healthProbe, healthTimeout: fakeTransport && !pauseTrial ? 500 : 3500, ...imageOptions })
+process.exitCode = await runSupervisor({ ...options, fetch, healthProbe, healthTimeout: options.healthTimeout ?? (fakeTransport && !pauseTrial ? 500 : 3500), ...imageOptions })

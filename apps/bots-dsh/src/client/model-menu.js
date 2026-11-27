@@ -1715,7 +1715,7 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 .bt-model-menu .bt-mp-rail .bt-mp-tab{position:relative;flex:none;width:34px;height:34px;min-height:34px;padding:0;justify-content:center;border-radius:8px;color:var(--bt-ink-2)}
 .bt-model-menu .bt-mp-rail .bt-mp-tab svg{width:18px;height:18px;margin:0}
 .bt-model-menu .bt-mp-rail .bt-mp-tab[aria-pressed=true]{background:var(--bt-active);color:var(--bt-ink)}
-.bt-model-menu .bt-mp-rail .bt-mp-tab[aria-pressed=true]::after{content:"";position:absolute;right:-5px;top:7px;width:3px;height:20px;border-radius:2px;background:var(--bt-accent)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab[aria-pressed=true]::after{content:"";position:absolute;right:-5px;top:7px;width:3px;height:20px;border-radius:4px;background:var(--bt-accent)}
 .bt-model-menu .bt-mp-rail .bt-mp-tab:disabled{opacity:.42;cursor:default;background:none}
 .bt-model-menu .bt-mp-rail .bt-mp-tab[data-model-picker-provider=favorites]{color:var(--bt-ink)}
 .bt-mp-rail-sep{flex:none;width:24px;height:1px;margin:2px 0;background:var(--bt-line-2)}
@@ -1742,7 +1742,7 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 .bt-model-menu .bt-mp-row .bt-mp-star svg{width:14px;height:14px;margin:0}
 .bt-mp-row[data-highlighted] .bt-mp-star,.bt-mp-row:hover .bt-mp-star,.bt-mp-star[data-on]{opacity:1}
 .bt-model-menu .bt-mp-row .bt-mp-star[data-on]{color:var(--bt-accent)}
-.bt-mp-kbd{flex:none;min-width:24px;padding:2px 5px;border-radius:5px;background:var(--bt-tag-bg);color:var(--bt-ink-3);font:inherit;font-size:11px;line-height:14px;text-align:center;font-variant-numeric:tabular-nums}
+.bt-mp-kbd{flex:none;min-width:24px;padding:2px 5px;border-radius:4px;background:var(--bt-tag-bg);color:var(--bt-ink-3);font:inherit;font-size:11px;line-height:14px;text-align:center;font-variant-numeric:tabular-nums}
 .bt-mp-note{flex:none;padding:6px 8px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-mp-empty{flex:none;padding:8px;color:var(--bt-ink-2)}
 .bt-model-menu .bt-mp-manage-row{flex:none;margin-top:4px;color:var(--bt-ink-2)}
@@ -1758,7 +1758,7 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 .bt-mp-effort-none{padding:6px 8px;color:var(--bt-ink-3)}
 .bt-mp-foot{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid var(--bt-line);background:var(--bt-tag-bg)}
 .bt-mp-speed{display:flex;padding:2px;border-radius:var(--st-r-seg,8px);background:var(--bt-tag-bg)}
-.bt-model-menu .bt-mp-speed .bt-mp-segment{width:auto;min-height:24px;height:24px;padding:0 8px;gap:4px;border-radius:calc(var(--st-r-seg,8px) - 2px);font-size:12px;line-height:16px;color:var(--bt-ink-2)}
+.bt-model-menu .bt-mp-speed .bt-mp-segment{width:auto;min-height:24px;height:24px;padding:0 8px;gap:4px;border-radius:6px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-model-menu .bt-mp-speed .bt-mp-segment[data-checked]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 0 0 .5px var(--bt-line-2)}
 .bt-model-menu .bt-mp-speed .bt-mp-segment:disabled{opacity:.5;cursor:default}
 .bt-mp-bolt{display:inline-flex;color:inherit}
