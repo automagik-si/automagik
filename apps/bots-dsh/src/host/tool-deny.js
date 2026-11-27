@@ -363,11 +363,18 @@ export function install(rt) {
     if (registered !== undefined && (registered?.id !== id || registered.session?.id !== id)) return null
     if ((agent?.id !== undefined && agent.id !== id) || (agent?.session?.id !== undefined && agent.session.id !== id)
       || (stored?.id !== undefined && stored.id !== id)) return null
-    const headers = [registered?.session?.header, stored?.header, agent?.session?.header].filter(header => header !== undefined)
+    const registeredHeader = registered?.session?.header
+    const storedHeader = stored?.header
+    const headers = [registeredHeader, storedHeader, agent?.session?.header].filter(header => header !== undefined)
     const [first] = headers
     if (headers.some(header => !header || typeof header !== 'object' || Array.isArray(header)
       || header.id !== id || header.origin !== first.origin || header.parentSession !== first.parentSession
       || header.delegationDepth !== first.delegationDepth)) return null
+    // Older ordinary forks may retain their source ID. Only a matching live and
+    // durable header can distinguish this root from unproved child ancestry.
+    if (first?.origin === undefined && first?.parentSession !== undefined
+      && (registeredHeader === undefined || storedHeader === undefined
+        || typeof first.parentSession !== 'string' || first.parentSession === '' || first.parentSession === id)) return null
     return first
   }
 
@@ -386,7 +393,7 @@ export function install(rt) {
         if (child) {
           if (typeof header.parentSession !== 'string' || header.parentSession === ''
             || (header.delegationDepth !== undefined && (!Number.isSafeInteger(header.delegationDepth) || header.delegationDepth < 1))) return unavailable
-        } else if (header && (header.origin !== undefined || header.parentSession !== undefined
+        } else if (header && (header.origin !== undefined
           || (header.delegationDepth !== undefined && header.delegationDepth !== 0))) return unavailable
         const scheduled = rt.scheduledNativeOwner?.(current) !== undefined
         const past = rt.pastOwners?.get(current)

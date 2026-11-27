@@ -141,7 +141,7 @@ test('Create makes the reviewer, then the Solver with its real name, then native
   assert.equal(solver.brief, undefined)
   // The name the reviewer's create-bot returned, not the one the dialog asked for.
   assert.ok(solver.instructions.includes('Message "Solver reviewer 7" with message_bot FIRST for every review, plan and result alike (reply_to "me").'))
-  assert.ok(solver.instructions.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'))
+  assert.ok(solver.instructions.includes('ONLY when your reviewer fails (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure. A slow reviewer has not failed: wait for it.'))
   assert.doesNotMatch(solver.instructions, /no reviewer/i)
   assert.deepEqual(calls[4], ['updateBot', 's-new', { nativeTools: true }])
   assert.deepEqual(calls[5], ['send', 's-new', 'Compare two libraries'])
@@ -201,7 +201,7 @@ test('(1) an existing Bot as reviewer is never deleted, whichever step fails', a
     const solver = ui.actions.calls.find(call => call[0] === 'createBot')[1]
     // An existing shared reviewer is named too, and asked first.
     assert.ok(solver.instructions.includes('Message "Ann" with message_bot FIRST for every review, plan and result alike (reply_to "me", when "queue").'))
-    assert.ok(solver.instructions.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'))
+    assert.ok(solver.instructions.includes('ONLY when your reviewer fails (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure. A slow reviewer has not failed: wait for it.'))
     assert.doesNotMatch(solver.instructions, /no reviewer/i)
     assert.match(ui.alert(), /nothing was created/i)
   }
@@ -435,14 +435,14 @@ test('the Review guard tick: on by default with a reviewer Bot, absent for a fre
   assert.equal(Object.hasOwn(unticked.actions.calls.filter(call => call[0] === 'createBot')[1][1], 'reviewGuard'), false)
 })
 
-test('the Review guard tick stays on where the guard holds nothing, with the not-held line beside it', () => {
+test('the Review guard tick stays on with the Codex plan gate and Claude approval details', () => {
   const ui = dialog()
   ui.pickModel(CODEX)
   ui.tickNative()
   assert.equal(ui.guard().props.checked, true)
-  assert.match(ui.text(), /Not held on this agent: its own tools run without asking\. Only the delivery mark shows unreviewed work\./)
+  assert.match(ui.text(), /Codex runs read-only inside this Bot's folder; then the chosen level applies\./)
   ui.pickModel(KEPT)
-  assert.match(ui.text(), /Not held on this agent/)
+  assert.match(ui.text(), /Codex runs read-only inside this Bot's folder; then the chosen level applies\./)
   ui.pickModel(CLAUDE)
   ui.tickNative()
   assert.match(ui.text(), /Held only for the steps Claude Code asks about\./)
@@ -550,7 +550,7 @@ test('New Solver can create on every offered agent and model with an independent
   const roster = rosterOf({ bots: [reviewer], models: rows, prefs: { defaultBotModel: CLAUDE } })
   const rendered = dialog({ roster })
   assert.equal(rendered.modelMenu('new-bot').props.bot.model, CLAUDE)
-  const offered = rows.filter(row => row.ref !== alias && row.ref !== AGY).map(row => row.ref)
+  const offered = rows.filter(row => row.ref !== alias && row.ref !== AGY && row.ref !== OMP).map(row => row.ref)
   assert.deepEqual(rendered.modelMenu('new-bot').props.roster.models.map(row => row.ref), offered)
   rendered.pickModel(opus)
   assert.ok(rendered.modelMenu('new-reviewer').props.roster.models.some(row => row.ref === nativeOpus))

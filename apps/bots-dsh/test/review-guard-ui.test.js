@@ -62,11 +62,12 @@ test('the row: shown with a reviewer id, the guard on, or the marker; its line f
   assert.equal(off.on, false)
   off.onChange(true)
   assert.deepEqual(JSON.parse(JSON.stringify(updates.at(-1))), ['s1', { reviewGuard: true }])
-  // The best-effort route (r1.6 K5), and the routes where it holds nothing (K6, K7).
+  // Guarded Claude keeps ask rules at Full access. Codex uses a read-only plan gate.
   const claude = { model: 'acp-claude/default', nativeTools: true, nativeToolsAgent: 'acp-claude', reviewGuard: true }
   assert.equal(switchOf(render(claude)).hint, `Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused. ${scope}`)
-  assert.equal(switchOf(render({ ...claude, permission: 'danger-full-access' }, { permissions: { defaultPreset: 'workspace-write', options: [] } })).hint.startsWith('Not held at this level'), true)
-  assert.equal(switchOf(render({ model: 'acp-codex/x', nativeTools: true, nativeToolsAgent: 'acp-codex', reviewGuard: true })).hint.startsWith('Not held on this agent'), true)
+  assert.equal(switchOf(render({ ...claude, permission: 'danger-full-access' }, { permissions: { defaultPreset: 'workspace-write', options: [] } })).hint.startsWith('Held only for the steps Claude Code asks about.'), true)
+  assert.match(switchOf(render({ model: 'acp-codex/x', nativeTools: true, nativeToolsAgent: 'acp-codex', reviewGuard: true })).hint,
+    /Codex runs read-only inside this Bot's folder; then the chosen level applies\./)
   // A plain Bot has no row.
   assert.equal(render({ role: 'Helper', reviewerId: undefined }), null)
 })

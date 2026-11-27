@@ -662,7 +662,7 @@ for (const isolated of [true, false]) test(`chat spawn returns its isolated home
 
 // Linux's sandbox re-executes Codex's own binary for every command (bwrap execvp): a profile
 // that cannot read its folder runs no command at all.
-test('the Codex executable folder is readable in both profiles', { skip: process.platform === 'win32' }, t => {
+test('the Codex executable folder is readable in all three chat profiles', { skip: process.platform === 'win32' }, t => {
   const root = realpathSync(directory(t))
   const bin = join(root, 'release', 'bin')
   mkdirSync(bin, { recursive: true })
@@ -696,7 +696,12 @@ test('the Codex executable folder is readable in both profiles', { skip: process
   const modes = ensureChatProfiles(home, { codexPath: link, platform: 'linux' })
   assert.ok(modes)
   const text = readFileSync(join(home, 'config.toml'), 'utf8')
-  assert.equal(text.split('\n').filter(line => line === `'${bin}' = 'read'`).length, 2)
+  const sections = text.split(/^\[permissions\./m)
+  for (const kind of ['read', 'workspace', 'gate']) {
+    const profile = sections.find(section => section.startsWith(`automagik-${kind}-`) && section.split(']')[0].endsWith('.filesystem'))
+    assert.ok(profile?.split('\n').includes(`'${bin}' = 'read'`), kind)
+  }
+  assert.equal(text.split('\n').filter(line => line === `'${bin}' = 'read'`).length, 3)
 })
 
 test('an unresolvable Codex executable keeps the legacy modes and writes nothing', t => {

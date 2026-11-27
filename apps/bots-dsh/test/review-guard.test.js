@@ -12,6 +12,7 @@ import { apply } from '../index.js'
 import { ROUTE, TEAM_TOOLS } from '../src/host/constants.js'
 import { answerSender } from '../src/host/turns.js'
 import { HELD_TEAM_TOOLS, OPEN_TEAM_TOOLS } from '../src/host/review-guard.js'
+import { resultSnapshot } from '../src/host/solver-progress.js'
 import { WHY_EN, stopLineEn } from '../src/host/stops.js'
 import { REVIEW_GUARD_COPY, guardVerdictOf } from '../src/shared/review-guard.js'
 import { parseProposal, proposalLine } from '../src/shared/proposals.js'
@@ -138,7 +139,7 @@ test('G1: a Bot without the field is never held, Solver marker and reviewer id o
 })
 
 test('G2/G17/G14b: every work call is refused with the guard text and a guard stop; the stop line names the guard', async (t) => {
-  const { rt, run, person, solver, reviewer, plain, stops } = bench(t)
+  const { rt, guard, run, person, solver, reviewer, plain, stops } = bench(t)
   const ada = await reviewer()
   const other = await plain('Other Bot')
   const bot = await solver({ reviewerId: ada.id })
@@ -152,7 +153,7 @@ test('G2/G17/G14b: every work call is refused with the guard text and a guard st
     ['browser_type', {}], ['browser_exec', {}], ['mcp__github__create_issue', {}],
     // G17: an ACP agent's own call: work kinds, a command, a mode switch, any "other" call, an unknown kind.
     ['acp_tool', { kind: 'edit', title: 'Write bom.md', input: { file_path: 'bom.md' } }], ['acp_tool', { kind: 'execute', title: 'ls', input: { command: 'ls' } }],
-    ['acp_tool', { kind: 'delete', input: {} }], ['acp_tool', { kind: 'move', input: {} }], ['acp_tool', { kind: 'read', input: { command: 'cat a' } }],
+    ['acp_tool', { kind: 'delete', input: {} }], ['acp_tool', { kind: 'move', input: {} }],
     ['acp_tool', { kind: 'switch_mode', input: {} }], ['acp_tool', { kind: 'other', title: 'mcp__github__create_issue', input: {} }],
     ['acp_tool', { kind: 'other', title: 'Anything', input: {} }], ['acp_tool', { kind: 'made_up', input: {} }], ['acp_tool', { input: {} }],
     // G14b: an unknown tool and held team tools.
@@ -165,6 +166,10 @@ test('G2/G17/G14b: every work call is refused with the guard text and a guard st
   await assert.rejects(run(bot, 'mcp__dsh__message_bot', { to: other.name, message: 'x' }), ONLY_REVIEWER)
   assert.ok(stops.length > 0 && stops.every(stop => stop.why === 'guard'), JSON.stringify(stops.slice(0, 2)))
   assert.equal(stops[0].tool, 'write')
+  await assert.rejects(guard({
+    name: 'acp_tool', arguments: { kind: 'read', input: { command: 'cat a' } }, agent: { id: bot.id },
+  }, () => assert.fail('the command-shaped read reached the body')), /can read and search only inside its folder/)
+  assert.equal(stops.at(-1).why, 'confine')
   // The person's stop line names the guard and its switch (H6-3).
   assert.equal(stopLineEn({ why: 'guard', tool: 'write' }), `write did not run: ${REVIEW_GUARD_COPY.stop}`)
   assert.equal(WHY_EN.guard, REVIEW_GUARD_COPY.stop)
@@ -184,14 +189,21 @@ test('G3/G14b/G14c: reads, research, asking the person, the notes file and the r
   const bot = await solver({ reviewerId: ada.id })
   bot.workDir = folder
   person(bot.id, 'Compare two libraries.')
-  const DSH_OPEN = ['read', 'read_image', 'grep', 'glob', 'web_search', 'web_fetch', 'subagent', 'list_subagent_models', 'get_goal', 'todo_write']
+  const marker = join(folder, 'fixture.txt')
+  writeFileSync(marker, 'synthetic research')
+  const DSH_OPEN = [
+    ['read', { file_path: marker }], ['read_image', { file_path: marker }],
+    ['grep', { path: marker, pattern: 'synthetic' }], ['glob', { path: folder, pattern: '**' }],
+    ...['web_search', 'web_fetch', 'subagent', 'list_subagent_models', 'get_goal', 'todo_write'].map(name => [name, {}]),
+  ]
   for (const [name, args] of [
-    ...DSH_OPEN.flatMap(name => [[name, {}], [`mcp__dsh__${name}`, {}]]),
+    ...DSH_OPEN.flatMap(([name, args]) => [[name, args], [`mcp__dsh__${name}`, args]]),
     ...OPEN_TEAM_TOOLS.filter(name => name !== 'message_bot' && name !== 'update_bot').flatMap(name => [[name, {}], [`mcp__dsh__${name}`, {}]]),
     ['mail_read', {}], ['mail_search', {}], ['browser_open', {}], ['browser_snapshot', {}], ['browser_screenshot', {}], ['browser_tabs', {}], ['browser_back', {}],
     ['message_bot', { to: ada.name, message: 'My plan: …', reply_to: 'me' }], ['mcp__dsh__message_bot', { to: ada.name, message: 'Plan' }],
     ['update_bot', { role: 'Solver' }], ['update_bot', { bot: bot.name, color: 'blue' }], ['update_bot', { model: '' }],
-    ['acp_tool', { kind: 'read', input: {} }], ['acp_tool', { kind: 'search', input: {} }], ['acp_tool', { kind: 'fetch', input: {} }],
+    ['acp_tool', { kind: 'read', input: { file_path: marker }, locations: [{ path: marker }] }],
+    ['acp_tool', { kind: 'search', input: { path: folder, pattern: 'synthetic' } }], ['acp_tool', { kind: 'fetch', input: {} }],
     ['acp_tool', { kind: 'think', title: 'Agent', input: {} }],
     ['write', { file_path: '.solver/notes.md' }], ['mcp__dsh__write', { file_path: join(folder, '.solver', 'notes.md') }],
     ['acp_tool', { kind: 'edit', title: 'Write notes', input: { file_path: join(folder, '.solver/notes.md') }, locations: [{ path: join(folder, '.solver/notes.md') }] }],
@@ -212,7 +224,7 @@ test('G14: every team tool is on exactly one list', () => {
 })
 
 test('Skills registry: the guarded Solver can load its Automatic skill before a verdict', async t => {
-  const { call, guard, person, solver, reviewer, plain, rt } = bench(t)
+  const { call, ctx, guard, person, solver, reviewer, plain, rt, sessions } = bench(t)
   const bot = await solver({ reviewerId: (await reviewer()).id })
   const other = await plain()
   const skill = { name: 'planning-notes', description: 'Read planning notes.', content: 'Use the short plan format.' }
@@ -222,8 +234,15 @@ test('Skills registry: the guarded Solver can load its Automatic skill before a 
   assert.equal((await call('bot-skill-add', { ...assignment, mode: 'automatic' })).ok, true)
   person(bot.id, 'Read the notes to plan this task.')
   const registered = rt.teamTools.find(tool => tool.name === 'load_skill')
-  const load = (name, id) => {
-    const exec = { name, callId: 'skill-read', arguments: { name: skill.name }, agent: { id } }
+  const load = async (name, id) => {
+    let session = sessions.get(id)
+    if (session === undefined) {
+      session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: Date.now(), isSeeded: false })
+      sessions.set(id, session)
+    }
+    const { agent } = await ctx.sessionController.resolveAgent(id)
+    agent.session = session
+    const exec = { name, callId: 'skill-read', arguments: { name: skill.name }, agent }
     return guard(exec, () => registered.execute(exec.arguments, exec))
   }
   const spellings = ['load_skill', 'mcp__dsh__load_skill']
@@ -721,7 +740,7 @@ test('G15 cases 7-9 (H7-2, A1): a no-reply note, the opener\'s follow-up and the
 })
 
 test('G15 case 10 (A1): after such a message the Solver cannot deliver without the reviewer\'s result verdict', async (t) => {
-  const { rt, run, person, botMessage, reply, endTurn, solver, reviewer, plain } = bench(t)
+  const { rt, home, run, person, botMessage, reply, endTurn, solver, reviewer, plain } = bench(t)
   const ada = await reviewer()
   const x = await plain('Bot X2')
   const y = await plain('Bot Y2')
@@ -764,6 +783,9 @@ test('G15 case 10 (A1): after such a message the Solver cannot deliver without t
     assert.equal(bot.reviewTrack.verdicts.length, 1, kind)
     clock += 10
     const progress = bot.reviewTrack.solver
+    bot.workDir = mkdtempSync(join(home, 'result-fixture-'))
+    progress.snapshot = resultSnapshot(bot.workDir)
+    assert.ok(progress.snapshot)
     progress.review = { exchangeId: 'w-result', reviewerId: ada.id, revision: progress.revision, solverModel: 'acp-claude/fixture' }
     await reply(ada.id, bot.id, 'RESULT SHIP', { exchangeId: 'w-result', model: 'acp-codex/fixture' })
     assert.equal(bot.reviewTrack.verdicts.length, 2, kind)

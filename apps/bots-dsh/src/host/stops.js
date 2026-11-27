@@ -6,6 +6,7 @@ export const STOP_WHYS = ['never', 'unavailable', 'tool', 'level', 'address', 'r
 export const STOP_KEEP_MS = 6 * 60 * 60 * 1000
 export const STOPS_MAX = 50
 export const CALLS_MAX = 20
+const rule = 'a rule here refused it'
 export const WHY_EN = {
   never: 'approvals are off here, so you were not asked',
   unavailable: 'it needed your approval, but nothing here could ask you',
@@ -14,7 +15,7 @@ export const WHY_EN = {
   address: 'the address list blocks that site',
   review: 'Auto review refused it',
   sandbox: 'the sandbox blocked it',
-  rule: 'a rule here refused it',
+  rule,
   // The Solver's review guard (review-guard.js); `guard-request` when a Bot's new request opened
   // the plan it waits for.
   guard: 'the review guard waits for the reviewer\'s verdict on the plan; you can turn it off in Details',
@@ -23,6 +24,7 @@ export const WHY_EN = {
   limit: 'the Solver reached an attempt limit and is waiting for your answer',
   'solver-run': 'the Solver needs to start a check run with solver_progress',
   'solver-progress': 'the Solver needs to finish recording its current progress with solver_progress',
+  confine: rule,
 }
 
 export function stopLineEn(entry) {

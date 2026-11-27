@@ -16,6 +16,7 @@ import { viaOf } from '../shared/im-platforms.js'
 import { BRIDGE_ACTIVITY_RECORD, bridgeOriginOf, toolEventOf } from '../shared/tool-activity.js'
 import { reminderText } from './schedules.js'
 import { modelOf, replyModel } from './solver-progress.js'
+import { actualSolver } from './review-guard.js'
 
 // What a running tool call is about, for an approval card.
 export const detailOfArgs = raw => {
@@ -67,6 +68,12 @@ export function capabilityOfArgs(raw, tool) {
 // person waits for. A Bot's request that lands inside one joins it rather than claiming it,
 // so its reply stays in the chat (issue #62).
 export const opensByItself = source => source?.kind === 'goal'
+
+const firstBotRequest = source => source?.role === 'request' && source.deferred !== true
+  && source.resumed !== true && source.resumedByUpdate !== true && source.retried !== true
+
+export const scopedBotRequest = (bot, source, direct) => direct && bot?.reviewGuard === true
+  && firstBotRequest(source) && actualSolver(bot)
 
 // DSH injects a schedule-change notice as context when a task changes elsewhere.
 const scheduleNotice = message => message?.source?.kind === 'schedule'
@@ -936,9 +943,8 @@ export function install(rt) {
       if (receipt.agent !== agent || receipt.session !== session || receipt.exchangeId !== source?.exchangeId) return false
       return receipt.current() ? receipt : false
     }
-    if (owner === undefined || source?.kind !== SOURCE_KIND || source.role !== 'request'
-      || source.deferred === true || source.resumed === true || source.resumedByUpdate === true || source.retried === true) return
-    const bot = rt.botOf(owner)
+    const bot = owner === undefined ? undefined : rt.botOf(owner)
+    if (source?.kind !== SOURCE_KIND || !scopedBotRequest(bot, source, owner !== undefined)) return
     const team = rt.teamGeneration?.()
     const { exchangeId } = source
     const messageId = message.id
@@ -1204,6 +1210,10 @@ export function install(rt) {
             ...(source.goalId !== undefined ? { goalId: source.goalId } : {}),
           })
         } else if (source?.kind === SOURCE_KIND) {
+          const owner = rt.chatOwners.get(id)
+          if (owner !== undefined && firstBotRequest(source) && !scopedBotRequest(rt.botOf(owner), source, true)) {
+            rt.reviewBotRequest?.(owner, source.senderSessionId, { noReply: source.noReply === true, exchangeId: source.exchangeId })
+          }
           if (entry.turn === undefined) {
             entry.pending = source
             entry.pendingText = textOf(personParts(originalReviewContent(event.data))).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')

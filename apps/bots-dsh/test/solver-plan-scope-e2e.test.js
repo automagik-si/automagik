@@ -14,6 +14,7 @@ import * as executor from '@deepseek-ai/dsh-tool-executor-native'
 import * as files from '@deepseek-ai/dsh-tool-fs'
 import * as search from '@deepseek-ai/dsh-tool-fs-search'
 import Tools from '@deepseek-ai/dsh-tools'
+import { Session, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { nativeWorld, CLAUDE, CODEX, person } from '../../acp-dsh/test/fixtures/managed-native-world.js'
 import { AGENTS } from '../../acp-dsh/src/host/agents.js'
 import * as profiles from '../../acp-dsh/src/host/codex-chat-profiles.js'
@@ -152,6 +153,7 @@ function fixtureFolders(t) {
 
 async function teamOf(t, places, world, { provider = CLAUDE, workspace = places.workspace, protectedRoot = places.protectedRoot } = {}) {
   const sessions = new Map()
+  const agents = new Map()
   let guard
   const acpAgents = world ? {
     botIdentity: world.identityReaders.register,
@@ -160,7 +162,7 @@ async function teamOf(t, places, world, { provider = CLAUDE, workspace = places.
     endSession: world.adapter.endSession.bind(world.adapter),
   } : { signInRoots: () => [protectedRoot] }
   const ctx = fakeContext({ services: {
-    acpAgents, workingDirectory: { get: () => workspace, ensure: async () => workspace },
+    acpAgents, agents, workingDirectory: { get: () => workspace, ensure: async () => workspace },
     permissionPresets: { current: () => 'full' },
   } })
   ctx.sessions = { get: id => sessions.get(id), list: () => [...sessions.values()] }
@@ -180,7 +182,7 @@ async function teamOf(t, places, world, { provider = CLAUDE, workspace = places.
   await rt.solverReview(bot, reviewer, true, { kind: 'plan', request, exchangeId: 'plan', prepare: async () => true })
   const accept = () => rt.reviewVerdict(reviewer.id, bot.id, undefined, 'PLAN SHIP', Date.now(),
     { replyTo: 'plan', reviewReceipt: 'receipt-plan' }, 'acp-codex/fixture-reviewer')
-  return { bot, rt, ctx, sessions, accept, get guard() { return guard } }
+  return { bot, rt, ctx, sessions, agents, accept, get guard() { return guard } }
 }
 
 test('#2134 K9 E-Child and scheduled controls apply the actual Bots lineage policy', async t => {
@@ -313,7 +315,8 @@ test('#2134 K9 E-Native real DSH reads and traversals use only synthetic workspa
   const outside = join(places.protectedRoot, 'outside.txt')
   const distinct = `OUT-${randomBytes(8).toString('hex')}`
   writeFileSync(outside, distinct)
-  const team = await teamOf(t, places, undefined, { provider: 'dsh' })
+  const world = nativeWorld(t, { managed: false, policyState: id => world.identityReaders.readState(id) })
+  const team = await teamOf(t, places, world, { provider: 'dsh' })
   const ctx = new Context()
   t.after(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
@@ -324,13 +327,22 @@ test('#2134 K9 E-Native real DSH reads and traversals use only synthetic workspa
   await ctx.plugin(LocalSubprocess)
   await ctx.plugin(files, { read: true, readImage: false, write: false, edit: false })
   await ctx.plugin(search, { sampleOverCapGlobResults: false })
-  const agent = { id: team.bot.id, session: { id: team.bot.id, header: { cwd: places.workspace } } }
+  const makeAgent = (id, cwd, header) => ({ id, session: Session.create(id, [], {
+    version: SESSION_FORMAT_VERSION, id, createdAt: 0, isSeeded: false, cwd, ...header,
+  }) })
+  const register = (agent, stored = agent.session) => {
+    team.agents.set(agent.id, agent)
+    team.sessions.set(agent.id, stored)
+    return agent
+  }
+  const agent = register(makeAgent(team.bot.id, places.workspace))
   const guard = team.ctx.listeners.get('tools/execute')[0]
   ctx.on('tools/execute', (exec, next) => guard(exec, () => {
     if (exec.callId.startsWith('denied-')) throw new Error('Fixture fence: legacy guard reached the excluded body')
     return next()
   }))
-  async function call(id, name, args) {
+  async function call(id, name, args, agentForCall = agent) {
+    const agent = agentForCall
     const toolSet = await ctx.tools.resolve({ agent, signal: t.signal })
     try {
       const batch = await ctx.tools.execute({ calls: [{ id, name, arguments: args }], agent, signal: t.signal, toolSet })
@@ -353,5 +365,52 @@ test('#2134 K9 E-Native real DSH reads and traversals use only synthetic workspa
       assert.match(text, /can (read and )?search only inside its folder/)
       assert.ok(!text.includes(distinct))
     }
+  }
+  const ordinaryFolder = join(places.root, 'ordinary')
+  mkdirSync(ordinaryFolder)
+  const ordinaryPath = join(ordinaryFolder, 'ordinary.txt')
+  const ordinaryText = `FORK-${randomBytes(8).toString('hex')}`
+  writeFileSync(ordinaryPath, ordinaryText)
+  const historical = { parentSession: team.bot.id }
+  const readPolicy = id => world.identityReaders.readState(id)
+  const fork = makeAgent('historical-ordinary', ordinaryFolder, historical)
+  const helper = team.rt.state.bots[fork.id] = { id: fork.id, name: 'Fixture Helper', role: 'Helper', workDir: ordinaryFolder, createdAt: 1 }
+  team.rt.chatOwners.set(fork.id, helper.id)
+  register(fork, makeAgent(fork.id, ordinaryFolder, historical).session)
+  const ordinary = readPolicy(fork.id)
+  assert.equal(ordinary.ok, true)
+  assert.equal(ordinary.identity.name, helper.name)
+  assert.deepEqual(ordinary.identity.solverPolicy, { state: 'none', bot: helper, own: true })
+  assert.equal(ordinary.identity.planGate, false)
+  assert.match(JSON.stringify(await call('fork-read', 'read', { file_path: ordinaryPath }, fork)), new RegExp(ordinaryText))
+
+  const solverFork = register(makeAgent(team.bot.id, places.workspace, { parentSession: fork.id, delegationDepth: 0 }))
+  const child = register(makeAgent('solver-fork-child', places.workspace, { origin: 'subagent', parentSession: solverFork.id, delegationDepth: 1 }))
+  for (const scoped of [solverFork, child]) {
+    const identity = readPolicy(scoped.id).identity
+    assert.equal(identity.solverPolicy.bot, team.bot)
+    assert.equal(identity.solverPolicy.own, true)
+    assert.equal(identity.solver, true)
+    assert.match(JSON.stringify(await call(`inside-${scoped.id}`, 'read', { file_path: hidden }, scoped)), new RegExp(marker))
+    const refused = await call(`denied-fork-${scoped.id}`, 'read', { file_path: ordinaryPath }, scoped)
+    assert.equal(refused.isError, true)
+    assert.match(JSON.stringify(refused), /can read and search only inside its folder/)
+    assert.ok(!JSON.stringify(refused).includes(ordinaryText))
+  }
+  for (const [id, live, durable] of [
+    ['disagreement', historical, { parentSession: fork.id }],
+    ['no-registered-header', null, historical],
+    ['no-durable-header', historical, null],
+    ['supplied-header-only', null, null],
+  ]) {
+    const supplied = makeAgent(id, ordinaryFolder, historical)
+    if (live) team.agents.set(id, makeAgent(id, ordinaryFolder, live))
+    else if (durable) team.agents.set(id, { id, session: { id } })
+    if (durable) team.sessions.set(id, makeAgent(id, ordinaryFolder, durable).session)
+    assert.deepEqual(readPolicy(id), { ok: false }, id)
+    const rejected = await call(`denied-${id}`, 'read', { file_path: ordinaryPath }, supplied)
+    assert.equal(rejected.isError, true, id)
+    assert.match(JSON.stringify(rejected), /could not confirm this Session's rules/, id)
+    assert.ok(!JSON.stringify(rejected).includes(ordinaryText), id)
   }
 })

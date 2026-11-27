@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { syncDirectory, syncFile } from './files.js'
 import { recordedModelOf, replyModel } from './solver-progress.js'
-import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
+import { answerSender, cutOffText, failureLine, handBackRequests, scopedBotRequest, turnFailure } from './turns.js'
 import { rawTextOf, textOf } from './text.js'
 import { startUpdateRecovery } from './self-update-recovery.js'
 
@@ -298,7 +298,8 @@ export function install(rt) {
         rt.warn('ds-bot: resumable %s failed on the resume of %s: %s', id, sessionId, error?.message ?? error)
       }
     }
-    if (await post() !== false) resumed.push(sessionId)
+    await post()
+    resumed.push(sessionId)
   }
 
   /** @type {Record<string, {botId:string, roomId?:string, since:number, trigger?:any, approval?:{tool:string, reason:string}, resumed?:boolean}>} */
@@ -1014,15 +1015,15 @@ export function install(rt) {
   }
 
   const sessionFor = (sessionId, args) => rt.sessionNow(sessionId, args?.toId, args?.roomId)
-  // For replies and reports the payload's room can describe where the message
-  // came from. The saved Session determines which chat or group receives it.
+  // The saved Session supplies the destination scope even when it has moved.
   const deliveryRoom = id => rt.groupOwners.get(id)?.roomId ?? rt.pastOwners.get(id)?.roomId
-  const deliveryDestination = (savedId, args) => {
-    const roomId = deliveryRoom(savedId)
-    const destination = rt.sessionNow(savedId, args.toId, roomId)
+  const scopedDelivery = (id, args, bot) => scopedBotRequest(bot, args, deliveryRoom(id) === undefined
+    && !rt.taskOwners?.has(id) && !rt.state?.tasks?.[id])
+  const deliveryDestination = (savedId, args, scoped) => {
+    const destination = scoped ? rt.sessionNow(savedId, args.toId, undefined) : sessionFor(savedId, args)
     if (destination === savedId) return destination
     const past = rt.pastOwners.get(savedId)
-    if (past?.botId === args.toId && past?.roomId === roomId) return destination
+    if (past?.botId === args.toId && (!scoped || past.roomId === undefined)) return destination
   }
 
   const waitingFor = agent => new Set([...(agent.inbox?.nextStep ?? []), ...(agent.inbox?.nextTurn ?? [])]
@@ -1036,27 +1037,27 @@ export function install(rt) {
     const received = item => recovery?.resumed(item.recordId === undefined ? 'delivery' : 'turn',
       item.recordId ?? item.args.exchangeId)
     const ownsDestination = (agent, session, item, destination) => {
-      const { args, bot, roomId } = item
+      const { args, bot } = item
       const owner = rt.selfOf(destination)
-      const current = roomId === undefined ? rt.chatOf(args.toId) : rt.roomOf(roomId)?.sessions?.[args.toId]
-      const task = rt.taskOwners?.get(destination)?.botId === args.toId && item.oldId === destination
       if (!ownsTeam() || !bot || rt.botOf(args.toId) !== bot || session?.id !== destination
         || agent.session !== session || ctx.get?.('agents')?.get?.(destination) !== agent
-        || (owner !== undefined && owner !== args.toId) || (current !== destination && !task)) return false
-      if (item.recordId !== undefined) {
-        const record = item.record.stoppedBy === 'update' ? updateTurns.get(item.recordId) : pendingTurns[item.recordId]
-        return record === item.record
-      }
-      return deliveryRoom(item.oldId) === roomId && item.note.args === args && queued[item.savedId]?.includes(item.note) === true
-        && deliveryDestination(item.oldId, args) === destination
+        || (owner !== undefined && owner !== args.toId) || rt.chatOf(args.toId) !== destination) return false
+      return scopedDelivery(item.oldId, args, bot) && item.note.args === args && queued[item.savedId]?.includes(item.note) === true
+        && deliveryDestination(item.oldId, args, true) === destination
     }
     const sendable = (agent, session, item, destination) => {
-      if (!ownsDestination(agent, session, item, destination)
+      if (!ownsTeam() || (item.scoped ? !ownsDestination(agent, session, item, destination)
+        : item.recordId === undefined && deliveryDestination(item.oldId, item.args, false) !== destination)
         || (item.args.resumedByUpdate !== true && item.args.resumed && started(item, destination))) return false
       const id = item.args.exchangeId
       if (taken?.has(id) === true) {
         received(item)
         return false
+      }
+      if (!item.scoped && item.recordId === undefined) {
+        const note = rt.deliveryNote(id)
+        if (note === undefined ? item.liveClaim || item.args.reviewReply != null
+          : note.sessionId !== item.savedId && note.sessionId !== destination) return false
       }
       if ([...(claims.get(destination)?.values() ?? [])].some(message => message.source?.exchangeId === id)) return false
       if (waitingFor(agent).has(id)) {
@@ -1133,17 +1134,19 @@ export function install(rt) {
         try {
           for (const staged of batch) {
             const { item, message, sent, session } = staged
-            const eligible = () => staged.agent === agent && sendable(agent, session, item, target)
+            const eligible = () => (!item.scoped || staged.agent === agent) && sendable(staged.agent, session, item, target)
             try {
               if (!eligible()) {
                 sent.resolve(false)
                 continue
               }
-              const pending = rt.admitBotRequest?.(agent, message, {
-                sendable: eligible,
-                destination: () => ownsDestination(agent, session, item, target),
-              })
-              const admission = pending === undefined ? undefined : await pending
+              let admission
+              if (item.scoped) {
+                admission = await rt.admitBotRequest?.(agent, message, {
+                  sendable: eligible,
+                  destination: () => ownsDestination(agent, session, item, target),
+                })
+              }
               if (admission === false) sent.resolve(false)
               else ready.push({ ...staged, eligible, admission })
             } catch (error) {
@@ -1176,11 +1179,10 @@ export function install(rt) {
               throw error
             }
           }
-          if (delivered.length === 0) return false
+          if (delivered.length === 0) return
           if (await ctx.sessions.flush(agent.session) === false) throw new Error('Could not flush the resumed turn')
           if (delivered.some(({ item }) => !item.args.resumed)) resent.add(target)
           for (const { sent } of delivered) sent.resolve(true)
-          return resumeItem === undefined || delivered.some(({ item }) => item === resumeItem.item)
         } catch (error) {
           for (const { sent } of batch) sent.reject(error)
           throw error
@@ -1562,7 +1564,7 @@ export function install(rt) {
       if (!Array.isArray(list)) continue
       for (const item of list) {
         if (item?.args?.exchangeId === undefined || taken?.has(item.args.exchangeId) === true || rt.botOf(item.args.toId) === undefined) continue
-        const key = deliveryDestination(oldId, item.args) ?? oldId
+        const key = deliveryDestination(oldId, item.args, scopedDelivery(oldId, item.args, rt.botOf(item.args.toId))) ?? oldId
         queued = { ...queued, [key]: [...(queued[key] ?? []), item] }
       }
     }
@@ -1627,7 +1629,7 @@ export function install(rt) {
       }
       const target = record.roomId === undefined ? rt.chatOf(record.botId)
         : rt.roomOf(record.roomId)?.sessions?.[record.botId] ?? sessionId
-      add(target, { record, recordId: sessionId, roomId: record.roomId, bot: rt.botOf(record.botId), done: pickedUp })
+      add(target, { record, recordId: sessionId, done: pickedUp })
     }
     const notes = Object.entries(dropped).flatMap(([oldId, list]) => Array.isArray(list)
       ? list.filter(note => note?.args?.exchangeId !== undefined).map(note => ({ note, args: note.args, oldId }))
@@ -1652,13 +1654,18 @@ export function install(rt) {
       if (pendingBack.has(args.exchangeId) || (liveClaims && !liveClaims.has(args.exchangeId))) continue
       if (taken?.has(args.exchangeId)) recovery?.resumed('delivery', args.exchangeId)
       if (args.wake === true && rt.wakeLog?.accountsFor(args.exchangeId)) continue
-      if (rt.botOf(args.toId) === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
-      const target = deliveryDestination(oldId, args)
-      if (target === undefined) continue
+      const bot = rt.botOf(args.toId)
+      if (bot === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
+      const scoped = scopedDelivery(oldId, args, bot)
+      const target = deliveryDestination(oldId, args, scoped)
+      if (target === undefined) {
+        if (args.reviewReply && ownsTeam()) rt.retireReviewReply?.(args.toId, args.exchangeId)
+        continue
+      }
       seen.add(args.exchangeId)
       // Boot rekeys existing notes before this pass. Live claims still use the
       // saved key. In both cases the selected note and original route must survive.
-      add(target, { ...item, savedId: liveClaims ? oldId : target, roomId: deliveryRoom(oldId), bot: rt.botOf(args.toId) })
+      add(target, { ...item, savedId: liveClaims ? oldId : target, liveClaim: !!liveClaims, scoped, bot })
     }
     const prepare = async (target, item) => {
       if (!ownsTeam()) return undefined

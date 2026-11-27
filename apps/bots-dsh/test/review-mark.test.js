@@ -25,7 +25,7 @@ const step = () => wait(3)
 test('#2134 K7a AW-R7 result credit belongs to the current exchange and revision', async t => {
   for (const invalidate of [false, true]) {
     await t.test(invalidate ? 'invalidated result' : 'current result', async t => {
-      const { rt, reviewer, solver } = bench(t)
+      const { rt, reviewer, solver, designate } = bench(t)
       const judge = await reviewer()
       const bot = await solver({ reviewerId: judge.id })
       let now = 100
@@ -33,7 +33,7 @@ test('#2134 K7a AW-R7 result credit belongs to the current exchange and revision
       const request = await rt.reviewRequest(bot.id, { text: 'Fixture request' })
       rt.reviewVerdict(judge.id, bot.id, undefined, 'SHIP', Date.now())
       rt.reviewWork(bot, true, 'bash', { command: 'synthetic' })
-      bot.reviewTrack.solver.review = { revision: 0, exchangeId: 'result', reviewerId: judge.id, solverModel: 'acp-claude/fixture' }
+      designate('result', bot, judge, 'result')
       await rt.reviewVerdict(judge.id, bot.id, undefined, 'RESULT SHIP', Date.now(),
         { replyTo: 'result', reviewReceipt: 'fixture-receipt' }, 'acp-codex/fixture')
       if (invalidate) {
@@ -147,7 +147,12 @@ function bench(t) {
       create: async options => ({ sessionId: options.sessionId ?? `s${++created}` }),
       resolveAgent: async (sessionId) => {
         if (!agents.has(sessionId)) {
-          agents.set(sessionId, { session: sessions.get(sessionId) ?? { id: sessionId }, ctx: { tools: { restrict: () => () => {} }, effect: execute => execute() } })
+          const session = sessions.get(sessionId) ?? Session.create(sessionId, [], {
+            version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: Date.now(), isSeeded: false,
+          })
+          sessions.set(sessionId, session)
+          agents.set(sessionId, { id: sessionId, session,
+            ctx: { tools: { restrict: () => () => {} }, effect: execute => execute() } })
         }
         return { agent: agents.get(sessionId) }
       },
@@ -185,7 +190,10 @@ function bench(t) {
     return rt
   }
   const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))).json()
-  const guard = (exec) => (ctx.listeners.get('tools/execute') ?? [])[0](exec, async () => 'ran')
+  const guard = async exec => {
+    const { agent } = await ctx.sessionController.resolveAgent(exec.agent.id)
+    return (ctx.listeners.get('tools/execute') ?? [])[0]({ ...exec, agent }, async () => 'ran')
+  }
   let seq = 0
   const event = (sessionId, type, data) => {
     for (const listener of ctx.listeners.get('session/event') ?? []) listener({ id: sessionId }, { type, seq: ++seq, time: Date.now(), data })
@@ -243,7 +251,12 @@ function bench(t) {
     assert.ok(progress?.request)
     const identity = { exchangeId, reviewerId: reviewer.id }
     if (stage === 'plan') progress.plan = { checks: ['fixture'], revision: progress.revision, review: identity }
-    else progress.review = { ...identity, revision: progress.revision, solverModel: 'acp-claude/fixture' }
+    else {
+      bot.workDir ??= mkdtempSync(join(home, 'result-fixture-'))
+      progress.snapshot = resultSnapshot(bot.workDir)
+      assert.ok(progress.snapshot)
+      progress.review = { ...identity, revision: progress.revision, solverModel: 'acp-claude/fixture' }
+    }
     return exchangeId
   }
   const planReply = (bot, reviewer, value = 'PLAN SHIP', exchangeId) =>
@@ -839,7 +852,7 @@ test('a delivered symlink into the notes file changed after the result verdict r
 })
 
 test('any other write before the plan verdict marks the plan unreviewed: lookalikes, .., another folder, a symlink, a link', async (t) => {
-  const { guard, person, endTurn, planReply, resultReply, solver, reviewer } = bench(t)
+  const { home, guard, person, endTurn, planReply, resultReply, solver, reviewer } = bench(t)
   const { root, folder, outside } = notesFolder(t)
   // A second folder whose notes path leads out through a symlink, one whose notes file is a symlink, and
   // one whose notes file is a hard link to a file outside.
@@ -880,6 +893,8 @@ test('any other write before the plan verdict marks the plan unreviewed: lookali
     await step()
     planReply(bot, ada)
     await step()
+    // The hard-link work decision is recorded. Review a separate text-only result.
+    if (workDir === hardFile) bot.workDir = mkdtempSync(join(home, 'result-fixture-'))
     await resultReply(bot, ada)
     endTurn(bot.id, 'Delivered.')
     assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: true }, label)
