@@ -58,12 +58,15 @@ export function solverReadPolicy(rt, bot, name, args, cwd, { agentConsumes = fal
   const search = mirror ? args.kind === 'search' : dshSearches.has(name)
   const input = mirror ? args.input : args
   const key = search ? 'path' : Object.hasOwn(args ?? {}, 'file_path') ? 'file_path' : 'path'
+  const explicitSearchRoot = mirror && search && Object.hasOwn(input ?? {}, 'path')
   const paths = mirror
-    ? [...pathsIn(input), ...(Array.isArray(args.locations) ? args.locations.map(at => at?.path) : [])]
+    ? [...(search && !explicitSearchRoot ? [cwd] : []), ...pathsIn(input),
+      ...(Array.isArray(args.locations) ? args.locations.map(at => at?.path) : [])]
     : search && input?.[key] === undefined ? [] : [input?.[key]]
   const held = path => ({ held: { why: 'confine', text: search
     ? `${bot.name} can search only inside its folder, and not a folder that holds the app's data or a sign-in folder: search a subfolder.`
     : `${bot.name} can read and search only inside its folder: ${typeof path === 'string' && path !== '' ? path : 'the requested path'} is outside it.` } })
+  if (explicitSearchRoot && typeof input.path !== 'string') return held(input.path)
   if (search && (mirror ? [input?.pattern, input?.glob] : [name === 'glob' ? input?.pattern : input?.include]).some(unsafePattern)) return held()
   if (search && paths.length === 0) paths.push(cwd)
   if (paths.length === 0 || (mirror && input !== null && typeof input !== 'object')) return held()
@@ -109,5 +112,12 @@ export function claudeDenyPaths(rt, bot) {
       }
     } catch { return undefined }
   }
-  return [...roots].sort()
+  return [...roots].sort().map(path => {
+    try {
+      const entry = statSync(path)
+      if (entry.isFile()) return { path, kind: 'file' }
+      if (entry.isDirectory()) return { path, kind: 'directory' }
+    } catch {}
+    return { path, kind: 'unknown' }
+  })
 }

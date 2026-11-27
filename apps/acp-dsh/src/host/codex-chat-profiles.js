@@ -102,7 +102,18 @@ const contains = (root, path) => {
   return part !== '..' && !part.startsWith('..' + sep) && !isAbsolute(part)
 }
 
-export function createGateBinding(codexPath, profile, env, canaryRoot, { run } = {}) {
+// Only the host's physical program store can account for an app-root overlap.
+function managedAppRoot(managedClisHome, executable, runtime) {
+  if (typeof managedClisHome !== 'string' || !isAbsolute(managedClisHome)) return undefined
+  try {
+    const app = realpathSync.native(dirname(dirname(managedClisHome)))
+    const store = realpathSync.native(managedClisHome)
+    if (store === join(app, 'acp', 'clis') && statSync(store).isDirectory()
+      && runtime !== store && contains(store, runtime) && contains(store, realpathSync.native(executable))) return app
+  } catch {}
+}
+
+export function createGateBinding(codexPath, profile, env, canaryRoot, { managedClisHome, run } = {}) {
   const fileIdentity = path => {
     const { dev, ino, size, mtimeMs, ctimeMs } = statSync(path)
     return JSON.stringify([dev, ino, size, mtimeMs, ctimeMs])
@@ -129,9 +140,13 @@ export function createGateBinding(codexPath, profile, env, canaryRoot, { run } =
       if (runtime === undefined || typeof canaryRoot !== 'string' || typeof env.CODEX_HOME !== 'string') return false
       const protectedRoot = realpathSync(canaryRoot)
       if (!scope.signInRoots.includes(protectedRoot)) return false
+      const physicalRuntime = realpathSync.native(runtime)
+      const overlapsRuntime = root => contains(physicalRuntime, root) || contains(root, physicalRuntime)
+      if (scope.signInRoots.some(root => overlapsRuntime(root) || contains(cwd, root) || contains(root, cwd))) return false
+      const app = managedAppRoot(managedClisHome, executable, physicalRuntime)
       const roots = scope.protectedRoots
       for (const root of roots) {
-        if (contains(cwd, root) || contains(runtime, root) || contains(root, runtime)) return false
+        if (contains(cwd, root) || (root !== app && overlapsRuntime(root))) return false
         if (contains(root, cwd) && (scope.signInRoots.includes(root) || !scope.team
           || root === scope.team || !contains(root, scope.team) || !contains(scope.team, cwd))) return false
       }

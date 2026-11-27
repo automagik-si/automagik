@@ -406,19 +406,19 @@ export function mirrorTool(host) {
               const question = nested.permission
               const captured = capture(nested, question, true)
               if (!marked && question.call?.structuredName !== 'request_permissions' && captured.decide()) continue
-              if (dispatchNested) {
+              // Auto review reads a call from its own DSH execution. A nested call asked from
+              // the waiting Agent card has none yet, so at Auto run its own card here, inside
+              // the open step: the reviewer answers it like any call, and only an escalation
+              // reaches the person. Manual and Full keep the direct dialog below.
+              const auto = !dispatchNested
+                && levelOf(host.approval(), exec.agent?.session, host.sandboxPolicy?.(), host.permissionPresets?.()).auto === true
+              if (dispatchNested || (auto && live.policyManaged === true)) {
                 let answered
                 try { answered = await host.runNested?.(live, nested, exec, question) } catch {}
                 if (answered !== true) question.answer(optionFor('rejected', question.options))
                 continue
               }
-              // Auto review reads a call from its own DSH execution. A nested call asked from
-              // the waiting Agent card has none yet, so at Auto run its own card here, inside
-              // the open step: the reviewer answers it like any call, and only an escalation
-              // reaches the person. Manual and Full keep the direct dialog below.
-              const level = levelOf(host.approval(), exec.agent?.session, host.sandboxPolicy?.(), host.permissionPresets?.())
-              if (level.auto === true && typeof host.runNested === 'function'
-                && await host.runNested(live, nested, exec)) continue
+              if (auto && typeof host.runNested === 'function' && await host.runNested(live, nested, exec)) continue
               question.asked = true
               const outcome = await ask(host, live, nested, exec, question, { review: false })
               if (live.policyManaged === true && outcome === 'allowed-once') captured.answer(outcome)

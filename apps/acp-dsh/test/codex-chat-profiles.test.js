@@ -1,6 +1,6 @@
 // Chat profiles stay in the app's home; an older adapter still takes the legacy modes.
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -149,6 +149,119 @@ test('#2134 AW-R4 scope, full grant table and checked marker cleanup', t => {
   assert.equal(binding(workspace, scope), false, 'a changed config cannot authorize a running process')
   assert.equal(bind()(workspace, scope), false, 'an appended grant at launch invalidates the proof before probing')
   assert.equal(seen.length, 2)
+})
+
+test('#2134 managed runtime: exact program layout with protected roots and marker controls', { skip: process.platform === 'win32' }, async t => {
+  const dir = realpathSync.native(directory(t))
+  const app = join(dir, 'app')
+  const store = join(app, 'acp', 'clis')
+  const cliHomes = join(app, 'acp', 'cli-homes')
+  const workspace = join(dir, 'workspace')
+  const home = join(cliHomes, 'codex')
+  const runtime = join(store, 'codex', 'version')
+  for (const folder of [home, workspace]) mkdirSync(folder, { recursive: true })
+  const binary = layout => {
+    mkdirSync(join(layout, 'bin'), { recursive: true })
+    writeFileSync(join(layout, 'codex-package.json'), '{}')
+    const path = join(layout, 'bin', 'fake-codex')
+    writeFileSync(path, 'synthetic executable placeholder')
+    return path
+  }
+  const executable = binary(runtime)
+  const profile = profiles.gateProfileOf(PROFILE_MODES)
+  const env = { CODEX_HOME: home }
+  const scope = { cwd: workspace, protectedRoots: [app, cliHomes], signInRoots: [cliHomes] }
+  const bind = ({ command = executable, layout = runtime, managedClisHome = store } = {}) => {
+    writeFileSync(join(home, 'config.toml'), chatProfilesConfig(home, HEX, layout))
+    const seen = []
+    const binding = profiles.createGateBinding(command, profile, env, cliHomes, {
+      managedClisHome,
+      run(command, args, options) {
+        const marker = args.at(-1)
+        seen.push(marker)
+        assert.equal(command, realpathSync.native(executable))
+        assert.equal(options.cwd, workspace)
+        assert.equal(options.env, env)
+        assert.deepEqual(args.slice(0, -1), ['sandbox', '-P', profile.slice('permission-profile:'.length),
+          '-C', workspace, '--', 'env', 'LC_ALL=C', 'cat', '--'])
+        if (marker.startsWith(workspace + '/')) return { status: 0, stdout: readFileSync(marker, 'utf8') }
+        assert.ok(marker.startsWith(cliHomes + '/'))
+        assert.ok(readFileSync(marker, 'utf8'))
+        return { status: 1, stdout: '', stderr: `cat: ${marker}: Permission denied\n` }
+      },
+    })
+    return { binding, seen }
+  }
+  const refuses = (options, selection = scope, cwd = workspace) => {
+    const { binding, seen } = bind(options)
+    assert.equal(binding(cwd, selection), false)
+    assert.deepEqual(seen, [], 'refused before the probe')
+  }
+  await t.test('managed layout proves workspace read and CLI-home denial before caching', () => {
+    const appAlias = join(dir, 'app-alias')
+    symlinkSync(app, appAlias)
+    const { binding, seen } = bind({ managedClisHome: join(appAlias, 'acp', 'clis') })
+    assert.equal(binding(workspace, scope), true, 'managed layout under app root should reach the sandbox probe')
+    assert.equal(seen.length, 2)
+    assert.ok(seen.every(marker => !existsSync(marker)))
+    assert.equal(binding(workspace, scope), true)
+    assert.equal(seen.length, 2)
+    unlinkSync(appAlias)
+    assert.equal(binding(workspace, scope), false, 'an unavailable store cannot reuse cached authority')
+    assert.equal(seen.length, 2)
+  })
+  await t.test('CLI homes, distinct protected roots and workspace overlaps are refused', () => {
+    const privateRuntime = join(cliHomes, 'private-program')
+    refuses({ command: binary(privateRuntime), layout: privateRuntime })
+    const appData = join(store, 'codex')
+    const alias = join(dir, 'data-alias')
+    symlinkSync(appData, alias)
+    const protectedData = realpathSync.native(alias)
+    for (const root of [protectedData, join(runtime, 'bin')]) {
+      refuses({}, { ...scope, protectedRoots: [...scope.protectedRoots, root] })
+      refuses({}, { ...scope, protectedRoots: [...scope.protectedRoots, root], signInRoots: [cliHomes, root] })
+    }
+    refuses({}, { ...scope, signInRoots: [cliHomes, app] })
+    refuses({}, { ...scope, cwd: cliHomes, team: cliHomes }, cliHomes)
+    refuses({}, { ...scope, cwd: dir }, dir)
+    refuses({}, scope, join(dir, 'missing-workspace'))
+  })
+  await t.test('missing and linked-out stores and layouts outside the store are refused', () => {
+    refuses({ managedClisHome: null })
+    const otherApp = join(dir, 'other-app')
+    const linkedStore = join(otherApp, 'acp', 'clis')
+    mkdirSync(join(otherApp, 'acp'), { recursive: true })
+    symlinkSync(store, linkedStore)
+    refuses({ managedClisHome: linkedStore })
+    const sibling = join(app, 'acp', 'clis-sibling', 'codex')
+    refuses({ command: binary(sibling), layout: sibling })
+    const inStoreAlias = join(runtime, 'bin', 'outside-alias')
+    symlinkSync(join(sibling, 'bin', 'fake-codex'), inStoreAlias)
+    refuses({ command: inStoreAlias, layout: sibling })
+    const storeLayout = binary(store)
+    refuses({ command: storeLayout, layout: store })
+  })
+  await t.test('launch executable and selected native runtime must each be within the store', () => {
+    const triple = {
+      'linux-x64': 'x86_64-unknown-linux-musl', 'linux-arm64': 'aarch64-unknown-linux-musl',
+      'darwin-x64': 'x86_64-apple-darwin', 'darwin-arm64': 'aarch64-apple-darwin',
+    }[`${process.platform}-${process.arch}`]
+    if (triple === undefined) return
+    const launcher = (folder, layout) => {
+      const command = join(folder, 'bin', 'codex.js')
+      const native = join(folder, 'vendor', triple, 'bin')
+      mkdirSync(join(folder, 'bin'), { recursive: true })
+      mkdirSync(native, { recursive: true })
+      writeFileSync(command, '// synthetic launcher\n')
+      symlinkSync(join(layout, 'bin', 'fake-codex'), join(native, 'codex'))
+      assert.equal(codexRuntimeRoot(command), layout)
+      return command
+    }
+    const otherRuntime = join(app, 'other-runtime')
+    binary(otherRuntime)
+    refuses({ command: launcher(join(dir, 'external'), runtime) })
+    refuses({ command: launcher(join(store, 'launcher'), otherRuntime), layout: otherRuntime })
+  })
 })
 
 for (const [home, key] of [

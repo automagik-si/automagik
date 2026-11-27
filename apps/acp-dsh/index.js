@@ -27,7 +27,7 @@ import { answerAside, asideFailure, supportsAside } from './src/host/aside-run.j
 import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
-import { CliStore, CLI_CHECK_EVERY_MS } from './src/host/clis.js'
+import { CliStore, CLI_CHECK_EVERY_MS, clisHome } from './src/host/clis.js'
 import { CliHomes, HOME_ENV, runCount, stopRuns } from './src/host/cli-homes.js'
 import { canRunProfile, createGateBinding, ensureChatProfiles, gateProfileOf } from './src/host/codex-chat-profiles.js'
 import { NATIVE_OFF_UNAVAILABLE, nativeOffLaunch } from './src/host/codex-native.js'
@@ -738,7 +738,9 @@ export function apply(ctx, config = {}, {
           verify: profile => profileCheck(env.CODEX_PATH, profile, { cwd: env.CODEX_HOME, env }),
         })
         if (profileModes !== undefined) return { command, args, env, profileModes,
-          gateBinding: createGateBinding(env.CODEX_PATH, gateProfileOf(profileModes), env, cliHome, { run: gateProbeRun }),
+          gateBinding: createGateBinding(env.CODEX_PATH, gateProfileOf(profileModes), env, cliHome, {
+            managedClisHome: clisHome(), run: gateProbeRun,
+          }),
           ...(context?.sessionFiles === undefined ? {} : sessionFileConfig(env, context.sessionFiles, profileModes)),
         }
         if (context?.sessionFiles?.files?.length) throw new Error('The restricted image profile is unavailable; no image prompt was sent.')

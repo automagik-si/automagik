@@ -1392,6 +1392,43 @@ test('#2134 K6 AW-R6 one-shot decisions use the live child and its independent g
   }
 })
 
+test('#2134 source 5 managed nested Auto decisions carry the exact pending question', async t => {
+  const h = guardedMirror(t, { marked: false, auto: true, questionGuard: () => undefined })
+  const parent = await h.prepare()
+  h.run.prompting = new Promise(() => {})
+  await h.update('child', { kind: 'read', title: 'Synthetic child', status: 'pending',
+    rawInput: { path: 'fixture.txt' }, _meta: { claudeCode: { toolName: 'Read', parentToolUseId: 'parent' } },
+  })
+  const child = h.run.tools.get('child')
+  const first = h.question('child')
+  const initial = child.permission
+  const review = Promise.withResolvers()
+  const bindings = []
+  h.adapter.runNested = async (_live, nested, _exec, bound) => {
+    bindings.push(bound)
+    if (bindings.length === 1) {
+      await review.promise
+      bound?.answer(picked('yes'))
+      return true
+    }
+    nested.permission.answer(picked('no'))
+    return true
+  }
+  const result = h.execute()
+  await until(() => bindings.length === 1)
+  assert.equal(bindings.length, 1)
+  const second = h.question('child')
+  const replacement = child.permission
+  review.resolve()
+  assert.deepEqual(await soon(first), CANCELLED)
+  assert.deepEqual(await soon(second), picked('no'))
+  await h.update(parent.id, { status: 'completed' })
+  await result
+  assert.equal(bindings[0], initial, 'the first review carries the original question')
+  assert.equal(bindings[1], replacement, 'the replacement has a distinct review')
+  assert.equal(bindings.length, 2)
+})
+
 test('#2132 T8 a marked mirror answers its own Full-access question with the guard refusal', async t => {
   const h = guardedMirror(t)
   await h.prepare('pending')

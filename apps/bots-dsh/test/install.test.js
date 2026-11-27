@@ -87,6 +87,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on session/event',
     'on subagent/start',
     'on subagent/end',
+    'on agent/pre-step',
     'on session/event',
     'on subagent/start',
     'on subagent/end',

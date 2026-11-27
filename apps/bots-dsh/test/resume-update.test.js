@@ -21,6 +21,7 @@ import { SOURCE_KIND, UPDATE_CUT } from '../src/host/constants.js'
 import MemberWallFileSystem from '../src/host/member-wall/fs.js'
 import { scopeSessions } from '../src/host/member-wall/principals.js'
 import { install as installParts } from '../src/host/parts.js'
+import { install as installReviewMark, planOpenAt } from '../src/host/review-mark.js'
 import { install, RESUME_DELAY_MS } from '../src/host/resume.js'
 import { createUpdateHold, install as installHold, STOP_WAIT_MS } from '../src/host/self-update-hold.js'
 import { readUpdateRecovery } from '../src/host/self-update-recovery.js'
@@ -446,7 +447,8 @@ async function realLoop(t, home, { run = null, expectedRun, supervised = false, 
     if (enqueue) {
       if (!await enqueue(agent, message)) return
     } else {
-      agent.followup(message)
+      if (args.steer) agent.steer(message)
+      else agent.followup(message)
       made?.(message)
       await ctx.sessions.flush(agent.session)
     }
@@ -487,6 +489,123 @@ async function realLoop(t, home, { run = null, expectedRun, supervised = false, 
   }
   return { ctx, rt, events, create, calls, disposeHold, warnings, partsHook, delivered, verdict }
 }
+
+function guardedRequest(loop, pauseSave = async () => {}) {
+  const { rt } = loop
+  const bot = rt.botOf('ada')
+  const reviewer = rt.state.bots.reviewer = { id: 'reviewer', name: 'Reviewer' }
+  rt.chatOwners.set('chat', bot.id)
+  Object.assign(bot, { role: 'Solver', reviewerId: reviewer.id, reviewGuard: true })
+  const at = Date.now() - 1000
+  const proof = { request: 'old-request', exchangeId: 'old-plan', reviewerId: reviewer.id, verdict: 'SHIP', at }
+  bot.reviewTrack = {
+    requested: true, requestAt: at, planOpen: proof, planVerdictAt: at, verdicts: [],
+    solver: { request: proof.request, origin: 'person', revision: 0,
+      plan: { checks: ['fixture'], revision: 0, review: { ...proof } } },
+  }
+  rt.state.works = {}
+  rt.isActualSolver = () => true
+  rt.planGateClosed = target => planOpenAt(target, target.reviewTrack) === undefined
+  const writes = []
+  const withdrawn = []
+  rt.withdrawPlanAuthority = target => withdrawn.push(target.reviewTrack.openerExchange)
+  rt.saveCopy = async (change, { beforeCommit, afterWrite }) => {
+    const copy = structuredClone(rt.state)
+    change(copy)
+    writes.push(copy.bots.ada.reviewTrack.openerExchange)
+    await pauseSave()
+    beforeCommit()
+    afterWrite()
+  }
+  installReviewMark(rt)
+  return { bot, open: () => !rt.planGateClosed(bot), writes, withdrawn }
+}
+
+test('#2134 source 2 claimed and recovered Bot requests wait for committed admission', async t => {
+  const relay = { fromId: 'sender', toId: 'ada', role: 'request', exchangeId: 'fixture-request', text: 'Synthetic request' }
+  const seen = (loop, id = relay.exchangeId) => loop.events.some(event =>
+    event.type === 'user/message' && event.data?.source?.exchangeId === id)
+
+  for (const steer of [false, true]) await t.test(steer ? 'busy steer' : 'queued next-turn request', async t => {
+    const home = temp(t)
+    const previous = Promise.withResolvers()
+    const commit = Promise.withResolvers()
+    const entering = Promise.withResolvers()
+    const loop = await realLoop(t, home, {
+      turns: true, stream: () => loop.calls.length === 1 ? previous.promise : undefined,
+    })
+    t.after(() => { previous.resolve(); commit.resolve() })
+    const fixture = guardedRequest(loop, () => { entering.resolve(); return commit.promise })
+    const { agent } = await loop.create('chat')
+    await loop.rt.resumesDone
+    agent.followup(user('synthetic earlier turn', { kind: 'user', generated: true }))
+    await until(() => loop.calls.length === 1)
+    try {
+      await loop.rt.deliver({ ...relay, steer })
+      assert.equal(fixture.open(), true)
+      assert.deepEqual(fixture.writes, [])
+      previous.resolve()
+      await entering.promise
+      await immediate()
+      assert.equal(seen(loop), false)
+      assert.equal(loop.calls.length, 1)
+      assert.equal(fixture.open(), true)
+      assert.ok(loop.rt.deliveryNote(relay.exchangeId))
+    } finally { commit.resolve() }
+    await until(() => seen(loop) && loop.calls.length === 2)
+    assert.equal(fixture.open(), false)
+    assert.deepEqual(fixture.withdrawn, [relay.exchangeId])
+  })
+
+  await t.test('a failed save leaves the same exchange pending and recovery commits before sending', async t => {
+    const home = temp(t)
+    const before = await realLoop(t, home, { turns: true })
+    const original = guardedRequest(before, async () => { throw new Error('synthetic required save failed') })
+    await before.create('chat')
+    await before.rt.resumesDone
+    await before.rt.deliver(relay)
+    await until(() => original.writes.length === 1 && before.events.some(event => event.type === 'turn/end'))
+    assert.equal(seen(before), false)
+    assert.deepEqual(before.calls, [])
+    assert.equal(before.rt.turnCutSnapshot('chat').info, undefined)
+    assert.equal(original.open(), true)
+    assert.ok(before.rt.deliveryNote(relay.exchangeId))
+    await before.rt.flushUpdateNotes()
+    assert.equal(notesOf(home).queued.chat[0].args.exchangeId, relay.exchangeId)
+    await before.ctx.fiber.dispose()
+
+    const commit = Promise.withResolvers()
+    const after = await realLoop(t, home, { turns: true })
+    t.after(() => commit.resolve())
+    const recovered = guardedRequest(after, () => commit.promise)
+    const { agent } = await after.create('chat')
+    try {
+      await until(() => recovered.writes.length === 1)
+      assert.equal(agent.inbox.nextTurn.length, 0)
+      assert.equal(seen(after), false)
+      assert.deepEqual(after.calls, [])
+    } finally { commit.resolve() }
+    await after.rt.resumesDone
+    await until(() => seen(after))
+    assert.deepEqual(recovered.withdrawn, [relay.exchangeId])
+    assert.deepEqual(recovered.writes, [relay.exchangeId])
+  })
+
+  await t.test('a resend already waiting in the inbox is skipped before admission', async t => {
+    const home = temp(t)
+    seed(home, { queued: { chat: [{ at: Date.now(), args: relay }] } })
+    const loop = await realLoop(t, home, { turns: true })
+    const fixture = guardedRequest(loop)
+    const { agent } = await loop.create('chat')
+    agent.inject(user(relay.text, { kind: SOURCE_KIND, ...relay, senderSessionId: relay.fromId }))
+    await loop.rt.resumesDone
+    assert.equal(seen(loop), false)
+    assert.deepEqual(loop.calls, [])
+    assert.deepEqual(fixture.writes, [])
+    assert.deepEqual(fixture.withdrawn, [])
+    assert.equal(fixture.open(), true)
+  })
+})
 
 test('real inbox disposal preserves two owner messages and a direct group goal, with per-ID acknowledgement on boot', async t => {
   const home = temp(t)

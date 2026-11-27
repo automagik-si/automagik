@@ -859,6 +859,7 @@ export class AcpAdapter extends LlmAdapter {
       || exec.toolSet === undefined || question === undefined) return false
     const run = live.run
     const args = boundQuestion?.call ? callArguments(boundQuestion.call) : callArguments(nested)
+    if (live.policyManaged === true && boundQuestion === undefined) return false
     if (boundQuestion && (this.live.get(session.id) !== live || run.tools.get(nested.id) !== nested
       || !nestedPermissionMatches(nested, boundQuestion, args))) return false
     const id = `acp_${randomUUID()}`
@@ -2125,11 +2126,17 @@ export class AcpAdapter extends LlmAdapter {
           return { key: hard, meta: hard ? agent.hardAsk() : {} }
         }
         const deny = identity.confineDeny
-        if (!Array.isArray(deny)) return undefined
+        if (!Array.isArray(deny) || deny.some(entry => typeof entry?.path !== 'string' || entry.path === ''
+          || !['file', 'directory', 'unknown'].includes(entry.kind))) return undefined
         const permissions = {
           ask: [...(hard ? agent.hardAsk().claudeCode.options.settings.permissions.ask : []),
             ...(identity.guardedSolver ? CLAUDE_GATE_ASK : []), ...CLAUDE_READ_ASK],
-          deny: deny.map(path => `Read(//${path.replace(/^[\\/]/, '').replaceAll('\\', '/')}${path.endsWith('/.claude.json') ? '' : '/**'})`),
+          deny: deny.flatMap(({ path, kind }) => {
+            const root = `//${path.replace(/^[\\/]/, '').replaceAll('\\', '/')}`
+            if (kind === 'file') return [`Read(${root})`]
+            if (kind === 'directory') return [`Read(${root}/**)`]
+            return [`Read(${root})`, `Read(${root}/**)`]
+          }),
         }
         return { key: JSON.stringify(permissions), meta: { claudeCode: { options: { settings: { permissions } } } } }
       }

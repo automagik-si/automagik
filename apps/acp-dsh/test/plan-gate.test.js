@@ -21,7 +21,7 @@ function session(t, { provider = CLAUDE, gated = true, solver = true, guarded = 
   const identity = {
     name: 'Solver', nativeTools: true, nativeToolsAgent: provider, solver, guardedSolver: guarded && solver,
     solverPolicy: { state: solver ? 'solver' : 'none' },
-    confineDeny: solver ? ['/synthetic/protected'] : undefined,
+    confineDeny: solver ? [{ path: '/synthetic/protected', kind: 'directory' }] : undefined,
     get solverWorkspace() { return { cwd: realpathSync(world.dir) } },
     get planGate() { return solver && state },
   }

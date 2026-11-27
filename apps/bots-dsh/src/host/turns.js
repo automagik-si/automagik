@@ -918,6 +918,43 @@ export function install(rt) {
     if (rt.groupOwners.has(info?.id)) void rt.goalSettled?.(rt.roomOf(rt.groupOwners.get(info.id).roomId)).catch(error => rt.warn('omni-ui: goal settle failed: %s', error))
   })
 
+  // DSH awaits this after claiming the input, before recording it or dispatching a provider.
+  const admittedRequests = new WeakMap()
+  rt.admitBotRequest = (agent, message, sendable) => {
+    const source = message?.source
+    const session = agent?.session
+    const owner = rt.chatOwners.get(session?.id)
+    if (owner === undefined || source?.kind !== SOURCE_KIND || source.role !== 'request'
+      || source.deferred === true || source.resumed === true || source.resumedByUpdate === true || source.retried === true) return
+    const bot = rt.botOf(owner)
+    const eligible = () => {
+      const currentAgent = ctx.get?.('agents')?.get?.(session.id)
+      return agent.session === session && (currentAgent === undefined || currentAgent === agent)
+        && rt.chatOwners.get(session.id) === owner && rt.botOf(owner) === bot && sendable?.() !== false
+    }
+    if (!eligible()) return false
+    if (admittedRequests.get(message) === session) return true
+    return Promise.resolve(rt.reviewBotRequest?.(owner, source.senderSessionId, {
+      noReply: source.noReply === true, exchangeId: source.exchangeId, eligible,
+    })).then(() => {
+      if (!eligible()) return false
+      admittedRequests.set(message, session)
+      return true
+    })
+  }
+  ctx.on('agent/pre-step', async function admitBotStep({ agent, messages, signal }, next) {
+    try {
+      for (const message of messages ?? []) {
+        const admission = rt.admitBotRequest(agent, message, () => signal?.aborted !== true)
+        if (admission !== undefined && await admission === false) return { kind: 'reject' }
+      }
+    } catch (error) {
+      rt.warn('omni-ui: Solver request could not be saved: %s', error)
+      return { kind: 'reject' }
+    }
+    return next()
+  })
+
   ctx.on('session/event', (session, event) => {
     const id = session?.id
     if (id === undefined) return
@@ -1142,12 +1179,6 @@ export function install(rt) {
             ...(source.goalId !== undefined ? { goalId: source.goalId } : {}),
           })
         } else if (source?.kind === SOURCE_KIND) {
-          // A Bot's request in a guarded Solver's own chat, at its first arrival (a handed-back,
-          // resumed or retried one was counted then, H7-3), may open a new review (review-mark.js).
-          if (source.role === 'request' && rt.chatOwners.get(id) !== undefined && source.deferred !== true && source.resumed !== true
-            && source.resumedByUpdate !== true && source.retried !== true) {
-            rt.reviewBotRequest?.(rt.chatOwners.get(id), source.senderSessionId, { noReply: source.noReply === true, exchangeId: source.exchangeId })
-          }
           if (entry.turn === undefined) {
             entry.pending = source
             entry.pendingText = textOf(personParts(originalReviewContent(event.data))).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')

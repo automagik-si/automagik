@@ -138,6 +138,12 @@ const planProof = (proof, solver, reviewerId) => isRecord(proof) && isTime(proof
   && typeof proof.reviewerId === 'string' && proof.reviewerId === reviewerId && isReviewVerdict(proof.verdict)
   && !solver.plan?.superseded && matchesReview(solver.plan?.review, reviewerId, proof.exchangeId)
   && solver.plan.review.verdict === proof.verdict
+const resultProof = (proof, solver, reviewerId) => isRecord(proof) && isTime(proof.at)
+  && typeof proof.request === 'string' && proof.request === solver?.request
+  && proof.revision === solver.revision && proof.revision === solver.review?.revision
+  && typeof reviewerId === 'string' && proof.reviewerId === reviewerId
+  && matchesReview(solver.review, reviewerId, proof.exchangeId)
+  && isReviewVerdict(proof.verdict) && solver.review.verdict === proof.verdict
 
 export function planOpenAt(bot, track, { legacy = true } = {}) {
   if (!track?.requested) return undefined
@@ -169,6 +175,10 @@ export function cleanTrack(track) {
     ? track.verdicts.filter(entry => isRecord(entry) && typeof entry.verdict === 'string' && isTime(entry.at)).slice(-VERDICTS_KEPT)
     : []
   const solver = cleanProgress(track.solver)
+  if (solver?.review && Object.hasOwn(solver.review, 'proof')
+    && !resultProof(solver.review.proof, solver, solver.review.reviewerId)) {
+    solver.review = { ...solver.review, proof: null }
+  }
   return {
     requested: track.requested === true,
     requestAt: isTime(track.requestAt) ? track.requestAt : 0,
@@ -238,6 +248,14 @@ export function install(rt) {
     return result.snapshot === progress.snapshot && result.manifest?.indeterminate === false ? result.manifest : undefined
   }
   const legacyText = (bot, progress) => manifestsMatch(bot, progress)?.entries.length === 0
+  const restoredShip = (bot, progress) => {
+    const result = progress?.review
+    return result?.verdict === 'SHIP' && result.images?.v !== 1 && !Object.hasOwn(result, 'proof')
+      && !legacyResultReview(result) && result.revision === progress.revision && typeof bot.reviewerId === 'string'
+      && matchesReview(result, bot.reviewerId, result.exchangeId) && result.reviewer?.id === bot.reviewerId
+  }
+  const legacyShipEntry = track => track.verdicts.findLast(entry => entry.stage === undefined && entry.verdict === 'SHIP'
+    && entry.at >= track.requestAt && !Object.hasOwn(entry, 'legacyTextRevision'))
   const deferIngress = (bot, apply) => {
     const queue = progressWrites.get(bot)
     if (queue === undefined) return false
@@ -325,10 +343,20 @@ export function install(rt) {
       if (track.solver.plan && !instruction) {
         const progress = track.solver
         const result = progress.review
+        const oldShip = result?.verdict === 'SHIP' && result.images?.v !== 1
+        const oldText = oldShip && legacyText(bot, progress)
         // The restored designation can identify visual work until this follow-up invalidates it.
-        if (result && result.images?.v !== 1 && (result.unverified === 'images'
-          || (result.verdict === 'SHIP' && !legacyText(bot, progress)))) progress.visualReviewRequired = true
+        if (result?.images?.v !== 1 && (result?.unverified === 'images' || (oldShip && !oldText))) {
+          progress.visualReviewRequired = true
+        }
+        const legacyShip = oldText && restoredShip(bot, progress) ? legacyShipEntry(track) : undefined
         invalidateResult(progress)
+        // Carry only the restored text credit into this first follow-up revision.
+        if (legacyShip) {
+          track.verdicts = track.verdicts.map(entry => entry === legacyShip ? {
+            ...entry, request: progress.request, reviewerId: bot.reviewerId, legacyTextRevision: progress.revision,
+          } : entry)
+        }
       }
       const directAuto = noProgressTool && instruction && track.solver.origin === 'person' && !track.solver.auto
       if (limit || directAuto) {
@@ -342,10 +370,10 @@ export function install(rt) {
       if (bot.reviewGuard === true && planOpenAt(bot, track) !== undefined && rt.planGateClosed?.(bot) === false) {
         const next = openedTrack(bot, Date.now(), 'person')
         if (noProgressTool && instruction) next.solver.auto = true
-        return saveProgress(bot, before, next.solver, next, () => {
+        return saveProgress(bot, before, next.solver, next, { onCommit: () => {
           forgetPrevious(bot)
           remember(next)
-        }).then(() => next.solver.request)
+        } }).then(() => next.solver.request)
       }
       open(bot, Date.now())
       track = bot.reviewTrack
@@ -357,22 +385,26 @@ export function install(rt) {
 
   // Keep input and review events ordered with the durable write, including the interval
   // between rename and directory sync. A replacement team still produces a conflict.
-  async function saveProgress(bot, before, solver, next = { ...before, solver }, { onCommit, authorizeCommit } = {}) {
+  async function saveProgress(bot, before, solver, next = { ...before, solver }, { onCommit, authorizeCommit, eligible } = {}) {
     if (progressWrites.has(bot)) throw refusal('A Solver progress update is still being saved.')
     const assertCurrent = () => {
       if (rt.botOf(bot.id) !== bot || bot.reviewTrack !== before) throw refusal('The Solver request changed. Read solver_progress status again.')
+    }
+    const assertEligible = () => {
+      assertCurrent()
+      if (eligible?.() === false) throw refusal('The Solver request no longer belongs to this chat.')
     }
     const queue = []
     const wasOpen = rt.planGateClosed?.(bot) === false
     progressWrites.set(bot, queue)
     try {
       await rt.saveCopy(copy => {
-        assertCurrent()
+        assertEligible()
         copy.bots[bot.id].reviewTrack = next
       }, {
         durable: true,
         beforeCommit: () => {
-          assertCurrent()
+          assertEligible()
           authorizeCommit?.()
         },
         afterWrite: () => {
@@ -935,6 +967,10 @@ export function install(rt) {
         const provenance = stage === 'result'
           ? { request, revision: current.solver.revision, exchangeId: reply.replyTo, reviewerId: fromId }
           : {}
+        if (stage === 'result') {
+          const proof = { at, verdict, ...provenance }
+          if (resultProof(proof, current.solver, fromId)) current.solver.review.proof = proof
+        }
         current.verdicts = [...current.verdicts, { verdict, at, ...(stage ? { stage } : {}), ...provenance }].slice(-VERDICTS_KEPT)
       }
       bot.reviewTrack = current
@@ -1119,20 +1155,29 @@ export function install(rt) {
   // `personAt` would let a turn end deliver past the reviewer (H7-1).
   // After a delivery (or with none asked yet) a request opens the next track; a no-reply message
   // and the reviewer's own message open nothing.
-  function reviewBotRequest(botId, senderId, { noReply = false, exchangeId } = {}) {
+  function reviewBotRequest(botId, senderId, { noReply = false, exchangeId, eligible } = {}) {
     const bot = rt.botOf(botId)
-    if (!tracked(bot) || typeof senderId !== 'string' || senderId === botId) return
-    if (deferIngress(bot, () => reviewBotRequest(botId, senderId, { noReply, exchangeId }))) return
+    if (!tracked(bot) || typeof senderId !== 'string' || senderId === botId || eligible?.() === false) return
+    const queue = progressWrites.get(bot)
+    if (queue) return new Promise((resolve, reject) => {
+      queue.push(() => {
+        try { resolve(reviewBotRequest(botId, senderId, { noReply, exchangeId, eligible })) }
+        catch (error) { reject(error) }
+      })
+    })
     const before = bot.reviewTrack
     const track = cleanTrack(before)
+    if (typeof exchangeId === 'string' && exchangeId === track?.openerExchange) return
     const dates = noReply || senderId === bot.reviewerId
+    const durable = bot.reviewGuard === true && rt.isActualSolver?.(bot) !== false
     if (track?.requested === true && track.delivered !== true) {
       if (dates || senderId === track.openerId) return
       const progress = track.solver
       const wasOpen = bot.reviewGuard === true && planOpenAt(bot, track) !== undefined && rt.planGateClosed?.(bot) === false
       const guardedOpen = bot.reviewGuard === true && (wasOpen
         || (rt.isActualSolver?.(bot) === false && isTime(track.planVerdictAt)))
-      if (progress?.plan || progress?.pending || progress?.review) {
+      const hasProgress = progress?.plan || progress?.pending || progress?.review
+      if (hasProgress) {
         invalidateResult(progress)
         if (progress.plan) progress.plan = { checks: progress.plan.checks, revision: progress.plan.revision, superseded: true }
       }
@@ -1144,10 +1189,12 @@ export function install(rt) {
         next.openedBy = 'bot'
         next.openerId = senderId
         if (typeof exchangeId === 'string') next.openerExchange = exchangeId
-        return saveProgress(bot, before, next.solver, next, () => forgetPrevious(bot)).catch(error =>
-          rt.warn('omni-ui: Solver request could not be saved: %s', error))
+        return saveProgress(bot, before, next.solver, next, { onCommit: () => forgetPrevious(bot), eligible })
       }
-      if (progress?.plan || progress?.pending || progress?.review) bot.reviewTrack = track
+      if (durable && hasProgress) {
+        return saveProgress(bot, before, progress, track, { onCommit: () => autoInstructions.delete(bot), eligible })
+      }
+      if (hasProgress) bot.reviewTrack = track
       autoInstructions.delete(bot)
       if (!guardedOpen) {
         save()
@@ -1159,11 +1206,10 @@ export function install(rt) {
       else delete bot.reviewTrack.personAt
     } else {
       if (dates) return
-      if (bot.reviewGuard === true && planOpenAt(bot, track) !== undefined && rt.planGateClosed?.(bot) === false) {
+      if (durable) {
         const next = { ...openedTrack(bot, Date.now(), 'bot'), openedBy: 'bot', openerId: senderId,
           ...(typeof exchangeId === 'string' ? { openerExchange: exchangeId } : {}) }
-        return saveProgress(bot, before, next.solver, next, () => forgetPrevious(bot)).catch(error =>
-          rt.warn('omni-ui: Solver request could not be saved: %s', error))
+        return saveProgress(bot, before, next.solver, next, { onCommit: () => forgetPrevious(bot), eligible })
       }
       open(bot, Date.now(), 'bot')
     }
@@ -1213,14 +1259,19 @@ export function install(rt) {
     }
     track.outcome = solverOutcome(bot, track, review, pending, model, track.solver?.snapshot ? snapshotOf(bot) : undefined, visualKind)
     const imagesUnverified = track.solver?.visualReviewRequired === true || track.solver?.review?.unverified === 'images'
-    const resultAt = track.verdicts.findLast(entry => entry.stage === 'result' && isReviewVerdict(entry.verdict)
-      && entry.request === track.solver?.request && entry.revision === track.solver?.revision
-      && entry.reviewerId === bot.reviewerId && matchesReview(result, entry.reviewerId, entry.exchangeId)
-      && result.revision === entry.revision && result.verdict === entry.verdict)?.at
+    const proof = result && Object.hasOwn(result, 'proof') ? result.proof
+      : track.verdicts.findLast(entry => entry.stage === 'result' && resultProof(entry, track.solver, bot.reviewerId))
+    const legacyTextShip = visualKind === 'text' && restoredShip(bot, track.solver)
+    const legacyFollowup = !result && track.solver && track.verdicts.findLast(entry => entry.stage === undefined
+      && entry.verdict === 'SHIP' && entry.request === track.solver.request && entry.reviewerId === bot.reviewerId
+      && entry.legacyTextRevision === track.solver.revision)
+    const resultAt = resultProof(proof, track.solver, bot.reviewerId) ? proof.at
+      : legacyTextShip ? legacyShipEntry(track)?.at : legacyFollowup?.at
     track.last = { ...deliveryMark(track, review, Date.now(), {
       pending, planAt: planOpenAt(bot, track, { legacy: false }), resultAt,
     }), ...(track.outcome.done
-      ? { done: true, reviewer: track.outcome.reviewer, resultExchangeId: track.outcome.exchangeId }
+      ? { done: true, reviewer: track.outcome.reviewer, resultExchangeId: track.outcome.exchangeId,
+          ...(legacyTextShip ? { result: true } : {}) }
       : imagesUnverified ? { result: false } : {}) }
     if (!imagesUnverified) track.delivered = true
     save()

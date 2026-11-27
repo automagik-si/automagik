@@ -397,13 +397,18 @@ export function install(rt) {
           return { state: 'solver', bot, own, guarded: bot.reviewGuard === true, gateClosed: rt.planGateClosed?.(bot) === true }
         }
         const liveHeader = agent?.session?.id === current ? agent.session.header : undefined
-        const header = liveHeader ?? ctx.sessions?.get?.(current)?.header
-        if (!header || typeof header !== 'object' || Array.isArray(header)) return unavailable
-        if (header.origin !== 'subagent') {
-          if (header.origin === undefined && (header.id !== current || header.parentSession !== undefined)) return unavailable
-          if (header.origin !== undefined && typeof header.origin !== 'string') return unavailable
+        const storedHeader = ctx.sessions?.get?.(current)?.header
+        const header = liveHeader ?? storedHeader
+        if (!header || typeof header !== 'object' || Array.isArray(header) || header.id !== current) return unavailable
+        if (liveHeader !== undefined && storedHeader !== undefined
+          && [liveHeader, storedHeader].some(entry => entry?.id !== current || entry.origin !== header.origin
+            || entry.parentSession !== header.parentSession || entry.delegationDepth !== header.delegationDepth)) return unavailable
+        if (header.origin === undefined) {
+          if (header.parentSession !== undefined || (header.delegationDepth !== undefined && header.delegationDepth !== 0)) return unavailable
           return { state: 'none' }
         }
+        if (header.origin !== 'subagent' || typeof header.parentSession !== 'string' || header.parentSession === ''
+          || (header.delegationDepth !== undefined && (!Number.isSafeInteger(header.delegationDepth) || header.delegationDepth < 1))) return unavailable
         current = header.parentSession
       }
     } catch {}

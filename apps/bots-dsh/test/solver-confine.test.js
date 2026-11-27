@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { createIdentityReaders } from '../../acp-dsh/src/host/identity.js'
+import { nativeWorld } from '../../acp-dsh/test/fixtures/managed-native-world.js'
 import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 
@@ -19,8 +21,9 @@ async function setup(t) {
   writeFileSync(inside, 'inside fixture')
   writeFileSync(outsideFile, 'independent fixture')
   let cwd = folder
+  const identity = createIdentityReaders(() => {})
   const ctx = fakeContext({ services: {
-    acpAgents: { signInRoots: () => [protectedRoot] },
+    acpAgents: { signInRoots: () => [protectedRoot], botIdentity: identity.register },
     workingDirectory: { get: () => cwd, ensure: async () => cwd },
   } })
   apply(ctx, { home })
@@ -39,7 +42,7 @@ async function setup(t) {
     const exec = { name, arguments: args, callId: 'fixture-call', agent }
     return guard(exec, () => body(exec.arguments))
   }
-  return { root, work, folder, inside, outsideFile, protectedRoot, rt, bot, agent, execute, setCwd: path => { cwd = path } }
+  return { root, home, work, folder, inside, outsideFile, protectedRoot, rt, bot, agent, identity, execute, setCwd: path => { cwd = path } }
 }
 
 test('#2134 F5 C1-C4 G6 C7 K5a-b confined reads and traversal refuse before an inert body', async t => {
@@ -95,4 +98,82 @@ test('#2134 K3 AW-R3 missing intermediate ownership cannot dispatch a DSH body',
   sessions.set('missing', { header: { id: 'missing', origin: 'subagent', parentSession: w.bot.id } })
   assert.equal(w.rt.solverPolicyOf('child', exec.agent).bot, w.bot)
   assert.equal(w.rt.botOfSession('child', exec.agent), w.bot)
+})
+
+test('#2134 source 3 exact lineage reaches the ACP policy reader and DSH tool gate', async t => {
+  const w = await setup(t)
+  const id = 'lineage-fixture'
+  const root = { id, cwd: w.work }
+  const child = { ...root, origin: 'subagent', parentSession: w.bot.id, delegationDepth: 1 }
+  const sessions = new Map()
+  w.rt.ctx.sessions = { get: id => sessions.get(id) }
+  const guard = w.rt.ctx.listeners.get('tools/execute')[0]
+  const run = header => guard({
+    name: 'read', arguments: { file_path: w.inside }, agent: { id, session: { id, header } },
+  }, () => 'inert body')
+  await t.test('confirmed root and child retain their routes', async () => {
+    for (const [header, expected] of [[root, 'none'], [child, 'solver']]) {
+      sessions.set(id, { id, header })
+      assert.equal(w.identity.readState(id).identity?.solverPolicy.state, expected)
+      assert.equal(await run(header), 'inert body')
+    }
+  })
+  await t.test('unknown origin and wrong header ID are unavailable', async () => {
+    for (const header of [{ ...root, origin: 'unfamiliar' }, { ...child, id: 'another-session' }]) {
+      sessions.set(id, { id, header })
+      assert.deepEqual(w.identity.readState(id), { ok: false })
+      await assert.rejects(run(header), /could not confirm this Session.s rules/)
+    }
+  })
+  await t.test('stored and live lineage disagreement is unavailable', async () => {
+    sessions.set(id, { id, header: root })
+    await assert.rejects(run(child), /could not confirm this Session.s rules/)
+  })
+})
+
+test('#2134 source 4 the ACP search root is checked independently of locations', async t => {
+  const w = await setup(t)
+  const search = (cwd, input, location = w.inside) => w.rt.solverQuestionDecision({
+    agent: w.agent, provider: 'acp-claude', cwd, args: {
+      kind: 'search', id: 'synthetic-search', input, locations: [{ path: location }],
+    },
+  })
+  await t.test('explicit and default in-folder roots are allowed', () => {
+    assert.equal(search(w.work, { pattern: 'fixture' }).decision, 'allow')
+    assert.equal(search(w.folder, { pattern: 'fixture', path: w.work }).decision, 'allow')
+  })
+  await t.test('the reported location leaves an unconfined default root refused', () => {
+    assert.equal(search(w.folder, { pattern: 'fixture' }).decision, 'refuse')
+  })
+  await t.test('invalid supplied locations and roots stay refused', () => {
+    assert.equal(search(w.work, { pattern: 'fixture' }, w.outsideFile).decision, 'refuse')
+    assert.equal(search(w.work, { pattern: 'fixture', path: 0 }).decision, 'refuse')
+  })
+})
+
+test('#2134 source 6 Claude session rules protect regular files beside the team workspace', async t => {
+  const w = await setup(t)
+  const workspace = join(w.home, 'workspace')
+  const privateFolder = join(w.home, 'other-data')
+  const privateFile = join(w.home, 'fixture-state.json')
+  mkdirSync(workspace)
+  mkdirSync(privateFolder)
+  writeFileSync(privateFile, 'fixture data')
+  w.rt.teamFolder = () => workspace
+  w.bot.workDir = workspace
+  const world = nativeWorld(t, {
+    managed: true, hidden: true,
+    identity: () => ({
+      name: 'Solver', solver: true, solverPolicy: { state: 'solver' }, nativeTools: true, nativeToolsAgent: 'acp-claude',
+      confineDeny: w.identity.readState(w.bot.id).identity.confineDeny,
+    }),
+    policyState: id => world.identityReaders.readState(id),
+  })
+  await world.chat('fixture-claude', { cwd: workspace }).turn('synthetic request')
+  const rules = world.events('new-session')[0].meta.claudeCode.options.settings.permissions
+  const root = path => `Read(/${path}`
+  assert.ok(rules.deny.includes(`${root(privateFolder)}/**)`))
+  assert.ok(rules.deny.includes(`${root(w.protectedRoot)}/**)`))
+  assert.ok(rules.deny.every(rule => !rule.startsWith(root(workspace))))
+  assert.ok(rules.deny.includes(`${root(privateFile)})`), 'the sibling file itself has an exact Read denial')
 })

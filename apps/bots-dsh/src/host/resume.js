@@ -1101,23 +1101,45 @@ export function install(rt) {
     })
     if (batch.length > 0) {
       const { agent } = batch[0]
-      const inject = agent.status !== 'running' && typeof agent.inject === 'function'
       const resumeItem = batch.find(({ item }) => item.args.resumed === true)
       const send = async () => {
+        const ready = []
         try {
-          for (const [index, { item, message }] of batch.entries()) {
+          for (const staged of batch) {
+            const { item, message, sent } = staged
+            const session = staged.agent.session
+            const eligible = () => staged.agent === agent && agent.session === session && session?.id === target
+              && sendable(agent, item, target) && rt.deliveryNote(item.args.exchangeId) !== undefined
+            try {
+              const admission = rt.admitBotRequest?.(staged.agent, message, eligible)
+              if (admission !== undefined && await admission === false) sent.resolve(false)
+              else ready.push({ ...staged, eligible: admission === undefined ? undefined : eligible })
+            } catch (error) {
+              sent.reject(error)
+            }
+          }
+          // No await between the final eligibility check and the actual sends. The last
+          // surviving input still wakes the driver even when other candidates were skipped.
+          const sending = ready.filter(({ eligible, sent }) => {
+            if (eligible?.() !== false) return true
+            sent.resolve(false)
+            return false
+          })
+          if (sending.length === 0) return
+          const inject = agent.status !== 'running' && typeof agent.inject === 'function'
+          for (const [index, { item, message }] of sending.entries()) {
             if (!ownsTeam()) throw new Error('The team changed before the resumed turn could be sent')
             rt.assertShellChoice?.(target, item.args.toId)
             const input = item.args.consumedResult ? noteReviewContinuation(target, message, item.args) : message
             if (!item.args.consumedResult && item.recordId !== undefined) noteDelivery(target, item.args)
             if (!item.args.resumed && (item.args.role === 'request' || item.args.role === 'stopped')) rt.lateWork?.(item.args.exchangeId)
             // DSH claims next-step injections before the waking next-turn followup.
-            if (inject && index < batch.length - 1) agent.inject(input)
+            if (inject && index < sending.length - 1) agent.inject(input)
             else agent.followup(input)
           }
           if (await ctx.sessions.flush(agent.session) === false) throw new Error('Could not flush the resumed turn')
-          if (batch.some(({ item }) => !item.args.resumed)) resent.add(target)
-          for (const { sent } of batch) sent.resolve(true)
+          if (sending.some(({ item }) => !item.args.resumed)) resent.add(target)
+          for (const { sent } of sending) sent.resolve(true)
         } catch (error) {
           for (const { sent } of batch) sent.reject(error)
           throw error
