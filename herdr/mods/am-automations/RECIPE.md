@@ -47,7 +47,7 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   and `LAST RESULT`: status and exit code, the result line, the last lines of stderr when it
   failed, and what became of the report to its bot.
 - **Form**: name, schedule pills over a cron field, repo with `Choose…`, "runs in" (new worktree,
-  repo root, existing space), an "after a run" close switch (worktree and repo root only), agent
+  repo root, existing space), an "after a run" switch to close the run's space or tab, agent
   pills (installed agents plus hc templates), model, `PERMISSIONS`, prompt, timeout, MCP config, and
   `Next: …` previewed live; `Cancel` / `Save`. A prompt naming a terminal address gets a
   `blocked`-coloured line under it.
@@ -122,13 +122,12 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
 - **A run's status is the scheduler's** (#938): the panel shows `status` from `history --json` as
   it is and derives none of its own (the row's dot while a run is live is the terminal's state, a
   different thing). A wrong `done` or `failed` is fixed in `herdr/scheduler/internal/host`.
-- **Closing a run's workspace** (#498): the scheduler closes a fresh run's workspace once the run
-  is `done` when its entry says `close_workspace: on-success` (v0.12.0; failed and blocked runs
-  stay open; refused with `workspace: existing`, so a workspace you already had is never closed).
-  Our build (`herdr/scheduler/`, released as `herdr-automations-v<version>`) carries the field
-  through `ls --json` and `put`, so the form sets it with "Close the space after a successful run":
-  shown for new worktree and repo-root runs only, on by default for a new automation (D2), and set
-  from what `ls --json` reports for an existing one (`never` or `on-success`). Switching it off
+- **Closing a run's workspace** (#498). With `close_workspace: on-success`, the scheduler waits
+  until the run is `done` to close its workspace for new worktree and repo-root runs. In an
+  existing space it closes the tab the run opened, provided another one remains at the time of
+  the check (scheduler ADR 0012, since 0.12.1-am.2). The form says "Close the space after a
+  successful run" or "Close the run's tab after a successful run". The switch starts on for
+  a new automation (D2) and uses the saved value from `ls --json` when editing. Switching it off
   sends `close_workspace: never`. The panel knows our build by its `version` output containing
   `-am.`; with an upstream `herdr-automations` the switch is replaced by one line saying our build
   is needed, and the key is never sent, so a hand-written `close_workspace` (and `session`) survives

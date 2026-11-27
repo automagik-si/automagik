@@ -610,14 +610,16 @@ test("our scheduler: a new worktree automation closes its space after a successf
   } finally { s.done(); }
 });
 
-test("upstream: close_workspace is never sent, and one line says our build is needed (#595)", async () => {
-  const { s, view, cx, draw } = await stubPanel([{ ...nightly("claude"), close_workspace: "on-success" }]);
+test("upstream: an existing space needs our build to close the run's tab, and put omits the key", async () => {
+  const entry = { ...nightly("claude"), workspace: "existing", workspace_id: "w7", close_workspace: "on-success" };
+  const { s, view, cx, draw } = await stubPanel([entry]);
   try {
     view.edit("nightly", cx);
     await cx.settle();
     const n = draw();
     assert.ok(!n.has("f-close"), "no switch for an upstream binary");
     assert.match(textOf(n.get("f-close-upstream")), /Our scheduler build \(0\.12\.1-am\.3\) is needed/);
+    assert.match(textOf(n.get("f-close-upstream")), /close the run's tab/);
     view.form.prompt.type("p, said again", cx);
     await saveIt(view, cx);
     assert.ok(!("close_workspace" in s.saves()[0].entry), "never sent");
@@ -625,18 +627,80 @@ test("upstream: close_workspace is never sent, and one line says our build is ne
   } finally { s.done(); }
 });
 
-test("an existing space hides the switch: close_workspace on-success is refused with workspace existing", async () => {
-  const { s, view, cx, draw } = await stubPanel([{ ...nightly("claude"), workspace: "existing", workspace_id: "w7" }], { version: OUR });
+test("our older scheduler: an existing space needs a newer build, and put sends never", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { version: OUR });
+  state.spaces = [{ id: "w7", name: "Project" }];
   try {
-    view.edit("nightly", cx);
+    await fillNew(view, cx, draw, "claude");
+    draw().get("f-ws-existing").click({}, cx);
+    draw().get("f-space-w7").click({}, cx);
     await cx.settle();
-    assert.ok(!draw().has("f-close"), "no switch");
-    assert.ok(!draw().has("f-close-upstream"), "and no upstream line: ours is installed");
+    const n = draw();
+    assert.ok(!n.has("f-close"), "no switch on the older build");
+    assert.match(textOf(n.get("f-close-upstream")), /is needed to close the run's tab/);
     await saveIt(view, cx);
-    assert.equal(s.saves()[0].entry.close_workspace, "never", "sent never, never on-success");
+    assert.equal(s.saves()[0].entry.close_workspace, "never");
     assert.equal(s.yaml()[0].close_workspace, "never");
-  } finally { s.done(); }
+  } finally {
+    delete state.spaces;
+    s.done();
+  }
 });
+
+test("a new existing-space automation saves on-success by default", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { version: SCHEDULER.version });
+  state.spaces = [{ id: "w7", name: "Project" }];
+  try {
+    const t = (await import(stubs.herdr)).theme();
+    await fillNew(view, cx, draw, "claude");
+    draw().get("f-ws-existing").click({}, cx);
+    draw().get("f-space-w7").click({}, cx);
+    await cx.settle();
+    const toggle = draw().get("f-close");
+    const formText = textOf(view.render(cx));
+    await saveIt(view, cx);
+    const [saved] = s.saves();
+    assert.equal(saved.entry.workspace, "existing");
+    assert.equal(saved.entry.workspace_id, "w7");
+    assert.equal(saved.entry.close_workspace, "on-success");
+    assert.equal(s.yaml()[0].close_workspace, "on-success");
+    assert.ok(toggle, "shown for an existing space");
+    assert.equal(bg(toggle), t.accent, "on by default");
+    assert.match(formText, /Close the run's tab after a successful run/);
+  } finally {
+    delete state.spaces;
+    s.done();
+  }
+});
+
+for (const savedClose of ["never", "on-success"]) {
+  test(`an existing-space automation keeps ${savedClose} until its close switch changes`, async () => {
+    const entry = { ...nightly("claude"), workspace: "existing", workspace_id: "w7", close_workspace: savedClose };
+    const { s, view, cx, draw } = await stubPanel([entry], { version: SCHEDULER.version });
+    try {
+      const t = (await import(stubs.herdr)).theme();
+      const wasOn = savedClose === "on-success";
+      view.edit("nightly", cx);
+      await cx.settle();
+      const toggle = draw().get("f-close");
+      assert.ok(toggle, "shown for an existing space");
+      assert.equal(bg(toggle), wasOn ? t.accent : t.input);
+      view.form.prompt.type("p, said again", cx);
+      await saveIt(view, cx);
+      assert.equal(s.saves()[0].entry.close_workspace, savedClose);
+      assert.equal(s.yaml()[0].close_workspace, savedClose);
+
+      view.edit("nightly", cx);
+      await cx.settle();
+      draw().get("f-close").click({}, cx);
+      await cx.settle();
+      await saveIt(view, cx);
+      const changedClose = wasOn ? "never" : "on-success";
+      assert.equal(s.saves()[1].entry.close_workspace, changedClose);
+      assert.equal(s.yaml()[0].close_workspace, changedClose);
+    } finally { s.done(); }
+  });
+}
 
 test("an existing entry shows ls's on-success, and switching the close switch off sends never", async () => {
   const { s, view, cx, draw } = await stubPanel([{ ...nightly("claude"), close_workspace: "on-success" }], { version: OUR });
