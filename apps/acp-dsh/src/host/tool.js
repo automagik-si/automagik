@@ -41,6 +41,19 @@ function compatibleCall(captured, current) {
     && isDeepStrictEqual(before, after)
 }
 
+const plainInput = input => input !== null && typeof input === 'object'
+  && [Object.prototype, null].includes(Object.getPrototypeOf(input))
+
+// The first mirror can precede additional input fields and presentation details.
+function refinesCall(earlier, completed) {
+  if (earlier.id !== completed.id || earlier.kind !== completed.kind
+    || (earlier.parent !== undefined && earlier.parent !== completed.parent)) return false
+  const { input: before } = earlier
+  const { input: after } = completed
+  return isDeepStrictEqual(before, after) || (plainInput(before) && plainInput(after)
+    && Reflect.ownKeys(before).every(key => Object.hasOwn(after, key) && isDeepStrictEqual(before[key], after[key])))
+}
+
 const diffsOf = content => (Array.isArray(content) ? content : [])
   .filter(item => item?.type === 'diff' && typeof item.path === 'string')
   .map(item => ({ path: item.path, oldText: item.oldText ?? null, newText: item.newText ?? '' }))
@@ -295,7 +308,7 @@ export function mirrorTool(host) {
             const fromTool = snapshotOf(target)
             return compatibleCall(captured, fromQuestion) && compatibleCall(captured, fromTool)
               && compatibleCall(fromQuestion, fromTool)
-              && (nested || compatibleCall(captured, args) && compatibleCall(captured, exec.arguments))
+              && (nested || refinesCall(args, captured) && refinesCall(exec.arguments, captured))
           } catch { return false }
         }
         const decisionFor = () => {

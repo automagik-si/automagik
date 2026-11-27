@@ -1354,13 +1354,49 @@ function guardedMirror(t, { provider = 'acp-claude', native = true, marked = tru
     await update('parent', { kind: 'execute', status, title: 'Parent', rawInput: { command: 'echo parent' } })
     return run.tools.get('parent')
   }
-  const execute = args => {
+  const execute = (args, executionArgs) => {
     const input = args ?? callArguments(run.tools.get('parent'))
-    exec.arguments = input
+    exec.arguments = executionArgs ?? input
     return adapter.tool.execute(input, exec)
   }
   return { adapter, run, live, exec, update, question, prepare, execute }
 }
+
+test('#2134 binds direct streamed permission to both earlier records and the complete live call', async t => {
+  const partial = { file_path: '/synthetic/marker', options: { create: true } }
+  const completed = { ...partial, content: 'fixture' }
+  for (const [variant, replace, checked] of [
+    ['added field', args => [args, { ...args, input: completed }], 1],
+    ['changed first-sight field', args => [{ ...args, input: { ...partial, options: {} } }, args], 0],
+    ['missing execution field', args => [args, { ...args, input: { ...partial, extra: true } }], 0],
+    ['different tool ID', args => [args, { ...args, id: 'other' }], 0],
+    ['different tool kind', args => [{ ...args, kind: 'read' }, args], 0],
+    ['lost known parent', args => [args, { ...args, parent: 'known-parent' }], 0],
+    ['changed before answer', args => [args, args], 1],
+  ]) {
+    await t.test(variant, async t => {
+      const guarded = []
+      const h = guardedMirror(t, { marked: false, questionGuard: request => {
+        guarded.push(request.args.input)
+        if (variant === 'changed before answer') h.run.tools.get('parent').rawInput = { ...completed, content: 'changed' }
+        return { decision: 'allow' }
+      } })
+      await h.update('parent', { kind: 'edit', status: 'pending', title: 'Write fixture', rawInput: partial,
+        _meta: { claudeCode: { toolName: 'Write' } },
+      })
+      const args = callArguments(h.run.tools.get('parent'))
+      await h.update('parent', { rawInput: completed })
+      const question = h.question('parent', {
+        rawInput: completed, content: [{ type: 'diff', path: completed.file_path, oldText: null, newText: completed.content }],
+      })
+      const result = await h.execute(...replace(args))
+      const allowed = variant === 'added field'
+      assert.deepEqual(await soon(question), picked(allowed ? 'yes' : 'no'))
+      assert.deepEqual(guarded, checked ? [completed] : [])
+      if (!allowed) assert.match(result.text, /permission question no longer matches this call/)
+    })
+  }
+})
 
 test('#2134 K6 AW-R6 one-shot decisions use the live child and its independent guard', async t => {
   for (const [variant, expected] of [['in-folder', 'yes'], ['attempt-hold', 'no'], ['changed', 'no'], ['lasting-only', 'no']]) {

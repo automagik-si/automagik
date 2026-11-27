@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -22,7 +22,7 @@ import { apply } from '../index.js'
 import { reviewMarkText } from '../src/client/solver-draft.js'
 import { fakeContext } from './fake-ctx.js'
 
-test('#2134 K9 joined synthetic Solver keeps the Session on verdict and delivers a verified result', { timeout: 18_000 }, async t => {
+async function joinedSolver(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'solver-scope-e2e-')))
   const folder = join(root, 'workspace')
   const home = join(root, 'team')
@@ -41,7 +41,7 @@ test('#2134 K9 joined synthetic Solver keeps the Session on verdict and delivers
     policyState: id => world.identityReaders.readState?.(id),
     questionGuard: request => questionGuard?.(request),
     env: { FAKE_ACP_MODES: 'auto,default,bypassPermissions',
-      FAKE_ACP_FIXTURE_MARKER: insidePath, FAKE_ACP_FIXTURE_OTHER: outsidePath },
+      FAKE_ACP_FIXTURE_MARKER: insidePath, FAKE_ACP_FIXTURE_OTHER: outsidePath, FAKE_ACP_STREAM_DIR: root },
   })
   const chat = world.chat('solver', { cwd: folder })
   const acpAgents = {
@@ -86,6 +86,13 @@ test('#2134 K9 joined synthetic Solver keeps the Session on verdict and delivers
     { replyTo: exchangeId, reviewReceipt: `receipt-${exchangeId}` }, 'acp-codex/fake-reviewer')
   await designate('plan', 'plan')
   rt.reviewVerdict(reviewer.id, bot.id, undefined, 'SHIP', Date.now())
+  return { root, folder, insidePath, outsidePath, inside, outside, world, chat, ctx, rt, reviewer, bot, request, designate,
+    verdict, dialogs: () => dialogs }
+}
+
+test('#2134 K9 joined synthetic Solver keeps the Session on verdict and delivers a verified result', { timeout: 18_000 }, async t => {
+  const { folder, insidePath, outsidePath, inside, outside, world, chat, ctx, rt, reviewer, bot, request, designate, verdict, dialogs } =
+    await joinedSolver(t)
   const execute = (name, args, next) => ctx.listeners.get('tools/execute')[0]({
     name, arguments: args, agent: chat.agent, callId: 'fixture-check',
   }, next)
@@ -111,7 +118,7 @@ test('#2134 K9 joined synthetic Solver keeps the Session on verdict and delivers
   await confirmReadPair()
   assert.equal(world.events('new-session').length, 1)
   assert.equal(world.events('set-mode').at(-1)?.modeId, 'bypassPermissions')
-  assert.equal(dialogs, 0)
+  assert.equal(dialogs(), 0)
   assert.equal(readFileSync(insidePath, 'utf8'), inside)
   assert.match(await rt.solverProgress(bot, true, { action: 'start', request, run: 'check', checks: ['fixture'] }), /Recorded/)
   await execute('bash', { command: 'fixture-check' }, async () => ({
@@ -139,6 +146,47 @@ test('#2134 K9 joined synthetic Solver keeps the Session on verdict and delivers
   assert.equal(world.events('new-session').length, 2)
   assert.equal(world.events('set-mode').at(-1)?.modeId, 'default')
 })
+
+for (const [variant, label, refusal] of [
+  ['bash', 'allows streamed Bash after the designated plan verdict'],
+  ['write', 'allows streamed Write after the designated plan verdict'],
+  ['changed', 'refuses a changed streamed Bash argument', /permission question no longer matches this call/],
+  ['outside', 'confines a streamed Read to the Solver folder', /only inside its folder/],
+]) {
+  test(`#2134 ${label}`, { timeout: 18_000 }, async t => {
+    const { root, folder, world, chat, verdict, dialogs } = await joinedSolver(t)
+    await verdict('PLAN SHIP', 'plan')
+    const path = variant === 'outside' ? join(root, 'outside-stream.txt') : join(folder, `stream-${variant}.txt`)
+    const outside = 'Disposable outside marker'
+    if (variant === 'outside') writeFileSync(path, outside)
+
+    const firstSeen = []
+    const stream = world.adapter.stream
+    t.mock.method(world.adapter, 'stream', async function* (...args) {
+      for await (const chunk of stream.apply(this, args)) {
+        if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+          firstSeen.push(JSON.parse(chunk.block.arguments))
+          writeFileSync(join(root, 'mirror-recorded'), '')
+        }
+        yield chunk
+      }
+    })
+    await chat.turn(person(`plan-scope-stream ${variant}`))
+    const [permission, ...duplicates] = world.events('fixture-stream-permission')
+    assert.ok(permission, 'the fake requested permission')
+    assert.deepEqual(duplicates, [])
+    assert.deepEqual(firstSeen.map(args => [args.id, args.input]), [[permission.toolCallId,
+      variant === 'write' || variant === 'outside' ? { file_path: path } : { command: 'fixture-stream-check' }]])
+    assert.equal(dialogs(), 0)
+    const result = chat.history.at(-2)?.content?.[0]?.text ?? ''
+    assert.equal(permission.answer, refusal ? 'no' : 'yes', result)
+    assert.equal(world.events('own-tool-ran').filter(row => row.toolCallId === permission.toolCallId).length, refusal ? 0 : 1)
+    if (refusal) assert.match(result, refusal)
+    if (variant === 'outside') assert.equal(readFileSync(path, 'utf8'), outside)
+    else if (refusal) assert.equal(existsSync(path), false)
+    else assert.equal(readFileSync(path, 'utf8'), 'Synthetic streamed operation')
+  })
+}
 
 function fixtureFolders(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'solver-joined-')))
