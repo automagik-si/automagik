@@ -1,5 +1,5 @@
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { BotMark, lookOf, petOf, useBaked } from './mark.js'
+import { BotMark, Crown, lookOf, petOf, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
 import { BODY, CELL, FLOOR } from './pet-poses.js'
 import { hostText, t } from './i18n.js'
@@ -8,8 +8,7 @@ import { QUIET, Status, WORDED, stateOfStatus, statusOr, word, worstStatus } fro
 
 // -------------------------------------------------------------------------
 // The Team side of the new left bar (direction C): the project's Bots, the channels and chats
-// under a Bot, then the group chats. One line per row: the art, the name, one status mark. No
-// crown or preview line.
+// under a Bot, then the group chats. One line per row: the art, the name, one status mark.
 //
 // A team, as the bar reads it:
 //   bots      [{ id, name, status, unread, channelSource?, channels?, ...the Bot's own look
@@ -19,6 +18,7 @@ import { QUIET, Status, WORDED, stateOfStatus, statusOr, word, worstStatus } fro
 //             needs-someone, idle); with none, `channels` already on the Bot are drawn as they
 //             are. `status` is one of left-bar-status.js STATUSES.
 //   frontId   the project's front Bot: shown first, above every section
+//   mainBotId the team's first Main Bot: wears the crown
 //   sections  [{ label, bots: [id] }], optional quiet labels (DS Bot ruling 10)
 //   groups    [{ id, name, members: [id], status, unread }], after the Bots
 
@@ -119,13 +119,14 @@ export function teamRows(team) {
 
 // The art's sizes are tokens (--lb-art and --lb-duo-art, left-bar-css.js), and a Bot's character
 // is drawn for a size in pixels: the list measures its first art boxes and draws at those sizes.
-const ART = { art: 28, duo: 19 }
+const ART = { art: 36, duo: 19 }
+const MAIN_ART = 42
 
 function useArtSizes(ref, skin, count) {
   const [sizes, setSizes] = useState(ART)
   useLayoutEffect(() => {
     const width = selector => Math.round(ref.current?.querySelector(selector)?.getBoundingClientRect().width ?? 0)
-    const art = width('.lb-art') || ART.art
+    const art = width('.lb-row:not(.lb-row-crowned) .lb-art') || ART.art
     const duo = width('.lb-duo-a') || ART.duo
     setSizes(now => (now.art === art && now.duo === duo ? now : { art, duo }))
   }, [skin, count])
@@ -193,7 +194,9 @@ function BotArt({ bot, size, state, look = lookOf(bot) }) {
   const { fit, lift } = bakedFit(wants.bake)
   const margin = Math.round((size * fit - size) / 2)
   const drawn = size + 2 * margin
-  return h('span', { className: 'lb-art-pet', style: { left: -margin, top: -margin - Math.round(drawn * lift) } },
+  // The 36 px Omni sprite's painted centre sits two pixels below its fitted centre.
+  const paintLift = size === ART.art && wants.bake.clay === 'omni' ? 2 : 0
+  return h('span', { className: 'lb-art-pet', style: { left: -margin, top: -margin - Math.round(drawn * lift) - paintLift } },
     h('span', { className: 'bt-mark', 'data-shape': 'pet', 'data-state': state, 'data-live': '', 'aria-hidden': true, style: { width: drawn, height: drawn } },
       h(PetSprite, { pet: baked, size: drawn, state, live: true })))
 }
@@ -275,6 +278,7 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
   const draw = (row) => {
     if (row.kind === 'section') return h('div', { key: row.key, className: classes('lb-sec', row.first && 'lb-sec-first') }, row.label)
     if (row.kind === 'bot') {
+      const crowned = row.id === team.mainBotId
       // The row's own status may be silent (a chat says it); the character still plays the Bot's.
       const state = row.bot.state ?? stateOfStatus(statusOr(row.bot.status))
       const tag = row.bot.remote ? t('Needs the scoped link') : row.bot.seat ? row.bot.projectTag : row.bot.roleTag
@@ -285,8 +289,10 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
       // Keep the button's name from its contents (including role and unread activity).
       // The missing plugin's reason describes the row and remains on the status mark.
       const reason = row.bot?.installed === false && typeof row.bot.reason === 'string' ? hostText(row.bot.reason) : ''
-      return button(row, classes(row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), { ...extra, 'aria-description': reason || undefined },
-        h('span', { className: 'lb-art' }, renderArt(row.bot, art, state)),
+      return button(row, classes(crowned && 'lb-row-crowned', row.unread && 'lb-row-unread', row.status === 'off' && 'lb-row-off'), {
+        ...extra, 'aria-description': reason || undefined, style: crowned ? { '--bt-size': `${MAIN_ART}px` } : undefined,
+      },
+        h('span', { className: 'lb-art' }, renderArt(row.bot, crowned ? MAIN_ART : art, state), crowned ? h(Crown) : null),
         h('span', { className: 'lb-name' }, row.name),
         tag ? h('span', { className: 'bt-tag' }, tag) : null,
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,

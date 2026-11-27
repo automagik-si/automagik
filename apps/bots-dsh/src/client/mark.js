@@ -212,7 +212,7 @@ function useSettled(state) {
 }
 
 // The crown the team's first Main Bot wears in the sidebar, in clay gold.
-function Crown() {
+export function Crown() {
   return h('span', { className: 'bt-crown', 'aria-hidden': true },
     h('svg', { viewBox: '0 0 44 30' },
       h('path', { className: 'bt-crown-body', d: 'M4 26 L2 8 L13 16 L22 2 L31 16 L42 8 L40 26 Z' }),
