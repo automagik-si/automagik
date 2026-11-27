@@ -74,6 +74,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-attachment-local": "*",
+    "@deepseek-ai/dsh-fs": "*",
     "@deepseek-ai/dsh-fs-local": "*",
     "@deepseek-ai/dsh-fs-patch": "*",
     "@deepseek-ai/dsh-fs-sandbox": "*",
@@ -81,12 +82,14 @@
     "@deepseek-ai/dsh-sandbox": "*",
     "@deepseek-ai/dsh-sandbox-local": "*",
     "@deepseek-ai/dsh-scope": "*",
+    "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-subprocess-local": "*",
     "@deepseek-ai/dsh-tool-fs": "*",
     "@deepseek-ai/dsh-tool-fs-search": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-util-ripgrep": "*",
-    "@deepseek-ai/dsh-web": "*"
+    "@deepseek-ai/dsh-web": "*",
+    "@deepseek-ai/schemastery": "*"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-attachment-local": {
