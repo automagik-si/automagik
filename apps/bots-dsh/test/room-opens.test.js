@@ -229,22 +229,26 @@ export async function settleTurn(host, id) {
 
 export async function tornAdmission(t, { checkMarker = true, beforeResume } = {}) {
   const { home, id } = await makeColdRoom(t, { tail: [turnStart(1)] })
-  const scanned = []
+  const scanned = Promise.withResolvers()
   const host = await mountHost(t, home, { beforeTeam({ persistence }) {
     const open = persistence.open.bind(persistence)
     t.mock.method(persistence, 'open', async (...args) => {
       const handle = await open(...args)
       if (args[0] === id) {
         const close = handle.close.bind(handle)
-        t.mock.method(handle, 'close', (...opts) => { scanned.push(args[1]); return close(...opts) })
+        t.mock.method(handle, 'close', async (...opts) => {
+          await close(...opts)
+          scanned.resolve(true)
+        })
       }
       return handle
     })
   } })
   // The controller's cold list is also the base's control when no repair effect exists.
   await host.list(id)
-  await wait(30)
-  const startupRead = scanned.length > 0
+  const timeout = new AbortController()
+  const startupRead = await Promise.race([scanned.promise, wait(2_000, false, { signal: timeout.signal })])
+  timeout.abort()
   assert.equal(host.rt.roomOf(id).opened, undefined, 'startup found only the lone start')
   assert.deepEqual(boundary(await host.raw(id)), [turnStart(1)])
   await beforeResume?.(host, id)
