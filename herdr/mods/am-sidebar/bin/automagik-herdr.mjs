@@ -7656,9 +7656,21 @@ async function rerunHelpers(plans, parent, say) {
     const guardWhy = launchGuardProblem(helperRun, name ?? p.name);
     if (guardWhy) { failed(guardWhy); continue; }
     const r = await hc(helperRun);
-    let address = null;
-    try { address = JSON.parse(r.stdout).address ?? null; } catch { address = null; }
+    let answer;
+    try { answer = JSON.parse(r.stdout); } catch { answer = null; }
+    const address = answer?.address;
     if (r.code !== 0 || !address) { failed(`hc run failed (${(r.stderr || r.stdout).trim()})`); continue; }
+    const skillCore = p.skillBinding?.core;
+    const matchesSkillDestination = (pane, generation) => sameLivePane(pane, address, generation)
+      && pane.finished_ms == null && pane.labels?.[WORKER_OF_LABEL] === p.skillBinding.botId
+      && pane.parent === parent && pane.cwd === p.cwd && (!name || pane.name === name);
+    let skillGeneration = paneCreated(answer);
+    if (skillCore && isHcTerminalId(address) && !Object.hasOwn(answer, "created_ms")) {
+      // Older hc replies omit the generation. Identify the launch before readiness can wait.
+      const first = await hcGet(address).catch(() => null);
+      const generation = paneCreated(first);
+      if (matchesSkillDestination(first, generation) && await freshCoreId() === skillCore) skillGeneration = generation;
+    }
     let up;
     try { up = await agentUp(address, { project }); }
     catch (e) { failed(e.message); continue; }
@@ -7684,8 +7696,11 @@ async function rerunHelpers(plans, parent, say) {
       let squad = w.squad ?? null;
       if (!("squad" in w)) { try { squad = squadOf(loadProject(w.project).file, w.botId); } catch { squad = null; } }
       const pid = await pidOf(address);
-      const skills = p.skillBinding && core && isHcTerminalId(address) && sameLivePane(up.get, address, createdMs)
-        && up.get.finished_ms == null && await freshCoreId() === core ? p.skillBinding : null;
+      let skills;
+      if (skillCore && core === skillCore && isHcTerminalId(address) && matchesSkillDestination(up.get, skillGeneration)) {
+        const current = await hcGet(address).catch(() => null);
+        if (matchesSkillDestination(current, skillGeneration) && await freshCoreId() === skillCore) skills = p.skillBinding;
+      }
       const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid, botId: skills?.botId ?? w.botId, task: w.task, branch: w.branch,
         project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
         template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
@@ -7745,7 +7760,7 @@ async function captureHelperSkills(plans, old, { project, bot, view }) {
     const binding = attached.get(p.skillSource);
     const otherBot = [p.binding?.bot, binding?.bot, p.labels?.[BOT_LABEL], p.labels?.[WORKER_OF_LABEL],
       pane.labels?.[BOT_LABEL], pane.labels?.[WORKER_OF_LABEL]].some(id => id != null && id !== source.botId);
-    if (!otherBot) p.skillBinding = { botId: source.botId, skillTeam: source.skillTeam };
+    if (!otherBot) p.skillBinding = { botId: source.botId, skillTeam: source.skillTeam, core: view.core };
   }
 }
 
@@ -12838,7 +12853,7 @@ async function cmdSkill(opts, [name, ...extra]) {
   let row;
   for (;;) {
     const pane = await hcGet(terminal, { timeout: Math.min(15_000, Math.max(1, deadline - Date.now())) }).catch(() => null);
-    if (pane?.address !== terminal || pane.state !== "live" || pane.finished_ms != null) throw refusal();
+    if (pane?.address !== terminal || (pane.state !== undefined && pane.state !== "live") || pane.finished_ms != null) throw refusal();
     const current = launchKey({ core, terminal, created_ms: pane.created_ms });
     if (!current || (key && key !== current)) throw refusal();
     key = current;

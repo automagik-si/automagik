@@ -5263,6 +5263,140 @@ test("#2085 source round 1 P2: a delayed start requires fresh status on the pinn
   }
 });
 
+// Vary only the fake hc replies for this helper, keeping the scene's socket and other calls.
+function reviveDestination(s, worker, scenario) {
+  const preload = join(s.root, "revive-destination.mjs");
+  const trace = join(s.root, "revive-destination.json");
+  writeFileSync(preload, `
+    import fs from "node:fs";
+    if (process.argv[1] === ${JSON.stringify(FAKE_HC)}) {
+      const [verb, address] = process.argv.slice(2);
+      const scenario = ${JSON.stringify(scenario)};
+      const trace = ${JSON.stringify(trace)};
+      const name = ${JSON.stringify(worker.name)};
+      const nameAt = process.argv.indexOf("--name");
+      const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = function (text, ...args) {
+        if (verb === "run" && nameAt >= 0 && process.argv[nameAt + 1] === name) {
+          const reply = JSON.parse(text);
+          const pane = JSON.parse(fs.readFileSync(process.env.HC_FAKE_STATE, "utf8")).terminals
+            .find(pane => pane.address === reply.address);
+          if (!scenario.startsWith("omitted")) reply.created_ms = pane.created_ms;
+          fs.writeFileSync(trace, JSON.stringify({ reply, generation: pane.created_ms, gets: 0 }));
+          return write(JSON.stringify(reply) + "\\n", ...args);
+        }
+        if (verb === "get" && fs.existsSync(trace)) {
+          const record = JSON.parse(fs.readFileSync(trace, "utf8"));
+          if (address === record.reply.address) {
+            const pane = JSON.parse(text);
+            record.gets++;
+            if (scenario.endsWith("readiness") && record.gets >= 2) pane.created_ms++;
+            if (scenario === "omitted unverified first lookup" && record.gets === 1) delete pane.created_ms;
+            if (scenario === "wrong owner") pane.labels[${JSON.stringify(WORKER_OF_LABEL)}] = ${JSON.stringify(ID.cap)};
+            if (scenario === "wrong parent") pane.parent = "t4";
+            if (scenario === "wrong worktree") pane.cwd = ${JSON.stringify(s.project)};
+            if (scenario === "wrong name") pane.name = "other-name";
+            record.lastGeneration = pane.created_ms;
+            fs.writeFileSync(trace, JSON.stringify(record));
+            return write(JSON.stringify(pane) + "\\n", ...args);
+          }
+        }
+        return write(text, ...args);
+      };
+    }
+  `);
+  return { preload: "--import=" + preload, observed: () => JSON.parse(readFileSync(trace, "utf8")) };
+}
+
+test("#2085 source exception P1: revive grants skills only to the intended destination", async t => {
+  for (const scenario of ["reported exact", "omitted exact", "reported changed during readiness", "omitted changed during readiness",
+    "omitted unverified first lookup", "wrong owner", "wrong parent", "wrong worktree", "wrong name"]) {
+    await t.test(scenario, sub => {
+      const s = scene(sub);
+      bindIn(s, "t1", ID.dev, s.project);
+      const { terminal } = startForSkills(s, "fix/revive-destination");
+      const [source] = s.ledger();
+      // This binding is a synthetic ledger value. The fixture has no team folder or body.
+      const skillTeam = { path: join(s.root, "synthetic-team"), dev: "1", ino: "2" };
+      writeFileSync(join(s.app, "automagik-herdr/workers.jsonl"), JSON.stringify({ ...source, skillTeam }) + "\n");
+      const state = s.hcState();
+      const parent = state.terminals.find(pane => pane.address === "t1");
+      const worker = state.terminals.find(pane => pane.address === terminal);
+      parent.foreground.argv = ["zsh"];
+      worker.status.state = "idle";
+      worker.screen = "> ";
+      writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+
+      const fixture = reviveDestination(s, worker, scenario);
+      const revived = s.cli(["revive", "--json"], { from: null, env: {
+        NODE_OPTIONS: fixture.preload, AUTOMAGIK_HERDR_RESTART_STABLE_MS: "200",
+      } });
+      assert.equal(revived.code, 0, revived.err + revived.out);
+      const result = revived.json().projects[0].results.find(row => row.bot === ID.dev);
+      const helper = result.helpers.find(helper => helper.name === worker.name);
+      assert.equal(helper?.outcome, "fresh", revived.out);
+      const observed = fixture.observed();
+      const replacement = s.hcState().terminals.find(pane => pane.address === observed.reply.address);
+      assert.equal(replacement?.parent, result.terminal);
+      assert.equal(replacement.state, "live");
+      const row = s.ledger().find(row => row.event === "start" && row.terminal === replacement.address);
+      assert.deepEqual([row.kind, row.botId, row.core, row.project, row.worktree, row.branch, row.agent],
+        [source.kind, source.botId, source.core, source.project, source.worktree, source.branch, source.agent]);
+      const changedDuring = scenario.includes("during readiness");
+      assert.equal(row.created_ms, observed.generation + Number(changedDuring));
+      sub.diagnostic(JSON.stringify({ ...observed, ledgerGeneration: row.created_ms, bound: Boolean(row.skillTeam) }));
+      if (scenario.endsWith("exact")) {
+        assert.deepEqual(row.skillTeam, skillTeam);
+      } else {
+        // The matched baseline stops at this assertion before any list or load.
+        assert.equal(row.skillTeam, undefined, "only the intended replacement may get the synthetic binding");
+        if (changedDuring) {
+          const env = { NODE_OPTIONS: fixture.preload };
+          for (const args of [["skill"], ["skill", "notes"]]) {
+            const refused = s.cli(args, { from: replacement.address, env });
+            assert.deepEqual([refused.code, refused.out], [2, ""], refused.err);
+            assert.match(refused.err, /was not started with its Bot's skills/);
+          }
+        }
+      }
+    });
+  }
+});
+
+test("#2085 source exception P2: only omitted or live pane state is compatible", async t => {
+  for (const [label, state, finished, generation] of [
+    ["omitted", undefined, undefined, 1],
+    ["live", "live", undefined, 1],
+    ["nonlive", "finished", undefined, 1],
+    ["finished marker", undefined, 2, 1],
+    ["other generation", undefined, undefined, 2],
+  ]) await t.test(label, sub => {
+    const s = scene(sub);
+    publishSkills(s);
+    const { terminal } = startForSkills(s, "fix/pane-state");
+    assert.ok(s.ledger().find(row => row.terminal === terminal).skillTeam);
+    const current = s.hcState();
+    const pane = current.terminals.find(pane => pane.address === terminal);
+    Object.assign(pane, { state, finished_ms: finished, created_ms: pane.created_ms + generation - 1 });
+    writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(current));
+    const results = [["skill"], ["skill", "notes"]]
+      .map(args => s.cli(args, { from: terminal, env: skillClock(s) }))
+      .map(({ code, out, err }) => ({ code, out, err }));
+    sub.diagnostic(JSON.stringify({ state: state ?? "omitted", finished, generationMatches: generation === 1, results }));
+    if (label === "omitted" || label === "live") {
+      assert.deepEqual(results, [
+        { code: 0, out: `notes: ${SKILL_DESCRIPTION}\n`, err: "" },
+        { code: 0, out: SKILL_MARKER + "\n", err: "" },
+      ]);
+    } else {
+      for (const { code, out, err } of results) {
+        assert.deepEqual([code, out], [2, ""]);
+        assert.match(err, /Only a verified live local worker/);
+      }
+    }
+  });
+});
+
 test("#2085 readiness note 3: revoke before the run handoff while worktree setup holds the lock", async t => {
   for (const template of [null, "dev-sol"]) await t.test(template ?? "direct", async sub => {
     const s = scene(sub);
