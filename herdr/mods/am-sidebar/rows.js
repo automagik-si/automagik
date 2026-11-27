@@ -739,7 +739,7 @@ const folderName = (key) => String(key ?? "").replace(/\/+$/, "").split("/").pop
  * row that didn't carry it. `defaults`: modelDefaultsFrom(texts), parsed once by the caller
  * (main.js loadModelTexts); without it the default is parsed from `texts` here. Either way
  * only when the command line names no model. A row on a linked machine (`tree.machine`) takes
- * `remoteDefaults[machine]` (modelDefaultsFrom of the texts read there), else no default.
+ * `remoteDefaults[machine]` (modelsRemote.js parseModelProbe, found there), else no default.
  */
 export function secondLine(r, tree, { texts = {}, defaults = null, remoteDefaults = {}, argvOf = () => null } = {}) {
   const n = r.node, b = n.bot;

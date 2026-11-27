@@ -188,9 +188,9 @@ export async function modelTexts() {
   return out;
 }
 
-// The same defaults' files on a linked machine (#2097): null when it can't be read (away, no
-// shell), else the texts modelsRemote.js parses.
-export async function remoteModelTexts(machine) {
+// The agents' default models on a linked machine (#2097), found there so only the models cross
+// the link: null when it can't be read (away, no shell), else modelsRemote.js parseModelProbe's.
+export async function remoteModelDefaults(machine) {
   try { return parseModelProbe(await exec("sh", ["-c", MODEL_PROBE], { on: machine })); } catch { return null; }
 }
 
