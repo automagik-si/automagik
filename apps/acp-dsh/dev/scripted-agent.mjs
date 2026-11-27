@@ -4,11 +4,11 @@
 // SCRIPTED_ACP_TRACE, normalized (no ids, paths or timings) so a run compares with its golden.
 //
 // Script: { initialize: <InitializeResponse>, session: <NewSessionResponse> | { authRequired: true },
-//           turn: [<step>] } with steps
+//           turn: [<step>] | turns: [[<step>], ...] } (`turns`: one list per prompt, in order) with steps
 //   { update: <SessionUpdate> }                     a session/update notification
 //   { ask: { toolCall, options } }                 a session/request_permission, its outcome traced
 //   { waitCancel: true }                            waits for session/cancel, then ends cancelled
-//   { end: <stopReason> }                           the prompt's answer
+//   { end: <stopReason>, usage?: <Usage> }         the prompt's answer (with its usage, if any)
 import { agent, methods, ndJsonStream, RequestError } from '@agentclientprotocol/sdk/unstable'
 import { appendFileSync, readFileSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
@@ -17,6 +17,7 @@ const script = JSON.parse(readFileSync(process.env.SCRIPTED_ACP_SCRIPT, 'utf8'))
 const trace = frame => appendFileSync(process.env.SCRIPTED_ACP_TRACE, `${JSON.stringify(frame)}\n`)
 const { session } = methods.agent
 let cancelled
+let prompts = 0
 const cancel = new Promise((resolve) => { cancelled = resolve })
 
 agent({ name: 'scripted-agent' })
@@ -35,7 +36,9 @@ agent({ name: 'scripted-agent' })
   .onRequest(session.close, () => { trace({ in: 'session/close' }); return {} })
   .onRequest(session.prompt, async ({ params, client }) => {
     trace({ in: 'session/prompt', text: params.prompt.filter(block => block.type === 'text').map(block => block.text).join(' ') })
-    for (const step of script.turn) {
+    const steps = script.turns === undefined ? script.turn : script.turns[Math.min(prompts, script.turns.length - 1)]
+    prompts += 1
+    for (const step of steps) {
       if (step.update !== undefined) {
         trace({ out: 'session/update', update: step.update })
         await client.notify(methods.client.session.update, { sessionId: params.sessionId, update: step.update })
@@ -53,7 +56,7 @@ agent({ name: 'scripted-agent' })
         return { stopReason: 'cancelled' }
       } else if (step.end !== undefined) {
         trace({ out: 'session/prompt', stopReason: step.end })
-        return { stopReason: step.end }
+        return { stopReason: step.end, ...(step.usage === undefined ? {} : { usage: step.usage }) }
       }
     }
     return { stopReason: 'end_turn' }

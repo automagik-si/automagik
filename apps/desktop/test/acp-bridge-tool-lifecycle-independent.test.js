@@ -208,7 +208,7 @@ function writeLog(file, events) {
 
 // The loader's tolerated-count line is written to stderr (console.warn). Capture the real thing
 // for the duration of the synchronous restore rather than asserting on an internal counter.
-function restoreCapturingStderr(loader, artifact) {
+function restoreCapturingStderr(loader, artifact, known = KNOWN) {
   const chunks = []
   const original = process.stderr.write
   process.stderr.write = function capture(chunk, ...rest) {
@@ -216,7 +216,7 @@ function restoreCapturingStderr(loader, artifact) {
     return rest.length > 0 && typeof rest.at(-1) === 'function' ? (rest.at(-1)(), true) : true
   }
   try {
-    return { result: loader.restoreReleasedV4Artifact(artifact, KNOWN), stderr: chunks.join('') }
+    return { result: loader.restoreReleasedV4Artifact(artifact, known), stderr: chunks.join('') }
   } finally {
     process.stderr.write = original
   }
@@ -361,4 +361,44 @@ test('A3: a repeated tool/call stays refused on the patched loader and worker, w
   assert.equal(accepted.ok, true, accepted.message)
   assert.equal(tolerated(accepted.stderr), '2')
   assert.equal(sha256(readFileSync(distinctLog)), sha256(distinctBytes), 'the control log is not rewritten either')
+})
+
+// A4: the chat acp-dsh writes (apps/acp-dsh/test/wire-replay.test.js keeps this fixture equal to
+// what its real DSH host writes: one approved tool call, the agent's plan and its usage) opens on
+// the pinned worker and the patched loader, unrepaired, with its plan and usage rows and the
+// todo list the panel draws.
+const REOPEN_FIXTURE = join(HERE, 'fixtures', 'acp-reopen', 'planned.v4.jsonl')
+
+test('A4: a chat acp-dsh wrote with a plan and usage opens on the pinned reader with its rows and list', async (t) => {
+  const runtime = makeRuntime(t)
+  applyPatch(runtime)
+  const lines = readFileSync(REOPEN_FIXTURE, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  const [{ type: _session, ...header }, ...events] = lines
+  const log = join(runtime.logs, 'acp-reopen.v4.jsonl')
+  cpSync(REOPEN_FIXTURE, log)
+  const bytes = readFileSync(log)
+  const checked = await new Promise((resolve, reject) => {
+    const worker = new Worker(pathToFileURL(runtime.worker), { workerData: { path: log, compression: 'none', expectedId: header.id, expectedEventCount: events.length }, stderr: true })
+    let stderr = ''
+    worker.stderr.on('data', chunk => { stderr += chunk })
+    worker.once('message', message => resolve({ ...message, stderr }))
+    worker.once('error', reject)
+  })
+  assert.equal(checked.ok, true, checked.message)
+  assert.equal(stderrLines(checked.stderr).length, 0, 'nothing tolerated: every call is advertised')
+  const patched = await import(`${pathToFileURL(runtime.format).href}?a4`)
+  const known = new Set(events.map(event => event.type).filter(type => !type.startsWith('plugin:')))
+  const { result, stderr } = restoreCapturingStderr(patched, { header, events: structuredClone(events), inheritedEventCount: 0 }, known)
+  assert.equal(stderrLines(stderr).length, 0)
+  assert.deepEqual(result.events, events)
+  assert.ok(known.has('todo/write'))
+  // What the chat draws from them: the notices' summaries, and the last todo list of the turn.
+  const notices = result.events.filter(event => event.type === 'user/message' && event.data.source?.form === 'notice').map(event => event.data.source)
+  assert.deepEqual(notices.map(source => [source.kind, source.notice, source.summary]), [
+    ['acp-session', 'plan', 'Plan: Report plan'],
+    ['acp-session', 'usage', 'Tokens: 1,200 in · 330 out · 900 cache read · 1,530 total (as the agent reported it)'],
+  ])
+  const todos = result.events.filter(event => event.type === 'todo/write').at(-1).data.todos
+  assert.deepEqual(todos, [{ content: 'Create the report', status: 'completed' }, { content: 'Check it', status: 'completed' }])
+  assert.equal(sha256(readFileSync(log)), sha256(bytes), 'reading never rewrites the chat')
 })

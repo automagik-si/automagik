@@ -19,7 +19,7 @@ import {
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { PLAN_RECORD, USAGE_RECORD, bindingOf, decide, latestNative, writeNative } from './continuity.js'
-import { bindingDigest, todosOf } from './features.js'
+import { bindingDigest, planNoticeOf, todosOf, usageNoticeOf } from './features.js'
 import { HOME_ENV } from './cli-homes.js'
 import { AGY_NOT_LOADED_TEXT, AGY_TOOLS_OFF_TEXT } from './agy-off.js'
 import { ACP_USAGE_LIMIT_CODES } from './usage-limit.js'
@@ -3221,9 +3221,24 @@ export class AcpAdapter extends LlmAdapter {
       if (event.type === 'plan') {
         // The agent's plan (features.js): its change is the chat's record (a reopened chat folds
         // them), and DSH's own todo panel draws its checklist.
+        // The panel is the turn's one list: when this turn already holds DSH's own `todo_write`
+        // list, the plan never replaces it and shows as a row at the prompt's end instead; a list
+        // equal to the one the panel draws is not written again.
         try {
           appendPluginRecord(live.session, PLAN_RECORD, { provider: options.provider, nativeSessionId: live.run.sessionId, change: event.change })
-          live.session?.append?.('todo/write', { todos: todosOf(event.plans) })
+          const panel = turnTodos(live.session)
+          const todos = todosOf(event.plans)
+          const own = panel.foreign !== true
+          const changed = event.plans.find(plan => plan.planId === event.change.planId)
+          if (own && !isDeepStrictEqual(panel.todos, todos) && (panel.todos !== undefined || todos.length > 0)) live.session?.append?.('todo/write', { todos })
+          ;(live.planRows ??= new Map())
+          if (event.change.removed === true) {
+            // A plan the chat already shows as a row gets a row saying it went; one not shown yet
+            // simply never shows.
+            if (live.planShown?.has(event.change.planId)) live.planRows.set(event.change.planId, { planId: event.change.planId, removed: true })
+            else live.planRows.delete(event.change.planId)
+          } else if (changed !== undefined && (changed.type === 'markdown' || !own)) live.planRows.set(changed.planId, changed)
+          else live.planRows.delete(event.change.planId)
         } catch (error) {
           this.warn(`${agent.name}'s plan was not written: ${error?.message ?? error}`)
         }
@@ -3283,6 +3298,15 @@ export class AcpAdapter extends LlmAdapter {
         if (usage !== undefined && (usage.completeness !== 'absent' || usage.context !== undefined)) {
           try { appendPluginRecord(live.session, USAGE_RECORD, { provider: options.provider, runId: live.run.runId, ...usage }) } catch {}
         }
+        // What the person sees of this prompt beyond its words, written once as it settles: each
+        // plan the todo panel does not draw (features.js planNoticeOf) and the prompt's usage.
+        for (const plan of live.planRows?.values() ?? []) {
+          appendNotice(live.session, planNoticeOf(plan), { notice: 'plan', planId: plan.planId }, this.warn.bind(this))
+          ;(live.planShown ??= new Set())[plan.removed === true ? 'delete' : 'add'](plan.planId)
+        }
+        live.planRows = undefined
+        const usageRow = usageNoticeOf(usage)
+        if (usageRow !== undefined) appendNotice(live.session, usageRow, { notice: 'usage' }, this.warn.bind(this))
         const wasOwn = live.own
         live.own = false
         const r = live.run.reviews
@@ -3391,6 +3415,36 @@ export class AcpAdapter extends LlmAdapter {
     for (const id of this.sessionFiles.owners.keys()) this.sessionFiles.clear(id)
     for (const agent of this.agents.values()) agent.catalog?.dispose()
     for (const [sessionId, live] of this.live) this.end(sessionId, live)
+  }
+}
+
+/**
+ * The todo list the panel draws now: the turn's last `todo/write` (`todos`, undefined before
+ * one), and `foreign` when that turn holds one this plugin did not write (DSH's own
+ * `todo_write`). This plugin's write always directly follows its plan record.
+ */
+export function turnTodos(session) {
+  let todos
+  let foreign = false
+  for (let seq = (session?.seq ?? 0) - 1; seq >= 0; seq -= 1) {
+    const event = session.eventAt?.(seq)
+    if (event === undefined || event.type === 'turn/start') break
+    if (event.type !== 'todo/write') continue
+    todos ??= event.data?.todos
+    if (session.eventAt?.(seq - 1)?.type !== PLAN_RECORD) foreign = true
+  }
+  return { todos, foreign }
+}
+
+/** Appends one notice row ({ summary, text }) of this plugin; never fails the turn. */
+function appendNotice(session, { summary, text }, extra, warn) {
+  try {
+    session?.append?.('user/message', createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: NOTICE_KIND, form: 'notice', ...extra, summary: boundContextSummary(summary) },
+    }), { surfaceOp: 'append' })
+  } catch (error) {
+    try { warn?.(`a ${extra.notice} row was not written: ${error?.message ?? error}`) } catch {}
   }
 }
 

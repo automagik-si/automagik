@@ -168,3 +168,42 @@ export function reattachMethodOf(agentCapabilities, allowed = ['resume', 'load']
 export function bindingDigest(parts) {
   return createHash('sha256').update(JSON.stringify(Object.keys(parts).sort().map(key => [key, parts[key] ?? null]))).digest('base64url')
 }
+
+const firstHeading = markdown => /^#{1,6}\s+(.+?)\s*#*\s*$/m.exec(markdown)?.[1]
+const STATUS_MARK = { pending: '[ ]', in_progress: '[~]', completed: '[x]' }
+
+/**
+ * The chat row a plan change leaves when DSH's todo panel does not draw it (a markdown plan, or
+ * an items plan while the turn's list is DSH's own `todo_write`): `{ summary, text }`, the
+ * summary the row shows and the whole plan its body opens to. A removed plan says so.
+ */
+export function planNoticeOf(plan) {
+  if (plan.removed === true) return { summary: 'The agent withdrew its plan', text: '[The agent withdrew its plan.]' }
+  if (plan.type === 'markdown') {
+    const title = firstHeading(plan.markdown) ?? plan.markdown.trim().split('\n')[0]?.slice(0, 80) ?? ''
+    return { summary: title === '' ? "The agent's plan" : `Plan: ${title}`, text: `[The agent's plan${plan.path === undefined ? '' : ` (${plan.path})`}:]\n\n${plan.markdown}` }
+  }
+  const done = plan.entries.filter(entry => entry.status === 'completed').length
+  return {
+    summary: `Plan: ${done} of ${plan.entries.length} done`,
+    text: `[The agent's plan:]\n\n${plan.entries.map(entry => `- ${STATUS_MARK[entry.status]} ${entry.content}`).join('\n')}`,
+  }
+}
+
+const number = value => value.toLocaleString('en-US')
+
+/**
+ * The chat row of one prompt's usage, as the agent reported it (`promptUsageOf`), or undefined
+ * when it reported nothing. Missing counts stay unnamed, never zero; the semantics say whose
+ * numbers they are. Never a cost: costs are the meter's (RFC 0018).
+ */
+export function usageNoticeOf(usage) {
+  const tokens = usage?.tokens ?? {}
+  const parts = [['inputTokens', 'in'], ['outputTokens', 'out'], ['thoughtTokens', 'thinking'], ['cachedReadTokens', 'cache read'], ['cachedWriteTokens', 'cache write'], ['totalTokens', 'total']]
+    .filter(([key]) => tokens[key] !== undefined).map(([key, label]) => `${number(tokens[key])} ${label}`)
+  const context = usage?.context === undefined ? undefined : `context ${number(usage.context.used)} of ${number(usage.context.size)}`
+  if (parts.length === 0 && context === undefined) return undefined
+  const scope = usage.semantics === 'per-prompt' ? 'this prompt' : 'as the agent reported it'
+  const line = [parts.length === 0 ? undefined : `${parts.join(' · ')} (${scope}${usage.completeness === 'partial' ? ', partial' : ''})`, context].filter(Boolean).join('; ')
+  return { summary: `Tokens: ${line}`, text: `[Tokens: ${line}.]` }
+}
