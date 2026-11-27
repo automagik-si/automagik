@@ -17,6 +17,13 @@ export const ASLEEP_MS = 10 * 60 * 1000;
 export const projectId = (p) => JSON.stringify([p?.machine ?? null, p?.key ?? null]);
 
 const addressOf = (t) => t?.address ?? t?.id ?? null;
+
+function appendRow(map, key, row) {
+  const group = map.get(key);
+  if (group) group.push(row);
+  else map.set(key, [row]);
+}
+
 // Decision 3: an agent in front, by the program table or by the foreground process. The
 // table can say shell while an agent runs (herdr-core lists the pane by its shell when the
 // agent's report is missing or stale), so a false there never hides an agent in front: the
@@ -76,7 +83,7 @@ function bindingMachines(binding, projects) {
 // folder is not known to be another project, and no second pane answers to that terminal. A
 // similar address (another machine's `t2y`, `t2y2`) never stands in: the evidence would be a
 // guess, and the design asks for the same identity (#1875).
-function bindingTerminal(binding, rows, terminals, projects, keyOf) {
+function bindingTerminal(binding, rows, byBare, projects, keyOf) {
   const address = bindingAddress(binding);
   if (typeof address !== "string" || !address) return null;
   const machine = typeof binding?.machine === "string" && binding.machine ? binding.machine : null;
@@ -90,15 +97,13 @@ function bindingTerminal(binding, rows, terminals, projects, keyOf) {
   if (machineOfAddress(address)) return null;
   const allowed = machine ? new Set([machine]) : bindingMachines(binding, projects);
   if (!allowed.size) return null;
-  const matches = terminals.filter((t) => {
-    const a = addressOf(t);
-    const m = machineOfAddress(a);
-    if (m === null || !allowed.has(m) || bareAddress(a) !== address) return false;
+  const matches = (byBare.get(address) ?? []).filter(([m, t]) => {
+    if (!allowed.has(m)) return false;
     if (!sameGeneration(binding?.created_ms, t.created_ms)) return false;
     const key = keyOf(t);
     return !(binding?.project && typeof key === "string" && key && key !== binding.project);
   });
-  return matches.length === 1 ? matches[0] : null;
+  return matches.length === 1 ? matches[0][1] : null;
 }
 
 /**
@@ -108,11 +113,21 @@ function bindingTerminal(binding, rows, terminals, projects, keyOf) {
  * an ambiguous one, are left out: their pane is not claimed by the ledger (#1875).
  */
 export function ledgerSessions(bindings, terminals, projects = null, keyOf = () => null) {
-  if (bindings === null || bindings === undefined) return [];
-  const rows = new Map((terminals ?? []).filter((t) => addressOf(t)).map((t) => [addressOf(t), t]));
-  const all = [...rows.values()];
-  return (bindings ?? []).flatMap((binding) => {
-    const terminal = bindingTerminal(binding, rows, all, projects, keyOf);
+  if (!bindings?.length) return [];
+  const rows = new Map();
+  for (const t of terminals ?? []) {
+    const address = addressOf(t);
+    if (address) rows.set(address, t);
+  }
+  // Index the same deduplicated rows used by the exact lookup. A bare address
+  // only considers rows with that suffix on a linked machine.
+  const byBare = new Map();
+  for (const [address, terminal] of rows) {
+    const machine = machineOfAddress(address);
+    if (machine !== null) appendRow(byBare, bareAddress(address), [machine, terminal]);
+  }
+  return bindings.flatMap((binding) => {
+    const terminal = bindingTerminal(binding, rows, byBare, projects, keyOf);
     return terminal ? [{ binding, terminal }] : [];
   });
 }
@@ -175,9 +190,10 @@ function namesBot(bound, botId, pid) {
  * compares with all of them). By project and id (paneCounts): `keyOf(row)` gives a pane's
  * project key or null, or the binding's `project`; a pane with one is at liveKey(id, its
  * projectId), the newest of that project's panes and those with none; a bot's panes with none
- * at its bare id. Read it with liveOf.
+ * at its bare id. Read it with liveOf. A draw can supply its already resolved `sessions`.
  */
-export function liveFrom(terminals, known = null, argvOf = () => null, keyOf = () => null, bindings = null, projects = null, { labels = true } = {}) {
+export function liveFrom(terminals, known = null, argvOf = () => null, keyOf = () => null, bindings = null, projects = null,
+  { labels = true, sessions = ledgerSessions(bindings, terminals, projects, keyOf) } = {}) {
   const readArgv = (t) => { const v = argvOf(addressOf(t), t.created_ms ?? null); return Array.isArray(v) ? v : null; };
   // id -> { any: the panes with no project, at: Map project id -> that project's panes }
   const holders = new Map();
@@ -187,7 +203,6 @@ export function liveFrom(terminals, known = null, argvOf = () => null, keyOf = (
     if (pid === null) h.any.push(t);
     else h.at.set(pid, [...(h.at.get(pid) ?? []), t]);
   };
-  const sessions = ledgerSessions(bindings, terminals, projects, keyOf);
   for (const { binding: b, terminal: t } of sessions) {
     const id = b?.bot;
     if (!id || (known && !known.has(id)) || (b.state && b.state !== "live")) continue;
@@ -248,12 +263,12 @@ export const liveOf = (live, project, botId) => live?.[liveKey(botId, projectId(
  * only its bound panes in that project: a label for it on another pane there is no bot row
  * (that pane stays an agent row), the ledger's authority (#1875). `known`: the ids a project defines; a binding or label
  * for any other id is no bot row. `projects`: as liveFrom's, for a ledger row that kept the
- * bare terminal (#1875).
+ * bare terminal (#1875). A draw can supply its already resolved `sessions`.
  */
-export function botTerminals(terminals, known, bindings = null, projects = null, keyOf = () => null) {
+export function botTerminals(terminals, known, bindings = null, projects = null, keyOf = () => null,
+  sessions = ledgerSessions(bindings, terminals, projects, keyOf)) {
   const rows = new Map((terminals ?? []).filter((t) => addressOf(t)).map((t) => [addressOf(t), t]));
   const out = new Map();
-  const sessions = ledgerSessions(bindings, terminals, projects, keyOf);
   for (const { binding: b, terminal: t } of sessions) {
     const id = b?.bot;
     if (!id || (known && !known.has(id)) || (b.state && b.state !== "live")) continue;
@@ -400,14 +415,23 @@ export function nextWake(live, now) {
   return next;
 }
 
+function childrenByParent(terminals) {
+  const children = new Map();
+  for (const t of terminals ?? []) if (t?.state === "live") appendRow(children, t.parent, t);
+  return children;
+}
+
 /**
  * A pane's helpers: the live terminals whose hc parent it is, depth first, with their own
  * helpers beneath. A terminal tied to a known bot is never anyone's helper (it shows as that
  * bot, by definition), and what it started stays under it, so it is not followed.
  */
 export function helpersOf(terminals, address, known = new Set(), depth = 0, seen = new Set([address])) {
-  const kids = (terminals ?? []).filter((t) => t?.parent === address && t.state === "live" && !seen.has(addressOf(t))
-    && !known.has(t.labels?.[BOT_LABEL]));
+  return helpersBelow(childrenByParent(terminals), address, known, depth, seen);
+}
+
+function helpersBelow(children, address, known, depth = 0, seen = new Set([address])) {
+  const kids = (children.get(address) ?? []).filter((t) => !seen.has(addressOf(t)) && !known.has(t.labels?.[BOT_LABEL]));
   return kids.flatMap((t) => {
     const terminal = addressOf(t);
     seen.add(terminal);
@@ -418,7 +442,7 @@ export function helpersOf(terminals, address, known = new Set(), depth = 0, seen
       template: t.labels?.["worker.template"] || null,
       // The branch label, else the task label of a worker started before the task contract.
       branch: workerBranch(t.labels), task: workerTaskId(t.labels) };
-    return [row, ...helpersOf(terminals, terminal, known, depth + 1, seen)];
+    return [row, ...helpersBelow(children, terminal, known, depth + 1, seen)];
   });
 }
 
@@ -426,12 +450,13 @@ export function helpersOf(terminals, address, known = new Set(), depth = 0, seen
  * Every project's bot tree. `projects`: discoverProjects()' entries ({ key, machine?, file,
  * warnings?, stale? }); one tree per machine and key however often it is listed (worktree
  * spaces), `stale` carried over.
- * `live`: liveFrom()'s map. `terminals`: terminals() rows, for helpers only. A member nests
+ * `live`: liveFrom()'s map. `children`: live terminals by parent, for helpers only, indexed
+ * from `terminals` when not supplied. A member nests
  * under its effective lead (A1, by definition only, never by hc parent); the main bot's
  * direct reports group by `category` in file order, then the uncategorised; a planned bot
  * is never live and has no members (a planned lead falls back to the main bot).
  */
-export function buildTree({ projects, live = {}, terminals = [], now = Date.now(), rateLimited = null }) {
+export function buildTree({ projects, live = {}, terminals = [], children = childrenByParent(terminals), now = Date.now(), rateLimited = null }) {
   const known = knownBots(projects);
   const done = new Set();
   const unique = [];
@@ -492,7 +517,7 @@ export function buildTree({ projects, live = {}, terminals = [], now = Date.now(
         live: l ? { terminal: l.terminal, created_ms: l.created_ms ?? null, duplicate: l.duplicate, parent: l.parent ?? null } : null,
         status: l?.status ?? null, program: l?.program ?? null, argv: l?.argv ?? null,
         ...(rate ? { rateLimited: rate } : {}),
-        helpers: l ? helpersOf(terminals, l.terminal, known) : [],
+        helpers: l ? helpersBelow(children, l.terminal, known) : [],
       };
       const crossWarn = (bot.crossMembers?.length || bot.members?.length)
         ? crossMemberWarnings(file, bot.id, { project: p.key, projects: sameMachine })[0] ?? null
@@ -932,33 +957,44 @@ export function clickActionOf(terminal, panes) {
  * binding's project with `bindings`).
  */
 export function heldTerminalOf(botId, terminals, panes = [], project = null, keyOf = () => null, bindings = null, projects = null, { labels = true } = {}) {
-  const shown = new Set((panes ?? []).map((p) => p?.terminal).filter(Boolean));
   const sessions = ledgerSessions(bindings, terminals, projects, keyOf);
-  const pid = project ? projectId(project) : null;
-  const held = [];
-  const seen = new Set();
+  return heldTerminals(terminals, sessions, keyOf, panes)(botId, project, { labels });
+}
+
+/** The heldTerminalOf lookup for one snapshot, shared by its cards and project headers. */
+export function heldTerminals(terminals, sessions, keyOf, panes = []) {
+  const shown = new Set((panes ?? []).map((p) => p?.terminal).filter(Boolean));
+  const byBinding = new Map(), byLabel = new Map();
+  const claimed = claimedAddresses(sessions);
+  const named = boundBots(sessions);
   for (const { binding: b, terminal: t } of sessions) {
-    if (b?.bot !== botId || (b.state && b.state !== "live")) continue;
-    if (pid !== null && sessionProject(b, t) !== pid) continue;
-    const address = addressOf(t);
-    if (t.state !== "live" || seen.has(address)) continue;
-    seen.add(address);
-    held.push(t);
+    if (t.state === "live" && (!b.state || b.state === "live")) {
+      appendRow(byBinding, b.bot, { terminal: t, pid: sessionProject(b, t) });
+    }
   }
-  if (labels) {
-    const claimed = claimedAddresses(sessions);
-    const named = boundBots(sessions);
-    held.push(...(terminals ?? []).filter((t) => botId && t?.labels?.[BOT_LABEL] === botId && t.state === "live"
-      && addressOf(t) && !claimed.has(addressOf(t)) && !namesBot(named, botId, paneProject(t, keyOf))
-      && (!project || paneCounts(t, project, keyOf))));
+  for (const t of terminals ?? []) {
+    const bot = t?.labels?.[BOT_LABEL];
+    if (!bot || t.state !== "live" || !addressOf(t) || claimed.has(addressOf(t))) continue;
+    const pid = paneProject(t, keyOf);
+    if (!namesBot(named, bot, pid)) appendRow(byLabel, bot, { terminal: t, pid });
   }
-  if (!held.length) return null;
   const rank = (t) => [shown.has(addressOf(t)) ? 1 : 0, t.created_ms ?? -1];
-  const pick = held.reduce((a, b) => {
+  const prefer = (a, b) => {
+    if (!a) return b;
     const [sa, ca] = rank(a), [sb, cb] = rank(b);
     return sb > sa || (sb === sa && cb > ca) ? b : a;
-  });
-  return addressOf(pick);
+  };
+  return (botId, project = null, { labels = true } = {}) => {
+    const pid = project ? projectId(project) : null;
+    let pick = null;
+    for (const row of byBinding.get(botId) ?? []) {
+      if (pid === null || row.pid === pid) pick = prefer(pick, row.terminal);
+    }
+    if (labels) for (const row of byLabel.get(botId) ?? []) {
+      if (pid === null || row.pid === null || row.pid === pid) pick = prefer(pick, row.terminal);
+    }
+    return addressOf(pick);
+  };
 }
 
 /**
