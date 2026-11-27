@@ -92,8 +92,11 @@ export function gateProfileHolds(codexPath, profile, { cwd, env, canary, control
     if (positive.error || positive.signal || positive.status !== 0 || positive.stdout !== inside) return false
     const negative = read(canary)
     if (negative.error || negative.signal || negative.status !== 1 || negative.stdout !== '') return false
-    return String(negative.stderr).split('\n').some(line =>
-      line === `cat: ${canary}: Permission denied` || line === `cat: ${canary}: Operation not permitted`)
+    const lines = String(negative.stderr).split('\n')
+    if (lines.some(line =>
+      line === `cat: ${canary}: Permission denied` || line === `cat: ${canary}: Operation not permitted`)) return true
+    // A mount sandbox can hide the canary while its marker remains visible to the host.
+    return lines.includes(`cat: ${canary}: No such file or directory`) && readFileSync(canary, 'utf8') === marker
   } catch { return false }
 }
 

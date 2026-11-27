@@ -81,7 +81,7 @@ test('#2134 K4a gate table grants only the workspace, minimal files and runtime'
   assert.deepEqual(Object.keys(PROFILE_MODES), ['read-only', 'workspace-write'])
 })
 
-test('#2134 K4b positive marker and conclusive denial through the same fake runner', t => {
+function gateProbeFixture(t) {
   const dir = directory(t)
   const workspace = join(dir, 'workspace')
   const protectedRoot = join(dir, 'protected')
@@ -92,6 +92,13 @@ test('#2134 K4b positive marker and conclusive denial through the same fake runn
   const inside = 'synthetic inside marker'
   writeFileSync(control, inside)
   writeFileSync(canary, 'synthetic distinct marker')
+  const inspect = run => profiles.gateProfileHolds('/fake/codex', `permission-profile:automagik-gate-${HEX}`,
+    { cwd: workspace, env: { PATH: '/fake' }, control, canary, run })
+  return { workspace, control, canary, inside, inspect }
+}
+
+test('#2134 K4b positive marker and conclusive denial through the same fake runner', t => {
+  const { workspace, control, canary, inside, inspect } = gateProbeFixture(t)
   assert.equal(typeof profiles.gateProfileHolds, 'function', 'boundary check exists')
   let mode = 'deny'
   const calls = []
@@ -100,16 +107,27 @@ test('#2134 K4b positive marker and conclusive denial through the same fake runn
     return args.at(-1) === control
       ? { status: mode === 'no-control' ? 1 : 0, stdout: inside }
       : mode === 'deny' ? { status: 1, stdout: '', stderr: `cat: ${canary}: Permission denied\n` }
-        : mode === 'missing' ? { status: 1, stdout: '', stderr: `cat: ${canary}: No such file or directory\n` }
-          : mode === 'timeout' ? { error: new Error('fake timeout'), status: null }
-            : { status: 0, stdout: 'fake outside result' }
+        : mode === 'timeout' ? { error: new Error('fake timeout'), status: null }
+          : { status: 0, stdout: 'fake outside result' }
   }
-  const inspect = () => profiles.gateProfileHolds('/fake/codex', `permission-profile:automagik-gate-${HEX}`,
-    { cwd: workspace, env: { PATH: '/fake' }, control, canary, run })
-  assert.equal(inspect(), true)
+  assert.equal(inspect(run), true)
   assert.deepEqual(calls.map(call => [call.command, call.args.at(-1), call.options.cwd]),
     [['/fake/codex', control, workspace], ['/fake/codex', canary, workspace]])
-  for (mode of ['no-control', 'missing', 'timeout', 'allowed']) assert.equal(inspect(), false, mode)
+  for (mode of ['no-control', 'timeout', 'allowed']) assert.equal(inspect(run), false, mode)
+})
+
+for (const [name, deleted] of [
+  ['intact canary makes ENOENT a conclusive denial', false],
+  ['canary deleted during the probe makes ENOENT inconclusive', true],
+]) test(`#2134 K4b ${name}`, t => {
+  const { control, canary, inside, inspect } = gateProbeFixture(t)
+  const result = inspect((_command, args) => {
+    if (args.at(-1) === control) return { status: 0, stdout: inside }
+    if (deleted) unlinkSync(canary)
+    return { status: 1, stdout: '', stderr: `cat: ${canary}: No such file or directory\n` }
+  })
+  assert.equal(result, !deleted)
+  assert.equal(existsSync(canary), !deleted)
 })
 
 test('#2134 AW-R4 scope, full grant table and checked marker cleanup', t => {

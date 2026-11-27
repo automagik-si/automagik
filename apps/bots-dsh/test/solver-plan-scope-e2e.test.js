@@ -290,7 +290,7 @@ test('#2134 K9 E-Codex and X1 K2d bind the kept run and reclose it through Bots'
   const fakeProbe = (_command, args) => {
     const file = args.at(-1)
     if (file.startsWith(workspace + '/')) return { status: 0, stdout: readFileSync(file, 'utf8') }
-    return { status: 1, stdout: '', stderr: `cat: ${file}: Permission denied\n` }
+    return { status: 1, stdout: '', stderr: `cat: ${file}: No such file or directory\n` }
   }
   const w = nativeWorld(t, {
     managed: false, hidden: true,
