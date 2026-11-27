@@ -2,6 +2,7 @@ package host
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -39,13 +40,15 @@ type hcOps interface {
 // desktop app shows them (ADR 0011).
 func NewHC() Host {
 	home, _ := os.UserHomeDir()
-	return &hcHost{ops: hcLive{}, home: home, knobs: defaultKnobs()}
+	return &hcHost{ops: hcLive{}, home: home, knobs: defaultKnobs(),
+		installID: sync.OnceValue(schedulerInstallID)}
 }
 
 type hcHost struct {
-	ops   hcOps
-	home  string
-	knobs knobs
+	ops       hcOps
+	home      string
+	knobs     knobs
+	installID func() string
 	// Tests advance the clock for blocked grace and startup inspections.
 	clock func() time.Time
 	// notes belong to runs on different panes, which can finish together.
@@ -55,6 +58,13 @@ type hcHost struct {
 	// .herdr/bots.json and the pack's real `am`.
 	roster func(path string) ([]byte, error)
 	amFn   func(args, extraEnv []string) (string, error)
+}
+
+const installLabel = "automation.install"
+
+func schedulerInstallID() string {
+	paths := cleanPath(config.Path()) + "\x00" + cleanPath(config.StateDir())
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(paths)))
 }
 
 const (
@@ -109,7 +119,7 @@ func (h *hcHost) Provision(a config.Automation) (Session, error) {
 	// is called after its folder and nests under its repo. The tab ID also
 	// identifies this run if hc later reuses its terminal address.
 	labels := map[string]string{"herdr.space": space, "herdr.tab": tab, "automation": a.Name,
-		"automation.workspace": string(a.Workspace)}
+		"automation.workspace": string(a.Workspace), installLabel: h.installID()}
 	address, err := h.ops.Run(cwd, labels, argv)
 	s := Session{WorkspaceID: space, PaneID: address, TabID: tab, Workspace: a.Workspace}
 	if err != nil {
@@ -126,11 +136,15 @@ func (h *hcHost) worktree(a config.Automation) (string, error) {
 		return "", fmt.Errorf("%s is not a git repository: %w", a.Repo, err)
 	}
 	branch := fmt.Sprintf("auto/%s-%s", slug(a.Name), time.Now().Format("20060102-1504"))
-	path := filepath.Join(h.home, ".herdr", "worktrees", filepath.Base(main), appSlug(branch))
+	path := filepath.Join(h.worktreeFolder(main), appSlug(branch))
 	if err := h.ops.WorktreeAdd(a.Repo, branch, path); err != nil {
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}
 	return path, nil
+}
+
+func (h *hcHost) worktreeFolder(main string) string {
+	return filepath.Join(h.home, ".herdr", "worktrees", filepath.Base(main))
 }
 
 // Do carries out the run: a bot target hands the prompt over (or skips a busy
@@ -170,10 +184,14 @@ func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration)
 	grace := a.BlockedGrace()
 	failFast := !a.WaitsOutBlocked()
 	var blockedSince, inspected, dialogSince time.Time
+	var waitErr error
 	previousDialog := ""
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			if waitErr != nil {
+				return fmt.Errorf("wait for the agent until the run timeout: %w", waitErr)
+			}
 			if turn == 0 && !working {
 				if h.agentState(s) == "working" {
 					sawWork()
@@ -192,8 +210,11 @@ func (h *hcHost) waitTurn(s Session, a config.Automation, timeout time.Duration)
 			if errors.Is(err, hc.ErrNotFound) {
 				return ErrCancelled
 			}
-			return fmt.Errorf("wait for the agent: %w", err)
+			waitErr = err
+			time.Sleep(min(h.knobs.statusPoll, time.Until(deadline)))
+			continue
 		}
+		waitErr = nil
 		// Claude counts a turn when it starts, pi when it ends: having been
 		// seen at work is what says the prompt landed. Blocked is not that: a
 		// dialog can come up before the prompt is read (a trust or a permission

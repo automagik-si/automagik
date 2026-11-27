@@ -73,9 +73,10 @@ func (r *Runner) removePrevious(terminals host.RunTerminals, a config.Automation
 	}
 	known := make([]host.Session, 0, len(runs))
 	for _, rec := range runs {
-		s := host.Session{WorkspaceID: rec.WorkspaceID, PaneID: rec.PaneID, HerdrSession: rec.Session,
+		s := host.Session{HistoryID: rec.RunID, WorkspaceID: rec.WorkspaceID,
+			PaneID: rec.PaneID, HerdrSession: rec.Session,
 			TabID: rec.TabID, Workspace: rec.Workspace, TerminalID: rec.TerminalID, Target: rec.Target,
-			Started: rec.Started, Observed: rec.At,
+			Started: rec.Started, Observed: rec.TerminalObserved, TargetParent: rec.TargetParent,
 			CleanupPending: rec.CleanupPending}
 		switch rec.Status {
 		case history.StatusRunning, history.StatusFailed, history.StatusDone:
@@ -92,6 +93,9 @@ func (r *Runner) removePrevious(terminals host.RunTerminals, a config.Automation
 	for _, s := range previous {
 		rec := runRecord(history.NewID(a.Name, "recovered"), a.Name, trigger, history.StatusRunning, s)
 		for _, old := range runs {
+			if s.HistoryID != "" && s.HistoryID != old.RunID {
+				continue
+			}
 			if old.PaneID == s.PaneID && (old.WorkspaceID == "" || old.WorkspaceID == s.WorkspaceID) &&
 				old.Session == s.HerdrSession &&
 				(old.TabID == "" || old.TabID == s.TabID) &&
@@ -99,6 +103,14 @@ func (r *Runner) removePrevious(terminals host.RunTerminals, a config.Automation
 				rec = old
 				break
 			}
+		}
+		if s.CleanupSkip != "" {
+			rec.Seen = false
+			rec.Cleanup, rec.CleanupPending = s.CleanupSkip, true
+			if err := history.Append(rec); err != nil {
+				log.Printf("history append failed: %v", err)
+			}
+			continue
 		}
 		announce := rec.Status == history.StatusRunning
 		if announce {
@@ -115,6 +127,7 @@ func (r *Runner) removeTerminal(terminals host.RunTerminals, a config.Automation
 	rec.Seen = false // This is an update, not a seen marker.
 	rec.TabID, rec.Workspace, rec.TerminalID = s.TabID, s.Workspace, s.TerminalID
 	rec.WorkspaceID = s.WorkspaceID
+	rec.TargetParent = s.TargetParent
 	if screen, err := terminals.Screen(s); err != nil {
 		log.Printf("%s: could not read terminal %s: %v", a.Name, s.PaneID, err)
 	} else if screen != "" && rec.Screen == "" {

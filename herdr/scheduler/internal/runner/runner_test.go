@@ -871,6 +871,73 @@ func TestRunSavesFailureScreenBeforeRemovingTerminal(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotRemoveTerminalWhenSavingHistoryFails(t *testing.T) {
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
+	h := terminalHost{
+		fakeHost: &fakeHost{do: func(host.Session, config.Automation, time.Duration) error {
+			path := filepath.Join(config.StateDir(), "history.jsonl")
+			if err := os.Rename(path, path+".saved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return errors.New("timed out")
+		}},
+		remove: func(host.Session, config.Automation) error {
+			t.Fatal("removed a terminal before its failure and screen could be saved")
+			return nil
+		},
+	}
+	err := New(h).Run(automation(), history.TriggerCron)
+	if err == nil || !strings.Contains(err.Error(), "save history before removing terminal") {
+		t.Fatalf("run error = %v", err)
+	}
+}
+
+func TestRunRecordsSkippedHerdrCleanupAndStillProvisions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", dir)
+	bin := filepath.Join(dir, "fake-herdr")
+	script := `#!/bin/sh
+[ "$*" = "--session missing pane list" ] || exit 64
+echo "connection refused" >&2
+exit 1
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN_PATH", bin)
+	a := automation()
+	earlier := history.Record{RunID: "earlier", Automation: a.Name, PaneID: "w1:p1",
+		WorkspaceID: "w1", Session: "missing", Status: history.StatusDone, At: time.Now()}
+	if err := history.Append(earlier); err != nil {
+		t.Fatal(err)
+	}
+	provisioned := false
+	h := terminalHost{fakeHost: &fakeHost{
+		provision: func(config.Automation) (host.Session, error) {
+			provisioned = true
+			return host.Session{}, nil
+		},
+	}, previous: host.New().(host.RunTerminals).Previous,
+		remove: func(host.Session, config.Automation) error {
+			t.Fatal("removed a pane in an unavailable session")
+			return nil
+		},
+	}
+	if err := New(h).Run(a, history.TriggerCron); err != nil || !provisioned {
+		t.Fatalf("provisioned = %v, run error = %v", provisioned, err)
+	}
+	for _, rec := range runs(t) {
+		if rec.RunID == earlier.RunID && rec.Status == earlier.Status && rec.At.Equal(earlier.At) &&
+			rec.CleanupPending && strings.Contains(rec.Cleanup, "connection refused") {
+			return
+		}
+	}
+	t.Fatal("the earlier run has no recorded cleanup skip")
+}
+
 func TestRunLeavesBotTargetsAndCancelledRunsAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name, target string
@@ -946,6 +1013,37 @@ func TestRunReapsPreviousTerminalBeforeProvision(t *testing.T) {
 		t.Fatal("the earlier run lost its failure record")
 		return nil
 	}}
+	if err := New(h).Run(a, history.TriggerCron); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreviousUsesFirstTerminalObservation(t *testing.T) {
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
+	a := automation()
+	started := time.Now()
+	atLaunch := started.Add(time.Second)
+	rec := history.Record{RunID: "earlier", Automation: a.Name, Status: history.StatusScheduled,
+		At: started}
+	if err := history.Append(rec); err != nil {
+		t.Fatal(err)
+	}
+	rec.Status, rec.At, rec.PaneID, rec.Target = history.StatusRunning, atLaunch, "t1", "worker:b1"
+	if err := history.Append(rec); err != nil {
+		t.Fatal(err)
+	}
+	rec.Status, rec.At = history.StatusFailed, atLaunch.Add(time.Minute)
+	if err := history.Append(rec); err != nil {
+		t.Fatal(err)
+	}
+	h := terminalHost{fakeHost: &fakeHost{},
+		previous: func(_ config.Automation, known []host.Session) ([]host.Session, error) {
+			if len(known) != 1 || !known[0].Started.Equal(started) || !known[0].Observed.Equal(atLaunch) {
+				t.Fatalf("legacy worker identity window = %+v", known)
+			}
+			return nil, nil
+		},
+	}
 	if err := New(h).Run(a, history.TriggerCron); err != nil {
 		t.Fatal(err)
 	}

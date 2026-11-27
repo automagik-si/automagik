@@ -33,13 +33,14 @@ const maxSubmitMismatches = 3
 
 func (w agentWork) do(s Session, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	startupUntil := w.now().Add(startupDialogWindow)
 	if err := w.start(s); err != nil {
 		if !w.ops.HasCode(err, herdr.CodeAgentNotReady) && !w.ops.HasCode(err, herdr.CodeAgentBlocked) {
 			return fmt.Errorf("start %s agent: %w", w.a.Agent, err)
 		}
 		// A blocked startup retains its agent in this pane. Wait for the
 		// dialog before submitting; starting a second agent would be wrong.
-		if _, err := w.waitBlocked(s, deadline); err != nil {
+		if _, err := w.waitBlocked(s, deadline, startupUntil); err != nil {
 			return err
 		}
 	}
@@ -55,7 +56,7 @@ func (w agentWork) do(s Session, timeout time.Duration) error {
 		if !w.ops.HasCode(err, herdr.CodeAgentBlocked) {
 			return err
 		}
-		sawBlocked, err := w.waitBlocked(s, deadline)
+		sawBlocked, err := w.waitBlocked(s, deadline, startupUntil)
 		if err != nil {
 			return err
 		}
@@ -79,8 +80,9 @@ func (w agentWork) do(s Session, timeout time.Duration) error {
 
 // waitBlocked covers a dialog that prevents startup or prompt submission from
 // reaching await. Once it clears, the prompt still needs to be submitted.
-func (w agentWork) waitBlocked(s Session, deadline time.Time) (sawBlocked bool, err error) {
-	var since time.Time
+func (w agentWork) waitBlocked(s Session, deadline, startupUntil time.Time) (bool, error) {
+	sawBlocked := false
+	var since, dialogSince time.Time
 	var previousDialog string
 	for {
 		status, err := w.ops.AgentStatus(s.PaneID)
@@ -91,14 +93,32 @@ func (w agentWork) waitBlocked(s Session, deadline time.Time) (sawBlocked bool, 
 			return sawBlocked, nil
 		}
 		sawBlocked = true
+		if !time.Now().Before(deadline) {
+			return true, fmt.Errorf("the agent was still blocked at the run timeout")
+		}
 		if since.IsZero() {
 			since = w.now()
 		}
-		if err := w.checkDialog(s, &since, &previousDialog); err != nil {
-			return true, err
-		}
-		if !time.Now().Before(deadline) {
-			return true, fmt.Errorf("the agent was still blocked at the run timeout")
+		if !w.a.WaitsOutBlocked() {
+			now := w.now()
+			expired := now.Sub(since) > w.a.BlockedGrace()
+			startup := now.Before(startupUntil)
+			if expired || startup {
+				screen := w.readBlockedScreen(s)
+				line := startupDialogLine(screen, w.a.Prompt)
+				if line != previousDialog {
+					previousDialog, dialogSince = line, now
+				}
+				if expired || startup && line != "" && now.Sub(dialogSince) >= startupDialogHold {
+					if state, err := w.ops.AgentStatus(s.PaneID); err == nil && state != "blocked" {
+						return true, nil
+					}
+					if line == "" {
+						line = promptLine(screen)
+					}
+					return true, dialogError(line)
+				}
+			}
 		}
 		time.Sleep(min(w.knobs.statusPoll, time.Until(deadline)))
 	}
@@ -214,7 +234,6 @@ func (w agentWork) await(s Session, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last error
 	var blockedSince time.Time
-	var previousDialog string
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -236,15 +255,18 @@ func (w agentWork) await(s Session, timeout time.Duration) error {
 			if blockedSince.IsZero() {
 				blockedSince = w.now()
 			}
-			if err := w.checkDialog(s, &blockedSince, &previousDialog); err != nil {
-				return err
+			if !w.a.WaitsOutBlocked() && w.now().Sub(blockedSince) > w.a.BlockedGrace() {
+				screen := w.readBlockedScreen(s)
+				if state, err := w.ops.AgentStatus(s.PaneID); err != nil || state == "blocked" {
+					return dialogError(promptLine(screen))
+				}
+				blockedSince = time.Time{}
 			}
 			// A blocked wait returns at once. Pace it while the grace runs.
 			time.Sleep(min(w.knobs.statusPoll, time.Until(deadline)))
 			continue
 		}
 		blockedSince = time.Time{}
-		previousDialog = ""
 		if err == nil {
 			if statusErr != nil {
 				return fmt.Errorf("read agent status after waiting: %w", statusErr)
@@ -273,29 +295,13 @@ func (w agentWork) await(s Session, timeout time.Duration) error {
 	}
 }
 
-func (w agentWork) checkDialog(s Session, since *time.Time, previous *string) error {
-	if w.a.WaitsOutBlocked() {
-		return nil
-	}
-	expired := w.now().Sub(*since) > w.a.BlockedGrace()
+func (w agentWork) readBlockedScreen(s Session) string {
 	screen, err := w.ops.PaneRead(s.PaneID, 30)
 	if err != nil {
 		log.Printf("could not read the screen of %s: %v", s.PaneID, err)
+		return ""
 	}
-	line := dialogLine(screen)
-	confirmed := line != "" && line == *previous
-	*previous = line
-	if !expired && !confirmed {
-		return nil
-	}
-	if state, err := w.ops.AgentStatus(s.PaneID); err == nil && state != "blocked" {
-		*since, *previous = time.Time{}, ""
-		return nil
-	}
-	if line == "" {
-		line = promptLine(screen)
-	}
-	return dialogError(line)
+	return screen
 }
 
 // agentGoneOutcome disambiguates herdr's agent_not_running: it means either

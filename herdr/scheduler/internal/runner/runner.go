@@ -232,6 +232,7 @@ func runRecord(id, name string, trigger history.Trigger, st history.Status, s ho
 		RunID: id, Automation: name, Trigger: trigger, Status: st, At: time.Now(),
 		Session: s.HerdrSession, WorkspaceID: s.WorkspaceID, PaneID: s.PaneID,
 		Target: s.Target, TabID: s.TabID, Workspace: s.Workspace, TerminalID: s.TerminalID,
+		TargetParent: s.TargetParent,
 	}
 }
 

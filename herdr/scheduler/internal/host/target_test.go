@@ -276,6 +276,7 @@ func TestWorkerTargetRemovesTheRunWorkerOnFailure(t *testing.T) {
 					t.Fatal("the successful worker stop was used on failure")
 				}
 				f.gets["t9"] = hc.Terminal{Address: "t9", CreatedMS: 42, State: "live", Parent: "t7",
+					Cwd:    f.worktree[2],
 					Labels: map[string]string{"worker.of": "b-6jrz4bmxml", "branch": f.worktree[1]}}
 				return `{"terminal":"t9"}`, nil
 			}

@@ -3,6 +3,7 @@ package host
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ func (h *hcHost) Previous(a config.Automation, known []Session) ([]Session, erro
 		}
 	}
 	seen := make(map[string]bool)
+	install := h.installID()
 	var previous []Session
 	for _, address := range addresses {
 		if !localAddress(address) || seen[address] {
@@ -54,16 +56,15 @@ func (h *hcHost) Previous(a config.Automation, known []Session) ([]Session, erro
 		if err != nil {
 			return nil, err
 		}
-		if s, ok := previousWorker(t, a.Name, candidates[address]); ok {
+		if s, ok := previousWorker(t, a.Name, candidates[address]); ok &&
+			matchesInstall(t, install) && h.inRunFolder(a, t.Cwd) {
 			previous = append(previous, s)
 			continue
 		}
 		space, tab := t.Labels["herdr.space"], t.Labels["herdr.tab"]
-		if !runTerminal(t, address, a.Name) {
+		if !runTerminal(t, address, a.Name) || !matchesInstall(t, install) || !h.inRunFolder(a, t.Cwd) {
 			continue
 		}
-		// A terminal without a mode label may belong to a shared space,
-		// even if this automation now runs in a space of its own.
 		s := Session{WorkspaceID: space, TabID: tab, PaneID: address,
 			TerminalID: hcIdentity(t), Workspace: config.Workspace(t.Labels["automation.workspace"])}
 		for _, old := range candidates[address] {
@@ -95,6 +96,32 @@ func runTerminal(t hc.Terminal, address, name string) bool {
 		t.Labels["herdr.space"] != "" && t.Labels["herdr.tab"] != ""
 }
 
+func matchesInstall(t hc.Terminal, install string) bool {
+	label, present := t.Labels[installLabel]
+	return !present || label == install
+}
+
+func withinFolder(dir, root string) bool {
+	if !filepath.IsAbs(dir) || !filepath.IsAbs(root) {
+		return false
+	}
+	rel, err := filepath.Rel(cleanPath(root), cleanPath(dir))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func (h *hcHost) inRunFolder(a config.Automation, cwd string) bool {
+	if withinFolder(cwd, cleanPath(a.Repo)) {
+		return true
+	}
+	// The app groups worktrees by basename, which two checkouts can share.
+	main, err := h.ops.MainCheckout(a.Repo)
+	if err != nil || !filepath.IsAbs(main) || !withinFolder(cwd, h.worktreeFolder(main)) {
+		return false
+	}
+	owner, err := h.ops.MainCheckout(cwd)
+	return err == nil && cleanPath(owner) == cleanPath(main)
+}
+
 func workerTerminal(t hc.Terminal, s Session, automation string) bool {
 	kind, bot, err := config.SplitTarget(s.Target)
 	when, branchMatches := strings.CutPrefix(t.Labels["branch"], "auto/"+slug(automation)+"-")
@@ -105,15 +132,27 @@ func workerTerminal(t hc.Terminal, s Session, automation string) bool {
 		t.CreatedMS > 0 && (s.TerminalID == "" || hcIdentity(t) == s.TerminalID)
 }
 
+func matchesLegacyWorkerLaunch(t hc.Terminal, s Session, automation string) bool {
+	if s.Started.IsZero() || t.CreatedMS > s.Observed.UnixMilli() {
+		return false
+	}
+	if t.CreatedMS >= s.Started.UnixMilli() {
+		return true // The scheduled row preceded the launch.
+	}
+	// Without a scheduled row the first observation followed provisioning.
+	// Use the branch's launch minute and reject older or reused addresses.
+	created := time.UnixMilli(t.CreatedMS)
+	launchMinute := created.In(time.Local).Format("20060102-1504")
+	return t.Labels["branch"] == "auto/"+slug(automation)+"-"+launchMinute &&
+		s.Started.Sub(created) < time.Minute
+}
+
 func previousWorker(t hc.Terminal, name string, known []Session) (Session, bool) {
 	for _, s := range known {
 		if !workerTerminal(t, s, name) || t.State != "live" && !s.CleanupPending {
 			continue
 		}
-		// Older worker rows have no launch identity. Their worker must have
-		// been created during that run, otherwise the address could be reused.
-		if s.TerminalID == "" && (s.Started.IsZero() || t.CreatedMS < s.Started.UnixMilli() ||
-			t.CreatedMS > s.Observed.UnixMilli()) {
+		if s.TerminalID == "" && !matchesLegacyWorkerLaunch(t, s, name) {
 			continue
 		}
 		s.TerminalID, s.TargetParent = hcIdentity(t), t.Parent
@@ -152,15 +191,20 @@ func (h *hcHost) Remove(s Session, a config.Automation) error {
 		owned = s.TerminalID != "" && workerTerminal(t, s, a.Name)
 	}
 	if !owned || t.Labels["herdr.space"] != s.WorkspaceID ||
-		t.Labels["herdr.tab"] != s.TabID || s.TerminalID != "" && hcIdentity(t) != s.TerminalID {
+		t.Labels["herdr.tab"] != s.TabID || s.TerminalID != "" && hcIdentity(t) != s.TerminalID ||
+		!matchesInstall(t, h.installID()) || !h.inRunFolder(a, t.Cwd) {
 		return fmt.Errorf("terminal identity changed")
 	}
-	if s.WorkspaceID != "" && s.Workspace != config.WorkspaceWorktree && s.Workspace != config.WorkspaceRoot {
-		if err := h.preserveSpace(s, t.Cwd); err != nil {
-			return err
-		}
-	}
 	if t.State == "live" {
+		// A finished terminal's pane is already gone. Only preserve a known
+		// shared space while ending a live terminal could close its last tab.
+		shared := s.WorkspaceID == a.WorkspaceID || s.Workspace == config.WorkspaceExisting ||
+			t.Labels["automation.workspace"] == string(config.WorkspaceExisting)
+		if s.WorkspaceID != "" && shared {
+			if err := h.preserveSpace(s, t.Cwd); err != nil {
+				return err
+			}
+		}
 		if err := h.ops.Kill(s.PaneID); err != nil && !errors.Is(err, hc.ErrNotFound) {
 			return err
 		}

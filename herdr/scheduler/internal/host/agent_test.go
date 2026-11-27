@@ -63,15 +63,15 @@ func TestDoSubmitBlockedStatusMismatchHasPacedAttemptLimit(t *testing.T) {
 	}
 }
 
-func TestAwaitConfirmedDialogFailsBeforeGrace(t *testing.T) {
+func TestHerdrStartupDialogMustHoldTenSeconds(t *testing.T) {
 	clock := time.Unix(0, 0)
 	ops := &fakeOps{
-		agentWait: func(string, time.Duration) error {
-			clock = clock.Add(time.Minute)
-			return nil // Herdr settles immediately on blocked.
+		agentStart: func(string, string, string, []string) error {
+			return apiErr("agent start", herdr.CodeAgentBlocked)
 		},
 		agentStatus: func(string) (string, error) { return "blocked", nil },
 		paneRead: func(string, int) (string, error) {
+			clock = clock.Add(5 * time.Second)
 			return "\x1b[31m│ Do you want to proceed? │\x1b[0m\n❯ 1. Yes\nEsc to cancel", nil
 		},
 	}
@@ -81,11 +81,46 @@ func TestAwaitConfirmedDialogFailsBeforeGrace(t *testing.T) {
 	if err == nil || err.Error() != "blocked on a dialog: Do you want to proceed?" {
 		t.Fatalf("want the dialog line, got %v", err)
 	}
-	if ops.waits != 2 || ops.reads != 2 || len(ops.stopRequests) != 0 {
+	if ops.waits != 0 || ops.reads != 3 || len(ops.stopRequests) != 0 {
 		t.Fatalf("waits=%d reads=%d stopRequests=%v", ops.waits, ops.reads, ops.stopRequests)
 	}
 	if len(ops.closed) != 0 || len(ops.closedTabs) != 0 {
 		t.Fatal("blocked failure closed its layout")
+	}
+}
+
+func TestHerdrMidRunDialogAllowsConfiguredGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step time.Duration
+		want string
+	}{
+		{"clears", time.Second, ""},
+		{"outlasts grace", 11 * time.Minute, "blocked on a dialog: Do you want to proceed?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := time.Unix(0, 0)
+			states := []string{"working", "blocked", "blocked", "blocked", "blocked", "done"}
+			index := -1
+			ops := &fakeOps{
+				agentWait: func(string, time.Duration) error {
+					index++
+					clock = clock.Add(tc.step)
+					return nil
+				},
+				agentStatus: func(string) (string, error) { return states[index], nil },
+				paneRead: func(string, int) (string, error) {
+					return "Do you want to proceed?\n❯ 1. Yes\nEsc to cancel", nil
+				},
+			}
+			w := agentWorkWith(ops, config.Automation{BlockedGraceMinutes: 30})
+			w.clock = func() time.Time { return clock }
+			err := w.do(Session{PaneID: "p"}, time.Second)
+			if tc.want == "" && err != nil ||
+				tc.want != "" && (err == nil || err.Error() != tc.want || ops.waits != 5) {
+				t.Fatalf("waits=%d error=%v want %q", ops.waits, err, tc.want)
+			}
+		})
 	}
 }
 
@@ -109,7 +144,7 @@ func TestAwaitBlockedBlipsResetGraceThenDoneSucceeds(t *testing.T) {
 	if err := w.await(Session{PaneID: "p"}, time.Second); err != nil {
 		t.Fatalf("a blip failed: %v", err)
 	}
-	if ops.waits != len(states) || len(ops.stopRequests) != 0 || ops.reads != 4 {
+	if ops.waits != len(states) || len(ops.stopRequests) != 0 || ops.reads != 0 {
 		t.Fatalf("waits=%d stopRequests=%v reads=%d", ops.waits, ops.stopRequests, ops.reads)
 	}
 }
@@ -158,7 +193,8 @@ func TestDoPreAwaitDialogsFailAtGrace(t *testing.T) {
 			if err == nil || err.Error() != "blocked on a dialog: Do you trust this folder?" {
 				t.Fatalf("want a blocked failure, got %v", err)
 			}
-			if len(ops.stopRequests) != 0 || ops.reads != 4 || ops.waits != 0 || len(ops.closed)+len(ops.closedTabs) != 0 {
+			if len(ops.stopRequests) != 0 || ops.reads != 2 || ops.waits != 0 ||
+				len(ops.closed)+len(ops.closedTabs) != 0 {
 				t.Fatalf("stopRequests=%v reads=%d waits=%d layout closes=%v/%v", ops.stopRequests, ops.reads, ops.waits, ops.closed, ops.closedTabs)
 			}
 		})

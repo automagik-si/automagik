@@ -30,7 +30,7 @@ func TestDoResumesWhenDialogClearsBeforeFailure(t *testing.T) {
 				return nil
 			}
 			ops.paneRead = func(string, int) (string, error) {
-				if ops.reads == 4 {
+				if clock.Sub(time.Unix(0, 0)) >= 4*time.Minute {
 					state, dialogCleared = "working", true
 				}
 				return "Do you want to proceed?", nil

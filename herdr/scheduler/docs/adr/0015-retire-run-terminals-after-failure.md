@@ -22,23 +22,30 @@ limit.
   output and removal errors can occur if the backend is unavailable. If the
   history write fails, removal waits for a later occurrence. Existing failure
   toasts retain their one-line reason (ADR 0007).
+  History files are private to the scheduler's user.
 - hc ends the terminal and removes its core record. Herdr closes the pane the
   run opened. In a shared space, removal first checks that another pane or tab
   can keep the space open. If the run has the sole pane in the last tab, a
-  shell preserves that tab. Scheduler processes sharing the state directory
+  shell preserves that tab. An unlabelled hc terminal is treated as sharing
+  its space if the automation names that workspace or other users of the
+  space are present. Scheduler processes sharing the state directory
   serialize these checks per space. A person can still change the layout
   between the check and the backend call, which offers no atomic guard.
   A space created solely for the run can disappear when its pane is removed.
 - Before provisioning, an occurrence reconciles earlier run terminals for its
   automation. hc can also discover orphaned terminals by their automation
-  label. Recovery updates the earlier run when history identifies it and
+  label, checking the terminal folder and any scheduler install label.
+  Recovery updates the earlier run when history identifies it and
   creates a recovery record otherwise. A refusal or failed removal holds up
   provisioning until the next occurrence can reconcile it. A nonblocking
   automation lock across scheduler processes preserves dropping an occurrence
-  when a scheduler is actively running it.
-- A dialog confirmed by two screen inspections can fail early with its
-  question. A transient or unrecognised blocked state uses the configured
-  grace. hc inspects a silent startup before the agent reports any status.
+  when a scheduler is actively running it. An unavailable Herdr pane list
+  records a cleanup skip in the affected runs' history and allows provisioning.
+- Before the first turn, an interactive question with a selected option and a
+  key hint can fail the run early if held for ten seconds within the first two
+  minutes. hc also inspects a silent startup. The configured grace governs
+  other blocked states. With `blocked_grace_minutes: -1`, startup dialog
+  checks are disabled and only the run timeout bounds a blocked state.
 - A worker target still uses the pack's checked stop on success. On failure,
   the scheduler may stop its own worker mid-turn using the core's terminal
   removal calls. The worker must match the run's launch identity, automation

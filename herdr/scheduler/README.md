@@ -274,9 +274,11 @@ automations:
 
 `blocked_grace_minutes` applies to both agent backends. An omitted key or
 `0` uses 2 minutes. A continuous blocked state past the grace fails with the
-dialog line and a notice. A recognised dialog can fail as soon as two screen
-reads confirm it. With `-1`, a reported blocked state can wait out the
-timeout, though hc still checks for an unanswered startup dialog.
+dialog line and a notice. Before the first turn and within the first two
+minutes, a question with a selected option and a key hint that persists for
+ten seconds can fail the run sooner. Herdr checks during blocked startup or
+prompt submission, and hc can also check a silent startup. With `-1`, the
+startup dialog check is disabled and a blocked state can wait out the timeout.
 
 Herdr prompt retries check the run deadline and wait one status-poll interval
 between submissions. If submission keeps reporting blocked but status never

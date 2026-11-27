@@ -33,6 +33,46 @@ func TestHerdrCleanupRefusesReusedTerminalID(t *testing.T) {
 	}
 }
 
+func TestHerdrScreenRefusesReusedTerminalID(t *testing.T) {
+	s := Session{PaneID: "w7:p2", WorkspaceID: "w7", TabID: "tb1", TerminalID: "t7"}
+	pane := herdr.PaneInfo{PaneID: s.PaneID, WorkspaceID: s.WorkspaceID, TabID: s.TabID,
+		TerminalID: "t8"}
+	f := &fakeOps{paneGet: func(string) (herdr.PaneInfo, error) { return pane, nil }}
+	screen, err := (&live{ops: f}).Screen(s)
+	if err == nil || screen != "" || f.reads != 0 {
+		t.Fatalf("reused pane screen = %q, error = %v, reads = %d", screen, err, f.reads)
+	}
+}
+
+func TestHerdrRemoveDoesNotSplitALastTabWithAnotherPane(t *testing.T) {
+	s := Session{PaneID: "w7:p2", WorkspaceID: "w7", TabID: "tb1", TerminalID: "t7",
+		Workspace: config.WorkspaceExisting}
+	pane := herdr.PaneInfo{PaneID: s.PaneID, WorkspaceID: s.WorkspaceID, TabID: s.TabID,
+		TerminalID: s.TerminalID}
+	f := &fakeOps{
+		paneGet: func(string) (herdr.PaneInfo, error) { return pane, nil },
+		tabList: func(string) ([]string, error) { return []string{"tb1"}, nil },
+		paneList: func() ([]herdr.PaneInfo, error) {
+			peer := pane
+			peer.PaneID, peer.TerminalID = "w7:p3", "t8"
+			return []herdr.PaneInfo{pane, peer}, nil
+		},
+		paneSplit: func(string) error {
+			t.Fatal("opened a shell beside a pane that already keeps the tab open")
+			return nil
+		},
+		paneClose: func(pane string) error {
+			if pane != s.PaneID {
+				t.Fatalf("closed %s, want %s", pane, s.PaneID)
+			}
+			return nil
+		},
+	}
+	if err := (&live{ops: f}).Remove(s, config.Automation{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHerdrPreviousRefusesUnlabelledLegacyPane(t *testing.T) {
 	a := config.Automation{Name: "triage"}
 	s := Session{PaneID: "w7:p2", WorkspaceID: "w7"}
@@ -90,10 +130,10 @@ func TestHerdrPreviousLogsUnreadablePaneListAndSkipsThatSession(t *testing.T) {
 		}, nil
 	}
 	previous, err := (&live{ops: f}).Previous(a, known)
-	if err != nil || len(previous) != 1 || previous[0].HerdrSession != "available" {
+	if err != nil || len(previous) != 3 || previous[2].HerdrSession != "available" {
 		t.Fatalf("previous = %+v, err = %v", previous, err)
 	}
-	want := `triage: skipping earlier terminal cleanup in Herdr session "unavailable":` +
+	want := `triage: skipped terminal cleanup in Herdr session "unavailable":` +
 		" list panes: connection refused"
 	if got := logs.String(); strings.Count(got, want) != 1 {
 		t.Fatalf("expected one log with the skip reason, got %q", got)

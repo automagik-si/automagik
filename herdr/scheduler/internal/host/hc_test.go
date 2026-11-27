@@ -22,6 +22,7 @@ type fakeHC struct {
 	argv       []string
 	worktree   [3]string // repo, branch, path
 	waits      []hc.Wait
+	waitErrors []error
 	term       hc.Terminal
 	gets       map[string]hc.Terminal // per-address `hc get` answers; nil falls back to term
 	screen     string
@@ -41,6 +42,8 @@ type fakeHC struct {
 	killErr    error
 	sent       []string // hc send's texts, in order
 	sendErr    error
+
+	mainCheckout func(string) (string, error)
 }
 
 func (f *fakeHC) Send(address, text string) error {
@@ -90,6 +93,13 @@ func (f *fakeHC) Wait(string, time.Duration) (hc.Wait, error) {
 	if f.onWait != nil {
 		f.onWait()
 	}
+	if len(f.waitErrors) != 0 {
+		err := f.waitErrors[0]
+		f.waitErrors = f.waitErrors[1:]
+		if err != nil {
+			return hc.Wait{}, err
+		}
+	}
 	if len(f.waits) == 0 {
 		return hc.Wait{Reason: "timeout"}, nil
 	}
@@ -111,17 +121,27 @@ func (f *fakeHC) Get(address string) (hc.Terminal, error) {
 	return f.term, nil
 }
 
-func (f *fakeHC) MainCheckout(string) (string, error) { return "/src/myapp", nil }
+func (f *fakeHC) MainCheckout(dir string) (string, error) {
+	if f.mainCheckout != nil {
+		return f.mainCheckout(dir)
+	}
+	return "/src/myapp", nil
+}
 
 func (f *fakeHC) WorktreeAdd(repo, branch, path string) error {
 	f.worktree = [3]string{repo, branch, path}
 	return nil
 }
 
+const fakeHCHome = "/test-home"
+
 func newHCTest(f *fakeHC) *hcHost {
-	return &hcHost{ops: f, home: "/home/me", knobs: knobs{
-		paneReady: 30 * time.Millisecond, waitSlice: time.Millisecond, statusPoll: time.Millisecond,
-	}}
+	return &hcHost{
+		ops: f, home: fakeHCHome, installID: func() string { return "test-install" },
+		knobs: knobs{
+			paneReady: 30 * time.Millisecond, waitSlice: time.Millisecond, statusPoll: time.Millisecond,
+		},
+	}
 }
 
 func hcAutomation() config.Automation {
@@ -144,7 +164,9 @@ func TestHCProvisionMakesAWorktreeTheAppRecognises(t *testing.T) {
 	if repo != "/src/myapp/sub" || !strings.HasPrefix(branch, "auto/issue-triage-") {
 		t.Fatalf("worktree add %q %q", repo, branch)
 	}
-	if want := filepath.Join("/home/me/.herdr/worktrees/myapp", strings.ReplaceAll(branch, "/", "-")); path != want {
+	want := filepath.Join(fakeHCHome, ".herdr", "worktrees", "myapp",
+		strings.ReplaceAll(branch, "/", "-"))
+	if path != want {
 		t.Fatalf("path %q, want %q", path, want)
 	}
 	if f.cwd != path {
@@ -616,9 +638,52 @@ func TestHCDoWaitsOutBlockedWhenTheGraceIsMinusOne(t *testing.T) {
 	}
 }
 
+func TestHCDoRetriesFailedWaitAfterWorkStarts(t *testing.T) {
+	f := &fakeHC{
+		waits: []hc.Wait{
+			{Reason: "timeout", Status: "working", Turn: 1},
+			{Reason: "status", Status: "done", Turn: 1},
+		},
+		waitErrors: []error{nil, errors.New("temporarily unavailable"), nil},
+	}
+	if err := newHCTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), time.Second); err != nil {
+		t.Fatalf("transient wait error failed the run: %v", err)
+	}
+}
+
+func TestHCDoReportsPersistentWaitErrorAtDeadline(t *testing.T) {
+	want := errors.New("temporarily unavailable")
+	f := &fakeHC{}
+	waits := 0
+	f.onWait = func() {
+		waits++
+		f.waitErrors = []error{want}
+	}
+	err := newHCTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 30*time.Millisecond)
+	if !errors.Is(err, want) || waits < 2 || !strings.Contains(err.Error(), "run timeout") {
+		t.Fatalf("waits = %d, error = %v", waits, err)
+	}
+}
+
+func TestHCMinusOneSkipsSilentStartupScreen(t *testing.T) {
+	clock := time.Unix(0, 0)
+	f := &fakeHC{
+		waits:  []hc.Wait{{Reason: "timeout"}, {Reason: "timeout"}, {Reason: "status", Status: "done"}},
+		onWait: func() { clock = clock.Add(11 * time.Second) },
+		screen: trustScreen,
+	}
+	h := newHCTest(f)
+	h.clock = func() time.Time { return clock }
+	a := hcAutomation()
+	a.BlockedGraceMinutes = -1
+	if err := h.Do(Session{PaneID: "t7"}, a, time.Second); err != nil || f.readCalls != 0 {
+		t.Fatalf("startup reads = %d, error = %v", f.readCalls, err)
+	}
+}
+
 func automationTerminal(address, name, space, tab, state string) hc.Terminal {
 	return hc.Terminal{
-		Address: address, CreatedMS: 10, State: state, Cwd: "/repo",
+		Address: address, CreatedMS: 10, State: state, Cwd: hcAutomation().Repo,
 		Labels: map[string]string{"automation": name, "herdr.space": space, "herdr.tab": tab},
 	}
 }

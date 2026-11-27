@@ -6,11 +6,12 @@ What changed for someone using the plugin. Dates are release dates.
 
 - Failed, timed-out and blocked runs save their reason and terminal output in
   history before the scheduler removes their terminal. The next occurrence
-  reconciles earlier run terminals before launching. Under hc, a startup dialog
-  must persist for at least ten seconds to fail a run before its first turn.
-  The scheduler preserves the last tab of a shared or unlabelled space and keeps
-  the run's worktree. If Herdr cannot list panes, the scheduler logs the reason
-  and starts the run without cleaning up that session's earlier panes (ADR 0015).
+  reconciles earlier run terminals before launching. hc checks the terminal's
+  folder and install label, and retries transient wait errors until the run
+  deadline. A startup dialog must persist for ten seconds to fail early. After
+  the first turn starts, the configured grace applies. History is private to
+  the scheduler's user and records skipped cleanup when Herdr cannot list panes.
+  The scheduler preserves shared spaces and keeps the run's worktree (ADR 0015).
 - `target:` hands a prompt to a bot (`bot:<id>`) or to a worker of one
   (`worker:<id>`) instead of opening a fresh session: the bot's own terminal is
   used, a stopped bot is started with `am start`, and a worker is started under

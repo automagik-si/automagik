@@ -172,8 +172,9 @@ type Automation struct {
 	// laptop-was-asleep case. 0 uses the default (120); -1 never catches up.
 	CatchUpMinutes int `yaml:"catch_up_minutes,omitempty"`
 	// BlockedGraceMinutes bounds a reported blocked state. Zero uses the
-	// default (2). With -1 only the run timeout bounds that state; hc can
-	// still recognise a startup dialog from the screen.
+	// default (2). Before the first turn, an interactive dialog held for 10
+	// seconds in the first two minutes can fail sooner. With -1 there is no
+	// startup dialog check and only the run timeout bounds a blocked state.
 	BlockedGraceMinutes int `yaml:"blocked_grace_minutes,omitempty"`
 	// Session is the Herdr session the run happens in, whoever triggers it.
 	// Empty means the session of the process running it (ADR 0010).

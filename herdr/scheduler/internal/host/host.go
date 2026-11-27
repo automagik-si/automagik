@@ -31,6 +31,8 @@ type Session struct {
 	Workspace      config.Workspace
 	TerminalID     string
 	CleanupPending bool
+	CleanupSkip    string
+	HistoryID      string
 	Started        time.Time
 	Observed       time.Time
 	// TabID identifies the tab the run opened when the backend can name it.

@@ -25,6 +25,7 @@ func (h *live) Previous(a config.Automation, known []Session) ([]Session, error)
 	var previous []Session
 	seen := make(map[[2]string]bool)
 	panes := make(map[string]map[string]herdr.PaneInfo)
+	skipped := make(map[string]string)
 	for _, s := range known {
 		key := [2]string{s.HerdrSession, s.PaneID}
 		if seen[key] || !strings.HasPrefix(s.PaneID, s.WorkspaceID+":") || s.Target != "" {
@@ -35,16 +36,22 @@ func (h *live) Previous(a config.Automation, known []Session) ([]Session, error)
 		if !listed {
 			list, err := o.PaneList()
 			if err != nil {
-				log.Printf("%s: skipping earlier terminal cleanup in Herdr session %q: list panes: %v",
-					a.Name, s.HerdrSession, err)
+				skipped[s.HerdrSession] = fmt.Sprintf(
+					"skipped terminal cleanup in Herdr session %q: list panes: %v", s.HerdrSession, err)
+				log.Printf("%s: %s", a.Name, skipped[s.HerdrSession])
 				panes[s.HerdrSession] = nil
-				continue
+			} else {
+				byID = make(map[string]herdr.PaneInfo, len(list))
+				for _, pane := range list {
+					byID[pane.PaneID] = pane
+				}
+				panes[s.HerdrSession] = byID
 			}
-			byID = make(map[string]herdr.PaneInfo, len(list))
-			for _, pane := range list {
-				byID[pane.PaneID] = pane
-			}
-			panes[s.HerdrSession] = byID
+		}
+		if reason := skipped[s.HerdrSession]; reason != "" {
+			s.CleanupSkip = reason
+			previous = append(previous, s)
+			continue
 		}
 		pane := byID[s.PaneID]
 		if !samePane(s, pane) {
@@ -136,11 +143,20 @@ func (h *live) Remove(s Session, _ config.Automation) error {
 			return fmt.Errorf("the run's pane is no longer in its tab")
 		}
 		if len(tabs) == 1 {
-			if err := o.PaneSplit(s.PaneID); err != nil {
-				// Keep the tab if a shell cannot be opened. A blocked agent
-				// can still be asked to stop without taking the tab with it.
-				_, stopErr := o.AgentStop(s.PaneID)
-				return errors.Join(fmt.Errorf("keep the space's last tab: %w", err), stopErr)
+			panes, err := o.PaneList()
+			if err != nil {
+				return fmt.Errorf("check the space's last pane: %w", err)
+			}
+			hasPeer := slices.ContainsFunc(panes, func(peer herdr.PaneInfo) bool {
+				return peer.WorkspaceID == s.WorkspaceID && peer.TabID == pane.TabID &&
+					peer.PaneID != "" && peer.PaneID != s.PaneID
+			})
+			if !hasPeer {
+				if err := o.PaneSplit(s.PaneID); err != nil {
+					// A blocked agent can still stop without taking the tab with it.
+					_, stopErr := o.AgentStop(s.PaneID)
+					return errors.Join(fmt.Errorf("keep the space's last tab: %w", err), stopErr)
+				}
 			}
 		}
 	}
