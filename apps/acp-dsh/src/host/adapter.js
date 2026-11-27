@@ -18,7 +18,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
-import { PLAN_RECORD, USAGE_RECORD, bindingOf, decide, latestNative, writeNative } from './continuity.js'
+import { PLAN_RECORD, USAGE_RECORD, bindingOf, decide, latestNative, planEventsOf, plansFromLog, writeNative, writeSent } from './continuity.js'
 import { bindingDigest, elicitationAnswer, elicitationQuestions, planNoticeOf, todosOf, usageNoticeOf } from './features.js'
 import { HOME_ENV, VERSION_ENV } from './cli-homes.js'
 import { GENERATION_ENV } from './cli-generations.js'
@@ -2467,12 +2467,19 @@ export class AcpAdapter extends LlmAdapter {
               : decide({ route: agent.continuity, record: latestNative(dshAgent?.session, options.provider), digest: state.binding })
             state.continuityTried = reattach.sessionId !== undefined
             state.interrupted = reattach.interrupted === true
+            // The rows the uncertain prompt carried: never sent again, and named again in the next
+            // 'sent' record until a prompt after them settles.
+            state.uncertainRows = reattach.interrupted === true ? reattach.rows : undefined
+            // The plans this native session last showed, so a later update or removal of one finds
+            // it (only that session's: another one's plans never come back).
+            const planScope = reattach.sessionId === undefined ? undefined : { provider: options.provider, nativeSessionId: reattach.sessionId }
+            const restoredPlans = planScope === undefined ? [] : plansFromLog(planEventsOf(dshAgent?.session, planScope), planScope)
             if (reattach.skip !== undefined && reattach.skip !== 'not-a-restart') {
               try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} starts a new session (${reattach.skip})`) } catch {}
             }
             const run = new AgentRun({
               ...spec,
-              ...(reattach.sessionId === undefined ? {} : { continuity: { sessionId: reattach.sessionId, methods: reattach.methods } }),
+              ...(reattach.sessionId === undefined ? {} : { continuity: { sessionId: reattach.sessionId, methods: reattach.methods, plans: restoredPlans } }),
               // An agent's form elicitation, asked of the person in DSH's question dialog while
               // one of this chat's prompts is open; withdrawn when it ends (Stop included), and
               // a cancel when nobody can be asked. Never answered for the person, at any level.
@@ -2489,7 +2496,14 @@ export class AcpAdapter extends LlmAdapter {
               onUnreadPlan: update => this.warn(`${agent.name} sent a plan this app does not read (${String(update?.plan?.type ?? update?.sessionUpdate).slice(0, 40)}); it is not shown`),
               onPromptSettled: (ordinal, settled) => {
                 if (state.run !== run || !settled || agent.continuity === undefined || state.binding === undefined) return
-                writeNative(dshAgent?.session, { provider: options.provider, nativeSessionId: run.sessionId, digest: state.binding, state: 'idle', ordinal }, message => this.warn(message))
+                // Only the prompt the chat's last record is about settles it: a run another one
+                // replaced, or a prompt a newer 'sent' followed, writes nothing (that would hide
+                // the newer prompt's uncertain dispatch after a restart).
+                const owner = this.live.get(sessionId)
+                if (owner !== undefined && owner !== state) return
+                const last = latestNative(dshAgent?.session, options.provider)
+                if (last?.state !== 'sent' || last.run !== run.runId || last.ordinal !== ordinal || last.nativeSessionId !== run.sessionId) return
+                writeNative(dshAgent?.session, { provider: options.provider, nativeSessionId: run.sessionId, digest: state.binding, state: 'idle', ordinal, run: run.runId }, message => this.warn(message))
               },
               provider: options.provider,
               ...(state.solverCwdReset ? { env: { ...spec.env, CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: '1' } } : {}),
@@ -2916,8 +2930,10 @@ export class AcpAdapter extends LlmAdapter {
       if (refused !== undefined) return yield refused
       const currentSkills = personCalls => skills?.project(options, { ...skillOptions, turnStart: inputStart, personCalls }) ?? options
       const beforeUploads = currentSkills()
+      // The uncertain prompt's rows (below) carry no upload again either.
+      const heldBack = fresh && live.reattached === true && live.interrupted === true ? new Set(live.uncertainRows ?? []) : undefined
       const uploads = uploadBlocks(
-        beforeUploads.messages, this.redact, dshAgent?.session, this.ctx)
+        heldBack === undefined ? beforeUploads.messages : beforeUploads.messages.filter(row => !heldBack.has(row.id)), this.redact, dshAgent?.session, this.ctx)
       const uploadRun = live.run
       const uploadSession = uploadRun.sessionId
       // Only the asynchronous upload path uses this stricter ownership check. Never
@@ -3070,12 +3086,15 @@ export class AcpAdapter extends LlmAdapter {
       if (prepared !== undefined && (!isDeepStrictEqual(send.messages, beforeUploads.messages) ||
           !isDeepStrictEqual(replay ?? [], live.replay ?? []))) return yield uploadStopped()
       // A reattached session that was answering when the host stopped has those rows already:
-      // they are not sent again, only the note that the last turn may have partly run.
+      // they are not sent again (the 'sent' record names them), only the note that the last turn
+      // may have partly run. The rows after them are this turn's and go as usual.
       const uncertain = fresh && live.reattached === true && live.interrupted === true
+      const dropped = uncertain ? new Set(live.uncertainRows ?? []) : undefined
       const cutRows = prepared === undefined && fresh && !uncertain && (live.replay === undefined || live.owed?.handoff === true)
         ? cutUserRows(send.messages, dshAgent?.session) : []
       const cutIds = new Set(cutRows.map(row => row.id))
-      const current = cutRows.length === 0 ? send.messages : send.messages.filter(row => !cutIds.has(row.id))
+      const current = dropped !== undefined ? send.messages.filter(row => !dropped.has(row.id))
+        : cutRows.length === 0 ? send.messages : send.messages.filter(row => !cutIds.has(row.id))
       const recovered = cutRows.length === 0 ? [] : [
         ...replayOf(cutRows, { renewed: true }),
         { type: 'text', text: 'The previous turn was interrupted. Check any tool outcomes before repeating work.' },
@@ -3174,6 +3193,34 @@ export class AcpAdapter extends LlmAdapter {
       }
       if (codexRow && live.appliedGate && !verifiedGate(finalPolicy.identity, true)) return yield stopProfile()
       if (!uploadValid()) return yield uploadStopped()
+      // Written, and on disk, before the prompt is: from here a restart cannot tell whether the
+      // agent acted. Only a route that can take its session back keeps a binding in the chat. A
+      // record that will not save sends nothing; one saved for a prompt that then does not go is
+      // withdrawn (the record before it is written again).
+      if (agent.continuity !== undefined && live.binding !== undefined) {
+        const before = latestNative(session, options.provider)
+        const withdraw = () => {
+          if (latestNative(session, options.provider)?.run !== live.run.runId) return
+          const { v: _v, ...held } = before ?? { provider: options.provider, nativeSessionId: live.run.sessionId, digest: live.binding, state: 'idle', ordinal: live.run.prompts, run: live.run.runId }
+          writeNative(session, held, message => this.warn(message))
+        }
+        const flush = typeof this.ctx.sessions?.flush === 'function' ? () => this.ctx.sessions.flush(session) : undefined
+        // A row with no id is named null: the record then cannot say which rows it carried, and
+        // a restart after it does not take the session back (decide, 'uncertain-rows-unknown').
+        const rows = [...(dropped ?? []), ...promptRows(current).rows.map(row => (typeof row.id === 'string' && row.id !== '' ? row.id : null))]
+        try {
+          await writeSent(session, { provider: options.provider, nativeSessionId: live.run.sessionId, digest: live.binding, ordinal: live.run.prompts + 1, run: live.run.runId, rows }, flush)
+        } catch (error) {
+          withdraw()
+          this.warn(`the native session binding was not saved, so the message was not sent: ${error?.message ?? error}`)
+          return yield finish('error', `${agent.name} was not sent this message: the chat could not save it first. Send it again.`, 'acp_binding_unsaved')
+        }
+        if (archived() || this.isArchived(sessionId)) { withdraw(); return yield finish('stop') }
+        if (startChanged() || live.held !== undefined || this.live.get(sessionId) !== live || options.signal?.aborted || !uploadValid()) {
+          withdraw()
+          return yield* stopChanged()
+        }
+      }
       started()
       live.replay = undefined
       live.owed = undefined
@@ -3190,9 +3237,7 @@ export class AcpAdapter extends LlmAdapter {
       live.confinedReason = undefined
       live.toolIds?.clear()
       live.skillCatalog = catalog?.text ? catalog.key : undefined
-      // Written before the prompt is: from here a restart cannot tell whether the agent acted.
-      // Only a route that can take its session back keeps a binding in the chat.
-      if (agent.continuity !== undefined && live.binding !== undefined) writeNative(session, { provider: options.provider, nativeSessionId: live.run.sessionId, digest: live.binding, state: 'sent', ordinal: live.run.prompts + 1 }, message => this.warn(message))
+      live.uncertainRows = undefined
       const review = teamService(this.ctx)
       const rows = promptRows(current).rows
       const verified = new Set(uploads?.reviews.size ? prompt.filter(block => block.type === 'image')
@@ -3251,7 +3296,11 @@ export class AcpAdapter extends LlmAdapter {
           const todos = todosOf(event.plans)
           const own = panel.foreign !== true
           const changed = event.plans.find(plan => plan.planId === event.change.planId)
-          if (own && !isDeepStrictEqual(panel.todos, todos) && (panel.todos !== undefined || todos.length > 0)) live.session?.append?.('todo/write', { todos })
+          // Before this turn wrote a list, the panel shows the chat's last one: an emptied plan
+          // clears it when that list was this plugin's (a session taken back removing its plan),
+          // never DSH's own.
+          const shown = panel.todos ?? (panel.lastOwn ? panel.last : undefined)
+          if (own && !isDeepStrictEqual(shown, todos) && (shown !== undefined || todos.length > 0)) live.session?.append?.('todo/write', { todos })
           ;(live.planRows ??= new Map())
           if (event.change.removed === true) {
             // A plan the chat already shows as a row gets a row saying it went; one not shown yet
@@ -3452,12 +3501,22 @@ export class AcpAdapter extends LlmAdapter {
 export function turnTodos(session) {
   let todos
   let foreign = false
-  for (let seq = (session?.seq ?? 0) - 1; seq >= 0; seq -= 1) {
+  let inTurn = true
+  const top = (session?.seq ?? 0) - 1
+  for (let seq = top; seq >= 0 && top - seq < 4000; seq -= 1) {
     const event = session.eventAt?.(seq)
-    if (event === undefined || event.type === 'turn/start') break
+    if (event === undefined) break
+    if (event.type === 'turn/start') {
+      if (todos !== undefined || foreign) break
+      inTurn = false
+      continue
+    }
     if (event.type !== 'todo/write') continue
+    const ours = session.eventAt?.(seq - 1)?.type === PLAN_RECORD
+    // An earlier turn's last list: what the panel shows before this turn writes one.
+    if (!inTurn) return { todos, foreign, last: event.data?.todos, lastOwn: ours }
     todos ??= event.data?.todos
-    if (session.eventAt?.(seq - 1)?.type !== PLAN_RECORD) foreign = true
+    if (!ours) foreign = true
   }
   return { todos, foreign }
 }

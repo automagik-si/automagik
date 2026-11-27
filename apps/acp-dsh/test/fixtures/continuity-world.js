@@ -1,5 +1,6 @@
 // The world continuity.test.js and plan-usage.test.js run in: the real adapter and bridge over
 // the stdio fake agent, which keeps native context in a state file across processes.
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,12 +17,13 @@ export const synthetic = phases => writeReceipt(process.env.ACP_RECEIPT_DIR, { r
 export const FAKE = join(import.meta.dirname, '..', '..', 'dev', 'fake-agent.mjs')
 export const ROUTE = 'acp-fake'
 
-export const user = text => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
+// DSH gives every message an id (createMessage); a restart's rows keep it.
+export const user = text => ({ id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
 export const answer = text => ({ role: 'assistant', source: { kind: 'model', provider: ROUTE, model: 'm' }, content: [{ type: 'text', text }] })
 
 // A Bot's own CLI home at a generation, and a connector build: what a real launch names
 // (agents.js launchOf, cli-homes.js environment). Without them a start binds nothing.
-export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }, account = () => 'account-a', startMs, home = () => ({ AUTOMAGIK_BOT_CLI_HOME: join(dir, 'cli-home'), AUTOMAGIK_BOT_CLI_GENERATION: 'g1', AUTOMAGIK_BOT_CLI_VERSION: '' }), connector = () => ({ version: '1.0.0', key: `${FAKE} fake-cli 1.0.0` }) }) {
+export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }, account = () => 'account-a', startMs, flush, home = () => ({ AUTOMAGIK_BOT_CLI_HOME: join(dir, 'cli-home'), AUTOMAGIK_BOT_CLI_GENERATION: 'g1', AUTOMAGIK_BOT_CLI_VERSION: '' }), connector = () => ({ version: '1.0.0', key: `${FAKE} fake-cli 1.0.0` }) }) {
   const trace = join(dir, 'fake.ndjson')
   const state = join(dir, 'native-state.json')
   const session = Session.create('s1', undefined, { version: 4, id: 's1', createdAt: 0, isSeeded: false, cwd: dir })
@@ -49,6 +51,8 @@ export function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }
       return undefined
     },
     logger: { warn: line => logs.push(`warn: ${line}`), info: line => logs.push(line) },
+    // DSH's session store, when a test gives it a durability checkpoint (`flush`).
+    ...(flush === undefined ? {} : { sessions: { get: id => (id === 's1' ? session : undefined), flush: target => flush(target) } }),
   }
   const logs = []
   const catalog = { models: async () => [{ id: 'default', name: 'Fake agent' }], model: async () => undefined, ownEffort: () => undefined, dispose() {} }
@@ -73,6 +77,17 @@ export async function turn(h, text) {
   const said = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
   h.messages.push(answer(said))
   return { chunks, said, finish: chunks.at(-1) }
+}
+
+/**
+ * One request as DSH's loop makes it after `rows` (the person's messages) with no answer written
+ * after them, the way an interrupted turn leaves the chat: the next request carries them again.
+ */
+export async function send(h, ...texts) {
+  h.messages.push(...texts.map(user))
+  const chunks = []
+  for await (const chunk of h.adapter.stream(markAgentLoopRequest({ provider: ROUTE, model: 'default', sessionId: 's1', messages: h.messages }))) chunks.push(chunk)
+  return { chunks, said: chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), finish: chunks.at(-1) }
 }
 
 export const events = path => (existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])

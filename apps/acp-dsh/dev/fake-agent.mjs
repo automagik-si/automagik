@@ -604,6 +604,17 @@ const implementation = {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `bridge tools: ${names}` } })
       return { stopReason: 'end_turn' }
     }
+    // A later turn's change to a plan an earlier turn sent (a session taken back: plan-usage.test.js).
+    if (/\bplan-remove-p1\b/.test(current)) {
+      await update({ sessionUpdate: 'plan_removed', planId: 'p1' })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Removed.' } })
+      return { stopReason: 'end_turn' }
+    }
+    if (/\bplan-update-p1\b/.test(current)) {
+      await update({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'p1', entries: [{ content: 'read the code', priority: 'high', status: 'completed' }, { content: 'ship it', priority: 'low', status: 'pending' }] } })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Updated.' } })
+      return { stopReason: 'end_turn' }
+    }
     // Plans (plan-usage.test.js): two plans, an update in place, an unknown removal and a removal.
     if (/\bplan-demo\b/.test(current)) {
       const items = (status) => ({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'p1', entries: [

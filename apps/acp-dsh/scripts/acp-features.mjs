@@ -15,12 +15,40 @@ import { pathToFileURL } from 'node:url'
 const PLUGIN = resolve(import.meta.dirname, '..')
 export const POLICY_PATH = join(PLUGIN, 'dev', 'acp-features.json')
 
+// A field's own schema under its wrappers (optional, nullable, default, and the SDK's
+// defaultOnError catch or pipe).
 const unwrap = (schema) => {
   let s = schema
-  while (s?._zod?.def?.innerType !== undefined) s = s._zod.def.innerType
-  return s
+  for (;;) {
+    const def = s?._zod?.def
+    if (def?.innerType !== undefined) s = def.innerType
+    else if (def?.type === 'pipe' && def.in !== undefined) s = def.in?._zod?.def?.type === 'transform' ? def.out : def.in
+    else return s
+  }
 }
 const shapeKeys = schema => Object.keys(unwrap(schema)?._zod?.def?.shape ?? {}).filter(key => key !== '_meta')
+
+/**
+ * Every capability under `root`, at any depth: `[id, type]`, where type is what the peer sends
+ * for it (`object`: `{}` turns it on; `boolean`; `record`). A nested object is walked too, so a
+ * capability inside one (fs.readTextFile, auth.terminal, elicitation.url) has its own decision.
+ */
+function capabilityIds(root, prefix) {
+  const out = []
+  const walk = (schema, path) => {
+    const def = unwrap(schema)?._zod?.def
+    for (const key of Object.keys(def?.shape ?? {})) {
+      if (key === '_meta') continue
+      const field = unwrap(def.shape[key])
+      const type = field?._zod?.def?.type
+      const id = `${prefix}:${[...path, key].join('.')}`
+      out.push([id, type === 'boolean' ? 'boolean' : type === 'object' ? 'object' : type ?? 'unknown'])
+      if (type === 'object') walk(field, [...path, key])
+    }
+  }
+  walk(root, [])
+  return out
+}
 
 function updateKinds(z) {
   const kinds = new Set()
@@ -40,17 +68,8 @@ function updateKinds(z) {
 
 const methodNames = (tree, prefix) => Object.values(tree).flatMap(value => (typeof value === 'string' ? [`${prefix}:${value}`] : methodNames(value, prefix)))
 
-// The capability objects a peer advertises, and where each sits.
-const CAPABILITIES = [
-  ['client-capability', 'zClientCapabilities'],
-  ['client-capability:session', 'zClientSessionCapabilities'],
-  ['client-capability:elicitation', 'zElicitationCapabilities'],
-  ['agent-capability', 'zAgentCapabilities'],
-  ['agent-capability:sessionCapabilities', 'zSessionCapabilities'],
-  ['agent-capability:promptCapabilities', 'zPromptCapabilities'],
-  ['agent-capability:mcpCapabilities', 'zMcpCapabilities'],
-  ['agent-capability:auth', 'zAgentAuthCapabilities'],
-]
+// The capability objects a peer advertises: each walked from its root, at every depth.
+const CAPABILITY_ROOTS = [['client-capability', 'zClientCapabilities'], ['agent-capability', 'zAgentCapabilities']]
 
 /** The inventory of the SDK installed beside this plugin: `{ sdk, items: [{ id, stable }] }`. */
 export async function inventory() {
@@ -65,7 +84,7 @@ export async function inventory() {
     import('@agentclientprotocol/sdk'), import('@agentclientprotocol/sdk/unstable'),
   ])
   const items = new Map()
-  const add = (id, stable) => items.set(id, { id, stable: (items.get(id)?.stable ?? false) || stable })
+  const add = (id, stable, type) => items.set(id, { id, stable: (items.get(id)?.stable ?? false) || stable, ...(type ?? items.get(id)?.type) === undefined ? {} : { type: type ?? items.get(id)?.type } })
   for (const [acp, stable] of [[unstableAcp, false], [stableAcp, true]]) {
     for (const id of methodNames(acp.methods.agent, 'method:agent')) add(id, stable)
     for (const id of methodNames(acp.methods.client, 'method:client')) add(id, stable)
@@ -73,7 +92,7 @@ export async function inventory() {
   }
   for (const [z, stable] of [[unstableZod, false], [stableZod, true]]) {
     for (const kind of updateKinds(z)) add(`update:${kind}`, stable)
-    for (const [prefix, name] of CAPABILITIES) for (const key of shapeKeys(z[name])) add(`${prefix}.${key}`.replace(/^([a-z-]+)\./, '$1:'), stable)
+    for (const [prefix, name] of CAPABILITY_ROOTS) for (const [id, type] of capabilityIds(z[name], prefix)) add(id, stable, type)
     for (const key of shapeKeys(z.zPromptResponse)) add(`prompt-response:${key}`, stable)
   }
   return { sdk, items: [...items.values()].sort((a, b) => a.id.localeCompare(b.id)) }
@@ -81,15 +100,18 @@ export async function inventory() {
 
 export const readPolicy = (path = POLICY_PATH) => JSON.parse(readFileSync(path, 'utf8'))
 
-/** The client capability object the implemented `client-capability:*` rows make. */
-export function implementedClientCapabilities(policy) {
+/**
+ * The client capability object the implemented `client-capability:*` rows make: `{}` for an
+ * object capability, `true` for a boolean one (`types`: id -> type, from the inventory).
+ */
+export function implementedClientCapabilities(policy, types = new Map()) {
   const out = {}
   for (const [id, row] of Object.entries(policy.features)) {
     if (row.status !== 'implemented' || !id.startsWith('client-capability:')) continue
     const path = id.slice('client-capability:'.length).split('.')
     let at = out
     for (const part of path.slice(0, -1)) at = (at[part] ??= {})
-    at[path.at(-1)] ??= {}
+    at[path.at(-1)] ??= types.get(id) === 'boolean' ? true : {}
   }
   return out
 }

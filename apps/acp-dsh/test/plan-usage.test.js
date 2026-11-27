@@ -5,9 +5,9 @@
 // it, RFC 0018), and a quarantined replay adds nothing.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PLAN_RECORD, USAGE_RECORD, plansFromLog, usageFromLog } from '../src/host/continuity.js'
+import { NATIVE_RECORD, PLAN_RECORD, USAGE_RECORD, latestNative, planScopeOf, plansFromLog, usageFromLog } from '../src/host/continuity.js'
 import { CLIENT_CAPABILITIES, Plans, contextOf, planOf, promptUsageOf, todosOf } from '../src/host/features.js'
-import { of, synthetic, turn, withFixture } from './fixtures/continuity-world.js'
+import { ROUTE, of, synthetic, turn, withFixture } from './fixtures/continuity-world.js'
 
 // The log as a reopened chat reads it: written out and parsed back.
 const reopened = session => JSON.parse(JSON.stringify(session.snapshotEvents()))
@@ -88,4 +88,65 @@ test('usage readings', () => {
   assert.deepEqual(promptUsageOf(undefined, 'acp-claude'), { completeness: 'absent', semantics: 'per-prompt' })
   assert.equal(promptUsageOf({ totalTokens: 1, inputTokens: 1, outputTokens: 0 }, 'acp-codex').semantics, 'unknown')
   assert.deepEqual(promptUsageOf({ inputTokens: 1.5 }, 'x'), { completeness: 'absent', semantics: 'unknown', tokens: {} })
+})
+
+// The panel DSH draws is its last `todo/write` (its todos projection folds them).
+const panelOf = session => session.snapshotEvents().filter(event => event.type === 'todo/write').at(-1)?.data.todos
+
+test('a session taken back knows the plans the chat shows: a later removal or update of one reaches the panel and the reopened chat', async () => {
+  await withFixture('plan-reattach', { env: { FAKE_ACP_RESUME: '1' } }, async (h) => {
+    await turn(h, 'plan-demo')
+    const native = latestNative(h.session, ROUTE).nativeSessionId
+    assert.deepEqual(panelOf(h.session).map(todo => todo.content), ['read the code', 'write the fix'])
+    h.restart()
+    const updated = await turn(h, 'plan-update-p1')
+    assert.match(updated.said, /Updated/)
+    assert.equal(latestNative(h.session, ROUTE).nativeSessionId, native, 'the same native session, taken back')
+    const update = h.session.snapshotEvents().filter(event => event.type === PLAN_RECORD).at(-1).data.change
+    assert.deepEqual([update.planId, update.order, update.revision], ['p1', 0, 1], 'the same plan in its place, one revision on')
+    assert.deepEqual(panelOf(h.session).map(todo => todo.content), ['read the code', 'ship it'])
+    h.restart()
+    await turn(h, 'plan-remove-p1')
+    const removal = h.session.snapshotEvents().filter(event => event.type === PLAN_RECORD).at(-1).data.change
+    assert.equal(removal.planId, 'p1')
+    assert.equal(removal.removed, true)
+    assert.deepEqual(panelOf(h.session), [], 'the removed checklist is cleared, not left showing')
+    assert.deepEqual(plansFromLog(reopened(h.session)).map(plan => plan.planId), ['p2'])
+  })
+})
+
+test('a new native session never brings back the plans of the one before it', async () => {
+  await withFixture('plan-fresh', {}, async (h) => {
+    await turn(h, 'plan-demo')
+    const first = latestNative(h.session, ROUTE).nativeSessionId
+    h.restart()
+    // This agent cannot take its session back: a new one starts, with no plans of its own.
+    await turn(h, 'plan-remove-p1')
+    const second = latestNative(h.session, ROUTE).nativeSessionId
+    assert.notEqual(second, first)
+    assert.equal(h.session.snapshotEvents().filter(event => event.type === PLAN_RECORD && event.data.change.removed === true).length, 0, 'the new session has no p1 to remove')
+    assert.deepEqual(planScopeOf(reopened(h.session)), { provider: ROUTE, nativeSessionId: second })
+    assert.deepEqual(plansFromLog(reopened(h.session)), [], 'the old session\'s plans do not come back on reopen')
+    assert.deepEqual(plansFromLog(reopened(h.session), { provider: ROUTE, nativeSessionId: first }).map(plan => plan.planId), ['p1', 'p2'], 'they are still that session\'s')
+  })
+})
+
+test('the fold is per native session: cumulative within one, reset by the next', () => {
+  const record = (type, data) => ({ type, ignorable: true, data })
+  const items = (planId, content) => ({ planId, type: 'items', entries: [{ content, priority: 'low', status: 'pending' }] })
+  const a = { provider: ROUTE, nativeSessionId: 'A' }
+  const b = { provider: ROUTE, nativeSessionId: 'B' }
+  const log = [
+    record(NATIVE_RECORD, { ...a, state: 'idle' }),
+    record(PLAN_RECORD, { ...a, change: items('a1', 'one') }),
+    record(PLAN_RECORD, { ...a, change: items('a2', 'two') }),
+    record(PLAN_RECORD, { ...a, change: { planId: 'a1', removed: true } }),
+  ]
+  assert.deepEqual(plansFromLog(log).map(plan => plan.planId), ['a2'])
+  const later = [...log, record(NATIVE_RECORD, { ...b, state: 'idle' })]
+  assert.deepEqual(plansFromLog(later), [], 'session B with no plan records shows nothing of A')
+  assert.deepEqual(plansFromLog([...later, record(PLAN_RECORD, { ...b, change: items('b1', 'three') })]).map(plan => plan.planId), ['b1'])
+  // A route that keeps no binding: the last plan record's session.
+  assert.deepEqual(plansFromLog(log.slice(1)).map(plan => plan.planId), ['a2'])
+  assert.deepEqual(plansFromLog([]), [])
 })

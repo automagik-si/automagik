@@ -115,9 +115,16 @@ export function recordFromReceipts({ pin, previous, receipts, packages = adapter
   const failures = []
   const adapters = { ...previous?.adapters }
   const kept = []
+  // One run's receipts make one record: a receipt with no run, or of another run (an old one
+  // left in the folder), is never evidence for this one.
+  const runs = new Set(receipts.map(({ receipt }) => receipt?.run))
+  if (runs.size > 1 || runs.has(undefined) || runs.has('')) failures.push(`the receipts are not of one run (${[...runs].map(run => run ?? 'none').join(', ')}): run the suite with ACP_RECEIPT_RUN set, into an empty ACP_RECEIPT_DIR`)
   for (const { name, receipt, problems } of receipts) {
     if (problems.length > 0) { failures.push(`${name}: ${problems.join('; ')}`); continue }
     if (receipt.sdk !== pin) { failures.push(`${name} ran on SDK ${receipt.sdk}, not the pin ${pin}`); continue }
+    // A phase that failed is a failed run, whatever else passed: it never moves the record.
+    const failed = Object.entries(receipt.phases).filter(([, outcome]) => outcome === 'failed').map(([phase]) => phase)
+    if (failed.length > 0) { failures.push(`${name}: ${failed.join(', ')} failed`); continue }
     if (receipt.scenario !== 'synthetic-replay') {
       if (!packages.includes(receipt.adapter?.name)) { failures.push(`${name} names an adapter the app does not install`); continue }
       if (receipt.phases.initialize !== 'passed') { failures.push(`${name}: initialize did not pass`); continue }

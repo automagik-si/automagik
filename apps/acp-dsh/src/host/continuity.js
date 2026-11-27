@@ -3,10 +3,13 @@
 // one fed the DSH transcript. The chat's own log holds what that takes, as ignorable plugin
 // records (a reader that does not know them skips them, so old and new chats both open):
 //
-//   plugin:acp-dsh/native-session  { v, provider, nativeSessionId, digest, state, ordinal?, outcome? }
+//   plugin:acp-dsh/native-session  { v, provider, nativeSessionId, digest, state, ordinal?, rows? }
 //                                  state 'idle' after a start or a prompt's end, 'sent' while a
 //                                  prompt is written and not answered. A 'sent' last record is
-//                                  an uncertain dispatch: the agent may have acted on it.
+//                                  an uncertain dispatch: the agent may have acted on it. `rows`
+//                                  names the chat rows (their ids) that prompt carried, so a
+//                                  restart sends none of them again. 'sent' is on disk before
+//                                  the prompt goes out (writeSent), or the prompt does not go.
 //   plugin:acp-dsh/plan            one plan change (features.js Plans), for a reopened chat
 //   plugin:acp-dsh/usage           one prompt's usage as the agent reported it, once per prompt
 //
@@ -71,29 +74,77 @@ export function decide({ route, record, digest }) {
   if (record === undefined) return { skip: 'no-binding' }
   if (record.v !== BINDING_VERSION || typeof record.nativeSessionId !== 'string' || record.nativeSessionId === '') return { skip: 'no-binding' }
   if (record.digest !== digest) return { skip: 'binding-changed' }
-  return { sessionId: record.nativeSessionId, methods: route.methods, interrupted: record.state === 'sent' }
+  if (record.state !== 'sent') return { sessionId: record.nativeSessionId, methods: route.methods, interrupted: false }
+  // An uncertain dispatch that does not say which rows it carried cannot be told apart from the
+  // rows after it: the session is not taken back (the chat is replayed to a new one instead).
+  if (!Array.isArray(record.rows) || !record.rows.every(id => typeof id === 'string' && id !== '')) return { skip: 'uncertain-rows-unknown' }
+  return { sessionId: record.nativeSessionId, methods: route.methods, interrupted: true, rows: [...record.rows] }
 }
 
 /** Writes one native-session record; never fails the turn (a log that will not take it starts fresh next time). */
 export function writeNative(session, data, warn) {
   try {
     appendPluginRecord(session, NATIVE_RECORD, { v: BINDING_VERSION, ...data })
+    return true
   } catch (error) {
     try { warn?.(`the native session binding was not written: ${error?.message ?? error}`) } catch {}
+    return false
   }
 }
 
-/** The plans this chat shows, folded from its plan records: what a reopened chat draws. */
-export function plansFromLog(events) {
-  const plans = new Plans()
+/**
+ * Writes the 'sent' record and waits until it is durable (`flush`, DSH's session/flush), before
+ * the prompt goes out. Throws when either fails: the caller then sends nothing, so a restart never
+ * reads an older 'idle' record as the truth about a prompt the agent may have acted on.
+ */
+export async function writeSent(session, data, flush) {
+  appendPluginRecord(session, NATIVE_RECORD, { v: BINDING_VERSION, ...data, state: 'sent' })
+  if (typeof flush === 'function') await flush()
+}
+
+const sameScope = (data, scope) => data?.provider === scope.provider && data?.nativeSessionId === scope.nativeSessionId
+
+/**
+ * The native session a chat's plans belong to: the last native-session record's, else (a route
+ * that keeps no binding) the last plan record's. Undefined when there is neither.
+ */
+export function planScopeOf(events) {
+  let native
+  let plan
   for (const event of events) {
-    if (event?.type !== PLAN_RECORD || event.ignorable !== true) continue
+    if (event?.ignorable !== true) continue
+    if (event.type === NATIVE_RECORD) native = event
+    else if (event.type === PLAN_RECORD) plan = event
+  }
+  const last = native ?? plan
+  return last === undefined ? undefined : { provider: last.data?.provider, nativeSessionId: last.data?.nativeSessionId }
+}
+
+/**
+ * The plans of one native session (`scope`: { provider, nativeSessionId }, by default the chat's
+ * current one, planScopeOf), folded from its plan records in order: what a reopened chat draws and
+ * what a session taken back starts from. Another native session's plans never come back.
+ */
+export function plansFromLog(events, scope = planScopeOf(events)) {
+  const plans = new Plans()
+  if (scope === undefined) return []
+  for (const event of events) {
+    if (event?.type !== PLAN_RECORD || event.ignorable !== true || !sameScope(event.data, scope)) continue
     const change = event.data?.change
     if (change === undefined) continue
     if (change.removed === true) plans.take({ planId: change.planId, removed: true })
     else plans.take(change)
   }
   return plans.list().map(({ planId, type, entries, markdown, path }) => ({ planId, type, ...(type === 'markdown' ? { markdown, ...(path === undefined ? {} : { path }) } : { entries }) }))
+}
+
+/** The plan records of one native session in `session`'s log (bounded, as latestNative), oldest first. */
+export function planEventsOf(session, scope) {
+  const out = []
+  for (const event of backwards(session)) {
+    if (event.type === PLAN_RECORD && event.ignorable === true && sameScope(event.data, scope)) out.push(event)
+  }
+  return out.reverse()
 }
 
 /** The usage records of this chat, one per prompt (`runId`, `ordinal`), however often it was read. */

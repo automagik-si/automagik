@@ -13,8 +13,10 @@ import { createHash } from 'node:crypto'
  */
 export const CLIENT_CAPABILITIES = Object.freeze({
   plan: Object.freeze({}),
-  // `notice` and `compaction_update` / `compaction_summary_chunk` become chat rows (SessionRows).
-  session: Object.freeze({ notices: Object.freeze({}), compaction: Object.freeze({}) }),
+  // `notice` and `compaction_update` / `compaction_summary_chunk` become chat rows (SessionRows);
+  // so does the current `prompt_suggestions_update` list, of text and resource_link blocks only
+  // (the base the capability promises: no image, audio or embedded resource is advertised).
+  session: Object.freeze({ notices: Object.freeze({}), compaction: Object.freeze({}), promptSuggestions: Object.freeze({}) }),
   // A form elicitation is asked in DSH's question dialog (elicitationQuestions); a URL one is not.
   elicitation: Object.freeze({ form: Object.freeze({}) }),
 })
@@ -280,9 +282,10 @@ export class SessionRows {
         return { key: 'commands', notice: 'commands', summary: `The agent's commands: ${commands.slice(0, 6).map(command => `/${command.name}`).join(', ')}${commands.length > 6 ? ', …' : ''}`, text: `[The agent's own commands; type one as the first word of a message:]\n\n${commands.map(command => `- /${command.name}${command.description === '' ? '' : ` — ${command.description}`}`).join('\n')}` }
       }
       case 'prompt_suggestions_update': {
+        // The list replaces the one before; an empty list (or one with nothing readable) clears it.
         if (!Array.isArray(update.suggestions)) return undefined
         const suggestions = update.suggestions.map(suggestion => line(blocksText(suggestion?.prompt))).filter(Boolean).slice(0, 5)
-        if (suggestions.length === 0) return undefined
+        if (suggestions.length === 0) return { key: 'suggestions', clear: true }
         return { key: 'suggestions', notice: 'suggestions', summary: `Suggested next: ${suggestions[0]}`, text: `[The agent suggests what to send next:]\n\n${suggestions.map(suggestion => `- ${suggestion}`).join('\n')}` }
       }
       case 'subagent_update': {

@@ -30,8 +30,28 @@ test('every SDK item has a decision, and every decision an SDK item', async () =
   }
 })
 
-test('the client capabilities sent are exactly the implemented rows', () => {
-  assert.deepEqual(JSON.parse(JSON.stringify(CLIENT_CAPABILITIES)), implementedClientCapabilities(readPolicy()))
+test('the client capabilities sent are exactly the implemented rows', async () => {
+  const { items } = await inventory()
+  const types = new Map(items.map(item => [item.id, item.type]))
+  assert.deepEqual(JSON.parse(JSON.stringify(CLIENT_CAPABILITIES)), implementedClientCapabilities(readPolicy(), types))
+  // A boolean capability is sent as true, an object one as {} (fs.readTextFile vs plan).
+  assert.deepEqual(implementedClientCapabilities({ features: { 'client-capability:fs.readTextFile': { status: 'implemented' }, 'client-capability:plan': { status: 'implemented' } } }, types), { fs: { readTextFile: true }, plan: {} })
+})
+
+test('capabilities are read at every depth, so a nested one has its own decision', async () => {
+  const { items } = await inventory()
+  const ids = new Set(items.map(item => item.id))
+  for (const id of ['client-capability:fs.readTextFile', 'client-capability:fs.writeTextFile', 'client-capability:auth.terminal', 'client-capability:elicitation.form', 'client-capability:elicitation.url', 'client-capability:session.promptSuggestions.image', 'agent-capability:sessionCapabilities.systemPrompt.mode.override']) {
+    assert.ok(ids.has(id), id)
+  }
+  assert.equal(items.find(item => item.id === 'client-capability:fs.readTextFile').type, 'boolean')
+  // A nested capability is never sent while its parent is not.
+  const policy = readPolicy()
+  for (const [id, row] of Object.entries(policy.features)) {
+    if (!id.startsWith('client-capability:') || row.status !== 'implemented' || !id.includes('.')) continue
+    const parent = id.slice(0, id.lastIndexOf('.'))
+    assert.equal(policy.features[parent]?.status, 'implemented', `${id} is sent, so ${parent} is too`)
+  }
 })
 
 test('an unstable item is never declared as handled without a test', async () => {

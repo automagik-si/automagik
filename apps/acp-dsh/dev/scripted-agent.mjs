@@ -5,7 +5,10 @@
 //
 // Script: { initialize: <InitializeResponse>, session: <NewSessionResponse> | { authRequired: true },
 //           turn: [<step>] | turns: [[<step>], ...] } (`turns`: one list per prompt, in order) with steps
-//   { update: <SessionUpdate> }                     a session/update notification
+//   { update: <SessionUpdate>, when?: <path> }      a session/update notification; with `when`
+//                                                   (a client capability path, as
+//                                                   'session.promptSuggestions'), only when the
+//                                                   client advertised it, else traced as withheld
 //   { ask: { toolCall, options } }                 a session/request_permission, its outcome traced
 //   { waitCancel: true }                            waits for session/cancel, then ends cancelled
 //   { elicit: <CreateElicitationRequest> }          an elicitation/create, its answer traced
@@ -19,12 +22,15 @@ const trace = frame => appendFileSync(process.env.SCRIPTED_ACP_TRACE, `${JSON.st
 const { session } = methods.agent
 let cancelled
 let prompts = 0
+let advertised = {}
+const offered = path => path.split('.').reduce((at, key) => (at == null ? undefined : at[key]), advertised) != null
 const cancel = new Promise((resolve) => { cancelled = resolve })
 
 agent({ name: 'scripted-agent' })
   .onNotification(session.cancel, () => { trace({ in: 'session/cancel' }); cancelled() })
   .onRequest(methods.agent.initialize, ({ params }) => {
     trace({ in: 'initialize', clientCapabilities: params.clientCapabilities })
+    advertised = params.clientCapabilities ?? {}
     return script.initialize
   })
   .onRequest(session.new, ({ params }) => {
@@ -40,7 +46,9 @@ agent({ name: 'scripted-agent' })
     const steps = script.turns === undefined ? script.turn : script.turns[Math.min(prompts, script.turns.length - 1)]
     prompts += 1
     for (const step of steps) {
-      if (step.update !== undefined) {
+      if (step.update !== undefined && step.when !== undefined && !offered(step.when)) {
+        trace({ withheld: step.update.sessionUpdate, when: step.when })
+      } else if (step.update !== undefined) {
         trace({ out: 'session/update', update: step.update })
         await client.notify(methods.client.session.update, { sessionId: params.sessionId, update: step.update })
       } else if (step.ask !== undefined) {

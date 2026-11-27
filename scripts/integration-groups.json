@@ -82,6 +82,34 @@
       ]
     },
     {
+      "id": "acp-real-backend-claude",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/real-backend.test.js"],
+      "select": "real Claude Code:",
+      "env": ["AUTOMAGIK_TEST_CLAUDE_ACP", "AUTOMAGIK_TEST_CLAUDE"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Real claude-agent-acp and Claude Code on the loopback model stub: no account, no model request leaves the machine.",
+      "details": [
+        "PR CI installs no claude-agent-acp / Claude Code.",
+        "Scheduled acp-drift.yml installs the newest adapters daily and requires this test to run.",
+        "Its receipts name backend loopback-stub; they never stand for a signed-in run."
+      ]
+    },
+    {
+      "id": "acp-real-backend-codex",
+      "cwd": "apps/acp-dsh",
+      "files": ["test/real-backend.test.js"],
+      "select": "real Codex:",
+      "env": ["AUTOMAGIK_TEST_CODEX_ACP", "AUTOMAGIK_TEST_CODEX"],
+      "jobs": {"acp-dsh (plugin tests)": "unprovisioned"},
+      "note": "Real codex-acp and native Codex on the loopback model stub: no account, no model request leaves the machine.",
+      "details": [
+        "PR CI installs no codex-acp / Codex.",
+        "Scheduled acp-drift.yml installs the newest adapters daily and requires this test to run.",
+        "Its receipts name backend loopback-stub; they never stand for a signed-in run."
+      ]
+    },
+    {
       "id": "acp-real-login-claude",
       "cwd": "apps/acp-dsh",
       "files": ["test/real-login.test.js"],

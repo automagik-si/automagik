@@ -465,6 +465,10 @@ export class AgentRun {
     const params = { sessionId: want.sessionId, cwd, mcpServers, ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }), ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }) }
     try {
       const answer = await (method === 'load' ? this.conn.loadSession(params) : this.conn.resumeSession(params))
+      // The session's plans as the chat last showed them (the adapter reads them from the chat's
+      // records of this native session), so a later update or removal of one finds it. A loaded
+      // session's replayed plans stay quarantined: these come from the chat, not the replay.
+      for (const plan of want.plans ?? []) this.plans.take(plan)
       this.continuity = { outcome: method === 'load' ? 'loaded' : 'resumed', method, ...(method === 'load' ? { replayed: this.quarantine.updates, permissions: this.quarantine.permissions } : {}) }
       return answer ?? {}
     } catch (error) {
@@ -635,6 +639,9 @@ export class AgentRun {
   prompt(prompt, onDelivered, signal) {
     if (this.busy) throw new Error(`${this.spec.name} is still answering`)
     this.queue = []
+    // Suggestions sent after the last prompt ended were for the message the person has now
+    // written: they are not shown after this one.
+    this.rows.delete('suggestions')
     this.promptSkillRefusals = new Set()
     this.reviews = { denied: 0, inRow: 0, last: undefined, after: false }
     this.promptEnded = false
@@ -1088,7 +1095,8 @@ export class AgentRun {
       case 'subagent_update': {
         if (typeof sessionId !== 'string' || sessionId !== this.sessionId) break
         const row = this.sessionRows.take(update)
-        if (row !== undefined) {
+        if (row?.clear === true) this.rows.delete(row.key)
+        else if (row !== undefined) {
           this.rows.delete(row.key)
           this.rows.set(row.key, row)
           while (this.rows.size > 50) this.rows.delete(this.rows.keys().next().value)

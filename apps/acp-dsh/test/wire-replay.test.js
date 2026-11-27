@@ -8,6 +8,7 @@
 // usage, the plan beside DSH's own `todo_write` list, Stop while the approval is open, and a
 // handshake that stops at auth_required.
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -177,7 +178,7 @@ test('one approved tool call: the wire and the reopened chat match their goldens
   assert.deepEqual(r.reopened.rows, r.live.rows, 'the reopened chat is the chat as it was')
   assert.equal(r.asked.length, 1, 'one approval for one call')
   assert.equal(r.reopened.todos, null, 'no plan, no list')
-  assert.deepEqual(CLIENT_CAPABILITIES, { plan: {}, session: { notices: {}, compaction: {} }, elicitation: { form: {} } })
+  assert.deepEqual(CLIENT_CAPABILITIES, { plan: {}, session: { notices: {}, compaction: {}, promptSuggestions: {} }, elicitation: { form: {} } })
   writeReceipt(process.env.ACP_RECEIPT_DIR, {
     route: 'acp-scripted', scenario: 'synthetic-replay', sdk: SDK, platform: `${process.platform}-${process.arch}`, node: process.version,
     phases: { initialize: 'passed', session: 'passed', prompt: 'passed', toolApproval: 'passed' },
@@ -377,6 +378,73 @@ test('notices, compaction, commands, subagents and session messages are rows, al
   assert.match(rows[0].text, /- \/review — Review the diff/)
   assert.match(rows[1].text, /80% of the window used\./)
   assert.deepEqual(r.reopened.rows.filter(row => row.role !== 'notice'), [{ role: 'user', text: 'make the report' }, { role: 'assistant', text: 'All done.', calls: 0 }])
+})
+
+// Prompt suggestions (unstable): an agent sends them only when the client advertised
+// `session.promptSuggestions` (`when`); each list replaces the last, an empty one clears it, and
+// a list sent for an earlier prompt is never shown after the next one.
+const suggest = (...prompts) => ({ update: { sessionUpdate: 'prompt_suggestions_update', suggestions: prompts.map(prompt => ({ prompt: [{ type: 'text', text: prompt }] })) }, when: 'session.promptSuggestions' })
+const SUGGEST = {
+  ...APPROVED,
+  turns: [
+    [{ update: text('One.') }, suggest('run the tests', 'open a PR'), suggest('ship it'), { end: 'end_turn' }],
+    [{ update: text('Two.') }, suggest('clean up'), suggest(), { end: 'end_turn' }],
+  ],
+}
+
+test('prompt suggestions are advertised and shown as the latest list; an empty list clears it', { timeout: 60_000 }, async (t) => {
+  let durable
+  const r = await roundTrip(t, SUGGEST, {
+    during: async (agent, host) => {
+      await say(agent, 'first')
+      await say(agent, 'second')
+      // The checkpoint a continuity route's 'sent' record waits on (adapter.js, writeSent) takes
+      // the chat's own Session in DSH's loop, and has a durability listener here (JSONL).
+      durable = await host.ctx.sessions.flush(agent.session)
+    },
+  })
+  assert.equal(durable, true)
+  const advertised = r.wire().find(frame => frame.in === 'initialize').clientCapabilities
+  assert.deepEqual(advertised.session.promptSuggestions, {})
+  assert.equal(r.wire().filter(frame => frame.withheld !== undefined).length, 0, 'the peer sent every list: it was told it may')
+  const rows = r.reopened.rows.filter(row => row.role === 'notice' && row.notice === 'suggestions')
+  assert.deepEqual(rows.map(row => row.summary), ['Suggested next: ship it'], 'the first prompt shows only its last list; the second cleared its own')
+  assert.match(rows[0].text, /- ship it/)
+  assert.equal(rows[0].text.includes('run the tests'), false)
+  // Never history: the agent's next prompt does not carry a suggestion as the person's words.
+  const prompts = r.wire().filter(frame => frame.in === 'session/prompt').map(frame => frame.text)
+  assert.equal(prompts.at(-1).includes('ship it'), false, prompts.at(-1))
+})
+
+test('a peer that is not told it may send suggestions sends none', { timeout: 30_000 }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'acp-suggest-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const script = join(root, 'script.json')
+  const trace = join(root, 'trace.ndjson')
+  writeFileSync(script, JSON.stringify({ ...SUGGEST, turns: undefined, turn: SUGGEST.turns[0] }))
+  const child = spawn(process.execPath, [AGENT], { env: { ...process.env, SCRIPTED_ACP_SCRIPT: script, SCRIPTED_ACP_TRACE: trace }, stdio: ['pipe', 'pipe', 'inherit'] })
+  t.after(() => child.kill('SIGKILL'))
+  const answers = new Map()
+  let rest = ''
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => {
+    rest += chunk
+    for (let at = rest.indexOf('\n'); at !== -1; at = rest.indexOf('\n')) {
+      const message = JSON.parse(rest.slice(0, at))
+      rest = rest.slice(at + 1)
+      if (message.method === undefined) answers.get(message.id)?.(message)
+    }
+  })
+  const request = (id, method, params) => new Promise((resolve) => {
+    answers.set(id, resolve)
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+  })
+  await request(1, 'initialize', { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { session: { notices: {} } } })
+  const session = await request(2, 'session/new', { cwd: root, mcpServers: [] })
+  await request(3, 'session/prompt', { sessionId: session.result.sessionId, prompt: [{ type: 'text', text: 'first' }] })
+  const frames = readFileSync(trace, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  assert.equal(frames.filter(frame => frame.update?.sessionUpdate === 'prompt_suggestions_update').length, 0)
+  assert.deepEqual(frames.filter(frame => frame.withheld !== undefined).map(frame => frame.withheld), ['prompt_suggestions_update', 'prompt_suggestions_update'])
 })
 
 const FORM = { mode: 'form', message: 'Which environment should I deploy to?', requestedSchema: { type: 'object', properties: { target: { type: 'string', title: 'Environment', enum: ['staging', 'production'] }, replicas: { type: 'integer', title: 'Replicas' }, notify: { type: 'boolean', title: 'Notify the team' } }, required: ['target'] } }

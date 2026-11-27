@@ -137,7 +137,7 @@ for (const real of REAL) {
   const spec = AGENTS[real.id]
   const skip = real.adapter && real.cli ? false : `set ${real.names} to run the real ${spec.defaultName} on the loopback model stub`
 
-  test(`real ${spec.defaultName} on a synthetic backend: native history and a fresh bridge survive a restart`, { skip, timeout: 240_000 }, async (t) => {
+  test(`real ${spec.defaultName}: on a synthetic backend, native history and a fresh bridge survive a restart`, { skip, timeout: 240_000 }, async (t) => {
     const stub = await startModelStub()
     t.after(() => stub.close())
     const root = mkdtempSync(join(tmpdir(), 'acp-real-backend-'))

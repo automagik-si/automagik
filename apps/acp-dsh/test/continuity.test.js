@@ -7,7 +7,7 @@ import { rmSync } from 'node:fs'
 import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { NATIVE_RECORD, bindingOf, decide, latestNative } from '../src/host/continuity.js'
-import { ROUTE, answer, of, synthetic, turn, user, withFixture } from './fixtures/continuity-world.js'
+import { ROUTE, answer, of, send, synthetic, turn, user, withFixture } from './fixtures/continuity-world.js'
 
 for (const how of ['resume', 'load']) {
   test(`a restart takes back the native session by ${how}: the agent remembers what only it was told, and nothing is replayed`, async () => {
@@ -109,7 +109,9 @@ test('a changed account, a changed Bot policy or an old chat with no binding sta
   // The decision itself, for what the adapter computes into the digest.
   assert.deepEqual(decide({ route: { methods: ['resume'] }, record: undefined, digest: 'd' }), { skip: 'no-binding' })
   assert.deepEqual(decide({ route: { methods: ['resume'] }, record: { v: 1, nativeSessionId: 'n', digest: 'x', state: 'idle' }, digest: 'd' }), { skip: 'binding-changed' })
-  assert.deepEqual(decide({ route: { methods: ['resume'] }, record: { v: 1, nativeSessionId: 'n', digest: 'd', state: 'sent' }, digest: 'd' }), { sessionId: 'n', methods: ['resume'], interrupted: true })
+  assert.deepEqual(decide({ route: { methods: ['resume'] }, record: { v: 1, nativeSessionId: 'n', digest: 'd', state: 'sent', rows: ['r1', 'r2'] }, digest: 'd' }), { sessionId: 'n', methods: ['resume'], interrupted: true, rows: ['r1', 'r2'] })
+  // An uncertain dispatch that cannot say which rows it carried is not taken back.
+  for (const rows of [undefined, ['r1', null], 'r1']) assert.deepEqual(decide({ route: { methods: ['resume'] }, record: { v: 1, nativeSessionId: 'n', digest: 'd', state: 'sent', rows }, digest: 'd' }), { skip: 'uncertain-rows-unknown' })
   await withFixture('old-chat', { env: { FAKE_ACP_RESUME: '1' } }, async (h) => {
     // Answers from before this version: no native-session record anywhere in the log.
     h.messages.push(user('earlier'), answer('earlier answer'))
@@ -223,5 +225,84 @@ test('a Stop during the reattachment ends the turn as a Stop and leaves the bind
     assert.notEqual(chunks.at(-1).reason.kind, 'stop')
     assert.equal(of(h, 'new-session').length, 1, 'no fresh session is started after a Stop')
     assert.equal(h.session.snapshotEvents().filter(event => event.type === NATIVE_RECORD).at(-1).data.state, 'idle')
+  })
+})
+
+// An interrupted turn leaves no answer after the person's rows, so the next request carries
+// them again, after any rows sent since: only those the uncertain prompt carried are held back.
+test('an uncertain prompt of several rows is never sent again, across two crashes, and the rows after it are', async () => {
+  await withFixture('uncertain-rows', { env: { FAKE_ACP_RESUME: '1' } }, async (h) => {
+    await turn(h, 'native-remember m-8')
+    const cut = await send(h, 'exit-mid-prompt first-instruction', 'and-also second-instruction')
+    assert.notEqual(cut.finish.reason.kind, 'stop')
+    const sent = latestNative(h.session, ROUTE)
+    assert.equal(sent.state, 'sent')
+    assert.deepEqual(sent.rows, h.messages.slice(-2).map(row => row.id), 'the record names exactly the rows that prompt carried')
+    h.restart()
+    // The retry after the restart: the same native session, the interrupted rows held back.
+    const second = await send(h, 'exit-mid-prompt third-instruction')
+    assert.notEqual(second.finish.reason.kind, 'stop')
+    let prompt = of(h, 'prompt').at(-1).text
+    for (const old of ['first-instruction', 'second-instruction']) assert.equal(prompt.includes(old), false, prompt)
+    assert.match(prompt, /third-instruction/)
+    assert.match(prompt, /may have partly run/)
+    // That prompt crashed too: its record still names the first prompt's rows beside its own.
+    assert.deepEqual(latestNative(h.session, ROUTE).rows, h.messages.slice(-3).map(row => row.id))
+    h.restart()
+    const after = await send(h, 'native-recall')
+    assert.equal(after.finish.reason.kind, 'stop')
+    assert.match(after.said, /m-8/, 'still the same native session')
+    prompt = of(h, 'prompt').at(-1).text
+    for (const old of ['first-instruction', 'second-instruction', 'third-instruction']) assert.equal(prompt.includes(old), false, prompt)
+    assert.match(prompt, /native-recall/)
+    assert.equal(of(h, 'acted').length, 2, 'each interrupted action ran once: nothing was dispatched again')
+    assert.equal(latestNative(h.session, ROUTE)?.state, 'idle')
+  })
+})
+
+test('a sent record that cannot be saved sends nothing and leaves the record it found', async () => {
+  let failing = false
+  const flush = async () => { if (failing) throw new Error('disk full') }
+  await withFixture('unsaved', { env: { FAKE_ACP_RESUME: '1' }, flush }, async (h) => {
+    await turn(h, 'native-remember m-9')
+    const before = latestNative(h.session, ROUTE)
+    assert.equal(before.state, 'idle')
+    const prompts = of(h, 'prompt').length
+    failing = true
+    const refused = await send(h, 'native-remember never-sent')
+    assert.equal(refused.finish.reason.kind, 'error')
+    assert.equal(refused.finish.reason.failure.code, 'acp_binding_unsaved')
+    assert.equal(of(h, 'prompt').length, prompts, 'no prompt went to the agent')
+    const { v: _v, ...held } = latestNative(h.session, ROUTE)
+    const { v: _w, ...was } = before
+    assert.deepEqual(held, was, 'the record withdrawn: the chat says what it said before')
+    assert.ok(h.logs.some(line => line.includes('disk full')))
+    // Saved again, the next prompt goes, and a restart takes the session back with no warning.
+    failing = false
+    h.messages.pop()
+    await turn(h, 'native-remember m-10')
+    h.restart()
+    const after = await turn(h, 'native-recall')
+    assert.match(after.said, /m-9,m-10/)
+    assert.equal(of(h, 'prompt').at(-1).text.includes('may have partly run'), false)
+  })
+})
+
+test('a prompt that settles after its run was replaced writes nothing over the newer record', async () => {
+  await withFixture('late', { env: { FAKE_ACP_RESUME: '1' } }, async (h) => {
+    await turn(h, 'native-remember m-11')
+    const old = h.adapter.live.get('s1').run
+    h.restart()
+    await turn(h, 'native-remember m-12')
+    const records = h.session.snapshotEvents().filter(event => event.type === NATIVE_RECORD).length
+    const newer = latestNative(h.session, ROUTE)
+    assert.notEqual(newer.run, old.runId)
+    // The old run's answer arriving now: it is not the chat's last prompt, so it says nothing.
+    old.spec.onPromptSettled(1, true)
+    // Nor does a prompt of the current run that is not the last record's.
+    const current = h.adapter.live.get('s1').run
+    current.spec.onPromptSettled(newer.ordinal + 1, true)
+    assert.equal(h.session.snapshotEvents().filter(event => event.type === NATIVE_RECORD).length, records)
+    assert.deepEqual(latestNative(h.session, ROUTE), newer)
   })
 })

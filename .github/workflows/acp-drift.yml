@@ -115,7 +115,7 @@ jobs:
             echo
             echo "Run: ${RUN_URL}"
             echo
-            echo 'To clear it: bump `@agentclientprotocol/sdk` in `apps/acp-dsh/package.json` (exact version, with `bun.lock`), run the plugin suite and the real-adapter tests with `ACP_RECEIPT_DIR` set, then `node scripts/acp-drift.mjs --record --receipts <that dir>`, in one pull request.'
+            echo 'To clear it: bump `@agentclientprotocol/sdk` in `apps/acp-dsh/package.json` (exact version, with `bun.lock`), run the plugin suite and the real-adapter tests with `ACP_RECEIPT_DIR` (an empty folder) and `ACP_RECEIPT_RUN` set, then `node scripts/acp-drift.mjs --record --receipts <that dir>`, in one pull request.'
           } > "${body}"
           number=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number,title --jq "map(select(.title == \"${title}\")) | .[0].number // empty")
           if [ -n "${number}" ]; then
@@ -338,6 +338,7 @@ jobs:
           set -uo pipefail
           # Each launch writes its receipt (scripts/acp-receipts.mjs), kept with the run's log.
           export ACP_RECEIPT_DIR="${RUNNER_TEMP}/acp-receipts"
+          export ACP_RECEIPT_RUN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-daily-${RUNNER_OS}"
           if npm test > "${RUNNER_TEMP}/acp-daily.log" 2>&1; then
             code=0
           else
@@ -353,6 +354,11 @@ jobs:
           for agent in 'Claude Code' 'Codex'; do
             if ! grep -q "^✔ real ${agent}: the adapter answers initialize" "${RUNNER_TEMP}/acp-daily.log"; then
               echo "::error::the real-adapter tests did not run for ${agent}"
+              echo "code=3" >> "$GITHUB_OUTPUT"
+            fi
+            # The real adapter and CLI on the loopback model stub (test/real-backend.test.js).
+            if ! grep -q "^✔ real ${agent}: on a synthetic backend, " "${RUNNER_TEMP}/acp-daily.log"; then
+              echo "::error::the synthetic-backend test did not run for ${agent}"
               echo "code=3" >> "$GITHUB_OUTPUT"
             fi
           done
@@ -593,6 +599,7 @@ jobs:
           # The record must name the new pin before the suite's own check of it runs. The suite's
           # launches write receipts; the record's adapters then come from what actually ran.
           export ACP_RECEIPT_DIR="${RUNNER_TEMP}/acp-receipts"
+          export ACP_RECEIPT_RUN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-bump"
           if { node scripts/acp-drift.mjs --record && bun run lint && npm test && node scripts/acp-drift.mjs --record --receipts "${ACP_RECEIPT_DIR}"; } > "${RUNNER_TEMP}/acp-bump.log" 2>&1; then
             code=0
           else

@@ -104,6 +104,14 @@
       "how": "Bot identity as systemPrompt append, else a preamble",
       "test": "test/bot-identity.test.js"
     },
+    "agent-capability:sessionCapabilities.systemPrompt.mode": {
+      "status": "not-consumed",
+      "reason": "the Bot identity is always sent in append mode (acp.js identityDelivery), which every agent advertising systemPrompt supports: no other mode is asked for"
+    },
+    "agent-capability:sessionCapabilities.systemPrompt.mode.override": {
+      "status": "not-consumed",
+      "reason": "override would replace the agent's own instructions with the Bot identity; the identity is appended instead, so the agent keeps its built-in safety and tool rules"
+    },
     "agent-capability:sessionCapabilities.title": {
       "status": "not-consumed",
       "reason": "unstable; DSH titles its chats"
@@ -111,6 +119,10 @@
     "client-capability:auth": {
       "status": "not-advertised",
       "reason": "sign-in runs the agent's own auth methods (login.js); terminal auth would take over a terminal DSH does not own"
+    },
+    "client-capability:auth.terminal": {
+      "status": "not-advertised",
+      "reason": "as client-capability:auth: terminal auth would take over a terminal DSH does not own; sign-in runs the agent's own auth methods (login.js)"
     },
     "client-capability:elicitation": {
       "status": "implemented",
@@ -130,6 +142,14 @@
       "status": "not-advertised",
       "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox"
     },
+    "client-capability:fs.readTextFile": {
+      "status": "not-advertised",
+      "reason": "as client-capability:fs: a client file read would run outside DSH's tool consent and sandbox; files reach the agent through the dsh MCP bridge with DSH's approval"
+    },
+    "client-capability:fs.writeTextFile": {
+      "status": "not-advertised",
+      "reason": "as client-capability:fs: a client file write would run outside DSH's tool consent and sandbox; writes go through the dsh MCP bridge with DSH's approval"
+    },
     "client-capability:plan": {
       "status": "implemented",
       "how": "plan_update and plan_removed become plugin:acp-dsh/plan records and the todo panel",
@@ -137,7 +157,7 @@
     },
     "client-capability:session": {
       "status": "implemented",
-      "how": "notices and compaction below",
+      "how": "notices, compaction and prompt suggestions below",
       "test": "test/wire-replay.test.js"
     },
     "client-capability:session.compaction": {
@@ -149,6 +169,10 @@
       "status": "not-advertised",
       "reason": "config options are read from session answers and config_option_update without the extension"
     },
+    "client-capability:session.configOptions.boolean": {
+      "status": "not-advertised",
+      "reason": "as client-capability:session.configOptions: this client reads only the model and effort select options (acp.js takeOptions) and has no control for a boolean option"
+    },
     "client-capability:session.cursors": {
       "status": "not-advertised",
       "reason": "unstable; no DSH surface shows an agent cursor"
@@ -159,8 +183,21 @@
       "test": "test/wire-replay.test.js"
     },
     "client-capability:session.promptSuggestions": {
+      "status": "implemented",
+      "how": "each prompt_suggestions_update list replaces the last as one chat row at the prompt's end (features.js SessionRows), an empty list clears it, a list from before a prompt is dropped when it starts, and the row is a notice: never sent to an agent or replayed as the person's words",
+      "test": "test/wire-replay.test.js"
+    },
+    "client-capability:session.promptSuggestions.audio": {
       "status": "not-advertised",
-      "reason": "unstable in SDK 2.12.0; a prompt_suggestions_update sent anyway is a chat row (SessionRows, test/wire-replay.test.js)"
+      "reason": "the suggestion row shows text and resource_link blocks only (features.js blockText); audio in a suggestion would be dropped from it"
+    },
+    "client-capability:session.promptSuggestions.embeddedContext": {
+      "status": "not-advertised",
+      "reason": "the suggestion row shows text and resource_link blocks only (features.js blockText); an embedded resource in a suggestion would be dropped from it"
+    },
+    "client-capability:session.promptSuggestions.image": {
+      "status": "not-advertised",
+      "reason": "the suggestion row shows text and resource_link blocks only (features.js blockText); an image in a suggestion would be dropped from it"
     },
     "client-capability:subagents": {
       "status": "not-advertised",
@@ -396,7 +433,7 @@
     },
     "update:prompt_suggestions_update": {
       "status": "handled",
-      "how": "a chat row of up to five suggestions; unstable, not advertised",
+      "how": "a chat row of up to five suggestions (text and resource_link blocks), the latest list per prompt; advertised as session.promptSuggestions",
       "test": "test/wire-replay.test.js"
     },
     "update:session_info_update": {
