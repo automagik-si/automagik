@@ -21,6 +21,9 @@ for (const how of ['resume', 'load']) {
       assert.match(after.said, /I remember: m-42 \(turn 2\)/)
       assert.equal(of(h, 'new-session').length, 1, 'no new session after the restart')
       assert.deepEqual(of(h, `${how}-session`).map(event => [event.sessionId, event.servers]), [[first, ['dsh']]])
+      // The session switches go again with the reattachment: without `disableBuiltInTools`
+      // Claude Code's resumed session offers its own tools beside the bridge (real-backend.test.js).
+      assert.deepEqual(of(h, `${how}-session`)[0].meta, { disableBuiltInTools: true })
       const prompt = of(h, 'prompt').at(-1).text
       assert.equal(prompt, 'native-recall', 'the chat is not replayed to a session that holds it')
       // A fresh bridge credential for the reattached session, never the old one.

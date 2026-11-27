@@ -327,7 +327,7 @@ const keep = (sessionId, session) => {
 }
 async function reattach(params, how) {
   const stored = readState()[params.sessionId]
-  trace({ event: `${how}-session`, sessionId: params.sessionId, found: stored !== undefined, servers: (params.mcpServers ?? []).map(server => server.name) })
+  trace({ event: `${how}-session`, sessionId: params.sessionId, found: stored !== undefined, servers: (params.mcpServers ?? []).map(server => server.name), meta: params._meta ?? null })
   if (process.env.FAKE_ACP_RESUME_HANG === '1') await new Promise(() => {})
   if (stored === undefined) throw RequestError.sessionNotFound(params.sessionId)
   const session = newSession(params.sessionId, params.cwd)

@@ -453,7 +453,11 @@ export class AgentRun {
     }
     this.sessionId = want.sessionId
     if (method === 'load') this.quarantine = { sessionId: want.sessionId, updates: 0, permissions: 0, tools: new Set() }
-    const params = { sessionId: want.sessionId, cwd, mcpServers, ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }) }
+    // The same session switches as `session/new` sends (`sessionMeta`: Claude Code's
+    // `disableBuiltInTools`): a session taken back without them offers the CLI's own tools
+    // beside the bridge (measured on claude-agent-acp 0.113.0, test/real-backend.test.js).
+    const { sessionMeta } = this.spec
+    const params = { sessionId: want.sessionId, cwd, mcpServers, ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }), ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }) }
     try {
       const answer = await (method === 'load' ? this.conn.loadSession(params) : this.conn.resumeSession(params))
       this.continuity = { outcome: method === 'load' ? 'loaded' : 'resumed', method, ...(method === 'load' ? { replayed: this.quarantine.updates, permissions: this.quarantine.permissions } : {}) }
