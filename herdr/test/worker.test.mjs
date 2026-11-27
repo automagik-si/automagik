@@ -4391,7 +4391,7 @@ test("unproxied worker CLI stays on the guard path with switch off and forged en
     "an unproxied pane retains server.status for core id");
 });
 
-async function startOneShotTransportServer(t, socketPath, result) {
+async function startOneShotTransportServer(t, socketPath, result, { status = { core: { id: "fakecore0000" } } } = {}) {
   const requests = [];
   const sockets = new Set();
   const server = net.createServer((socket) => {
@@ -4406,7 +4406,7 @@ async function startOneShotTransportServer(t, socketPath, result) {
       if (newline < 0) return;
       const { id, method } = JSON.parse(input.slice(0, newline));
       requests.push(method);
-      const answer = method === "server.status" ? { result: { core: { id: "fakecore0000" } } }
+      const answer = method === "server.status" && status ? { result: status }
         : method === "proxy.workerTransport" && result ? { result } : { error: { code: -32601, message: "unknown method" } };
       socket.end(JSON.stringify({ jsonrpc: "2.0", id, ...answer }) + "\n");
     });
@@ -5128,6 +5128,140 @@ async function reachBarrier(barrier) {
   for (let i = 0; i < 160 && !existsSync(barrier.entered); i++) await new Promise(resolve => setTimeout(resolve, 50));
   return JSON.parse(readFileSync(barrier.entered, "utf8"));
 }
+
+test("#2085 source round 1 P1: revive carries only an exact unended worker's team", async t => {
+  for (const scenario of ["exact worker", "reused address", "foreign core", "duplicate start", "pre-ended", "different Bot", "label only"]) {
+    await t.test(scenario, sub => {
+      const s = scene(sub);
+      bindIn(s, "t1", ID.dev, s.project);
+      publishSkills(s);
+      const { terminal } = startForSkills(s, "fix/revive-skills");
+      const [source] = s.ledger();
+      assert.equal(source.botId, ID.dev);
+      assert.ok(source.skillTeam);
+      const state = s.hcState();
+      const parent = state.terminals.find(pane => pane.address === "t1");
+      const worker = state.terminals.find(pane => pane.address === terminal);
+      parent.foreground.argv = ["zsh"];
+      worker.status.state = "idle";
+      worker.screen = "> ";
+      const unrelated = { ...term("t80", { cwd: s.project }), argv: ["claude"], parent: "t1", die_with_parent: true,
+        labels: { "agent.session": "99999999-9999-4999-8999-999999999999" }, screen: "> " };
+      state.terminals.push(unrelated);
+      if (scenario === "reused address") worker.created_ms += 1;
+      const rows = scenario === "label only" ? [] : [{ ...source }];
+      if (scenario === "foreign core") rows[0].core = "foreign-core";
+      if (scenario === "duplicate start") rows.push(source);
+      if (scenario === "pre-ended") rows.push(endRow({ kind: "worker", terminal, core: source.core,
+        createdMs: source.created_ms, reason: "finished" }));
+      if (scenario === "different Bot") rows[0].botId = ID.cap;
+      writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+      writeFileSync(join(s.app, "automagik-herdr/workers.jsonl"), rows.map(row => JSON.stringify(row) + "\n").join(""));
+
+      const revived = s.cli(["revive", "--json"], { from: null, env: { AUTOMAGIK_HERDR_RESTART_STABLE_MS: "200" } });
+      assert.equal(revived.code, 0, revived.err + revived.out);
+      const result = revived.json().projects[0].results.find(row => row.bot === ID.dev);
+      assert.equal(result.helpers.length, 2);
+      const newPanes = s.hcState().terminals.filter(pane => pane.state === "live" && pane.parent === result.terminal);
+      const replacement = newPanes.find(pane => pane.cwd === worker.cwd);
+      assert.ok(replacement, "the worker-shaped helper was started again");
+      assert.ok(newPanes.some(pane => pane.name === unrelated.name), "the unrelated helper was started again");
+      const row = s.ledger().find(row => row.event === "start" && row.terminal === replacement.address);
+      if (scenario !== "label only") assert.ok(row, "the existing worker ledger entry is still written");
+      const load = s.cli(["skill", "notes"], { from: replacement.address, env: skillClock(s) });
+      sub.diagnostic(JSON.stringify({ source: [source.core, terminal, worker.created_ms],
+        replacement: [row?.core, replacement.address, replacement.created_ms], bound: Boolean(row?.skillTeam), load }));
+      if (scenario === "exact worker") {
+        assert.deepEqual([row.core, row.created_ms, row.botId, row.skillTeam],
+          [source.core, replacement.created_ms, ID.dev, source.skillTeam]);
+        assert.deepEqual([load.code, load.out], [0, SKILL_MARKER + "\n"], load.err);
+      } else {
+        assert.equal(row?.skillTeam, undefined, "the replacement must not acquire a skillTeam");
+        assert.deepEqual([load.code, load.out], [2, ""]);
+      }
+    });
+  }
+});
+
+test("#2085 source round 1 P2: a delayed start requires fresh status on the pinned socket", async t => {
+  for (const [scenario, name] of [["unchanged core", "notes"], ["changed core, list", null],
+    ["changed core, load", "notes"], ["cached proxy", "notes"]]) {
+    await t.test(scenario, async sub => {
+      const s = scene(sub);
+      const publication = publishSkills(s);
+      const terminal = "t100", createdMs = 42;
+      const state = s.hcState();
+      state.terminals.push({ ...term(terminal, { cwd: s.project }), created_ms: createdMs });
+      writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+      const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+      mkdirSync(dirname(ledger), { recursive: true });
+      writeFileSync(ledger, "", { mode: LEDGER_MODE });
+      const info = statSync(publication.home, { bigint: true });
+      const row = startRow({ kind: "worker", terminal, core: "fakecore0000", createdMs, botId: ID.dev,
+        skillTeam: { path: publication.home, dev: String(info.dev), ino: String(info.ino) } });
+
+      const preload = join(s.root, "delayed-skill.mjs");
+      const observed = preload + ".observed", release = preload + ".release", teamRead = preload + ".team-read";
+      const rpcLog = preload + ".rpc";
+      writeFileSync(preload, `
+        import fs from "node:fs";
+        import { syncBuiltinESMExports } from "node:module";
+        const read = fs.readFileSync, lstat = fs.lstatSync;
+        fs.readFileSync = function(path, ...args) {
+          const value = read(path, ...args);
+          if (path === ${JSON.stringify(ledger)} && !fs.existsSync(${JSON.stringify(observed)})) {
+            fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify(String(value)));
+            const deadline = Date.now() + 8000;
+            while (!fs.existsSync(${JSON.stringify(release)}) && Date.now() < deadline) {
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+            }
+            if (!fs.existsSync(${JSON.stringify(release)})) throw new Error("start row was never released");
+          }
+          return value;
+        };
+        fs.lstatSync = function(path, ...args) {
+          if (typeof path === "string" && path.startsWith(${JSON.stringify(publication.home)})) {
+            fs.writeFileSync(${JSON.stringify(teamRead)}, "team was inspected");
+          }
+          return lstat(path, ...args);
+        };
+        syncBuiltinESMExports();
+      `);
+      const env = { NODE_OPTIONS: "--import=" + preload, HC_FAKE_RPC_LOG: rpcLog };
+      let proxy;
+      if (scenario === "cached proxy") {
+        const dir = shortSocketDir(sub, "skill-proxy-");
+        env.HC_SOCKET = join(dir, "proxy.sock");
+        env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
+        env.AUTOMAGIK_HERDR_TEST_ROOTS = s.env.AUTOMAGIK_HERDR_TEST_ROOTS + ":" + dir;
+        proxy = await startOneShotTransportServer(sub, env.HC_SOCKET, { v: 1, terminal, core: { id: row.core } }, { status: null });
+      }
+      const pending = s.cliAsync(["skill", ...(name ? [name] : [])], { from: terminal, env });
+      try {
+        assert.equal(await reachBarrier({ entered: observed }), "", "first read observed an empty ledger");
+        if (proxy) assert.equal(proxy.calls("proxy.workerTransport"), 1);
+        else assert.deepEqual(readJsonLines(rpcLog).filter(call => call.method === "server.status").map(call => call.socket), [s.env.HC_SOCKET]);
+        state.core = { id: scenario.startsWith("changed") ? "replacement-core" : row.core };
+        writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+        writeFileSync(ledger, JSON.stringify(row) + "\n");
+      } finally { writeFileSync(release, ""); }
+      const result = await pending;
+      const statusSockets = proxy ? null : readJsonLines(rpcLog).filter(call => call.method === "server.status").map(call => call.socket);
+      const readTeam = existsSync(teamRead);
+      sub.diagnostic(JSON.stringify({ terminal, createdMs, initialCore: row.core, currentCore: state.core.id,
+        statusProbes: statusSockets?.length ?? proxy.calls("server.status"), readTeam, result }));
+      if (scenario === "unchanged core") {
+        assert.deepEqual(result, { code: 0, out: SKILL_MARKER + "\n", err: "" });
+        assert.equal(readTeam, true);
+      } else {
+        assert.deepEqual([result.code, result.out, readTeam], [2, "", false]);
+        assert.match(result.err, /Only a verified live local worker/);
+        if (statusSockets) assert.ok(statusSockets.length >= 2 && statusSockets.every(socket => socket === s.env.HC_SOCKET));
+        else assert.equal(proxy.calls("proxy.workerTransport"), 1, "the cached identification was only used at startup");
+      }
+    });
+  }
+});
 
 test("#2085 readiness note 3: revoke before the run handoff while worktree setup holds the lock", async t => {
   for (const template of [null, "dev-sol"]) await t.test(template ?? "direct", async sub => {

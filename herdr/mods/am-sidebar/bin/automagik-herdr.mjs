@@ -1199,9 +1199,9 @@ async function pinLocalStartCore() {
 }
 
 /** Read the core again on the same endpoint used for the pane operations. */
-async function freshCoreId() {
+async function freshCoreId(timeoutMs) {
   if (!discoveredCoreSocket) return null;
-  const { status } = await coreStatus(localHcEnv(), { sockets: [discoveredCoreSocket] });
+  const { status } = await coreStatus(localHcEnv(), { sockets: [discoveredCoreSocket], timeoutMs });
   return status?.core?.id ?? null;
 }
 
@@ -7121,6 +7121,20 @@ function workerLedgerRows(dir = appHome()) {
   try { return readLedger(readText(ledgerPath(dir)) ?? ""); } catch { return []; }
 }
 
+/** Undefined while a start is missing. Null means the launch cannot authorize a worker. */
+function workerStartForLaunch(rows, key) {
+  if (!key) return null;
+  let start;
+  for (const row of rows) {
+    if (launchKey(row) !== key) continue;
+    if (row.event === "end") return null;
+    if (row.event !== "start") continue;
+    if (start || row.kind !== "worker") return null;
+    start = row;
+  }
+  return start;
+}
+
 /**
  * The workers ledger's last seat row for `botId` in project `key`, as the pane it stood for:
  * { address, created_ms, cwd, labels, env }, or null. `env` is the launch home the row recorded
@@ -7669,10 +7683,13 @@ async function rerunHelpers(plans, parent, say) {
       // a row from before squads gets its bot's squad now.
       let squad = w.squad ?? null;
       if (!("squad" in w)) { try { squad = squadOf(loadProject(w.project).file, w.botId); } catch { squad = null; } }
-      const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid: await pidOf(address), botId: w.botId, task: w.task, branch: w.branch,
+      const pid = await pidOf(address);
+      const skills = p.skillBinding && core && isHcTerminalId(address) && sameLivePane(up.get, address, createdMs)
+        && up.get.finished_ms == null && await freshCoreId() === core ? p.skillBinding : null;
+      const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid, botId: skills?.botId ?? w.botId, task: w.task, branch: w.branch,
         project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
         template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
-        core, createdMs, squad, env: homeEnv, skillTeam: w.skillTeam, session: p.agent === "claude" ? p.session : null, ...launchLogin(freshLogin) }));
+        core, createdMs, squad, env: homeEnv, skillTeam: skills?.skillTeam, session: p.agent === "claude" ? p.session : null, ...launchLogin(freshLogin) }));
       if (unlogged) say(unlogged);
     }
     if (p.binding) {
@@ -7705,6 +7722,31 @@ async function rerunHelpers(plans, parent, say) {
     }
   }
   return out;
+}
+
+/** Capture the skill binding while the source pane is still live, before ending its parent. */
+async function captureHelperSkills(plans, old, { project, bot, view }) {
+  const candidates = plans.filter(p => p.skillSource);
+  if (!candidates.length) return;
+  if (discoveredCoreSocket) pinnedCoreSocket = discoveredCoreSocket;
+  const [parent, ...panes] = await Promise.all([old.address, ...candidates.map(p => p.replaced)]
+    .map(address => hcGet(address).catch(() => null)));
+  if (!sameLivePane(parent, old.address, old.created_ms) || await freshCoreId() !== view.core) return;
+  let attached;
+  try { attached = foldAttach(readAttachFile(view.path) ?? []).byKey; } catch { return; }
+  const rows = workerLedgerRows();
+  for (const [i, p] of candidates.entries()) {
+    const pane = panes[i];
+    if (!sameLivePane(pane, p.replaced, p.createdMs) || pane.finished_ms != null
+        || pane.parent !== old.address || pane.die_with_parent === false) continue;
+    const source = workerStartForLaunch(rows, p.skillSource);
+    if (!source?.skillTeam || source.botId !== bot.id || source.project !== project.key
+        || p.worker?.botId !== source.botId || p.worker.project !== source.project) continue;
+    const binding = attached.get(p.skillSource);
+    const otherBot = [p.binding?.bot, binding?.bot, p.labels?.[BOT_LABEL], p.labels?.[WORKER_OF_LABEL],
+      pane.labels?.[BOT_LABEL], pane.labels?.[WORKER_OF_LABEL]].some(id => id != null && id !== source.botId);
+    if (!otherBot) p.skillBinding = { botId: source.botId, skillTeam: source.skillTeam };
+  }
 }
 
 /**
@@ -7795,7 +7837,9 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     const templateWorker = Boolean(worker?.template || h.labels?.[WORKER_TEMPLATE_LABEL]);
     const codexWithheld = agentKey === "codex" && !planned.error && !templateWorker && grantPlan
       ? localCodexWarning(worker || h.labels?.[WORKER_OF_LABEL] ? agents.codex?.run : kept.command?.argv, grantPlan) : null;
-    return { ...planned, codexWithheld,
+    const sourceKey = isHcTerminalId(h.address) && launchKey({ core: view.core, terminal: h.address, created_ms: h.created_ms });
+    const skillSource = workerStartForLaunch(ledger, sourceKey)?.skillTeam ? sourceKey : null;
+    return { ...planned, codexWithheld, skillSource,
       worker, binding, proxyIdentity, env: homeEnv,
       createdMs: Number.isSafeInteger(h.created_ms) ? h.created_ms : null };
   };
@@ -10431,7 +10475,11 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
       await hcKill(seat.terminal);
       throw new CliError(`${bot.name} was attached to ${moved.lost} while it restarted, so ${seat.terminal} was ended and nothing changed.`);
     }
-    const treeKill = managedTree ? await hcKill(old.address) : null;
+    const killTree = async () => {
+      await captureHelperSkills(plans, old, { project, bot, view });
+      return hcKill(old.address);
+    };
+    const treeKill = managedTree ? await killTree() : null;
     if (managedTree) {
       try { await supersedeQueue(); }
       catch (e) {
@@ -10451,7 +10499,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     // --tree: the old pane ends now, its helpers with it, so nothing types into a pane on the
     // bot's session while the new one runs it; then each helper runs again under the new pane.
     if (plans.length) {
-      const k = treeKill ?? await hcKill(old.address);
+      const k = treeKill ?? await killTree();
       if (k.code === 0) {
         oldEnded = true;
         await endOld();
@@ -12790,14 +12838,19 @@ async function cmdSkill(opts, [name, ...extra]) {
   let row;
   for (;;) {
     const pane = await hcGet(terminal, { timeout: Math.min(15_000, Math.max(1, deadline - Date.now())) }).catch(() => null);
-    if (pane?.address !== terminal || (pane.state !== undefined && pane.state !== "live") || pane.finished_ms != null) throw refusal();
+    if (pane?.address !== terminal || pane.state !== "live" || pane.finished_ms != null) throw refusal();
     const current = launchKey({ core, terminal, created_ms: pane.created_ms });
     if (!current || (key && key !== current)) throw refusal();
     key = current;
-    const rows = workerLedgerRows().filter(entry => launchKey(entry) === key);
-    const starts = rows.filter(entry => entry.event === "start");
-    if (rows.some(entry => entry.event === "end") || starts.length > 1 || (starts.length && starts[0].kind !== "worker")) throw refusal();
-    if (starts.length) { row = starts[0]; break; }
+    const start = workerStartForLaunch(workerLedgerRows(), key);
+    if (start === null) throw refusal();
+    if (start) {
+      // A proxy's startup identity cannot vouch for the core that answered this pane lookup.
+      if (await freshCoreId(Math.min(3000, deadline - Date.now())) !== core) throw refusal();
+      row = workerStartForLaunch(workerLedgerRows(), key);
+      if (!row) throw refusal();
+      break;
+    }
     // The first prompt can run before its parent records the start. Wait for this launch only.
     if (Date.now() >= deadline) throw refusal();
     await sleep(Math.min(250, Math.max(0, deadline - Date.now())));
