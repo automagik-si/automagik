@@ -34,7 +34,7 @@ import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
 import { characterSvg, characterFile, inkOf, isDark } from "./characters.js";
 import { workerClick, rowWorker, openWorkerTab } from "./workerTab.js";
-import { liveFrom, liveOf, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, liveBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, heldTerminalOf, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED, rateLimitObservation } from "./rows.js";
+import { liveFrom, liveOf, botTerminals, buildTree, placeTrees, placesOf, withSpaceless, knownBots, liveBots, nextWake, projectId, secondLine, modelTextsUpdate, argvToAsk, argvAfter, argvReader, spaceRowOrder, clickActionOf, ledgerSessions, heldTerminals, listedKeyOf, parentMarkText, orderMachines, movedToTop, readMachineOrder, programForApp, needsYouText, ownerQuestionOf, OWNER_QUESTION, RATE_LIMITED, rateLimitObservation } from "./rows.js";
 import { rateLimitDialog } from "./restart.js";
 import { dueRemoteProbes, remoteModelMachines } from "./modelsRemote.js";
 
@@ -637,20 +637,24 @@ export default class Spaces extends View {
     const now = this.now ?? Date.now();
     const known = knownBots(this.bots);
     const drawable = liveBots(this.bots);
-    this.keyOf = listedKeyOf(this.bots, this.paneKeyReader());
+    const keyOf = listedKeyOf(this.bots, this.paneKeyReader());
     const readArgv = argvReader(this.argvOf);
-    const live = liveFrom(this.all, drawable, readArgv, this.keyOf, this.ledger, this.bots);
+    // Resolve the ledger once per draw. The held lookup reuses those sessions and groups
+    // terminal candidates by bot so building each card never scans the terminal history.
+    const sessions = ledgerSessions(this.ledger, this.all, this.bots, keyOf);
+    this.heldTerminal = heldTerminals(this.all, sessions, keyOf);
+    const live = liveFrom(this.all, drawable, readArgv, keyOf, this.ledger, this.bots, { sessions });
     // The ledger alone, for the actions the ledger owns: a live label that no row names is a
     // status and a focus, never an attachment (Start, Attach, Detach, persistence). When the
     // CLI can't answer at all there is no ledger to own them, and the labels stand, as before.
     this.bound = this.ledger == null ? null
-      : liveFrom(this.all, drawable, readArgv, this.keyOf, this.ledger, this.bots, { labels: false });
+      : liveFrom(this.all, drawable, readArgv, keyOf, this.ledger, this.bots, { labels: false, sessions });
     // The bot panes as readPaneKeys asks for them: a new one, or one in another folder, is
     // read on the next tick (botTick), not only after the next discovery.
     this.paneSig = JSON.stringify(this.all.filter((k) => k.state === "live" && !String(k.address).includes("/") && known.has(k.labels?.[BOT_LABEL]))
       .map((k) => [k.address, k.created_ms ?? null, paneFolder(k)]));
-    this.botOf = botTerminals(this.all, drawable, this.ledger, this.bots, this.keyOf);
-    this.trees = buildTree({ projects: this.bots, live, terminals: this.all, now, rateLimited: this.rateLimited });
+    this.botOf = botTerminals(this.all, drawable, this.ledger, this.bots, keyOf, sessions);
+    this.trees = buildTree({ projects: this.bots, live, children: this.children, now, rateLimited: this.rateLimited });
     this.wakeAt = nextWake(live, now);
   }
 
@@ -894,7 +898,7 @@ export default class Spaces extends View {
   botTerminal(n, tree) {
     if (n.live) return n.live.terminal;
     if (n.planned) return null;
-    return heldTerminalOf(n.bot.id, this.all, [], { key: n.project ?? tree.key, machine: tree.machine }, this.keyOf, this.ledger, this.bots);
+    return this.heldTerminal(n.bot.id, { key: n.project ?? tree.key, machine: tree.machine });
   }
 
   // The session a bot row was drawn with (#1875): its terminal address and generation
@@ -923,8 +927,8 @@ export default class Spaces extends View {
     const project = { key: n.project ?? tree.key, machine: tree.machine };
     // Not counted live but holding a live terminal (no agent seen in front yet): its pane, or
     // a peek, rather than nothing. Its generation is this render's; the click revalidates it.
-    const held = live || planned ? null : heldTerminalOf(b.id, this.all, [], project, this.keyOf, this.ledger, this.bots);
-    const heldCreated = held ? (this.all.find((k) => k?.address === held)?.created_ms ?? null) : null;
+    const held = live || planned ? null : this.heldTerminal(b.id, project);
+    const heldCreated = held ? (this.byAddress.get(held)?.created_ms ?? null) : null;
     const promptHold = planned ? null : this.heldOf(live ? live.terminal : held);
     const s = promptHold ? "blocked" : n.rateLimited ? "rate-limited" : n.status === "error" ? "blocked" : n.status;
     const pose = promptHold ? "needs-you" : n.pose;
@@ -943,9 +947,9 @@ export default class Spaces extends View {
     // Detach or a fresh restart. With no ledger answer, the labels own it, as before.
     const auth = this.ledger == null ? live : liveOf(this.bound, project, b.id);
     const authHeld = this.ledger == null ? held
-      : heldTerminalOf(b.id, this.all, [], project, this.keyOf, this.ledger, this.bots, { labels: false });
+      : this.heldTerminal(b.id, project, { labels: false });
     const attached = auth?.terminal ?? authHeld ?? null;
-    const attachedCreated = auth?.created_ms ?? (authHeld ? (this.all.find((k) => k?.address === authHeld)?.created_ms ?? null) : null);
+    const attachedCreated = auth?.created_ms ?? (authHeld ? (this.byAddress.get(authHeld)?.created_ms ?? null) : null);
     const focus = live?.terminal ?? held ?? null;
     const focusCreated = live?.created_ms ?? heldCreated ?? null;
     const onMenu = () => openBotForm({ form: "menu", bot: b.id, name: b.name, planned: planned, project: project.key,
@@ -1020,7 +1024,7 @@ export default class Spaces extends View {
     const project = { key: tree.key, machine: tree.machine };
     const attached = this.ledger == null ? n?.live
       : (n ? liveOf(this.bound, project, n.bot.id)
-        ?? heldTerminalOf(n.bot.id, this.all, [], project, this.keyOf, this.ledger, this.bots, { labels: false }) : null);
+        ?? this.heldTerminal(n.bot.id, project, { labels: false }) : null);
     return !tree.machine && n && !n.planned && !attached ? n.bot : null;
   }
 
