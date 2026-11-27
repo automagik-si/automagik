@@ -16,12 +16,12 @@ export const MAX_ADDRESS_ENTRY_LENGTH = 253
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 const ALLOWED = Object.freeze({ allowed: true })
 
-const stripBrackets = value => {
+export const stripBrackets = value => {
   const text = String(value ?? '').trim()
   return text.startsWith('[') && text.endsWith(']') ? text.slice(1, -1) : text
 }
 
-const ipv4Of = address => address.kind() === 'ipv6' && address.isIPv4MappedAddress()
+export const ipv4Of = address => address.kind() === 'ipv6' && address.isIPv4MappedAddress()
   ? address.toIPv4Address()
   : address
 
@@ -46,7 +46,7 @@ export function schemeRefusal(url, kind) {
   return SCHEME_REFUSAL
 }
 
-const normalizedHost = host => stripBrackets(host).replace(/\.$/, '').toLowerCase()
+export const normalizedHost = host => stripBrackets(host).replace(/\.$/, '').toLowerCase()
 
 function literalOf(host) {
   const value = normalizedHost(host)

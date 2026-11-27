@@ -14,7 +14,8 @@ import { install as installLibrary } from '../src/host/skill-library.js'
 import { skillHash } from '../src/host/skill-library-rules.js'
 import { fakeLocale } from '../../locale-pt-br-dsh/test/fake-locale.js'
 import { member, serviceStub } from './caller-fixture.js'
-import { stubSkillReviewer } from './fixtures/skill-review-model.js'
+import { assembledReview, stubSkillReviewer } from './fixtures/skill-review-model.js'
+import { directLink, publicResolver, response, skillMd } from './fixtures/skill-link-fixtures.js'
 import { browser } from './viewer-fixture.js'
 
 const { outputFiles } = await build({
@@ -44,7 +45,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve))
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 
 function fixture(t, role, fetch) {
-  let slots, position
+  let slots, position, cleanups
   const react = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children } }),
     createContext: value => ({ value }), useContext: ctx => ctx.value, Component: class {},
@@ -63,7 +64,8 @@ function fixture(t, role, fetch) {
       const i = position++
       if (slots[i]) return
       slots[i] = true
-      if (effect) queueMicrotask(() => { const close = effect(); if (close) t.after(close) })
+      const mounted = cleanups
+      if (effect) queueMicrotask(() => { const close = effect(); if (close) mounted.add(close) })
     },
     useLayoutEffect() {},
     useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (_, read) => read(),
@@ -77,11 +79,19 @@ function fixture(t, role, fetch) {
   })
   const mount = (component, props) => {
     const current = []
-    return () => {
+    const effects = new Set()
+    const unmount = () => {
+      for (const close of effects) close()
+      effects.clear()
+    }
+    t.after(unmount)
+    const render = () => {
       position = 0
       slots = current
+      cleanups = effects
       return component(props)
     }
+    return Object.assign(render, { unmount })
   }
   return { ...module.exports, mount }
 }
@@ -621,4 +631,246 @@ test('#2078 Skills presents archive upload to admins and keeps the folder picker
   const tree = f.mount(form.type, form.props)()
   assert.equal(match(tree, 'From folder'), undefined)
   assert.match(walk(tree, node => node.props?.type === 'file')[0].props.accept, /\.zip/)
+})
+
+function linkScreen(t, { recovered, row, save } = {}) {
+  const ui = fixture(t, 'owner')
+  const requests = []
+  let reads = 0
+  const owner = ui.mount(ui.SkillsScreen, {
+    rosterSource: { subscribe() {}, getSnapshot: () => ({}) },
+    actions: {
+      skillLibrary: async () => { reads++; return { skills: row ? [row] : [], active: {} } },
+      getSkill: async () => row,
+      saveSkill: async input => { requests.push(JSON.parse(JSON.stringify(input))); return save?.(input) },
+      ...(recovered ? { resumeSkillSaves: async () => [{ status: 'fulfilled', value: recovered }] } : {}),
+    },
+  })()
+  const render = ui.mount(owner.type, owner.props)
+  const child = name => {
+    const node = walk(render(), entry => entry.type?.name === name)[0]
+    assert.ok(node, name)
+    return ui.mount(node.type, node.props)
+  }
+  return { render, child, requests, reads: () => reads }
+}
+
+const linkSource = { kind: 'link', url: 'https://github.com/automagik-si/automagik/tree/main/skills/link-folder',
+  ref: 'refs/heads/main', revision: 'a'.repeat(40), host: 'raw.githubusercontent.com', fetchedAt: 1_790_000_000_000 }
+const linkRow = { name: 'link-notes', source: linkSource, checkable: true,
+  held: 'Held: prompt injection was found. A skill with prompt injection is never accepted.' }
+const linkReport = { name: linkRow.name, token: 'original-token', source: { ...linkSource, revision: 'b'.repeat(40) },
+  previousSource: linkSource, usedBy: [{ id: 'a', name: 'Fixture Bot', mode: 'manual' }],
+  endpoints: { new: [{ host: 'api.changed.example' }], gone: [] },
+  scriptChanges: { new: [{ path: 'scripts/run.sh', interpreter: 'bash' }], gone: [] },
+  diff: { files: { added: [{ path: 'scripts/run.sh', text: 'fixture' }], removed: [], changed: [], omitted: { count: 0 } },
+    findings: { new: [], gone: [] } }, findings: [] }
+const recoverLink = (data, stale = false) => ({ ...data, form: { kind: 'check', target: linkRow.name }, stale })
+
+test('#2079 Skills previews a link and keeps URL and provenance out of its Save claim', async t => {
+  const ui = linkScreen(t, { save: input => input.token ? { saved: true }
+    : { preview: true, name: linkRow.name, source: linkSource, token: 'preview-token' } })
+  ui.render()
+  await flush()
+  match(ui.render(), 'New skill').props.onClick()
+  const form = ui.child('SkillForm')
+  match(form(), 'From link').props.onClick()
+  const field = walk(form(), node => node.props?.label === 'Link')[0]
+  assert.ok(field)
+  field.props.onChange(linkSource.url)
+  await match(form(), 'Preview').props.onClick()
+  const preview = walk(form(), node => node.type?.name === 'TreePreview')[0]
+  assert.ok(preview)
+  assert.deepEqual(ui.requests, [{ preview: true, source: 'link', url: linkSource.url }])
+  assert.deepEqual(preview.props.tree.view.source, linkSource)
+  await preview.props.tree.save()
+  assert.deepEqual(ui.requests[1], { token: 'preview-token', name: linkRow.name })
+})
+
+test('#2079 F1a recovers a clean update card, applies its original token and drops a stale result', async t => {
+  const ui = linkScreen(t, { recovered: recoverLink(linkReport), row: linkRow, save: () => ({ saved: true }) })
+  ui.render()
+  await flush()
+  assert.match(text(ui.render()), /Held: prompt injection/)
+  const update = ui.child('LinkUpdate')
+  const card = update()
+  assert.match(text(card), /New endpoints.*api\.changed\.example.*New scripts.*scripts\/run\.sh.*Fixture Bot/)
+  assert.ok(walk(card, node => node.type?.name === 'TreeDiff')[0])
+  await match(card, 'Apply').props.onClick()
+  assert.deepEqual(ui.requests, [{ update: 'apply', token: 'original-token', name: linkRow.name }])
+
+  const stale = linkScreen(t, { recovered: recoverLink(linkReport, true), row: linkRow })
+  stale.render()
+  await flush()
+  assert.ok(stale.reads() >= 2)
+  assert.equal(walk(stale.render(), node => node.type?.name === 'LinkUpdate').length, 0)
+  assert.deepEqual(stale.requests, [])
+})
+
+test('#2079 F1a recovers Up to date on a held link and keeps Check without re-accept', async t => {
+  const ui = linkScreen(t, { recovered: recoverLink({ upToDate: true, held: linkRow.held, checkedAt: linkSource.fetchedAt }), row: linkRow })
+  ui.render()
+  await flush()
+  assert.match(text(ui.render()), /Up to date.*checked/)
+  assert.match(text(ui.render()), /Held: prompt injection/)
+  assert.ok(match(ui.render(), 'Check for update'))
+  assert.ok(match(ui.render(), 'Delete'))
+  assert.equal(match(ui.render(), 'Review skill'), undefined)
+  assert.deepEqual(ui.requests, [])
+})
+
+test('#2079 Skills shows every refusal finding, never Apply, and Cancel sends nothing', async t => {
+  const refused = { ...linkReport, token: undefined, refused: true, message: 'A synthetic refusal.',
+    findings: [{ rule: 'endpoint', path: 'SKILL.md', line: 1, reason: 'Synthetic gate finding.' },
+      { area: 'prompt-injection', file: 'SKILL.md', line: 2, severity: 'low', injection: true, reason: 'Synthetic model finding.' }] }
+  const ui = linkScreen(t, { recovered: recoverLink(refused), row: linkRow })
+  ui.render()
+  await flush()
+  const card = ui.child('LinkUpdate')()
+  const review = walk(card, node => node.type?.name === 'SkillReport')[0]
+  assert.ok(review)
+  assert.deepEqual(review.props.report.findings, refused.findings)
+  assert.equal(match(card, 'Apply'), undefined)
+  match(card, 'Cancel').props.onClick()
+  assert.deepEqual(ui.requests, [])
+})
+
+test('#2079 F4 recovered expiry copy uses the tombstone kind and starts no new operation', async t => {
+  for (const [kind, message] of [['check', 'Check for update again.'], ['apply', 'Check for update again.'],
+    ['preview', 'Save the skill again.']]) {
+    const ui = linkScreen(t, { recovered: { expired: true, kind }, row: linkRow })
+    ui.render()
+    await flush()
+    const alerts = walk(ui.render(), node => node.props?.role === 'alert').map(text)
+    assert.deepEqual(alerts, ['This result is no longer available. ' + message])
+    assert.deepEqual(ui.requests, [])
+  }
+})
+
+function linkedPanel(t) {
+  const home = mkdtempSync(join(tmpdir(), 'linked-skills-panel-'))
+  t.after(() => rmSync(home, { recursive: true }))
+  const path = join(home, 'skill-library', 'library.json')
+  const rt = { home, ctx: {}, readOnly: () => undefined, teamGeneration: () => 1,
+    sameTeam: generation => generation === 1, teamCurrent: () => true, botOf: () => undefined }
+  let fetches = 0, reviews = 0, content = 'LINK-BODY-1', waitForOpen
+  stubSkillReviewer(rt)
+  rt.assembleLlm = async () => { reviews++; return assembledReview() }
+  installLibrary(rt, { linkTransport: {
+    resolve: publicResolver,
+    async open(url) {
+      assert.equal(url.href, directLink)
+      fetches++
+      await waitForOpen?.()
+      return response(skillMd(content))
+    },
+  } })
+  const call = (action, input) => rt.skillLibrary.endpoint(action, input, { role: 'owner', id: 'owner' })
+  const complete = async (id, recover = false) => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const result = await call('skill-library-save', { operation: id, poll: true, recover })
+      if (!result.pending) return result
+      await flush()
+    }
+    assert.fail('Pending skill operation did not finish')
+  }
+  const name = 'link-notes'
+  const previewInput = { preview: true, source: 'link', url: directLink }
+  const seed = async () => {
+    const operation = '1'.repeat(32)
+    await call('skill-library-save', { ...previewInput, operation })
+    const { token } = await complete(operation)
+    await call('skill-library-save', { token, name, operation: '2'.repeat(32) })
+    assert.deepEqual(await complete('2'.repeat(32)), { saved: true })
+  }
+  const ui = fixture(t)
+  const requests = []
+  const actions = ui.teamActions({ after: promise => promise, call: async (action, input, signal) => {
+    signal?.throwIfAborted()
+    if (action === 'skill-library-save') requests.push(input)
+    return call(action, input)
+  } })
+  const panel = () => {
+    const owner = ui.mount(ui.SkillsScreen, { actions, rosterSource: { subscribe() {}, getSnapshot: () => ({}) },
+      onBack: () => render.unmount() })()
+    const render = ui.mount(owner.type, owner.props)
+    render()
+    return render
+  }
+  return { ui, panel, requests, path, name, seed, complete, call, counts: () => [fetches, reviews],
+    upstream: next => { content = next }, delayOpen: gate => { waitForOpen = gate } }
+}
+
+test('#2079 source damaged link Check renders the verified files and Apply writes them', async t => {
+  const f = linkedPanel(t)
+  await f.seed()
+  const stored = JSON.parse(readFileSync(f.path, 'utf8'))
+  stored.skills[f.name].content = 'DAMAGED OLD CONTENT'
+  writeFileSync(f.path, JSON.stringify(stored))
+  f.upstream('LINK-BODY-2')
+  const render = f.panel()
+  await flush()
+  await match(render(), 'Check for update').props.onClick()
+  const update = walk(render(), node => node.type?.name === 'LinkUpdate')[0]
+  assert.ok(update)
+  const card = f.ui.mount(update.type, update.props)()
+  assert.match(text(card), /The saved version could not be verified.*checked new content/)
+  const tree = walk(card, node => node.type?.name === 'TreeDetails')[0]
+  assert.match(text(tree.type(tree.props)), /SKILL\.md.*bytes/)
+  assert.doesNotMatch(text(card), /DAMAGED OLD CONTENT/)
+  await match(card, 'Apply').props.onClick()
+  const saved = await f.call('skill-library-get', { name: f.name })
+  assert.match(saved.content, /LINK-BODY-2/)
+  assert.equal(saved.held, undefined)
+  assert.deepEqual(f.counts(), [2, 2])
+})
+
+test('#2079 source Check completed with the panel closed recovers its original token', async t => {
+  const f = linkedPanel(t)
+  await f.seed()
+  f.upstream('LINK-BODY-2')
+  const opened = Promise.withResolvers(), release = Promise.withResolvers()
+  f.delayOpen(() => { opened.resolve(); return release.promise })
+  const first = f.panel()
+  await flush()
+  const checking = match(first(), 'Check for update').props.onClick()
+  await opened.promise
+  const id = f.requests.find(request => request.update === 'check').operation
+  match(first(), 'Back').props.onClick()
+  release.resolve()
+  const completed = await f.complete(id)
+  assert.ok(completed.token)
+  await checking
+  const before = f.counts()
+  const reopened = f.panel()
+  await flush()
+  const update = walk(reopened(), node => node.type?.name === 'LinkUpdate')[0]
+  assert.ok(update, 'The reopened Skills panel recovered the completed Check')
+  assert.equal(update.props.report.token, completed.token)
+  assert.deepEqual(f.counts(), before)
+  assert.equal(f.requests.filter(request => request.update === 'check').length, 1)
+  assert.equal(f.requests.filter(request => request.poll).length, 1)
+  assert.equal(f.requests.at(-1).operation, id)
+  assert.equal(f.requests.at(-1).recover, true)
+  const card = f.ui.mount(update.type, update.props)()
+  await match(card, 'Apply').props.onClick()
+  assert.match((await f.call('skill-library-get', { name: f.name })).content, /LINK-BODY-2/)
+  assert.deepEqual(f.counts(), before)
+})
+
+test('#2079 source link create preview renders declared key names before Save', async t => {
+  const f = linkedPanel(t)
+  f.upstream('Read $DSH_SECRET_FIXTURE_KEY when needed.')
+  const render = f.panel()
+  await flush()
+  match(render(), 'New skill').props.onClick()
+  const entry = walk(render(), node => node.type?.name === 'SkillForm')[0]
+  const form = f.ui.mount(entry.type, entry.props)
+  match(form(), 'From link').props.onClick()
+  walk(form(), node => node.props?.label === 'Link')[0].props.onChange(directLink)
+  await match(form(), 'Preview').props.onClick()
+  const preview = form()
+  const card = preview.type(preview.props)
+  assert.match(text(card), /Declared key names.*FIXTURE_KEY/)
+  assert.ok(match(card, 'Save'))
 })

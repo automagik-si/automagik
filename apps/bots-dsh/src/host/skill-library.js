@@ -11,6 +11,7 @@ import { fileEntries, LIMITS, skillHash, skillName, textSkillMd } from './skill-
 import { runSkillReview } from './skill-review.js'
 import { ARCHIVE_BASE64_MAX, ARCHIVE_INPUT_MAX, readSkillArchive, skillArchiveKind } from './skill-archive.js'
 import { readSkillFolder } from './skill-folder.js'
+import { fetchSkillLink, parseSkillLink, validLinkSource } from './skill-link.js'
 import { pathOrder, SKILL_MD, validateSkillTree } from './skill-tree.js'
 
 const SKILL_READS = new Set(['skill-library', 'skill-library-get'])
@@ -36,8 +37,17 @@ const REPLACE_REQUIRED = 'Replace this skill from a folder or an archive.'
 const ARCHIVE_FORMAT = 'Choose a supported .zip or .tar.gz skill archive.'
 const ARCHIVE_LARGE = 'The skill archive is over 6 MiB.'
 const FOLDER_OWNER = 'Only the owner of this computer can read a folder on it. Upload a .zip or .tar.gz instead.'
+const NOT_LINK = 'Only a skill made from a link can check for updates.'
+const LINK_EDIT = 'A skill made from a link changes only through Check for update.'
+const LINK_DESCRIPTION = 'The linked SKILL.md needs a one-line description of up to 200 characters.'
+const LINK_BUSY = 'Another link is being fetched. Wait for it to finish.'
+const CHECK_CHANGED = 'The skill changed while it was checked. Check for update again.'
+const APPLY_CHANGED = 'The skill changed since the check. Check for update again.'
+const INVALID_OPERATION = 'Invalid Skills save operation.'
 const PREVIEW_TTL = 15 * 60 * 1000
 const PREVIEW_LIMIT = 4
+const SAVE_RECOVERY_MS = PREVIEW_TTL
+const SAVE_RECOVERY_MAX = 16
 const HOLD_PREEXISTING_TYPED = true
 const SNAPSHOT_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.json$/
 const SNAPSHOT_TEMP = /^\.[A-Za-z0-9_-]+\.json\.[0-9a-f-]{36}\.tmp$/
@@ -94,6 +104,7 @@ const fromUtf8 = bytes => new TextDecoder('utf-8', { fatal: true, ignoreBOM: tru
 const sourceFile = name => typeof name === 'string' && name.length <= 255 && basename(name) === name &&
   !/[\\\p{Cc}\p{Cf}]/u.test(name) && /\.(?:md|markdown|txt)$/i.test(name)
 const treeSource = kind => kind === 'folder' || kind === 'archive'
+const filesSource = kind => treeSource(kind) || kind === 'link'
 const sourceLabel = value => wellFormed(value) && value.length > 0 && Buffer.byteLength(value) <= 255 &&
   value !== '.' && value !== '..' && !/[/\\\p{Cc}\p{Cf}]/u.test(value)
 const archiveName = name => sourceLabel(name) && skillArchiveKind(name)
@@ -135,11 +146,25 @@ function diffEntries(entries) {
   return fileEntries(entries).map(entry => ({ ...entry, bytes: bytes.get(entry.path) }))
 }
 
+function changes(before, after, identify = value => value) {
+  const prior = new Set(before.map(identify))
+  const next = new Set(after.map(identify))
+  return { new: after.filter(value => !prior.has(identify(value))), gone: before.filter(value => !next.has(identify(value))) }
+}
+
+function linkOperation(body) {
+  if (body.preview === true && body.source === 'link') return 'link-preview'
+  if (body.update === 'check' || body.update === 'apply') return body.update
+}
+
 function storedTree(name, record, checks) {
+  const { source } = record
   if (typeof record.frontmatter !== 'string' || Buffer.byteLength(record.frontmatter) > LIMITS.skillMd ||
       !wellFormed(record.frontmatter) || !Array.isArray(record.files) ||
       record.files.length >= LIMITS.files ||
-      (record.source.kind === 'folder' ? !sourceLabel(record.source.folderName) : !archiveName(record.source.fileName))) return
+      (source.kind === 'folder' && !sourceLabel(source.folderName)) ||
+      (source.kind === 'archive' && !archiveName(source.fileName)) ||
+      (source.kind === 'link' && !validLinkSource(source))) return
   const entries = [{ path: SKILL_MD, bytes: Buffer.from(record.frontmatter) }]
   let total = entries[0].bytes.length
   let last
@@ -213,7 +238,7 @@ function storedDocument(name, record, checks) {
   if (!record || record.name !== name || reservedCommandOf(name) ||
       !validDescription(record.description) || !wellFormed(record.content) ||
       !record.source) return
-  if (treeSource(record.source.kind)) return storedTree(name, record, checks)
+  if (filesSource(record.source.kind)) return storedTree(name, record, checks)
   if (!['text', 'file'].includes(record.source.kind)) return
   if (record.source.kind === 'file' && !sourceFile(record.source.fileName)) return
   const bytes = record.frontmatter === undefined ? textSkillMd(record)
@@ -234,7 +259,7 @@ const safeDir = info => info?.isDirectory() && privateMode(info) && owned(info)
 const sameInode = (a, b) => a?.dev === b?.dev && a?.ino === b?.ino
 const fileStamp = info => info && [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs].join(':')
 
-export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, platform = process.platform } = {}) {
+export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, platform = process.platform, linkTransport } = {}) {
   const root = join(rt.home, 'skill-library')
   const path = join(root, 'library.json')
   const auditPath = join(root, 'audit.jsonl')
@@ -253,11 +278,16 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
   const rememberedNames = new Set()
   const botRemovals = new Map()
   const saves = new Map()
+  const completedSaves = new Map()
   const previewJobs = new Map()
   const previews = new Map()
+  const epochs = new Map()
   const treeChecks = new Map()
   let previewing = false
+  let fetchingLink = false
   let reviewing
+  const epoch = name => epochs.get(name) ?? 0
+  const bumpEpoch = name => epochs.set(name, epoch(name) + 1)
   const serial = task => {
     const run = queue.then(task)
     queue = run.catch(() => {})
@@ -316,8 +346,11 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
   }
 
   function checkedRecord(name, record, data, key) {
+    const link = record?.source?.kind === 'link'
+    if (link && !validLinkSource(record.source)) return { name, held: CHANGED }
+    const tree = link ? { source: record.source, checkable: true }
+      : treeSource(record?.source?.kind) ? { source: { kind: record.source.kind } } : {}
     const document = storedDocument(name, record, treeChecks)
-    const tree = treeSource(record?.source?.kind) ? { source: { kind: record.source.kind } } : {}
     if (!document) return { name, held: CHANGED, ...tree }
     const { check, parsed, valid } = document
     if (check.injection.length || blockFor(data, check.hash, key)) return { name, held: HELD_INJECTION, ...tree }
@@ -344,6 +377,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
     const source = record.source.kind === 'folder' ? { kind: 'folder', folderName: record.source.folderName }
       : record.source.kind === 'text' ? { kind: 'text' } : { kind: record.source.kind, fileName: record.source.fileName }
     return { name, description: parsed.description, content: parsed.body, hash: check.hash, source,
+      ...(link ? tree : {}),
       check: { version: check.version, fingerprint: check.fingerprint, verdict: check.verdict,
         ranAt: current && Number.isFinite(record.check?.ranAt) ? record.check.ranAt : Date.now(),
         findings: checkFindings(check), truncated: check.truncated, counts: check.counts },
@@ -793,10 +827,11 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
       const document = storedDocument(name, previous)
       if (!document?.valid || document.check.hash !== body.reviewHash) throw reject(CHANGED, 'bot/refused')
       const record = checkedRecord(name, previous, data, hostKey())
-      if (!record.reviewHash && !record.held) throw reject(CHANGED, 'bot/refused')
+      if (!record.reviewHash && (previous.source.kind === 'link' || !record.held)) throw reject(CHANGED, 'bot/refused')
       return { ...document, previous, source: previous.source, frontmatter: previous.frontmatter }
     }
     if (treeSource(previous?.source?.kind)) throw reject(REPLACE_REQUIRED, 'bot/refused')
+    if (previous?.source?.kind === 'link') throw reject(LINK_EDIT, 'bot/refused')
     const { bytes, frontmatter } = documentOf(name, body)
     if (bytes.length > LIMITS.skillMd) throw reject(TOO_LARGE)
     const parsed = parseSkillMd(bytes)
@@ -834,8 +869,8 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
     const workerRevision = eligible && !eligible.held && eligible.hash === check.hash
       ? previous?.workerRevision : randomUUID()
     if (workerRevision !== undefined) record.workerRevision = workerRevision
-    if (treeSource(source.kind)) {
-      record.revision = randomUUID()
+    if (filesSource(source.kind)) {
+      if (treeSource(source.kind)) record.revision = randomUUID()
       record.files = entries.filter(entry => entry.path !== SKILL_MD)
         .map(({ path, bytes }) => ({ path, text: fromUtf8(bytes) }))
     }
@@ -845,6 +880,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
       record.acceptanceSeal = acceptance(key, record, check.fingerprint, decision.reviewDigest, decision.findingsDigest)
     }
     await write({ ...data, skills: { ...data.skills, [name]: record } }, generation, stamp)
+    bumpEpoch(name)
     return { saved: true }
   }
 
@@ -858,6 +894,126 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
       if (table.size <= limit) break
       if (entry.expires !== undefined) table.delete(id)
     }
+  }
+
+  function verifiedDocument(name, record) {
+    const document = storedDocument(name, record, treeChecks)
+    return document?.valid ? document : undefined
+  }
+
+  async function readLink(link, generation, ref) {
+    if (fetchingLink) throw reject(LINK_BUSY, 'bot/refused')
+    fetchingLink = true
+    try {
+      const result = await fetchSkillLink(link, linkTransport, ref)
+      authorizedGeneration(generation)
+      return result
+    } finally { fetchingLink = false }
+  }
+
+  function linkDocument(entries, expected) {
+    const { name, description } = parseSkillMd(entries.find(entry => entry.path === SKILL_MD).bytes)
+    if (!skillName(name)) throw reject('Use lowercase letters, digits and single hyphens, up to 32 characters, starting with a letter.')
+    if (reservedCommandOf(name)) throw reject(`The name ${name} is reserved for the /${name} command. Choose another name.`)
+    if (expected !== undefined && name !== expected) {
+      throw reject(`The linked SKILL.md now names the skill ${name}. Create it as a new skill from the link.`)
+    }
+    if (!validDescription(description)) throw reject(LINK_DESCRIPTION)
+    return treeDocument(name, entries)
+  }
+
+  function linkView(document, source, skipped) {
+    const { parsed, entries, check } = document
+    const manifest = treeManifest(entries, check)
+    return { name: parsed.name, description: parsed.description, source, hash: check.hash,
+      check: { verdict: check.verdict }, files: manifest.tree, ...manifest, skipped }
+  }
+
+  function linkResult(document, decision, view, { identity, generation }, source, base) {
+    const { check, parsed: { name }, entries } = document
+    const findings = treeReportFindings(check, decision)
+    if (decision.decision !== 'accept' && decision.decision !== 'confirm') {
+      auditReviewRefusal(name, identity, generation, decision)
+      return { ...view, ...saveView(decision, findings) }
+    }
+    const token = randomBytes(16).toString('hex')
+    previews.set(token, { kind: view.preview ? 'link' : 'update', identity, generation: JSON.stringify(generation),
+      name, source, base, entries, view, hash: check.hash, reviewDigest: decision.reviewDigest,
+      findingsDigest: decision.findingsDigest, expires: Date.now() + PREVIEW_TTL })
+    prunePreviews(previews)
+    return { ...view, token, ...(decision.decision === 'confirm' ? saveView(decision, findings)
+      : { findings, review: decision.review }) }
+  }
+
+  async function linkPreview(input, caller, job) {
+    const link = parseSkillLink(input.url)
+    job.target = link.url
+    const { entries, source, skipped } = await readLink(link, caller.generation)
+    const document = linkDocument(entries)
+    const { parsed: { name }, check } = document
+    const nameEpoch = job.nameEpoch = epoch(name)
+    const ensureAbsent = () => {
+      if (own(snapshot().data.skills, name)) throw reject(`A skill named ${name} already exists. Edit it, or choose another name.`)
+    }
+    ensureAbsent()
+    const decision = await reviewSkill({ name, entries, check, caller })
+    ensureAbsent()
+    if (epoch(name) !== nameEpoch) throw reject(REPLACE_CHANGED, 'bot/refused')
+    const view = { preview: true, ...linkView(document, source, skipped), keyNames: check.uses.secrets }
+    return linkResult(document, decision, view, caller, source, { epoch: nameEpoch })
+  }
+
+  function updateView({ data, skills }, old, previous, document, decision, source, skipped) {
+    const view = linkView(document, source, skipped)
+    const { check, entries, parsed: { name } } = document
+    const key = hostKey()
+    const review = old && verifies(key, old.check.hash, previous.review, previous.reviewSeal) ? previous.review : undefined
+    const priorFindings = old ? treeReportFindings(old.check, { review, blocked: blockFor(data, old.check.hash, key) }) : []
+    const usedBy = Object.entries(data.active).flatMap(([id, list]) => {
+      const bot = rt.botOf(id)
+      const mode = bot && assignments(list, skills).get(name)
+      return mode ? [{ id, name: bot.name ?? id, mode }] : []
+    })
+    const endpoints = changes(old?.check.uses.endpoints ?? [], check.uses.endpoints)
+    const endpoint = origin => ({ origin, host: new URL(origin).host })
+    return { ...view, previousSource: previous.source, usedBy,
+      endpoints: { new: endpoints.new.map(endpoint), gone: endpoints.gone.map(endpoint) },
+      scriptChanges: changes(old?.check.uses.scripts ?? [], check.uses.scripts, script => JSON.stringify([script.path, script.interpreter])),
+      keyNames: changes(old?.check.uses.secrets ?? [], check.uses.secrets),
+      diff: { ...(old ? { files: compareFiles(diffEntries(old.entries), diffEntries(entries)) } : { held: true }),
+        findings: findingDelta(priorFindings, treeReportFindings(check, decision)) } }
+  }
+
+  async function checkUpdate(input, caller, job) {
+    const { name } = input
+    const first = snapshot(true)
+    const previous = own(first.data.skills, name)
+    if (!skillName(name) || !validLinkSource(previous?.source)) throw reject(NOT_LINK, 'bot/refused')
+    const base = { record: JSON.stringify(previous), epoch: epoch(name) }
+    const old = verifiedDocument(name, previous)
+    job.target = name
+    job.base = old?.check.hash ?? null
+    const ensureBase = () => {
+      authorizedGeneration(caller.generation)
+      const current = snapshot(true)
+      if (epoch(name) !== base.epoch || JSON.stringify(own(current.data.skills, name)) !== base.record) {
+        throw reject(CHECK_CHANGED, 'bot/refused')
+      }
+      return current
+    }
+    const link = parseSkillLink(previous.source.url)
+    const { entries, source, skipped } = await readLink(link, caller.generation, previous.source.ref)
+    const document = linkDocument(entries, name)
+    const current = ensureBase()
+    if (document.check.hash === job.base) {
+      const { held, reviewHash } = current.skills.get(name)
+      return { upToDate: true, checkedAt: source.fetchedAt, revision: source.revision,
+        ...(held ? { held } : {}), ...(reviewHash ? { reviewHash } : {}) }
+    }
+    const decision = await reviewSkill({ name, entries, check: document.check, caller })
+    const latest = ensureBase()
+    const view = updateView(latest, old, previous, document, decision, source, skipped)
+    return linkResult(document, decision, view, caller, source, base)
   }
 
   async function previewTree(body, caller) {
@@ -922,36 +1078,77 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
       if (!preview || preview.identity !== identity || preview.generation !== JSON.stringify(generation)) {
         throw reject(PREVIEW_EXPIRED, 'bot/refused')
       }
+      const link = preview.kind === 'link' || preview.kind === 'update'
+      const update = body.update === 'apply'
+      if (update !== (preview.kind === 'update') || (link && body.name !== preview.name)) {
+        throw reject(PREVIEW_EXPIRED, 'bot/refused')
+      }
       const { name, source } = preview
       const current = snapshot(true)
       const { data, skills } = current
       const previous = own(data.skills, name)
-      if (preview.edit ? !previous || replacementBaseline(previous, skills.get(name)) !== preview.baseline : previous) {
+      if (update && (epoch(name) !== preview.base.epoch || JSON.stringify(previous) !== preview.base.record)) {
+        previews.delete(body.token)
+        throw reject(APPLY_CHANGED, 'bot/refused')
+      }
+      if (!update && (preview.edit ? !previous || replacementBaseline(previous, skills.get(name)) !== preview.baseline : previous)) {
         previews.delete(body.token)
         throw reject(preview.edit ? REPLACE_CHANGED : `A skill named ${name} already exists. Edit it, or choose another name.`, 'bot/refused')
+      }
+      if (preview.kind === 'link' && epoch(name) !== preview.base.epoch) {
+        previews.delete(body.token)
+        throw reject(REPLACE_CHANGED, 'bot/refused')
       }
       const document = treeDocument(name, preview.entries)
       const { check } = document
       if (check.hash !== preview.hash) throw reject(CHANGED, 'bot/refused')
       const key = hostKey()
       const decision = decisionOf(check, cachedReview(data, check.hash, key), blockFor(data, check.hash, key), identity, generation)
-      if (decision.decision === 'block' || decision.why === 'injection') {
+      if (decision.decision === 'block' || decision.why === 'injection' || (link && decision.decision === 'refuse')) {
         previews.delete(body.token)
         auditReviewRefusal(name, identity, generation, decision)
-        return saveView(decision, treeReportFindings(check, decision))
+        return { ...preview.view, ...saveView(decision, treeReportFindings(check, decision)) }
       }
-      if (decision.reviewDigest !== preview.reviewDigest) {
+      if (decision.reviewDigest !== preview.reviewDigest || (link && decision.findingsDigest !== preview.findingsDigest)) {
         previews.delete(body.token)
         throw reject(PREVIEW_EXPIRED, 'bot/refused')
       }
       if (decision.decision !== 'accept' && (decision.decision !== 'confirm' || !equalMac(body.confirm, decision.receipt))) {
-        return saveView(decision, treeReportFindings(check, decision))
+        return { ...preview.view, ...(update ? { token: body.token } : {}), ...saveView(decision, treeReportFindings(check, decision)) }
       }
+      if (link) previews.delete(body.token)
       const result = await writeSkill(document, name, source, decision, key, current, generation)
       previews.delete(body.token)
       audit('skill-library-save', { name }, identity, 'allowed', 'review-done')
       return result
     })
+  }
+
+  function expireSave(id) {
+    const completed = completedSaves.get(id)
+    if (!completed) return
+    clearTimeout(completed.timer)
+    const { scope, identity, inputHash, kind } = saves.get(id)
+    const expiredKind = kind === 'link-preview' ? 'preview' : kind
+    saves.set(id, { scope, identity, inputHash, expired: true, ...(expiredKind ? { kind: expiredKind } : {}) })
+    completedSaves.delete(id)
+  }
+
+  function pruneSaves() {
+    for (const [id, { until }] of completedSaves) {
+      if (until <= Date.now() || completedSaves.size > SAVE_RECOVERY_MAX) expireSave(id)
+    }
+  }
+
+  function recoverSave(job) {
+    const { kind, target, result, form } = job
+    if (!kind) return form ? { ...result, form } : result
+    if (kind === 'apply') return { ...result, form: { kind, target } }
+    const { skills } = snapshot().data
+    const current = own(skills, kind === 'check' ? target : result.name)
+    const stale = kind === 'check' ? (verifiedDocument(target, current)?.check.hash ?? null) !== job.base
+      : !!current || epoch(result.name) !== job.nameEpoch
+    return { ...result, form: { kind, target }, stale }
   }
 
   async function save(body, identity, generation) {
@@ -999,48 +1196,69 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
   function saveOperation(body, identity, generation, role) {
     authorizedGeneration(generation)
     const { operation, poll, recover, ...input } = body
-    const preview = input.preview === true && treeSource(input.source)
+    const kind = linkOperation(input)
+    const preview = !kind && input.preview === true && treeSource(input.source)
     if (preview && input.source === 'folder' && role !== 'owner') throw reject(FOLDER_OWNER, 'bot/refused')
     if (preview && input.source === 'archive' && typeof input.fileBytes === 'string' &&
         input.fileBytes.length > ARCHIVE_BASE64_MAX) throw reject(ARCHIVE_LARGE)
-    const run = () => preview ? previewTree(input, { identity, generation }) : input.token !== undefined
-      ? saveTree(input, identity, generation) : save(input, identity, generation)
-    if (operation === undefined) return run()
-    if (typeof operation !== 'string' || !/^[a-f0-9]{32}$/.test(operation)) throw reject('Invalid Skills save operation.')
+    const caller = { identity, generation }
+    const run = job => {
+      if (kind === 'link-preview') return linkPreview(input, caller, job)
+      if (kind === 'check') return checkUpdate(input, caller, job)
+      if (kind === 'apply') {
+        job.target = skillName(input.name) ? input.name : undefined
+        return saveTree(input, identity, generation)
+      }
+      if (preview) return previewTree(input, caller)
+      return input.token !== undefined ? saveTree(input, identity, generation) : save(input, identity, generation)
+    }
+    if (operation === undefined) {
+      if (kind) throw reject(INVALID_OPERATION)
+      return run()
+    }
+    if (typeof operation !== 'string' || !/^[a-f0-9]{32}$/.test(operation)) throw reject(INVALID_OPERATION)
     const scope = JSON.stringify(generation)
     prunePreviews(previewJobs)
+    pruneSaves()
     const entry = saves.get(operation) ?? previewJobs.get(operation)
     if (entry) {
       if (entry.scope !== scope || entry.identity !== identity) {
         throw reject('This Skills save is no longer available. Save the skill again.', 'bot/not-found')
       }
       if (poll !== true && entry.inputHash !== hashJson(input)) throw reject(CHANGED, 'bot/refused')
+      if (entry.expired) return { expired: true, ...(entry.kind ? { kind: entry.kind } : {}) }
       if (entry.error) throw entry.error
-      if (poll === true && recover === true && entry.form) return { ...entry.result, form: entry.form }
+      if (poll === true && recover === true && entry.result) return recoverSave(entry)
       return entry.result ?? { pending: true }
     }
     if (poll === true) throw reject('This Skills save is no longer available. Save the skill again.', 'bot/not-found')
-    const job = { scope, identity, inputHash: hashJson(input) }
+    const job = { scope, identity, inputHash: hashJson(input), kind }
     if (preview && previewing) throw reject(PREVIEW_BUSY, 'bot/refused')
     const jobs = preview ? previewJobs : saves
     jobs.set(operation, job)
     if (preview) prunePreviews(previewJobs)
-    const finishPreview = () => {
+    const finish = () => {
       if (preview) job.expires = Date.now() + PREVIEW_TTL
+      else {
+        const timer = setTimeout(() => expireSave(operation), SAVE_RECOVERY_MS)
+        timer.unref()
+        completedSaves.set(operation, { until: Date.now() + SAVE_RECOVERY_MS, timer })
+        pruneSaves()
+      }
     }
-    void run().then(result => {
-      finishPreview()
+    void run(job).then(result => {
       job.result = result
       // The initiating viewer may be gone before it receives a warning. Keep
       // its exact form with the result, behind the same actor and team checks.
-      if (result.needsConfirm && !preview) {
+      if (result.needsConfirm && !preview && !kind) {
         const fields = input.reviewHash === undefined ? ['name', 'description', 'content', 'source', 'fileName', 'fileBytes']
           : ['name', 'reviewHash']
         if (input.token !== undefined) fields.push('token')
         job.form = Object.fromEntries(fields.filter(key => typeof input[key] === 'string').map(key => [key, input[key]]))
         job.form.edit = input.edit === true
       }
-    }, error => { finishPreview(); job.error = error })
+      finish()
+    }, error => { job.error = error; finish() })
     return { pending: true }
   }
 
@@ -1124,6 +1342,7 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
           Object.defineProperty(data.active, id, { value: storedAssignments(active, keys), enumerable: true, configurable: true, writable: true })
         } else throw reject('Unknown Skills action')
         if (!result.needsConfirm) await write(data, generation, stamp)
+        if (action === 'skill-library-delete') bumpEpoch(name)
         audit(action, body, identity, result.needsConfirm ? 'pending' : 'allowed', result.needsConfirm ? 'confirmation' : null)
         return result
       } catch (error) {

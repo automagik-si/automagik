@@ -63,7 +63,8 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       throw error
     }
   }
-  async function saveSkill(skill) {
+  async function saveSkill(skill, signal) {
+    signal?.throwIfAborted()
     const viewerGuard = requestViewer('skill-library-save')
     const scope = skillScope()
     // A held skill is reviewed from storage. Only its identity and confirmation are sent.
@@ -74,6 +75,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     const existing = storedSaves(scope)
     const digest = skillStorage && globalThis.crypto.subtle
       ? hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(key)))) : undefined
+    signal?.throwIfAborted()
     let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find(entry => entry.digest === digest))
     if (!job) {
       // Only an operation ID and a request digest enter browser storage.
@@ -82,11 +84,11 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     }
     skillSaves.set(key, job)
     try {
-      const result = await finishSave(scope, job, input, undefined, viewerGuard)
+      const result = await finishSave(scope, job, input, signal, viewerGuard)
       skillSaves.delete(key)
       return result
     } catch (error) {
-      if (!unfinishedSave(error)) skillSaves.delete(key)
+      if (!signal?.aborted && !unfinishedSave(error)) skillSaves.delete(key)
       throw error
     }
   }
@@ -536,7 +538,8 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     imLoginWait: payload => call('im-login-wait', payload),
     skillLibrary: signal => call('skill-library', {}, signal),
     getSkill: (name, signal) => call('skill-library-get', { name }, signal),
-    saveSkill: skill => after(saveSkill(skill)),
+    // The panel-scoped Check refreshes its own rows. Hand it the result before a team pull can delay delivery.
+    saveSkill: (skill, signal) => signal ? saveSkill(skill, signal) : after(saveSkill(skill)),
     resumeSkillSaves,
     deleteSkill: name => after(call('skill-library-delete', { name })),
     setBotSkill: (id, name, attached, mode) => after(call(attached ? 'bot-skill-add' : 'bot-skill-remove', { id, name, mode })),
