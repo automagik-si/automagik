@@ -32,7 +32,7 @@ For a manually installed dialog, turn its standalone bridge off before replacing
 files. Copy the current mod from the Automagik repository:
 
 ```sh
-d=$(mktemp -d) && m=~/.config/herdr-app/mods/pocket-link && git clone -q --depth 1 --filter=blob:none --sparse https://github.com/automagik-dev/automagik "$d" && git -C "$d" sparse-checkout set herdr/mods/pocket-link && { cmp -s "$d/herdr/mods/pocket-link/bridge/package-lock.json" "$m/bridge/package-lock.json" || rm -rf "$m/bridge/node_modules"; } && rsync -a "$d/herdr/mods/pocket-link/" "$m/"
+d=$(mktemp -d) && m=~/.config/herdr-app/mods/pocket-link && git clone -q --depth 1 --filter=blob:none --sparse https://github.com/automagik-si/automagik "$d" && git -C "$d" sparse-checkout set herdr/mods/pocket-link && { cmp -s "$d/herdr/mods/pocket-link/bridge/package-lock.json" "$m/bridge/package-lock.json" || rm -rf "$m/bridge/node_modules"; } && rsync -a "$d/herdr/mods/pocket-link/" "$m/"
 ```
 
 Reopen the dialog after updating it. A standalone copy may ask you to install its bridge packages
@@ -97,9 +97,9 @@ again. Pairings live outside the mod folder.
     pending slots, by flooding through a relay with a new key per connection or by stalling
     handshakes. While that lasts, a paired phone's *new* sessions are refused. Sessions already
     open keep working, and nothing gets paired. The remedy is a new desktop key, so the old address
-    leads nowhere: [#48](https://github.com/automagik-dev/automagik-pocket/issues/48).
+    leads nowhere: [#48](https://github.com/automagik-si/automagik-pocket/issues/48).
 - **No usage meter.** Older versions installed and ran
-  [usagemeter](https://github.com/automagik-dev/usagemeter) on every connected machine. The
+  [usagemeter](https://github.com/automagik-si/usagemeter) on every connected machine. The
   Automagik Herdr pack installs it now; the phone only reads its summary
   ([decision](../../../apps/pocket/docs/decisions/pocket-link-no-meter-installer.md)).
 
