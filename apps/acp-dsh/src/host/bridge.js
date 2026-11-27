@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The per-session MCP bridge, named `dsh` (RFC 0003, amendment, "The bridge"). The ACP agent's
+// The per-session MCP bridge (RFC 0003, amendment, "The bridge"). The ACP agent's
 // adapter spawns this process itself and speaks MCP to it over stdio, so there is no listen
 // socket on this leg: the only way in is the adapter's pipe. Its tools are DSH's, reached over
 // the loopback back-channel to acp-dsh with the credential minted for this session; DSH executes
@@ -16,6 +16,12 @@ import { createInterface } from 'node:readline'
 const CREDENTIAL = process.env.DSH_BRIDGE_CREDENTIAL
 const ATTACHMENT = randomBytes(16).toString('hex')
 const URL = process.env.DSH_BRIDGE_URL
+const nameFlag = process.argv.indexOf('--server-name', 2)
+const serverName = nameFlag === -1 ? 'dsh' : process.argv[nameFlag + 1]
+if (serverName !== 'dsh' && (serverName?.length !== 13 || !/^dsh[a-z2-7]{10}$/.test(serverName))) {
+  process.stderr.write('acp-dsh bridge: invalid --server-name\n')
+  process.exit(2)
+}
 const WAIT_MS = 20_000
 // The deadline of a short exchange (`list`, `hello`, `bye`). A `call` has none: DSH runs the
 // tool for as long as it takes (a long wait, a slow command, an approval dialog left open), and
@@ -182,7 +188,7 @@ const handlers = {
     return {
       protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18',
       capabilities: { tools: { listChanged: true } },
-      serverInfo: { name: 'dsh', version: '1' },
+      serverInfo: { name: serverName, version: '1' },
     }
   },
   async ping() {

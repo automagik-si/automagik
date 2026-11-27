@@ -21,6 +21,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { AcpAdapter, BRIDGE_PATH } from '../src/host/adapter.js'
 import { AGY_OFF_CHECKED, AGY_OFF_SKILLS_NAME, agyOffPaths } from '../src/host/agy-off.js'
 import { Backchannel, signatureOf } from '../src/host/backchannel.js'
+import { mcpName } from '../src/host/names.js'
 import { AGY, AGY_OFF_ARGS, agyWorld, approvalTeam, unixOnly } from './fixtures/agy-world.js'
 import { answerGroup, groupApprovals } from '../../bots-dsh/src/client/approvals.js'
 import { codexWorld, scheduled, turnOn } from './fixtures/codex-native-world.js'
@@ -30,6 +31,7 @@ import { CANCELLED, picked, probe, soon } from './support/state-probe.js'
 
 const HISTORY = 'read_own_chat'
 const SKILL = 'load_skill'
+const runServerPattern = /^dsh[a-z2-7]{10}$/
 const definitions = [HISTORY, SKILL, 'bash', 'update_bot', 'read_group_chat', 'write'].map(name => ({
   name, description: name, parameters: { type: 'object' },
 }))
@@ -180,7 +182,8 @@ function agyHistory(t, nativeTools, options) {
       const exec = { agent, callId: call.id, name: call.name, signal }
       const body = () => h.execute(exec, async () => {
         h.executed.push(call)
-        return { content: [{ type: 'text', text: await h.controls.body(call) }], isError: false }
+        const value = await h.controls.body(call)
+        return { content: Array.isArray(value) ? value : [{ type: 'text', text: value }], isError: false }
       })
       const result = options?.team === undefined ? await body() : await fakeDshTool(h, exec, body)
       return { results: [{ result }] }
@@ -220,7 +223,28 @@ function agySkills(h, available = () => true) {
 const textOf = chunks => chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
 const toolBlocks = chunks => chunks.filter(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
 
-test('D1 Antigravity ON lists history on dsh and keeps the exact-pair control', { ...unixOnly, timeout: 15_000 }, async t => {
+function assertBridgeRegistration(h, registration, expectedName, tools) {
+  const { pid, sessionId, servers } = registration
+  assert.deepEqual(servers, [expectedName], 'one bridge registration')
+  const forSession = event => h.events(event).filter(row => row.pid === pid && row.sessionId === sessionId)
+  assert.deepEqual(forSession('mcp-spawn').map(row => [row.server, row.serverNameArg]), [[expectedName, expectedName]],
+    'the child gets the explicit registered name')
+  assert.deepEqual(forSession('mcp-init').map(row => [row.server, row.serverInfo]), [[expectedName, expectedName]],
+    'the handshake reports the registered name')
+  assert.deepEqual(forSession('mcp-list').map(row => [row.server, row.tools]), [[expectedName, tools]])
+}
+
+function assertRunServer(registration) {
+  const name = registration?.servers[0] ?? ''
+  assert.match(name, runServerPattern, 'the history registration uses a per-run name')
+  return name
+}
+
+function registrations(h, pid) {
+  return h.events('new-session').filter(row => row.pid === pid)
+}
+
+test('D1 Antigravity ON lists history on its per-run bridge and keeps the exact-pair control', { ...unixOnly, timeout: 15_000 }, async t => {
   const h = agyHistory(t, true)
   agySkills(h, id => id === 'with-skills')
   const chat = h.chat()
@@ -255,8 +279,10 @@ test('D1 Antigravity ON lists history on dsh and keeps the exact-pair control', 
 
   const chunks = await chat.turn('agy-bridge read_own_chat {"query":"correlated"}')
   const { args, pid } = h.conversation('"correlated"')
-  assert.deepEqual(h.events('new-session').filter(event => event.pid === pid).map(event => event.servers), [['dsh']])
-  assert.deepEqual(h.events('mcp-list').map(({ server, tools }) => [server, tools]), [['dsh', [HISTORY]]])
+  const [registration] = h.events('new-session').filter(event => event.pid === pid)
+  const name = assertRunServer(registration)
+  assertBridgeRegistration(h, registration, name, [HISTORY])
+  assert.equal(h.events('mcp-list').length, 1)
   assert.deepEqual(args, ['acp'])
   assert.deepEqual(order, ['agyReady', 'ready'])
   assert.equal(chunks.at(-1)?.reason.kind, 'stop')
@@ -271,7 +297,7 @@ test('D1 Antigravity ON lists history on dsh and keeps the exact-pair control', 
 
   const live = h.adapter.live.get(chat.session.id)
   const verified = live.run.tools.get(read.toolCallId)
-  assert.equal(verified.structuredName, 'mcp_dsh_read_own_chat')
+  assert.equal(verified.structuredName, `mcp_${name}_${HISTORY}`)
   assert.equal(verified.skillOperation, HISTORY)
   assert.equal(verified.skillPrompt.aborted, true)
 
@@ -297,7 +323,10 @@ test('D1 Antigravity ON lists history on dsh and keeps the exact-pair control', 
   const withSkills = await h.chat('with-skills').turn('plain with automatic skills')
   assert.equal(withSkills.at(-1)?.reason.kind, 'stop')
   const skillPid = h.conversation('plain with automatic skills').pid
-  assert.deepEqual(h.events('new-session').filter(event => event.pid === skillPid).map(event => event.servers), [['dsh']])
+  const [skillRegistration] = h.events('new-session').filter(event => event.pid === skillPid)
+  const skillName = assertRunServer(skillRegistration)
+  assert.notEqual(skillName, name)
+  assertBridgeRegistration(h, skillRegistration, skillName, [HISTORY, SKILL])
   assert.deepEqual(h.events('mcp-list').map(event => event.tools), [[HISTORY], [HISTORY, SKILL]])
 })
 
@@ -306,7 +335,8 @@ test('D1b Antigravity ON stops before its first prompt if the bridge never lists
   h.adapter.agents.get(AGY).bridgeReadyMs = 50
   const chunks = await h.chat().turn('plain readiness control')
   assert.equal(chunks.at(-1)?.reason.failure?.code, 'acp_bridge_missing')
-  assert.deepEqual(h.events('new-session').at(-1)?.servers, ['dsh'])
+  const registration = h.events('new-session').at(-1)
+  assert.deepEqual(registration?.servers, [assertRunServer(registration)])
   assert.deepEqual(h.events('mcp-list'), [])
   assert.deepEqual(h.events('prompt'), [])
   assert.equal(h.services.tools.execute.mock.callCount(), 0)
@@ -333,7 +363,12 @@ test('D1 Stop discards a pending Antigravity history result', { ...unixOnly, tim
   })
   const launch = await chat.turn('plain stop control')
   assert.equal(launch.at(-1)?.reason.kind, 'stop')
+  const pid = h.conversation('plain stop control').pid
+  const [registration] = registrations(h, pid)
+  const name = assertRunServer(registration)
   assert.deepEqual(h.events('mcp-list').map(event => event.tools), [[HISTORY]])
+  const live = h.adapter.live.get(chat.session.id)
+  const record = live.bridge
   const pending = chat.turn('agy-bridge read_own_chat {"query":"stop"}', [], stop.signal)
   try {
     const signal = await soon(entered.promise)
@@ -351,6 +386,14 @@ test('D1 Stop discards a pending Antigravity history result', { ...unixOnly, tim
   assert.equal(h.approvals.length, 1)
   assert.equal(h.requests.length, 1)
   assert.equal(h.services.tools.execute.mock.callCount(), 1)
+  assert.equal(h.adapter.live.get(chat.session.id), live)
+  assert.equal(live.bridge, record)
+  assert.equal(record.closed, false)
+  h.services.tools.execute.mock.restore()
+  assert.equal(textOf(await chat.turn(agyRequest({ query: 'after stop' }))).includes(maskedLine), true)
+  assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY, HISTORY])
+  assert.equal(registrations(h, pid).length, 1)
+  assertBridgeRegistration(h, registration, name, [HISTORY])
 })
 
 for (const verified of [true, false]) {
@@ -389,6 +432,74 @@ const agyTest = { ...unixOnly, timeout: 15_000 }
 const agyRequest = (...steps) => `agy-real ${JSON.stringify(steps)}`
 const agyAllow = { outcome: 'selected', optionId: 'agy-allow' }
 const maskedLine = 'synthetic marker [secret:fixture]'
+const historyName = server => `mcp_${server}_${HISTORY}`
+
+function historyPermission(sessionId, toolCallId, name) {
+  return { sessionId, toolCall: { toolCallId, title: `Run ${name}`, kind: 'other', status: 'pending' },
+    options: [{ optionId: 'agy-allow', kind: 'allow_once', name: 'Allow' }] }
+}
+
+async function waitForFixture(read) {
+  const deadline = Date.now() + 2_000
+  for (;;) {
+    const value = read()
+    if (value !== undefined) return value
+    assert.ok(Date.now() < deadline, 'the fixture event arrived before its deadline')
+    await delay(10)
+  }
+}
+
+test('#2125 ordinary omp history keeps the explicit dsh name', agyTest, async t => {
+  const previous = process.env.DSH_BRIDGE_SERVER
+  process.env.DSH_BRIDGE_SERVER = 'dshaaaaaaaaaa'
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_BRIDGE_SERVER
+    else process.env.DSH_BRIDGE_SERVER = previous
+  })
+  const h = omp(t)
+  const chunks = await h.chat().turn('plain omp naming control')
+  assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+  const [registration] = registrations(h, h.conversation('plain omp naming control').pid)
+  assertBridgeRegistration(h, registration, 'dsh', [HISTORY])
+})
+
+test('#2125 Antigravity OFF Skills keeps the explicit dsh name', agyTest, async t => {
+  const agySkillsVersions = []
+  const h = agyHistory(t, false, { registry: 'eager', version: AGY_OFF_CHECKED,
+    deps: { agySkillsVersions }, env: { DSH_BRIDGE_SERVER: 'dshaaaaaaaaaa' } })
+  agySkillsVersions.push({ version: AGY_OFF_CHECKED, sha256: createHash('sha256').update(readFileSync(h.agy)).digest('hex') })
+  agySkills(h)
+  assert.equal((await h.chat().turn('plain OFF naming control')).at(-1)?.reason.kind, 'stop')
+  const [registration] = registrations(h, h.conversation('plain OFF naming control').pid)
+  assertBridgeRegistration(h, registration, 'dsh', [SKILL])
+})
+
+test('#2125 the history claim uses the exact current title', async t => {
+  const name = 'dshaaaaaaaaaa'
+  const p = probe(t, { provider: AGY, skillBridge: true, skillTools: new Set([HISTORY]),
+    agyHistoryRequest: true, agyServer: name })
+  const end = p.begin()
+  try {
+    const permission = (id, flatName, signal) => p.run.onPermission(historyPermission('current', id, flatName), signal)
+    const pending = Symbol('pending')
+    assert.deepEqual(await Promise.race([permission('current-title', historyName(name)), Promise.resolve(pending)]),
+      { outcome: agyAllow }, 'claim the exact current title')
+    for (const [id, variant] of [
+      ['different-name', historyName('dshbbbbbbbbbb')],
+      ['extra-operation-suffix', `${historyName(name)}_extra`],
+      ['extra-server-suffix', historyName(`${name}x`)],
+    ]) {
+      const withdraw = new AbortController()
+      const answer = permission(id, variant, withdraw.signal)
+      assert.equal(await Promise.race([answer, Promise.resolve(pending)]), pending)
+      assert.ok(p.run.tools.get(id)?.permission)
+      withdraw.abort()
+      assert.deepEqual(await answer, CANCELLED)
+    }
+  } finally {
+    await end()
+  }
+})
 
 function openAgyHistory(h) {
   const chat = h.chat()
@@ -423,6 +534,66 @@ function assertAgyRead(chunks, h, approvals) {
   assert.equal(textOf(chunks).split(maskedLine).length - 1, 1)
   assert.equal(h.executed.length, 1)
 }
+
+test('#2125 two successful reads reuse the same registration and handshake', agyTest, async t => {
+  const h = agyHistory(t, true)
+  const chat = openAgyHistory(h)
+  const first = await chat.turn(agyRequest({ query: 'first on this session' }))
+  const pid = h.conversation('first on this session').pid
+  const [registration] = registrations(h, pid)
+  const name = assertRunServer(registration)
+  assertAgyRead(first, h, 1)
+  const live = h.adapter.live.get(chat.session.id)
+  const record = live.bridge
+  assert.equal(live.run.historySignal, undefined)
+  assert.deepEqual(await soon(live.run.onPermission(historyPermission(live.run.sessionId, 'between-prompts', historyName(name)))), CANCELLED)
+  const second = await chat.turn(agyRequest({ query: 'second on this session' }))
+  assert.deepEqual(toolBlocks(second), [])
+  assert.equal(second.at(-1)?.reason.kind, 'stop')
+  assert.equal(textOf(second).split(maskedLine).length - 1, 1)
+  assert.equal(h.adapter.live.get(chat.session.id), live)
+  assert.equal(live.bridge, record)
+  assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY, HISTORY])
+  assert.deepEqual(h.executed.map(call => call.name), [HISTORY, HISTORY])
+  assert.deepEqual(h.events('permission-answer').map(row => row.answer), [agyAllow, agyAllow])
+  assert.equal(registrations(h, pid).length, 1)
+  assert.equal(h.events('mcp-init').length, 1)
+  assertBridgeRegistration(h, registration, name, [HISTORY])
+})
+
+test('#2125 noncooperative Stop reaps the old registration', agyTest, async t => {
+  const h = agyHistory(t, true, { env: { FAKE_ACP_IGNORE_CANCEL: '1' } })
+  h.adapter.cancelWaitMs = 120
+  const chat = openAgyHistory(h)
+  const stop = new AbortController()
+  const pending = chat.turn('hang', [], stop.signal)
+  let old
+  let first
+  try {
+    await waitForFixture(() => h.events('prompt')[0])
+    first = registrations(h, h.conversation('hang').pid)[0]
+    assertRunServer(first)
+    old = h.adapter.live.get(chat.session.id)
+    assert.equal(old.run.busy, true)
+  } finally {
+    stop.abort()
+    await pending
+  }
+  assert.equal((await pending).at(-1)?.reason.kind, 'aborted')
+  await waitForFixture(() => old.run.disposed === true ? true : undefined)
+  await waitForFixture(() => h.events('cancel').find(row => row.pid === first.pid))
+  assert.equal(h.adapter.live.has(chat.session.id), false)
+  assert.equal(old.bridge.closed, true)
+  assert.equal((await wire(h.adapter.backchannel, old.bridge)('list')).status, 401)
+  assert.deepEqual(h.executed, [])
+  const chunks = await chat.turn('plain replacement after reap')
+  assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+  const [second] = registrations(h, h.conversation('plain replacement after reap').pid)
+  const name = assertRunServer(second)
+  assert.notEqual(second.pid, first.pid)
+  assert.notEqual(name, first.servers[0])
+  assertBridgeRegistration(h, second, name, [HISTORY])
+})
 
 for (const level of ['workspace', 'manual']) {
   for (const [label, meta] of [['T1 matching', 'matching'], ['T2 absent', undefined], ['T3 rejection', undefined]]) {
@@ -499,7 +670,7 @@ test('AD2T-1 verified unbound operation conflict leaves an unknown id independen
     const { run } = h.adapter.live.get(record.sessionId)
     // Seed only the verified identity. No ACP prompt owned this synthetic Skills claim.
     const tool = { id: mismatch }
-    run.markCall(tool, { name: 'mcp__dsh__load_skill' }, run.sessionId)
+    run.markCall(tool, { name: mcpName(record.serverName, SKILL) }, run.sessionId)
     run.tools.set(mismatch, tool)
     seeded = { operation: tool.skillOperation, prompt: tool.skillPrompt, bridge: tool.skillBridge }
   })
@@ -787,6 +958,175 @@ function assertCard(h, team, session, entry, outcome, decidedBy, bodies) {
   const rows = approvalRows(session, entry.callId)
   assert.equal(rows.outcome, outcome)
   return rows.result
+}
+
+async function ownedHistoryRead(t, h, team, chat, query) {
+  const cardCount = h.approvals.length
+  const bodyCount = h.executed.length
+  const answers = h.events('permission-answer').length
+  const opened = Promise.withResolvers()
+  const held = Promise.withResolvers()
+  const originalAsk = h.controls.ask
+  h.controls.ask = () => { opened.resolve(true); return held.promise }
+  const turn = chat.turn(agyRequest({ query }))
+  try {
+    assert.equal(await soon(Promise.race([opened.promise, turn.then(() => false)])), true)
+    assert.deepEqual(h.events('permission-answer').slice(answers).map(row => row.answer), [agyAllow])
+    assert.equal(h.approvals.length, cardCount + 1)
+    assert.equal(h.executed.length, bodyCount)
+    const entry = h.approvals.at(-1)
+    assert.equal(entry.tool, HISTORY)
+    const [ask] = chat.session.snapshotEvents().filter(row => row.type === 'approval/asked' && row.data.callId === entry.callId)
+    assert.equal(ask?.data.toolName, HISTORY)
+    team.rt.answerApproval(entry.id, 'allow')
+    const chunks = await turn
+    assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+    assert.deepEqual(toolBlocks(chunks), [])
+    const result = assertCard(h, team, chat.session, entry, 'allowed-once', 'web', 1)
+    assert.deepEqual(result.message.content, [{ type: 'text', text: maskedLine }])
+    assert.deepEqual(h.events('agy-real-result').at(-1)?.answer, { content: [{ type: 'text', text: maskedLine }], isError: false })
+    assert.equal(textOf(chunks).split(maskedLine).length - 1, 1)
+    assert.equal(h.approvals.length, cardCount + 1)
+    assert.equal(h.executed.length, bodyCount + 1)
+    assert.deepEqual(team.rt.approvalsView(), [])
+    t.diagnostic(JSON.stringify({ read: query, card: entry.id, approval: ask.data.id, call: entry.callId, decision: 'allowed-once',
+      cards: 1, bodies: 1, mirrors: 0, maskedAnswer: maskedLine, occurrences: 1 }))
+  } finally {
+    held.resolve('cancelled')
+    h.controls.ask = originalAsk
+    await turn
+  }
+}
+
+async function syntheticApproval(t, h, team, chat, name, choice) {
+  const live = h.adapter.live.get(chat.session.id)
+  const answerCount = h.events('permission-answer').length
+  const authorizedCount = h.events('synthetic-approved').length
+  const bridgeCalls = h.services.tools.execute.mock.callCount()
+  const cardCount = h.approvals.length
+  const opened = Promise.withResolvers()
+  const held = Promise.withResolvers()
+  const originalAsk = h.controls.ask
+  h.controls.ask = () => { opened.resolve(true); return held.promise }
+  let execution
+  try {
+    const chunks = await chat.turn(`agy-approval-fixture ${name}`)
+    const [mirror] = toolBlocks(chunks).map(chunk => chunk.block)
+    if (mirror?.name === 'acp_tool') {
+      execution = h.adapter.tool.execute(JSON.parse(mirror.arguments), { agent: live.dshAgent, callId: mirror.id, signal: t.signal })
+      await soon(Promise.race([opened.promise, execution, live.run.prompting]))
+    }
+    assert.deepEqual(h.events('permission-answer').slice(answerCount), [], 'the synthetic permission stays pending before the card is answered')
+    assert.deepEqual(toolBlocks(chunks).map(chunk => chunk.block.name), ['acp_tool'])
+    assert.equal(h.approvals.length, cardCount + 1)
+    const entry = h.approvals.at(-1)
+    assert.equal(entry.callId, mirror.id)
+    assert.equal(entry.answerable, true)
+    const { id } = JSON.parse(mirror.arguments)
+    assert.ok(live.run.tools.get(id)?.permission)
+    assert.equal(h.events('synthetic-approved').length, authorizedCount)
+    const prompting = live.run.prompting
+    if (choice === 'stop') {
+      await live.run.cancel()
+      await soon(prompting)
+      assert.equal(live.run.tools.get(id)?.permission, undefined, 'prompt end withdraws the permission while the card is held')
+    } else {
+      team.rt.answerApproval(entry.id, choice)
+    }
+    const answered = await waitForFixture(() => h.events('permission-answer').slice(answerCount).find(row => row.toolCallId === id))
+    const expected = choice === 'stop' ? CANCELLED.outcome : choice === 'allow' ? agyAllow : { outcome: 'selected', optionId: 'agy-reject' }
+    assert.deepEqual(answered.answer, expected)
+    assert.equal(answered.sessionId, live.run.sessionId)
+    held.resolve('cancelled')
+    await soon(execution)
+    await soon(prompting)
+    assert.equal(h.events('permission-answer').length, answerCount + 1)
+    assert.equal(h.events('synthetic-approved').length, authorizedCount + (choice === 'allow' ? 1 : 0))
+    assert.equal(h.services.tools.execute.mock.callCount(), bridgeCalls)
+    t.diagnostic(JSON.stringify({ synthetic: choice, pendingAtCard: true, answer: expected, bridgeCalls: 0,
+      authorizedMockActions: choice === 'allow' ? 1 : 0 }))
+  } finally {
+    held.resolve('cancelled')
+    h.controls.ask = originalAsk
+    if (execution !== undefined) await soon(execution)
+  }
+}
+
+test('#2125 cooperative Stop withdraws a pending ordinary permission and keeps the run', agyTest, async t => {
+  const { h, team, chat } = await ownedAgyHistory(t)
+  assert.equal((await chat.turn('plain cooperative setup')).at(-1)?.reason.kind, 'stop')
+  const pid = h.conversation('plain cooperative setup').pid
+  const [registration] = registrations(h, pid)
+  const name = assertRunServer(registration)
+  const live = h.adapter.live.get(chat.session.id)
+  const record = live.bridge
+  await syntheticApproval(t, h, team, chat, 'fixture_unknown_operation', 'stop')
+  assert.equal(live.run.historySignal, undefined)
+  assert.equal(h.events('cancel').filter(row => row.pid === registration.pid).length, 1)
+  assert.equal(h.adapter.live.get(chat.session.id), live)
+  assert.equal(live.bridge, record)
+  assert.equal(record.closed, false)
+  await ownedHistoryRead(t, h, team, chat, 'after-cooperative-stop')
+  assert.equal(registrations(h, pid).length, 1)
+  assertBridgeRegistration(h, registration, name, [HISTORY])
+})
+
+for (const level of ['workspace-write', 'manual']) {
+  test(`#2125 e2e at ${level} renews the registration and protects the one-card read`, agyTest, async t => {
+    const { h, team, chat } = await ownedAgyHistory(t, { level })
+    let catalog = { key: 'first', text: 'Your skills (load with load_skill):\nFixture catalog A' }
+    agySkills(h)
+    const checkedSkill = { type: 'text', text: 'fixture skill body', automagikSkill: {
+      kind: 'automagik-skill', use: 'load', name: 'fixture-skill', hash: 'fixture', botId: 'fixture-bot',
+    } }
+    Object.assign(h.services.omniTeam.skillCalls, {
+      catalog: () => catalog,
+      load: (_sessionId, name) => name === checkedSkill.automagikSkill.name ? checkedSkill : undefined,
+    })
+    h.controls.body = call => call.name === SKILL ? [checkedSkill] : maskedLine
+    assert.equal((await chat.turn('plain naming setup')).at(-1)?.reason.kind, 'stop')
+    const pid = h.conversation('plain naming setup').pid
+    const [first] = registrations(h, pid)
+    const name = assertRunServer(first)
+    assertBridgeRegistration(h, first, name, [HISTORY, SKILL])
+    const live = h.adapter.live.get(chat.session.id)
+    const old = live.bridge
+    const skill = async () => {
+      const calls = h.executed.length
+      const chunks = await chat.turn('agy-bridge load_skill {"name":"fixture-skill"}')
+      assert.equal(chunks.at(-1)?.reason.kind, 'stop')
+      assert.deepEqual(toolBlocks(chunks), [])
+      assert.deepEqual(h.events('permission-answer').at(-1)?.answer, agyAllow)
+      assert.deepEqual(h.executed.slice(calls).map(call => call.name), [SKILL])
+      assert.match(textOf(chunks), /fixture skill body/)
+    }
+    await skill()
+    await ownedHistoryRead(t, h, team, chat, 'read-A')
+    // This input is reached only after the candidate's per-run registration is established.
+    await syntheticApproval(t, h, team, chat, historyName('dsh'), 'reject')
+    await syntheticApproval(t, h, team, chat, historyName('dsh'), 'allow')
+    assert.deepEqual(h.executed.map(call => call.name), [SKILL, HISTORY])
+
+    catalog = { key: 'changed', text: 'Your skills (load with load_skill):\nFixture catalog B' }
+    await ownedHistoryRead(t, h, team, chat, 'read-B')
+    const second = registrations(h, pid)[1]
+    const replacement = assertRunServer(second)
+    assert.notEqual(replacement, name)
+    assert.equal(second.pid, first.pid)
+    assert.notEqual(second.sessionId, first.sessionId)
+    assert.equal(h.adapter.live.get(chat.session.id), live)
+    assert.equal(live.run.spec.agyServer, replacement)
+    assert.equal(live.bridge.serverName, replacement)
+    assert.equal(old.closed, true)
+    assert.equal((await wire(h.adapter.backchannel, old)('list')).status, 401)
+    assert.deepEqual(await soon(live.run.onPermission(historyPermission(first.sessionId, 'old-acp-session', historyName(name)))), CANCELLED)
+    assertBridgeRegistration(h, second, replacement, [HISTORY, SKILL])
+    await syntheticApproval(t, h, team, chat, historyName(name), 'reject')
+    await skill()
+    assert.deepEqual(h.executed.map(call => call.name), [SKILL, HISTORY, HISTORY, SKILL])
+    assert.equal(registrations(h, pid).length, 2)
+    assert.equal(h.events('mcp-init').length, 2)
+  })
 }
 
 test(`${noCardCase} N1/R2: the owned Workspace read reaches a real card in production order`, agyTest, async t => {

@@ -4,6 +4,7 @@
 // credential ends the process instead of leaving an agent with half a tool set.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -101,8 +102,8 @@ async function backchannel() {
   }
 }
 
-function bridge(env) {
-  const child = spawn(process.execPath, [BRIDGE], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
+function bridge(env, args = []) {
+  const child = spawn(process.execPath, [BRIDGE, ...args], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
   const messages = []
   let buffer = ''
   let seq = 0
@@ -171,6 +172,36 @@ test('server/discover is method-not-found, so both adapters fall back to the sta
     channel.close()
   }
 })
+
+for (const [label, args, name] of [
+  ['takes the explicit name', ['--server-name', 'dshbbbbbbbbbb'], 'dshbbbbbbbbbb'],
+  ['keeps the legacy name without an argument', [], 'dsh'],
+  ['rejects a malformed name', ['--server-name', 'dsh_x']],
+  ['rejects a missing name value', ['--server-name']],
+]) {
+  test(`#2125 bridge ${label}`, { timeout: 10_000 }, async () => {
+    const channel = await backchannel()
+    const run = bridge({ DSH_BRIDGE_URL: channel.url, DSH_BRIDGE_CREDENTIAL: CREDENTIAL,
+      DSH_BRIDGE_SERVER: 'dshaaaaaaaaaa' }, args)
+    try {
+      if (name !== undefined) {
+        const answer = await run.answer(run.send('initialize', {}))
+        assert.equal(answer.result.serverInfo.name, name)
+      } else {
+        const closed = once(run.child, 'close')
+        run.child.stdin.on('error', () => {})
+        run.send('initialize', {})
+        run.child.stdin.end()
+        assert.equal((await closed)[0], 2)
+        assert.deepEqual(run.messages, [])
+        assert.equal(run.stderr(), 'acp-dsh bridge: invalid --server-name\n')
+      }
+    } finally {
+      run.close()
+      channel.close()
+    }
+  })
+}
 
 test('tools come from DSH, a call is forwarded with the bridge credential, and a new list is announced', async () => {
   const channel = await backchannel()

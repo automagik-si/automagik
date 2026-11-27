@@ -1,11 +1,19 @@
+import { randomBytes } from 'node:crypto'
+
 // Names that cross a process or a provider boundary, kept in one module so the bridge, the
 // back-channel and the adapter cannot drift apart on them (RFC 0003, amendment, "The bridge").
 // The server name is a contract: a Claude Code allow rule reads `mcp__dsh__*`.
 export const BRIDGE_NAME = 'dsh'
 export const HISTORY_TOOL_NAME = 'read_own_chat'
-export const agyBridgeName = tool => `mcp_${BRIDGE_NAME}_${tool}`
+export const agyBridgeName = (tool, server = BRIDGE_NAME) => `mcp_${server}_${tool}`
 export const ompBridgeName = tool => `mcp__${BRIDGE_NAME}_${tool}`
 export const AGY_SKILL_TOOL = agyBridgeName('load_skill')
+const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567'
+
+export function agyRunServerName() {
+  return BRIDGE_NAME + Array.from(randomBytes(10), byte => BASE32[byte & 31]).join('')
+}
+
 export const CREDENTIAL_ENV = 'DSH_BRIDGE_CREDENTIAL'
 export const URL_ENV = 'DSH_BRIDGE_URL'
 // The source marker of the tool-call block every bridge call adds as its v4 advertisement. It

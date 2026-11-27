@@ -155,7 +155,10 @@ function configOptions(session) {
 // ignores it, which is why the plugin forks there instead); the trace keeps the order observable.
 function connect(server, sessionId, { probe = false } = {}) {
   const env = { ...process.env, ...Object.fromEntries((server.env ?? []).map(({ name, value }) => [name, value])) }
-  const child = spawn(server.command, server.args ?? [], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+  const args = server.args ?? []
+  const nameFlag = args.indexOf('--server-name')
+  trace({ event: 'mcp-spawn', sessionId, server: server.name, serverNameArg: nameFlag === -1 ? null : args[nameFlag + 1] ?? null })
+  const child = spawn(server.command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] })
   child.stdin.on('error', () => {})
   let seq = 0
   const pending = new Map()
@@ -221,7 +224,8 @@ function connect(server, sessionId, { probe = false } = {}) {
         trace({ event: 'mcp-discover', sessionId, server: server.name, error: error.message })
       }
     }
-    await request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-agent', version: '1' } })
+    const result = await request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-agent', version: '1' } })
+    trace({ event: 'mcp-init', sessionId, server: server.name, serverInfo: result?.serverInfo?.name })
     if (probe) return []
     notify('notifications/initialized', {})
     const listed = await request('tools/list', {})
@@ -249,8 +253,10 @@ async function attachServer(session, server, sessionId) {
 
 async function attach(session, servers, sessionId) {
   session.mcp = new Map()
+  session.bridgeName = undefined
   if (SKIP_MCP) return
   for (const server of servers ?? []) {
+    if (server.env?.some(entry => entry.name === 'DSH_BRIDGE_CREDENTIAL')) session.bridgeName = server.name
     if (server.name === 'dsh') session.dshServer = server
     if (OMP_DISCOVER && server.name === 'dsh') {
       const probe = connect(server, sessionId, { probe: true })
@@ -509,7 +515,9 @@ const implementation = {
     session.cancelled = false
     session.turns++
     const said = prompt.filter(block => block.type === 'text').map(block => block.text).join(' ')
-    const current = prompt.findLast(block => block.type === 'text')?.text ?? ''
+    // A catalog can follow the person's message on the first prompt after renewal.
+    const current = prompt.findLast(block => block.type === 'text' &&
+      !block.text.startsWith('Your skills (load with load_skill):'))?.text ?? ''
     // What the client actually sent this turn (a replayed transcript, for a crossing).
     trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
@@ -792,7 +800,8 @@ const implementation = {
     }
     const agyReal = /^agy-real(-parallel)? (\[.*\])$/m.exec(current)
     if (agyReal !== null) {
-      const connection = session.mcp.get('dsh')
+      const server = session.bridgeName
+      const connection = session.mcp.get(server)
       const parallel = agyReal[1] !== undefined
       const runStep = async (step, index) => {
         const { query, meta, operation = 'read_own_chat', conflicting, retry, permission = true, includeQuery } = step
@@ -800,10 +809,10 @@ const implementation = {
         if (permission) {
           // Title, kind and summary reflect the observed ACP shape. The name value and
           // every MCP id variant below are synthetic. The optional query was seen in 5a.
-          const name = conflicting ? `mcp_other_${operation}` : `mcp_dsh_${operation}`
-          const toolCall = { toolCallId, name, title: `Run mcp_dsh_${operation}`, kind: 'other', status: 'pending',
+          const name = conflicting ? `mcp_other_${operation}` : `mcp_${server}_${operation}`
+          const toolCall = { toolCallId, name, title: `Run mcp_${server}_${operation}`, kind: 'other', status: 'pending',
             rawInput: operation === 'read_own_chat' ? { toolSummary: 'Read this chat', ...(includeQuery && { query }) }
-              : { server: 'dsh', tool: operation } }
+              : { server, tool: operation } }
           await update({ sessionUpdate: 'tool_call', ...toolCall })
           const { outcome } = await conn.requestPermission({ sessionId, toolCall, options: [
             { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
@@ -842,6 +851,34 @@ const implementation = {
       }
       return { stopReason: 'end_turn' }
     }
+    // An inert permission input. A selected mock answer only increments the trace count.
+    const approvalFixture = /^agy-approval-fixture (\S+)$/.exec(current)
+    if (approvalFixture !== null) {
+      const name = approvalFixture[1]
+      const toolCallId = `agy-approval-fixture-${session.turns}`
+      const toolCall = { toolCallId, name, title: `Run ${name}`, kind: 'other', status: 'pending',
+        rawInput: { toolSummary: 'Synthetic approval input' } }
+      const stopped = Promise.withResolvers()
+      session.wake = stopped.resolve
+      try {
+        await update({ sessionUpdate: 'tool_call', ...toolCall })
+        const answer = conn.requestPermission({ sessionId, toolCall, options: [
+          { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'agy-reject', name: 'Reject', kind: 'reject_once' },
+        ] }).then(({ outcome }) => {
+          trace({ event: 'permission-answer', sessionId, toolCallId, answer: outcome })
+          if (outcome.optionId === 'agy-allow') trace({ event: 'synthetic-approved', sessionId, toolCallId })
+          return outcome
+        })
+        const outcome = await Promise.race([answer, stopped.promise])
+        if (session.cancelled) return { stopReason: 'cancelled' }
+        await update({ sessionUpdate: 'tool_call_update', toolCallId,
+          status: outcome.optionId === 'agy-allow' ? 'completed' : 'failed' })
+        return { stopReason: 'end_turn' }
+      } finally {
+        session.wake = undefined
+      }
+    }
     // codex-acp's own shapes (#1564 PR B), each checked before the generic "bridge" trigger.
     const codexBridge = /\b(agy-bridge(?:-without-id)?) (\S+)(?: (\{.*\}))?/.exec(current)
       ?? /\b(codex-bridge) (\S+)(?: (\{.*\}))?/.exec(said)
@@ -850,9 +887,11 @@ const implementation = {
       const args = raw === undefined ? {} : JSON.parse(raw)
       const toolCallId = `codex-bridge-${session.turns}`
       const agyBridge = style !== 'codex-bridge'
+      const server = agyBridge ? session.bridgeName : 'dsh'
       if (agyBridge) {
-        const toolCall = { toolCallId, name: `mcp_dsh_${name}`, title: `mcp_dsh_${name}`, kind: 'execute',
-          rawInput: { server: 'dsh', tool: name, arguments: args } }
+        const flatName = `mcp_${server}_${name}`
+        const toolCall = { toolCallId, name: flatName, title: flatName, kind: 'execute',
+          rawInput: { server, tool: name, arguments: args } }
         await update({ sessionUpdate: 'tool_call', ...toolCall, status: 'pending' })
         const { outcome } = await conn.requestPermission({ sessionId, toolCall, options: [
           { optionId: 'agy-allow', name: 'Allow', kind: 'allow_once' },
@@ -864,13 +903,15 @@ const implementation = {
         await update({ sessionUpdate: 'tool_call', toolCallId, title: `mcp.dsh.${name}`, kind: 'execute', status: 'in_progress', rawInput: { server: 'dsh', tool: name, arguments: args }, _meta: { is_mcp_tool_call: true } })
       }
       let text = 'the bridge is not connected'
-      const connection = session.mcp.get('dsh')
+      const connection = session.mcp.get(server)
       if (connection !== undefined) {
         try {
           const history = agyBridge && name === 'read_own_chat'
+          // Skills on the combined history bridge still need the verified ACP binding.
+          const combinedSkill = agyBridge && server !== 'dsh' && name === 'load_skill'
           const answer = await connection.request('tools/call', {
             name, arguments: args,
-            ...(history && style === 'agy-bridge' && { _meta: { callId: toolCallId } }),
+            ...((history || combinedSkill) && style === 'agy-bridge' && { _meta: { callId: toolCallId } }),
           })
           if (history) trace({ event: 'mcp-history-result', sessionId, toolCallId, answer })
           text = (answer.content ?? []).map(block => block.text ?? '').join('\n') || '(no text)'
