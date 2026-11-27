@@ -4,12 +4,14 @@ import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { apply as applyAutoReview } from '@deepseek-ai/dsh-experimental-auto-review'
 import { createUserMessage, LlmAdapter, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import NodePtcRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { crossed } from '../../acp-dsh/src/host/switch.js'
 import { install, requestedSkills, skillPart, skillTool } from '../src/host/skill-library-call.js'
+import { registerTrustedTool } from '../src/host/tool-registrations.js'
 import { SKILL_NOTICE } from '../src/host/skill-message.js'
 import { skillActivityOf } from '../src/shared/skill-activity.js'
 import { appendLegacyRefusal, nativeText, ordinaryText, rawText, refusedName, saveModelInput } from './support/legacy-skill-refusal.js'
@@ -385,4 +387,92 @@ test('2083 follows only established skill lineage and stops on missing, cyclic o
     assert.equal(rt.skillCalls.catalog(id).text, '')
     assert.equal(rt.skillCalls.load(id, x.name), undefined)
   }
+})
+
+test('#2164 proof requires the current owner, reviewed assignment and exact trusted registration', async t => {
+  let foreignFetches = 0
+  t.mock.method(globalThis, 'fetch', () => {
+    foreignFetches++
+    throw new Error('Unexpected foreign fetch in the proof fixture')
+  })
+  const root = new Context()
+  t.after(async () => {
+    await root.fiber.dispose()
+    assert.equal(foreignFetches, 0)
+  })
+  await mountAgentLoopTestDependencies(root)
+  const session = { id: 'fixture-proof' }
+  const agent = { session }
+  await root.inject(['tools'], ctx => { agent.ctx = createScope(ctx, agent).ctx })
+  let currentAgent = agent
+  let currentOwner = true
+  let currentTeam = true
+  let active = [{ ...x, review: { status: 'done', hash: x.hash, findings: [] } }]
+  const read = () => active
+  const rt = {
+    ctx: { get: key => key === 'agents' ? { get: () => currentAgent } : root.get(key), on() {} },
+    isBotSession: () => currentOwner, teamCurrent: () => currentTeam,
+    selfOf: () => 'fixture-bot', botOf: id => id === 'fixture-bot' ? { id } : undefined,
+    skillLibrary: { active: read }, canUseWorkerSkillTool: () => true,
+  }
+  const shipped = skillTool(rt)
+  rt.teamTools = [shipped]
+  install(rt)
+  const prove = () => rt.skillCalls.reviewed?.(session.id, x.name, agent, session)
+  const dispose = registerTrustedTool(agent.ctx.tools, shipped)
+  const proof = prove()
+  assert.ok(proof, 'a current reviewed assignment yields a proof')
+  assert.equal(proof.definition, shipped)
+  assert.equal(proof.current(), true)
+
+  const [reviewed] = active
+  for (const record of [
+    { ...reviewed, review: undefined },
+    { ...reviewed, review: { ...reviewed.review, hash: 'other' } },
+    { ...reviewed, held: 'fixture hold' },
+    { ...reviewed, mode: 'manual' },
+    { ...reviewed, hash: 'changed' },
+  ]) {
+    active = [record]
+    assert.equal(prove(), undefined)
+    assert.equal(proof.current(), false)
+  }
+  active = [reviewed]
+  rt.skillLibrary.active = () => { throw new Error('Fixture read failure') }
+  assert.equal(prove(), undefined)
+  assert.equal(proof.current(), false)
+  rt.skillLibrary.active = read
+  currentOwner = false
+  assert.equal(prove(), undefined)
+  rt.state = { tasks: { [session.id]: { skillsOwner: 'fixture-bot', skillsInstructionsId: 'fixture-pin', skills: [reviewed] } } }
+  assert.equal(prove()?.current(), true, 'an admitted worker can use its existing matching pin')
+  rt.state.tasks[session.id].skills = []
+  assert.equal(prove(), undefined)
+  delete rt.state
+  currentOwner = true
+  currentTeam = false
+  assert.equal(prove(), undefined)
+  assert.equal(proof.current(), false)
+  currentTeam = true
+  currentAgent = { session }
+  assert.equal(prove(), undefined)
+  currentAgent = agent
+  agent.session = { ...session }
+  assert.equal(prove(), undefined)
+  assert.equal(proof.current(), false)
+  agent.session = session
+
+  dispose()
+  const untrusted = agent.ctx.tools.register(shipped)
+  assert.equal(prove(), undefined)
+  untrusted()
+  const other = registerTrustedTool(agent.ctx.tools, { ...shipped })
+  assert.equal(prove(), undefined)
+  other()
+  const global = registerTrustedTool(root.tools, shipped)
+  assert.equal(prove(), undefined)
+  global()
+  registerTrustedTool(agent.ctx.tools, shipped)
+  assert.equal(prove()?.current(), true)
+  assert.equal(proof.current(), false, 'a new trusted registration cannot revive the captured proof')
 })

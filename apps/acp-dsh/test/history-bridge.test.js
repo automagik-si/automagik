@@ -37,6 +37,14 @@ const definitions = [HISTORY, SKILL, 'bash', 'update_bot', 'read_group_chat', 'w
 }))
 const attachment = 'a'.repeat(32)
 
+async function dispatchSkill(toolSet, exec, call) {
+  const tool = toolSet.view(exec.agent).get(call.name)
+  assert.ok(tool, 'the per-call tool view admits the fixture skill')
+  const args = JSON.parse(call.arguments)
+  const value = await tool.execute(args, exec)
+  return { content: tool.output.render(args, value), isError: false }
+}
+
 function wire(backchannel, record, id = attachment, path = backchannel.urlFor(record)) {
   return async (op, body = {}) => {
     const response = await fetch(path, {
@@ -70,10 +78,11 @@ function world(t, { level = 'manual', only = new Set([HISTORY]), sandbox = level
     permissionPresets: { current: () => level },
     tools: {
       definitions: () => definitions,
-      async execute({ calls: [call], agent, signal }) {
+      async execute({ calls: [call], agent, signal, toolSet }) {
         await controls.beforeBody({ call, agent, signal })
         const exec = { agent, callId: call.id, name: call.name, signal }
         const dispatch = async () => {
+          if (call.name === SKILL && toolSet !== undefined) return dispatchSkill(toolSet, exec, call)
           executed.push(call)
           const value = await controls.body(call)
           return { content: Array.isArray(value) ? value : [{ type: 'text', text: value }], isError: false }
@@ -180,9 +189,10 @@ function agyHistory(t, nativeTools, options) {
   h.controls.body = () => 'synthetic marker [secret:fixture]'
   h.services.tools = {
     definitions: () => definitions,
-    execute: t.mock.fn(async ({ calls: [call], agent, signal }) => {
+    execute: t.mock.fn(async ({ calls: [call], agent, signal, toolSet }) => {
       const exec = { agent, callId: call.id, name: call.name, signal }
       const body = () => h.execute(exec, async () => {
+        if (call.name === SKILL && toolSet !== undefined) return dispatchSkill(toolSet, exec, call)
         h.executed.push(call)
         const value = await h.controls.body(call)
         return { content: Array.isArray(value) ? value : [{ type: 'text', text: value }], isError: false }
@@ -2314,3 +2324,84 @@ test('fresh fork after withdrawal of the last Automatic skill', async t => {
   assert.equal(refusal.status, 200)
   assert.deepEqual(refusal.body, old, 'a stale request still gets the checked refusal')
 })
+
+function reviewedBridgeFixture(t, h, { proof = 'current', origin } = {}) {
+  let foreignFetches = 0
+  const fetch = globalThis.fetch
+  t.mock.method(globalThis, 'fetch', (input, options) => {
+    if (origin?.() === new URL(input).origin) return fetch(input, options)
+    foreignFetches++
+    throw new Error('Unexpected foreign fetch in the bridge fixture')
+  })
+  t.after(() => assert.equal(foreignFetches, 0))
+  const part = { type: 'text', text: 'CHECKED-CITRUS-BODY',
+    automagikSkill: { kind: 'automagik-skill', use: 'load', name: 'marker', hash: 'citrus-hash', botId: 'fixture-bot' } }
+  const count = { checks: 0, rejected: 0, bodies: 0 }
+  const definition = { ...definitions.find(tool => tool.name === SKILL),
+    execute: () => { count.bodies++; return part }, output: { render: (_args, value) => [value] } }
+  h.services.omniTeam = { skillCalls: {
+    available: () => true, catalog: () => undefined, project: options => options, admit() {},
+    load: () => part, unavailable: 'The fixture skill is unavailable.',
+    reviewed() {
+      if (proof === 'missing') return
+      if (proof === 'throws') throw new Error('Fixture proof error')
+      return { ...part.automagikSkill, text: part.text, definition, current() {
+        count.checks++
+        if (proof === 'reject') count.rejected++
+        return proof !== 'reject'
+      } }
+    },
+  } }
+  h.controls.body = call => call.name === SKILL ? (++count.bodies, [part]) : 'Fixture history'
+  return { part, count }
+}
+
+test('#2164 omp combined bridge keeps history approval and skips only the reviewed load request', async t => {
+  const h = world(t, { only: new Set([HISTORY, SKILL]) })
+  const { part, count } = reviewedBridgeFixture(t, h)
+  const loaded = await h.backchannel.call(h.record, { name: SKILL, arguments: { name: 'marker' }, callId: 'fixture-skill' })
+  const history = await h.call('fixture-history')
+  t.diagnostic(`requests=${h.requests.map(request => request.toolName)} bodies=${count.bodies}`)
+  assert.deepEqual(h.requests.map(request => request.toolName), [HISTORY])
+  assert.deepEqual(loaded, { content: [{ type: 'text', text: part.text }], isError: false })
+  assert.equal(count.bodies, 1)
+  assert.equal(count.checks, 2)
+  assert.equal(history.isError, false)
+})
+
+test('#2164 Antigravity ON verifies its per-run skill call and still asks for history', { ...unixOnly, timeout: 15_000 }, async t => {
+  const h = agyHistory(t, true)
+  const { part, count } = reviewedBridgeFixture(t, h, { origin: () => h.adapter.backchannel.url })
+  const chat = h.chat()
+  const loaded = await chat.turn('agy-bridge load_skill {"name":"marker"}')
+  const [registration] = registrations(h, h.conversation('agy-bridge load_skill').pid)
+  const server = assertRunServer(registration)
+  assertBridgeRegistration(h, registration, server, [HISTORY, SKILL])
+  const live = h.adapter.live.get(chat.session.id)
+  const row = live.run.tools.get('codex-bridge-1')
+  assert.equal(row.structuredName, `mcp_${server}_${SKILL}`)
+  assert.equal(row.skillOperation, SKILL)
+  const history = await chat.turn('agy-bridge read_own_chat {"query":"marker"}')
+  t.diagnostic(`requests=${h.approvals.map(request => request.toolName)} bodies=${count.bodies}`)
+  assert.deepEqual(h.approvals.map(request => request.toolName), [HISTORY])
+  assert.ok(textOf(loaded).includes(part.text))
+  assert.equal(count.bodies, 1)
+  assert.equal(count.checks, 2)
+  assert.ok(textOf(history).includes('Fixture history'))
+})
+
+for (const proof of ['missing', 'throws', 'reject']) {
+  test(`#2164 ${proof} proof never runs a skill body without approval`, async t => {
+    const h = world(t, { only: new Set([HISTORY, SKILL]) })
+    const { count } = reviewedBridgeFixture(t, h, { proof })
+    h.controls.ask = () => 'rejected'
+    const response = await h.backchannel.call(h.record, { name: SKILL, arguments: { name: 'marker' }, callId: 'fixture-skill' })
+    assert.equal(response.isError, true)
+    assert.equal(count.bodies, 0)
+    const checked = proof === 'reject' && count.checks === 1
+    t.diagnostic(`approval=${h.requests.length} wrapper=${count.checks} rejected=${count.rejected} shipped=${count.bodies}`)
+    assert.equal(h.requests.length, checked ? 0 : 1)
+    assert.equal(count.rejected, checked ? 1 : 0)
+    if (checked) assert.match(response.content[0].text, /fixture skill is unavailable/)
+  })
+}

@@ -52,7 +52,8 @@ Every model entry gets a descriptor `{ harness, connectedBy }`, derived from its
   the agent asks permission for goes through DSH's approval dialog under the Session's level
   (what the agent's own settings already allow does not ask; see the Session's level below),
   except `mcp__dsh__*` while `dshTools` is on: acp-dsh answers that ACP request itself and the
-  bridge raises the one DSH approval (Amendments, "One dialog per call"). How, for the agent's
+  bridge raises the one DSH approval (Amendments, "One dialog per call"), with the asking-level
+  exception for an assigned, reviewed skill's `load_skill` described below. How, for the agent's
   own tools: each call it makes ends the model step with a call to `acp_tool`, a mirror tool
   registered in that agent's scope only. DSH writes those `tool/call` and `tool/result` rows and
   draws the card from the call's ACP kind (terminal, diff, generic); the mirror tool waits for
@@ -375,9 +376,10 @@ refuses any other. The name is a contract, because a Claude Code allow rule read
 the bridge confirms it was started and fails the turn when it was not, instead of running with
 half a tool set.
 
-**Approval.** Every DSH tool call asks DSH's approval service (`approval/request`) under the
-Session's level before it runs, and hands the agent DSH's answer; a refusal is an error to the
-agent. The agent's own rules cannot lift it: an entry in the person's Claude Code settings that
+**Approval.** DSH tool calls follow the Session's level, with the assigned, reviewed skill
+exception below. When the bridge asks DSH's approval service (`approval/request`), it hands the
+agent DSH's answer. A refusal is an error to the agent. The agent's own rules cannot lift it:
+an entry in the person's Claude Code settings that
 always allows `mcp__*`, or a hook that approves it, stops Claude Code asking, never the bridge.
 Delivery 6's test is exactly that: with such a rule saved, a DSH tool call still raises
 `approval/asked` in the Session log and waits for the person. `session/request_permission` is not
@@ -388,10 +390,23 @@ Code's `auto` mode ran an MCP tool call with no permission request at all).
 double it. In Manual the spike shows Claude Code asking `session/request_permission` for an
 `mcp__` tool. The plugin's rule: for `mcp__dsh__*`, acp-dsh answers that request itself with
 `allow-once` and raises no DSH dialog from it — the bridge's `approval/request` is the one dialog
-the person sees. For any other `mcp__` tool (a person's own server), the agent's own mode and
-rules decide whether the request exists at all, and acp-dsh forwards it to DSH's dialog as it
-does today (read from `acp.js`); the bridge never sees that call, so there is one dialog there
-too.
+the person sees, except for assigned, reviewed skills below. For any other `mcp__` tool (a
+person's own server), the agent's own mode and rules decide whether the request exists at
+all, and acp-dsh forwards it to DSH's dialog as it does today (read from `acp.js`); the bridge
+never sees that call, so there is one dialog there too.
+
+**Assigned, reviewed skills load without the bridge's request (#2164).** At an asking level,
+the bridge skips its request for `load_skill` with exactly one string argument, `name`, when
+the Session's current Bot has that skill assigned as Automatic, or an eligible worker has the
+existing matching assignment and task pin. The skill must be available, non-held and have a
+verified model review for its exact current hash. The proof binds the original bridge Session,
+its current Agent and the Bots team's exact trusted tool registration through body entry and
+result release. The bridge checks the same proof and the current reviewed assignment before
+keeping the result. A failed check refuses the load. An otherwise available call without proof
+at the decision follows the ordinary approval path. An unavailable skill follows the existing
+early refusal. Auto retains its reviewer and possible escalation, as on native. Full access
+and other tools follow their existing paths. In-step loads keep the ordinary call and result
+rows. Self-opened loads use the existing `bridge-outside-step` outcome.
 
 **The agent's own tools.** `acp-claude`: off, by `session/new` `_meta.disableBuiltInTools: true`
 (the adapter's legacy shorthand for `_meta.claudeCode.options.tools: []`), which the spike shows
