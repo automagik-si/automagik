@@ -112,8 +112,8 @@ name: Release
 # A role's version is the release in which its package bytes last changed. Each later plugin cut attaches the same bytes under its own tag.
 #
 # Nothing is published to npm: the plugins ship as git sources and release files only.
-# Pushes use the workflow's own token; CI already ran on the dev commit being released, and
-# this job runs the gates again before it tags.
+# release-verify.yml gates a pinned dev commit before the publication lock. The cut accepts
+# that commit only while it is still dev. A newer merge has its own verification and cut.
 
 on:
   push:
@@ -186,18 +186,29 @@ on:
 permissions: {}
 
 jobs:
+  preflight:
+    name: Preflight
+    uses: ./.github/workflows/release-verify.yml
+    permissions:
+      contents: read
+      actions: read
+
   cut:
     name: Cut v<version> on dev
+    needs: preflight
+    if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-24.04
-    # The job keeps its 45-minute timeout. A re-cut starts only if the longest measured attempt
-    # fits before the cut deadline, leaving five minutes for the steps after a successful push.
+    # Verification jobs can finish out of order. Queue every publisher and admit only the current tip.
     timeout-minutes: 45
     concurrency:
       group: release-cut
+      queue: max
       cancel-in-progress: false
     permissions:
+      actions: read
       contents: write
     outputs:
+      successor: ${{ steps.new.outputs.successor || steps.cut.outputs.successor }}
       version: ${{ steps.cut.outputs.version }}
       plugins: ${{ steps.publish.outputs.plugins }}
       sha: ${{ steps.cut.outputs.sha }}
@@ -224,108 +235,53 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: dev
+          ref: ${{ needs.preflight.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
 
-      # One Node version for both jobs (#1645): the release reads the same file CI's herdr and am
-      # matrix reads, and runs the exact `release` version, which must be one of that matrix's
-      # legs. They have to stay in step: a Node minor can change filesystem, network or process
-      # behaviour, and 24.0-24.13.0's rmSync followed a symlink to a directory where 24.18
-      # unlinked it, so a release on 24.9.0 failed for hours while every PR check on 22 + latest
-      # 24 passed. Do not write a Node version into either workflow outside this file.
-      - name: The Node version CI gates the release on
-        id: node
-        run: |
-          set -euo pipefail
-          release=$(jq -r '.release' .github/node-versions.json)
-          if [[ ! "${release}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::release Node version '${release}' in .github/node-versions.json is not exact x.y.z"
-            exit 1
-          fi
-          if ! jq -e --arg version "${release}" '.ci | index($version)' .github/node-versions.json > /dev/null; then
-            echo "::error::release Node version '${release}' is not one of the ci matrix legs in .github/node-versions.json"
-            exit 1
-          fi
-          echo "version=${release}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: ${{ steps.node.outputs.version }}
+          node-version: ${{ needs.preflight.outputs.node }}
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
 
-      - name: Anything new since the last release
+      - name: Admit only the verified dev commit
         id: new
         run: |
           set -euo pipefail
-          # The newest release, a full one or a plugin patch (calendar tags have six-digit minors).
-          last=$(git tag --list 'v3.*' --sort=-v:refname | grep -E '^v3\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$' | head -1 || true)
-          if [[ -z "${last}" ]]; then
-            # The first release: everything since the beginning ships.
-            echo "release=true" >> "$GITHUB_OUTPUT"
+          tip=$(git ls-remote --exit-code origin refs/heads/dev | cut -f1)
+          if [[ "$(git rev-parse HEAD)" != "$tip" ]]; then
+            echo "successor=$tip" >> "$GITHUB_OUTPUT"
           else
-            # The path decision is authoritative, not the subjects: PR #759's test(pocket) squash
-            # merge touched Pocket's shipped Kotlin source while its subject looked inert (#767).
-            # Ask ships first; a failure stops the run instead of reading as "nothing reaches an
-            # install".
-            ships=$(bun scripts/lane.ts ships "${last}")
-            if [[ "${ships}" == "yes" ]]; then
-              echo "release=true" >> "$GITHUB_OUTPUT"
-            elif [[ "${ships}" != "no" ]]; then
-              echo "::error::scripts/lane.ts ships ${last} printed '${ships}', not yes or no"
-              exit 1
-            else
-              # The subjects are only a fast path to the wording: all inert (the release's own
-              # version commit and index listing, CI, docs, tests) with nothing shipping is "dev
-              # has nothing"; any other subject reaches no install either when the diff ships
-              # nothing (a plugin's dev tools, its lint script: not in its package's files).
-              subjects=$(git log --no-merges --format=%s "${last}..HEAD" \
-                | grep -vE '^(chore\(release\)|ci|docs|test)(\([^)]*\))?!?: ' || true)
-              if [[ -n "${subjects}" ]]; then
-                echo "nothing since ${last} reaches an install: no release"
-              else
-                echo "dev has nothing since ${last}: no release"
-              fi
-            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: The gates the release stands on
-        if: steps.new.outputs.release == 'true'
-        run: bash scripts/release-gates.sh base
 
       - name: Which lane
         id: lane
         if: steps.new.outputs.release == 'true'
         run: bash scripts/release-gates.sh lane
 
-      # The old automagik-herdr CI gate, on the pack this release attaches (Node 22.7+, shellcheck).
-      - name: The herdr pack's gates
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
-        run: bash scripts/release-gates.sh herdr
-
-      # The release gate for every mod the pack ships (#652, generalised): walk each PACK_MODS
-      # entry's static import graph against gpui-shell 0.7.1 and fail a load-time import.meta.url.
-      # The pack's tests above run it too; this step names the gate a pack release may not skip.
-      - name: Every pack mod's import graph
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
-        run: bash scripts/release-gates.sh herdr-imports
-
-      # The same mods through the app's own loader (#624, #652), headless: the pack this release
-      # would attach is built from this commit and every PACK_MODS mod must load in the pinned
-      # Linux herdr-app. A load failure stops the release and prints herdr-app's output for that
-      # mod. The version and sha256 are pinned in .github/scripts/herdr-app-check.mjs, never latest.
-      - name: herdr-app system libraries
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
+      - name: Check that every required part passed verification
+        if: steps.new.outputs.release == 'true'
+        env:
+          VERIFIED_HERDR: ${{ needs.preflight.outputs.herdr }}
+          VERIFIED_POCKET: ${{ needs.preflight.outputs.pocket }}
+          VERIFIED_METER: ${{ needs.preflight.outputs.meter }}
+          HERDR: ${{ steps.lane.outputs.herdr }}
+          POCKET: ${{ steps.lane.outputs.pocket }}
+          METER: ${{ steps.lane.outputs.meter }}
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libxkbcommon-x11-0 libxcb-xkb1
-
-      - name: Every pack mod loads in herdr-app
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
-        run: bash scripts/release-gates.sh herdr-app
+          set -euo pipefail
+          for part in HERDR POCKET METER; do
+            previous="VERIFIED_${part}"
+            if [[ "${!part}" == yes && "${!previous}" != yes ]]; then
+              echo "::error::The lane now requires ${part}. Rerun verification before publishing."
+              exit 1
+            fi
+          done
+          bun install --frozen-lockfile --ignore-scripts
 
       # Before the cut, check the slot named by HERDR_PACK_SIGNER and its key against pack-keys.json.
       # An unset or empty selector defaults to HERDR_PACK_KEY. An unknown selector or an empty
@@ -336,12 +292,6 @@ jobs:
           HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
           HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}
         run: bash scripts/release-gates.sh herdr-key
-
-      # Every release carries am (RFC 0012): its tests, a syntax check, shellcheck on its launcher,
-      # and its copies of the pack's CLI and briefing byte for byte the pack's.
-      - name: The am part's gates
-        if: steps.new.outputs.release == 'true'
-        run: bash scripts/release-gates.sh am
 
       # Before the cut, on every release, since every release carries am: once am-keys.json lists
       # keys, AM_LANE_KEY (the slot AM_LANE_SIGNER names) must be one of them, or the run stops
@@ -354,15 +304,6 @@ jobs:
         env:
           AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || vars.AM_LANE_SIGNER != 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY || '' }}
         run: bash scripts/release-gates.sh am-key
-
-      # Before the cut, so a release that builds the meter never goes out with a crate that fails its
-      # gates (ci.yml's usagemeter job, again on the commit being released), on the toolchain ci.yml
-      # pins. Its four release binaries are built after the cut, on CI, from the tag (the meter job).
-      - name: The meter's gates
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'
-        env:
-          RUST_TOOLCHAIN: 1.93.0
-        run: bash scripts/release-gates.sh meter
 
       # Before the cut, on a release that builds the meter (so meter-keys.json lists a key: the lane is
       # held until it does): METER_LANE_KEY (the slot METER_LANE_SIGNER names) must be set and be one
@@ -384,24 +325,6 @@ jobs:
           HAS_PASSWORD: ${{ secrets.POCKET_SIGNING_PASSWORD != '' }}
         run: bash scripts/release-gates.sh pocket-key
 
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
-        with:
-          packages: 'platforms;android-36 build-tools;35.0.0'
-
-      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
-
-      - name: Pocket's gates
-        if: steps.new.outputs.release == 'true' && steps.lane.outputs.pocket == 'yes'
-        run: bash scripts/release-gates.sh pocket
-
       # Before the cut, so an add-on that cannot ride the lane stops the run before any tag.
       - name: Pack the add-ons the lane carries
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.kind != 'herdr' && steps.lane.outputs.kind != 'pocket' && steps.lane.outputs.kind != 'am' && steps.lane.outputs.kind != 'meter'
@@ -411,6 +334,7 @@ jobs:
         id: cut
         if: steps.new.outputs.release == 'true'
         env:
+          RELEASE_CUT_ATTEMPTS: 1
           RELEASE_CUT_STARTED: ${{ steps.clock.outputs.started }}
           RELEASE_CUT_DEADLINE: ${{ steps.clock.outputs.deadline }}
           KIND: ${{ steps.lane.outputs.kind }}
@@ -419,14 +343,6 @@ jobs:
           POCKET_SINCE: ${{ steps.lane.outputs.pocket_since }}
           METER: ${{ steps.lane.outputs.meter }}
           METER_SINCE: ${{ steps.lane.outputs.meter_since }}
-          # A re-cut re-runs the signing-key gates on the new tip: they read the key lists, which a
-          # merge in the window can change, so the same secrets the key-check steps got are here.
-          HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
-          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}
-          AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || vars.AM_LANE_SIGNER != 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY || '' }}
-          METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || vars.METER_LANE_SIGNER != 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY || '' }}
-          HAS_KEYSTORE: ${{ secrets.POCKET_SIGNING_KEYSTORE != '' }}
-          HAS_PASSWORD: ${{ secrets.POCKET_SIGNING_PASSWORD != '' }}
         run: bash scripts/release-cut.sh
 
       # Every release, whatever its kind (RFC 0012). Into release/ before the plugins'
@@ -658,6 +574,7 @@ jobs:
       # A herdr, pocket, am or meter patch packs no plugins: the lane stays on the release that last did.
       - name: Sign and post the plugin lane
         if: steps.cut.outputs.version != '' && steps.lane.outputs.kind != 'herdr' && steps.lane.outputs.kind != 'pocket' && steps.lane.outputs.kind != 'am' && steps.lane.outputs.kind != 'meter'
+        id: plugin_feed
         env:
           VERSION: ${{ steps.cut.outputs.version }}
           KIND: ${{ steps.lane.outputs.kind }}
@@ -689,6 +606,41 @@ jobs:
               --notes "lane.json lists the newest Automagik plugins (their tarballs are on their own versioned releases); lane.json.sig is its ed25519 signature, checked against plugin-lane/keys.json. See scripts/lane.ts."
           fi
           gh release upload plugin-lane lane/lane.json lane/lane.json.sig --clobber --repo "${GITHUB_REPOSITORY}"
+
+      - name: Release publication summary
+        if: always() && !steps.new.outputs.successor && !steps.cut.outputs.successor
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+          PUBLISHED: ${{ steps.publish.outcome }}
+          FEED: ${{ steps.plugin_feed.outcome }}
+          PLUGINS: ${{ steps.publish.outputs.plugins }}
+          RESULT: ${{ job.status }}
+        run: bash scripts/release-summary.sh
+
+  handoff:
+    name: Find or start the successor release
+    needs: [preflight, cut]
+    if: needs.cut.outputs.successor != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: release-handoff-${{ needs.cut.outputs.successor }}
+      queue: max
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          persist-credentials: false
+      - name: Hand publication to the next verified run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUCCESSOR: ${{ needs.cut.outputs.successor }}
+          PRERELEASE: ${{ inputs.prerelease == true }}
+          DESKTOP: ${{ inputs.desktop != false || github.event_name == 'push' }}
+        run: bash scripts/release-summary.sh
 
   server-image:
     name: Dispatch the release's server image

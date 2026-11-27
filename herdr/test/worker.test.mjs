@@ -1373,11 +1373,19 @@ test("start and attach append a seat row to the ledger", (t) => {
   assert.equal(seat.template, null, "a seat runs no template");
 });
 
+function runClock(file, elapsed) {
+  return {
+    NODE_OPTIONS: `--import=${new URL("./hc-run-clock.mjs", import.meta.url).href}`,
+    HC_TEST_ANSWER_MS: String(elapsed),
+    HC_TEST_CLOCK_FILE: file,
+  };
+}
+
 test("#1262: a seat start gets the longer hc run timeout too, and a timed-out run is recorded by name", (t) => {
   const s = scene(t);
   const done = join(s.root, "seat-run-answered");
-  hcStateExtra(s, { runDelayMs: 16_000, runDelayDone: done });
-  const r = s.cli(["start", "Genie"], { from: null, env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "20000" } });
+
+  const r = s.cli(["start", "Genie"], { from: null, env: { ...runClock(done, 16_000), AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "20000" } });
   assert.equal(r.code, 0, r.err);
   assert.ok(existsSync(done), "the seat's hc run was allowed to answer past the old 15 s timeout");
   const seat = s.ledger().find((x) => x.kind === "seat");
@@ -1446,11 +1454,9 @@ test("#1262: a template worker that reports no status is waited for past hc's 60
   const s = scene(t);
   // hc itself waits 60 s for a template's new terminal to report a status before it answers.
   const done = join(s.root, "run-answered");
-  hcStateExtra(s, { runDelayMs: 61_000, runDelayDone: done });
-  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: runClock(done, 61_000) });
   assert.equal(r.code, 0, r.err);
-  // The fake writes `done` only when its own 61 s wait reaches the answer, never when the CLI
-  // killed the call: its presence is the proof that the wait outlasted the old 15 s timeout.
   assert.ok(existsSync(done), "hc's run was allowed to answer, not killed at 15 s");
   const row = s.ledger().find((x) => x.kind === "worker");
   assert.equal(row.terminal, "t100");

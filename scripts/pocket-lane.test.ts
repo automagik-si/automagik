@@ -26,8 +26,8 @@ const laneJob = job('pocket-lane', 'desktop');
 const pocketJob = buildJob + laneJob;
 
 describe('pocket-lane is never taken for a release', () => {
-  test('every tag filter in release.yml takes v3.N.P and no rolling lane', () => {
-    const filters = [...(release + gates).matchAll(/grep -E '(\^v3[^']*)'/g)].map(match => new RegExp(match[1]));
+  test('every release tag filter takes v3.N.P and no rolling lane', () => {
+    const filters = [...(release + read('.github/workflows/release-verify.yml') + gates).matchAll(/grep -E '(\^v3[^']*)'/g)].map(match => new RegExp(match[1]));
     expect(filters.length).toBeGreaterThanOrEqual(3);
     for (const filter of filters) {
       for (const lane of LANES) expect(filter.test(lane)).toBe(false);

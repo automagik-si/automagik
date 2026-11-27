@@ -24,6 +24,8 @@ const LEG = /^\d+(\.\d+){0,2}$/;
 const setupNodes = (job: any): any[] =>
   (job.steps ?? []).filter((step: any) => String(step.uses ?? '').startsWith('actions/setup-node'));
 
+const verification = workflow('release-verify.yml');
+
 describe('the one Node versions file', () => {
   test('lists distinct versions, and the release pin is one of them, exactly', () => {
     expect(Array.isArray(file.ci)).toBe(true);
@@ -59,15 +61,17 @@ describe('the CI matrix', () => {
 describe('the release cut', () => {
   test('runs the exact version the CI matrix covers, read from the same file', () => {
     const cut = release.jobs.cut;
-    const readStep = (cut.steps as any[]).find((step) => step.id === 'node');
+    const readStep = (verification.jobs.plan.steps as any[]).find((step) => step.id === 'node');
     expect(readStep).toBeDefined();
     expect(readStep.run).toContain("jq -r '.release' .github/node-versions.json");
     // It refuses a pin that is floating or missing from the matrix instead of running it.
     expect(readStep.run).toContain("'.ci | index($version)'");
 
-    const setup = setupNodes(cut);
-    expect(setup).toHaveLength(1);
-    expect(setup[0].with['node-version']).toBe('${{ steps.node.outputs.version }}');
+    for (const [job, source] of [[cut, 'preflight'], [verification.jobs.verify, 'plan']] as const) {
+      const setup = setupNodes(job);
+      expect(setup).toHaveLength(1);
+      expect(setup[0].with['node-version']).toBe(`\${{ needs.${source}.outputs.node }}`);
+    }
   });
 });
 
@@ -76,7 +80,7 @@ describe('every other Node pin', () => {
   // blocks above (the matrix reads the file, the cut reads the file).
   function literalPins(): { where: string; version: string }[] {
     const pins: { where: string; version: string }[] = [];
-    for (const [name, parsed] of [['ci.yml', ci], ['release.yml', release]] as const) {
+    for (const [name, parsed] of [['ci.yml', ci], ['release.yml', release], ['release-verify.yml', verification]] as const) {
       for (const [id, job] of Object.entries<any>(parsed.jobs)) {
         for (const step of setupNodes(job)) {
           const value = step.with?.['node-version'];
@@ -97,7 +101,7 @@ describe('every other Node pin', () => {
   });
 
   test('is not hidden in a second literal matrix or a node-version key', () => {
-    for (const name of ['ci.yml', 'release.yml']) {
+    for (const name of ['ci.yml', 'release.yml', 'release-verify.yml']) {
       const text = read(`.github/workflows/${name}`);
       // A `node: ['22', ...]` matrix would be a second place by construction.
       expect(text).not.toMatch(/node:\s*\[/);

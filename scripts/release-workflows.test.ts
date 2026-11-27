@@ -633,11 +633,10 @@ describe('every release carries am (RFC 0012)', () => {
   const ifOf = (name: string) => lines[at(name) + 1]?.trim() ?? '';
 
   test('am\'s gates and key check run on every release kind, before the tag', () => {
-    for (const name of ['The am part\'s gates', 'The am lane\'s signing key']) {
+    for (const name of ['The am lane\'s signing key']) {
       expect(at(name)).toBeGreaterThan(-1);
       expect(at(name)).toBeLessThan(at('Version, commit and tag'));
     }
-    expect(ifOf('The am part\'s gates')).toBe("if: steps.new.outputs.release == 'true'");
     expect(lines[at('The am lane\'s signing key') + 1].trim()).toBe('id: amkey');
     expect(lines[at('The am lane\'s signing key') + 2].trim()).toBe("if: steps.new.outputs.release == 'true'");
   });
@@ -794,12 +793,11 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
   });
 
   test('the meter\'s gates and key check run before the tag, only when the release builds the meter', () => {
-    for (const name of ['The meter\'s gates', 'The meter lane\'s signing key']) {
+    for (const name of ['The meter lane\'s signing key']) {
       expect(at(name)).toBeGreaterThan(-1);
       expect(at(name)).toBeLessThan(at('Version, commit and tag'));
       expect(at(name)).toBeGreaterThan(at('Which lane'));
     }
-    expect(lines[at('The meter\'s gates') + 1].trim()).toBe("if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'");
     expect(lines[at('The meter lane\'s signing key') + 1].trim()).toBe('id: meterkey');
     expect(lines[at('The meter lane\'s signing key') + 2].trim()).toBe("if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'");
     const key = lines.slice(at('The meter lane\'s signing key'), at('The meter lane\'s signing key') + 6).join('\n');
@@ -812,21 +810,18 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     expect(cut).toContain('meter_sign: ${{ steps.meterkey.outputs.sign }}');
   });
 
-  test('the meter is signed with its own key alone, in three places only; the posting job holds no key', () => {
+  test('the meter is signed with its own key alone, in two places only; the posting job holds no key', () => {
     const attach = job('meter-attach').join('\n');
     expect(attach).toContain('METER_LANE_KEY:');
     for (const other of ['PLUGIN_LANE_KEY', 'HERDR_PACK_KEY', 'AM_LANE_KEY']) expect(attach).not.toContain(other);
     expect(job('meter-lane').join('\n')).not.toMatch(/LANE_KEY|PACK_KEY/);
-    // The meter's key reaches only the key check, the cut step (which re-runs the check on a moved
-    // dev, #1653) and the attach step.
+    // Only the admission check and the signing job receive this key.
     const named = lines.map((line, i) => [line, i] as const).filter(([line]) => /secrets\.METER_LANE_KEY/.test(line)).map(([, i]) => i);
-    expect(named.length).toBe(3);
+    expect(named.length).toBe(2);
     expect(named[0]).toBeGreaterThan(at('The meter lane\'s signing key'));
     expect(named[0]).toBeLessThan(at('The meter lane\'s signing key') + 5);
-    expect(named[1]).toBeGreaterThan(at('Version, commit and tag'));
-    expect(named[1]).toBeLessThan(at('Pack am'));
-    expect(named[2]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
-    expect(named[2]).toBeLessThan(jobEnds('meter-attach'));
+    expect(named[1]).toBeGreaterThan(at('Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'));
+    expect(named[1]).toBeLessThan(jobEnds('meter-attach'));
     // The attach job is gated on the key too, and signs before anything goes up.
     expect(job('meter-attach').map(line => line.trim())).toContain("if: needs.cut.outputs.version != '' && needs.cut.outputs.meter == 'yes' && needs.cut.outputs.meter_sign == 'yes'");
     expect(attach.indexOf('bun scripts/meter-lane.ts verify')).toBeLessThan(attach.indexOf('gh release upload'));
@@ -968,8 +963,8 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
   });
 });
 
-describe("the cut's 'Anything new since the last release' step", () => {
-  const lines = workflow('release.yml');
+describe("the plan's 'Anything new since the last release' step", () => {
+  const lines = workflow('release-verify.yml');
   const step = lines.findIndex(line => line.trim() === '- name: Anything new since the last release');
   const runLine = lines.findIndex((line, i) => i > step && line.trim() === 'run: |');
   const indent = runLine > -1 ? (/^ */.exec(lines[runLine])?.[0].length ?? 0) + 2 : 0;
@@ -1224,8 +1219,8 @@ describe('an empty selected signing slot never falls back to the other one (#170
     return { pub: publicKey.export({ type: 'spki', format: 'pem' }).toString(), priv: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() };
   };
   const lanes = [
-    { secret: 'AM_LANE_KEY', signer: 'AM_LANE_SIGNER', steps: ['The am lane\'s signing key', 'Version, commit and tag', 'Sign and post the am lane'] },
-    { secret: 'METER_LANE_KEY', signer: 'METER_LANE_SIGNER', steps: ['The meter lane\'s signing key', 'Version, commit and tag', 'Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'] },
+    { secret: 'AM_LANE_KEY', signer: 'AM_LANE_SIGNER', steps: ['The am lane\'s signing key', 'Sign and post the am lane'] },
+    { secret: 'METER_LANE_KEY', signer: 'METER_LANE_SIGNER', steps: ['The meter lane\'s signing key', 'Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'] },
   ] as const;
   const strict = (secret: string, signer: string) => `vars.${signer} == '${secret}_NEXT' && secrets.${secret}_NEXT || vars.${signer} != '${secret}_NEXT' && secrets.${secret} || ''`;
   const fallback = (secret: string, signer: string) => `vars.${signer} == '${secret}_NEXT' && secrets.${secret}_NEXT || secrets.${secret}`;
@@ -1235,14 +1230,14 @@ describe('an empty selected signing slot never falls back to the other one (#170
       secrets: { [lane.secret]: primary, [`${lane.secret}_NEXT`]: next },
     }));
 
-  test('each lane\'s three steps bind its key with the same strict expression, and the old fallback is gone', () => {
+  test('each lane\'s signing steps bind its key with the same strict expression, and the old fallback is gone', () => {
     for (const lane of lanes) {
       const bound = lane.steps.map(step => binding(step, lane.secret));
-      expect(bound).toEqual([0, 1, 2].map(() => strict(lane.secret, lane.signer)));
-      expect(lines.filter(line => new RegExp(`^\\s+${lane.secret}: \\$\\{\\{`).test(line)).length).toBe(3);
+      expect(bound).toEqual(lane.steps.map(() => strict(lane.secret, lane.signer)));
+      expect(lines.filter(line => new RegExp(`^\\s+${lane.secret}: \\$\\{\\{`).test(line)).length).toBe(2);
       expect(text).not.toContain(`|| secrets.${lane.secret} }}`);
     }
-    expect(binding('Version, commit and tag', 'HERDR_PACK_KEY')).toBe(strict('HERDR_PACK_KEY', 'HERDR_PACK_SIGNER'));
+    expect(() => binding('Version, commit and tag', 'HERDR_PACK_KEY')).toThrow();
   });
 
   test('the selector picks one slot, whether or not either secret is filled', () => {

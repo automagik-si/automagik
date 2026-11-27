@@ -8,6 +8,9 @@
 # dev, re-decides the lane, re-runs the gates on the new tip and retries, up to
 # RELEASE_CUT_ATTEMPTS whole attempts (default 3). A retried cut tags a tree the release gates saw.
 #
+# The release workflow sets RELEASE_CUT_ATTEMPTS=1. Its successor gates the new tip outside
+# the publication lock. Direct callers can still use the bounded in-process retry below.
+#
 # A merge can also change the lane (a herdr or Pocket change during a plugins cut, say). This run
 # gated and would publish the old lane, so a re-decided lane that differs steps aside as before: the
 # queued run for that merge builds the part this one did not. The notice says so either way, and
@@ -483,4 +486,5 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
   fi
 done
 
+echo "successor=$(git rev-parse origin/dev)" >> "${GITHUB_OUTPUT}"
 echo "::notice::dev moved on while this run cut v${version} on each of ${attempts} attempts; the run for the newer merge releases these changes too"
