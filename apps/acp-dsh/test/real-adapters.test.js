@@ -10,9 +10,10 @@
 // CLI may stop at `session/new` with ACP's auth_required: that is a pass for the handshake, and
 // the checks that need a session say they did not run.
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk/unstable'
 import { AgentRun } from '../src/host/acp.js'
@@ -20,6 +21,28 @@ import { BRIDGE_PATH } from '../src/host/adapter.js'
 import { AGENTS } from '../src/host/agents.js'
 import { Backchannel } from '../src/host/backchannel.js'
 import { BRIDGE_NAME, CREDENTIAL_ENV, URL_ENV, isAuthRequired } from '../src/host/names.js'
+import { writeReceipt } from '../scripts/acp-receipts.mjs'
+
+// The receipt of what this process launched (acp-receipts.mjs): the adapter's own package
+// version, the CLI's own --version, never npm's latest. Written only when ACP_RECEIPT_DIR is set.
+const SDK_VERSION = JSON.parse(readFileSync(new URL('../node_modules/@agentclientprotocol/sdk/package.json', import.meta.url), 'utf8')).version
+function launched(real, spec, env) {
+  let adapter
+  for (let dir = dirname(real.adapter); dir !== dirname(dir); dir = dirname(dir)) {
+    try { adapter = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')); if (adapter.name === spec.adapter) break } catch {}
+  }
+  let cli = 'unknown'
+  try { cli = execFileSync(real.cli, ['--version'], { env: { ...process.env, ...env }, timeout: 20_000, encoding: 'utf8' }).trim().split('\n')[0].slice(0, 80) } catch {}
+  return { route: real.id, scenario: 'real-unprompted', sdk: SDK_VERSION, adapter: { name: spec.adapter, version: adapter?.name === spec.adapter ? adapter.version : 'unknown' }, cli: { version: cli }, platform: `${process.platform}-${process.arch}`, node: process.version }
+}
+const advertisedOf = init => ({
+  protocolVersion: init?.protocolVersion ?? null,
+  agentInfo: init?.agentInfo?.version === undefined ? null : `${init.agentInfo.name ?? ''} ${init.agentInfo.version}`.trim(),
+  loadSession: init?.agentCapabilities?.loadSession === true,
+  sessionCapabilities: Object.keys(init?.agentCapabilities?.sessionCapabilities ?? {}).filter(key => init.agentCapabilities.sessionCapabilities[key] != null).sort(),
+  promptCapabilities: Object.keys(init?.agentCapabilities?.promptCapabilities ?? {}).filter(key => init.agentCapabilities.promptCapabilities[key] === true).sort(),
+  authMethods: (init?.authMethods ?? []).map(method => method?.id).filter(Boolean).sort(),
+})
 
 const REAL = [
   { id: 'acp-claude', adapter: process.env.AUTOMAGIK_TEST_CLAUDE_ACP, cli: process.env.AUTOMAGIK_TEST_CLAUDE, names: 'AUTOMAGIK_TEST_CLAUDE_ACP and AUTOMAGIK_TEST_CLAUDE' },
@@ -79,13 +102,21 @@ for (const real of REAL) {
     t.after(() => run.dispose())
     let failure
     await run.start().catch((error) => { failure = error })
+    const receipt = { ...launched(real, spec, env), advertised: advertisedOf(run.init) }
+    const initialized = run.init?.protocolVersion === PROTOCOL_VERSION
+    writeReceipt(process.env.ACP_RECEIPT_DIR, { ...receipt, phases: { initialize: initialized ? 'passed' : 'failed' } })
     assert.equal(run.init?.protocolVersion, PROTOCOL_VERSION, `initialize answered version ${run.init?.protocolVersion}: ${failure?.message ?? ''}`)
+    t.diagnostic(`${real.id}: ${receipt.adapter.name} ${receipt.adapter.version}, CLI ${receipt.cli.version}; advertises load ${receipt.advertised.loadSession}, session ${receipt.advertised.sessionCapabilities.join(',') || 'none'}`)
     // Signed out, `session/new` may stop at the sign-in; anything else is a real failure.
     if (failure !== undefined) {
+      writeReceipt(process.env.ACP_RECEIPT_DIR, { ...receipt, phases: { session: isAuthRequired(failure) ? 'auth-required' : 'failed' } })
       assert.equal(isAuthRequired(failure), true, `session/new failed with something other than auth_required: ${failure.message}`)
       t.diagnostic(`${real.id}: signed out, session/new answered auth_required; the session checks did not run`)
       return
     }
+    // A session opened in a throwaway home with no sign-in. Nothing is prompted, so no account is
+    // used; the receipt claims the session start and nothing a prompt would prove.
+    writeReceipt(process.env.ACP_RECEIPT_DIR, { ...receipt, phases: { session: 'passed' } })
     t.diagnostic(`${real.id}: session/new opened a session signed out`)
     assert.equal(typeof run.sessionId, 'string')
     // The conventions catalog.js and agents.js read: a model select, an effort select when the
@@ -128,5 +159,40 @@ for (const real of REAL) {
     const source = run.sessionId
     const forked = await run.fork({ cwd, mcpServers: [] })
     assert.notEqual(forked, source, 'session/fork answered a new session, and session/close took the source')
+  })
+
+  // The release decision of native cold continuity (continuity.js): an advertised resume is not
+  // enough; the session must come back on a new process and bind a fresh bridge. No prompt is
+  // sent, so a session that never held a turn may be refused: that is recorded, not failed.
+  test(`real ${spec.defaultName}: a closed session comes back by resume on a new process with a fresh bridge, or says why not`, { skip }, async (t) => {
+    const { env, cwd } = home(t, spec, real.cli)
+    const meta = spec.disableBuiltInTools === true ? { sessionMeta: { disableBuiltInTools: true } } : {}
+    const first = await bridge(t)
+    const opened = new AgentRun({ command: process.execPath, args: [real.adapter], env, cwd, name: spec.name, mcpServers: [first.server], ...meta, dshTools: true, onReady: () => first.backchannel.announce(first.record) })
+    t.after(() => opened.dispose())
+    let failure
+    await opened.start().catch((error) => { failure = error })
+    const receipt = launched(real, spec, env)
+    if (failure !== undefined) {
+      writeReceipt(process.env.ACP_RECEIPT_DIR, { ...receipt, phases: { reattach: 'unverified' } })
+      assert.equal(isAuthRequired(failure), true, failure.message)
+      t.diagnostic(`${real.id}: signed out, no session to take back: reattach unverified`)
+      return
+    }
+    const nativeSessionId = opened.sessionId
+    opened.dispose()
+    first.backchannel.revoke(first.record)
+    const second = await bridge(t)
+    const back = new AgentRun({ command: process.execPath, args: [real.adapter], env, cwd, name: spec.name, mcpServers: [second.server], ...meta, dshTools: true,
+      continuity: { sessionId: nativeSessionId, methods: ['resume'] }, onReady: () => second.backchannel.announce(second.record) })
+    t.after(() => back.dispose())
+    await back.start().catch((error) => { failure = error })
+    const deadline = Date.now() + 15_000
+    while (failure === undefined && !second.record.listed && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50))
+    const outcome = back.continuity?.outcome
+    const reattach = outcome === 'resumed' && second.record.listed === true ? 'passed' : outcome === 'fresh' && back.continuity.reason === 'refused' ? 'refused' : 'failed'
+    writeReceipt(process.env.ACP_RECEIPT_DIR, { ...receipt, phases: { reattach }, advertised: { reattachDetail: `${outcome ?? 'none'}${back.continuity?.code === undefined ? '' : ` ${back.continuity.code}`}; fresh bridge listed ${second.record.listed === true}` } })
+    t.diagnostic(`${real.id}: reattach ${reattach} (${outcome ?? failure?.message ?? 'no outcome'}${back.continuity?.code === undefined ? '' : `, code ${back.continuity.code}`}); fresh bridge listed ${second.record.listed === true}`)
+    assert.notEqual(reattach, 'failed', `resume neither came back with the fresh bridge nor was refused: ${failure?.message ?? outcome}`)
   })
 }
