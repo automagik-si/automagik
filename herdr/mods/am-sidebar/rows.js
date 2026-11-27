@@ -697,6 +697,9 @@ export function visibleRows(tree, open = new Map()) {
 // The agents whose default model is one cheap local file (models.js defaultModelFrom).
 const DEFAULTED = ["claude", "codex", "antigravity"];
 
+/** Whether `agentKey` shows a default model read from a file (main.js loadRemoteModels asks only then). */
+export const modelAgent = (agentKey) => DEFAULTED.includes(agentKey);
+
 /**
  * Each agent's configured default model (models.js defaultModelFrom) out of `texts`
  * (configPaths' files), parsed once: { claude, codex, antigravity }, null where none.
@@ -735,10 +738,15 @@ const folderName = (key) => String(key ?? "").replace(/\/+$/, "").split("/").pop
  * than a guess. `argvOf(terminal)`: the command line the caller read with `hc get` for a
  * row that didn't carry it. `defaults`: modelDefaultsFrom(texts), parsed once by the caller
  * (main.js loadModelTexts); without it the default is parsed from `texts` here. Either way
- * only when the command line names no model.
+ * only when the command line names no model. A row on a linked machine (`tree.machine`) takes
+ * `remoteDefaults[machine]` (modelsRemote.js parseModelProbe, found there), else no default.
  */
-export function secondLine(r, tree, { texts = {}, defaults = null, argvOf = () => null } = {}) {
+export function secondLine(r, tree, { texts = {}, defaults = null, remoteDefaults = {}, argvOf = () => null } = {}) {
   const n = r.node, b = n.bot;
+  // #2097: a bot on another machine takes that machine's default, read there; with none read
+  // (the machine away, or no such file) it has none, never this computer's.
+  const machine = tree?.machine;
+  if (machine) { defaults = Object.hasOwn(remoteDefaults ?? {}, machine) ? remoteDefaults[machine] : {}; texts = {}; }
   if (r.kind === "planned") return b.planned?.note || "planned";
   let model = null;
   if (n.live) {

@@ -426,6 +426,22 @@ test("a project whose last space closes stays where that space was; one never pl
     [{ project: projectId({ key: "/z" }) }, { space: "s2" }]);
 });
 
+test("secondLine (#2097): a bot on a linked machine takes that machine's default, never this computer's", () => {
+  const texts = { codexConfig: 'model = "gpt-6-luna"\n' };
+  const defaults = modelDefaultsFrom(texts);
+  const codex = { ...file.bots.find((b) => b.id === "b-captaincap"), agent: "codex" };
+  const row = { kind: "bot", node: { bot: codex, live: { terminal: "t7", duplicate: false }, argv: ["codex"] } };
+  const local = { key: "/repo/proj/" }, remote = { key: "/repo/proj/", machine: "linux" };
+  const there = { linux: modelDefaultsFrom({ codexConfig: 'model = "gpt-6.2-sol"\n' }) };
+  assert.equal(secondLine(row, local, { texts, defaults, remoteDefaults: there }), "Captain · gpt-6-luna");
+  assert.equal(secondLine(row, remote, { texts, defaults, remoteDefaults: there }), "Captain · gpt-6.2-sol");
+  // Not read there (the machine away, or no files): no model, not the app machine's.
+  assert.equal(secondLine(row, remote, { texts, defaults, remoteDefaults: {} }), "Captain");
+  assert.equal(secondLine(row, remote, { texts, defaults, remoteDefaults: { linux: {} } }), "Captain");
+  assert.equal(secondLine(row, remote, { texts, defaults }), "Captain");
+  assert.equal(secondLine({ ...row, node: { ...row.node, argv: ["codex", "-m", "x"] } }, remote, { texts, defaults }), "Captain · x", "the command line still wins");
+});
+
 test("secondLine: the model a live pane runs (its command line, else the agent's default), never typed text", () => {
   const texts = { claudeSettings: JSON.stringify({ model: "sonnet" }) };
   const cap = file.bots.find((b) => b.id === "b-captaincap"); // pinned to an old free-text "GPT-6.1 Terra"

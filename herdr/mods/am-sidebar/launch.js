@@ -8,6 +8,7 @@ import { keyOf, rememberProject } from "./bots.js";
 import { installHook, runnerPath } from "./briefingText.mjs";
 import { spareTab } from "./launchArgs.js";
 import { configPaths } from "./models.js";
+import { MODEL_PROBE, parseModelProbe } from "./modelsRemote.js";
 import { PACK_NAME } from "./release.js";
 import { actionError } from "./actionError.js";
 
@@ -185,6 +186,12 @@ export async function modelTexts() {
     try { out[name] = await readTextFile(path); } catch { out[name] = null; }
   }
   return out;
+}
+
+// The agents' default models on a linked machine (#2097), found there so only the models cross
+// the link: null when it can't be read (away, no shell), else modelsRemote.js parseModelProbe's.
+export async function remoteModelDefaults(machine) {
+  try { return parseModelProbe(await exec("sh", ["-c", MODEL_PROBE], { on: machine })); } catch { return null; }
 }
 
 /** A sleep from a mod context's timer (mods have no setTimeout), for startBot; null without one. */
