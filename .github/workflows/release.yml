@@ -112,8 +112,8 @@ name: Release
 # A role's version is the release in which its package bytes last changed. Each later plugin cut attaches the same bytes under its own tag.
 #
 # Nothing is published to npm: the plugins ship as git sources and release files only.
-# Pushes use the workflow's own token; CI already ran on the dev commit being released, and
-# this job runs the gates again before it tags.
+# release-verify.yml gates a pinned dev commit before the publication lock. The cut accepts
+# that commit only while it is still dev. A newer merge has its own verification and cut.
 
 on:
   push:
@@ -614,6 +614,7 @@ jobs:
           VERSION: ${{ steps.cut.outputs.version }}
           PUBLISHED: ${{ steps.publish.outcome }}
           FEED: ${{ steps.plugin_feed.outcome }}
+          PLUGINS: ${{ steps.publish.outputs.plugins }}
           RESULT: ${{ job.status }}
         run: bash scripts/release-summary.sh
 

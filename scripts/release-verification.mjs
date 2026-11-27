@@ -1,6 +1,6 @@
 // The isolated tests run from exactly the git archive whose entries form their key.
 // Whole-repository checks, including privacy and the cross-plugin contracts, use the commit.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -75,7 +75,7 @@ export function passed(jobs, jobName, image) {
 }
 
 function previousPass(gate, key, image) {
-  if (!isolate(gate) || !image) return false;
+  if (!isolate(gate) || !image || process.env.GITHUB_EVENT_NAME === 'pull_request') return false;
   const repo = 'repos/' + process.env.GITHUB_REPOSITORY;
   const api = path => JSON.parse(execFileSync('gh', ['api', repo + path], { encoding: 'utf8' }));
   try {
@@ -84,6 +84,11 @@ function previousPass(gate, key, image) {
     const runs = api('/actions/workflows/release.yml/runs?branch=dev&event=push&per_page=12').workflow_runs;
     for (const prior of runs) {
       if (String(prior.id) === process.env.GITHUB_RUN_ID || prior.head_repository?.full_name !== process.env.GITHUB_REPOSITORY) continue;
+      if (!/^[0-9a-f]{40}$/.test(prior.head_sha)) continue;
+      // Independently bind the issuing workflow and its sources to this checkout.
+      // Most releases changed some shared input and need no jobs API request.
+      const diff = spawnSync('git', ['diff', '--quiet', prior.head_sha, 'HEAD', '--', ...scope]);
+      if (diff.status !== 0) continue;
       const { jobs } = api('/actions/runs/' + prior.id + '/jobs?per_page=100');
       if (passed(jobs, 'Preflight / Verify ' + gate + ' ' + key, image)) {
         console.log('Verified in ' + prior.html_url);

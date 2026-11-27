@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The release cut's pre-flight gates, in one place: .github/workflows/release.yml runs them from its
-# own steps before the cut, and a cut that lost its push to a merge re-runs them on the new tip
-# before it re-cuts (#668).
+# Release verification jobs share these gates with the publisher's signing checks and the
+# standalone cut script's retry path. The hosted publisher defers a race to the successor.
 #
 #   scripts/release-gates.sh base            the repository's checks and the plugins' client bundles
 #   scripts/release-gates.sh herdr           the pack's tests, syntax checks, shellcheck and indexes
+#   scripts/release-gates.sh herdr-static    the pack checks that accompany its sharded tests
 #   scripts/release-gates.sh herdr-imports   every shipped mod's static import graph
 #   scripts/release-gates.sh herdr-app       every shipped mod loads in the pinned herdr-app
 #   scripts/release-gates.sh herdr-key       HERDR_PACK_SIGNER selects a key pack-keys.json lists
@@ -306,7 +306,7 @@ case "${1:-}" in
   lane) lane "${2:-}" ;;
   all) all "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
   *)
-    echo "usage: scripts/release-gates.sh base|herdr|herdr-imports|herdr-app|herdr-key|am|am-key|meter|meter-key|pocket|pocket-key|addons|lane|all ..." >&2
+    echo "usage: scripts/release-gates.sh base|herdr|herdr-static|herdr-imports|herdr-app|herdr-key|am|am-key|meter|meter-key|pocket|pocket-key|addons|lane|all ..." >&2
     exit 2
     ;;
 esac

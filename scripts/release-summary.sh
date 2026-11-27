@@ -19,7 +19,12 @@ repo="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
     echo "### Published [v${VERSION}](${repo}/releases/tag/v${VERSION})"
     case "${FEED:-}" in
       success) echo "[Signed plugin feed](${repo}/releases/download/plugin-lane/lane.json) · [signature](${repo}/releases/download/plugin-lane/lane.json.sig)" ;;
-      skipped) echo "This release did not post a plugin feed." ;;
+      skipped)
+        if [[ "${PLUGINS:-}" == true ]]; then
+          echo "The versioned release exists, but its signed plugin feed was not posted."
+        else
+          echo "This release did not include plugins."
+        fi ;;
       *) echo "Plugin feed publication was not confirmed." ;;
     esac
   elif [[ -n "${VERSION:-}" ]]; then

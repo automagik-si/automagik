@@ -93,6 +93,8 @@ test('publication summary distinguishes the feed, release alone, tagged failure,
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'failure' })).toContain('publication was not confirmed');
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', FEED: 'success' })).toContain('plugin-lane/lane.json.sig');
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', FEED: 'failure' })).toContain('feed publication was not confirmed');
+    expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', PLUGINS: 'true', FEED: 'skipped' })).toContain('signed plugin feed was not posted');
+    expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', FEED: 'skipped' })).toContain('did not include plugins');
     expect(summary({ SUCCESSOR: 'a'.repeat(40) })).toContain('successor release run](https://github.com/example/repo/actions/runs/42)');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
