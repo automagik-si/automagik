@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { CLIENT_CAPABILITIES } from '../src/host/features.js'
 
 const CLAUDE = 'acp-claude'
 const CODEX = 'acp-codex'
@@ -498,7 +499,11 @@ test('#2153 unit 5 absent capability leaves the fake native mirror with console 
   })
   const chat = world.chat('fixture-no-capability')
   await chat.turn(person('plan-scope-claude-check verbatim'), CODEX)
-  assert.deepEqual(world.events('initialize').map(row => row.clientCapabilities), [{}])
+  // Only the capabilities every route advertises (features.js): no terminal_output for Codex.
+  // The fake agent traces initialize on the wire and again in its handler (SDK defaults filled).
+  const advertised = world.events('initialize').map(row => row.clientCapabilities)
+  assert.deepEqual(advertised[0], JSON.parse(JSON.stringify(CLIENT_CAPABILITIES)))
+  assert.ok(advertised.length > 0 && advertised.every(caps => caps?._meta?.terminal_output === undefined))
   assert.equal(world.events('claude-check-permission').at(-1)?.answer, 'yes')
   assert.equal(results.length, 1)
   const [value] = results

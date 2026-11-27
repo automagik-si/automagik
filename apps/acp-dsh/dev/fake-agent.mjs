@@ -88,9 +88,9 @@
 // `{ late: { ms, lines } }` appends more that long after the answer; no `lines` writes none;
 // `old`, `stampDaysBack`, `link` and `fifo` are described where it writes (agyLog).
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { delimiter, dirname, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
@@ -114,6 +114,28 @@ const SKILLS_PROBE = JSON.parse(process.env.FAKE_ACP_SKILLS_PROBE ?? 'null')
 const trace = (entry) => {
   if (TRACE === undefined) return
   try { appendFileSync(TRACE, `${JSON.stringify({ pid: process.pid, ...entry })}\n`) } catch {}
+}
+// FAKE_ACP_DISK_PROBE=<folder>: at each prompt, before anything else, the 'sent' native-session
+// records the chat's session files under that folder hold right then (durable-dispatch.test.js),
+// so a test reads what was on disk when the prompt arrived, as the agent saw it.
+const DISK_PROBE = process.env.FAKE_ACP_DISK_PROBE
+const sentOnDisk = () => {
+  const found = []
+  const visit = (value) => {
+    if (value === null || typeof value !== 'object') return
+    if (value.state === 'sent' && typeof value.nativeSessionId === 'string') found.push({ nativeSessionId: value.nativeSessionId, ordinal: value.ordinal, run: value.run })
+    else for (const child of Object.values(value)) visit(child)
+  }
+  for (const name of readdirSync(DISK_PROBE, { recursive: true })) {
+    const file = join(DISK_PROBE, String(name))
+    let text
+    try { text = readFileSync(file, 'utf8') } catch { continue }
+    for (const line of text.split('\n')) {
+      if (!line.includes('plugin:acp-dsh/native-session')) continue
+      try { visit(JSON.parse(line)) } catch {}
+    }
+  }
+  return found
 }
 const MODES = (process.env.FAKE_ACP_MODES ?? '').split(',').filter(Boolean)
 const SESSION_MODELS = process.env.FAKE_ACP_SESSION_MODELS === '1'
@@ -148,11 +170,24 @@ const offersOf = session => ({
   ...modesOf(session),
 })
 
+// FAKE_ACP_FAST=<configId>: a speed option shaped as the installed adapters send it without
+// boolean config options (codex-acp 2.12.1 `fast-mode`, claude-agent-acp 0.113.0 `fast`):
+// category `speed`, a select of `off` / `on`, offered only on FAKE_ACP_FAST_MODELS (default
+// fake-large). FAKE_ACP_FAST_REFUSE=1 answers `on` with `off` still current, as an account
+// that may not use it. Each prompt traces the speed in effect (`prompt-speed`).
+const FAST_ID = process.env.FAKE_ACP_FAST
+const FAST_MODELS = (process.env.FAKE_ACP_FAST_MODELS ?? 'fake-large').split(',').filter(Boolean)
+const fastOffered = session => FAST_ID !== undefined && FAST_MODELS.includes(session.model)
+
 function configOptions(session) {
   const model = MODELS.find(entry => entry.value === session.model)
   const options = [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model.value, options: MODELS.map(({ value, name, description }) => ({ value, name, ...(description ? { description } : {}) })) }]
   if (model.efforts.length > 0) {
     options.push({ id: 'effort', name: 'Effort', category: 'thought_level', type: 'select', currentValue: session.effort ?? 'default', options: [...DEFAULT_ROW, ...model.efforts.map(value => ({ value, name: value[0].toUpperCase() + value.slice(1) }))] })
+  }
+  if (fastOffered(session)) {
+    options.push({ id: FAST_ID, name: 'Fast mode', category: 'speed', type: 'select', currentValue: session.fast ? 'on' : 'off',
+      options: [{ value: 'off', name: 'Off' }, { value: 'on', name: 'On' }] })
   }
   return options
 }
@@ -252,6 +287,9 @@ function connect(server, sessionId, { probe = false } = {}) {
 async function attachServer(session, server, sessionId) {
   const connection = connect(server, sessionId)
   session.mcp.set(server.name, connection)
+  // Which bridge credential this session holds, as a short digest (never the credential).
+  const credential = (server.env ?? []).find(entry => entry.name === 'DSH_BRIDGE_CREDENTIAL')?.value
+  if (credential !== undefined) trace({ event: 'bridge-credential', sessionId, digest: createHash('sha256').update(credential).digest('hex').slice(0, 12) })
   const tools = await connection.tools.catch(() => [])
   session.listed?.set(server.name, tools.map(tool => tool?.name))
   trace({ event: 'mcp-list', sessionId, server: server.name, tools: tools.map(tool => tool?.name),
@@ -307,6 +345,46 @@ if (process.env.FAKE_ACP_CHILD !== undefined) {
 const stream = hearing(ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)))
 const sessions = new Map()
 let created = 0
+// Native continuity (continuity.test.js): FAKE_ACP_STATE names a JSON file that keeps each
+// session's native context (its turns and what it was told to `native-remember`) across processes, as
+// a CLI's own session store does. FAKE_ACP_RESUME=1 advertises `session/resume`, FAKE_ACP_LOAD=1
+// `session/load` (which replays the session's history first: a message, a finished call, a
+// permission request, a plan and a usage update, the way a loaded CLI session would).
+// FAKE_ACP_RESUME_IGNORES_SERVERS=1 takes the session back with no MCP server at all, as Codex
+// is documented to ignore a new server list on resume. FAKE_ACP_RESUME_HANG=1 never answers.
+const STATE = process.env.FAKE_ACP_STATE
+const readState = () => { try { return JSON.parse(readFileSync(STATE, 'utf8')) } catch { return {} } }
+const keep = (sessionId, session) => {
+  if (STATE === undefined) return
+  const all = readState()
+  all[sessionId] = { turns: session.turns, markers: session.markers ?? [], cwd: session.cwd, servers: (session.servers ?? []).map(server => server.name), tools: session.tools ?? [] }
+  writeFileSync(STATE, JSON.stringify(all))
+}
+async function reattach(params, how) {
+  const stored = readState()[params.sessionId]
+  trace({ event: `${how}-session`, sessionId: params.sessionId, found: stored !== undefined, servers: (params.mcpServers ?? []).map(server => server.name), meta: params._meta ?? null })
+  if (process.env.FAKE_ACP_RESUME_HANG === '1') await new Promise(() => {})
+  if (stored === undefined) throw RequestError.sessionNotFound(params.sessionId)
+  const session = newSession(params.sessionId, params.cwd)
+  session.turns = stored.turns
+  session.markers = stored.markers
+  if (how === 'load') {
+    const update = u => conn.sessionUpdate({ sessionId: params.sessionId, update: u })
+    await update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'an earlier question' } })
+    await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'an earlier answer' } })
+    await update({ sessionUpdate: 'tool_call', toolCallId: 'replayed-call', title: 'Run earlier', kind: 'execute', status: 'completed', rawInput: { command: 'touch replayed' } })
+    await update({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'replayed-plan', entries: [{ content: 'old step', priority: 'low', status: 'completed' }] } })
+    await update({ sessionUpdate: 'usage_update', used: 999, size: 1000 })
+    const asked = await conn.requestPermission({ sessionId: params.sessionId, toolCall: { toolCallId: 'replayed-call', title: 'Run earlier', kind: 'execute', rawInput: { command: 'touch replayed' } },
+      options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }] })
+    trace({ event: 'replayed-permission', outcome: asked.outcome.outcome })
+  }
+  if (process.env.FAKE_ACP_RESUME_IGNORES_SERVERS !== '1') await attach(session, params.mcpServers, params.sessionId)
+  session.servers = process.env.FAKE_ACP_RESUME_IGNORES_SERVERS === '1' ? [] : params.mcpServers ?? []
+  session.tools = [...(session.listed ?? new Map()).values()].flat()
+  keep(params.sessionId, session)
+  return offersOf(session)
+}
 
 // agy's own per-process log (FAKE_ACP_AGY_LOG, above).
 function agyLog() {
@@ -354,10 +432,13 @@ const implementation = {
     // FAKE_ACP_PROTOCOL answers another protocol version, as an adapter built for a later ACP does.
     const protocolVersion = process.env.FAKE_ACP_PROTOCOL === undefined ? PROTOCOL_VERSION : Number(process.env.FAKE_ACP_PROTOCOL)
     const agentCapabilities = {
-      loadSession: false,
-      ...(process.env.FAKE_ACP_SYSTEM_PROMPT === '1'
-        ? { sessionCapabilities: { systemPrompt: {} } } : {}),
+      loadSession: process.env.FAKE_ACP_LOAD === '1',
+      sessionCapabilities: {
+        ...(process.env.FAKE_ACP_SYSTEM_PROMPT === '1' ? { systemPrompt: {} } : {}),
+        ...(process.env.FAKE_ACP_RESUME === '1' ? { resume: {} } : {}),
+      },
     }
+    trace({ event: 'initialize', clientCapabilities: params?.clientCapabilities })
     if (process.env.FAKE_ACP_LOGOUT === '1') agentCapabilities.auth = { logout: {} }
     return {
       protocolVersion, agentCapabilities, authMethods: AUTH_METHODS.map(id => ({ id, name: id })),
@@ -428,7 +509,7 @@ const implementation = {
   async newSession(params) {
     if (AUTH === 'session') throw RequestError.authRequired(undefined, 'run the CLI\'s login first')
     if (AUTH === 'file' && !existsSync(SIGNED_IN())) throw RequestError.authRequired(undefined, 'sign in first')
-    const sessionId = `fake-${++created}`
+    const sessionId = STATE === undefined ? `fake-${++created}` : `fake-${randomBytes(4).toString('hex')}`
     trace({
       event: 'new-session', sessionId,
       ...(params._meta === undefined ? {} : { meta: params._meta }),
@@ -442,6 +523,8 @@ const implementation = {
       session.eager = new Set(registryMode === 'eager' ? params._meta?.antigravity?.eagerMcpServers : [])
     }
     await attach(session, params.mcpServers, sessionId)
+    session.servers = params.mcpServers ?? []
+    keep(sessionId, session)
     agyLog()
     trace({ event: 'new-answer', sessionId, at: Date.now() })
     return { sessionId, ...offersOf(session) }
@@ -500,7 +583,10 @@ const implementation = {
     if (!OFFERS || !session) throw RequestError.invalidParams(undefined, `Unknown config option: ${configId}`)
     const option = configOptions(session).find(entry => entry.id === configId)
     if (!option?.options.some(entry => entry.value === value)) throw RequestError.invalidParams(undefined, `Invalid value for config option ${configId}: ${value}`)
-    if (configId === 'model') {
+    trace({ event: 'set-config', sessionId, configId, value })
+    if (FAST_ID !== undefined && configId === FAST_ID) {
+      session.fast = value === 'on' && process.env.FAKE_ACP_FAST_REFUSE !== '1'
+    } else if (configId === 'model') {
       const model = MODELS.find(entry => entry.value === value)
       session.model = value
       // A new model keeps the effort when it offers it, else takes its own.
@@ -531,8 +617,81 @@ const implementation = {
     const current = prompt.findLast(block => block.type === 'text' &&
       !block.text.startsWith('Your skills (load with load_skill):'))?.text ?? ''
     // What the client actually sent this turn (a replayed transcript, for a crossing).
-    trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }) })
+    trace({ event: 'prompt', sessionId, turns: session.turns, text: said, ...(SKILLS_PROBE && { prompt }), ...(DISK_PROBE && { sentOnDisk: sentOnDisk() }) })
+    // What a turn would be served at: fast only on a model that offers it, as codex-acp's serviceTier.
+    if (FAST_ID !== undefined) trace({ event: 'prompt-speed', sessionId, model: session.model, fast: session.fast === true && fastOffered(session) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
+    keep(sessionId, session)
+    // The agent turns its own speed on or off (a `/fast` typed in its own terminal) and says so.
+    const selfFast = /\bself-fast (on|off)\b/.exec(current)
+    if (FAST_ID !== undefined && selfFast !== null) {
+      session.fast = selfFast[1] === 'on'
+      keep(sessionId, session)
+      await update({ sessionUpdate: 'config_option_update', configOptions: configOptions(session) })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `fast ${selfFast[1]}` } })
+      return { stopReason: 'end_turn' }
+    }
+    // Native context only this session holds (continuity.test.js): never in DSH's transcript.
+    const remember = /\bnative-remember (\S+)/.exec(current)
+    if (remember !== null) {
+      ;(session.markers ??= []).push(remember[1])
+      keep(sessionId, session)
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `noted (turn ${session.turns})` } })
+      return { stopReason: 'end_turn' }
+    }
+    if (/\bnative-recall\b/.test(current)) {
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `I remember: ${(session.markers ?? []).join(',') || 'nothing'} (turn ${session.turns})` } })
+      return { stopReason: 'end_turn' }
+    }
+    // What the agent can reach through the DSH bridge now (continuity: a removed tool is gone).
+    if (/\blist-bridge\b/.test(current)) {
+      const connection = session.mcp.get('dsh')
+      let names = 'no bridge'
+      if (connection !== undefined) {
+        try { names = ((await connection.request('tools/list', {}))?.tools ?? []).map(tool => tool.name).sort().join(',') } catch (error) { names = `bridge failed: ${error?.message ?? error}` }
+      }
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `bridge tools: ${names}` } })
+      return { stopReason: 'end_turn' }
+    }
+    // A later turn's change to a plan an earlier turn sent (a session taken back: plan-usage.test.js).
+    if (/\bplan-remove-p1\b/.test(current)) {
+      await update({ sessionUpdate: 'plan_removed', planId: 'p1' })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Removed.' } })
+      return { stopReason: 'end_turn' }
+    }
+    if (/\bplan-update-p1\b/.test(current)) {
+      await update({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'p1', entries: [{ content: 'read the code', priority: 'high', status: 'completed' }, { content: 'ship it', priority: 'low', status: 'pending' }] } })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Updated.' } })
+      return { stopReason: 'end_turn' }
+    }
+    // Plans (plan-usage.test.js): two plans, an update in place, an unknown removal and a removal.
+    if (/\bplan-demo\b/.test(current)) {
+      const items = (status) => ({ sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'p1', entries: [
+        { content: 'read the code', priority: 'high', status: 'completed' }, { content: 'write the fix', priority: 'medium', status } ] } })
+      await update(items('in_progress'))
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Planning.' } })
+      await update({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'p2', content: '# Notes\nkeep it small' } })
+      await update(items('in_progress'))
+      await update({ sessionUpdate: 'plan_removed', planId: 'never-sent' })
+      await update(items('completed'))
+      if (/\bplan-demo-remove\b/.test(current)) await update({ sessionUpdate: 'plan_removed', planId: 'p2' })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' Done.' } })
+      return { stopReason: 'end_turn' }
+    }
+    if (/\busage-demo\b/.test(current)) {
+      await update({ sessionUpdate: 'usage_update', used: 1200, size: 200000, cost: { amount: 0.01, currency: 'USD' } })
+      await update({ sessionUpdate: 'usage_update', used: 1500, size: 200000 })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Counted.' } })
+      if (/\busage-demo-partial\b/.test(current)) return { stopReason: 'end_turn', usage: { totalTokens: 30, inputTokens: 20 } }
+      if (/\busage-demo-none\b/.test(current)) return { stopReason: 'end_turn' }
+      return { stopReason: 'end_turn', usage: { totalTokens: 30, inputTokens: 20, outputTokens: 10, cachedReadTokens: 5 } }
+    }
+    if (/\bexit-mid-prompt\b/.test(current)) {
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Starting.' } })
+      trace({ event: 'acted', sessionId })
+      setTimeout(() => process.exit(1), 20)
+      await new Promise(() => {})
+    }
     const waitForFile = async file => {
       const deadline = Date.now() + 8_000
       while (!existsSync(file) && !session.cancelled) {
@@ -1299,5 +1458,8 @@ if (MODES.length > 0) {
     return {}
   }
 }
+
+if (process.env.FAKE_ACP_LOAD === '1') implementation.loadSession = params => reattach(params, 'load')
+if (process.env.FAKE_ACP_RESUME === '1') implementation.resumeSession = params => reattach(params, 'resume')
 
 const conn = serveAgent(implementation, stream)

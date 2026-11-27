@@ -100,6 +100,9 @@ export function install(rt) {
         ...(typeof rolePrompt === 'string' ? { rolePrompt } : {}),
         ...(solverLimitsPrompt ? { solverLimitsPrompt } : {}),
         ...(needsDshTools ? { needsDshTools: true } : {}),
+        // Standard or Fast, for the one model ref it was chosen on (acp-dsh speedFor).
+        ...(bot.speed?.model && (bot.speed.value === 'fast' || bot.speed.value === 'standard')
+          ? { speed: { model: bot.speed.model, value: bot.speed.value } } : {}),
       }
       // Identity also supplies the role on every turn. ACP asks for the switch
       // only when it creates a process.

@@ -357,6 +357,17 @@ export function install(rt) {
     return value
   }
 
+  // Whether a model offers Standard / Fast, as acp-dsh's catalog read that model's own
+  // options (a config option of category `speed`): `{ offered: true }`, `{ offered: false }`,
+  // or `{ offered: null }` while nothing has read it. Only ACP agents offer one today.
+  function speedOf(ref) {
+    const route = splitRef(ref)
+    if (route === undefined) return { offered: null }
+    let offered
+    try { offered = ctx.get?.('acpAgents')?.offersFast?.(route.provider, route.model) } catch { offered = undefined }
+    return { offered: typeof offered === 'boolean' ? offered : null }
+  }
+
   // Each agent's sign-in as acp-dsh last saw it: true, false, or absent while unknown. A
   // fresh catalog (a menu about to open) reads acp-dsh's `status()`, which spawns nothing; any
   // other catalog keeps the last answer unless adapters changed. An unknown agent ready to run
@@ -1115,7 +1126,7 @@ export function install(rt) {
     assembleLlm,
     modelsEpoch: () => catalogEpoch,
     catalog, cachedCatalog, quietCatalog: run => quiet.run(rt, run), cachedDefault: () => pickDefault(catalogCache.value),
-    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, checkSolverModel, modelAccess, assertModelAccess, desiredModel, taskAskerState, taskAskerModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
+    defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, checkSolverModel, modelAccess, assertModelAccess, desiredModel, taskAskerState, taskAskerModel, assertNotOffCli, reasoningOf, speedOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
     memoryModel, memoryBackground, quotaUntil,
     quotaHeld: provider => quotaUntil(provider) !== undefined,

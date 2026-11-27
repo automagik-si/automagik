@@ -9,8 +9,13 @@
 //                                         each adapter that moved past the record
 //   node scripts/acp-drift.mjs --offline  no network: the record names the pin (the check CI
 //                                         runs on every pull request)
-//   node scripts/acp-drift.mjs --record   write the record: the pin and npm's latest adapters,
-//                                         after the suite passed against them
+//   node scripts/acp-drift.mjs --record   write the record's pin, keeping its adapters as they are
+//   node scripts/acp-drift.mjs --record --receipts <dir>
+//                                         write the record from the receipts the suite's own
+//                                         launches wrote (ACP_RECEIPT_DIR, acp-receipts.mjs):
+//                                         each adapter at the version that actually ran, with
+//                                         its scenario and how far each phase got. npm's latest
+//                                         is never written into the record.
 //   node scripts/acp-drift.mjs --json     the report as JSON on stdout
 //
 // It exits 1 on drift, 2 when npm could not be read (not drift: the next run decides).
@@ -18,6 +23,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { AGENTS } from '../src/host/agents.js'
+import { readReceipts } from './acp-receipts.mjs'
 
 const PLUGIN = resolve(import.meta.dirname, '..')
 export const SDK = '@agentclientprotocol/sdk'
@@ -99,6 +105,44 @@ export function report({ pin, record, latest }) {
   return { ok: failures.length === 0, pin, latest: latest.sdk, adapters, failures, notes }
 }
 
+/**
+ * The record a set of receipts makes: the pin, each adapter at the version a real launch ran
+ * (the receipt's own, from the launched package), and every receipt's phases. An adapter with no
+ * real receipt keeps the version the old record had; a receipt with problems, or one for another
+ * SDK, fails the record instead of being written.
+ */
+export function recordFromReceipts({ pin, previous, receipts, packages = adapterPackages(), today = new Date().toISOString().slice(0, 10) }) {
+  const failures = []
+  const adapters = { ...previous?.adapters }
+  const kept = []
+  // One run's receipts make one record: a receipt with no run, or of another run (an old one
+  // left in the folder), is never evidence for this one.
+  const runs = new Set(receipts.map(({ receipt }) => receipt?.run))
+  if (runs.size > 1 || runs.has(undefined) || runs.has('')) failures.push(`the receipts are not of one run (${[...runs].map(run => run ?? 'none').join(', ')}): run the suite with ACP_RECEIPT_RUN set, into an empty ACP_RECEIPT_DIR`)
+  for (const { name, receipt, problems } of receipts) {
+    if (problems.length > 0) { failures.push(`${name}: ${problems.join('; ')}`); continue }
+    if (receipt.sdk !== pin) { failures.push(`${name} ran on SDK ${receipt.sdk}, not the pin ${pin}`); continue }
+    // A phase that failed is a failed run, whatever else passed: it never moves the record.
+    const failed = Object.entries(receipt.phases).filter(([, outcome]) => outcome === 'failed').map(([phase]) => phase)
+    if (failed.length > 0) { failures.push(`${name}: ${failed.join(', ')} failed`); continue }
+    if (receipt.scenario !== 'synthetic-replay') {
+      if (!packages.includes(receipt.adapter?.name)) { failures.push(`${name} names an adapter the app does not install`); continue }
+      if (receipt.phases.initialize !== 'passed') { failures.push(`${name}: initialize did not pass`); continue }
+      adapters[receipt.adapter.name] = receipt.adapter.version
+    }
+    kept.push({
+      route: receipt.route, scenario: receipt.scenario,
+      ...(receipt.backend === undefined ? {} : { backend: receipt.backend }),
+      ...(receipt.adapter === undefined ? {} : { adapter: receipt.adapter }),
+      ...(receipt.cli === undefined ? {} : { cli: receipt.cli }),
+      platform: receipt.platform, node: receipt.node, phases: receipt.phases,
+      ...(receipt.advertised === undefined ? {} : { advertised: receipt.advertised }),
+    })
+  }
+  if (receipts.length === 0) failures.push('no receipts: run the suite with ACP_RECEIPT_DIR set')
+  return { ok: failures.length === 0, failures, record: { sdk: pin, adapters, passed: today, receipts: kept } }
+}
+
 /** The offline half: the record exists, names the pin, and names every adapter the app installs. */
 export function offline({ pin, record, packages = adapterPackages() }) {
   const failures = []
@@ -125,6 +169,22 @@ async function main(argv) {
     return result.ok ? 0 : 1
   }
   if (argv.includes('--offline')) return print(offline({ pin, record: readRecord() }))
+  if (argv.includes('--record')) {
+    const at = argv.indexOf('--receipts')
+    const previous = readRecord()
+    if (at < 0) {
+      // The pin moves; the adapters stay what a launch last proved (a bump runs the suite next).
+      const record = { ...previous, sdk: pin, adapters: previous?.adapters ?? {}, passed: new Date().toISOString().slice(0, 10) }
+      writeFileSync(RECORD_PATH, `${JSON.stringify(record, null, 2)}\n`)
+      console.log(`acp-drift: recorded SDK ${pin}; adapters unchanged until receipts record them`)
+      return 0
+    }
+    const made = recordFromReceipts({ pin, previous, receipts: readReceipts(resolve(argv[at + 1] ?? '')) })
+    if (!made.ok) return print({ ok: false, failures: made.failures, notes: [] })
+    writeFileSync(RECORD_PATH, `${JSON.stringify(made.record, null, 2)}\n`)
+    console.log(`acp-drift: recorded SDK ${pin} with ${Object.entries(made.record.adapters).map(([name, version]) => `${name} ${version}`).join(', ')} from ${made.record.receipts.length} receipts`)
+    return 0
+  }
   let latest
   try {
     const packages = adapterPackages()
@@ -133,12 +193,6 @@ async function main(argv) {
   } catch (error) {
     console.error(`acp-drift: npm could not be read: ${error?.message ?? error}`)
     return 2
-  }
-  if (argv.includes('--record')) {
-    const record = { sdk: pin, adapters: latest.adapters, passed: new Date().toISOString().slice(0, 10) }
-    writeFileSync(RECORD_PATH, `${JSON.stringify(record, null, 2)}\n`)
-    console.log(`acp-drift: recorded SDK ${pin} with ${Object.entries(latest.adapters).map(([name, version]) => `${name} ${version}`).join(', ')}`)
-    return 0
   }
   return print(report({ pin, record: readRecord(), latest }))
 }

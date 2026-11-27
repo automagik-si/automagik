@@ -99,6 +99,7 @@ function driver(t, f, imageHost) {
   const signed = f.signed ??= lane(f)
   const options = {
     home: f.home, profile: f.profile, command: f.command, version: FROM, laneUrl: signed.laneUrl, keys: signed.keys,
+    healthTimeout: f.healthTimeout,
     tarballs: [...f.tarballs].map(([url, bytes]) => [url, bytes.toString('base64')]), imageHost,
   }
   return launch(t, process.execPath, [DRIVER], { ...f.env, SUPERVISOR_DRIVER: JSON.stringify(options) },
@@ -827,6 +828,9 @@ const previousVersion = f => read(join(f.profileDir, 'node_modules', BOTS, 'pack
 for (const fault of ['port', 'sign-in', 'plugins', 'roster', 'page']) {
   test('a failed trial ' + fault + ' rolls back to a healthy previous child', async t => {
     const f = fixture(t, { mode: 'trial-' + fault })
+    // The first window includes starting a real Node child, even with the fake transport.
+    // Give it time to announce its listener before probing the intended fault.
+    f.healthTimeout = { first: 3500, second: 500 }
     fakeTransport(f)
     const prior = { version: 1, live: { version: FROM, sequence: 41 }, kept: null, lastSequence: 41 }
     const current = join(f.store, 'current.json')

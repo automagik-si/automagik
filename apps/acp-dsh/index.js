@@ -27,7 +27,8 @@ import { answerAside, asideFailure, supportsAside } from './src/host/aside-run.j
 import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
-import { CliStore, CLI_CHECK_EVERY_MS, clisHome } from './src/host/clis.js'
+import { CliStore, CLI_CHECK_EVERY_MS, cliVersion, clisHome } from './src/host/clis.js'
+import { continuityFor, qualificationPath, readQualification } from './src/host/qualification.js'
 import { CliHomes, HOME_ENV, runCount, stopRuns } from './src/host/cli-homes.js'
 import { canRunProfile, createGateBinding, ensureChatProfiles, gateProfileOf } from './src/host/codex-chat-profiles.js'
 import { NATIVE_OFF_UNAVAILABLE, nativeOffLaunch } from './src/host/codex-native.js'
@@ -87,6 +88,12 @@ export const Config = z.object({
   // behaviour. A schema default would materialise true and erase the difference. Hidden from
   // settings forms (`.hidden()`): it is a rollback lever, not a preference, and stays writable
   // through DSH's settings service and the profile patch.
+  continuity: z.union([z.const('off'), z.const('qualified')]).default('off').hidden().description([
+    'Native cold continuity: after a restart, the same agent in the same chat takes back its own',
+    'session (session/resume) with a fresh bridge instead of a new session fed the transcript.',
+    "'qualified' turns it on only for the exact connector and CLI versions",
+    'scripts/acp-qualify.mjs recorded in acp-continuity.json; off by default and the rollback.',
+  ].join(' ')),
   dshTools: z.boolean().volatile().hidden().description([
     "Hand DSH's own tools to the agent over a per-session MCP bridge named dsh (the Session's",
     "preset, filtered by its level), approve every DSH tool call in DSH whatever the agent's own",
@@ -312,6 +319,11 @@ export function apply(ctx, config = {}, {
     onSignedOut: id => signedOut(id),
     access: id => consentGate(id),
     currentAccess: id => currentAccountRefusal(id),
+    // What a native session is bound to for its account (continuity.js): only a signed-in vendor
+    // whose account the person confirmed (or that was carried) has one. Any other state (signed
+    // out, not read yet, another account waiting for its confirmation) binds nothing.
+    accountBinding: id => (signIns.get(id) === true && currentAccountRefusal(id) === undefined
+      && (consentStates.get(id) === 'given' || consentStates.get(id) === 'carried') ? consents?.accountKey(id, accountsSeen.get(id)) : undefined),
   })
   // What acted on each Session's permissions (permission-diagnostics.js): it only records.
   const diagnostics = new PermissionDiagnostics()
@@ -591,6 +603,25 @@ export function apply(ctx, config = {}, {
     const stack = lines.findIndex((line, index) => index > at && /^\s*Require stack:/.test(line))
     return [lines[at], ...(stack < 0 || lines[stack + 1] === undefined ? [] : [lines[stack + 1]])]
   }
+  // The CLI's version, read once per binary (`--version` only); unknown until read, and an
+  // unknown version qualifies nothing.
+  const cliVersions = new Map()
+  const versionOfCli = (cli) => {
+    if (typeof cli !== 'string') return undefined
+    const key = `${cli} ${cliStamp(cli)}`
+    if (!cliVersions.has(key)) {
+      cliVersions.set(key, undefined)
+      void cliVersion(cli).then(version => { cliVersions.set(key, version) }, () => {})
+    }
+    return cliVersions.get(key)
+  }
+  const continuityOf = (spec, id, cli) => {
+    if (config.continuity !== 'qualified' || isNative(spec)) return undefined
+    const automagik = process.env.AUTOMAGIK_HOME || join(homedir(), '.automagik')
+    return continuityFor(readQualification(qualificationPath(automagik)), {
+      setting: config.continuity, route: id, adapterVersion: store?.binOf?.(spec.adapter, spec.bin)?.version, cliVersion: versionOfCli(cli),
+    })
+  }
   const agentOf = (spec, cli, id = idOf(spec)) => ({
     name: spec.name,
     sessionFiles: homes && !isNative(spec) && spec.key === 'codex',
@@ -617,6 +648,9 @@ export function apply(ctx, config = {}, {
       : typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, cliDetails.get(id)) } : {}),
     ...(spec.modeFor === undefined ? { levelNotice: true } : {}),
     cli,
+    // Whether this launch may take a native session back (qualification.js): read at each start,
+    // so a revoke or the setting going off applies to the next one.
+    get continuity() { return continuityOf(spec, id, cli) },
     ...(id === 'acp-claude' ? { concreteClaude: true } : {}),
     // The agent's own models and efforts, read from the adapter release installed now.
     catalog: new Catalog({
@@ -673,7 +707,7 @@ export function apply(ctx, config = {}, {
       },
     }),
     spawn: (context) => {
-      const { ready, command, args, env } = launch(spec, cli, id)
+      const { ready, command, args, env, version, key } = launch(spec, cli, id)
       if (!ready) {
         void install(spec)
         // Read after the try above: a record that still cannot be saved is this turn's reason.
@@ -727,7 +761,7 @@ export function apply(ctx, config = {}, {
             cwd, dir: codexOffDir, kept: spec.nativeKeptModels ?? [], signal: context.signal,
             log: line => info(ctx, line.replace(/^acp-dsh: /, '')),
           })
-          return { ...launched, profileModes }
+          return { ...launched, profileModes, version, key }
         })()
       }
       // The chat profiles of the Bot's isolated Codex home, for the session this process starts
@@ -737,7 +771,7 @@ export function apply(ctx, config = {}, {
           platform, codexPath: env.CODEX_PATH, log: line => warn(ctx, line),
           verify: profile => profileCheck(env.CODEX_PATH, profile, { cwd: env.CODEX_HOME, env }),
         })
-        if (profileModes !== undefined) return { command, args, env, profileModes,
+        if (profileModes !== undefined) return { command, args, env, version, key, profileModes,
           gateBinding: createGateBinding(env.CODEX_PATH, gateProfileOf(profileModes), env, cliHome, {
             managedClisHome: clisHome(), run: gateProbeRun,
           }),
@@ -745,7 +779,7 @@ export function apply(ctx, config = {}, {
         }
         if (context?.sessionFiles?.files?.length) throw new Error('The restricted image profile is unavailable; no image prompt was sent.')
       }
-      return { command, args, env }
+      return { command, args, env, version, key }
     },
   })
 
@@ -2544,6 +2578,13 @@ export function apply(ctx, config = {}, {
       return () => { questionGuards.delete(guard) }
     },
     modelIdentityOf: (provider, model) => adapter.modelIdentityOf(provider, model),
+    /**
+     * Whether `model` of this ACP agent offers Standard / Fast (a config option of category
+     * `speed`), as the catalog read it: true, false, or undefined while unknown. Read-only.
+     */
+    offersFast: (provider, model) => {
+      try { return adapter.agents.get(provider)?.catalog?.offersFast?.(model) } catch { return undefined }
+    },
     resolveModelIdentity: (provider, model) => adapter.resolveModelIdentity(provider, model),
     /** The live ACP acknowledgement for the answering DSH turn. A canonical resolver also checks for conflicting reports. */
     /**

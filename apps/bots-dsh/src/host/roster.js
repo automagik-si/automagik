@@ -949,7 +949,9 @@ export function install(rt) {
       throw refusal(`Only the person can move ${rt.botOf(id).name} to another model while its review guard is on.`)
     }
     if (Object.hasOwn(patch, 'people')) throw refusal('Only the user can choose who may talk to ' + (rt.botOf(id)?.name ?? 'this Bot'))
-    const model = patch.model !== undefined || patch.effort !== undefined
+    const speed = patch.speed !== undefined
+    const model = patch.model !== undefined || patch.effort !== undefined || speed
+    const speedModel = speed && patch.model === undefined ? rt.botOf(id)?.model : undefined
     // Either half can complete a written Solver setup. Removing a setup does not
     // need the model slot, so an already queued pick still rechecks the updated look.
     const setup = (typeof patch.role === 'string' && cleanRole(patch.role) === SOLVER_DESCRIPTION)
@@ -959,9 +961,12 @@ export function install(rt) {
       throw new Error('lock order: model change inside a look hold')
     }
     const identity = ['role', 'instructions', 'avatar', 'color'].some(key => patch[key] !== undefined)
-    const record = checkedAvatar => updateBotRecord(id, patch, actorId, fromSessionId, { ...options, checkedAvatar })
+    const record = checkedAvatar => {
+      if (speed && patch.model === undefined && rt.botOf(id)?.model !== speedModel) throw refusal('The Bot changed during model selection.')
+      return updateBotRecord(id, patch, actorId, fromSessionId, { ...options, checkedAvatar })
+    }
     const run = identity ? () => withLookHold(id, () => record(checkUpdateLook(id, patch, actorId))) : () => record()
-    return model || setup ? withModelChange(id, run, setup || options?.admit !== undefined) : run()
+    return model || setup ? withModelChange(id, run, speed || setup || options?.admit !== undefined) : run()
   }
 
   function updateBotRecord(id, patch, actorId, fromSessionId, options) {
@@ -988,11 +993,11 @@ export function install(rt) {
     }
     const checkHeldChoice = () => {
       if (bot.shellHeld !== undefined && rt.pickingModel?.(id)
-        && ['shell', 'model', 'effort', 'workDir'].some(key => patch[key] !== undefined)) {
+        && ['shell', 'model', 'effort', 'speed', 'workDir'].some(key => patch[key] !== undefined)) {
         throw refusal(`${bot.name} is already changing models.`)
       }
       // An agent switch under way in the Bot's chat: a model or level waits for its end.
-      if (rt.switchingChat?.(id, { crossing: true }) && (patch.model !== undefined || patch.effort !== undefined)) {
+      if (rt.switchingChat?.(id, { crossing: true }) && (patch.model !== undefined || patch.effort !== undefined || patch.speed !== undefined)) {
         throw refusal(`${bot.name} is already changing models.`)
       }
     }
@@ -1170,6 +1175,12 @@ export function install(rt) {
         effortId = await rt.resolveEffort(effortRef, patch.effort)
       }
     }
+    // Standard or Fast is the person's choice for one model ref: acp-dsh applies it only on that
+    // exact model (speedFor), and a new model below drops it. null clears it.
+    if (patch.speed !== undefined && patch.speed !== null && patch.speed !== '') {
+      if (patch.speed !== 'fast' && patch.speed !== 'standard') throw refusal('A speed is Standard or Fast')
+      if (!(modelRef === undefined ? bot.model : modelRef)) throw refusal('Pick a model before choosing a speed')
+    }
     // The name and the permission level are checked here too, before the model switch below
     // writes anything: a refusal of either leaves the model as it was.
     const nextName = patch.name === undefined ? undefined : String(patch.name).trim().slice(0, 40)
@@ -1199,7 +1210,7 @@ export function install(rt) {
         && (markOf(bot.model) !== markBefore || (clearsAuto && deferEmptyRev))) rt.movePermissionRev(bot)
     }
     if (patch.denyTools !== undefined && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
-    const modelChanged = patch.model !== undefined || patch.effort !== undefined
+    const modelChanged = patch.model !== undefined || patch.effort !== undefined || patch.speed !== undefined
     const modelBefore = modelChanged ? modelFields(bot) : undefined
     if (modelEntry !== undefined) {
       if (!autoCleared) commit(modelRef)
@@ -1384,7 +1395,7 @@ export function install(rt) {
   // A Bot's new model or level, on its Sessions before it is saved. `previousModel` keeps the
   // model it leaves (model-state.js), so a switch that fails on its first turn goes back to it.
   // If DSH turns the selection down, the record is as it was and the update is refused.
-  const MODEL_FIELDS = ['model', 'effort', 'previousModel', 'appliedModel', 'appliedEffort']
+  const MODEL_FIELDS = ['model', 'effort', 'speed', 'previousModel', 'appliedModel', 'appliedEffort']
   const modelFields = bot => Object.fromEntries(MODEL_FIELDS.filter(key => Object.hasOwn(bot, key)).map(key => [key, bot[key]]))
   const ownsModelFields = (bot, fields) => MODEL_FIELDS.every(key =>
     Object.hasOwn(bot, key) === Object.hasOwn(fields, key) && bot[key] === fields[key])
@@ -1438,6 +1449,7 @@ export function install(rt) {
         rt.noteModelChoice?.(bot, modelRef ?? undefined)
         // A failure that blocked the Bot was its old model's (turns.js).
         if ((modelRef ?? undefined) !== bot.model) delete bot.blocked
+        if ((modelRef ?? undefined) !== bot.model && patch.speed === undefined) delete bot.speed
         if (modelRef === null) delete bot.model
         else bot.model = modelRef
       }
@@ -1445,6 +1457,8 @@ export function install(rt) {
         if (effortId === null) delete bot.effort
         else bot.effort = effortId
       }
+      if (patch.speed === null || patch.speed === '') delete bot.speed
+      else if (patch.speed !== undefined) bot.speed = { model: bot.model, value: patch.speed }
     }
     return whilePicking(bot, async () => {
       if (modelEntry !== undefined) {
@@ -1488,7 +1502,8 @@ export function install(rt) {
         if (blockedBefore !== undefined) bot.blocked = blockedBefore
         rt.warn('ds-bot: the model of %s was not changed: %s', bot.name, error?.message ?? error)
         if (typeof error?.code === 'string' && error.code.startsWith('bot/')) throw error
-        const wanted = patch.model === undefined ? 'this thinking level' : modelRef ?? 'no model'
+        const wanted = patch.model !== undefined ? modelRef ?? 'no model'
+          : patch.effort === undefined ? 'this speed' : 'this thinking level'
         throw refusal(`${bot.name} could not switch to ${wanted}. `
           + `It stays on ${before.model ?? 'its current model'}.`, { cause: error })
       }

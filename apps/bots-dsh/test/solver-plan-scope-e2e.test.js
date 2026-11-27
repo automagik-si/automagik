@@ -259,9 +259,10 @@ for (const variant of ['verbatim', 'cd-strip', 'changed-tail', 'other-folder', '
     if (refused || variant === 'text-only') {
       if (refused) assert.match(text, /permission question no longer matches this call|only inside its folder/)
       else {
-        const { clientCapabilitiesFor } = await import('../../acp-dsh/src/host/acp.js')
-        assert.deepEqual(world.events('initialize').at(-1)?.clientCapabilities,
-          typeof clientCapabilitiesFor === 'function' ? { _meta: { terminal_output: true } } : {})
+        // Claude advertises terminal output as metadata. Text alone still cannot prove an exit.
+        const capabilities = world.events('initialize').at(-1).clientCapabilities
+        assert.deepEqual(capabilities._meta, { terminal_output: true })
+        assert.equal(capabilities.terminal, false)
         assert.equal(terminalOutcome.reason, 'Trusted ACP terminal exit data is missing.')
         assert.equal(evidence?.reason, terminalOutcome.reason)
       }

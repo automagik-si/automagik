@@ -3,6 +3,7 @@
 // adapter drains step by step; its tool calls are kept by id so the mirror tool (tool.js) can
 // wait on each one and answer its permission request through DSH.
 import { execFile, spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { Readable, Writable } from 'node:stream'
 // The `/unstable` entry: stable ACP v1 plus `session/fork` (how acp-codex's tool set follows a
 // preset change) and the session updates newer adapters send (a stable-only parser refuses an
@@ -17,6 +18,7 @@ import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
 import { usageLimitOf } from './usage-limit.js'
 import { pinOf, pinWire } from './model-identity.js'
 import { observeTerminal, vetoClaudeTerminalIdentity } from './terminal-evidence.js'
+import { CLIENT_CAPABILITIES, Plans, SessionRows, contextOf, planOf, promptUsageOf, reattachMethodOf } from './features.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -272,6 +274,17 @@ export class AgentRun {
     // Whether this prompt was cancelled by the app (a Stop, a reap, an ended session), so a
     // cancel the app did not ask for is told apart: it comes from the host stopping.
     this.cancelled = false
+    // The agent's plans (features.js), the context it last reported holding, and how many
+    // prompts this run sent: a prompt's usage is told once, by this ordinal.
+    this.plans = new Plans()
+    // The chat rows of updates beyond words and tools (features.js SessionRows): the latest per
+    // key, kept until the adapter takes them as a prompt settles (`takeRows`), so a row sent
+    // between prompts (commands right after session/new) waits for the next one.
+    this.sessionRows = new SessionRows()
+    this.rows = new Map()
+    this.context = undefined
+    this.prompts = 0
+    this.runId = randomUUID()
   }
 
   /**
@@ -324,7 +337,8 @@ export class AgentRun {
     this.conn = connect(this, stream)
     const ready = (async () => {
       this.init = await this.conn.initialize({
-        protocolVersion: PROTOCOL_VERSION, clientCapabilities: clientCapabilitiesFor(this.spec.provider),
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: { ...CLIENT_CAPABILITIES, ...clientCapabilitiesFor(this.spec.provider) },
       })
       // The agent answers the version it will speak: the one asked for, or its own latest when
       // it does not support that one. Going on over another version would read its messages
@@ -371,17 +385,30 @@ export class AgentRun {
         this.sessionPreamble = this.identityPreamble = identity
       }
       this.spec.onIdentity?.(this.identityDelivery)
-      const session = await this.conn.newSession({
-        cwd,
-        mcpServers,
-        ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }),
-        ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
-      })
-      this.sessionId = session.sessionId
-      this.modes = session.modes
-      this.takeOptions(session.configOptions ?? [], session.models)
-      // The model the agent started on: DSH's `default` model goes back to it.
-      this.startModel = optionOf(this.options, 'model')?.currentValue
+      const reattached = await this.reattach({ cwd, mcpServers })
+      if (reattached === undefined) {
+        const session = await this.conn.newSession({
+          cwd,
+          mcpServers,
+          ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }),
+          ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
+        })
+        this.sessionId = session.sessionId
+        this.modes = session.modes
+        this.takeOptions(session.configOptions ?? [], session.models)
+        // The model the agent started on: DSH's `default` model goes back to it.
+        this.startModel = optionOf(this.options, 'model')?.currentValue
+      } else {
+        this.modes = reattached.modes ?? undefined
+        this.takeOptions(reattached.configOptions ?? [], reattached.models)
+        // What a reattached session runs on is the person's last choice, not where this
+        // process started: DSH's `default` is not read from it.
+        this.startModel = undefined
+        // The native session already holds the Bot's identity: no preamble is sent again, and
+        // the permission mode is asked for again however it reports it.
+        this.identityPreamble = this.sessionPreamble = undefined
+        this.forceMode = true
+      }
       // The session exists (the spike's ordering rule for the bridge's first announcement) and
       // a bridge that never listed its tools fails the turn here, before the prompt.
       await this.spec.onReady?.(this)
@@ -409,6 +436,57 @@ export class AgentRun {
       this.letGo()
     }
     return this
+  }
+
+  /**
+   * Bring back the native session `spec.continuity` names, the way the agent advertised and the
+   * route allows (`continuity.methods`): `session/resume` restores its context with no replay;
+   * `session/load` replays its history, which is quarantined here: no replayed text, call or
+   * plan reaches DSH, a replayed call's id is retired, and a permission asked meanwhile is
+   * cancelled unseen. Answers the agent's answer, or undefined to open a new session: when
+   * nothing fits or the agent refused with a JSON-RPC error. A request it never answers, or an
+   * exit, is thrown: the caller ends this process and starts a fresh one (`held`'s rule).
+   * `this.continuity` says what happened, for the log and the chat's binding.
+   */
+  async reattach({ cwd, mcpServers }) {
+    const want = this.spec.continuity
+    if (want === undefined) return undefined
+    const method = reattachMethodOf(this.init?.agentCapabilities, want.methods)
+    if (method === undefined) {
+      this.continuity = { outcome: 'fresh', reason: 'not-advertised' }
+      return undefined
+    }
+    this.sessionId = want.sessionId
+    if (method === 'load') this.quarantine = { sessionId: want.sessionId, updates: 0, permissions: 0, tools: new Set() }
+    // The same session switches as `session/new` sends (`sessionMeta`: Claude Code's
+    // `disableBuiltInTools`): a session taken back without them offers the CLI's own tools
+    // beside the bridge (measured on claude-agent-acp 0.113.0, test/real-backend.test.js).
+    const { sessionMeta } = this.spec
+    const params = { sessionId: want.sessionId, cwd, mcpServers, ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }), ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }) }
+    try {
+      const answer = await (method === 'load' ? this.conn.loadSession(params) : this.conn.resumeSession(params))
+      // The session's plans as the chat last showed them (the adapter reads them from the chat's
+      // records of this native session), so a later update or removal of one finds it. A loaded
+      // session's replayed plans stay quarantined: these come from the chat, not the replay.
+      for (const plan of want.plans ?? []) this.plans.take(plan)
+      this.continuity = { outcome: method === 'load' ? 'loaded' : 'resumed', method, ...(method === 'load' ? { replayed: this.quarantine.updates, permissions: this.quarantine.permissions } : {}) }
+      return answer ?? {}
+    } catch (error) {
+      this.sessionId = undefined
+      if (Number.isInteger(error?.code)) {
+        this.continuity = { outcome: 'fresh', reason: 'refused', method, code: error.code }
+        return undefined
+      }
+      this.continuity = { outcome: 'failed', method, reason: 'no-answer' }
+      throw error
+    } finally {
+      const quarantine = this.quarantine
+      this.quarantine = undefined
+      for (const id of quarantine?.tools ?? []) {
+        this.tools.set(id, retiredTool({ id, status: 'completed', listeners: new Set() }))
+        this.retired.add(id)
+      }
+    }
   }
 
   /**
@@ -561,6 +639,9 @@ export class AgentRun {
   prompt(prompt, onDelivered, signal) {
     if (this.busy) throw new Error(`${this.spec.name} is still answering`)
     this.queue = []
+    // Suggestions sent after the last prompt ended were for the message the person has now
+    // written: they are not shown after this one.
+    this.rows.delete('suggestions')
     this.promptSkillRefusals = new Set()
     this.reviews = { denied: 0, inRow: 0, last: undefined, after: false }
     this.promptEnded = false
@@ -596,6 +677,9 @@ export class AgentRun {
       prompt = [{ type: 'text', text: this.identityPreamble }, ...prompt]
       this.identityPreamble = undefined
     }
+    this.promptUsage = undefined
+    const ordinal = ++this.prompts
+    const nativeSessionId = this.sessionId
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
       result => {
@@ -604,10 +688,16 @@ export class AgentRun {
           this.preambleOutcome = result?.stopReason !== 'cancelled' && !this.cancelled
             ? 'delivered' : 'unsure'
         }
+        // Read by the adapter at this end, once per prompt: its native session and ordinal are
+        // the key a replay or a reconnect cannot repeat.
+        try { this.spec.onPromptSettled?.(ordinal, result?.stopReason !== 'cancelled' || this.cancelled) } catch {}
+        this.promptUsage = { nativeSessionId, ordinal, ...promptUsageOf(result?.usage, this.spec.provider), ...(this.context === undefined ? {} : { context: this.context }) }
         return this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' })
       },
       error => {
         if (carried) this.preambleOutcome = 'unsure'
+        // An error the agent answered ends its prompt; an exit leaves it unknown (continuity.js).
+        try { this.spec.onPromptSettled?.(ordinal, Number.isInteger(error?.code)) } catch {}
         return this.endPrompt({
           type: 'error', message: error?.message ?? String(error),
           ...(error?.code === undefined ? {} : { code: error.code }),
@@ -658,9 +748,10 @@ export class AgentRun {
     const modeId = wanted.find(id => offered.has(id))
     try { this.spec.onMode?.({ wanted, offered: [...offered], chosen: modeId }) } catch {}
     if (modeId === undefined) throw new Error(`it offers none of the modes ${wanted.join(', ')} (it offers ${[...offered].join(', ') || 'no modes'})`)
-    if (!force && this.modes?.currentModeId === modeId) return
+    if (!force && this.forceMode !== true && this.modes?.currentModeId === modeId) return
     await this.held(() => this.conn.setSessionMode({ sessionId: this.sessionId, modeId }), { signal, what: 'taking its permission mode' })
     this.modes = { ...this.modes, currentModeId: modeId }
+    this.forceMode = false
   }
 
   takeOptions(options, models, fallback) {
@@ -923,6 +1014,12 @@ export class AgentRun {
 
   async onUpdate(update, sessionId) {
     const isTool = update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update'
+    // A loaded session's history: counted, its calls retired, nothing shown or asked (reattach).
+    if (this.quarantine !== undefined && (sessionId === undefined || sessionId === this.quarantine.sessionId)) {
+      this.quarantine.updates += 1
+      if (isTool && isToolId(update.toolCallId)) this.quarantine.tools.add(update.toolCallId)
+      return
+    }
     if (sessionId !== undefined && this.sessionId !== undefined && sessionId !== this.sessionId) {
       this.ignored('an update', isTool ? update : undefined)
       return
@@ -975,6 +1072,43 @@ export class AgentRun {
       case 'current_mode_update':
         if (this.modes) this.modes = { ...this.modes, currentModeId: update.currentModeId }
         break
+      case 'plan':
+      case 'plan_update':
+      case 'plan_removed': {
+        if (typeof sessionId !== 'string' || sessionId !== this.sessionId) break
+        const plan = planOf(update)
+        if (plan === undefined) {
+          try { this.spec.onUnreadPlan?.(update) } catch {}
+          break
+        }
+        const change = this.plans.take(plan)
+        if (change !== undefined) this.push({ type: 'plan', change, plans: this.plans.list() })
+        break
+      }
+      case 'notice':
+      case 'compaction_update':
+      case 'compaction_summary_chunk':
+      case 'session_message':
+      case 'session_message_chunk':
+      case 'available_commands_update':
+      case 'prompt_suggestions_update':
+      case 'subagent_update': {
+        if (typeof sessionId !== 'string' || sessionId !== this.sessionId) break
+        const row = this.sessionRows.take(update)
+        if (row?.clear === true) this.rows.delete(row.key)
+        else if (row !== undefined) {
+          this.rows.delete(row.key)
+          this.rows.set(row.key, row)
+          while (this.rows.size > 50) this.rows.delete(this.rows.keys().next().value)
+        }
+        break
+      }
+      case 'usage_update': {
+        if (typeof sessionId !== 'string' || sessionId !== this.sessionId) break
+        const context = contextOf(update)
+        if (context !== undefined) this.context = context
+        break
+      }
       default:
         break
     }
@@ -983,6 +1117,30 @@ export class AgentRun {
       if (tool !== undefined) observeTerminal(tool, update, sessionId, observedAt, {
         claude: this.spec.provider === 'acp-claude', firstSight,
       })
+    }
+  }
+
+  /** The rows held since the last take, in the order they last changed. */
+  takeRows() {
+    const rows = [...this.rows.values()]
+    this.rows.clear()
+    return rows
+  }
+
+  /**
+   * An agent's `elicitation/create`: asked of the person through the adapter (`onElicitation`,
+   * DSH's question dialog), never answered for them. A loaded session's history, another
+   * session's request, or nobody to ask is a cancel.
+   */
+  async onElicitation(params, signal) {
+    if (this.quarantine !== undefined) return { action: 'cancel' }
+    if (typeof params?.sessionId === 'string' && params.sessionId !== this.sessionId) return { action: 'cancel' }
+    if (typeof this.spec.onElicitation !== 'function') return { action: 'cancel' }
+    try {
+      const answer = await this.spec.onElicitation(params, signal)
+      return answer?.action === 'accept' || answer?.action === 'decline' ? answer : { action: 'cancel' }
+    } catch {
+      return { action: 'cancel' }
     }
   }
 
@@ -1226,6 +1384,10 @@ export class AgentRun {
    * @param {AbortSignal} [signal] aborts when the agent withdraws the request (`$/cancel_request`)
    */
   onPermission(params, signal) {
+    if (this.quarantine !== undefined) {
+      this.quarantine.permissions += 1
+      return Promise.resolve(CANCELLED)
+    }
     if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
     const { toolCall } = params
     const known = this.tools.get(toolCall.toolCallId)
@@ -1351,6 +1513,7 @@ function connect(run, stream) {
   const connection = client({ name: 'automagik-acp-dsh' })
     .onNotification(methods.client.session.update, ({ params }) => run.onUpdate(params.update, params.sessionId))
     .onRequest(methods.client.session.requestPermission, ({ params, signal }) => run.onPermission(params, signal))
+    .onRequest(methods.client.elicitation.create, ({ params, signal }) => run.onElicitation(params, signal))
     .connect(stream)
   const agent = connection.agent
   const { session } = methods.agent
@@ -1361,6 +1524,8 @@ function connect(run, stream) {
     logout: params => agent.request(methods.agent.logout, params),
     newSession: params => agent.request(session.new, params),
     forkSession: params => agent.request(session.fork, params),
+    loadSession: params => agent.request(session.load, params),
+    resumeSession: params => agent.request(session.resume, params),
     closeSession: params => agent.request(session.close, params),
     setSessionMode: params => agent.request(session.setMode, params),
     setSessionConfigOption: params => agent.request(session.setConfigOption, params),

@@ -1,7 +1,8 @@
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { currentPart } from './text.js'
-import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, ConnectorIcon, SlidersIcon } from './icons.js'
+import { BoltIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, ConnectorIcon, SearchIcon, SlidersIcon, StarIcon } from './icons.js'
+import { FAVORITES, adjacentModelPickerProvider, isMacPlatform, matchesModelSearch, modelJumpIndex, modelJumpLabel, modelPickerModelKey, moveBetweenRows } from './model-picker-t3.js'
 import { BotMark } from './mark.js'
 import { KeyIcon, MaskedInput } from './secret-card.js'
 import { SPRING_POP, SPRING_SHAPE, spring, stepMenuFocus, useLinger, useViewport, viewBottom } from './motion.js'
@@ -560,7 +561,9 @@ export const Caret = () => h('svg', { className: 'bt-model-caret', width: 12, he
 // `holdOnScroll`: a scroll outside follows the trigger instead of closing (the running
 // question, which an approval card arriving must not close); while the trigger is not
 // drawn (no client rects), the menu keeps its last place.
-export function useAnchoredMenu({ onEscape, minWidth = 240, holdOnScroll = false } = {}) {
+// `clamp`: the menu never runs wider than the window, less a 8px edge on each side (the
+// composer's picker, which is wider than a phone).
+export function useAnchoredMenu({ onEscape, minWidth = 240, holdOnScroll = false, clamp = false } = {}) {
   const [anchor, setAnchor] = useState(null)
   const [place, setPlace] = useState(null)
   const [shownPlace, leaving] = useLinger(place, MENU_EXIT_MS)
@@ -606,7 +609,7 @@ export function useAnchoredMenu({ onEscape, minWidth = 240, holdOnScroll = false
   useLayoutEffect(() => {
     if (anchor === null || !button.current) return
     const rect = button.current.getBoundingClientRect()
-    const width = Math.max(minWidth, rect.width)
+    const width = clamp ? Math.min(Math.max(minWidth, rect.width), window.innerWidth - 16) : Math.max(minWidth, rect.width)
     const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))
     const below = viewBottom() - rect.bottom
     setPlace(below >= 260 || below >= rect.top
@@ -665,9 +668,219 @@ export function RouteConfirm({ bot, roster, current, target, ask, onCancel, onCo
       h('button', { type: 'button', className: 'bt-model-confirm-go', onClick: onConfirm }, running ? t('Switch') : routeChanged ? t('Change route') : t('Change agent'))))
 }
 
+// The composer's picker, laid out as T3 Code's (model-picker-t3.js): a rail of providers on
+// the left (favorites first), a search box over one provider's models (every provider's while
+// searching) with ⌘1…⌘9 on the first nine rows, the shown model's reasoning levels on the right,
+// and the Standard / Fast switch in a footer when that model offers it. A route the Bot's kind
+// hides is no tab; Herdr and an ACP agent acp-dsh does not serve yet are disabled tabs.
+export function pickerTabs(bot, roster, current) {
+  const models = roster.models ?? []
+  const tabs = []
+  for (const route of routesFor(bot, roster)) {
+    // The Bot's model is listed as missing on Native only when it is a Native model.
+    if (route === 'native') tabs.push({ id: 'native', route, name: routeName('native'), models: nativeModels(models, current !== undefined && modelRoute(roster, current).route === 'native' ? current : undefined) })
+    else if (route === 'acp') {
+      for (const agent of acpAgents(models)) {
+        tabs.push({ id: agent.provider, route, provider: agent.provider, name: agent.name, models: agent.pending ? [] : agent.models, ...(agent.pending ? { disabled: true, why: t('Not available yet') } : {}) })
+      }
+    } else if (route === 'hermes-remote') tabs.push({ id: 'hermes-remote', route, name: routeName(route), models: models.filter(model => providerOf(model) === 'hermes-remote') })
+    else if (route === 'herdr') tabs.push({ id: 'herdr', route, name: routeName('herdr'), models: [], disabled: true, why: t('Not available yet') })
+  }
+  // What can be picked comes first; what is not available yet stays named, at the end.
+  return [...tabs.filter(tab => !tab.disabled), ...tabs.filter(tab => tab.disabled)]
+}
+
+// The tab a model is on: its ACP agent's, else its route's.
+export const tabOfRef = (tabs, ref) => (typeof ref !== 'string' ? undefined
+  : tabs.find(tab => tab.models.some(model => model.ref === ref))?.id)
+
+const FAVORITES_KEY = 'bt-model-favorites'
+// The favorite models are this browser's own (as T3 keeps them per environment): a list of refs.
+export function readFavorites() {
+  try {
+    const list = JSON.parse(globalThis.localStorage?.getItem(FAVORITES_KEY) ?? '[]')
+    return Array.isArray(list) ? list.filter(ref => typeof ref === 'string') : []
+  } catch { return [] }
+}
+function writeFavorites(list) {
+  try { globalThis.localStorage?.setItem(FAVORITES_KEY, JSON.stringify(list)) } catch { /* private window: kept for this menu only */ }
+}
+
+// The rows the list shows: the tab's models, every tab's while searching, the favorites on
+// the star. A heading row starts each provider in the Native tab (and each tab's rows while
+// searching or on favorites, as T3 groups them).
+export function pickerRows({ tabs, tab, query, favorites }) {
+  const searching = String(query ?? '').trim() !== ''
+  const open = tabs.filter(entry => !entry.disabled)
+  const pool = searching || tab === FAVORITES ? open : open.filter(entry => entry.id === tab)
+  const rows = []
+  for (const entry of pool) {
+    const picked = entry.models.filter(model => model.ref !== undefined
+      && (tab !== FAVORITES || searching || favorites.includes(model.ref))
+      && (!searching || matchesModelSearch(query, [modelLabel(model), model.name, model.ref, model.providerName, entry.name])))
+    if (picked.length === 0) continue
+    const groups = entry.route === 'native' ? groupModels(picked) : [[entry.name, picked]]
+    for (const [label, list] of groups) {
+      if (groups.length > 1 || searching || tab === FAVORITES) rows.push({ heading: label, key: `h:${entry.id}:${label}` })
+      for (const model of list) rows.push({ key: modelPickerModelKey(entry.id, model.ref), model, tab: entry })
+    }
+  }
+  return rows
+}
+
+const BoltMark = () => h('span', { className: 'bt-mp-bolt', 'aria-hidden': true }, h(BoltIcon))
+const TabMark = ({ tab, size = 18 }) => (tab.route === 'acp' ? h(AgentMark, { id: tab.provider, name: tab.name, size })
+  : tab.route === 'hermes-remote' ? h(HermesMark, { size }) : h(ROUTE_ICON[tab.route] ?? ConnectorIcon, { size }))
+
+// The levels the right column lists for a model: each level the model serves, the model's own
+// default marked Default (picking it clears the Bot's level, so the Bot follows the model), and
+// a Default row of its own first when the model names no default level.
+export function levelRows(reasoning) {
+  const efforts = reasoning?.efforts ?? []
+  if (efforts.length === 0) return []
+  const own = efforts.some(effort => effort.id === reasoning.defaultEffort) ? reasoning.defaultEffort : undefined
+  return [
+    ...(own === undefined ? [{ effort: undefined, label: t('Default'), isDefault: true }] : []),
+    ...efforts.map(effort => (effort.id === own
+      ? { effort: undefined, label: effort.name ?? effort.id, isDefault: true, id: effort.id }
+      : { effort: effort.id, label: effort.name ?? effort.id, id: effort.id })),
+  ]
+}
+
+// The docked picker's own state, as each opening starts it: the tab (the current model's), the
+// search, the highlighted row and the model whose levels show (the current one).
+const DOCK_START = Object.freeze({ tab: undefined, query: '', highlight: undefined, shown: undefined })
+// T3's popup: a 44px rail, the list, and a 192px reasoning column.
+const DOCK_WIDTH = 600
+const coarsePointer = () => { try { return globalThis.matchMedia?.('(pointer: coarse)')?.matches === true } catch { return false } }
+const nextFrame = (run) => { if (typeof globalThis.requestAnimationFrame === 'function') globalThis.requestAnimationFrame(run); else run() }
+
+// Whether a model offers Standard / Fast (the host's `speed`, models.js speedOf): true, false,
+// or null when unknown. The last answer per model is kept; each opening asks again.
+const speedCache = new Map()
+function askSpeed(ref, actions) {
+  if (typeof ref !== 'string' || typeof actions?.speed !== 'function') return Promise.resolve(null)
+  return Promise.resolve().then(() => actions.speed(ref)).then((value) => {
+    const offered = value?.offered === true ? true : value?.offered === false ? false : null
+    speedCache.set(ref, offered)
+    return offered
+  }, () => null)
+}
+export const speedOffered = ref => speedCache.get(ref) ?? null
+
+function DockedPicker({ bot, tabs, state, rows, current, shown, reasoning, picked, speed, favorites, mac, onTab, onQuery, onHighlight, onRowPick, onFavorite, onLevel, onSpeed, onRemote, onManage, onKeyDown, remoteConfigured }) {
+  const tab = tabs.find(entry => entry.id === state.tab)
+  const searching = state.query.trim() !== ''
+  const modelRows = rows.filter(row => row.model)
+  const highlighted = modelRows[state.highlight]?.key
+  const shownModel = shown === undefined ? undefined : tabs.flatMap(entry => entry.models).find(model => model.ref === shown)
+  const levels = levelRows(reasoning)
+  // The level the shown model runs on: the Bot's pick on its own model, else the model's default.
+  const shownLevel = (shown === current ? picked : undefined)
+    ?? (reasoning?.efforts?.some(effort => effort.id === reasoning.defaultEffort) ? reasoning.defaultEffort : undefined)
+  const selectedLevel = levels.findIndex(row => row.id === shownLevel || (row.id === undefined && shownLevel === undefined))
+  const speedChosen = bot.speed?.model === shown && bot.model === shown ? bot.speed.value : undefined
+  const speedLocked = bot.model !== shown
+  let jump = 0
+  return h('div', { className: 'bt-mp', 'data-model-picker-content': '', onKeyDown },
+    h('div', { className: 'bt-mp-body' },
+      h('div', { className: 'bt-mp-picker' },
+      h('div', { className: 'bt-mp-rail', 'data-model-picker-sidebar': '', role: 'toolbar', 'aria-orientation': 'vertical', 'aria-label': t('Providers') },
+        h('button', { type: 'button', className: 'bt-mp-tab', 'data-model-picker-provider': FAVORITES, 'aria-pressed': state.tab === FAVORITES, 'aria-label': t('Favorites'), title: t('Favorites'), tabIndex: state.tab === FAVORITES ? 0 : -1, onClick: () => onTab(FAVORITES) },
+          h(StarIcon, { filled: true })),
+        h('div', { className: 'bt-mp-rail-sep', 'aria-hidden': true }),
+        tabs.map(entry => h('button', {
+          key: entry.id, type: 'button', className: 'bt-mp-tab', 'data-model-picker-provider': entry.id, 'data-route': entry.route,
+          'aria-pressed': state.tab === entry.id, disabled: entry.disabled || undefined, tabIndex: state.tab === entry.id ? 0 : -1,
+          'aria-label': entry.why ? `${entry.name} · ${entry.why}` : entry.name, title: entry.why ? `${entry.name} · ${entry.why}` : entry.name,
+          'data-current': tabOfRef(tabs, current) === entry.id ? '' : undefined,
+          onClick: () => (entry.route === 'hermes-remote' && onRemote && !remoteConfigured ? onRemote() : onTab(entry.id)),
+        }, h(TabMark, { tab: entry }))),
+        onManage ? h('button', { type: 'button', className: 'bt-mp-tab bt-mp-manage', tabIndex: -1, 'aria-label': t('Models and providers…'), title: t('Models and providers…'), onClick: onManage }, h(SlidersIcon)) : null),
+      h('div', { className: 'bt-mp-main' },
+        h('label', { className: 'bt-mp-search' },
+          h(SearchIcon),
+          h('input', {
+            type: 'text', role: 'combobox', 'aria-expanded': true, 'aria-controls': `bt-mp-list-${bot.id}`, 'aria-autocomplete': 'list',
+            'aria-activedescendant': highlighted ? `bt-mp-${bot.id}-${state.highlight}` : undefined,
+            'aria-label': t('Search models'), placeholder: t('Search models...'), value: state.query, spellCheck: false, autoComplete: 'off',
+            'data-model-picker-search': '', onChange: event => onQuery(event.target.value),
+          })),
+        h('div', { className: 'bt-mp-list', id: `bt-mp-list-${bot.id}`, role: 'listbox', 'aria-label': searching ? t('Models') : tab?.name ?? t('Favorites') },
+          !searching && tab?.route === 'hermes-remote' ? h('div', { className: 'bt-mp-note' }, t("Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.")) : null,
+          modelRows.length > 0 ? null : h('div', { className: 'bt-mp-empty' },
+            searching ? t('No models match your search.')
+              : state.tab === FAVORITES ? t('No favorites yet. Star a model to keep it here.')
+                : tab?.route === 'hermes-remote' ? (remoteConfigured ? t('No models are known for this connection yet. Manage the connection to list them.') : t('Off by default. Set up Remote Hermes in Bot settings.'))
+                  : t('No models are set up for this route yet.')),
+          rows.map((row) => {
+            if (row.heading) return h('div', { key: row.key, className: 'bt-mp-heading', role: 'presentation' }, row.heading)
+            const index = jump++
+            const { model } = row
+            const refused = ownToolsRefused(bot, model)
+            const why = refused ? t(OWN_TOOLS_MENU_HINT) : modelUnavailableText(model)
+            const on = model.ref === current
+            const star = favorites.includes(model.ref)
+            const label = modelJumpLabel(index, mac)
+            const name = modelLabel(model)
+            return h('div', {
+              key: row.key, id: `bt-mp-${bot.id}-${index}`, role: 'option', className: 'bt-mp-row', 'aria-selected': on,
+              'aria-disabled': why ? true : undefined, 'data-highlighted': index === state.highlight ? '' : undefined,
+              'data-shown': model.ref === shown ? '' : undefined, 'data-unavailable': why ? '' : undefined, 'data-model-ref': model.ref,
+              title: refused ? t(OWN_TOOLS_MODEL_TEXT) : model.ref, 'aria-label': why ? `${name} · ${why}` : undefined,
+              onMouseMove: () => { if (index !== state.highlight) onHighlight(index) },
+              onClick: () => onRowPick(row),
+            },
+            h('span', { className: 'bt-mp-row-mark' }, h(TabMark, { tab: row.tab, size: 16 })),
+            h('span', { className: 'bt-mp-row-name' }, name),
+            on ? h('span', { className: 'bt-mp-row-check', 'aria-hidden': true }, h(CheckIcon)) : null,
+            why ? h('span', { className: 'bt-mp-row-hint' }, why)
+              : model.ref === bot.defaultModel ? h('span', { className: 'bt-mp-row-hint' }, t('Default')) : null,
+            h('button', {
+              type: 'button', className: 'bt-mp-star', tabIndex: index === state.highlight ? 0 : -1, 'aria-pressed': star, 'data-on': star ? '' : undefined,
+              'aria-label': star ? t('Remove {model} from favorites', { model: name }) : t('Add {model} to favorites', { model: name }),
+              onClick: (event) => { event.stopPropagation(); onFavorite(model.ref) },
+            }, h(StarIcon, { filled: star })),
+            label ? h('kbd', { className: 'bt-mp-kbd' }, label) : null)
+          }),
+          !searching && tab?.route === 'hermes-remote' && onRemote && remoteConfigured
+            ? h('button', { type: 'button', className: 'bt-mp-manage-row', 'data-manage-connection': '', onClick: () => onRemote(true) }, h(SlidersIcon), t('Manage connection…'))
+            : null))),
+      h('div', { className: 'bt-mp-effort', 'data-model-picker-effort': '' },
+        h('div', { className: 'bt-mp-effort-head' },
+          h('span', null, t('Reasoning')),
+          h('span', { className: 'bt-mp-effort-model' }, shownModel ? modelLabel(shownModel) : '')),
+        h('div', { className: 'bt-mp-effort-rows', role: 'radiogroup', 'aria-label': t('Reasoning') },
+          shownModel === undefined || reasoning === undefined ? null
+            : levels.length === 0 ? h('div', { className: 'bt-mp-effort-none' }, t('No effort levels'))
+              : levels.map((row, index) => {
+                const checked = index === selectedLevel
+                return h('button', {
+                  key: row.id ?? 'default', type: 'button', role: 'radio', className: 'bt-mp-level', 'aria-checked': checked,
+                  'data-effort-row': '', 'data-effort-level': row.label,
+                  tabIndex: (selectedLevel === -1 ? index === 0 : checked) ? 0 : -1,
+                  onClick: () => onLevel(shownModel, row.effort),
+                },
+                h('span', { className: 'bt-mp-level-name' }, row.label),
+                checked ? h('span', { className: 'bt-mp-level-check', 'aria-hidden': true }, h(CheckIcon))
+                  : row.isDefault && row.id !== undefined ? h('span', { className: 'bt-mp-level-default' }, t('Default')) : null)
+              })))),
+    speed !== true ? null : h('div', { className: 'bt-mp-foot' },
+      h('div', { className: 'bt-mp-speed', role: 'radiogroup', 'aria-label': t('Response speed'), title: speedLocked ? t('Pick this model first, then its speed.') : undefined },
+        ['standard', 'fast'].map(value => h('button', {
+          key: value, type: 'button', role: 'radio', className: 'bt-mp-segment', 'aria-checked': speedChosen === value,
+          'data-checked': speedChosen === value ? '' : undefined, 'data-speed': value, disabled: speedLocked || undefined,
+          onClick: () => onSpeed(speedChosen === value ? null : value),
+        }, value === 'fast' ? h(BoltMark) : null, value === 'fast' ? t('Fast') : t('Standard'))))))
+}
+
 function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, chat = false, bar = false, running = false, onPick, onPickEffort, saved = onPick === undefined, withEfforts = true }) {
   const solver = isSolver(bot)
+  // The composer's picker is T3's (DockedPicker); every other place keeps the menu in steps.
+  const docked = bar && !link && withEfforts && onPick === undefined
   const [view, setView] = useState(MENU_ROOT)
+  const [dock, setDock] = useState(DOCK_START)
+  const [favoriteList, setFavoriteList] = useState(undefined)
   const [hermes, setHermes] = useState(false)
   const remote = useRef({ generation: 0, active: false, mounted: true })
   const owner = useRef(bot.id)
@@ -690,6 +903,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   const back = () => {
     // Escape on the crossing's word cancels it before it goes back a step.
     if (confirm !== undefined) { setConfirm(undefined); return true }
+    if (docked) return false
     if (view.step === 'routes') return false
     keys.current = true
     if (view.step === 'levels') setView({ step: 'models', route: view.route, ...(view.provider ? { provider: view.provider } : {}) })
@@ -697,7 +911,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     else setView(MENU_ROOT)
     return true
   }
-  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300, holdOnScroll: confirm?.ask === 'running' })
+  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: docked ? DOCK_WIDTH : 300, clamp: docked, holdOnScroll: confirm?.ask === 'running' })
   const live = useRef(false)
   live.current = isOpen
   // An agent switch is running in this Bot's own chat (the host's model state): no pick
@@ -748,6 +962,13 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // clicked): its current row, else its first.
   useEffect(() => {
     const node = menu.current
+    // The composer's picker opens on its search box, as T3's does (not on a touch screen, where
+    // that would raise the keyboard over it).
+    if (docked && isOpen && node && confirm === undefined) {
+      keys.current = false
+      if (!coarsePointer()) node.querySelector('[data-model-picker-search]')?.focus()
+      return
+    }
     if (!isOpen || !node || !keys.current) return
     keys.current = false
     const rows = menuRows(node)
@@ -762,6 +983,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     // A click with no pointer (Enter, Space) opens the menu with the focus in it.
     keys.current = event?.detail === 0
     setView(MENU_ROOT)
+    setDock(DOCK_START)
     setConfirm(undefined)
     setKeyFor(undefined)
     // DSH settings can change the list at any time, so opening asks again.
@@ -861,6 +1083,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       return
     }
     if (offModel(model)) return
+    if (docked) { pickDocked(model); return }
     if (!withEfforts) { commit(model, undefined); return }
     const decide = (levels) => {
       if (!live.current) return
@@ -881,8 +1104,134 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       if (ask !== null) { setConfirm({ ref: model.ref, effort, ask, level: true }); return }
       routeChange = true
     }
-    finish()
+    // The composer's picker stays open on a level of the same harness, as T3's does.
+    if (!docked || routeChange) finish()
     void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {})
+  }
+  // The composer's picker (T3's): a model of the same harness applies and the picker stays open
+  // on its levels; a crossing asks first or switches and closes, as the menu in steps does.
+  // The current model only shows its levels: picking it again changes nothing.
+  const focusLevels = () => nextFrame(() => {
+    const column = menu.current?.querySelector('[data-model-picker-effort]')
+    ;(column?.querySelector('[data-effort-row][aria-checked="true"]') ?? column?.querySelector('[data-effort-row]'))?.focus()
+  })
+  const focusSearch = () => menu.current?.querySelector('[data-model-picker-search]')?.focus()
+  const showLevels = (ref) => {
+    const model = (roster.models ?? []).find(entry => entry.ref === ref)
+    if (model !== undefined && knownEfforts(model) === undefined) void askEfforts(ref, actions).then(() => { if (live.current) { setAsked(count => count + 1); focusLevels() } })
+    else focusLevels()
+  }
+  const pickDocked = (model) => {
+    if (switching) return
+    if (model.ref === current && bot.model) { setDock(state => ({ ...state, shown: undefined })); showLevels(model.ref); return }
+    let routeChange = recovery(model.ref)
+    if (!routeChange && crossing(model.ref)) {
+      const ask = askFor(model.ref)
+      if (ask !== null) { setConfirm({ ref: model.ref, effort: undefined, ask }); return }
+      routeChange = true
+    }
+    if (routeChange) { finish(); void Promise.resolve(pickModel(model.ref, undefined, { routeChange })).catch(() => {}); return }
+    setDock(state => ({ ...state, shown: model.ref }))
+    showLevels(model.ref)
+    void Promise.resolve(pickModel(model.ref, undefined)).then(
+      (done) => { if (done === false) setDock(state => (state.shown === model.ref ? { ...state, shown: undefined } : state)) },
+      () => setDock(state => (state.shown === model.ref ? { ...state, shown: undefined } : state)))
+  }
+  const favorites = docked ? favoriteList ?? readFavorites() : []
+  const solverRoster = solver ? { ...roster, models: (roster.models ?? []).filter(solverModel) } : roster
+  const tabs = docked ? pickerTabs(bot, solverRoster, current) : []
+  const startTab = () => tabOfRef(tabs, current) ?? (favorites.some(ref => tabOfRef(tabs, ref) !== undefined) ? FAVORITES : tabs.find(entry => !entry.disabled)?.id ?? FAVORITES)
+  const dockTab = dock.tab ?? startTab()
+  const dockRows = docked ? pickerRows({ tabs, tab: dockTab, query: dock.query, favorites }) : []
+  const dockModels = dockRows.filter(row => row.model)
+  const atCurrent = Math.max(0, dockModels.findIndex(row => row.model.ref === current))
+  const dockState = { ...dock, tab: dockTab, highlight: Math.min(dock.highlight ?? atCurrent, Math.max(0, dockModels.length - 1)) }
+  // The model whose levels and speed show: the one just picked until the Bot is on it, else the Bot's.
+  useLayoutEffect(() => {
+    if (dock.shown !== undefined && dock.shown === current) setDock(state => ({ ...state, shown: undefined }))
+  }, [dock.shown, current])
+  const shownRef = dock.shown ?? current
+  const shownServed = (roster.models ?? []).find(entry => entry.ref === shownRef)
+  const shownReasoning = shownRef === undefined ? undefined : shownRef === current ? reasoning ?? knownEfforts(shownServed) : knownEfforts(shownServed)
+  const fastOn = bot.model !== undefined && bot.model === current && bot.speed?.model === current && bot.speed?.value === 'fast' && speedOffered(current) === true
+  // A model's levels and speed are asked for when it shows; the Bot's own speed whenever it
+  // changes, for the bolt on the trigger.
+  useEffect(() => {
+    if (!bar) return undefined
+    let on = true
+    const refs = [...new Set([current, docked && isOpen ? shownRef : undefined].filter(ref => typeof ref === 'string'))]
+    for (const ref of refs) void askSpeed(ref, actions).then(() => { if (on) setAsked(count => count + 1) })
+    if (docked && isOpen && shownServed !== undefined && knownEfforts(shownServed) === undefined) {
+      void askEfforts(shownRef, actions).then(() => { if (on) setAsked(count => count + 1) })
+    }
+    return () => { on = false }
+  }, [bar, docked, isOpen, current, shownRef, opening])
+  const dockTo = (tab) => {
+    const rows = pickerRows({ tabs, tab, query: '', favorites }).filter(row => row.model)
+    setDock(state => ({ ...state, tab, query: '', highlight: Math.max(0, rows.findIndex(row => row.model.ref === current)) }))
+  }
+  const toggleFavorite = (ref) => {
+    const next = favorites.includes(ref) ? favorites.filter(entry => entry !== ref) : [...favorites, ref]
+    writeFavorites(next)
+    setFavoriteList(next)
+  }
+  const pickSpeed = (value) => {
+    if (switching || bot.model === undefined || bot.model !== shownRef) return
+    void Promise.resolve(run(actions.updateBot(bot.id, { speed: value }))).catch(() => {})
+  }
+  const mac = isMacPlatform()
+  const onDockKey = (event) => {
+    const jumpTo = modelJumpIndex(event, mac)
+    if (jumpTo >= 0) {
+      const row = dockModels[jumpTo]
+      if (row !== undefined) { event.preventDefault(); event.stopPropagation(); onModel(row.model, row.tab.route) }
+      return
+    }
+    const target = event.target
+    const plain = !event.altKey && !event.ctrlKey && !event.metaKey
+    if (target?.matches?.('[data-model-picker-search]')) {
+      if (event.isComposing || event.keyCode === 229) return
+      const move = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
+      if (move !== 0 && plain) {
+        event.preventDefault()
+        if (dockModels.length > 0) {
+          const highlight = Math.min(dockModels.length - 1, Math.max(0, dockState.highlight + move))
+          setDock(state => ({ ...state, highlight }))
+          menu.current?.querySelectorAll('[role="option"]')[highlight]?.scrollIntoView?.({ block: 'nearest' })
+        }
+        return
+      }
+      const highlighted = dockModels[dockState.highlight]
+      if (event.key === 'Enter' && highlighted !== undefined) { event.preventDefault(); onModel(highlighted.model, highlighted.tab.route); return }
+      if (event.key === 'ArrowRight' && plain && !event.shiftKey && target.selectionStart === dockState.query.length) {
+        event.preventDefault()
+        if (highlighted !== undefined && highlighted.model.ref !== shownRef) onModel(highlighted.model, highlighted.tab.route)
+        else focusLevels()
+        return
+      }
+      if (plain && ((event.key === 'ArrowLeft' && !event.shiftKey && dockState.query.length === 0) || (event.key === 'Tab' && event.shiftKey))) {
+        event.preventDefault()
+        menu.current?.querySelector('[data-model-picker-provider][aria-pressed="true"]:not(:disabled)')?.focus()
+      }
+      return
+    }
+    if (target?.closest?.('[data-model-picker-sidebar]')) {
+      const move = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
+      if (move !== 0 && plain) {
+        event.preventDefault()
+        const next = adjacentModelPickerProvider({ tabs, selected: dockTab, direction: move })
+        dockTo(next)
+        nextFrame(() => menu.current?.querySelector(`[data-model-picker-provider="${next}"]`)?.focus())
+        return
+      }
+      if (plain && (event.key === 'ArrowRight' || (event.key === 'Tab' && !event.shiftKey))) { event.preventDefault(); focusSearch() }
+      return
+    }
+    const column = menu.current?.querySelector('[data-model-picker-effort]')
+    if (column?.contains(target)) {
+      if (event.key === 'ArrowLeft' && plain) { event.preventDefault(); focusSearch(); return }
+      moveBetweenRows(event, column)
+    }
   }
   const onKeyDown = (event) => {
     const rows = menuRows(event.currentTarget)
@@ -962,8 +1311,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       'aria-label': t('Change the model of {name}', { name: bot.name }), onClick: toggle,
     }, t('change')) : h('button', {
       ref: button, type: 'button', className: `bt-model-trigger${bar ? ' bt-model-bar-trigger' : ''}`, 'data-wide': wide || undefined, 'aria-busy': switching || undefined,
-      'data-bar': bar || undefined, 'data-route': triggerRoute?.route, 'aria-haspopup': 'menu', 'aria-expanded': isOpen,
-      'aria-label': t('Model: {model}', { model: shownRunning?.name ?? shown?.name ?? t('none') }) + (runningTitle === undefined ? '' : `. ${runningTitle}`),
+      'data-bar': bar || undefined, 'data-route': triggerRoute?.route, 'aria-haspopup': docked ? 'dialog' : 'menu', 'aria-expanded': isOpen,
+      'aria-label': t('Model: {model}', { model: shownRunning?.name ?? shown?.name ?? t('none') }) + (bar && fastOn && shownRunning === undefined ? `, ${t('Fast')}` : '') + (runningTitle === undefined ? '' : `. ${runningTitle}`),
       title: runningTitle,
       'data-missing': shown !== undefined && shown.unavailable && models.length > 0 ? '' : undefined, onClick: toggle,
     },
@@ -972,13 +1321,25 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
         triggerRoute === undefined ? null : h('span', { className: 'bt-model-bar-route', 'aria-hidden': true }, h(ROUTE_ICON[triggerRoute.route] ?? ConnectorIcon, { size: 14 })),
         h('span', { className: 'bt-model-bar-name' }, shownRunning?.name ?? shown?.name ?? t('Choose a model')),
         triggerEffort === undefined ? null : h('span', { className: 'bt-model-bar-effort' }, triggerEffort),
+        fastOn && shownRunning === undefined ? h('span', { className: 'bt-model-bar-fast', 'data-fast': '' }, h(BoltMark)) : null,
         shownRunning === undefined ? null : h('span', { className: 'bt-model-bar-effort', 'data-running-instead': '' }, t('instead of {model}', { model: shown?.name ?? current })))
       : h('span', { className: 'bt-model-copy' },
         h('span', { className: 'bt-model-name' }, shown?.name ?? t('Choose a model')),
         second === null ? null : h('span', { className: 'bt-model-provider' }, second)),
     h(Caret)),
-    shownPlace ? createPortal(h('div', { ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== undefined ? ' bt-menu-up' : ''}`, role: 'menu', 'aria-label': t('Model for {name}', { name: bot.name }), 'aria-disabled': switching || undefined, style: shownPlace, 'data-leaving': leaving || undefined, onKeyDown },
-      confirmView ?? h(ModelSteps, {
+    shownPlace ? createPortal(h('div', {
+      ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== undefined ? ' bt-menu-up' : ''}`, role: docked ? 'dialog' : 'menu',
+      'aria-label': t('Model for {name}', { name: bot.name }), 'aria-disabled': switching || undefined, style: shownPlace, 'data-leaving': leaving || undefined,
+      'data-docked': docked ? '' : undefined, onKeyDown: docked ? (confirm === undefined && keyFor === undefined ? onDockKey : undefined) : onKeyDown,
+    },
+      docked && confirmView ? h('div', { className: 'bt-mp-confirm' }, confirmView) : confirmView ?? (docked ? DockedPicker({
+        bot: { ...bot, defaultModel: roster.defaultModel }, tabs, state: dockState, rows: dockRows, current, shown: shownRef, reasoning: shownReasoning, picked,
+        speed: speedOffered(shownRef), favorites, mac, remoteConfigured: roster.prefs?.hermesRemote?.enabled === true && Boolean(roster.prefs?.hermesRemote?.profile),
+        onTab: dockTo, onQuery: query => setDock(state => ({ ...state, query, highlight: 0 })),
+        onHighlight: index => setDock(state => ({ ...state, highlight: index })),
+        onRowPick: row => onModel(row.model, row.tab.route), onFavorite: toggleFavorite, onLevel, onSpeed: pickSpeed,
+        onRemote: openRemote, onManage: manage ? () => { finish(); manage() } : undefined,
+      }) : null) ?? h(ModelSteps, {
         roster: solver ? { ...roster, models: models.filter(solverModel) } : roster,
         bot, view, current, picked, levelName: effortLabel, go, onModel, onLevel, folds, levels: withEfforts,
         onRemote: openRemote,
@@ -1350,5 +1711,81 @@ menus use, with the menu item's hover, focus ring and a caret that points at the
 @keyframes bt-model-in{from{opacity:0;transform:translateY(6px)}}
 .bt-model-spin{flex:none;width:14px;height:14px;border-radius:50%;border:1.5px solid var(--bt-line-2);border-top-color:var(--bt-ink-2);animation:bt-model-spin .7s linear infinite}
 @keyframes bt-model-spin{to{transform:rotate(360deg)}}
+/* The composer's picker, laid out as T3 Code's (model-picker-t3.js): rail, search and list,
+   reasoning column, speed footer. One fixed height, so a model with more levels never resizes
+   it; a short window shrinks it and keeps the footer; below 640px the column goes under the list. */
+.bt-model-menu[data-docked]{padding:0;gap:0;overflow:hidden}
+.bt-mp{display:flex;flex-direction:column;min-height:0;flex:1 1 auto;font-size:13px;line-height:18px}
+.bt-mp-body{display:flex;height:346px;min-height:0;flex:0 1 auto}
+.bt-mp-picker{display:flex;flex:1 1 auto;min-width:0;min-height:0}
+.bt-mp-rail{flex:none;width:44px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px;box-sizing:border-box;overflow-y:auto;scrollbar-width:none;background:var(--bt-tag-bg)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab{position:relative;flex:none;width:34px;height:34px;min-height:34px;padding:0;justify-content:center;border-radius:8px;color:var(--bt-ink-2)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab svg{width:18px;height:18px;margin:0}
+.bt-model-menu .bt-mp-rail .bt-mp-tab[aria-pressed=true]{background:var(--bt-active);color:var(--bt-ink)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab[aria-pressed=true]::after{content:"";position:absolute;right:-5px;top:7px;width:3px;height:20px;border-radius:4px;background:var(--bt-accent)}
+.bt-model-menu .bt-mp-rail .bt-mp-tab:disabled{opacity:.42;cursor:default;background:none}
+.bt-model-menu .bt-mp-rail .bt-mp-tab[data-model-picker-provider=favorites]{color:var(--bt-ink)}
+.bt-mp-rail-sep{flex:none;width:24px;height:1px;margin:2px 0;background:var(--bt-line-2)}
+.bt-model-menu .bt-mp-rail .bt-mp-manage{margin-top:auto;color:var(--bt-ink-3)}
+.bt-mp-main{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;border-left:1px solid var(--bt-line)}
+.bt-mp-search{flex:none;display:flex;align-items:center;gap:8px;margin:10px 12px 0;height:33px;padding-bottom:6px;border-bottom:1px solid var(--bt-line-2);color:var(--bt-ink-3);box-sizing:border-box}
+.bt-mp-search:focus-within{border-bottom-color:var(--bt-accent)}
+.bt-mp-search svg{flex:none}
+.bt-mp-search input{flex:1;min-width:0;border:0;outline:0;background:none;padding:0;font:inherit;font-size:14px;line-height:20px;color:var(--bt-ink)}
+.bt-mp-search input::placeholder{color:var(--bt-ink-3)}
+.bt-mp-list{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:8px 8px 6px;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin}
+.bt-mp-heading{flex:none;padding:6px 8px 2px;font-size:11px;line-height:14px;font-weight:500;color:var(--bt-ink-3)}
+.bt-mp-row{flex:none;display:flex;align-items:center;gap:8px;min-height:32px;padding:0 6px 0 8px;border-radius:6px;cursor:pointer;color:var(--bt-ink);box-sizing:border-box}
+.bt-mp-row[data-highlighted]{background:var(--bt-hover)}
+.bt-mp-row[data-unavailable]{color:var(--bt-ink-3)}
+.bt-mp-row-mark{flex:none;display:inline-flex;width:16px;height:16px;align-items:center;justify-content:center;color:var(--bt-ink-2)}
+.bt-mp-row-mark svg{width:16px;height:16px}
+.bt-mp-row-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:var(--bt-weight-label,500)}
+.bt-mp-row-check{flex:none;display:inline-flex;color:var(--bt-ink-2)}
+.bt-mp-row-check svg{width:14px;height:14px}
+.bt-mp-row-hint{flex:none;margin-left:auto;font-size:11px;line-height:14px;color:var(--bt-ink-3);white-space:nowrap}
+.bt-model-menu .bt-mp-row .bt-mp-star{flex:none;width:24px;height:24px;min-height:24px;padding:0;margin-left:auto;justify-content:center;border-radius:6px;color:var(--bt-ink-3);opacity:0}
+.bt-mp-row-hint+.bt-mp-star{margin-left:0}
+.bt-model-menu .bt-mp-row .bt-mp-star svg{width:14px;height:14px;margin:0}
+.bt-mp-row[data-highlighted] .bt-mp-star,.bt-mp-row:hover .bt-mp-star,.bt-mp-star[data-on],.bt-mp-star:focus-visible{opacity:1}
+.bt-model-menu .bt-mp-row .bt-mp-star[data-on]{color:var(--bt-accent)}
+.bt-mp-kbd{flex:none;min-width:24px;padding:2px 5px;border-radius:4px;background:var(--bt-tag-bg);color:var(--bt-ink-3);font:inherit;font-size:11px;line-height:14px;text-align:center;font-variant-numeric:tabular-nums}
+.bt-mp-note{flex:none;padding:6px 8px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
+.bt-mp-empty{flex:none;padding:8px;color:var(--bt-ink-2)}
+.bt-model-menu .bt-mp-manage-row{flex:none;margin-top:4px;color:var(--bt-ink-2)}
+.bt-mp-effort{flex:none;width:192px;display:flex;flex-direction:column;min-height:0;border-left:1px solid var(--bt-line);background:var(--bt-tag-bg)}
+.bt-mp-effort-head{flex:none;display:flex;align-items:center;gap:8px;margin:10px 12px 0;height:33px;padding-bottom:6px;border-bottom:1px solid var(--bt-line-2);color:var(--bt-ink-2);box-sizing:border-box}
+.bt-mp-effort-model{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--bt-ink-3)}
+.bt-mp-effort-rows{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:8px 8px 6px;display:flex;flex-direction:column;gap:2px}
+.bt-model-menu .bt-mp-level{flex:none;min-height:32px;padding:0 8px;gap:8px}
+.bt-mp-level-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bt-mp-level-check{flex:none;display:inline-flex;color:var(--bt-ink)}
+.bt-mp-level-check svg{width:14px;height:14px}
+.bt-mp-level-default{flex:none;font-size:11px;line-height:14px;color:var(--bt-ink-3)}
+.bt-mp-effort-none{padding:6px 8px;color:var(--bt-ink-3)}
+.bt-mp-foot{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid var(--bt-line);background:var(--bt-tag-bg)}
+.bt-mp-speed{display:flex;padding:2px;border-radius:var(--st-r-seg,8px);background:var(--bt-tag-bg)}
+.bt-model-menu .bt-mp-speed .bt-mp-segment{width:auto;min-height:24px;height:24px;padding:0 8px;gap:4px;border-radius:6px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
+.bt-model-menu .bt-mp-speed .bt-mp-segment[data-checked]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 0 0 .5px var(--bt-line-2)}
+.bt-model-menu .bt-mp-speed .bt-mp-segment:disabled{opacity:.5;cursor:default}
+.bt-mp-bolt{display:inline-flex;color:inherit}
+.bt-mp-bolt svg,.bt-model-menu .bt-mp-segment .bt-mp-bolt svg{width:13px;height:13px;margin:0}
+.bt-model-bar-fast{display:inline-flex;flex:none;color:var(--bt-ink-3)}
+.bt-mp-confirm{padding:10px}
+.bt-model-menu .bt-mp :is(button,[role=option]):focus-visible{outline:2px solid var(--st-ring,var(--bt-accent));outline-offset:-2px}
+.bt-mp-search input:focus-visible{outline:0}
+/* Touch screens: rows and controls keep the 44px the other menus give a finger, and the star shows without a hover. */
+@media (hover:none){
+  .bt-mp-row,.bt-model-menu .bt-mp-level{min-height:44px}
+  .bt-model-menu .bt-mp-rail .bt-mp-tab{width:40px;height:40px;min-height:40px}
+  .bt-model-menu .bt-mp-row .bt-mp-star{width:36px;height:36px;min-height:36px;opacity:1}
+  .bt-model-menu .bt-mp-speed .bt-mp-segment{height:36px;min-height:36px;padding:0 12px}
+}
+@media (max-width:639px){
+  .bt-mp-body{flex-direction:column;height:auto}
+  .bt-mp-picker{height:300px;flex:0 1 auto}
+  .bt-mp-effort{width:auto;height:200px;border-left:0;border-top:1px solid var(--bt-line)}
+  .bt-mp-kbd{display:none}
+}
 @media (prefers-reduced-motion:reduce){.bt-model-dock{animation:none}.bt-model-step{animation:none}.bt-model-spin{animation-duration:2s}.bt-model-caret{transition:none}.bt-model-tick svg{animation:none}}
 `

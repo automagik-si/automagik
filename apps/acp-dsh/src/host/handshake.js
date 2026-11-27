@@ -5,6 +5,7 @@
 import { spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
+import { CLIENT_CAPABILITIES } from './features.js'
 import { redactText } from './redact.js'
 import { HOME_ENV } from './cli-homes.js'
 
@@ -66,7 +67,7 @@ export function handshake({ command, args = [], env, cwd }, { timeoutMs = HANDSH
     } catch (error) {
       return finish(error)
     }
-    connection.agent.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} }).then(
+    connection.agent.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: CLIENT_CAPABILITIES }).then(
       (answer) => {
         const version = answer?.protocolVersion
         if (version !== PROTOCOL_VERSION) return finish(new Error(`it speaks ACP protocol version ${version ?? 'unknown'}, and this app speaks version ${PROTOCOL_VERSION}`))
