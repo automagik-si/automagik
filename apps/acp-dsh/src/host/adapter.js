@@ -2150,7 +2150,7 @@ export class AcpAdapter extends LlmAdapter {
             ...(identity.guardedSolver ? CLAUDE_GATE_ASK : []), ...CLAUDE_READ_ASK],
           deny,
         }
-        return { key: JSON.stringify(permissions), meta: { claudeCode: { options: { settings: { permissions } } } } }
+        return { solver: true, key: JSON.stringify(permissions), meta: { claudeCode: { options: { settings: { permissions } } } } }
       }
       const desiredRules = claudeRules(policy.identity, native, turnLevel)
       if (!desiredRules) return yield stopPolicy()
@@ -2423,6 +2423,7 @@ export class AcpAdapter extends LlmAdapter {
             state.native = codexRow ? !codexOff : spawnNative
             state.nativeManaged = spawnManaged
             state.asks = spawnRules.key
+            state.solverCwdReset = spawnRules.solver === true
             // A Bot whose team or role tools live in DSH gets DSH's extras by default on Codex.
             // An explicit `dshTools: true` keeps the whole preset, and so does an OFF Codex.
             const roleExtras = bridged && agent.disableBuiltInTools !== true && decision.setting !== true && this.roleToolsInDsh(sessionId)
@@ -2440,6 +2441,7 @@ export class AcpAdapter extends LlmAdapter {
             const run = new AgentRun({
               ...spec,
               provider: options.provider,
+              ...(state.solverCwdReset ? { env: { ...spec.env, CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: '1' } } : {}),
               cwd: requestedCwd
                 ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME ?? homedir(),
               name: agent.name,
