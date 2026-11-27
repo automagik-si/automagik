@@ -1,7 +1,7 @@
 // The Solver's review guard (RFC 0048, delivery 1.5; #2056's hard guard). A Bot with the person's
 // own `reviewGuard: true` has its work refused, in its own chat and the subagents under it, until
 // its reviewer (the `reviewerId` the New Solver dialog stored) answers the current request's plan
-// with a verdict (review-mark.js records `planVerdictAt`). It only removes tools: a call is held
+// with a designated verdict (`planOpenAt` in review-mark.js). It only removes tools: a call is held
 // unless it is on the open list below (reads, research, asking the person, the notes file and
 // messages to the reviewer), so a tool nobody taught this file about is held. It never reads the
 // cosmetic Solver marker, and only the person sets or clears the field (setReviewGuard), or the
@@ -225,8 +225,7 @@ export function install(rt) {
         return { why: 'solver-run', text: `${bot.name} cannot use ${tool} yet. Start a check run with solver_progress before running a command for the accepted plan.` }
       }
     }
-    if (bot.reviewGuard !== true) return undefined
-    if (actualSolver(bot) ? !planGateClosed(bot) : typeof track?.planVerdictAt === 'number') return undefined
+    if (bot.reviewGuard !== true || planOpenAt(bot, track) !== undefined) return undefined
     const held = heldCall(rt, bot, name, args, definition, base)
     if (held === undefined) return undefined
     const why = track?.openedBy === 'bot' ? 'guard-request' : 'guard'
@@ -434,8 +433,7 @@ export function install(rt) {
   const reviewGuardViewOf = (bot, track = bot?.reviewTrack) => {
     if (bot?.reviewGuard !== true) return {}
     const clean = cleanTrack(track)
-    if (clean?.requested !== true || clean.delivered === true || (actualSolver(bot)
-      ? planOpenAt(bot, clean) !== undefined : typeof clean.planVerdictAt === 'number')) return {}
+    if (clean?.requested !== true || clean.delivered === true || planOpenAt(bot, clean) !== undefined) return {}
     return { reviewGuardWaitingSince: clean.requestAt }
   }
 

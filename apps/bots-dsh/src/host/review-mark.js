@@ -1173,9 +1173,9 @@ export function install(rt) {
     if (track?.requested === true && track.delivered !== true) {
       if (dates || senderId === track.openerId) return
       const progress = track.solver
-      const wasOpen = bot.reviewGuard === true && planOpenAt(bot, track) !== undefined && rt.planGateClosed?.(bot) === false
-      const guardedOpen = bot.reviewGuard === true && (wasOpen
-        || (rt.isActualSolver?.(bot) === false && isTime(track.planVerdictAt)))
+      const hasPlanVerdict = bot.reviewGuard === true && planOpenAt(bot, track) !== undefined
+      const wasOpen = hasPlanVerdict && rt.planGateClosed?.(bot) === false
+      const guardedOpen = hasPlanVerdict && (wasOpen || rt.isActualSolver?.(bot) === false)
       const hasProgress = progress?.plan || progress?.pending || progress?.review
       if (hasProgress) {
         invalidateResult(progress)
