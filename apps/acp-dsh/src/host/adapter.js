@@ -19,7 +19,7 @@ import {
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { PLAN_RECORD, USAGE_RECORD, bindingOf, decide, latestNative, writeNative } from './continuity.js'
-import { bindingDigest, planNoticeOf, todosOf, usageNoticeOf } from './features.js'
+import { bindingDigest, elicitationAnswer, elicitationQuestions, planNoticeOf, todosOf, usageNoticeOf } from './features.js'
 import { HOME_ENV, VERSION_ENV } from './cli-homes.js'
 import { GENERATION_ENV } from './cli-generations.js'
 import { AGY_NOT_LOADED_TEXT, AGY_TOOLS_OFF_TEXT } from './agy-off.js'
@@ -2473,6 +2473,19 @@ export class AcpAdapter extends LlmAdapter {
             const run = new AgentRun({
               ...spec,
               ...(reattach.sessionId === undefined ? {} : { continuity: { sessionId: reattach.sessionId, methods: reattach.methods } }),
+              // An agent's form elicitation, asked of the person in DSH's question dialog while
+              // one of this chat's prompts is open; withdrawn when it ends (Stop included), and
+              // a cancel when nobody can be asked. Never answered for the person, at any level.
+              onElicitation: async (params, signal) => {
+                const turn = this.live.get(sessionId)
+                const service = this.ctx.get?.('userQuestions')
+                const questions = elicitationQuestions(params, agent.name)
+                if (questions === undefined) return { action: 'decline' }
+                if (turn?.run !== run || turn.open !== true || turn.promptStop === undefined || typeof service?.ask !== 'function') return { action: 'cancel' }
+                const owner = this.ctx.agents?.get?.(sessionId) ?? dshAgent
+                const answer = await service.ask({ agent: owner, signal: AbortSignal.any([signal, turn.promptStop.signal].filter(Boolean)), questions })
+                return elicitationAnswer(params, answer)
+              },
               onUnreadPlan: update => this.warn(`${agent.name} sent a plan this app does not read (${String(update?.plan?.type ?? update?.sessionUpdate).slice(0, 40)}); it is not shown`),
               onPromptSettled: (ordinal, settled) => {
                 if (state.run !== run || !settled || agent.continuity === undefined || state.binding === undefined) return
@@ -3167,6 +3180,7 @@ export class AcpAdapter extends LlmAdapter {
       live.drifted = false
       live.open = true
       live.policyManaged = livePolicy.identity?.solver === true || finalPolicy.identity?.solver === true
+      live.promptStop = new AbortController()
       live.own = own === 'yes'
       // Ordinary strict sessions have no Auto record until an own-mode attempt or a late answer.
       this.diagnostics?.own(sessionId, live, live.ownSent === true || ['yes', 'late', 'changed', 'refused'].includes(own) ? { answer: own, taken: live.own } : undefined)
@@ -3217,6 +3231,7 @@ export class AcpAdapter extends LlmAdapter {
       let substitution
       if (event.type === 'end' || event.type === 'error' || event.type === 'aborted') {
         live.open = false
+        live.promptStop?.abort()
         substitution = live.substitution
         live.substitution = undefined
         this.backchannel?.cancel?.(live.bridge, event.type === 'aborted' ? 'the turn was stopped' : 'the turn ended')
@@ -3311,6 +3326,11 @@ export class AcpAdapter extends LlmAdapter {
           ;(live.planShown ??= new Set())[plan.removed === true ? 'delete' : 'add'](plan.planId)
         }
         live.planRows = undefined
+        // The agent's notices, compactions, commands, suggestions, subagents and messages
+        // (features.js SessionRows), the latest of each, as rows.
+        for (const row of live.run.takeRows?.() ?? []) {
+          appendNotice(live.session, row, { notice: row.notice, ...(row.severity === undefined ? {} : { severity: row.severity }) }, this.warn.bind(this))
+        }
         const usageRow = usageNoticeOf(usage)
         if (usageRow !== undefined) appendNotice(live.session, usageRow, { notice: 'usage' }, this.warn.bind(this))
         const wasOwn = live.own

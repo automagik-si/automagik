@@ -113,8 +113,18 @@
       "reason": "sign-in runs the agent's own auth methods (login.js); terminal auth would take over a terminal DSH does not own"
     },
     "client-capability:elicitation": {
+      "status": "implemented",
+      "how": "form elicitations are asked in DSH's question dialog (features.js elicitationQuestions) with a Decline option; never answered for the person; url mode is declined",
+      "test": "test/wire-replay.test.js"
+    },
+    "client-capability:elicitation.form": {
+      "status": "implemented",
+      "how": "asked in DSH's question dialog: string (free, enum, oneOf), number, integer, boolean and multi-select fields; at most 8",
+      "test": "test/wire-replay.test.js"
+    },
+    "client-capability:elicitation.url": {
       "status": "not-advertised",
-      "reason": "DSH user questions are asked through the bridge's ask tool with its consent; an ACP elicitation has no DSH dialog mapping yet"
+      "reason": "a url elicitation asks the client to open a page the agent names; this client never opens one, and declines it"
     },
     "client-capability:fs": {
       "status": "not-advertised",
@@ -126,12 +136,14 @@
       "test": "test/plan-usage.test.js"
     },
     "client-capability:session": {
-      "status": "not-advertised",
-      "reason": "no session-related client extension below is advertised"
+      "status": "implemented",
+      "how": "notices and compaction below",
+      "test": "test/wire-replay.test.js"
     },
     "client-capability:session.compaction": {
-      "status": "not-advertised",
-      "reason": "DSH owns compaction of its own transcript; an agent's compaction updates have no DSH row yet"
+      "status": "implemented",
+      "how": "compaction_update and compaction_summary_chunk become one chat row per compaction, with its summary",
+      "test": "test/wire-replay.test.js"
     },
     "client-capability:session.configOptions": {
       "status": "not-advertised",
@@ -142,16 +154,17 @@
       "reason": "unstable; no DSH surface shows an agent cursor"
     },
     "client-capability:session.notices": {
-      "status": "not-advertised",
-      "reason": "no DSH notice row is defined for agent notices; advertising would invite updates nothing shows"
+      "status": "implemented",
+      "how": "notice updates become chat rows at the prompt's end (features.js SessionRows)",
+      "test": "test/wire-replay.test.js"
     },
     "client-capability:session.promptSuggestions": {
       "status": "not-advertised",
-      "reason": "unstable; suggestions validate and are ignored (test/sdk-2-7-surface.test.js)"
+      "reason": "unstable in SDK 2.12.0; a prompt_suggestions_update sent anyway is a chat row (SessionRows, test/wire-replay.test.js)"
     },
     "client-capability:subagents": {
       "status": "not-advertised",
-      "reason": "subagent work is shown from tool calls (workersOf in acp.js); exposed subagent sessions would need their own routes and approvals"
+      "reason": "this client reads only its own session id's updates (acp.js onUpdate drops another session's): advertising would move subagent work off the parent's tool calls onto sessions it drops. subagent_update and session_message sent on the parent session are still rows (SessionRows)"
     },
     "client-capability:terminal": {
       "status": "not-advertised",
@@ -260,11 +273,12 @@
     },
     "method:client:elicitation/complete": {
       "status": "not-advertised",
-      "reason": "no elicitation capability is advertised"
+      "reason": "only a url elicitation completes out of band, and url elicitations are declined (this client never opens a page an agent names)"
     },
     "method:client:elicitation/create": {
-      "status": "not-advertised",
-      "reason": "no elicitation capability is advertised"
+      "status": "handled",
+      "how": "AgentRun.onElicitation -> adapter onElicitation -> ctx.userQuestions.ask while a prompt is open; cancel on Stop or with nobody to ask",
+      "test": "test/wire-replay.test.js"
     },
     "method:client:fs/read_text_file": {
       "status": "not-advertised",
@@ -332,16 +346,19 @@
       "test": "test/adapter.test.js"
     },
     "update:available_commands_update": {
-      "status": "ignored",
-      "reason": "agent slash commands are not offered in DSH's composer"
+      "status": "handled",
+      "how": "a chat row listing the agent's own slash commands when the set changes (sent before a prompt, shown after it)",
+      "test": "test/wire-replay.test.js"
     },
     "update:compaction_summary_chunk": {
-      "status": "ignored",
-      "reason": "no compaction capability advertised"
+      "status": "handled",
+      "how": "accumulated per compaction id into its completed row",
+      "test": "test/wire-replay.test.js"
     },
     "update:compaction_update": {
-      "status": "ignored",
-      "reason": "no compaction capability advertised; DSH owns its transcript"
+      "status": "handled",
+      "how": "one chat row per compaction id: in progress, completed with its summary, failed or cancelled",
+      "test": "test/wire-replay.test.js"
     },
     "update:config_option_update": {
       "status": "handled",
@@ -358,8 +375,9 @@
       "reason": "unstable; no cursor surface"
     },
     "update:notice": {
-      "status": "ignored",
-      "reason": "no client notices capability; no DSH row for it"
+      "status": "handled",
+      "how": "a chat row (notice agent-notice) with its severity, title and description",
+      "test": "test/wire-replay.test.js"
     },
     "update:plan": {
       "status": "handled",
@@ -377,24 +395,28 @@
       "test": "test/plan-usage.test.js"
     },
     "update:prompt_suggestions_update": {
-      "status": "ignored",
-      "reason": "unstable; validated and ignored, later text arrives (test/sdk-2-7-surface.test.js)"
+      "status": "handled",
+      "how": "a chat row of up to five suggestions; unstable, not advertised",
+      "test": "test/wire-replay.test.js"
     },
     "update:session_info_update": {
       "status": "ignored",
       "reason": "DSH titles its chats"
     },
     "update:session_message": {
-      "status": "ignored",
-      "reason": "sent to subagent-aware clients only; not advertised"
+      "status": "handled",
+      "how": "a chat row with the message (from the agent or a subagent)",
+      "test": "test/wire-replay.test.js"
     },
     "update:session_message_chunk": {
-      "status": "ignored",
-      "reason": "sent to subagent-aware clients only; not advertised"
+      "status": "handled",
+      "how": "accumulated per message id into its session_message row",
+      "test": "test/wire-replay.test.js"
     },
     "update:subagent_update": {
-      "status": "ignored",
-      "reason": "no subagents capability advertised"
+      "status": "handled",
+      "how": "a chat row per subagent state change (started, working, idle, needs an answer)",
+      "test": "test/wire-replay.test.js"
     },
     "update:tool_call": {
       "status": "handled",

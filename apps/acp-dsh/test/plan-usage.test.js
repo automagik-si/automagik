@@ -55,7 +55,7 @@ test('plan shapes: legacy plan, items, markdown, removal, and shapes this client
   plans.take({ planId: 'a', type: 'items', entries: [{ content: 'one', status: 'pending', priority: 'medium' }] })
   plans.take({ planId: 'b', type: 'markdown', markdown: 'm' })
   assert.deepEqual(todosOf(plans.list()), [{ content: 'one', status: 'pending' }])
-  assert.deepEqual(CLIENT_CAPABILITIES, { plan: {} })
+  assert.deepEqual(CLIENT_CAPABILITIES.plan, {})
 })
 
 test('usage: context occupancy is the latest report, a prompt\'s usage is recorded once with its completeness, and no DSH usage chunk is made', async () => {

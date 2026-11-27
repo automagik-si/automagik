@@ -44,6 +44,7 @@ const methodNames = (tree, prefix) => Object.values(tree).flatMap(value => (type
 const CAPABILITIES = [
   ['client-capability', 'zClientCapabilities'],
   ['client-capability:session', 'zClientSessionCapabilities'],
+  ['client-capability:elicitation', 'zElicitationCapabilities'],
   ['agent-capability', 'zAgentCapabilities'],
   ['agent-capability:sessionCapabilities', 'zSessionCapabilities'],
   ['agent-capability:promptCapabilities', 'zPromptCapabilities'],
@@ -88,7 +89,7 @@ export function implementedClientCapabilities(policy) {
     const path = id.slice('client-capability:'.length).split('.')
     let at = out
     for (const part of path.slice(0, -1)) at = (at[part] ??= {})
-    at[path.at(-1)] = {}
+    at[path.at(-1)] ??= {}
   }
   return out
 }

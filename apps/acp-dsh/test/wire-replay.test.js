@@ -19,6 +19,7 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import * as Jsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
 import * as Todo from '@deepseek-ai/dsh-tool-todo'
+import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import { apply, inject } from '../index.js'
 import { CLIENT_CAPABILITIES } from '../src/host/features.js'
 import { writeReceipt } from '../scripts/acp-receipts.mjs'
@@ -50,12 +51,12 @@ export const APPROVED = {
 
 // The plugin's model catalog first reads the agent's models in a process of its own (catalog.js),
 // as it does in the app; then the chat's process.
-const CATALOG_PROBE = [{ in: 'initialize', clientCapabilities: 'plan' }, { in: 'session/new', servers: [] }]
+const CATALOG_PROBE = [{ in: 'initialize', clientCapabilities: 'elicitation,plan,session' }, { in: 'session/new', servers: [] }]
 // The wire a person's one approval makes. The client answers the question with the allow-once
 // option, never the lasting one, and no frame repeats.
 const APPROVED_WIRE = [
   ...CATALOG_PROBE,
-  { in: 'initialize', clientCapabilities: 'plan' },
+  { in: 'initialize', clientCapabilities: 'elicitation,plan,session' },
   { in: 'session/new', servers: [] },
   { in: 'session/prompt', text: 'make the report' },
   { out: 'session/update', update: 'agent_message_chunk' },
@@ -102,12 +103,19 @@ export function rowsOf(messages) {
 }
 
 /** A DSH host as the app loads it, on the session files under `root`. */
-async function host(t, root, { approval } = {}) {
+async function host(t, root, { approval, answerer } = {}) {
   const ctx = new Context()
   t.after(() => ctx.fiber.dispose())
   await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
   await ctx.plugin(Jsonl, { root: join(root, 'sessions'), compression: 'none' })
   await ctx.plugin(Todo, { allowParallelInProgress: false })
+  await ctx.plugin(UserQuestions)
+  // The person at DSH's question dialog: `answerer` answers, else nobody does.
+  const questions = []
+  ctx.on('user-questions/request', async (request, next) => {
+    questions.push(request.questions)
+    return answerer ? answerer(request) : next()
+  })
   const asked = []
   ctx.provide('approval', { effectivePolicy: () => 'ask', request: async (request) => { asked.push(request.callId); return approval ? approval(request, ctx) : 'allowed-once' } })
   ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write' }) })
@@ -117,7 +125,7 @@ async function host(t, root, { approval } = {}) {
     apply: scoped => apply(scoped, { fakeAgent: AGENT, claude: false, codex: false, dshTools: false }, { store: { binOf: () => undefined, update: async () => {}, dispose() {} }, find: () => undefined }),
   })
   await mountAgentLoopTestHarness(ctx)
-  return { ctx, asked }
+  return { ctx, asked, questions }
 }
 
 function world(t, script) {
@@ -148,9 +156,9 @@ async function say(agent, words) {
 }
 
 /** Runs `script` for one turn on a fresh chat, restarts DSH and reopens the chat from its file. */
-async function roundTrip(t, script, { approval, during } = {}) {
+async function roundTrip(t, script, { approval, during, answerer } = {}) {
   const w = world(t, script)
-  const first = await host(t, w.root, { approval })
+  const first = await host(t, w.root, { approval, answerer })
   const { agent } = await first.ctx.agentLoop.createAgent(first.ctx, { sessionId: SESSION, agentOptions: { provider: ROUTE, model: 'default' }, meta: { cwd: w.root } })
   await (during ? during(agent, first) : say(agent, 'make the report'))
   const live = { todos: first.ctx.sessionProjections.stateOf(agent.session, 'todos'), rows: rowsOf(agent.session.deriveMessages()) }
@@ -159,7 +167,7 @@ async function roundTrip(t, script, { approval, during } = {}) {
   const second = await host(t, w.root)
   const { agent: back } = await second.ctx.agentLoop.resume(second.ctx, { resumeSessionId: SESSION, agentOptions: { provider: ROUTE, model: 'default' } })
   const reopened = { todos: second.ctx.sessionProjections.stateOf(back.session, 'todos'), rows: rowsOf(back.session.deriveMessages()) }
-  return { ...w, asked: first.asked, live, reopened, back, second }
+  return { ...w, asked: first.asked, questions: first.questions, live, reopened, back, second }
 }
 
 test('one approved tool call: the wire and the reopened chat match their goldens', { timeout: 60_000 }, async (t) => {
@@ -169,7 +177,7 @@ test('one approved tool call: the wire and the reopened chat match their goldens
   assert.deepEqual(r.reopened.rows, r.live.rows, 'the reopened chat is the chat as it was')
   assert.equal(r.asked.length, 1, 'one approval for one call')
   assert.equal(r.reopened.todos, null, 'no plan, no list')
-  assert.deepEqual(CLIENT_CAPABILITIES, { plan: {} })
+  assert.deepEqual(CLIENT_CAPABILITIES, { plan: {}, session: { notices: {}, compaction: {} }, elicitation: { form: {} } })
   writeReceipt(process.env.ACP_RECEIPT_DIR, {
     route: 'acp-scripted', scenario: 'synthetic-replay', sdk: SDK, platform: `${process.platform}-${process.arch}`, node: process.version,
     phases: { initialize: 'passed', session: 'passed', prompt: 'passed', toolApproval: 'passed' },
@@ -331,4 +339,85 @@ test('the reopened chat file the desktop test reads is the one this plugin write
   }
   const committed = readFileSync(FIXTURE, 'utf8').trim().split('\n').map(line => JSON.parse(line))
   assert.deepEqual(shapeOf(committed), shapeOf(lines))
+})
+
+// The other updates an agent sends beyond words and tools, each a chat row after the prompt,
+// all there after a restart: a notice, a compaction with its streamed summary, its commands
+// (sent before the prompt, kept for it), a suggestion, a subagent and a session message.
+const OTHERS = {
+  ...APPROVED,
+  turn: [
+    { update: { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'review', description: 'Review the diff' }, { name: 'init', description: 'Write AGENTS.md' }] } },
+    { update: { sessionUpdate: 'notice', severity: 'warning', title: 'Rate limit is near', description: '80% of the window used.' } },
+    { update: { sessionUpdate: 'compaction_update', compactionId: 'c1', status: 'in_progress' } },
+    { update: { sessionUpdate: 'compaction_summary_chunk', compactionId: 'c1', content: { type: 'text', text: 'Earlier: made the ' } } },
+    { update: { sessionUpdate: 'compaction_summary_chunk', compactionId: 'c1', content: { type: 'text', text: 'report.' } } },
+    { update: { sessionUpdate: 'compaction_update', compactionId: 'c1', status: 'completed' } },
+    { update: { sessionUpdate: 'subagent_update', sessionId: 'sub-1', title: 'Explorer', state: { state: 'running' } } },
+    { update: { sessionUpdate: 'subagent_update', sessionId: 'sub-1', title: 'Explorer', state: { state: 'running' } } },
+    { update: { sessionUpdate: 'subagent_update', sessionId: 'sub-1', title: 'Explorer', state: { state: 'idle' } } },
+    { update: { sessionUpdate: 'session_message_chunk', messageId: 'm1', content: { type: 'text', text: 'Found 3 ' } } },
+    { update: { sessionUpdate: 'session_message', messageId: 'm1', senderSessionId: 'sub-1', content: [{ type: 'text', text: 'Found 3 files.' }] } },
+    { update: text('All done.') },
+    { end: 'end_turn' },
+  ],
+}
+
+test('notices, compaction, commands, subagents and session messages are rows, all there after a restart', { timeout: 60_000 }, async (t) => {
+  const r = await roundTrip(t, OTHERS)
+  const rows = r.reopened.rows.filter(row => row.role === 'notice')
+  assert.deepEqual(rows.map(row => [row.notice, row.summary]), [
+    ['commands', "The agent's commands: /review, /init"],
+    ['agent-notice', 'Warning: Rate limit is near'],
+    ['compaction', 'The agent compacted its context'],
+    ['subagent', 'Explorer is idle'],
+    ['session-message', 'A message from a subagent'],
+  ])
+  assert.match(rows[2].text, /Earlier: made the report\./)
+  assert.match(rows[0].text, /- \/review — Review the diff/)
+  assert.match(rows[1].text, /80% of the window used\./)
+  assert.deepEqual(r.reopened.rows.filter(row => row.role !== 'notice'), [{ role: 'user', text: 'make the report' }, { role: 'assistant', text: 'All done.', calls: 0 }])
+})
+
+const FORM = { mode: 'form', message: 'Which environment should I deploy to?', requestedSchema: { type: 'object', properties: { target: { type: 'string', title: 'Environment', enum: ['staging', 'production'] }, replicas: { type: 'integer', title: 'Replicas' }, notify: { type: 'boolean', title: 'Notify the team' } }, required: ['target'] } }
+const ELICIT = { ...APPROVED, turn: [{ elicit: FORM }, { update: text('Thanks.') }, { end: 'end_turn' }] }
+const elicited = r => r.wire().find(frame => frame.in === 'elicitation-answer')
+
+test('an elicitation is asked in DSH\'s question dialog and the person\'s answer goes back typed', { timeout: 60_000 }, async (t) => {
+  const r = await roundTrip(t, ELICIT, {
+    answerer: () => ({ answers: [{ id: 'target', selected: ['staging'] }, { id: 'replicas', selected: [], custom: '3' }, { id: 'notify', selected: ['Yes'] }] }),
+  })
+  assert.equal(r.questions.length, 1, 'one dialog')
+  const [asked] = r.questions
+  assert.deepEqual(asked.map(question => question.id), ['target', 'replicas', 'notify'])
+  assert.match(asked[0].question, /Which environment should I deploy to\?/)
+  assert.ok(asked[0].options.some(option => option.label === 'Decline (send nothing)'))
+  assert.deepEqual(elicited(r), { in: 'elicitation-answer', action: 'accept', content: { target: 'staging', replicas: 3, notify: true } })
+})
+
+test('an elicitation the person declines, or nobody answers, sends nothing; a URL one is declined unasked', { timeout: 90_000 }, async (t) => {
+  const declined = await roundTrip(t, ELICIT, { answerer: () => ({ answers: [{ id: 'target', selected: ['Decline (send nothing)'] }] }) })
+  assert.deepEqual(elicited(declined), { in: 'elicitation-answer', action: 'decline' })
+  // No answerer at all (no person at the dialog): a cancel, never an answer made up.
+  const nobody = await roundTrip(t, ELICIT)
+  assert.equal(elicited(nobody).action, 'cancel')
+  const url = await roundTrip(t, { ...APPROVED, turn: [{ elicit: { mode: 'url', message: 'Sign in', url: 'https://example.com/x', elicitationId: 'e1' } }, { end: 'end_turn' }] })
+  assert.deepEqual(elicited(url), { in: 'elicitation-answer', action: 'decline' })
+  assert.equal(url.questions.length, 0, 'a URL elicitation never opens a dialog')
+})
+
+test('Stop while an elicitation is open withdraws the dialog and the agent gets a cancel', { timeout: 60_000 }, async (t) => {
+  const r = await roundTrip(t, { ...ELICIT, turn: [{ elicit: FORM }, { waitCancel: true }] }, {
+    answerer: ({ signal }) => new Promise((resolve, reject) => { signal?.addEventListener('abort', () => reject(signal.reason ?? new Error('withdrawn')), { once: true }) }),
+    during: async (agent, first) => {
+      agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'deploy' }] }))
+      const deadline = Date.now() + 10_000
+      while (Date.now() < deadline && first.questions.length === 0) await delay(10)
+      agent.cancel()
+      await agent.whenIdle()
+    },
+  })
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline && elicited(r) === undefined) await delay(20)
+  assert.equal(elicited(r)?.action, 'cancel')
 })

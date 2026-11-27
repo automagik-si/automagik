@@ -18,7 +18,7 @@ import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
 import { usageLimitOf } from './usage-limit.js'
 import { pinOf, pinWire } from './model-identity.js'
 import { observeTerminal, vetoClaudeTerminalIdentity } from './terminal-evidence.js'
-import { CLIENT_CAPABILITIES, Plans, contextOf, planOf, promptUsageOf, reattachMethodOf } from './features.js'
+import { CLIENT_CAPABILITIES, Plans, SessionRows, contextOf, planOf, promptUsageOf, reattachMethodOf } from './features.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -277,6 +277,11 @@ export class AgentRun {
     // The agent's plans (features.js), the context it last reported holding, and how many
     // prompts this run sent: a prompt's usage is told once, by this ordinal.
     this.plans = new Plans()
+    // The chat rows of updates beyond words and tools (features.js SessionRows): the latest per
+    // key, kept until the adapter takes them as a prompt settles (`takeRows`), so a row sent
+    // between prompts (commands right after session/new) waits for the next one.
+    this.sessionRows = new SessionRows()
+    this.rows = new Map()
     this.context = undefined
     this.prompts = 0
     this.runId = randomUUID()
@@ -1073,6 +1078,23 @@ export class AgentRun {
         if (change !== undefined) this.push({ type: 'plan', change, plans: this.plans.list() })
         break
       }
+      case 'notice':
+      case 'compaction_update':
+      case 'compaction_summary_chunk':
+      case 'session_message':
+      case 'session_message_chunk':
+      case 'available_commands_update':
+      case 'prompt_suggestions_update':
+      case 'subagent_update': {
+        if (typeof sessionId !== 'string' || sessionId !== this.sessionId) break
+        const row = this.sessionRows.take(update)
+        if (row !== undefined) {
+          this.rows.delete(row.key)
+          this.rows.set(row.key, row)
+          while (this.rows.size > 50) this.rows.delete(this.rows.keys().next().value)
+        }
+        break
+      }
       case 'usage_update': {
         if (typeof sessionId !== 'string' || sessionId !== this.sessionId) break
         const context = contextOf(update)
@@ -1087,6 +1109,30 @@ export class AgentRun {
       if (tool !== undefined) observeTerminal(tool, update, sessionId, observedAt, {
         claude: this.spec.provider === 'acp-claude', firstSight,
       })
+    }
+  }
+
+  /** The rows held since the last take, in the order they last changed. */
+  takeRows() {
+    const rows = [...this.rows.values()]
+    this.rows.clear()
+    return rows
+  }
+
+  /**
+   * An agent's `elicitation/create`: asked of the person through the adapter (`onElicitation`,
+   * DSH's question dialog), never answered for them. A loaded session's history, another
+   * session's request, or nobody to ask is a cancel.
+   */
+  async onElicitation(params, signal) {
+    if (this.quarantine !== undefined) return { action: 'cancel' }
+    if (typeof params?.sessionId === 'string' && params.sessionId !== this.sessionId) return { action: 'cancel' }
+    if (typeof this.spec.onElicitation !== 'function') return { action: 'cancel' }
+    try {
+      const answer = await this.spec.onElicitation(params, signal)
+      return answer?.action === 'accept' || answer?.action === 'decline' ? answer : { action: 'cancel' }
+    } catch {
+      return { action: 'cancel' }
     }
   }
 
@@ -1459,6 +1505,7 @@ function connect(run, stream) {
   const connection = client({ name: 'automagik-acp-dsh' })
     .onNotification(methods.client.session.update, ({ params }) => run.onUpdate(params.update, params.sessionId))
     .onRequest(methods.client.session.requestPermission, ({ params, signal }) => run.onPermission(params, signal))
+    .onRequest(methods.client.elicitation.create, ({ params, signal }) => run.onElicitation(params, signal))
     .connect(stream)
   const agent = connection.agent
   const { session } = methods.agent

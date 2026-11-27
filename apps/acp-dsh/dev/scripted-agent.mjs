@@ -8,6 +8,7 @@
 //   { update: <SessionUpdate> }                     a session/update notification
 //   { ask: { toolCall, options } }                 a session/request_permission, its outcome traced
 //   { waitCancel: true }                            waits for session/cancel, then ends cancelled
+//   { elicit: <CreateElicitationRequest> }          an elicitation/create, its answer traced
 //   { end: <stopReason>, usage?: <Usage> }         the prompt's answer (with its usage, if any)
 import { agent, methods, ndJsonStream, RequestError } from '@agentclientprotocol/sdk/unstable'
 import { appendFileSync, readFileSync } from 'node:fs'
@@ -50,6 +51,10 @@ agent({ name: 'scripted-agent' })
           trace({ out: 'session/prompt', stopReason: 'cancelled' })
           return { stopReason: 'cancelled' }
         }
+      } else if (step.elicit !== undefined) {
+        trace({ out: 'elicitation/create', mode: step.elicit.mode })
+        const answer = await client.request(methods.client.elicitation.create, { sessionId: params.sessionId, ...step.elicit })
+        trace({ in: 'elicitation-answer', action: answer.action, ...(answer.content === undefined ? {} : { content: answer.content }) })
       } else if (step.waitCancel) {
         await cancel
         trace({ out: 'session/prompt', stopReason: 'cancelled' })
