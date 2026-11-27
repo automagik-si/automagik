@@ -7,14 +7,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 import { AcpAdapter } from '../../acp-dsh/src/host/adapter.js'
 import { Backchannel, offeredTools } from '../../acp-dsh/src/host/backchannel.js'
 import { AGY_TOOLS_OFF_TEXT } from '../../acp-dsh/src/host/agy-off.js'
 import { AGY_OFF_ARGS, agyWorld, unixOnly } from '../../acp-dsh/test/fixtures/agy-world.js'
 import { createSystemMessage, createToolResultMessage, createUserMessage, markAgentLoopRequest, textOnlyImageText } from '@deepseek-ai/dsh-llm'
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session } from '@deepseek-ai/dsh-session'
 import { install, skillPart, skillTool } from '../src/host/skill-library-call.js'
+import { attestToolRegistration } from '../src/host/tool-registrations.js'
 import { AGY_OFF_SKILLS_NOTICE, SKILL_NOTICE } from '../src/host/skill-message.js'
 import { callerItems } from '../src/host/caller-view.js'
 import { rowsOf } from '../src/host/pocket-chat.js'
@@ -167,7 +170,7 @@ test('Skills row 8: Antigravity OFF with exact eager proof admits only the Sessi
   assert.deepEqual(executions, ['eligible', 'other-eligible'])
 })
 
-function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, addedSkills = [], worker } = {}) {
+function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, addedSkills = [], worker, approvalFixture } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'skill-acp-'))
   const trace = join(dir, 'trace.ndjson')
   const session = worker === 'subagent' ? Session.create('bot-a', undefined, {
@@ -182,40 +185,71 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
   let nextTurn = earlierTurns
   let preset = 'standard'
   let admitted = true
+  let review = approvalFixture?.review
+  const requests = []
+  const bodies = []
   const handlers = new Map()
   const rt = {
     ctx: { on: (key, handler) => handlers.set(key, handler),
       get: key => key === 'sessions' ? { get: id => id === agent.id ? agent.session : undefined } : undefined },
     load: async () => {}, selfOf: id => id === (worker ? 'fixture-parent' : agent.id) ? 'owner-a' : undefined,
     botOf: id => id === 'owner-a' ? { id } : undefined,
-    skillLibrary: { active: id => id === 'owner-a' && active.has(id) ? [{ ...skill, mode }, ...addedSkills] : [] },
+    skillLibrary: { active: id => id === 'owner-a' && active.has(id)
+      ? [{ ...skill, mode, ...(review !== undefined && { review }) }, ...addedSkills] : [] },
     ...(worker && { canUseWorkerSkillTool: () => admitted }),
     ...(worker === 'task' && { state: { tasks: { [session.id]: { skillsOwner: 'owner-a',
       skillsInstructionsId: 'fixture-task-instructions', skills: [{ ...automatic }] } } } }),
   }
   install(rt)
   const tool = skillTool(rt)
+  const registration = { definition: tool }
+  const tools = {
+    definitions: () => admitted ? [tool, other] : [other],
+    executable: name => (admitted ? [tool, other] : [other]).find(definition => definition.name === name),
+    view: () => ({ registrations: new Map([[tool.name, registration]]) }),
+    layers: { peek: scope => scope === agent ? { tools: new Map([[tool.name, registration]]) } : undefined },
+    execute: async ({ calls, agent: actual, toolSet, signal }) => {
+      const { id, name, arguments: input } = calls[0]
+      assert.equal(name, tool.name)
+      const args = JSON.parse(input)
+      offered = true
+      const selected = toolSet === undefined ? tool : toolSet.view(actual).get(name)
+      const value = await selected.execute(args, { agent: actual, callId: id, name, signal })
+      afterLoad?.(id)
+      return { results: [{ callId: id, result: { content: selected.output.render(args, value), isError: false } }] }
+    },
+  }
   const ctx = {
     agents: { get: id => id === agent.id ? agent : undefined, turnBoundaryOf: () => ({ lastTurn: nextTurn }) },
     get(key) {
       if (key === 'omniTeam') return rt
-      if (key === 'tools') return {
-        definitions: () => admitted ? [tool, other] : [other],
-        executable: name => (admitted ? [tool, other] : [other]).find(definition => definition.name === name),
-        execute: async ({ calls, agent: actual }) => {
-          const { id, name, arguments: input } = calls[0]
-          assert.equal(name, tool.name)
-          const args = JSON.parse(input)
-          offered = true
-          const value = await tool.execute(args, { agent: actual })
-          afterLoad?.(id)
-          return { results: [{ callId: id, result: { content: tool.output.render(args, value), isError: false } }] }
-        },
+      if (key === 'tools') return tools
+      if (key === 'approval') return { effectivePolicy: () => !approvalFixture || approvalFixture.level === 'full' ? 'never' : 'ask',
+        ...(approvalFixture && { async request(request) {
+          requests.push(request)
+          return approvalFixture.request?.(request) ?? 'allowed-once'
+        } }) }
+      if (key === 'permissionPresets' && approvalFixture) return { current: () => approvalFixture.level }
+      if (key === 'sandboxPolicy') return {
+        resolve: () => ({ mode: !approvalFixture || approvalFixture.level === 'full' ? 'danger-full-access' : 'workspace-write' }),
       }
-      if (key === 'approval') return { effectivePolicy: () => 'never' }
-      if (key === 'sandboxPolicy') return { resolve: () => ({ mode: 'danger-full-access' }) }
       if (key === 'agentPresets') return { presetForSession: () => preset }
     },
+  }
+  if (approvalFixture) {
+    const root = new Context()
+    agent.ctx = createScope(root, agent).ctx
+    attestToolRegistration({ ctx: agent.ctx, layers: tools.layers }, tool)
+    const get = rt.ctx.get
+    rt.ctx.get = key => key === 'agents' ? ctx.agents : key === 'tools' ? tools : get(key)
+    rt.isBotSession = id => id === agent.id
+    rt.teamTools = [tool]
+    const execute = tool.execute
+    t.mock.method(tool, 'execute', function (args, exec) {
+      bodies.push(exec.callId)
+      return execute.call(this, args, exec)
+    })
+    t.after(() => root.fiber.dispose())
   }
   const row = {
     name: 'Fixture agent',
@@ -268,7 +302,8 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
   return { active, setMode: value => { mode = value }, setPreset: value => { preset = value },
     excludeSkill: () => { admitted = false },
     onLoad: hook => { afterLoad = hook },
-    ctx, rt, agent, run, events, preStep, stream: handlers.get('llm/stream'), adapter, bridge, called: () => offered }
+    ctx, rt, agent, run, events, preStep, stream: handlers.get('llm/stream'), adapter, bridge, called: () => offered,
+    requests, bodies, withdrawReview: () => { review = undefined } }
 }
 
 test('2083 a Codex task gets the same checked catalog and load as its Bot through ACP', { timeout: 15_000 }, async t => {
@@ -842,3 +877,73 @@ test('Skills row 9: a Hermes chat sends ordinary text with an Automatic assignme
   assert.match(f.events('prompt').at(-1).text, /Hermes ordinary message/)
   assert.doesNotMatch(f.events('prompt').at(-1).text, /Adds the file marker|CHECKED-ACP-BODY/)
 })
+
+function approvalLoad(t, options) {
+  let foreignFetches = 0
+  t.mock.method(globalThis, 'fetch', () => {
+    foreignFetches++
+    throw new Error('Unexpected foreign fetch in the approval fixture')
+  })
+  t.after(() => assert.equal(foreignFetches, 0))
+  const f = fixture(t, 'acp-codex', { approvalFixture: options })
+  f.active.add('owner-a')
+  const { session } = f.agent
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('request/header', {
+    header: { config: { provider: 'acp-codex', model: 'default' },
+      tools: offeredTools(f.ctx, f.agent).map(({ name, description, inputSchema }) => ({ name, description, parameters: inputSchema })) },
+    reason: 'initial',
+  })
+  const record = f.bridge.mint({ sessionId: session.id, agent: f.agent, name: 'Codex' })
+  const callId = 'fixture-approval-load'
+  const call = () => f.bridge.call(record, { name: 'load_skill', arguments: { name: skill.name }, callId })
+  const rows = type => session.snapshotEvents().filter(event => event.type === type)
+  const terminal = () => rows('tool/result').find(event => event.data.message.toolCallId === callId)
+  return { ...f, record, call, callId, rows, terminal }
+}
+
+const checkedReview = { status: 'done', hash: skill.hash, findings: [] }
+
+test('#2164 same-byte review loss during the body withholds the result', async t => {
+  const f = approvalLoad(t, { level: 'workspace-write', review: checkedReview })
+  f.onLoad(f.withdrawReview)
+  const response = await f.call()
+  t.diagnostic(`approval=${f.requests.length} shipped=${f.bodies.length} receipts=${f.rows('plugin:automagik/skill-delivery').length}`)
+  assert.equal(f.rt.skillCalls.load(f.agent.id, skill.name).text, skill.content)
+  assert.deepEqual(f.bodies, [f.callId])
+  assert.equal(response.isError, true, 'same bytes without the current review are refused')
+  assert.equal(f.requests.length, 0)
+  assert.deepEqual(f.terminal().data.message.content, [])
+  assert.equal(f.terminal().data.message.isError, true)
+  assert.deepEqual(f.rows('plugin:automagik/skill-delivery'), [])
+  assert.deepEqual(activities(f.agent.session), [])
+})
+
+for (const outcome of ['allowed-once', 'rejected', 'cancelled']) {
+  test(`#2164 loadable unreviewed skill keeps ordinary ${outcome} settlement`, async t => {
+    const f = approvalLoad(t, { level: 'workspace-write', request() {
+      if (outcome === 'cancelled') f.bridge.cancel(f.record, 'fixture stop')
+      return outcome
+    } })
+    const response = await f.call()
+    assert.equal(f.requests.length, 1)
+    assert.deepEqual(f.bodies, outcome === 'allowed-once' ? [f.callId] : [])
+    assert.equal(f.terminal().data.message.isError, outcome !== 'allowed-once')
+    assert.equal(response.isError, outcome !== 'allowed-once')
+  })
+}
+
+for (const level of ['auto', 'full']) {
+  test(`#2164 ${level} dispatch leaves the asking-level exemption idle`, async t => {
+    const f = approvalLoad(t, { level, review: checkedReview })
+    let proofs = 0
+    f.rt.skillCalls.reviewed = () => { proofs++; throw new Error('Unexpected exempt proof') }
+    const response = await f.call()
+    assert.equal(proofs, 0)
+    assert.equal(f.requests.length, 0)
+    assert.deepEqual(f.bodies, [f.callId])
+    assert.deepEqual(response, { content: [text(skill.content)], isError: false })
+    assert.equal(f.terminal().data.message.isError, false)
+  })
+}

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
+import { symbols } from '@deepseek-ai/cordis'
 import { boundContextSummary, createSystemMessage, createUserMessage, isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { AUTOMATIC_SKILL_MODE } from '../shared/skill-mode.js'
@@ -10,6 +12,7 @@ import { MAX_SESSION_LINEAGE_DEPTH } from './bot-sessions.js'
 import { GROUP_MEMORY_SOURCE, MEMORY_RECALL_SOURCE, MEMORY_UPDATE_SOURCE } from './memory-copy.js'
 import { freezeLoopRequest } from './secrets.js'
 import { skillName } from './skill-library-rules.js'
+import { isTrustedToolRegistration } from './tool-registrations.js'
 
 import { AGY_OFF_SKILLS_NOTICE, personParts, SKILL_SOURCE, SKILL_NOTICE, SKILL_TOOL } from './skill-message.js'
 export { SKILL_TOOL } from './skill-message.js'
@@ -471,6 +474,58 @@ export function loadSkill(rt, sessionId, name) {
   return skill && skillPart(owner.botId, skill, 'load')
 }
 
+function skillBinding(rt, agent) {
+  const tools = rt.ctx.get?.('tools') ?? rt.ctx.tools
+  const definition = rt.teamTools?.find(tool => tool.name === SKILL_TOOL)
+  const registration = tools?.view?.(agent)?.registrations?.get(SKILL_TOOL)
+  const service = tools?.[symbols.original] ?? tools
+  if (definition !== undefined && registration?.definition === definition &&
+      tools?.executable?.(SKILL_TOOL, agent) === definition && isTrustedToolRegistration(registration) &&
+      scopeOf(agent.ctx) === agent && service?.layers?.peek?.(agent)?.tools?.get(SKILL_TOOL) === registration) {
+    return { definition, registration }
+  }
+}
+
+function reviewedRecord(rt, sessionId, name, agent, session) {
+  const agents = rt.ctx.get?.('agents') ?? rt.ctx.agents
+  if (!skillName(name) || typeof sessionId !== 'string' || session?.id !== sessionId ||
+      agent?.session !== session || agents?.get?.(sessionId) !== agent || rt.teamCurrent?.() === false) return
+  const owner = skillOwner(rt, sessionId, session)
+  if (owner === undefined || !hasCurrentRoot(rt, owner)) return
+  if (owner.kind !== 'own' && rt.canUseWorkerSkillTool?.(sessionId) !== true) return
+  const skill = automaticOf(recordsOf(rt, owner)).find(record => record.name === name)
+  if (!skill || skill.held !== undefined || typeof skill.hash !== 'string' || typeof skill.content !== 'string') return
+  // The library exposes review only after verifying the seal against the current hash.
+  const { review } = skill
+  if (review?.status === 'done' && review.hash === skill.hash && Array.isArray(review.findings)) {
+    return { botId: owner.botId, name, hash: skill.hash, text: skill.content }
+  }
+}
+
+export function reviewedSkill(rt, sessionId, name, agent, session) {
+  try {
+    const record = reviewedRecord(rt, sessionId, name, agent, session)
+    const binding = record && skillBinding(rt, agent)
+    if (binding === undefined) return
+    return Object.freeze({
+      ...record,
+      definition: binding.definition,
+      current() {
+        try {
+          const now = reviewedRecord(rt, sessionId, name, agent, session)
+          const active = now && skillBinding(rt, agent)
+          return active?.registration === binding.registration && active.definition === binding.definition &&
+            now.botId === record.botId && now.hash === record.hash && now.text === record.text
+        } catch {
+          return false
+        }
+      },
+    })
+  } catch {
+    return undefined
+  }
+}
+
 export function skillTool(rt) {
   return defineTool({
     name: SKILL_TOOL,
@@ -710,6 +765,7 @@ export function install(rt) {
       }
     },
     load: (sessionId, name) => loadSkill(rt, sessionId, name),
+    reviewed: (sessionId, name, agent, session) => reviewedSkill(rt, sessionId, name, agent, session),
     unavailable: SKILL_UNAVAILABLE,
     catalog(sessionId) {
       const records = availableRecords(sessionId)

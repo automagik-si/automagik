@@ -453,13 +453,14 @@ export function recordDrift(session, data) {
  * them reach the same loopback server, which resolves the credential to its Session before it
  * reads anything else.
  */
-function checkedSkillContent(ctx, record, name, requested, content) {
+function checkedSkillContent(ctx, record, name, requested, content, exemption) {
   if (name !== 'load_skill') return content
   const part = content.find(block => block?.automagikSkill?.kind === 'automagik-skill')
   if (!part || part.automagikSkill.use !== 'load' || part.automagikSkill.name !== requested) return []
   const current = ctx?.get?.('omniTeam')?.skillCalls?.load(record.sessionId, requested)
   return current?.automagikSkill.hash === part.automagikSkill.hash &&
-    current.automagikSkill.botId === part.automagikSkill.botId && current.text === part.text ? [part] : []
+    current.automagikSkill.botId === part.automagikSkill.botId && current.text === part.text &&
+    (exemption === undefined || exemption.accepts(part)) ? [part] : []
 }
 
 function skillRequest(ctx, record, name, requested) {
@@ -474,6 +475,58 @@ function skillRequest(ctx, record, name, requested) {
       if (typeof requested === 'string') refused?.add(requested)
       return { content: [{ type: 'text', text: skills.unavailable }], isError: true }
     },
+  }
+}
+
+function skillLoadName(args) {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return
+  const keys = Object.keys(args)
+  if (keys.length === 1 && keys[0] === 'name' && typeof args.name === 'string') return args.name
+}
+
+function reviewedSkillLoad(ctx, record, session, id, skill, name, args) {
+  if (skill === undefined || name !== 'load_skill') return
+  const requested = skillLoadName(args)
+  if (requested === undefined) return
+  const agent = record.agent
+  const sameSession = () => session?.id === record.sessionId && record.session === session &&
+    record.agent === agent && agent?.session === session
+  try {
+    if (!sameSession()) return
+    const proof = ctx?.get?.('omniTeam')?.skillCalls?.reviewed?.(session.id, requested, agent, session)
+    if (proof?.name !== requested || typeof proof.botId !== 'string' || typeof proof.hash !== 'string' ||
+        typeof proof.text !== 'string' || typeof proof.definition?.execute !== 'function' ||
+        typeof proof.current !== 'function' || !sameSession()) return
+    const { definition } = proof
+    let open = true
+    let entered = false
+    let refused = false
+    const current = () => {
+      try { return sameSession() && proof.current() === true && sameSession() }
+      catch { return false }
+    }
+    const wrapped = { ...definition, execute(loadArgs, exec) {
+      if (!open || entered || exec?.agent !== agent || exec.callId !== id || exec.name !== name ||
+          exec.parent !== undefined || exec.signal?.aborted || skillLoadName(loadArgs) !== requested || !current()) {
+        refused = true
+        throw Object.assign(new Error('The skill changed before it loaded.'), { code: 'SKILL_PROOF_CHANGED' })
+      }
+      entered = true
+      return definition.execute(loadArgs, exec)
+    } }
+    return {
+      toolSet: {
+        view: scope => open && scope === agent ? new Map([[name, wrapped]]) : new Map(),
+        dispose: () => { open = false },
+      },
+      get refused() { return refused },
+      accepts(part) {
+        const { botId, hash } = part.automagikSkill
+        return entered && !refused && botId === proof.botId && hash === proof.hash && part.text === proof.text && current()
+      },
+    }
+  } catch {
+    return undefined
   }
 }
 
@@ -1052,7 +1105,7 @@ export class Backchannel {
     // without a card (no loadable row exists outside a step); Auto refuses, because Auto review
     // reads a call from its step. A plain refusal here would be a silent dead end for the agent.
     if (openStepOf(session) === undefined && !betweenSteps(session) && record.promptRunning?.() !== true) {
-      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered })
+      return await this.selfOpenedCall(record, { name, args, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered })
     }
     const approval = this.ctx?.get?.('approval')
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
@@ -1147,8 +1200,9 @@ export class Backchannel {
       stopped.addEventListener('abort', releaseApproval, { once: true })
     }
     let answered = false
+    let skillExemption
     const settle = async (resultContent, isError, rawInfo) => {
-      let content = checkedSkillContent(this.ctx, record, name, args?.name, resultContent)
+      let content = checkedSkillContent(this.ctx, record, name, args?.name, resultContent, skillExemption)
       let historyContent
       if (restricted) {
         if (restrictedHistory && restrictedAllowed() && !stopped.aborted) {
@@ -1246,9 +1300,12 @@ export class Backchannel {
     let approvalAbortedBeforeDispatch = false
     try {
       if (skill && !skill.available()) return await settle([], false)
-      // Manual and every other asking level raise the one DSH dialog here. Auto does not: the
-      // pipeline's pre-execute is auto-review's gate, and its ask (if any) is the one dialog.
+      // At asking levels, only a proved skill load skips the bridge's own request.
+      // In Auto, pre-execute still runs the same reviewer as on native.
       if (!level.full && !level.auto) {
+        skillExemption = reviewedSkillLoad(this.ctx, record, session, id, skill, name, args)
+      }
+      if (!level.full && !level.auto && skillExemption === undefined) {
         if (requestScoped && typeof this.ctx?.on === 'function') {
           // The same effective preset the DSH reviewer reads supersedes this card,
           // including sandbox or approval overrides and a subsequent switch back.
@@ -1415,7 +1472,9 @@ export class Backchannel {
       if (levelChanged) {
         return await settle([{ type: 'text', text: `Auto review cannot finish ${name}: the permission level changed.` }], true, { name: 'AutoReviewUnavailableError', code: 'AUTO_REVIEW_LEVEL_CHANGED' })
       }
-      if (bridgeApproved) {
+      if (skillExemption !== undefined) {
+        toolSet = skillExemption.toolSet
+      } else if (bridgeApproved) {
         // The registry resolves the tool again after the execute waterfall. Wrap only
         // this call's existing executable so a later listener can wait safely.
         const agent = record.agent
@@ -1452,6 +1511,7 @@ export class Backchannel {
           return await settle([{ type: 'text', text: `Auto review cannot finish ${name}: the permission level changed.` }], true, { name: 'AutoReviewUnavailableError', code: 'AUTO_REVIEW_LEVEL_CHANGED' })
         }
         if (own.signal.aborted || !restrictedAllowed()) return await cancelled()
+        if (skillExemption?.refused) return await settle([], false)
         const text = `Error: ${thrownText(cause)}`
         // The info lands in the tool/result row, which must be plain JSON: an Error with no
         // string code (or a non-string name) would leave an undefined field, the row would be
@@ -1476,6 +1536,7 @@ export class Backchannel {
       }
       // Stopped while the body ran: a body that ignored its signal is not reported as a result.
       if (own.signal.aborted || !restrictedAllowed()) return await cancelled()
+      if (skillExemption?.refused) return await settle([], false)
       if (result === undefined) return await settle([{ type: 'text', text: 'The tool returned no result.' }], true)
       const info = result.isError === true ? (result.error?.info ?? (typeof result.error?.code === 'string' ? result.error : undefined)) : undefined
       return await settle(result.content ?? [], result.isError === true, info)
@@ -1510,9 +1571,9 @@ export class Backchannel {
    * Only a host caller with confirmed provenance may pass an origin. The bridge request
    * identifies the Session and call but carries no originating turn.
    * @param {any} record
-   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean, skill?: any, onSkillDelivered?: Function, origin?: {turn: number, exchangeId: string | null} }} call
+   * @param {{ name: string, args?: any, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean, skill?: any, onSkillDelivered?: Function, origin?: {turn: number, exchangeId: string | null} }} call
    */
-  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered, origin }) {
+  async selfOpenedCall(record, { name, args, raw, callId, signal: callerGone, authority, ended, skill, onSkillDelivered, origin }) {
     if (record.only?.has(HISTORY_TOOL_NAME)) return historyCancelled()
     const error = text => ({ content: name === 'load_skill' ? [] : [{ type: 'text', text }], isError: true })
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
@@ -1544,9 +1605,15 @@ export class Backchannel {
       callerGone?.removeEventListener('abort', onGone)
       if (record.closed && record.controllers.size === 0) record.guard?.release()
     }
+    let skillExemption
+    const refuseSkill = () => {
+      note('refused')
+      return skill.refuse()
+    }
     try {
       if (ended()) return { revoked: true }
-      if (!level.full) {
+      if (!level.full) skillExemption = reviewedSkillLoad(this.ctx, record, session, id, skill, name, args)
+      if (!level.full && skillExemption === undefined) {
         let outcome = 'unavailable'
         let policy
         try { policy = approval?.effectivePolicy?.(session) } catch {}
@@ -1573,19 +1640,23 @@ export class Backchannel {
       if (ended()) return { revoked: true }
       if (own.signal.aborted) return cancelled()
       if (skill && !skill.available()) return skill.refuse()
-      const settled = await tools.execute({ calls: [{ id, name, arguments: raw }], agent: record.agent, signal: stopped })
+      const settled = await tools.execute({
+        calls: [{ id, name, arguments: raw }], agent: record.agent, signal: stopped,
+        ...(skillExemption !== undefined && { toolSet: skillExemption.toolSet }),
+      })
       if (ended()) return { revoked: true }
       if (own.signal.aborted) return cancelled()
+      if (skillExemption?.refused) return refuseSkill()
       const result = settled?.results?.[0]?.result
       if (result === undefined) {
         note('failed')
         return error('The tool returned no result.')
       }
       const info = result.isError === true ? (result.error?.info ?? (typeof result.error?.code === 'string' ? result.error : undefined)) : undefined
-      const content = checkedSkillContent(this.ctx, record, name, name === 'load_skill' ? JSON.parse(raw)?.name : undefined, result.content ?? [])
+      const content = checkedSkillContent(this.ctx, record, name, name === 'load_skill' ? JSON.parse(raw)?.name : undefined,
+        result.content ?? [], skillExemption)
       if (skill && content.length === 0 && (result.isError !== true || !skill.available())) {
-        note('refused')
-        return skill.refuse()
+        return refuseSkill()
       }
       const eventSeq = note(result.isError === true ? 'failed' : 'ran')
       if (skills && eventSeq !== undefined && result.isError !== true && content.length > 0) {
@@ -1599,9 +1670,11 @@ export class Backchannel {
       }
     } catch (cause) {
       if (ended()) return { revoked: true }
+      if (skillExemption?.refused) return own.signal.aborted ? cancelled() : refuseSkill()
       note('failed')
       return error(`Error: ${thrownText(cause)}`)
     } finally {
+      skillExemption?.toolSet.dispose()
       leave()
     }
   }
