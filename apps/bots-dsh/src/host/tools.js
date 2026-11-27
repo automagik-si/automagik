@@ -1,6 +1,6 @@
 // Team tools: the roster, bot-to-bot messages, group chat settings and posts, and the
 // question and view cards. Group rounds and reading chats are in groups.js.
-import { skillTool } from './skill-library-call.js'
+import { SKILL_TOOL, skillTool } from './skill-library-call.js'
 import { randomUUID } from 'node:crypto'
 import { createEditInput } from './image-input.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -1223,7 +1223,7 @@ export function install(rt) {
   const syncScopedTools = () => {
     // unscope() deletes as it goes, which a Map keys iterator takes in stride.
     for (const id of scoped.keys()) {
-      if (!rt.isBotSession(id) && rt.roomOf(id) === undefined) unscope(id)
+      if (!rt.isBotSession(id) && rt.roomOf(id) === undefined && !scoped.get(id)?.skill) unscope(id)
     }
     // A reload lifts the scope of Agents that are still live, and an adopted
     // file can newly own one that already runs: scope each live Agent the team
@@ -1236,7 +1236,7 @@ export function install(rt) {
   // A wanted Session whose Agent cannot take scoped tools yet is warned about
   // once; held.tools stays unset, so the next step's check tries again.
   const registerless = new WeakSet()
-  const packageToolCollision = name => [...scoped.values()].some(held => !held.relay
+  const packageToolCollision = name => [...scoped.values()].some(held => !held.relay && !held.skill
     && !held.packageNames?.includes(name) && ctx.tools?.get?.(name, held.agent) !== undefined)
   const syncPackageTools = (agent, held) => {
     const role = rt.roleRuntime?.tools?.(agent, held.packageKey)
@@ -1275,7 +1275,8 @@ export function install(rt) {
     const id = agent.session?.id
     const owns = rt.isBotSession(id)
     const relayOnly = !owns && rt.roomOf(id) !== undefined
-    const wanted = owns || relayOnly
+    const skillOnly = !owns && !relayOnly && rt.skillCalls?.workerAvailable?.(id, agent) === true
+    const wanted = owns || relayOnly || skillOnly
     let held = scoped.get(id)
     // The local-agent tools (the CLI permission bridge) join the scope only of
     // a Bot whose route is a local agent; they are not in rt.teamTools. A Bot
@@ -1285,18 +1286,20 @@ export function install(rt) {
     // A Session that left the team, a scope of the wrong kind, a fresh Agent
     // for one Session, or a Bot that changed between a local route and a model
     // all start over; a wanted scope is registered again below.
-    if (held !== undefined && (!wanted || held.agent !== agent || held.relay !== relayOnly || (held.tools === true && held.local !== localBot))) {
+    if (held !== undefined && (!wanted || held.agent !== agent || held.relay !== relayOnly ||
+        (held.skill === true) !== skillOnly || (held.tools === true && held.local !== localBot))) {
       unscope(id)
       held = undefined
     }
     if (!wanted) return
+    const definitions = [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]
+      .filter(def => (!relayOnly || def.name === 'group_relay') && (!skillOnly || def.name === SKILL_TOOL))
     // A live Agent can be scoped while the modules that add tools are still installing:
     // loading the plugin again walks the live Agents from the load the memory module
     // starts, and the tools added after it (memory, secrets, connectors) would never
     // join that scope. Register what it is missing, so the next request is whole.
     if (held?.tools === true) {
-      for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
-        if (relayOnly && def.name !== 'group_relay') continue
+      for (const def of definitions) {
         if (def.name === 'solver_progress' && !rt.chatOwners.has(id)) continue
         if (held.added?.has(def.name) === true) continue
         try {
@@ -1331,8 +1334,7 @@ export function install(rt) {
     const disposers = []
     const failed = []
     const registered = []
-    for (const def of [...rt.teamTools, ...(localBot ? (rt.localAgentTools ?? []) : [])]) {
-      if (relayOnly && def.name !== 'group_relay') continue
+    for (const def of definitions) {
       if (def.name === 'solver_progress' && !rt.chatOwners.has(id)) continue
       try {
         const dispose = registerTrustedTool(agent.ctx.tools, def)
@@ -1351,6 +1353,7 @@ export function install(rt) {
     held ??= { relay: relayOnly, tools: false, restricted: false, filtered: false, disposers: [], unlisted: new Set() }
     held.agent = agent
     held.relay = relayOnly
+    held.skill = skillOnly
     held.tools = true
     held.local = localBot
     held.disposers.push(...disposers)
@@ -1394,7 +1397,7 @@ export function install(rt) {
     if (rt.teamTools.some(tool => tool.name === def.name)) return
     rt.teamTools.push(def)
     for (const held of scoped.values()) {
-      if (held.relay || typeof held.agent?.ctx?.tools?.register !== 'function') continue
+      if (held.relay || held.skill || typeof held.agent?.ctx?.tools?.register !== 'function') continue
       try {
         const dispose = held.agent.ctx.tools.register(def)
         if (typeof dispose === 'function') held.disposers.push(dispose)
@@ -1457,9 +1460,17 @@ export function install(rt) {
       } catch { /* the executor guard still refuses the call */ }
     }
   }
+  const dropUnavailableWorkerTools = () => {
+    for (const [id, held] of scoped) {
+      if (held.skill && rt.skillCalls?.workerAvailable(id, held.agent) !== true) unscope(id)
+    }
+  }
   const reapplyToolMasks = () => {
+    // Local tools bypass DSH masks. Lift the definition as soon as a
+    // profile filter changes so the ACP bridge observes the same surface.
+    dropUnavailableWorkerTools()
     for (const held of scoped.values()) {
-      if (held.agent === undefined) continue
+      if (held.agent === undefined || held.skill) continue
       try { maskConnectorTools(held.agent, held) } catch (error) { rt.warn('omni-ui: connector mask failed: %s', error) }
       try { maskRoleTools(held.agent, held) } catch (error) { rt.warn('omni-ui: role mask failed: %s', error) }
     }
@@ -1524,6 +1535,22 @@ export function install(rt) {
     maskConnectorTools(agent, held)
     maskRoleTools(agent, held)
   }
+  rt.syncWorkerSkillTool = shareBotTools
+  rt.dropUnavailableWorkerTools = dropUnavailableWorkerTools
+  rt.workerSkillInStep = id => {
+    const held = scoped.get(id)
+    return held?.stepTools?.view(held.agent).has(SKILL_TOOL) === true
+  }
+  rt.canUseWorkerSkillTool = id => {
+    const held = scoped.get(id)
+    const agent = held?.agent
+    if (!held?.skill || !held.added?.has(SKILL_TOOL) || rt.skillCalls?.workerAvailable(id, agent) !== true) return false
+    const agents = ctx.get?.('agents')
+    if (typeof agents?.get === 'function' && agents.get(id) !== agent) return false
+    const tools = ctx.get?.('tools') ?? ctx.tools
+    return typeof tools?.executable !== 'function' ||
+      tools.executable(SKILL_TOOL, agent) === rt.teamTools.find(def => def.name === SKILL_TOOL)
+  }
   ctx.on('tools/change', () => reapplyToolMasks())
   // A new Bot, part, or group Session gets its Agent before ds-bot records it, so the
   // recording path resolves it again once the session is known as a Bot's; meanwhile
@@ -1576,6 +1603,7 @@ export function install(rt) {
     }
     let assembled = await next()
     const held = scoped.get(agent.session?.id)
+    if (held?.skill) held.stepTools = context.toolSet
     if (held?.removedPackages?.size && Array.isArray(assembled.tools)) {
       assembled = { ...assembled, tools: assembled.tools.filter(tool => !held.removedPackages.has(tool.name)) }
       held.removedPackages.clear()

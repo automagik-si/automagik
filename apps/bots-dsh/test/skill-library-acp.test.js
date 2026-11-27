@@ -15,7 +15,7 @@ import { createSystemMessage, createToolResultMessage, createUserMessage, markAg
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import { Session } from '@deepseek-ai/dsh-session'
 import { install, skillPart, skillTool } from '../src/host/skill-library-call.js'
-import { SKILL_NOTICE } from '../src/host/skill-message.js'
+import { AGY_OFF_SKILLS_NOTICE, SKILL_NOTICE } from '../src/host/skill-message.js'
 import { callerItems } from '../src/host/caller-view.js'
 import { rowsOf } from '../src/host/pocket-chat.js'
 
@@ -163,10 +163,12 @@ test('Skills row 8: Antigravity OFF with exact eager proof admits only the Sessi
   assert.deepEqual(executions, ['eligible', 'other-eligible'])
 })
 
-function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, addedSkills = [] } = {}) {
+function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, addedSkills = [], worker } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'skill-acp-'))
   const trace = join(dir, 'trace.ndjson')
-  const session = Session.create('bot-a')
+  const session = worker === 'subagent' ? Session.create('bot-a', undefined, {
+    version: 4, id: 'bot-a', createdAt: 0, isSeeded: false, origin: 'subagent', parentSession: 'fixture-parent',
+  }) : Session.create('bot-a')
   const agent = { id: session.id, session, ctx: { tools: { register() {} } } }
   const active = new Set()
   const other = { name: 'other_fixture_tool' }
@@ -175,13 +177,17 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
   let offered = false
   let nextTurn = earlierTurns
   let preset = 'standard'
+  let admitted = true
   const handlers = new Map()
   const rt = {
     ctx: { on: (key, handler) => handlers.set(key, handler),
       get: key => key === 'sessions' ? { get: id => id === agent.id ? agent.session : undefined } : undefined },
-    load: async () => {}, selfOf: id => id === agent.id ? 'owner-a' : undefined,
+    load: async () => {}, selfOf: id => id === (worker ? 'fixture-parent' : agent.id) ? 'owner-a' : undefined,
     botOf: id => id === 'owner-a' ? { id } : undefined,
     skillLibrary: { active: id => id === 'owner-a' && active.has(id) ? [{ ...skill, mode }, ...addedSkills] : [] },
+    ...(worker && { canUseWorkerSkillTool: () => admitted }),
+    ...(worker === 'task' && { state: { tasks: { [session.id]: { skillsOwner: 'owner-a',
+      skillsInstructionsId: 'fixture-task-instructions', skills: [{ ...automatic }] } } } }),
   }
   install(rt)
   const tool = skillTool(rt)
@@ -190,8 +196,8 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
     get(key) {
       if (key === 'omniTeam') return rt
       if (key === 'tools') return {
-        definitions: () => [tool, other],
-        executable: name => [tool, other].find(definition => definition.name === name),
+        definitions: () => admitted ? [tool, other] : [other],
+        executable: name => (admitted ? [tool, other] : [other]).find(definition => definition.name === name),
         execute: async ({ calls, agent: actual }) => {
           const { id, name, arguments: input } = calls[0]
           assert.equal(name, tool.name)
@@ -253,9 +259,88 @@ function fixture(t, provider, { reforks = false, earlierTurns = 0, probeTurns, a
     return decision.messages[0]
   }
   return { active, setMode: value => { mode = value }, setPreset: value => { preset = value },
+    excludeSkill: () => { admitted = false },
     onLoad: hook => { afterLoad = hook },
     ctx, rt, agent, run, events, preStep, stream: handlers.get('llm/stream'), adapter, bridge, called: () => offered }
 }
+
+test('2083 a Codex task gets the same checked catalog and load as its Bot through ACP', { timeout: 15_000 }, async t => {
+  const prompt = 'Choose a skill for the worker.'
+  const load = 'Load the offered skill for the report.'
+  const restricted = 'A later restricted request.'
+  const f = fixture(t, 'acp-codex', { worker: 'task',
+    probeTurns: [{ text: prompt, loads: [] }, { text: load, loads: [skill.name] }, { text: restricted, loads: [] }] })
+  f.active.add('owner-a')
+  // Let the opening turn finish on both revisions. The fake only uses MCP once
+  // the opening request has established that this Session offers the skill.
+  const initial = user(prompt)
+  const reply = answer('acp-codex')
+  await f.run([initial], { record: [initial], reply })
+  const sent = f.events('prompt').at(-1)
+  assert.deepEqual(sent.prompt, [text(prompt), text(catalog)])
+  const listed = f.events('mcp-list').find(event => event.sessionId === sent.sessionId && event.server === 'dsh')
+  assert.ok(listed.definitions.some(definition => definition.name === 'load_skill'))
+  const loaded = await f.run([initial, reply, user(load)])
+  assert.equal(loaded.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'Fixture work completed.')
+  assert.deepEqual(f.events('skills-load').at(-1).answer, { content: [text(skill.content)], isError: false })
+  f.excludeSkill()
+  assert.equal(f.rt.skillCalls.load(f.agent.id, skill.name), undefined)
+  assert.deepEqual(offeredTools(f.ctx, f.agent, { skillOnly: true }), [])
+  await f.run([user(restricted)])
+  assert.doesNotMatch(f.events('prompt').at(-1).text, /Adds the file marker/)
+})
+
+test('2083 ACP replay strips delegated skill gestures while keeping ordinary child instructions', { timeout: 15_000 }, async t => {
+  const delegatedText = 'Keep these delegated instructions and use the skill mint-notes.'
+  const followup = 'Check the result again.'
+  // The probe matches an entire text block. Accept both inputs here so the
+  // assertions below judge the replay, irrespective of the fixture's reply.
+  const probeTurns = [delegatedText, 'Keep these delegated instructions and.', followup]
+    .map(text => ({ text, loads: [] }))
+  const f = fixture(t, 'acp-codex', { worker: 'subagent', addedSkills: [manual],
+    probeTurns })
+  f.active.add('owner-a')
+  const delegated = user(delegatedText)
+  const reply = answer('acp-codex')
+  await f.run([delegated], { record: [delegated], reply })
+  assert.match(f.events('prompt').at(-1).text, /Keep these delegated instructions/)
+  assert.doesNotMatch(f.events('prompt').at(-1).text, /mint-notes|MINT-OK/)
+  f.adapter.endSession(f.agent.id)
+  await f.run([delegated, reply, user(followup)])
+  const replay = f.events('prompt').at(-1).text
+  assert.match(replay, /Keep these delegated instructions/)
+  assert.doesNotMatch(replay, /mint-notes|MINT-OK/)
+})
+
+test('2083 the Antigravity task uses its own OFF route and gives the existing availability sentence', { ...unixOnly, timeout: 15_000 }, async t => {
+  const h = agyWorld(t)
+  const chat = h.chat('fixture-task')
+  const initial = user('Antigravity worker route check.')
+  const rt = {
+    ctx: { on() {} }, load: async () => {}, selfOf: () => undefined,
+    botOf: id => id === 'owner-a' ? { id } : undefined,
+    skillLibrary: { active: () => [automatic] },
+    canUseWorkerSkillTool: id => id === chat.session.id,
+    state: { tasks: { [chat.session.id]: { skillsOwner: 'owner-a',
+      skillsInstructionsId: initial.id, skills: [{ ...automatic }] } } },
+  }
+  install(rt)
+  h.services.omniTeam = rt
+  const identity = []
+  h.service.botIdentity(id => {
+    identity.push(id)
+    return id === 'owner-a' ? { nativeTools: true, nativeToolsAgent: 'acp-antigravity' } : undefined
+  })
+  h.services.tools = { definitions: () => [skillTool(rt)] }
+  const result = await chat.turn(initial)
+  assert.equal(result.at(-1).reason.kind, 'stop')
+  const run = h.conversation('Antigravity worker route check')
+  assert.ok(identity.includes(chat.session.id))
+  assert.deepEqual(run.args, AGY_OFF_ARGS)
+  assert.equal(run.prompt, initial.content[0].text)
+  assert.deepEqual(chat.session.deriveMessages().filter(row => row.source?.kind === SKILL_NOTICE)
+    .map(row => row.content[0].text), [AGY_OFF_SKILLS_NOTICE])
+})
 
 test('Codex Automatic self-load receives the exact skill tool and catalog', { timeout: 15_000 }, async t => {
   const prompt = 'Choose a workflow for this task.'

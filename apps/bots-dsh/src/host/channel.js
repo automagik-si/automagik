@@ -251,7 +251,10 @@ export function install(rt) {
     // What other Omni plugins add to the view (extend.js): the automations, for one.
     ...rt.extended.view(),
     // Tasks a Bot started (agents.js), for their live cards in the chat.
-    tasks: state.tasks ?? {},
+    tasks: Object.fromEntries(Object.entries(state.tasks ?? {}).map(([id, task]) => {
+      const { title, from, at, status, said, tool, steps, endedAt, summary } = task
+      return [id, { title, from, at, status, said, tool, steps, endedAt, summary }]
+    })),
     // `sessionId` is the Bot's current own-chat part; `parts` its earlier ones.
     // `waiting`: the Bot holds its greeting until the user picks its model or fixes
     // what failed it. `blocked`: the facts of a failure only the user can fix (turns.js).

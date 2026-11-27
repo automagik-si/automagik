@@ -519,3 +519,35 @@ test('a live Bot Session gets its team tools back after a disable and re-enable'
   assert.ok(hasShowView(second, 'a'), 'the scoped team tools are back')
   assert.ok(denied(second, 'a'), 'the blocking question tool is denied again')
 })
+
+test('2083 worker definitions stay scoped when a new Agent replaces one for the same Session', async t => {
+  const liveAgents = new Map()
+  const team = structuredClone(TEAM)
+  team.bots.a.segments = [{ sessionId: 'archived-part' }]
+  const host = start(team, {}, [], { liveAgents })
+  t.after(host.stop)
+  await host.call('state', {})
+  const marker = { name: 'marker', mode: 'automatic', content: 'Fixture instructions.', hash: 'checked' }
+  let active = [marker]
+  rt.skillLibrary.active = () => active
+  rt.state.tasks = {
+    worker: { from: 'a', status: 'working', skillsOwner: 'a', skillsInstructionsId: 'initial', skills: [marker] },
+    empty: { from: 'a', status: 'working', skillsOwner: 'a', skillsInstructionsId: 'initial-empty', skills: [] },
+  }
+  await host.agentCreated('worker')
+  await host.agentCreated('empty')
+  await host.agentCreated('archived-part')
+  assert.deepEqual(scopedNames(host, 'worker'), ['load_skill'])
+  assert.deepEqual(scopedNames(host, 'empty'), [])
+  assert.deepEqual(scopedNames(host, 'archived-part'), [])
+  const first = liveAgents.get('worker')
+  liveAgents.delete('worker')
+  await host.agentCreated('worker')
+  assert.notEqual(first, liveAgents.get('worker'))
+  assert.deepEqual(scopedNames(host, 'worker'), ['load_skill'])
+  active = []
+  rt.syncScopedTools()
+  assert.deepEqual(scopedNames(host, 'worker'), [])
+  await host.unload()
+  assert.deepEqual(host.scoped, [])
+})

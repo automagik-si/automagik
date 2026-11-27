@@ -60,6 +60,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, custom = {}, defaul
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-task-in-task-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify({ ...TEAM, bots: { m1: { ...TEAM.bots.m1, ...bots.m1 }, b2: { ...TEAM.bots.b2, ...bots.b2 } }, rooms: { r1: { ...TEAM.rooms.r1, ...room } }, ...(tasks ? { tasks } : {}) }))
   const log = []
+  const instructions = new Map()
   const open = new Set()
   const presetOf = new Map()
   const service = {
@@ -106,7 +107,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, custom = {}, defaul
           for (const listener of ctx.listeners.get('session/created') ?? []) void Promise.resolve(listener(session)).catch(() => {})
         }
         await new Promise(resolve => setTimeout(resolve, 1))
-        return { agent: { session, followup() {} } }
+        return { agent: { session, followup(message) { instructions.set(sessionId, message.id) } } }
       },
       selectModel: async () => {},
     },
@@ -136,7 +137,7 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, custom = {}, defaul
   const wish = (from = 'm1', extra = {}) => rt.startTask({ title: 'Wish', text: 'Do it', from, ...extra })
   // A task started from `sessionId`'s tool call.
   const from = (sessionId, ...args) => toolCall(sessionId, () => wish(...args))
-  return { ctx, rt, service, call, presets, toolCall, wish, from, log, made: () => sessions }
+  return { ctx, rt, service, call, presets, toolCall, wish, from, log, instructions, made: () => sessions }
 }
 
 test('a task started from inside a narrowed task runs no wider than the group', async (t) => {
@@ -188,8 +189,11 @@ test('it only narrows: a wide parent or group never raises the child', async (t)
   // A wide parent of another Bot gives a narrow Bot's task nothing.
   const mixed = team(t, { bots: { m1: { permission: FULL }, b2: { permission: WRITE } } })
   await mixed.call('state', {})
-  const own = await mixed.from(await mixed.from(mixed.rt.chatOf('m1')), 'b2')
+  const mixedParent = await mixed.from(mixed.rt.chatOf('m1'))
+  const own = await mixed.from(mixedParent, 'b2')
   await setTo(mixed.presets, own, [WRITE])
+  const mismatched = mixed.rt.state.tasks[own]
+  assert.deepEqual(mismatched, { title: 'Wish', from: 'b2', at: mismatched.at, status: 'working', levelTaskId: mixedParent })
 
   // No group and the same Bot: the level is the Bot's, as before.
   const free = team(t, { bots: { m1: { permission: FULL } } })
@@ -197,8 +201,17 @@ test('it only narrows: a wide parent or group never raises the child', async (t)
   const parent = await free.from(free.rt.chatOf('m1'))
   const child = await free.from(parent)
   await setTo(free.presets, child, [FULL])
-  assert.deepEqual(Object.keys(free.rt.state.tasks[parent]).sort(), ['at', 'from', 'status', 'title'])
-  assert.deepEqual(Object.keys(free.rt.state.tasks[child]).sort(), ['at', 'from', 'levelTaskId', 'status', 'title'])
+  for (const [id, lineage] of [[parent, {}], [child, { levelTaskId: parent }]]) {
+    const task = free.rt.state.tasks[id]
+    assert.match(task.skillsInstructionsId, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+    assert.equal(task.skillsInstructionsId, free.instructions.get(id))
+    assert.ok(Number.isFinite(task.at))
+    assert.deepEqual(task, {
+      title: 'Wish', from: 'm1', at: task.at, status: 'working', ...lineage,
+      skills: [], skillsInstructionsId: free.instructions.get(id), skillsOwner: 'm1',
+    })
+  }
+  assert.notEqual(free.instructions.get(parent), free.instructions.get(child))
 })
 
 test('a child of a wider Bot is bound by its parent, live', async (t) => {
