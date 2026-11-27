@@ -85,7 +85,7 @@ export function plansFromLog(events) {
     if (change.removed === true) plans.take({ planId: change.planId, removed: true })
     else plans.take(change)
   }
-  return plans.list().map(({ planId, type, entries, markdown }) => ({ planId, type, ...(type === 'markdown' ? { markdown } : { entries }) }))
+  return plans.list().map(({ planId, type, entries, markdown, path }) => ({ planId, type, ...(type === 'markdown' ? { markdown, ...(path === undefined ? {} : { path }) } : { entries }) }))
 }
 
 /** The usage records of this chat, one per prompt (`runId`, `ordinal`), however often it was read. */

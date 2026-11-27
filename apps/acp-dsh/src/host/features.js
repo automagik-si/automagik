@@ -37,8 +37,11 @@ export function planOf(update) {
   const plan = update.plan
   if (typeof plan?.planId !== 'string' || plan.planId === '') return undefined
   if (plan.type === 'items') return { planId: plan.planId, type: 'items', entries: entriesOf(plan.entries) }
-  if (plan.type === 'markdown' && typeof plan.markdown === 'string') {
-    return { planId: plan.planId, type: 'markdown', markdown: shortText(plan.markdown, PLAN_TEXT_MAX * 4) }
+  // SDK 2.12.0's PlanMarkdown: the whole plan as `content`, and an optional absolute `path` of
+  // the file holding it. The path is the agent's; it is kept as text and never opened here.
+  if (plan.type === 'markdown' && typeof plan.content === 'string') {
+    return { planId: plan.planId, type: 'markdown', markdown: shortText(plan.content, PLAN_TEXT_MAX * 4),
+      ...(typeof plan.path === 'string' && plan.path !== '' ? { path: shortText(plan.path, 1024) } : {}) }
   }
   return undefined
 }
@@ -70,7 +73,7 @@ export class Plans {
       this.byId.delete(plan.planId)
       return { planId: plan.planId, removed: true, order: held.order, revision: held.revision + 1 }
     }
-    const body = plan.type === 'markdown' ? { type: 'markdown', markdown: plan.markdown } : { type: 'items', entries: plan.entries }
+    const body = plan.type === 'markdown' ? { type: 'markdown', markdown: plan.markdown, ...(plan.path === undefined ? {} : { path: plan.path }) } : { type: 'items', entries: plan.entries }
     if (held !== undefined && JSON.stringify(held.body) === JSON.stringify(body)) return undefined
     const order = held?.order ?? this.next++
     const revision = (held?.revision ?? -1) + 1

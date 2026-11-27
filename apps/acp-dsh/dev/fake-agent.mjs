@@ -610,7 +610,7 @@ const implementation = {
         { content: 'read the code', priority: 'high', status: 'completed' }, { content: 'write the fix', priority: 'medium', status } ] } })
       await update(items('in_progress'))
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Planning.' } })
-      await update({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'p2', markdown: '# Notes\nkeep it small' } })
+      await update({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'p2', content: '# Notes\nkeep it small' } })
       await update(items('in_progress'))
       await update({ sessionUpdate: 'plan_removed', planId: 'never-sent' })
       await update(items('completed'))

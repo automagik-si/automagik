@@ -3221,8 +3221,8 @@ export class AcpAdapter extends LlmAdapter {
         // The agent's plan (features.js): its change is the chat's record (a reopened chat folds
         // them), and DSH's own todo panel draws its checklist.
         try {
-          appendPluginRecord(session, PLAN_RECORD, { provider: options.provider, nativeSessionId: live.run.sessionId, change: event.change })
-          session?.append?.('todo/write', { todos: todosOf(event.plans) })
+          appendPluginRecord(live.session, PLAN_RECORD, { provider: options.provider, nativeSessionId: live.run.sessionId, change: event.change })
+          live.session?.append?.('todo/write', { todos: todosOf(event.plans) })
         } catch (error) {
           this.warn(`${agent.name}'s plan was not written: ${error?.message ?? error}`)
         }
@@ -3280,7 +3280,7 @@ export class AcpAdapter extends LlmAdapter {
         const usage = live.run.promptUsage
         live.run.promptUsage = undefined
         if (usage !== undefined && (usage.completeness !== 'absent' || usage.context !== undefined)) {
-          try { appendPluginRecord(session, USAGE_RECORD, { provider: options.provider, runId: live.run.runId, ...usage }) } catch {}
+          try { appendPluginRecord(live.session, USAGE_RECORD, { provider: options.provider, runId: live.run.runId, ...usage }) } catch {}
         }
         const wasOwn = live.own
         live.own = false

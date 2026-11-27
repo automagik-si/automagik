@@ -3,87 +3,11 @@
 // state file, as a CLI's session store does, so a marker it was told to remember lives only
 // there, never in DSH's transcript. A restart is a new adapter over the same DSH Session.
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { rmSync } from 'node:fs'
 import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
-import { Session } from '@deepseek-ai/dsh-session'
-import { AcpAdapter } from '../src/host/adapter.js'
-import { Backchannel } from '../src/host/backchannel.js'
 import { NATIVE_RECORD, decide, latestNative } from '../src/host/continuity.js'
-
-const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-agent.mjs')
-const ROUTE = 'acp-fake'
-
-const user = text => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
-const answer = text => ({ role: 'assistant', source: { kind: 'model', provider: ROUTE, model: 'm' }, content: [{ type: 'text', text }] })
-
-function fixture({ dir, env = {}, route = { methods: ['resume', 'load'] }, account = () => 'account-a', startMs }) {
-  const trace = join(dir, 'fake.ndjson')
-  const state = join(dir, 'native-state.json')
-  const session = Session.create('s1')
-  session.append('turn/start', { turn: 1 })
-  session.append('step/start', { turn: 1, step: 0 })
-  const agent = { session, ctx: { tools: { register: () => () => {} } } }
-  const tools = { names: ['bash', 'write'] }
-  const counts = { approvals: 0, executed: 0 }
-  const ctx = {
-    agents: { get: () => agent, turnBoundaryOf: () => ({ lastTurn: 1 }) },
-    get: (key) => {
-      if (key === 'tools') {
-        const definitions = () => tools.names.map(name => ({ name, description: name, parameters: { type: 'object', properties: {} } }))
-        return {
-          definitions, executable: n => definitions().find(d => d.name === n),
-          execute: async ({ calls }) => {
-            counts.executed += 1
-            return { results: calls.map(call => ({ id: call.id, result: { content: [{ type: 'text', text: `ran ${call.name}` }] } })) }
-          },
-        }
-      }
-      if (key === 'approval') return { effectivePolicy: () => 'ask', request: async () => { counts.approvals += 1; return 'allowed-once' } }
-      if (key === 'sandboxPolicy') return { resolve: () => ({ mode: 'workspace-write' }) }
-      if (key === 'agentPresets') return { presetForSession: () => 'standard' }
-      return undefined
-    },
-    logger: { warn: () => {}, info: line => logs.push(line) },
-  }
-  const logs = []
-  const catalog = { models: async () => [{ id: 'default', name: 'Fake agent' }], model: async () => undefined, ownEffort: () => undefined, dispose() {} }
-  const spec = {
-    name: 'Fake agent', catalog, installed: () => true, disableBuiltInTools: true,
-    spawn: () => ({ command: process.execPath, args: [FAKE], env: { FAKE_ACP_TRACE: trace, FAKE_ACP_STATE: state, ...env } }),
-    ...(route === null ? {} : { continuity: route }),
-    ...(startMs === undefined ? {} : { startMs }),
-  }
-  const backchannel = new Backchannel({ ctx })
-  const make = () => new AcpAdapter(ctx, new Map([[ROUTE, spec]]), { dshTools: () => undefined, backchannel, redactor: text => text, accountBinding: () => account() })
-  const h = { adapter: make(), spec, session, backchannel, trace, state, tools, counts, logs, messages: [] }
-  h.restart = () => { h.adapter.dispose(); h.adapter = make() }
-  h.close = () => { h.adapter.dispose(); backchannel.dispose() }
-  return h
-}
-
-async function turn(h, text) {
-  h.messages.push(user(text))
-  const chunks = []
-  for await (const chunk of h.adapter.stream(markAgentLoopRequest({ provider: ROUTE, model: 'default', sessionId: 's1', messages: h.messages }))) chunks.push(chunk)
-  const said = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
-  h.messages.push(answer(said))
-  return { chunks, said, finish: chunks.at(-1) }
-}
-
-const events = path => (existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
-const of = (h, kind) => events(h.trace).filter(event => event.event === kind)
-
-async function withFixture(name, options, body) {
-  const dir = mkdtempSync(join(tmpdir(), `acp-continuity-${name}-`))
-  const h = fixture({ dir, ...options })
-  try { await body(h) } finally {
-    h.close()
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
+import { ROUTE, answer, of, turn, user, withFixture } from './fixtures/continuity-world.js'
 
 for (const how of ['resume', 'load']) {
   test(`a restart takes back the native session by ${how}: the agent remembers what only it was told, and nothing is replayed`, async () => {
