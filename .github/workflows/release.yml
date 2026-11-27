@@ -196,6 +196,7 @@ jobs:
   cut:
     name: Cut v<version> on dev
     needs: preflight
+    if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-24.04
     # Verification jobs can finish out of order. Queue every publisher and admit only the current tip.
     timeout-minutes: 45
@@ -247,14 +248,12 @@ jobs:
 
       - name: Admit only the verified dev commit
         id: new
-        env:
-          RELEASE: ${{ needs.preflight.outputs.release }}
         run: |
           set -euo pipefail
           tip=$(git ls-remote --exit-code origin refs/heads/dev | cut -f1)
           if [[ "$(git rev-parse HEAD)" != "$tip" ]]; then
             echo "successor=$tip" >> "$GITHUB_OUTPUT"
-          elif [[ "$RELEASE" == true ]]; then
+          else
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 

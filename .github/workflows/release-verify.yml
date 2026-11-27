@@ -122,6 +122,10 @@ jobs:
           pocket: ${{ steps.lane.outputs.pocket }}
         run: node scripts/release-verification.mjs plan
 
+      - name: No release needed
+        if: github.event_name != 'pull_request' && steps.new.outputs.release != 'true'
+        run: echo '### No changes to publish' >> "$GITHUB_STEP_SUMMARY"
+
   verify:
     name: Verify ${{ matrix.gate }} ${{ matrix.key }}
     needs: plan
@@ -184,3 +188,7 @@ jobs:
       - name: Verified on ${{ steps.receipt.outputs.image }}
         if: steps.receipt.outputs.reuse != 'true'
         run: node scripts/release-verification.mjs verify "$GATE" "$KEY"
+
+      - name: Report verification failure
+        if: failure()
+        run: echo "Verification failed for \`$GATE\`. Publication is blocked." >> "$GITHUB_STEP_SUMMARY"

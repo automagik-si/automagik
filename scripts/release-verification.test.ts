@@ -65,6 +65,7 @@ test('only the publisher locks release-cut and its checkout is pinned to success
   const { jobs } = workflow('release');
   const verify = workflow('release-verify').jobs.verify;
   expect(jobs.cut.needs).toBe('preflight');
+  expect(jobs.cut.if).toBe("needs.preflight.outputs.release == 'true'");
   expect(jobs.preflight.uses).toBe('./.github/workflows/release-verify.yml');
   expect(jobs.cut.concurrency).toMatchObject({ group: 'release-cut', queue: 'max' });
   expect(jobs.cut.steps.find(s => s.uses?.includes('checkout@')).with.ref).toBe('${{ needs.preflight.outputs.sha }}');
