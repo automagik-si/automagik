@@ -208,6 +208,7 @@ jobs:
       actions: read
       contents: write
     outputs:
+      successor: ${{ steps.new.outputs.successor || steps.cut.outputs.successor }}
       version: ${{ steps.cut.outputs.version }}
       plugins: ${{ steps.publish.outputs.plugins }}
       sha: ${{ steps.cut.outputs.sha }}
@@ -607,14 +608,38 @@ jobs:
           gh release upload plugin-lane lane/lane.json lane/lane.json.sig --clobber --repo "${GITHUB_REPOSITORY}"
 
       - name: Release publication summary
-        if: always()
+        if: always() && !steps.new.outputs.successor && !steps.cut.outputs.successor
         env:
-          SUCCESSOR: ${{ steps.new.outputs.successor || steps.cut.outputs.successor }}
           VERSION: ${{ steps.cut.outputs.version }}
           PUBLISHED: ${{ steps.publish.outcome }}
           FEED: ${{ steps.plugin_feed.outcome }}
           PLUGINS: ${{ steps.publish.outputs.plugins }}
           RESULT: ${{ job.status }}
+        run: bash scripts/release-summary.sh
+
+  handoff:
+    name: Find or start the successor release
+    needs: [preflight, cut]
+    if: needs.cut.outputs.successor != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: release-handoff-${{ needs.cut.outputs.successor }}
+      queue: max
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          persist-credentials: false
+      - name: Hand publication to the next verified run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUCCESSOR: ${{ needs.cut.outputs.successor }}
+          PRERELEASE: ${{ inputs.prerelease == true }}
+          DESKTOP: ${{ inputs.desktop != false || github.event_name == 'push' }}
         run: bash scripts/release-summary.sh
 
   server-image:

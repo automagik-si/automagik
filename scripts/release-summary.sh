@@ -5,32 +5,31 @@ set -euo pipefail
 repo="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
 
 successor_run() {
-  local sha="$1" url depth
-  for depth in 0 1 2; do
-    url=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=dev&head_sha=${sha}&per_page=10" \
-      --jq '.workflow_runs[0].html_url // empty') || return 1
-    if [[ -n "$url" ]]; then echo "$url"; return 0; fi
-    # Version and market-index commits made with the workflow token have no push run.
-    # Follow only those bot commits to the merge that actually started their publisher.
-    (( depth < 2 )) || return 1
-    sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}" --jq '
-      select(.author.login == "github-actions[bot]" and (.parents | length) == 1)
-      | select(.commit.message | test("^chore\\(release\\): (list )?v[0-9]"))
-      | .parents[0].sha') || return 1
-    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
-  done
+  local workflow="repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml" runs id
+  runs=$(gh api "${workflow}/runs?branch=dev&head_sha=$1&per_page=100") || return 1
+  id=$(jq -r --arg current "${GITHUB_RUN_ID:?}" '[.workflow_runs[]
+    | select((.id | tostring) != $current and (.event == "push" or .event == "workflow_dispatch"))
+    | select(.status != "completed" or .conclusion == "success")][0].id // empty' <<< "$runs") || return 1
+  if [[ -z "$id" ]]; then
+    # A token-pushed market index has no push run. Dispatch on dev so it goes through
+    # the ordinary planning and immutable verification again, even if dev moved meanwhile.
+    id=$(jq -n --argjson pre "${PRERELEASE:-false}" --argjson desktop "${DESKTOP:-true}" \
+      '{ref:"dev",return_run_details:true,inputs:{prerelease:($pre|tostring),desktop:($desktop|tostring)}}' |
+      gh api --method POST "${workflow}/dispatches" --input - --jq '.workflow_run_id') || return 1
+  fi
+  [[ "$id" =~ ^[1-9][0-9]*$ && "$id" != "$GITHUB_RUN_ID" ]] || return 1
+  echo "${repo}/actions/runs/${id}"
 }
 
 {
   if [[ -n "${SUCCESSOR:-}" ]]; then
     [[ "$SUCCESSOR" =~ ^[0-9a-f]{40}$ ]] || exit 1
     echo "### Superseded before publication"
-    # A newer push can still be waiting for its workflow run to be registered.
-    url=$(successor_run "$SUCCESSOR") || url=''
-    if [[ -n "$url" ]]; then
-      echo "[Successor release run](${url}). Current dev is \`${SUCCESSOR:0:9}\`."
+    if url=$(successor_run "$SUCCESSOR"); then
+      echo "[Successor release run](${url}). Dev moved to \`${SUCCESSOR:0:9}\`."
     else
-      echo "Dev moved to \`${SUCCESSOR:0:9}\`. [Find the successor run](${repo}/actions/workflows/release.yml?query=branch%3Adev+${SUCCESSOR})."
+      echo "Could not confirm a successor for \`${SUCCESSOR:0:9}\`. [Retry this handoff](${repo}/actions/runs/${GITHUB_RUN_ID})."
+      exit 1
     fi
   elif [[ "${PUBLISHED:-}" == success ]]; then
     echo "### Published [v${VERSION}](${repo}/releases/tag/v${VERSION})"

@@ -79,13 +79,19 @@ test('publication summary distinguishes the feed, release alone, tagged failure,
   const dir = mkdtempSync(join(tmpdir(), 'publication-summary-'));
   try {
     const file = join(dir, 'summary');
-    writeFileSync(join(dir, 'gh'), '#!/bin/sh\necho https://github.com/example/repo/actions/runs/42\n');
+    const dispatched = join(dir, 'dispatch.json');
+    writeFileSync(join(dir, 'gh'), [
+      '#!/bin/sh', 'case "$*" in',
+      '  *head_sha=*) cat "$RUNS";;',
+      '  *"/dispatches "*) cat > "$DISPATCH"; echo "$NEW_ID";;',
+      '  *) exit 1;;', 'esac', '',
+    ].join('\n'));
     chmodSync(join(dir, 'gh'), 0o755);
     function summary(env: Record<string, string>) {
       writeFileSync(file, '');
       execFileSync('bash', [join(root, 'scripts/release-summary.sh')], { env: {
         PATH: dir + ':' + process.env.PATH, GITHUB_REPOSITORY: 'example/repo', GITHUB_SERVER_URL: 'https://github.com',
-        GITHUB_STEP_SUMMARY: file, RESULT: 'success', ...env,
+        GITHUB_STEP_SUMMARY: file, GITHUB_RUN_ID: '1', RUNS: join(dir, 'runs'), DISPATCH: dispatched, NEW_ID: '43', RESULT: 'success', ...env,
       } });
       return readFileSync(file, 'utf8');
     }
@@ -96,16 +102,29 @@ test('publication summary distinguishes the feed, release alone, tagged failure,
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', FEED: 'failure' })).toContain('feed publication was not confirmed');
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', PLUGINS: 'true', FEED: 'skipped' })).toContain('signed plugin feed was not posted');
     expect(summary({ VERSION: '3.4.1', PUBLISHED: 'success', FEED: 'skipped' })).toContain('did not include plugins');
-    expect(summary({ SUCCESSOR: 'a'.repeat(40) })).toContain('Successor release run](https://github.com/example/repo/actions/runs/42)');
-    const indexed = 'b'.repeat(40), tagged = 'c'.repeat(40), merged = 'd'.repeat(40);
-    writeFileSync(join(dir, 'gh'), [
-      '#!/bin/sh', 'case "$2" in',
-      `  */commits/${indexed}) echo ${tagged};;`,
-      `  */commits/${tagged}) echo ${merged};;`,
-      `  *head_sha=${merged}*) echo https://github.com/example/repo/actions/runs/43;;`,
-      'esac', '',
-    ].join('\n'));
-    expect(summary({ SUCCESSOR: indexed })).toContain('Successor release run](https://github.com/example/repo/actions/runs/43)');
-    expect(summary({ SUCCESSOR: 'e'.repeat(40) })).toContain('Find the successor run');
+    const successor = { SUCCESSOR: 'a'.repeat(40) };
+    const active = { id: 42, event: 'push', status: 'in_progress' };
+    const runs = (...workflow_runs: object[]) => writeFileSync(join(dir, 'runs'), JSON.stringify({ workflow_runs }));
+    runs(active);
+    expect(summary(successor)).toContain('Successor release run](https://github.com/example/repo/actions/runs/42)');
+    expect(readdirSync(dir)).not.toContain('dispatch.json');
+    // A workflow-token index push starts no run. Neither this run nor a cancelled
+    // verification is a successor. Starting a new release must return its actual ID.
+    runs({ ...active, id: 1 }, { ...active, status: 'completed', conclusion: 'cancelled' });
+    expect(summary({ ...successor, PRERELEASE: 'true', DESKTOP: 'false' })).toContain('actions/runs/43)');
+    expect(JSON.parse(readFileSync(dispatched, 'utf8'))).toEqual({
+      ref: 'dev', return_run_details: true, inputs: { prerelease: 'true', desktop: 'false' },
+    });
+    rmSync(dispatched);
+    runs({ ...active, event: 'workflow_dispatch', id: 43 });
+    expect(summary(successor)).toContain('actions/runs/43)');
+    expect(readdirSync(dir)).not.toContain('dispatch.json');
+    runs();
+    expect(() => summary({ ...successor, NEW_ID: '' })).toThrow();
+    expect(readFileSync(file, 'utf8')).toContain('Could not confirm a successor');
+    const { cut, handoff } = workflow('release').jobs;
+    expect(cut.outputs.successor).toContain('steps.cut.outputs.successor');
+    expect(handoff.if).toBe("needs.cut.outputs.successor != ''");
+    expect(handoff.permissions).toEqual({ actions: 'write', contents: 'read' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
