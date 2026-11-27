@@ -267,7 +267,7 @@ test("a symlinked invocation still runs the entry guard", { skip: symlinkSkip },
   assert.match(r.stderr, /usage: node \.github\/scripts\/herdr-app-check\.mjs/);
 });
 
-test("the release cut runs the check with --strict; PR CI keeps the default", () => {
+test("release preflight runs the strict app gate; PR CI keeps the default", () => {
   const step = (workflow, name) => {
     const text = readFileSync(join(REPO, ".github", "workflows", workflow), "utf8");
     const start = text.indexOf(`- name: ${name}`);
@@ -275,9 +275,9 @@ test("the release cut runs the check with --strict; PR CI keeps the default", ()
     const end = text.indexOf("\n\n", start);
     return text.slice(start, end === -1 ? undefined : end);
   };
-  // The command is the cut's gates script's (#668), so a re-cut on a moved dev runs it again.
-  assert.match(step("release.yml", "Every pack mod loads in herdr-app"),
-    /run: bash scripts\/release-gates\.sh herdr-app/);
+  assert.match(step("release-verify.yml", "Verified on "), /run: node scripts\/release-verification\.mjs verify "\$GATE" "\$KEY"/);
+  const verifier = readFileSync(join(REPO, "scripts", "release-verification.mjs"), "utf8");
+  assert.match(verifier, /if \(gate === 'herdr-static'\) \{[^}]*run\('bash', \['scripts\/release-gates\.sh', 'herdr-app'\]\)/);
   const gates = readFileSync(join(REPO, "scripts", "release-gates.sh"), "utf8");
   // The dispatch calls the gate function, and the function holds the command: a case label run as
   // a command (#1653) fails the dispatch test in scripts/release-cut.test.ts.
@@ -304,7 +304,7 @@ test("CI hands the standalone check the kept herdr-app on the Node 24 leg only; 
   const tests = step("Tests");
   assert.ok(tests.includes("AUTOMAGIK_HERDR_APP_CHECK: ${{ matrix.node == '24' && steps.app.outputs.outcome != 'unverified' && '1' || '' }}"));
   assert.ok(tests.includes("HERDR_APP_BIN: ${{ steps.app.outputs.bin }}"));
-  for (const file of [".github/workflows/release.yml", "scripts/release-gates.sh"]) {
+  for (const file of [".github/workflows/release.yml", ".github/workflows/release-verify.yml", "scripts/release-verification.mjs", "scripts/release-gates.sh"]) {
     assert.doesNotMatch(readFileSync(join(REPO, file), "utf8"), /AUTOMAGIK_HERDR_APP_CHECK|--keep-app/, file);
   }
 });
