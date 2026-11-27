@@ -185,7 +185,7 @@ export function teamOf({ roster = {}, order, status, marked = {}, current, now =
       const seen = status.groups?.get(entry.item.id) ?? { status: 'idle', unread: false }
       return { id: entry.item.id, name: entry.item.name, members: entry.item.members ?? [], status: seen.status, unread: unread(entry.item.id, `group:${entry.item.id}`, seen.unread) }
     })
-  return { frontId: frontRow?.id ?? main?.id, bots, groups }
+  return { frontId: frontRow?.id ?? main?.id, mainBotId: main?.id, bots, groups }
 }
 
 function sameFolder(project, workDir) {

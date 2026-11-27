@@ -28493,12 +28493,13 @@ function teamRows(team) {
   });
   return rows2;
 }
-var ART = { art: 28, duo: 19 };
+var ART = { art: 36, duo: 19 };
+var MAIN_ART = 42;
 function useArtSizes(ref, skin, count) {
   const [sizes, setSizes] = (0, import_react59.useState)(ART);
   (0, import_react59.useLayoutEffect)(() => {
     const width = (selector) => Math.round(ref.current?.querySelector(selector)?.getBoundingClientRect().width ?? 0);
-    const art = width(".lb-art") || ART.art;
+    const art = width(".lb-row:not(.lb-row-crowned) .lb-art") || ART.art;
     const duo = width(".lb-duo-a") || ART.duo;
     setSizes((now) => now.art === art && now.duo === duo ? now : { art, duo });
   }, [skin, count]);
@@ -28544,9 +28545,10 @@ function BotArt({ bot, size, state: state2, look = botLookOf(bot) }) {
   const { fit: fit2, lift } = bakedFit(wants.bake);
   const margin2 = Math.round((size * fit2 - size) / 2);
   const drawn2 = size + 2 * margin2;
+  const paintLift = size === ART.art && wants.bake.clay === "omni" ? 2 : 0;
   return (0, import_react59.createElement)(
     "span",
-    { className: "lb-art-pet", style: { left: -margin2, top: -margin2 - Math.round(drawn2 * lift) } },
+    { className: "lb-art-pet", style: { left: -margin2, top: -margin2 - Math.round(drawn2 * lift) - paintLift } },
     (0, import_react59.createElement)(
       "span",
       { className: "bt-mark", "data-shape": "pet", "data-state": state2, "data-live": "", "aria-hidden": true, style: { width: drawn2, height: drawn2 } },
@@ -28612,6 +28614,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
   const draw = (row2) => {
     if (row2.kind === "section") return (0, import_react59.createElement)("div", { key: row2.key, className: classes("lb-sec", row2.first && "lb-sec-first") }, row2.label);
     if (row2.kind === "bot") {
+      const crowned = row2.id === team.mainBotId;
       const state2 = row2.bot.state ?? stateOfStatus(statusOr(row2.bot.status));
       const tag = row2.bot.remote ? t("Needs the scoped link") : row2.bot.seat ? row2.bot.projectTag : row2.bot.roleTag;
       const extra = row2.bot.remote ? {
@@ -28621,9 +28624,13 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
       const reason = row2.bot?.installed === false && typeof row2.bot.reason === "string" ? hostText(row2.bot.reason) : "";
       return button2(
         row2,
-        classes(row2.unread && "lb-row-unread", row2.status === "off" && "lb-row-off"),
-        { ...extra, "aria-description": reason || void 0 },
-        (0, import_react59.createElement)("span", { className: "lb-art" }, renderArt2(row2.bot, art, state2)),
+        classes(crowned && "lb-row-crowned", row2.unread && "lb-row-unread", row2.status === "off" && "lb-row-off"),
+        {
+          ...extra,
+          "aria-description": reason || void 0,
+          style: crowned ? { "--bt-size": `${MAIN_ART}px` } : void 0
+        },
+        (0, import_react59.createElement)("span", { className: "lb-art" }, renderArt2(row2.bot, crowned ? MAIN_ART : art, state2), crowned ? (0, import_react59.createElement)(Crown) : null),
         (0, import_react59.createElement)("span", { className: "lb-name" }, row2.name),
         tag ? (0, import_react59.createElement)("span", { className: "bt-tag" }, tag) : null,
         row2.unread ? (0, import_react59.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
@@ -28695,7 +28702,7 @@ var SIZES = {
   "--lb-rail-gap": "10px",
   // The rows: one line each. A Bot's and a group's carry art; a channel carries its glyph, a
   // chat its person's face.
-  "--lb-row-h": "34px",
+  "--lb-row-h": "42px",
   "--lb-channel-h": "26px",
   "--lb-chat-h": "25px",
   "--lb-chat-face": "16px",
@@ -28703,7 +28710,7 @@ var SIZES = {
   "--lb-label-first-gap": "8px",
   "--lb-row-r": "var(--st-r-seg,8px)",
   // The Bot's character, and each of the two in a group's box.
-  "--lb-art": "28px",
+  "--lb-art": "36px",
   "--lb-art-gap": "10px",
   "--lb-duo-art": "19px",
   "--lb-glyph": "16px",
@@ -28790,6 +28797,8 @@ var ROWS2 = `
 .lb-row:focus-visible{outline:3px solid var(--st-ring,var(--bt-accent));outline-offset:-3px}
 .lb-row-lead{margin-top:6px}
 .lb-art{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-art);height:var(--lb-art)}
+.lb-row-crowned{height:max(var(--lb-row-h),calc(var(--bt-size) + 18px));padding-top:12px}
+.lb-row-crowned .lb-art{width:var(--bt-size);height:var(--bt-size)}
 .lb-art-pet{position:absolute;display:block;line-height:0}
 .lb-duo{position:relative;display:block}
 .lb-duo-a,.lb-duo-b{position:absolute;display:block;width:var(--lb-duo-art);height:var(--lb-duo-art);line-height:0}
@@ -28798,7 +28807,7 @@ var ROWS2 = `
 .lb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--bt-weight-label,500) 15px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:-.005em}
 .lb-row-unread .lb-name{font-weight:var(--bt-weight-title,600)}
 .lb-row-off .lb-name{color:var(--lb-muted)}
-.lb-row-off .lb-art{filter:grayscale(1);opacity:.55}
+.lb-row-off .lb-art>:not(.bt-crown){filter:grayscale(1);opacity:.55}
 .lb-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
 .lb-row-chat{height:var(--lb-chat-h);gap:7px;padding-right:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph) + 8px))}
@@ -29074,7 +29083,7 @@ function teamOf({ roster = {}, order, status, marked = {}, current, now = Date.n
     const seen = status.groups?.get(entry.item.id) ?? { status: "idle", unread: false };
     return { id: entry.item.id, name: entry.item.name, members: entry.item.members ?? [], status: seen.status, unread: unread(entry.item.id, `group:${entry.item.id}`, seen.unread) };
   });
-  return { frontId: frontRow?.id ?? main?.id, bots, groups };
+  return { frontId: frontRow?.id ?? main?.id, mainBotId: main?.id, bots, groups };
 }
 function sameFolder(project, workDir) {
   if (!workDir) return project === null;

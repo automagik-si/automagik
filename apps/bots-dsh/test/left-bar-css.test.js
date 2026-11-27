@@ -27,8 +27,8 @@ test('the stage is the default skin; flat and stage are token sets under data-lb
 test('the sizes are round 1.1 values', () => {
   const sizes = {
     '--lb-rail-w': '56px', '--lb-list-w': '264px', '--lb-tile': '36px', '--lb-tile-r': '12px', '--lb-rail-gap': '10px',
-    '--lb-row-h': '34px', '--lb-channel-h': '26px', '--lb-chat-h': '25px', '--lb-label-h': '26px', '--lb-label-first-gap': '8px',
-    '--lb-art': '28px', '--lb-art-gap': '10px', '--lb-duo-art': '19px', '--lb-glyph': '16px', '--lb-mark': '12px',
+    '--lb-row-h': '42px', '--lb-channel-h': '26px', '--lb-chat-h': '25px', '--lb-label-h': '26px', '--lb-label-first-gap': '8px',
+    '--lb-art': '36px', '--lb-art-gap': '10px', '--lb-duo-art': '19px', '--lb-glyph': '16px', '--lb-mark': '12px',
   }
   for (const [name, value] of Object.entries(sizes)) assert.equal(LEFT_BAR_TOKENS[name], value, name)
   assert.equal(LEFT_BAR_SKINS.stage['--lb-panel-gap'], '8px')

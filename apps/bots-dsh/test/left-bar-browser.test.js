@@ -114,11 +114,11 @@ test('round 1.1 sizes on both skins, both themes and both widths; every mark nam
         assert.deepEqual(at.cut, [], `${label}: no name cut without an ellipsis`)
         assert.equal(at.rail.width, 56, `${label}: the rail`)
         assert.ok(at.tiles.every(tile => tile.width === 36 && tile.height === 36), `${label}: tiles of 36`)
-        assert.ok(at.rows.bot.every(height => height === 34), `${label}: Bot rows of 34`)
-        assert.ok(at.rows.group.every(height => height === 34), `${label}: group rows of 34`)
+        assert.ok(at.rows.bot.every(height => height === 42), `${label}: Bot rows of 42`)
+        assert.ok(at.rows.group.every(height => height === 42), `${label}: group rows of 42`)
         assert.ok(at.rows.channel.every(height => height === 26), `${label}: channel rows of 26`)
         assert.ok(at.rows.chat.every(height => height === 25), `${label}: chat rows of 25`)
-        assert.ok(at.art.every(width => width === 28), `${label}: art of 28`)
+        assert.ok(at.art.every(width => width === 36), `${label}: art of 36`)
         assert.ok(at.marks.length > 0 && at.marks.every(mark => mark.label && mark.title === mark.label), `${label}: every mark has a name and a title`)
         if (size === WIDE) {
           assert.equal(at.list.width, 264, `${label}: the list`)
@@ -220,10 +220,10 @@ test('every character stands at one size by eye: none is drawn larger than the o
   const said = pet => `${pet.id} paints ${pet.width.toFixed(1)} by ${pet.height.toFixed(1)} px, ${pet.over.toFixed(1)} px out of its box, its middle ${pet.dx.toFixed(1)},${pet.dy.toFixed(1)} px off`
   const side = pet => Math.max(pet.width, pet.height)
   for (const pet of all) {
-    assert.equal(pet.art, 28)
-    // Its larger side is 25.5 to 28 px of the 28 px box, whatever its shape; it stays in the box,
+    assert.equal(pet.art, 36)
+    // Its larger side is 32.75 to 36 px of the 36 px box, whatever its shape; it stays in the box,
     // in the middle.
-    assert.ok(side(pet) >= 25.5 && side(pet) <= 28, said(pet))
+    assert.ok(side(pet) >= 32.75 && side(pet) <= 36, said(pet))
     assert.ok(pet.over <= 0.5, said(pet))
     assert.ok(Math.abs(pet.dx) <= 1 && Math.abs(pet.dy) <= 1.5, said(pet))
   }

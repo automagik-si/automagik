@@ -20,7 +20,7 @@ const SIZES = {
   '--lb-rail-gap': '10px',
   // The rows: one line each. A Bot's and a group's carry art; a channel carries its glyph, a
   // chat its person's face.
-  '--lb-row-h': '34px',
+  '--lb-row-h': '42px',
   '--lb-channel-h': '26px',
   '--lb-chat-h': '25px',
   '--lb-chat-face': '16px',
@@ -28,7 +28,7 @@ const SIZES = {
   '--lb-label-first-gap': '8px',
   '--lb-row-r': 'var(--st-r-seg,8px)',
   // The Bot's character, and each of the two in a group's box.
-  '--lb-art': '28px',
+  '--lb-art': '36px',
   '--lb-art-gap': '10px',
   '--lb-duo-art': '19px',
   '--lb-glyph': '16px',
@@ -132,6 +132,8 @@ const ROWS = `
 .lb-row:focus-visible{outline:3px solid var(--st-ring,var(--bt-accent));outline-offset:-3px}
 .lb-row-lead{margin-top:6px}
 .lb-art{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-art);height:var(--lb-art)}
+.lb-row-crowned{height:max(var(--lb-row-h),calc(var(--bt-size) + 18px));padding-top:12px}
+.lb-row-crowned .lb-art{width:var(--bt-size);height:var(--bt-size)}
 .lb-art-pet{position:absolute;display:block;line-height:0}
 .lb-duo{position:relative;display:block}
 .lb-duo-a,.lb-duo-b{position:absolute;display:block;width:var(--lb-duo-art);height:var(--lb-duo-art);line-height:0}
@@ -140,7 +142,7 @@ const ROWS = `
 .lb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--bt-weight-label,500) 15px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:-.005em}
 .lb-row-unread .lb-name{font-weight:var(--bt-weight-title,600)}
 .lb-row-off .lb-name{color:var(--lb-muted)}
-.lb-row-off .lb-art{filter:grayscale(1);opacity:.55}
+.lb-row-off .lb-art>:not(.bt-crown){filter:grayscale(1);opacity:.55}
 .lb-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
 .lb-row-chat{height:var(--lb-chat-h);gap:7px;padding-right:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph) + 8px))}
