@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createRuntimeResolution } from '@deepseek-ai/dsh-app-boot'
+import { build } from 'esbuild'
 import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 
@@ -19,6 +20,33 @@ test('a linked checkout declares the DSH patch parser as an optional peer', (t) 
   return createRuntimeResolution({ installAnchor, home }).then(({ entries }) => {
     assert.equal(entries.find(entry => entry.name === name)?.scope, 'installation')
   })
+})
+
+test('declares every direct DSH host import as a peer', async () => {
+  const { peerDependencies } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const plugin = fileURLToPath(new URL('../', import.meta.url))
+  const { metafile } = await build({
+    absWorkingDir: plugin,
+    entryPoints: globSync(['src/host/**/*.js', 'src/host/**/*.mjs', 'src/host/**/*.cjs'], { cwd: plugin }),
+    // Parse each file on its own and collect its import specifiers without resolving them.
+    bundle: true,
+    external: ['*'],
+    platform: 'node',
+    format: 'esm',
+    treeShaking: false,
+    outdir: 'out',
+    write: false,
+    metafile: true,
+  })
+  const missing = new Set()
+  for (const { imports } of Object.values(metafile.inputs)) {
+    for (const { path } of imports) {
+      if (!path.startsWith('@deepseek-ai/')) continue
+      const name = path.split('/').slice(0, 2).join('/')
+      if (!Object.hasOwn(peerDependencies, name)) missing.add(name)
+    }
+  }
+  assert.deepEqual([...missing].sort(), [], 'Undeclared @deepseek-ai host peers')
 })
 
 let rt
