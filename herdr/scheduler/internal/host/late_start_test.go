@@ -74,6 +74,12 @@ func newSeqTest(f *seqHC) *hcHost {
 	}}
 }
 
+func advanceHCStartupClock(h *hcHost, f *fakeHC) {
+	clock := time.Unix(0, 0)
+	h.clock = func() time.Time { return clock }
+	f.onWait = func() { clock = clock.Add(2 * time.Second) }
+}
+
 func timeouts(n int) []hc.Wait {
 	out := make([]hc.Wait, n)
 	for i := range out {
@@ -102,16 +108,18 @@ func TestHCLateStartIsNotNeverStarted(t *testing.T) {
 	}
 }
 
-// A trust dialog still fails before the timeout, quoting the question and
-// naming the pane, and its terminal is left for the person to answer.
+// A trust dialog fails before the timeout, quoting the question so the runner
+// can record it before removing the terminal.
 func TestHCTrustDialogFailsEarlyWithItsQuestion(t *testing.T) {
 	f := &seqHC{fakeHC: &fakeHC{}, screens: []string{trustScreen}}
+	h := newSeqTest(f)
+	advanceHCStartupClock(h, f.fakeHC)
 	start := time.Now()
-	err := newSeqTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 10*time.Second)
+	err := h.Do(Session{PaneID: "t7"}, hcAutomation(), 10*time.Second)
 	if err == nil {
 		t.Fatal("a dialog held run must fail")
 	}
-	for _, want := range []string{"never started working", "a dialog is waiting", "open t7", "Do you trust the files in this folder?"} {
+	for _, want := range []string{"never started working", "blocked on a dialog", "Do you trust the files in this folder?"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q lacks %q", err, want)
 		}
@@ -123,10 +131,10 @@ func TestHCTrustDialogFailsEarlyWithItsQuestion(t *testing.T) {
 		t.Fatalf("the dialog took %s to fail, not early", time.Since(start))
 	}
 	if len(f.calls) != 0 {
-		t.Fatalf("the dialog's terminal must stay for its answer, got %v", f.calls)
+		t.Fatalf("the wait must return before cleanup, got %v", f.calls)
 	}
-	if f.reads < 2 {
-		t.Fatalf("one inspection is not a confirmed dialog: %d reads", f.reads)
+	if f.reads != 6 {
+		t.Fatalf("want a ten-second hold at two-second intervals, got %d reads", f.reads)
 	}
 }
 
@@ -135,10 +143,10 @@ func TestHCTrustDialogFailsEarlyWithItsQuestion(t *testing.T) {
 func TestHCPromptWordWithoutOptionsIsNoDialog(t *testing.T) {
 	f := &seqHC{fakeHC: &fakeHC{}, screens: []string{"Reading the issue list. Should I continue with the next page?\n"}}
 	err := newSeqTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 200*time.Millisecond)
-	if err == nil || strings.Contains(err.Error(), "dialog is waiting") {
+	if err == nil || strings.Contains(err.Error(), "blocked on a dialog") {
 		t.Fatalf("want the timeout's verdict, got %v", err)
 	}
-	for _, want := range []string{"never started working", "no sign of work in 200ms", "open t7"} {
+	for _, want := range []string{"never started working", "no sign of work in 200ms"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q lacks %q", err, want)
 		}
@@ -153,6 +161,56 @@ func TestHCDialogSeenOnceThenWork(t *testing.T) {
 	f := &seqHC{fakeHC: &fakeHC{waits: waits, delay: 40 * time.Millisecond}, screens: []string{trustScreen, busyScreen}}
 	if err := newSeqTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 5*time.Second); err != nil {
 		t.Fatalf("want success, got %v", err)
+	}
+}
+
+func TestHCStartupLooksLikeDialogThenWorks(t *testing.T) {
+	for _, tc := range []struct {
+		name, screen, prompt string
+		samples              int
+	}{
+		{"numbered output", "Confirm the checks\n1. First check\n2. Second check", "", 2},
+		{"transient dialog", trustScreen, "", 2},
+		{"echoed prompt", trustScreen, "Do you trust the files in this folder?", 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := hcAutomation()
+			if tc.prompt != "" {
+				a.Prompt = "Read this:\n" + tc.prompt + "\n1. Yes, proceed\n2. No, exit"
+			}
+			waits := append(timeouts(tc.samples),
+				hc.Wait{Reason: "timeout", Status: "working", Turn: 1},
+				hc.Wait{Reason: "status", Status: "done", Turn: 1})
+			f := &seqHC{fakeHC: &fakeHC{waits: waits, delay: 2 * time.Millisecond},
+				screens: []string{tc.screen}}
+			h := newSeqTest(f)
+			advanceHCStartupClock(h, f.fakeHC)
+			if err := h.Do(Session{PaneID: "t7"}, a, time.Second); err != nil {
+				t.Fatalf("healthy startup failed after %d screen reads: %v", f.reads, err)
+			}
+			if f.reads != tc.samples {
+				t.Fatalf("screen reads = %d, want %d", f.reads, tc.samples)
+			}
+		})
+	}
+}
+
+func TestHCSilentProgramStopsScreenChecksAfterStartup(t *testing.T) {
+	clock := time.Unix(0, 0)
+	exitCode := 0
+	f := &fakeHC{
+		waits:  append(timeouts(3), hc.Wait{Reason: "exit"}),
+		screen: trustScreen,
+		term:   hc.Terminal{ExitCode: &exitCode},
+		onWait: func() { clock = clock.Add(time.Minute) },
+	}
+	h := newHCTest(f)
+	h.clock = func() time.Time { return clock }
+	if err := h.Do(Session{PaneID: "t7"}, hcAutomation(), time.Second); err != nil {
+		t.Fatalf("silent program failed: %v", err)
+	}
+	if f.readCalls != 1 {
+		t.Fatalf("screen reads = %d, want one before the end of startup", f.readCalls)
 	}
 }
 
@@ -180,17 +238,14 @@ func TestHCGetOnlyWitnessThenIdle(t *testing.T) {
 	}
 }
 
-// Get's blocked and done are not work (#938), but they stop an early verdict
-// on a dialog screen: blocked has its own grace, done its own outcome.
-func TestHCGetBlockedOrDoneStopsTheEarlyVerdict(t *testing.T) {
-	for _, state := range []string{"blocked", "done"} {
-		t.Run(state, func(t *testing.T) {
-			f := &seqHC{fakeHC: &fakeHC{}, screens: []string{trustScreen}, gets: []string{state}}
-			err := newSeqTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 200*time.Millisecond)
-			if err == nil || strings.Contains(err.Error(), "dialog is waiting") || !strings.Contains(err.Error(), "no sign of work") {
-				t.Fatalf("want the timeout's never started, got %v", err)
-			}
-		})
+// A fresh completed status supersedes a stale dialog screen.
+func TestHCGetDoneStopsTheEarlyVerdict(t *testing.T) {
+	f := &seqHC{fakeHC: &fakeHC{}, screens: []string{trustScreen}, gets: []string{"done"}}
+	h := newSeqTest(f)
+	advanceHCStartupClock(h, f.fakeHC)
+	err := h.Do(Session{PaneID: "t7"}, hcAutomation(), 200*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "no sign of work") {
+		t.Fatalf("want the timeout's verdict without a settled wait, got %v", err)
 	}
 }
 
@@ -332,5 +387,19 @@ func TestHCNotesOfConcurrentRunsStayApart(t *testing.T) {
 	}
 	if left := fmt.Sprint(h.notes); left != "map[]" {
 		t.Fatalf("notes left behind: %s", left)
+	}
+}
+
+func TestHCReportedStartupTrustDialogFailsBeforeGrace(t *testing.T) {
+	blocked := hc.Wait{Ended: true, Reason: "status", Status: "blocked"}
+	f := &seqHC{
+		fakeHC:  &fakeHC{waits: []hc.Wait{blocked, blocked, blocked, blocked, blocked, blocked}},
+		screens: []string{trustScreen}, gets: []string{"blocked"},
+	}
+	h := newSeqTest(f)
+	advanceHCStartupClock(h, f.fakeHC)
+	err := h.Do(Session{PaneID: "t7"}, hcAutomation(), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "Do you trust the files in this folder?") {
+		t.Fatalf("want the trust question before the grace or timeout, got %v", err)
 	}
 }

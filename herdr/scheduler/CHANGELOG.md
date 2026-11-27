@@ -4,16 +4,23 @@ What changed for someone using the plugin. Dates are release dates.
 
 ## Unreleased (the fork's next `-am` build)
 
-- An hc agent that is slow to report work gets its whole timeout to start.
-  Only the same dialog seen in two screen inspections can fail a silent run
-  early; the pane stays open for an answer. A run that starts late and finishes
-  carries a note in history and the panel (#1416).
+- Failed, timed-out and blocked runs save their reason and terminal output in
+  history before the scheduler removes their terminal. The next occurrence
+  reconciles earlier run terminals before launching. hc checks the terminal's
+  folder and install label, and retries transient wait errors until the run
+  deadline. A startup dialog must persist for ten seconds to fail early. After
+  the first turn starts, the configured grace applies. A private state file
+  keeps the hc install label stable across restarts. Logs name terminals with
+  folder or install mismatches. If Herdr cannot list panes, the current run
+  records how many earlier cleanups were skipped. History appends continue
+  with a warning if an existing file's permissions cannot be tightened.
+  The scheduler preserves shared spaces and keeps the run's worktree (ADR 0015).
 - `target:` hands a prompt to a bot (`bot:<id>`) or to a worker of one
   (`worker:<id>`) instead of opening a fresh session: the bot's own terminal is
   used, a stopped bot is started with `am start`, and a worker is started under
   it with `am worker` and ended through `am worker kill` once its turn has
-  finished. A worker still mid-turn at the timeout is refused by that checked
-  verb and stays, logged, with the run failed (ADR 0014).
+  finished. On a failure or timeout, the scheduler removes its own worker
+  after recording the reason and screen in history (ADR 0015).
   `target_when_busy: queue`
   (default) or `skip` answers a busy bot. The bot is named by its id from the
   project's `.herdr/bots.json`, never by an address. `ls --json` names the

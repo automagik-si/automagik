@@ -1,9 +1,40 @@
 package history
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestAppendKeepsHistoryPrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", dir)
+	write := func() {
+		t.Helper()
+		if err := Append(Record{RunID: "r1", Screen: "terminal output"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(name string, want os.FileMode) {
+		t.Helper()
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %o, want %o", filepath.Base(name), got, want)
+		}
+	}
+	write()
+	check(dir, 0o700)
+	check(path(), 0o600)
+	if err := os.Chmod(path(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write()
+	check(path(), 0o600)
+}
 
 func TestRunsCollapsesToLatestState(t *testing.T) {
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())

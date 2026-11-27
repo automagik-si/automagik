@@ -171,14 +171,15 @@ type Automation struct {
 	// CatchUpMinutes is how late a missed occurrence may still run — the
 	// laptop-was-asleep case. 0 uses the default (120); -1 never catches up.
 	CatchUpMinutes int `yaml:"catch_up_minutes,omitempty"`
-	// BlockedGraceMinutes is how long the agent may sit on a dialog before
-	// the run fails. 0 uses the default (2); -1 waits as long as the
-	// timeout allows, as before.
+	// BlockedGraceMinutes bounds a reported blocked state. Zero uses the
+	// default (2). Before the first turn, an interactive dialog held for 10
+	// seconds in the first two minutes can fail sooner. With -1 there is no
+	// startup dialog check and only the run timeout bounds a blocked state.
 	BlockedGraceMinutes int `yaml:"blocked_grace_minutes,omitempty"`
 	// Session is the Herdr session the run happens in, whoever triggers it.
 	// Empty means the session of the process running it (ADR 0010).
 	Session string `yaml:"session,omitempty"`
-	// CloseWorkspace closes a done run's workspace; failures stay open.
+	// CloseWorkspace controls whether a done run closes its workspace.
 	CloseWorkspace CloseWorkspace `yaml:"close_workspace,omitempty"`
 	// Target is who a prompt run hands its prompt to instead of opening a
 	// fresh session: "bot:<id>" (the bot's own terminal, started when it is

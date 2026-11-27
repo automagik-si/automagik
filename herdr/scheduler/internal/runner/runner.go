@@ -88,14 +88,30 @@ func (r *Runner) Run(a config.Automation, trigger history.Trigger) error {
 		return r.runCommand(id, a, trigger)
 	}
 
+	terminals, cleansTerminals := r.host.(host.RunTerminals)
+	if cleansTerminals {
+		release, err := lockRun(a.Name)
+		if errors.Is(err, errRunLocked) {
+			r.record(id, a.Name, trigger, history.StatusSkipped, host.Session{}, err.Error())
+			return fmt.Errorf("%s: %w, skipped", a.Name, err)
+		}
+		if err == nil {
+			defer release()
+			err = r.removePrevious(terminals, a, id, trigger)
+		}
+		if err != nil {
+			r.record(id, a.Name, trigger, history.StatusFailed, host.Session{}, err.Error())
+			return err
+		}
+	}
+
 	session, err := r.host.Provision(a)
 	if err != nil {
 		// Provision can say the run is not a failure at all: a busy bot target
 		// with target_when_busy: skip is a dropped occurrence (#498). Keep the
 		// whole session, so the pane and target already resolved stay on the
 		// row a person reads.
-		r.record(id, a.Name, trigger, statusFor(err), session, err.Error())
-		return err
+		return r.fail(id, a, trigger, session, err, terminals)
 	}
 	r.record(id, a.Name, trigger, history.StatusRunning, session, "")
 
@@ -106,17 +122,15 @@ func (r *Runner) Run(a config.Automation, trigger history.Trigger) error {
 		note = noter.Note(session)
 	}
 	if err != nil {
-		r.record(id, a.Name, trigger, statusFor(err), session, err.Error())
-		return err
+		return r.fail(id, a, trigger, session, err, terminals)
 	}
-	r.write(history.Record{
-		RunID: id, Automation: a.Name, Trigger: trigger, Status: history.StatusDone, At: time.Now(),
-		Session: session.HerdrSession, WorkspaceID: session.WorkspaceID, PaneID: session.PaneID,
-		Target: session.Target, Result: note,
-	}, "")
+	rec := runRecord(id, a.Name, trigger, history.StatusDone, session)
+	rec.Result = note
+	r.write(rec, "")
 	// After the record: closing is also how a person cancels a run.
 	if a.CloseWorkspace == config.CloseOnSuccess {
-		if err := r.host.Close(session, a); err != nil {
+		closeRun := func() error { return r.host.Close(session, a) }
+		if err := withWorkspaceLock(session, closeRun); err != nil {
 			log.Printf("%s: done, but its workspace stays open: %v", a.Name, err)
 		}
 	}
@@ -208,16 +222,26 @@ func statusFor(err error) history.Status {
 // caller of notify: the two cannot drift apart, and a future status inherits
 // its notification for free without runner filtering anything.
 func (r *Runner) record(id, name string, trigger history.Trigger, st history.Status, s host.Session, errMsg string) {
-	r.write(history.Record{
+	rec := runRecord(id, name, trigger, st, s)
+	rec.Error = errMsg
+	r.write(rec, errMsg)
+}
+
+func runRecord(id, name string, trigger history.Trigger, st history.Status, s host.Session) history.Record {
+	return history.Record{
 		RunID: id, Automation: name, Trigger: trigger, Status: st, At: time.Now(),
-		Session: s.HerdrSession, WorkspaceID: s.WorkspaceID, PaneID: s.PaneID, Target: s.Target, Error: errMsg,
-	}, errMsg)
+		Session: s.HerdrSession, WorkspaceID: s.WorkspaceID, PaneID: s.PaneID,
+		Target: s.Target, TabID: s.TabID, Workspace: s.Workspace, TerminalID: s.TerminalID,
+		TargetParent: s.TargetParent,
+	}
 }
 
 // write appends one record and announces it; detail is the toast's line.
-func (r *Runner) write(rec history.Record, detail string) {
-	if err := history.Append(rec); err != nil {
+func (r *Runner) write(rec history.Record, detail string) error {
+	err := history.Append(rec)
+	if err != nil {
 		log.Printf("history append failed: %v", err)
 	}
 	r.notifier.Outcome(rec.Automation, rec.Status, detail)
+	return err
 }

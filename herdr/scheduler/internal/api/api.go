@@ -87,8 +87,10 @@ type Run struct {
 	Terminal   string         `json:"terminal,omitempty"`
 	// Target is the automation's target when the run went to a bot or a worker
 	// instead of a terminal of its own (#498); Terminal is that pane.
-	Target string `json:"target,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Target  string `json:"target,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Screen  string `json:"screen,omitempty"`
+	Cleanup string `json:"cleanup,omitempty"`
 	// A command run's: its exit status (absent when it has none), its one
 	// line, the last lines of its stderr, and what became of the report.
 	// An agent run's done may carry a late-start note in Result.
@@ -164,6 +166,7 @@ func toRun(r history.Record) Run {
 		RunID: r.RunID, Automation: r.Automation, Status: r.Status, Trigger: string(r.Trigger),
 		Started: r.Started, At: r.At, Seconds: int(r.At.Sub(r.Started).Seconds()),
 		Space: r.WorkspaceID, Terminal: r.PaneID, Target: r.Target, Error: r.Error, Seen: r.Seen,
+		Screen: r.Screen, Cleanup: r.Cleanup,
 		ExitCode: r.ExitCode, Result: r.Result, Stderr: r.Stderr, Notified: r.Notified,
 	}
 }

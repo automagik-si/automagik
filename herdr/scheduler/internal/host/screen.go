@@ -1,7 +1,9 @@
 package host
 
 import (
+	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -42,21 +44,29 @@ func promptLine(screen string) string {
 	return clipPrompt(fallback)
 }
 
-// dialogLine picks the last question with an answer option below it. A word
-// like "continue" in ordinary output is not enough to call it a dialog.
-func dialogLine(screen string) string {
+// A silent agent may print arbitrary text. Look for a selected choice and a
+// key hint before treating its output as an interactive startup dialog.
+func startupDialogLine(screen, prompt string) string {
 	lines := strings.Split(screen, "\n")
-	hasOption := false
+	hint, selected := false, false
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := cleanLine(lines[i])
-		// An option is an answer, never the question, even when it reads like
-		// one ("1. Yes, proceed").
-		if optionLine.MatchString(line) {
-			hasOption = true
+		if keyHint(line) {
+			hint = true
 			continue
 		}
-		if hasOption && promptWord.MatchString(line) {
-			return clipPrompt(line)
+		text := strings.TrimSpace(strings.TrimLeft(line, "❯›>"))
+		if optionLine.MatchString(line) {
+			selected = selected || hint && text != line
+			continue
+		}
+		if selected && promptWord.MatchString(text) {
+			// A prompt can be echoed with a leading glyph and soft line wraps.
+			promptText := strings.Join(strings.Fields(cleanLine(prompt)), " ")
+			if strings.Contains(promptText, strings.Join(strings.Fields(text), " ")) {
+				return ""
+			}
+			return clipPrompt(text)
 		}
 	}
 	return ""
@@ -102,4 +112,25 @@ func clipPrompt(line string) string {
 		return string(r)
 	}
 	return string(r[:promptLimit-1]) + "…"
+}
+
+// screenTail keeps a bounded, plain-text excerpt in the run's history.
+func screenTail(screen string) string {
+	lines := strings.Split(screen, "\n")
+	tail := make([]string, 0, 12)
+	for i := len(lines) - 1; i >= 0 && len(tail) < cap(tail); i-- {
+		line := cleanLine(lines[i])
+		if line != "" {
+			tail = append(tail, clipPrompt(line))
+		}
+	}
+	slices.Reverse(tail)
+	return strings.Join(tail, "\n")
+}
+
+func dialogError(line string) error {
+	if line == "" {
+		return fmt.Errorf("blocked on a dialog")
+	}
+	return fmt.Errorf("blocked on a dialog: %s", line)
 }

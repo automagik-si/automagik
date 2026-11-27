@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -66,13 +67,25 @@ type Record struct {
 	Trigger    Trigger   `json:"trigger,omitempty"`
 	// Session is the Herdr session WorkspaceID and PaneID belong to; IDs are
 	// only meaningful inside it. Empty on runs recorded before ADR 0010.
-	Session     string `json:"session,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
-	PaneID      string `json:"pane_id,omitempty"`
+	Session     string           `json:"session,omitempty"`
+	WorkspaceID string           `json:"workspace_id,omitempty"`
+	PaneID      string           `json:"pane_id,omitempty"`
+	TabID       string           `json:"tab_id,omitempty"`
+	Workspace   config.Workspace `json:"workspace_mode,omitempty"`
+	// TerminalID identifies the original Herdr pane or hc terminal across ID reuse.
+	TerminalID string `json:"terminal_id,omitempty"`
+	// Screen and Cleanup preserve the evidence and outcome of terminal removal.
+	Screen  string `json:"screen,omitempty"`
+	Cleanup string `json:"cleanup,omitempty"`
+	// CleanupPending lets a later occurrence retry incomplete removal.
+	CleanupPending bool `json:"cleanup_pending,omitempty"`
+	// CleanupSkip records when this occurrence could not inspect earlier runs.
+	CleanupSkip string `json:"cleanup_skip,omitempty"`
 	// Target is the automation's target when the run was handed to a bot or a
 	// worker instead of a terminal of its own (#498); PaneID is that terminal.
-	Target string `json:"target,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Target       string `json:"target,omitempty"`
+	TargetParent string `json:"target_parent,omitempty"`
+	Error        string `json:"error,omitempty"`
 	// ExitCode, Stderr and Notified are a command run's (ADR 0013).
 	// ExitCode is the program's exit status, absent when it has none (it never
 	// started, the timeout or a signal ended it).
@@ -93,6 +106,8 @@ type Record struct {
 	// Started is when the run's first record was written. Filled in by Runs,
 	// never stored: the first record already says it.
 	Started time.Time `json:"-"`
+	// TerminalObserved is when this pane was first recorded for the run.
+	TerminalObserved time.Time `json:"-"`
 }
 
 func path() string { return filepath.Join(config.StateDir(), "history.jsonl") }
@@ -100,14 +115,17 @@ func path() string { return filepath.Join(config.StateDir(), "history.jsonl") }
 // Append writes one record; failures are returned but callers generally just
 // log them — history must never break a run.
 func Append(r Record) error {
-	if err := os.MkdirAll(config.StateDir(), 0o755); err != nil {
+	if err := os.MkdirAll(config.StateDir(), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		log.Printf("could not restrict history permissions: %v", err)
+	}
 	line, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -153,6 +171,15 @@ func Runs(automation string, limit int) ([]Record, error) {
 			r.Started = r.At
 		} else {
 			r.Started, r.Seen = prev.Started, prev.Seen
+			if r.CleanupSkip == "" {
+				r.CleanupSkip = prev.CleanupSkip
+			}
+		}
+		if r.PaneID != "" {
+			r.TerminalObserved = r.At
+			if prev.PaneID == r.PaneID {
+				r.TerminalObserved = prev.TerminalObserved
+			}
 		}
 		latest[r.RunID] = r
 	}

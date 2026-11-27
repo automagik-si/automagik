@@ -29,6 +29,12 @@ type fakeOps struct {
 	agentStop       func(paneID string) (bool, error)
 	paneRun         func(paneID string, command ...string) error
 	paneRead        func(paneID string, lines int) (string, error)
+	paneList        func() ([]herdr.PaneInfo, error)
+	paneGet         func(string) (herdr.PaneInfo, error)
+	paneClose       func(string) error
+	paneSplit       func(string) error
+	tabLabel        func(string) (string, error)
+	workspaceLabel  func(string) (string, error)
 	lookPath        func(file string) error
 	workspaceClose  func(workspaceID string) error
 
@@ -163,6 +169,36 @@ func (f *fakeOps) PaneRead(paneID string, lines int) (string, error) {
 		return "", nil
 	}
 	return f.paneRead(paneID, lines)
+}
+
+func (f *fakeOps) PaneList() ([]herdr.PaneInfo, error) {
+	if f.paneList != nil {
+		return f.paneList()
+	}
+	return nil, nil
+}
+
+func (f *fakeOps) PaneGet(id string) (herdr.PaneInfo, error) {
+	if f.paneGet != nil {
+		return f.paneGet(id)
+	}
+	return herdr.PaneInfo{}, apiErr("pane get", herdr.CodePaneGone)
+}
+
+func (f *fakeOps) PaneClose(id string) error {
+	return f.paneClose(id)
+}
+
+func (f *fakeOps) PaneSplit(id string) error {
+	return f.paneSplit(id)
+}
+
+func (f *fakeOps) TabLabel(id string) (string, error) {
+	return f.tabLabel(id)
+}
+
+func (f *fakeOps) WorkspaceLabel(id string) (string, error) {
+	return f.workspaceLabel(id)
 }
 
 func (f *fakeOps) LookPath(file string) error {
@@ -633,5 +669,38 @@ func TestTargetRefusesWithoutHerdrCore(t *testing.T) {
 	_, err := h.Provision(config.Automation{Name: "housekeeping", Target: "bot:b-6jrz4bmxml", Repo: "/src/project"})
 	if err == nil || !strings.Contains(err.Error(), "a target needs herdr-core") {
 		t.Fatalf("err %v", err)
+	}
+}
+
+func TestHerdrPreviousAndRemovePreserveSharedLastTab(t *testing.T) {
+	s := Session{PaneID: "w7:p2", WorkspaceID: "w7", HerdrSession: "other"}
+	var calls []string
+	pane := herdr.PaneInfo{PaneID: s.PaneID, WorkspaceID: "w7", TabID: "tb1", TerminalID: "t8"}
+	f := &fakeOps{
+		paneList: func() ([]herdr.PaneInfo, error) { return []herdr.PaneInfo{pane}, nil },
+		paneGet:  func(string) (herdr.PaneInfo, error) { return pane, nil },
+		tabLabel: func(string) (string, error) { return "auto: triage 2026-11-27 10:20", nil },
+		tabList:  func(string) ([]string, error) { return []string{"tb1"}, nil },
+		paneSplit: func(id string) error {
+			calls = append(calls, "split "+id)
+			return nil
+		},
+		paneClose: func(id string) error {
+			calls = append(calls, "close "+id)
+			return nil
+		},
+	}
+	h := &live{ops: f}
+	a := config.Automation{Name: "triage"}
+	previous, err := h.Previous(a, []Session{s})
+	if err != nil || len(previous) != 1 || previous[0].Workspace != config.WorkspaceExisting ||
+		previous[0].TerminalID != "t8" {
+		t.Fatalf("previous = %+v, err = %v", previous, err)
+	}
+	if err := h.Remove(previous[0], a); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "split w7:p2,close w7:p2" || f.session != "other" {
+		t.Fatalf("calls = %s, session = %s", got, f.session)
 	}
 }

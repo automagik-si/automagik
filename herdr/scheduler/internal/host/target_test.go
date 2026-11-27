@@ -1,16 +1,8 @@
 package host
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"log"
-	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -269,30 +261,40 @@ func TestWorkerTargetStartsAndEndsAWorker(t *testing.T) {
 	}
 }
 
-// A failing worker run still ends its worker through the checked path.
-func TestWorkerTargetEndsItsWorkerOnFailure(t *testing.T) {
-	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
-		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
-	}}
-	h := targetHost(f)
-	var ends []string
-	h.amFn = func(args, env []string) (string, error) {
-		if len(args) > 1 && args[1] == "kill" {
-			ends = append(ends, strings.Join(args, " ")+" env="+strings.Join(env, ","))
-			return `{"terminal":"t9","ended":true}`, nil
-		}
-		return `{"terminal":"t9"}`, nil
-	}
-	f.waits = []hc.Wait{{Ended: true, Reason: "status", Status: "error"}}
-	if _, err := h.Provision(targetAutomation("worker:b-6jrz4bmxml")); err != nil {
-		t.Fatal(err)
-	}
-	s := Session{PaneID: "t9", Target: "worker:b-6jrz4bmxml", TargetName: "Housekeeper", TargetParent: "t7"}
-	if err := h.Do(s, targetAutomation("worker:b-6jrz4bmxml"), time.Minute); err == nil {
-		t.Fatal("an agent error was recorded as done")
-	}
-	if len(ends) != 1 || !strings.HasPrefix(ends[0], "worker kill t9 --json") {
-		t.Fatalf("calls %v", ends)
+// A timed-out or failed worker is removed only after the wait reports its
+// error. Its bot must stay alive.
+func TestWorkerTargetRemovesTheRunWorkerOnFailure(t *testing.T) {
+	for _, state := range []string{"error", "working"} {
+		t.Run(state, func(t *testing.T) {
+			f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+				"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+			}}
+			h := targetHost(f)
+			a := targetAutomation("worker:b-6jrz4bmxml")
+			h.amFn = func(args, _ []string) (string, error) {
+				if len(args) > 1 && args[1] == "kill" {
+					t.Fatal("the successful worker stop was used on failure")
+				}
+				f.gets["t9"] = hc.Terminal{Address: "t9", CreatedMS: 42, State: "live", Parent: "t7",
+					Cwd:    f.worktree[2],
+					Labels: map[string]string{"worker.of": "b-6jrz4bmxml", "branch": f.worktree[1]}}
+				return `{"terminal":"t9"}`, nil
+			}
+			f.waits = []hc.Wait{{Ended: true, Reason: "status", Status: state}}
+			s, err := h.Provision(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Do(s, a, 20*time.Millisecond); err == nil || len(f.calls) != 0 {
+				t.Fatalf("wait error = %v, hc calls = %v", err, f.calls)
+			}
+			if err := h.Remove(s, a); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(f.calls, ",") != "kill t9,rm t9" {
+				t.Fatalf("hc calls = %v", f.calls)
+			}
+		})
 	}
 }
 
@@ -460,116 +462,6 @@ func TestBotTargetCannotSeeAStaleLabelTheLedgerMoved(t *testing.T) {
 	if len(f.sent) != 1 {
 		t.Fatalf("sent %v", f.sent)
 	}
-}
-
-// The pack refuses to end a worker that is still mid-turn (workers.js
-// workerKillRefusal), and the scheduler only logs that refusal: a run that times out
-// mid-turn fails and the worker stays, visible under its bot. This drives the
-// timeout through endWorker and checks the pack's own refusal is what gets logged.
-// The behaviour is deliberate (ending it would lose its work), so this is a
-// characterization test, not a red one; it fails if the scheduler bypasses the
-// checked verb or the pack stops refusing a mid-turn worker.
-func TestWorkerTimeoutLeavesTheWorkerAndLogsThePackRefusal(t *testing.T) {
-	refusal := packWorkerKillRefusal(t)
-	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
-		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
-	}}
-	h := targetHost(f)
-	h.knobs.waitSlice = time.Millisecond
-	h.knobs.statusPoll = time.Millisecond
-	var ended []string
-	h.amFn = func(args, _ []string) (string, error) {
-		if len(args) > 1 && args[1] == "kill" {
-			ended = append(ended, strings.Join(args, " "))
-			return "", errors.New(refusal)
-		}
-		return `{"terminal":"t9"}`, nil
-	}
-	f.waits = []hc.Wait{{Ended: true, Reason: "status", Status: "working"}}
-	a := targetAutomation("worker:b-6jrz4bmxml")
-	s, err := h.Provision(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var logged bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logged)
-	defer log.SetOutput(previous)
-	err = h.Do(s, a, 5*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "still working after") {
-		t.Fatalf("err %v, want the timeout failure", err)
-	}
-	if len(ended) != 1 || !strings.HasPrefix(ended[0], "worker kill t9 --json") {
-		t.Fatalf("ended %v, want the pack's checked end", ended)
-	}
-	if !strings.Contains(logged.String(), "could not end the run's worker t9") || !strings.Contains(logged.String(), refusal) {
-		t.Fatalf("log %q, want the pack's refusal", logged.String())
-	}
-	for _, call := range f.calls {
-		if strings.HasPrefix(call, "kill ") || strings.HasPrefix(call, "rm ") {
-			t.Fatalf("the checked path was bypassed: %v", f.calls)
-		}
-	}
-}
-
-// packWorkersPath finds herdr/mods/am-sidebar/workers.js from the directory the test
-// binary runs in, or from this source file when the binary was built elsewhere.
-func packWorkersPath(t *testing.T) string {
-	t.Helper()
-	candidates := []string{filepath.Join("..", "..", "..", "mods", "am-sidebar", "workers.js")}
-	if _, file, _, ok := runtime.Caller(0); ok {
-		candidates = append(candidates, filepath.Join(filepath.Dir(file), "..", "..", "..", "mods", "am-sidebar", "workers.js"))
-	}
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			abs, err := filepath.Abs(candidate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return abs
-		}
-	}
-	t.Fatalf("cannot find the pack's workers.js (looked in %v)", candidates)
-	return ""
-}
-
-// packWorkerKillRefusal asks the pack's own workers.js why it would refuse to end a
-// worker that is still working, so this test pins the real refusal line and not a
-// copy of it. The scheduler is Go; the pack is plain JavaScript, and the test skips
-// only where no node exists to read it.
-func packWorkerKillRefusal(t *testing.T) string {
-	t.Helper()
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is needed to read the pack's workerKillRefusal")
-	}
-	workers := packWorkersPath(t)
-	spec, err := json.Marshal((&url.URL{Scheme: "file", Path: workers}).String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	call, err := json.Marshal(map[string]any{
-		"target": map[string]any{
-			"address": "t9", "state": "live",
-			"labels": map[string]string{"worker.of": "b-6jrz4bmxml"},
-			"status": map[string]string{"state": "working"},
-		},
-		"botId": "b-6jrz4bmxml",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := fmt.Sprintf("import { workerKillRefusal } from %s;\n"+
-		"process.stdout.write(workerKillRefusal(%s) ?? \"\");", spec, call)
-	out, err := exec.Command(node, "--input-type=module", "-e", script).CombinedOutput()
-	if err != nil {
-		t.Fatalf("reading the pack's refusal: %v (%s)", err, out)
-	}
-	refusal := strings.TrimSpace(string(out))
-	if !strings.Contains(refusal, "still working") {
-		t.Fatalf("the pack did not refuse a mid-turn worker: %q", refusal)
-	}
-	return refusal
 }
 
 // What a person sees when the target cannot be reached: the bot's name, its

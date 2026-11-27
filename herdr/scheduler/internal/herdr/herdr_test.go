@@ -174,6 +174,57 @@ func TestTabList(t *testing.T) {
 	}
 }
 
+func TestTerminalCleanupCommands(t *testing.T) {
+	const pane = `{"pane_id":"w7:p2","terminal_id":"t8","workspace_id":"w7","tab_id":"tb7"}`
+	wantPane := PaneInfo{PaneID: "w7:p2", TerminalID: "t8", WorkspaceID: "w7", TabID: "tb7"}
+	for _, tc := range []struct {
+		name, response string
+		argv           []string
+		call           func(Client) (any, error)
+		want           any
+	}{
+		{
+			"pane get", `{"result":{"pane":` + pane + `}}`, []string{"pane", "get", "w7:p2"},
+			func(c Client) (any, error) { return c.PaneGet("w7:p2") }, wantPane,
+		},
+		{
+			"pane list", `{"result":{"panes":[` + pane + `]}}`, []string{"pane", "list"},
+			func(c Client) (any, error) { return c.PaneList() }, []PaneInfo{wantPane},
+		},
+		{
+			"tab get", `{"result":{"tab":{"tab_id":"tb7","label":"auto: daily"}}}`,
+			[]string{"tab", "get", "tb7"},
+			func(c Client) (any, error) { return c.TabLabel("tb7") }, "auto: daily",
+		},
+		{
+			"workspace get", `{"result":{"workspace":{"workspace_id":"w7","label":"auto: daily"}}}`,
+			[]string{"workspace", "get", "w7"},
+			func(c Client) (any, error) { return c.WorkspaceLabel("w7") }, "auto: daily",
+		},
+		{
+			"pane close", `{"result":{}}`, []string{"pane", "close", "w7:p2"},
+			func(c Client) (any, error) { return nil, c.PaneClose("w7:p2") }, nil,
+		},
+		{
+			"pane split", `{"result":{"pane":` + pane + `}}`,
+			[]string{"pane", "split", "w7:p2", "--no-focus"},
+			func(c Client) (any, error) { return nil, c.PaneSplit("w7:p2") }, nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := fakeHerdr(t, tc.response)
+			got, err := tc.call(Client{Session: "automations"})
+			if err != nil || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("result = %+v, %v, want %+v", got, err, tc.want)
+			}
+			wantArgs := append([]string{"--session", "automations"}, tc.argv...)
+			if gotArgs := readArgs(t, args); !reflect.DeepEqual(gotArgs, wantArgs) {
+				t.Fatalf("args = %q, want %q", gotArgs, wantArgs)
+			}
+		})
+	}
+}
+
 // fakeHerdr installs a herdr that records its argv and prints response.
 func fakeHerdr(t *testing.T, response string) (argsFile string) {
 	t.Helper()

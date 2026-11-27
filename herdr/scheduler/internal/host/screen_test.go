@@ -44,3 +44,11 @@ func TestPromptLineFallsBackToTheLastRealLine(t *testing.T) {
 		t.Fatalf("promptLine = %q, want empty", got)
 	}
 }
+
+func TestScreenTailKeepsTheLastTwelvePlainLines(t *testing.T) {
+	screen := "old output\n" + strings.Repeat("line\n", 11) + "\x1b[31mfinal line\x1b[0m\n\n"
+	want := strings.Repeat("line\n", 11) + "final line"
+	if got := screenTail(screen); got != want {
+		t.Fatalf("screen tail = %q, want %q", got, want)
+	}
+}

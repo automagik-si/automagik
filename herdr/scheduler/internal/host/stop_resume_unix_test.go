@@ -11,37 +11,29 @@ import (
 )
 
 // A person can answer a dialog after the grace and screen read, before the
-// stop request. A working agent at the final check resumes instead of failing.
-func TestDoResumesWhenDialogClearsBeforeSignal(t *testing.T) {
+// failure verdict. A working agent at the final check resumes instead of failing.
+func TestDoResumesWhenDialogClearsBeforeFailure(t *testing.T) {
 	for _, phase := range []string{"start", "submit", "await"} {
 		t.Run(phase, func(t *testing.T) {
 			clock := time.Unix(0, 0)
 			state := "blocked"
-			stopChecks, infoReads, signals := 0, 0, 0
+			dialogCleared := false
 			ops := &fakeOps{}
 			ops.agentStatus = func(string) (string, error) {
 				clock = clock.Add(time.Minute)
 				return state, nil
 			}
 			ops.agentWait = func(string, time.Duration) error {
-				if stopChecks > 0 {
+				if dialogCleared {
 					state = "done"
 				}
 				return nil
 			}
-			ops.paneRead = func(string, int) (string, error) { return "Do you want to proceed?", nil }
-			ops.agentStop = func(string) (bool, error) {
-				stopChecks++
-				return stopForeground(func() (herdr.ProcessInfo, error) {
-					infoReads++
-					if infoReads == 2 {
-						state = "working"
-					}
-					return herdr.ProcessInfo{ShellPID: 200, ForegroundGroup: 300}, nil
-				}, func() (string, error) { return ops.AgentStatus("p") }, 400, 401, func(int) error {
-					signals++
-					return nil
-				})
+			ops.paneRead = func(string, int) (string, error) {
+				if clock.Sub(time.Unix(0, 0)) >= 4*time.Minute {
+					state, dialogCleared = "working", true
+				}
+				return "Do you want to proceed?", nil
 			}
 			if phase == "start" {
 				ops.agentStart = func(string, string, string, []string) error { return apiErr("agent start", herdr.CodeAgentNotReady) }
@@ -63,8 +55,8 @@ func TestDoResumesWhenDialogClearsBeforeSignal(t *testing.T) {
 			if phase == "submit" {
 				wantSubmits = 2
 			}
-			if signals != 0 || stopChecks != 1 || infoReads != 2 || ops.starts != 1 || ops.submits != wantSubmits {
-				t.Fatalf("signals=%d stopChecks=%d infoReads=%d starts=%d submits=%d", signals, stopChecks, infoReads, ops.starts, ops.submits)
+			if !dialogCleared || len(ops.stopRequests) != 0 || ops.starts != 1 || ops.submits != wantSubmits {
+				t.Fatalf("dialogCleared=%t stopRequests=%v starts=%d submits=%d", dialogCleared, ops.stopRequests, ops.starts, ops.submits)
 			}
 			if len(ops.closed)+len(ops.closedTabs) != 0 {
 				t.Fatal("resumed run closed its layout")

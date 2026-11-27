@@ -108,6 +108,8 @@ func (h *hcHost) targetProvision(a config.Automation) (Session, error) {
 		}
 		return s, nil
 	}
+	// The parent is the caller, not the worker this run will own.
+	s.PaneID = ""
 	dir, err := h.worktree(a)
 	if err != nil {
 		return s, fmt.Errorf("a worker of %s (%s) needs a worktree: %w", name, botID, err)
@@ -117,12 +119,16 @@ func (h *hcHost) targetProvision(a config.Automation) (Session, error) {
 		return s, err
 	}
 	s.PaneID = terminal
+	if t, err := h.ops.Get(terminal); err == nil && workerTerminal(t, s, a.Name) {
+		s.TerminalID = hcIdentity(t)
+		s.WorkspaceID, s.TabID = t.Labels["herdr.space"], t.Labels["herdr.tab"]
+	}
 	return s, nil
 }
 
 // targetDo carries out a target run: a bot receives the prompt through hc
 // send, exactly as one bot messages another; a worker waits for its turn and
-// is ended when the run ends, success or not.
+// is ended here on success. A failure reaches the runner before cleanup.
 func (h *hcHost) targetDo(s Session, a config.Automation, timeout time.Duration) error {
 	kind, botID, err := config.SplitTarget(a.Target)
 	if err != nil {
@@ -133,8 +139,13 @@ func (h *hcHost) targetDo(s Session, a config.Automation, timeout time.Duration)
 		name = botID
 	}
 	if kind == config.TargetWorker {
-		defer h.endWorker(s)
-		return h.waitTurn(s, a, timeout)
+		err := h.waitTurn(s, a, timeout)
+		if err == nil {
+			if err := h.endWorker(s); err != nil {
+				log.Printf("could not end the run's worker %s through am worker kill: %v", s.PaneID, err)
+			}
+		}
+		return err
 	}
 	// Resolution and the send are two steps, and a terminal id can be reused
 	// or its agent can quit between them. Read the pane once more immediately
@@ -159,19 +170,13 @@ func (h *hcHost) targetDo(s Session, a config.Automation, timeout time.Duration)
 // `am worker kill`, with the bot's own pane as the caller, so the pack's guard
 // confirms this really is that bot's worker and no bot's seat. The finished
 // terminal stays, so the run's saved PaneID still names where the worker ran.
-// Its refusal is logged, not retried: a worker still mid-turn is deliberately
-// left (ending it would lose its work), so the log says it stays and how to end it.
-func (h *hcHost) endWorker(s Session) {
+func (h *hcHost) endWorker(s Session) error {
 	if s.TargetParent == "" {
-		log.Printf("could not end the run's worker %s through am worker kill: the bot's pane is unknown; "+
-			"the worker stays until it is ended from its bot's terminal (am worker kill %s)", s.PaneID, s.PaneID)
-		return
+		return fmt.Errorf("the worker's parent pane is unknown")
 	}
-	if _, err := h.am([]string{"worker", "kill", s.PaneID, "--json"},
-		[]string{"HC_TERMINAL_ID=" + s.TargetParent}); err != nil {
-		log.Printf("could not end the run's worker %s through am worker kill: %v; the worker stays until it is ended "+
-			"(wait for its turn, then am worker kill %s from its bot's terminal)", s.PaneID, err, s.PaneID)
-	}
+	_, err := h.am([]string{"worker", "kill", s.PaneID, "--json"},
+		[]string{"HC_TERMINAL_ID=" + s.TargetParent})
+	return err
 }
 
 // botState is the bot's own word about what it is doing, or "" when it has

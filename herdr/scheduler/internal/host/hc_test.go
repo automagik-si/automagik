@@ -22,6 +22,7 @@ type fakeHC struct {
 	argv       []string
 	worktree   [3]string // repo, branch, path
 	waits      []hc.Wait
+	waitErrors []error
 	term       hc.Terminal
 	gets       map[string]hc.Terminal // per-address `hc get` answers; nil falls back to term
 	screen     string
@@ -34,12 +35,15 @@ type fakeHC struct {
 	runErr     error
 	delay      time.Duration // per Wait
 	onWait     func()        // lets a test advance its clock
-	onKill     func()        // lets a test change the space at the read/act boundary
-	calls      []string      // kill and rm, with their address
+	onGet      func(string)
+	onKill     func()   // lets a test change the space at the read/act boundary
+	calls      []string // kill and rm, with their address
 	readCalls  int
 	killErr    error
 	sent       []string // hc send's texts, in order
 	sendErr    error
+
+	mainCheckout func(string) (string, error)
 }
 
 func (f *fakeHC) Send(address, text string) error {
@@ -89,6 +93,13 @@ func (f *fakeHC) Wait(string, time.Duration) (hc.Wait, error) {
 	if f.onWait != nil {
 		f.onWait()
 	}
+	if len(f.waitErrors) != 0 {
+		err := f.waitErrors[0]
+		f.waitErrors = f.waitErrors[1:]
+		if err != nil {
+			return hc.Wait{}, err
+		}
+	}
 	if len(f.waits) == 0 {
 		return hc.Wait{Reason: "timeout"}, nil
 	}
@@ -98,6 +109,9 @@ func (f *fakeHC) Wait(string, time.Duration) (hc.Wait, error) {
 }
 
 func (f *fakeHC) Get(address string) (hc.Terminal, error) {
+	if f.onGet != nil {
+		f.onGet(address)
+	}
 	if f.gets != nil {
 		if t, ok := f.gets[address]; ok {
 			return t, nil
@@ -107,17 +121,27 @@ func (f *fakeHC) Get(address string) (hc.Terminal, error) {
 	return f.term, nil
 }
 
-func (f *fakeHC) MainCheckout(string) (string, error) { return "/src/myapp", nil }
+func (f *fakeHC) MainCheckout(dir string) (string, error) {
+	if f.mainCheckout != nil {
+		return f.mainCheckout(dir)
+	}
+	return "/src/myapp", nil
+}
 
 func (f *fakeHC) WorktreeAdd(repo, branch, path string) error {
 	f.worktree = [3]string{repo, branch, path}
 	return nil
 }
 
+const fakeHCHome = "/test-home"
+
 func newHCTest(f *fakeHC) *hcHost {
-	return &hcHost{ops: f, home: "/home/me", knobs: knobs{
-		paneReady: 30 * time.Millisecond, waitSlice: time.Millisecond, statusPoll: time.Millisecond,
-	}}
+	return &hcHost{
+		ops: f, home: fakeHCHome, installID: func() string { return "test-install" },
+		knobs: knobs{
+			paneReady: 30 * time.Millisecond, waitSlice: time.Millisecond, statusPoll: time.Millisecond,
+		},
+	}
 }
 
 func hcAutomation() config.Automation {
@@ -140,7 +164,9 @@ func TestHCProvisionMakesAWorktreeTheAppRecognises(t *testing.T) {
 	if repo != "/src/myapp/sub" || !strings.HasPrefix(branch, "auto/issue-triage-") {
 		t.Fatalf("worktree add %q %q", repo, branch)
 	}
-	if want := filepath.Join("/home/me/.herdr/worktrees/myapp", strings.ReplaceAll(branch, "/", "-")); path != want {
+	want := filepath.Join(fakeHCHome, ".herdr", "worktrees", "myapp",
+		strings.ReplaceAll(branch, "/", "-"))
+	if path != want {
 		t.Fatalf("path %q, want %q", path, want)
 	}
 	if f.cwd != path {
@@ -536,20 +562,18 @@ func TestHCCloseExistingListFailureLeavesTheTabOpen(t *testing.T) {
 }
 
 // A dialog is not work: the run must fail at the grace with the line the
-// person would have read, and the blocked agent must not be left waiting.
-func TestHCDoFailsAtOnceOnALongBlockedDialog(t *testing.T) {
+// runner will record before removing its terminal.
+func TestHCDoFailsWhenReportedBlockOutlastsGrace(t *testing.T) {
 	clock := time.Unix(0, 0)
 	blocked := hc.Wait{Ended: true, Reason: "status", Status: "blocked", Turn: 1}
+	waited := 0
 	f := &fakeHC{
-		waits:  []hc.Wait{blocked, blocked, blocked, blocked},
-		onWait: func() { clock = clock.Add(time.Minute) },
-		screen: "╭──────────────────────────╮\n" +
-			"│ Bash command             │\n" +
-			"╰──────────────────────────╯\n" +
-			"Do you want to proceed?\n" +
-			"❯ 1. Yes\n" +
-			"  2. No\n" +
-			"Esc to cancel\n",
+		waits: []hc.Wait{blocked, blocked, blocked, blocked},
+		onWait: func() {
+			waited++
+			clock = clock.Add(time.Minute)
+		},
+		screen: "Waiting for a login\n",
 	}
 	h := newHCTest(f)
 	h.clock = func() time.Time { return clock }
@@ -557,17 +581,14 @@ func TestHCDoFailsAtOnceOnALongBlockedDialog(t *testing.T) {
 	a.BlockedGraceMinutes = 2
 
 	err := h.Do(Session{PaneID: "t7"}, a, 200*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "blocked on a dialog: Do you want to proceed?") {
+	if err == nil || err.Error() != "blocked on a dialog: Waiting for a login" {
 		t.Fatalf("want the dialog line reported, got %v", err)
 	}
-	if strings.Contains(err.Error(), "still working") {
-		t.Fatalf("waited for the timeout instead of failing at the grace: %v", err)
+	if waited != 4 || f.readCalls != 1 {
+		t.Fatalf("took %d waits and %d reads, want 4 waits and 1 read", waited, f.readCalls)
 	}
-	if f.readCalls != 1 {
-		t.Errorf("read the screen %d times, want once", f.readCalls)
-	}
-	if got := strings.Join(f.calls, "|"); got != "kill t7" {
-		t.Fatalf("calls %q, want the blocked agent's terminal ended and nothing else", got)
+	if got := strings.Join(f.calls, "|"); got != "" {
+		t.Fatalf("the wait must return before cleanup, got %q", got)
 	}
 }
 
@@ -614,5 +635,147 @@ func TestHCDoWaitsOutBlockedWhenTheGraceIsMinusOne(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("ended the agent under grace -1: %q", f.calls)
+	}
+}
+
+func TestHCDoRetriesFailedWaitAfterWorkStarts(t *testing.T) {
+	f := &fakeHC{
+		waits: []hc.Wait{
+			{Reason: "timeout", Status: "working", Turn: 1},
+			{Reason: "status", Status: "done", Turn: 1},
+		},
+		waitErrors: []error{nil, errors.New("temporarily unavailable"), nil},
+	}
+	if err := newHCTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), time.Second); err != nil {
+		t.Fatalf("transient wait error failed the run: %v", err)
+	}
+}
+
+func TestHCDoReportsPersistentWaitErrorAtDeadline(t *testing.T) {
+	want := errors.New("temporarily unavailable")
+	f := &fakeHC{}
+	waits := 0
+	f.onWait = func() {
+		waits++
+		f.waitErrors = []error{want}
+	}
+	err := newHCTest(f).Do(Session{PaneID: "t7"}, hcAutomation(), 30*time.Millisecond)
+	if !errors.Is(err, want) || waits < 2 || !strings.Contains(err.Error(), "run timeout") {
+		t.Fatalf("waits = %d, error = %v", waits, err)
+	}
+}
+
+func TestHCMinusOneSkipsSilentStartupScreen(t *testing.T) {
+	clock := time.Unix(0, 0)
+	f := &fakeHC{
+		waits:  []hc.Wait{{Reason: "timeout"}, {Reason: "timeout"}, {Reason: "status", Status: "done"}},
+		onWait: func() { clock = clock.Add(11 * time.Second) },
+		screen: trustScreen,
+	}
+	h := newHCTest(f)
+	h.clock = func() time.Time { return clock }
+	a := hcAutomation()
+	a.BlockedGraceMinutes = -1
+	if err := h.Do(Session{PaneID: "t7"}, a, time.Second); err != nil || f.readCalls != 0 {
+		t.Fatalf("startup reads = %d, error = %v", f.readCalls, err)
+	}
+}
+
+func automationTerminal(address, name, space, tab, state string) hc.Terminal {
+	return hc.Terminal{
+		Address: address, CreatedMS: 10, State: state, Cwd: hcAutomation().Repo,
+		Labels: map[string]string{"automation": name, "herdr.space": space, "herdr.tab": tab},
+	}
+}
+
+func TestHCPreviousFindsLabelledRunsAndRetriesFailedRemoval(t *testing.T) {
+	a := hcAutomation()
+	f := &fakeHC{
+		terminals: []string{"t1", "t2", "peer/t3", "t4", "t6"},
+		gets: map[string]hc.Terminal{
+			"t1":      automationTerminal("t1", a.Name, "sp1", "tb1", "live"),
+			"t2":      automationTerminal("t2", a.Name, "sp2", "tb2", "live"),
+			"peer/t3": automationTerminal("peer/t3", a.Name, "sp3", "tb3", "live"),
+			"t4":      automationTerminal("t4", "another", "sp4", "tb4", "live"),
+			"t5":      automationTerminal("t5", a.Name, "sp5", "tb5", "finished"),
+			"t6":      automationTerminal("t6", a.Name, "sp6", "tb6", "finished"),
+		},
+		onGet: func(address string) {
+			if address == "peer/t3" {
+				t.Fatal("looked up a remote terminal during local cleanup")
+			}
+		},
+	}
+	known := []Session{
+		{PaneID: "t5", WorkspaceID: "sp5", TabID: "tb5", CleanupPending: true},
+		{PaneID: "t6", WorkspaceID: "sp6", TabID: "tb6"},
+	}
+	h := newHCTest(f)
+	previous, err := h.Previous(a, known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var panes []string
+	for _, s := range previous {
+		panes = append(panes, s.PaneID)
+		if err := h.Remove(s, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Join(panes, ","); got != "t1,t2,t5" {
+		t.Fatalf("previous panes = %s", got)
+	}
+	if got := strings.Join(f.calls, ","); got != "kill t1,rm t1,kill t2,rm t2,rm t5" {
+		t.Fatalf("cleanup order = %s", got)
+	}
+}
+
+func TestHCRemoveKeepsSharedLastTabBeforeEndingAgent(t *testing.T) {
+	a := hcAutomation()
+	s := Session{PaneID: "t8", WorkspaceID: "sp1", TabID: "tb1", Workspace: config.WorkspaceExisting}
+	f := &fakeHC{terminals: []string{"t8"}, gets: map[string]hc.Terminal{
+		"t8": automationTerminal("t8", a.Name, "sp1", "tb1", "live"),
+	}}
+	f.onKill = func() {
+		if f.labels["herdr.space"] != s.WorkspaceID || f.labels["herdr.tab"] != s.TabID ||
+			f.labels["automation"] != "" || len(f.argv) != 0 {
+			t.Fatalf("shared tab needs a plain shell before kill, labels = %v, argv = %v", f.labels, f.argv)
+		}
+	}
+	if err := newHCTest(f).Remove(s, a); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.calls, ","); got != "kill t8,rm t8" {
+		t.Fatalf("cleanup order = %s", got)
+	}
+}
+
+func TestHCRemoveRefusesReusedAddressAfterKill(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*hc.Terminal)
+	}{
+		{"creation", func(term *hc.Terminal) { term.CreatedMS++ }},
+		{"tab", func(term *hc.Terminal) { term.Labels["herdr.tab"] = "tb2" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := hcAutomation()
+			s := Session{
+				PaneID: "t1", WorkspaceID: "sp1", TabID: "tb1", Workspace: config.WorkspaceRoot,
+			}
+			f := &fakeHC{gets: map[string]hc.Terminal{
+				"t1": automationTerminal("t1", a.Name, "sp1", "tb1", "live"),
+			}}
+			f.onKill = func() {
+				replacement := automationTerminal("t1", a.Name, "sp1", "tb1", "finished")
+				tc.change(&replacement)
+				f.gets["t1"] = replacement
+			}
+			err := newHCTest(f).Remove(s, a)
+			if err == nil || err.Error() != "terminal identity changed after kill" ||
+				strings.Join(f.calls, ",") != "kill t1" {
+				t.Fatalf("err = %v, calls = %v", err, f.calls)
+			}
+		})
 	}
 }
