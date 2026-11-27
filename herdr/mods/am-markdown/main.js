@@ -15,7 +15,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec, hc, home, shared, setShared, notify, focused, nextCommand, readTextFile, watchFolder } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec, hc, shared, setShared, notify, focused, nextCommand, readTextFile, watchFolder } from "herdr";
 import { markdownCandidates, resolve, label } from "./marks.js";
 import { openDefault } from "./open.js";
 
@@ -53,6 +53,10 @@ function prose(text, file) {
 // How much of the terminal to read, and how many files to offer.
 const LINES = 600;
 const OFFER = 12;
+// `hc read --json` answers `complete: false` when it gives the screen alone, and `why`: the pane's
+// state. Any other `why` (a later hc's, or none) is still a partial read.
+const PARTIAL = { working: "Pane is working", blocked: "Pane is blocked", error: "Pane has an error" };
+const partialNote = (why) => `${PARTIAL[why] ?? "Pane was not fully read"}: only paths on screen`;
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
@@ -145,6 +149,7 @@ export default class MdMenu extends View {
     this.git = null;
     this.marks = [];
     this.note = null;
+    this.searching = false;
     this.handle = cx.focus_handle();
     this.handle.focus();
     const p = props();
@@ -168,12 +173,14 @@ export default class MdMenu extends View {
     const term = tg.terminal ?? pane?.terminal ?? null;
     this.origin = anchor?.pane ?? pane?.pane ?? null;
     this.tab = anchor?.tab ?? pane?.tab ?? focused()?.tab ?? null;
-    if (term)
+    if (term) {
+      this.searching = true;
       cx.spawn(async (cx) => {
         await this.find(term, pane);
+        this.searching = false;
         cx.notify();
       });
-    else this.note = "No terminal in this tab";
+    } else this.note = "No terminal in this tab";
   }
 
   // The Markdown files this terminal's text shows, newest first, kept only if they exist.
@@ -181,27 +188,45 @@ export default class MdMenu extends View {
     try {
       const on = term.includes("/") ? term.split("/")[0] : null;
       const cwd = pane?.cwd ?? focused()?.cwd ?? null;
-      const read = await hc(["read", term, "--lines", String(LINES)]);
+      const read = await hc(["read", term, "--lines", String(LINES), "--json"]);
+      if (read?.code !== 0) return void (this.note = `Could not read this terminal: ${String(read?.stderr || `hc read exited ${read?.code}`).trim()}`);
+      // `--json` says how the pane was read; text that is not JSON is taken as the text itself.
+      let text = read.stdout ?? "", hint = null;
+      try {
+        const j = JSON.parse(text);
+        if (j && typeof j.text === "string") ({ text } = j), (hint = j.complete === false ? partialNote(j.why) : null);
+      } catch {}
       if (!cwd) return void (this.note = "No folder for this terminal");
       // A path in output may be relative to the shell's folder or to the repo's root.
       const roots = [cwd];
       const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
       const root = top?.code === 0 ? top.stdout.trim() : "";
       if (root && root !== cwd) roots.push(root);
-      const found = [];
-      for (const raw of markdownCandidates(read?.stdout ?? "").reverse())
-        for (const path of resolve(raw, roots, home()))
-          if (path && !found.some((f) => f.path === path)) found.push({ path, rel: label(path, cwd) });
-      if (!found.length) return void (this.note = "No Markdown files in this terminal");
-      // One process for every check: `[ -f ]` exits 1 when the last one isn't, so read stdout only.
+      // `~/` stays as printed: the machine the terminal runs on expands it, in the check below.
+      const args = [];
+      for (const raw of markdownCandidates(text).reverse())
+        for (const path of raw.startsWith("~/") ? [raw] : resolve(raw, roots, ""))
+          if (path && !args.includes(path)) args.push(path);
+      if (!args.length) return void (this.note = hint ?? "No Markdown files in this terminal");
+      // One process for every check, printing `printed<TAB>resolved` for the files that exist:
+      // `[ -f ]` exits 1 when the last one isn't, so read stdout only.
       const seen = await exec(
         "sh",
-        ["-c", 'for f do [ -f "$f" ] && printf "%s\\n" "$f"; done', "am-markdown", ...found.slice(0, 60).map((f) => f.path)],
+        ["-c", 'for f do case "$f" in "~/"*) p="$HOME/${f#??}";; *) p=$f;; esac; [ -f "$p" ] && printf "%s\\t%s\\n" "$f" "$p"; done', "am-markdown", ...args.slice(0, 60)],
         { on },
-      ).catch((e) => ({ stdout: e?.stdout ?? "" }));
-      const live = new Set((seen.stdout ?? "").split("\n").filter(Boolean));
-      this.marks = found.filter((f) => live.has(f.path)).slice(0, OFFER).map((f) => ({ ...f, on }));
-      if (!this.marks.length) this.note = "No Markdown files in this terminal";
+      );
+      const live = new Map();
+      for (const line of (seen.stdout ?? "").split("\n")) {
+        const [arg, path] = line.replace(/\r$/, "").split("\t");
+        if (arg && path) live.set(arg, path);
+      }
+      const found = [];
+      for (const arg of args) {
+        const path = live.get(arg);
+        if (path && !found.some((f) => f.path === path)) found.push({ path, rel: label(path, cwd) });
+      }
+      this.marks = found.slice(0, OFFER).map((f) => ({ ...f, on }));
+      this.note = this.marks.length ? hint : hint ?? "No Markdown files in this terminal";
     } catch (e) {
       this.note = String(e?.message ?? e);
     }
@@ -344,9 +369,10 @@ export default class MdMenu extends View {
               div().mx(7).my(4).h(1).bg(t.border),
               div().px(8).py(3).text_size(11).text_color(t.dim).child("Markdown in this terminal"),
               ...this.marks.map(markRow),
+              ...(this.note ? [div().px(8).py(3).text_size(11).text_color(t.dim).child(this.note)] : []),
             ]
-          : this.note
-            ? [div().mx(7).my(4).h(1).bg(t.border), div().px(8).py(3).text_size(11).text_color(t.dim).child(this.note)]
+          : this.searching || this.note
+            ? [div().mx(7).my(4).h(1).bg(t.border), div().px(8).py(3).text_size(11).text_color(t.dim).child(this.searching ? "Searching…" : this.note)]
             : []),
       ]);
   }
