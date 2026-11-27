@@ -21,6 +21,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { AcpAdapter, BRIDGE_PATH } from '../src/host/adapter.js'
 import { AGY_OFF_CHECKED, AGY_OFF_SKILLS_NAME, agyOffPaths } from '../src/host/agy-off.js'
 import { Backchannel, signatureOf } from '../src/host/backchannel.js'
+import { mcpName } from '../src/host/names.js'
 import { AGY, AGY_OFF_ARGS, agyWorld, approvalTeam, unixOnly } from './fixtures/agy-world.js'
 import { answerGroup, groupApprovals } from '../../bots-dsh/src/client/approvals.js'
 import { codexWorld, scheduled, turnOn } from './fixtures/codex-native-world.js'
@@ -669,7 +670,7 @@ test('AD2T-1 verified unbound operation conflict leaves an unknown id independen
     const { run } = h.adapter.live.get(record.sessionId)
     // Seed only the verified identity. No ACP prompt owned this synthetic Skills claim.
     const tool = { id: mismatch }
-    run.markCall(tool, { name: 'mcp__dsh__load_skill' }, run.sessionId)
+    run.markCall(tool, { name: mcpName(record.serverName, SKILL) }, run.sessionId)
     run.tools.set(mismatch, tool)
     seeded = { operation: tool.skillOperation, prompt: tool.skillPrompt, bridge: tool.skillBridge }
   })
