@@ -88,6 +88,7 @@ export const REVIEW_GUARD_COPY = Object.freeze({
   tickNote: 'On by default. You can turn it off later in Details.',
   hard: "Work waits for {reviewer}'s verdict on the plan: file changes, commands and messages to other Bots are refused until it answers.",
   asks: 'Held only for the steps Claude Code asks about. Its own allow rules, hooks and saved approvals can let a step run before the guard sees it, and that step may still show as refused.',
+  readOnly: "Until {reviewer} answers the plan, Codex runs read-only inside this Bot's folder; then the chosen level applies.",
   level: 'Not held at this level: nothing asks before acting. Only the delivery mark shows unreviewed work.',
   agent: 'Not held on this agent: its own tools run without asking. Only the delivery mark shows unreviewed work.',
   scope: "Held only in this Bot's own chat and the subagents it starts there. Its scheduled tasks that open a new conversation and its Omni automation runs that open their own conversation are not held.",
@@ -108,15 +109,16 @@ export const REVIEW_GUARD_COPY = Object.freeze({
  * Antigravity, Hermes).
  * @param {object} bot - the Bot as the view has it (`nativeToolsBlock` included).
  * @param {'full'|'auto'|'ask'} level - the Bot's level: Full access, Auto, or one that asks.
- * @returns {'hard'|'asks'|'level'|'agent'} the reach.
+ * @returns {'hard'|'asks'|'level'|'agent'|'readOnly'} the reach.
  */
-export function reviewGuardReach(bot, level) {
+export function reviewGuardReach(bot, level, gated = bot?.reviewGuard === true) {
   const remote = ref => typeof ref === 'string' && ref.startsWith('hermes-remote/')
   if (remote(bot?.model) || remote(bot?.appliedModel)) return 'agent'
   const mark = effectiveMarkOf(bot)
   if (mark === 'acp-antigravity' || mark === 'acp-hermes') return 'agent'
-  if (bot?.nativeToolsBlock === 'model-kept') return 'agent'
+  if (bot?.nativeToolsBlock === 'model-kept') return gated && mark === 'acp-codex' ? 'readOnly' : 'agent'
   if (bot?.nativeToolsBlock !== undefined || !nativeToolsOn(bot)) return 'hard'
-  if (mark === 'acp-claude') return level === 'full' || level === 'auto' ? 'level' : 'asks'
+  if (mark === 'acp-codex' && gated) return 'readOnly'
+  if (mark === 'acp-claude') return !gated && (level === 'full' || level === 'auto') ? 'level' : 'asks'
   return 'agent'
 }

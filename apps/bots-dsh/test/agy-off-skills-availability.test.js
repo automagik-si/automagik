@@ -29,7 +29,10 @@ function world(t, version) {
   }
   install(rt)
   h.services.omniTeam = rt
-  h.service.botIdentity(id => ({ name: id }))
+  h.service.botIdentity((id, request) => {
+    if (request?.policy) return id === 'eligible' ? { solverPolicy: { state: 'none' } } : undefined
+    return { name: id }
+  })
   const tool = skillTool(rt)
   let executions = 0
   h.services.tools = {

@@ -28,7 +28,7 @@ export function holdNativeStartup(t, w) {
   return { entered: entered.promise, release: release.resolve }
 }
 
-export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
+export function nativeWorld(t, { identity, hidden, managed = true, env, policyState, questionGuard, codexPatch } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-managed-native-'))
   const path = join(dir, 'trace.ndjson')
   const agents = new Map()
@@ -51,6 +51,7 @@ export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
   }
   const ctx = {
     agents: { get: id => agents.get(id), turnBoundaryOf: () => ({ lastTurn: 1 }) },
+    sessions: { get: id => agents.get(id)?.session },
     get: name => services[name],
     logger: { warn() {}, info() {} },
   }
@@ -67,13 +68,13 @@ export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
   })
   const { hardAsk, disableBuiltInTools, modeFor } = AGENTS[CLAUDE]
   const claude = { ...cli(CLAUDE), hardAsk, disableBuiltInTools, modeFor }
-  const codex = cli(CODEX)
+  const codex = { ...cli(CODEX), ...codexPatch }
   const backchannel = new Backchannel({ ctx })
   const identityReaders = createIdentityReaders(() => {})
   if (managed) identityReaders.register(identity ?? (() => undefined))
   const adapter = new AcpAdapter(ctx, new Map([[CLAUDE, claude], [CODEX, codex]]), {
     botIdentity: identityReaders.read, teamManaged: identityReaders.everRegistered,
-    nativeTools: () => hidden, dshTools: () => undefined, backchannel,
+    nativeTools: () => hidden, dshTools: () => undefined, backchannel, policyState, questionGuard,
   })
   t.after(() => {
     adapter.dispose()
@@ -82,30 +83,31 @@ export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
   })
   const events = event => (existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
     .filter(row => row.event === event)
-  function chat(id) {
-    const session = Session.create(id, undefined, { version: 4, id, createdAt: 0, isSeeded: false, cwd: dir })
+  function chat(id, { cwd = dir, header } = {}) {
+    const session = Session.create(id, undefined, { version: 4, id, createdAt: 0, isSeeded: false, cwd, ...header })
     session.append('turn/start', { turn: 1 })
     session.append('step/start', { turn: 1, step: 1 })
     const agent = { session, ctx: { tools: { register: () => () => {} } } }
     agents.set(id, agent)
     const history = []
-    async function turn(message, provider = CLAUDE, generated = []) {
+    async function turn(message, provider = CLAUDE, generated = [], model = 'default') {
       history.push(typeof message === 'string' ? person(`plain: ${message}`) : message, ...generated)
       for (let step = 0; step < 4; step++) {
         const chunks = []
-        for await (const chunk of adapter.stream(markAgentLoopRequest({ provider, model: 'default', sessionId: id, messages: [...history] }))) chunks.push(chunk)
+        for await (const chunk of adapter.stream(markAgentLoopRequest({ provider, model, sessionId: id, messages: [...history] }))) chunks.push(chunk)
         const content = chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block)
         history.push({ role: 'assistant', source: { kind: 'model', provider, model: 'default' }, content })
         const calls = content.filter(block => block.type === 'tool-call')
         if (calls.length === 0) return chunks
         for (const call of calls) {
-          const result = await adapter.tool.execute(JSON.parse(call.arguments), { agent, callId: call.id, signal: new AbortController().signal })
+          const args = JSON.parse(call.arguments)
+          const result = await adapter.tool.execute(args, { agent, callId: call.id, arguments: args, signal: new AbortController().signal })
           history.push({ role: 'tool', toolCallId: call.id, source: { kind: 'tool', callId: call.id }, content: [{ type: 'text', text: result.text }] })
         }
       }
       assert.fail('the fake agent did not finish its turn')
     }
-    return { session, history, turn }
+    return { session, agent, history, turn }
   }
   function assertToolset(index, expected) {
     const row = events('new-session')[index]
@@ -115,5 +117,5 @@ export function nativeWorld(t, { identity, hidden, managed = true, env } = {}) {
     assert.equal(list.tools.includes('bash'), !expected)
     assert.equal(list.tools.includes('read'), !expected)
   }
-  return { adapter, backchannel, claude, services, chat, events, assertToolset, executed, identityReaders }
+  return { dir, adapter, backchannel, claude, services, chat, events, assertToolset, executed, identityReaders }
 }

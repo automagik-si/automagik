@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { install as installHooks } from '../src/host/extend.js'
 import { install } from '../src/host/prompt.js'
 import { install as installNative } from '../src/host/native-tools.js'
+import { install as installToolDeny } from '../src/host/tool-deny.js'
 import { fakeContext } from './fake-ctx.js'
 
 const BOTS = [
@@ -92,8 +93,8 @@ test('an Agent with a different Session ID keeps its pre-role identity text', t 
 })
 
 // #1564 follow-up (P-a): a fresh scheduled Session whose task belongs to one Bot follows that
-// Bot's switch through a name-less identity: only the three native getters, no profile.
-test('a fresh scheduled Session of one Bot gets only the native getters; others get no identity', (t) => {
+// Bot's switch through a name-less identity: native tool and policy getters, with no Bot identity.
+test('a fresh scheduled Session of one Bot gets native and policy getters; others get no identity', (t) => {
   let read
   const sessions = new Map()
   const bots = new Map([
@@ -125,12 +126,22 @@ test('a fresh scheduled Session of one Bot gets only the native getters; others 
   }
   installHooks(rt)
   installNative(rt)
+  installToolDeny(rt)
   install(rt)
   sessions.set('fresh-worker', { mode: 'workspace-write' })
   sessions.set('fresh-ro', { mode: 'read-only' })
   const fresh = read('fresh-worker')
   assert.deepEqual(Object.keys(fresh), [])
-  assert.deepEqual(Object.getOwnPropertyNames(fresh).sort(), ['nativeTools', 'nativeToolsAgent', 'nativeToolsBlocked'])
+  assert.deepEqual(Object.getOwnPropertyNames(fresh).sort(), [
+    'confineDeny', 'guardedSolver', 'nativeTools', 'nativeToolsAgent', 'nativeToolsBlocked',
+    'planGate', 'solver', 'solverPolicy', 'solverWorkspace',
+  ])
+  assert.equal(fresh.planGate, false)
+  assert.equal(fresh.solver, false)
+  assert.equal(fresh.guardedSolver, false)
+  assert.equal(fresh.solverPolicy.state, 'none')
+  assert.equal(fresh.confineDeny, undefined)
+  assert.equal(fresh.solverWorkspace, undefined)
   for (const key of ['name', 'role', 'instructions', 'rolePrompt', 'needsDshTools']) assert.equal(key in fresh, false, key)
   assert.equal(fresh.nativeTools, true)
   assert.equal(fresh.nativeToolsBlocked, false)

@@ -269,7 +269,8 @@ test('the review guard lines have Chinese and Brazilian Portuguese texts with th
   const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
   const holes = text => [...String(text).matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort().join(',')
   const keys = Object.values(REVIEW_GUARD_COPY)
-  assert.equal(keys.length, 15)
+  assert.equal(keys.length, 16)
+  assert.ok(keys.includes("Until {reviewer} answers the plan, Codex runs read-only inside this Bot's folder; then the chosen level applies."))
   for (const key of keys) {
     assert.equal(typeof DICTIONARY.zh[key], 'string', key)
     assert.equal(typeof pt[key], 'string', key)

@@ -4,6 +4,8 @@
 // the tool/call and tool/result rows itself, as for any tool. The body runs nothing: it waits
 // for the agent's call to finish, and when the agent asks permission for it, asks DSH's
 // approval service and hands the agent the answer.
+import { realpathSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { contentImages, contentText, isTerminal } from './acp.js'
@@ -17,6 +19,67 @@ const kindOf = kind => (DSH_KINDS.has(kind) ? kind : 'other')
 const OUTPUT_LIMIT = 20_000
 const LASTING_ONLY = 'lasting-only'
 const CONFINED = 'confined'
+const STALE_QUESTION = 'The agent’s permission question no longer matches this call.'
+
+function managedCommand(live, tool, permission) {
+  const mode = live.run?.modes?.currentModeId
+  const input = permission?.call?.rawInput ?? tool.rawInput
+  const network = typeof permission?.title === 'string'
+    && /^(?:https?|socks5(?:tcp|udp)) network access to \S/i.test(permission.title)
+  return typeof mode === 'string' && /^permission-profile:automagik-(?:read|workspace|gate|image)-[0-9a-f]{32}$/.test(mode)
+    && permission?.startsCommand === true && tool.mcp !== true && !network
+    && input !== null && typeof input === 'object'
+    && [Object.prototype, null].includes(Object.getPrototypeOf(input))
+    && typeof input.command === 'string' && input.command.trim() !== '' && Object.hasOwn(input, 'command')
+    && Reflect.ownKeys(input).every(key => key === 'command' || key === 'cwd')
+    && permission.options.some(option => option.kind === 'allow_once' || option.kind === 'allow_always')
+}
+
+const snapshotOf = call => structuredClone(callArguments(call))
+function compatibleCall(captured, current) {
+  const { parent: capturedParent, ...before } = captured
+  const { parent: currentParent, ...after } = current
+  return (capturedParent === undefined || currentParent === undefined || capturedParent === currentParent)
+    && isDeepStrictEqual(before, after)
+}
+
+const plainInput = input => input !== null && typeof input === 'object'
+  && [Object.prototype, null].includes(Object.getPrototypeOf(input))
+
+// Claude's completed Bash input can omit a streamed cd to its working directory.
+const LEADING_CD = /^cd (?:'([^']+)'|"([^"\\$`!]+)"|([^\s'"\\$`&;|<>()*?[\]{}!]+)) && /
+
+function isWorkspacePath(path, workspace) {
+  // A same-directory alias can still change Bash's logical PWD.
+  return path === workspace && typeof path === 'string' && isAbsolute(path) && !/[\x00-\x1f\x7f]/.test(path)
+    // Shell cd can resolve .. logically before following symlinks.
+    && !path.split(process.platform === 'win32' ? /[\\/]/ : '/').includes('..')
+    && realpathSync.native(path) === workspace
+}
+
+function stripsWorkspaceCd(before, after, launch) {
+  const workspace = launch?.workspace
+  if (workspace === undefined || typeof before.command !== 'string'
+    || typeof after.command !== 'string' || after.command === '') return false
+  const prefix = LEADING_CD.exec(before.command)
+  return prefix !== null && before.command.slice(prefix[0].length) === after.command
+    && isWorkspacePath(launch.workspaceArgument, workspace)
+    && isWorkspacePath(prefix[1] ?? prefix[2] ?? prefix[3], workspace)
+    && [before, after].every(input => ['cwd', 'workdir'].every(key =>
+      !Object.hasOwn(input, key) || isWorkspacePath(input[key], workspace)))
+}
+
+// The first mirror can precede additional input fields and presentation details.
+function refinesCall(earlier, completed, launch) {
+  if (earlier.id !== completed.id || earlier.kind !== completed.kind
+    || (earlier.parent !== undefined && earlier.parent !== completed.parent)) return false
+  const { input: before } = earlier
+  const { input: after } = completed
+  return isDeepStrictEqual(before, after) || (plainInput(before) && plainInput(after)
+    && Reflect.ownKeys(before).every(key => Object.hasOwn(after, key)
+      && (isDeepStrictEqual(before[key], after[key])
+        || (key === 'command' && completed.kind === 'execute' && stripsWorkspaceCd(before, after, launch)))))
+}
 
 const diffsOf = content => (Array.isArray(content) ? content : [])
   .filter(item => item?.type === 'diff' && typeof item.path === 'string')
@@ -254,6 +317,73 @@ export function mirrorTool(host) {
         rejectDispatched()
         return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent’s permission question no longer matches this call.' }
       }
+      // Decisions apply to a captured question on the current child or direct tool. The DSH
+      // record still supplies the stricter dispatch binding when this is a nested mirror.
+      const capture = (target, question, nested = false) => {
+        let captured
+        try { captured = snapshotOf(question.call) } catch {}
+        const structuredName = question.call?.structuredName
+        const valid = () => {
+          if (!ownsTool() || run.tools.get(target.id) !== target || target.permission !== question
+            || exec.signal?.aborted || run.cancelled || run.disposed || question.signal?.aborted
+            || target.retired || target.ended || target.unanswerable || target.parentConflict
+            || typeof structuredName !== 'string' || structuredName === '' || question.call?.structuredName !== structuredName
+            || target.structuredName !== structuredName || captured?.id !== target.id) return false
+          if (dispatched && !nested && !matchesQuestion(question)) return false
+          try {
+            const fromQuestion = snapshotOf(question.call)
+            const fromTool = snapshotOf(target)
+            const direct = !nested && dispatched === undefined && captured.parent === undefined
+              && fromQuestion.parent === undefined && fromTool.parent === undefined
+            const nativeBash = live.native === true && live.provider === 'acp-claude' && structuredName === 'Bash'
+              && target.mcp !== true && target.mcpServer === undefined
+            const launch = direct && nativeBash ? live : undefined
+            return compatibleCall(captured, fromQuestion) && compatibleCall(captured, fromTool)
+              && compatibleCall(fromQuestion, fromTool)
+              && (nested || refinesCall(args, captured, launch) && refinesCall(exec.arguments, captured, launch))
+          } catch { return false }
+        }
+        const decisionFor = () => {
+          try {
+            const decision = host.questionGuard?.({
+              agent, args: structuredClone(captured), name: structuredName, provider: live.provider,
+              cwd: live.workspace, callId: nested ? `${callId}:child:${target.id}` : callId,
+            })
+            if (decision && typeof decision.then === 'function') throw new Error('Expected a synchronous guard.')
+            return decision
+          } catch {
+            return { decision: 'refuse', text: 'The Bot team could not confirm this call’s rules.' }
+          }
+        }
+        const answer = (outcome, text, alreadyChecked = false) => {
+          if (outcome === 'allowed-once' && !alreadyChecked && valid()) {
+            const decision = decisionFor()
+            if (decision?.decision === 'refuse') return answer('rejected', decision.text, true)
+          }
+          const current = valid()
+          if (!current || outcome === 'allowed-once' && !question.options.some(option => option.kind === 'allow_once')) {
+            if (target.permission === question) target.refusedReason = STALE_QUESTION
+            question.answer(optionFor('rejected', question.options))
+            return
+          }
+          if (text) target.refusedReason = text
+          question.answer(optionFor(outcome, question.options))
+        }
+        const decide = () => {
+          if (typeof host.questionGuard !== 'function' || live.policyManaged !== true) return false
+          if (managedCommand(live, target, question)) return false
+          if (!valid()) {
+            answer('rejected', STALE_QUESTION)
+            return true
+          }
+          const decision = decisionFor()
+          if (decision?.decision === 'allow') answer('allowed-once', undefined, true)
+          else if (decision?.decision === 'refuse') answer('rejected', decision.text)
+          else return false
+          return true
+        }
+        return { answer, decide }
+      }
       if (marked && (run?.spec?.provider !== 'acp-claude' || live.native !== true || (tool && !ownedOnEntry))) {
         observation.mismatch = true
         return { title: args.title, kind: args.kind, status: 'failed', text: observation.reason }
@@ -301,6 +431,8 @@ export function mirrorTool(host) {
                 permission.answer(optionFor('rejected', permission.options))
                 continue
               }
+              const captured = capture(tool, permission)
+              if (captured.decide()) continue
               let outcome
               try {
                 outcome = await ask(host, live, tool, exec, permission)
@@ -309,28 +441,33 @@ export function mirrorTool(host) {
                 outcome = 'rejected'
               }
               const decision = dispatched && (outcome === 'unavailable' || !matchesQuestion(permission)) ? 'rejected' : outcome
-              permission.answer(optionFor(decision, permission.options))
+              if (live.policyManaged === true && decision === 'allowed-once') captured.answer(decision)
+              else permission.answer(optionFor(decision, permission.options))
               continue
             }
             if (isTerminal(tool) || !live.run.busy) break
             const nested = nestedQuestion(live, tool)
             if (nested !== undefined) {
               const question = nested.permission
-              if (dispatchNested) {
+              const captured = capture(nested, question, true)
+              if (!marked && question.call?.structuredName !== 'request_permissions' && captured.decide()) continue
+              // Auto review reads a call from its own DSH execution. A nested call asked from
+              // the waiting Agent card has none yet, so at Auto run its own card here, inside
+              // the open step: the reviewer answers it like any call, and only an escalation
+              // reaches the person. Manual and Full keep the direct dialog below.
+              const auto = !dispatchNested
+                && levelOf(host.approval(), exec.agent?.session, host.sandboxPolicy?.(), host.permissionPresets?.()).auto === true
+              if (dispatchNested || (auto && live.policyManaged === true)) {
                 let answered
                 try { answered = await host.runNested?.(live, nested, exec, question) } catch {}
                 if (answered !== true) question.answer(optionFor('rejected', question.options))
                 continue
               }
-              // Auto review reads a call from its own DSH execution. A nested call asked from
-              // the waiting Agent card has none yet, so at Auto run its own card here, inside
-              // the open step: the reviewer answers it like any call, and only an escalation
-              // reaches the person. Manual and Full keep the direct dialog below.
-              const level = levelOf(host.approval(), exec.agent?.session, host.sandboxPolicy?.(), host.permissionPresets?.())
-              if (level.auto === true && typeof host.runNested === 'function'
-                && await host.runNested(live, nested, exec)) continue
+              if (auto && typeof host.runNested === 'function' && await host.runNested(live, nested, exec)) continue
               question.asked = true
-              question.answer(optionFor(await ask(host, live, nested, exec, question, { review: false }), question.options))
+              const outcome = await ask(host, live, nested, exec, question, { review: false })
+              if (live.policyManaged === true && outcome === 'allowed-once') captured.answer(outcome)
+              else question.answer(optionFor(outcome, question.options))
               continue
             }
             await changed(tool, exec.signal, live.native === true ? live.run : undefined)
@@ -508,22 +645,12 @@ async function ask(host, live, tool, exec, permission, { review = true } = {}) {
   tool.lastingReason = undefined
   tool.refusedReason = undefined
   const options = permission?.options ?? []
-  const mode = live.run?.modes?.currentModeId
-  const call = permission?.call
-  const rawInput = call?.rawInput ?? tool.rawInput
-  const network = typeof permission?.title === 'string'
-    && /^(?:https?|socks5(?:tcp|udp)) network access to \S/i.test(permission.title)
   // Codex keeps the managed profile's deny rule even after approving a command escalation.
   // codex-acp's standard renderer uses execute/pending for both new commands and write_stdin approvals.
-  if (typeof mode === 'string' && /^permission-profile:automagik-(?:read|workspace|image)-[0-9a-f]{32}$/.test(mode)
-    && permission?.startsCommand === true
-    && tool.mcp !== true && !network
-    && rawInput !== null && typeof rawInput === 'object'
-    && [Object.prototype, null].includes(Object.getPrototypeOf(rawInput))
-    && Object.hasOwn(rawInput, 'command') && typeof rawInput.command === 'string' && rawInput.command.trim() !== ''
-    && Reflect.ownKeys(rawInput).every(key => key === 'command' || key === 'cwd')
-    && options.some(option => option.kind === 'allow_once' || option.kind === 'allow_always')) {
-    tool.confinedReason = `${live.name} runs inside its own folder at this Bot's level, so an approval cannot run ${tool.title} outside it. Raise the Bot's level to Full access to run it.`.replace(/\s+/g, ' ').slice(0, 300)
+  if (managedCommand(live, tool, permission)) {
+    tool.confinedReason = live.appliedGate === true
+      ? `${live.name} stays read-only until the reviewer answers the plan. Send again after the verdict.`
+      : `${live.name} runs inside its own folder at this Bot's level, so an approval cannot run ${tool.title} outside it. Raise the Bot's level to Full access to run it.`.replace(/\s+/g, ' ').slice(0, 300)
     live.confinedReason = tool.confinedReason
     return CONFINED
   }

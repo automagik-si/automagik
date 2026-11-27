@@ -14,10 +14,11 @@ import { addStrings, hostText, t } from './i18n.js'
 import { presetDanger, presetName } from './permission-picker.js'
 import { ROLES_OFF_REASON, rolesOn } from '../shared/roles.js'
 import { SOLVER_ROLE_ID } from '../shared/solver-method.js'
+import { isUnofferedSolverModel } from '../shared/solver-agent.js'
 import { nameProblem } from '../shared/mentions.js'
 import { nativeSwitchView, nativeToolsCopy, nativeToolsZh } from './native-tools-copy.js'
 import {
-  SOLVER_LOOKS, agentOf, createSolver, guardLevelOf, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
+  SOLVER_LOOKS, createSolver, guardLevelOf, isHermesRemote, reviewerChoices, reviewerModels, reviewerName,
   reviewerPayload, solverAutoHint, solverCandidate, solverCatalog, solverLook, solverPayload, solverStartModel, uncertain,
 } from './solver-draft.js'
 import { CHOOSE_DIFFERENT, chosenIdentityOf } from '../shared/solver-model.js'
@@ -34,8 +35,7 @@ const roleNotes = {
 
 const pick = list => list[Math.floor(Math.random() * list.length)]
 
-// Antigravity cannot run a Solver end to end yet. The host's Solver agent check enforces this too.
-export const solverOwnRoster = roster => ({ ...roster, models: roster.models?.filter(row => agentOf(row.ref) !== 'acp-antigravity') })
+export const solverOwnRoster = roster => ({ ...roster, models: roster.models?.filter(row => !isUnofferedSolverModel(row.ref)) })
 
 export function NewSolver({ roster, actions, brief = '', sectionId = null, onBack, canGoBack = false, onCreated }) {
   const [look, setLook] = useState(() => solverLook())
@@ -141,8 +141,9 @@ export function NewSolver({ roster, actions, brief = '', sectionId = null, onBac
   // line Details shows for the chosen model and level, so it never claims a hold the route lacks.
   const candidate = solverCandidate(roster, model, native)
   const level = guardLevelOf(permission, presetDanger(permission))
-  const guardReach = model && choice.kind !== 'fresh' ? reviewGuardReach(candidate, level) : null
-  const guardHint = guardReach === null || guardReach === 'hard' ? null : t(REVIEW_GUARD_COPY[guardReach])
+  const guardReach = model && choice.kind !== 'fresh' ? reviewGuardReach(candidate, level, guarded) : null
+  const guardHint = guardReach === null || guardReach === 'hard' ? null
+    : t(REVIEW_GUARD_COPY[guardReach], { reviewer: choice.name ?? reviewerName(roster, finalName) })
   const autoHint = model ? solverAutoHint(candidate, level) : null
   const worksWithout = shownView !== null && !shownView.disabled && ['acp-claude', 'acp-codex'].includes(shownView.mark)
   return h('div', { className: 'bt-create', role: 'dialog', 'aria-label': t('New Solver') },

@@ -1,8 +1,8 @@
-import { isAntigravityModel, SOLVER_AGENT_REFUSAL } from '../shared/solver-agent.js'
+import { isUnofferedSolverModel, solverAgentRefusal } from '../shared/solver-agent.js'
 import { refusal } from './refusal.js'
 
 export function assertSolverAgent(ref) {
-  if (isAntigravityModel(ref)) throw refusal(SOLVER_AGENT_REFUSAL)
+  if (isUnofferedSolverModel(ref)) throw refusal(solverAgentRefusal(ref))
 }
 
 // A crossing can outlive the request that admitted it. Its destination and its rollback

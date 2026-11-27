@@ -150,6 +150,7 @@ async function world(t, { manual = false, guard = true, attempt, replaceSessionO
     shell: true, workDir: dir, model: PROVIDER + '/default', nativeTools: true, nativeToolsAgent: PROVIDER,
     createdAt: 1, reviewGuard: guard,
   }
+  bot.reviewTrack = { requested: true, requestAt: 1, verdicts: [] }
   if (attempt) {
     const plan = { revision: 0, checks: ['check'], accepted: true, commands: { check: 'touch unasked-1' } }
     const solver = { request: 'req-2132', origin: 'person', attempts: {}, runs: {}, revision: 0, plan }
@@ -235,6 +236,7 @@ for (const [label, manual, why] of [
     const attempt = why === 'guard' ? undefined : why
     const w = await world(t, { manual, guard: !attempt, attempt })
     const before = JSON.stringify(w.bot.reviewTrack)
+    const progressBefore = JSON.stringify(w.bot.reviewTrack.solver)
     const callId = await w.execute('unasked')
     const ran = w.trace().find(event => event.event === 'own-tool-ran')
     assert.equal(ran.mode, manual ? 'default' : 'bypassPermissions')
@@ -243,7 +245,11 @@ for (const [label, manual, why] of [
     const row = w.closeOf(callId)
     const stop = w.stopOf(callId)
     assert.equal(stop.why, why)
-    assert.equal(JSON.stringify(w.bot.reviewTrack), before)
+    const { firstWorkAt, lastWorkAt, ...otherTrackFields } = w.bot.reviewTrack
+    assert.equal(JSON.stringify(otherTrackFields), before)
+    assert.equal(JSON.stringify(w.bot.reviewTrack.solver), progressBefore)
+    assert.equal(typeof firstWorkAt, 'number')
+    assert.equal(lastWorkAt, firstWorkAt)
     assert.notEqual(row.data.message.isError, true, outputOf(row))
     assert.match(outputOf(row), /ran 1/)
     assert.equal(stop.ran, true)

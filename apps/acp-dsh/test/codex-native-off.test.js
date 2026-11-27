@@ -9,7 +9,6 @@ import { test } from 'node:test'
 import { CATALOG_DROPS, keptModel, modelPart, NATIVE_OFF_NESTED, NATIVE_OFF_TOOLS, nativeOffLaunch, nativeOffSetup, offCatalog, pruneCatalogs } from '../src/host/codex-native.js'
 import { apply } from '../index.js'
 import { AGENTS } from '../src/host/agents.js'
-import { Session } from '@deepseek-ai/dsh-session'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { AgentRun } from '../src/host/acp.js'
 import { Catalog } from '../src/host/catalog.js'
@@ -378,7 +377,15 @@ const NOTICE = 'The tools setting changed; send again.'
 const ON = () => ({ name: 'Ada', nativeTools: true, nativeToolsAgent: CODEX })
 const OFF = () => ({ name: 'Ada' })
 const MODELS = [...CHECKED, 'gpt-6-astra', KEPT]
-const world = (t, options = {}) => codexWorld(t, { models: MODELS, ...options })
+const ordinaryIdentity = readDisplay => (id, request) =>
+  request?.policy ? { solverPolicy: { state: 'none' } } : readDisplay?.(id)
+
+function world(t, { identity, ...options } = {}) {
+  const w = codexWorld(t, { models: MODELS, ...options, identity: ordinaryIdentity(identity) })
+  w.adapter.policyState = w.identityReaders.readState
+  return w
+}
+
 const sessions = w => w.events('new-session')
 const servers = w => sessions(w).map(row => row.servers)
 const pids = w => sessions(w).map(row => row.pid)
@@ -407,15 +414,10 @@ function writingTools(w) {
   return asked
 }
 
-/** A Session whose header says it is a DSH subagent's child. */
+/** A DSH subagent with a registered ordinary parent and child. */
 function subagentChat(w, id) {
-  const session = Session.create(id, undefined, { version: 4, id, createdAt: 0, isSeeded: false, cwd: tmpdir(), origin: 'subagent' })
-  session.append('turn/start', { turn: 1 })
-  session.append('step/start', { turn: 1, step: 1 })
-  const agent = { session, ctx: { tools: { register: () => () => {} } } }
-  const get = w.adapter.ctx.agents.get
-  w.adapter.ctx.agents.get = sid => sid === id ? agent : get(sid)
-  return { session, history: [] }
+  const parent = w.chat(`${id}-parent`)
+  return w.chat(id, { header: { origin: 'subagent', parentSession: parent.session.id, delegationDepth: 1 } })
 }
 
 test('A1 OFF launch on a scheduled turn: bridge forced for a Bot without needsDshTools, read-only id, DSH edit writes at Workspace (one DSH ask) and at Full (none)', async t => {
@@ -564,7 +566,7 @@ test('A-S1 team registration during a standalone ON startup stops it before its 
   })
   const pending = turnOn(w, chat, owner('owner before the team'))
   await entered.promise
-  w.identityReaders.register(() => undefined)
+  w.identityReaders.register(ordinaryIdentity())
   gate.resolve()
   const stopped = await pending
   assert.deepEqual(textOf(stopped), [NOTICE])

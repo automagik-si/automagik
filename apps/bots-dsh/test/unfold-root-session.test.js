@@ -102,7 +102,7 @@ async function instance(t, { team = EMPTY, services = {} } = {}) {
       events,
       session: {
         id,
-        header: { cwd: cwds.get(id) ?? teamFolder },
+        header: { id, cwd: cwds.get(id) ?? teamFolder },
         get seq() { return events.length },
         append(type, data) {
           const event = { type, data, seq: events.length, time: Date.now() }

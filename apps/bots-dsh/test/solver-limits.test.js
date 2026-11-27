@@ -14,7 +14,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { fileURLToPath } from 'node:url'
 import { apply as applyAcp } from '../../acp-dsh/index.js'
-import { Session } from '@deepseek-ai/dsh-session'
+import { Session, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { AssistantStreamAccumulator, createAssistantMessage, LlmAdapter, markAgentLoopRequest, textOnlyImageText } from '@deepseek-ai/dsh-llm'
 import * as timeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 import * as native from '@deepseek-ai/dsh-tool-executor-native'
@@ -44,6 +44,15 @@ const reviewerModel = { provider: 'fake', model: 'reviewer-model' }
 const refOf = ({ provider, model }) => `${provider}/${model}`
 const content = text => [{ type: 'text', text }]
 
+function scopedReadMarker(t) {
+  // The fixture's app data lives under its own temp directory.
+  const folder = mkdtempSync(join(tmpdir(), 'solver-read-'))
+  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 5 }))
+  const marker = join(folder, 'fixture.txt')
+  writeFileSync(marker, 'synthetic research')
+  return marker
+}
+
 function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { liveTurn, configure, agents = new Map() } = {}) {
   const ctx = fakeContext()
   let identity
@@ -59,7 +68,8 @@ function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { live
       const model = id === 'reviewer' ? reviewerModel : solverModel
       agents.set(id, {
         id, model: { current: () => model },
-        session: { id, requestHeader: () => ({ config: model }) },
+        session: { id, header: { id, version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false },
+          requestHeader: () => ({ config: model }) },
         ctx: { tools: { restrict: () => () => {} }, effect: run => run() },
         followup(message) { this.message = message },
       })
@@ -106,9 +116,16 @@ function fixture(t, home = mkdtempSync(join(tmpdir(), 'solver-limits-')), { live
     ctx.emit('agent/inbox/claimed', { agent: agentOf(id), message })
     event(id, 'user/message', message)
   }
-  const botMessage = () => event('solver', 'user/message', { content: content('New Bot work.'), source: {
-    kind: 'bot', role: 'request', senderSessionId: 'other',
-  } })
+  const botMessage = async () => {
+    const agent = agentOf('solver')
+    if (ctx.get('agents') === undefined) ctx.provided.set('agents', { get: id => agents.get(id), list: () => [...agents.values()] })
+    const message = { id: `bot-message-${++seq}`, content: content('New Bot work.'), source: {
+      kind: 'bot', role: 'request', senderSessionId: 'other', exchangeId: `bot-exchange-${seq}`,
+    } }
+    const admit = ctx.listeners.get('agent/pre-step').find(listener => listener.name === 'admitBotStep')
+    assert.equal(await admit({ agent, messages: [message] }, () => true), true)
+    takeInput('solver', message)
+  }
   const finish = (id, text) => {
     event(id, 'assistant/message', { message: { content: content(text) } })
     event(id, 'turn/end', { reason: { kind: 'completed' } })
@@ -347,7 +364,7 @@ async function bridgeFixture(t, { pocket = false, extra = {}, withPolicies = fal
     if (!agent.ctx.tools.register) {
       const scope = createScope(scopeHost, agent)
       agent.ctx = scope.ctx
-      agent.session.header = header
+      agent.session.header = { ...agent.session.header, ...header }
       const events = [{ type: 'turn/start', data: { turn: 2 }, seq: 0 },
         { type: 'step/start', data: { turn: 2, step: 1 }, seq: 1 }]
       agent.session.snapshotEvents = (from, to) => events.slice(from, to)
@@ -763,7 +780,8 @@ for (const closesBy of ['result', 'step']) {
 
 test('AC-6 a different tool can run after ordinary Allow with a closed progress call ID', async t => {
   const name = 'read'
-  const h = await bridgeFixture(t, { holdDesktopFor: name })
+  const marker = scopedReadMarker(t)
+  const h = await bridgeFixture(t, { holdDesktopFor: name, extra: { workDir: dirname(marker) } })
   let executions = 0
   h.solver.ctx.tools.register(defineTool({
     name, description: 'Fixture read', parameters: {},
@@ -782,7 +800,7 @@ test('AC-6 a different tool can run after ordinary Allow with a closed progress 
     toolCallId: closed.callId, content: content('closed'), isError: true,
   } })
 
-  const read = h.start(name, {}, { callId: closed.callId })
+  const read = h.start(name, { file_path: marker }, { callId: closed.callId })
   t.after(() => read.abort.abort())
   await immediate()
   assert.deepEqual(h.desktop, [{ id: h.solver.id, name, callId: closed.callId }])
@@ -850,7 +868,7 @@ test('H3 the registered Auto action still requires the exact words from the pers
   assert.match(await auto(request, 'Work alone until delivered.'), /Auto is on/)
   assert.equal(h.rt.botOf('solver').reviewTrack.solver.auto, true)
   h.finish('solver', 'Delivered.')
-  h.botMessage()
+  await h.botMessage()
   const botRequest = h.rt.botOf('solver').reviewTrack.solver.request
   assert.match(await auto(botRequest, 'Work alone until delivered.'), /Only the person can turn Auto on/)
   assert.equal(h.rt.botOf('solver').reviewTrack.solver.auto, undefined)
@@ -1100,6 +1118,7 @@ test('Stage 6 review reply preserves person interruption and request replacement
 
   h.event('solver', 'turn/start', { turn: 3 })
   h.person('This is a new request.')
+  await h.rt.live.get('solver')?.solverRequest
   const replacement = await requestOf(h)
   assert.ok(replacement && replacement !== request)
   h.event('solver', 'turn/end', { reason: { kind: 'completed' } })
@@ -2696,7 +2715,7 @@ test('LA-3 a reply to another Bot leaves the person budget open', async t => {
   const h = await setup(t)
   const request = await requestOf(h)
   await h.progress('replan', { request, run: 'first' })
-  h.botMessage()
+  await h.botMessage()
   h.event('solver', 'turn/start', { turn: 1 })
   h.finish('solver', 'Reply to the other Bot.')
   h.person('Continue my task.')
@@ -2838,7 +2857,8 @@ test('LA-5 a person message during durable progress preserves its count', async 
 })
 
 test('Normal holds the fourth failure and deduplicates the run', async t => {
-  const h = await setup(t)
+  const marker = scopedReadMarker(t)
+  const h = await setup(t, { workDir: dirname(marker) })
   const request = await requestOf(h)
   assert.ok(request)
   await plan(h, request)
@@ -2848,7 +2868,7 @@ test('Normal holds the fourth failure and deduplicates the run', async t => {
   assert.match(await h.progress('checks', { request, run: 'three', results: [{ check: 'check-a', pass: false }] }), /Recorded/)
   assert.match(await checked(h, request, 'four', { exitCode: 1 }), /failed after 3 fix attempts/)
   await assert.rejects(h.execute('write', { file_path: 'out' }), /exact decision/)
-  assert.equal(await h.execute('read', {}), 'ran')
+  assert.equal(await h.execute('read', { file_path: marker }), 'ran')
   h.person('Use the new input.')
   await h.rt.save({ required: true })
   assert.equal(await h.execute('write', { file_path: 'out' }), 'ran')
@@ -2920,7 +2940,8 @@ test('Skills loads are reads under the Solver attempt hold and preserve check ev
 })
 
 test('The attempt hold survives Bot traffic, a role change and a restart until its question is answered', async t => {
-  let h = await setup(t, { reviewGuard: true })
+  const marker = scopedReadMarker(t)
+  let h = await setup(t, { reviewGuard: true, workDir: dirname(marker) })
   const request = await requestOf(h)
   for (const run of ['one', 'two']) assert.match(await h.progress('replan', { request, run }), /Recorded/)
   assert.match(await h.progress('replan', { request, run: 'two' }), /Recorded/)
@@ -2932,7 +2953,7 @@ test('The attempt hold survives Bot traffic, a role change and a restart until i
   for (const name of ['write', 'edit', 'bash', 'create_bot', 'remember', 'subagent']) {
     await assert.rejects(h.execute(name, { file_path: 'out' }), /attempt limit/)
   }
-  for (const [name, args] of [['read', {}], ['ask_user', {}], ['solver_progress', {}],
+  for (const [name, args] of [['read', { file_path: marker }], ['ask_user', {}], ['solver_progress', {}],
     ['write', { file_path: '.solver/notes.md' }], ['message_bot', { to: 'reviewer' }]]) {
     assert.equal(await h.execute(name, args), 'ran', name)
   }
@@ -2940,7 +2961,7 @@ test('The attempt hold survives Bot traffic, a role change and a restart until i
   const exec = { name: 'mcp__dsh__write', arguments: { file_path: 'out' }, agent: h.agentOf('solver'), callId: 'step' }
   assert.equal((await guard(exec, () => ({ kind: 'allow' }))).kind, 'deny')
   const child = h.agentOf('child')
-  child.session.header = { origin: 'subagent', parentSession: 'solver' }
+  child.session.header = { ...child.session.header, origin: 'subagent', parentSession: 'solver', delegationDepth: 1 }
   const ask = request => h.ctx.listeners.get('approval/request').at(-1)(request, () => 'allowed')
   assert.equal(await ask({ toolName: 'acp_tool', callId: 'native', agent: child, mirrorCall: { kind: 'edit', title: 'Write' } }), 'rejected')
   const bridge = { toolName: 'write', callId: 'bridge', agent: child, bridgeCall: {} }
@@ -2956,7 +2977,7 @@ test('The attempt hold survives Bot traffic, a role change and a restart until i
     h.rt.indexSessions()
   }
   await h.tool('ask_user', { question: 'Example: work alone until delivered?', options: [{ label: 'Use the input' }] }, bot.id, 'question')
-  h.botMessage()
+  await h.botMessage()
   h.event(bot.id, 'user/message', { content: content('Work alone until delivered.'), source: { kind: 'user', resumed: true } })
   h.finish(bot.id, 'I need the decision.')
   assert.equal(bot.reviewTrack.solver.request, track.solver.request)
@@ -2988,7 +3009,8 @@ test('The attempt hold survives Bot traffic, a role change and a restart until i
 
 test('Only current complete checks and an independent designated SHIP mark Done', async t => {
   const h = await setup(t)
-  t.mock.method(Date, 'now', () => 100)
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => ++now)
   const request = await requestOf(h)
   const bot = h.rt.botOf('solver')
   bot.reviewTrack.requestAt = Date.now()
@@ -3106,7 +3128,7 @@ test('Auto setting permissions, Bot-started requests, and written method deliver
   const solver = h.rt.botOf('solver')
   assert.equal(solver.reviewTrack.last.done, undefined)
   assert.equal(solver.reviewTrack.outcome.reason, 'checks')
-  h.botMessage()
+  await h.botMessage()
   assert.notEqual(await requestOf(h), request)
   request = await requestOf(h)
   h.person('Work alone until delivered.')
@@ -4769,9 +4791,18 @@ test('2133 T2f an already delivered legacy track stays unchanged', async t => {
 })
 
 test('2133 exception 5 a first follow-up preserves restored visual verification', async t => {
-  for (const legacy of ['visual SHIP', 'unverified images', 'definite text SHIP', 'delivered SHIP']) {
+  for (const [legacy, { verdictCount, workOffset, resultCredit } = {}] of [
+    ['visual SHIP'],
+    ['unverified images'],
+    ['definite text SHIP'],
+    ['delivered SHIP'],
+    ['definite text SHIP with one verdict and no work', { verdictCount: 1, resultCredit: false }],
+    ['definite text SHIP with two verdicts and no work', { verdictCount: 2 }],
+    ['definite text SHIP after observed work', { verdictCount: 1, workOffset: -1 }],
+    ['definite text SHIP at the last observed work time', { verdictCount: 2, workOffset: 0, resultCredit: false }],
+  ]) {
     await t.test(legacy, async t => {
-      const textOnly = legacy === 'definite text SHIP'
+      const textOnly = legacy.startsWith('definite text SHIP')
       const delivered = legacy === 'delivered SHIP'
       const f = await checkedVisualReview(t, { path: textOnly ? null : reviewPath })
       const { h, request } = f
@@ -4783,7 +4814,14 @@ test('2133 exception 5 a first follow-up preserves restored visual verification'
       delete restored.solver.visualReviewRequired
       result.verdict = 'SHIP'
       result.reviewer = { id: 'reviewer', name: 'reviewer', model: refOf(reviewerModel) }
-      restored.verdicts.push({ verdict: 'SHIP', at: Date.now() + 10 })
+      const shipAt = Date.now() + 10
+      if (verdictCount !== undefined) {
+        restored.verdicts = verdictCount === 2 ? [{ verdict: 'SHIP', at: shipAt - 2 }] : []
+        delete restored.firstWorkAt
+        delete restored.lastWorkAt
+        if (workOffset !== undefined) restored.lastWorkAt = shipAt + workOffset
+      }
+      restored.verdicts.push({ verdict: 'SHIP', at: shipAt })
       if (legacy === 'unverified images') {
         result.verdict = 'unverified'
         result.unverified = 'images'
@@ -4804,7 +4842,7 @@ test('2133 exception 5 a first follow-up preserves restored visual verification'
       }
       assert.equal(f.track().solver.review, undefined)
       h.rt.reviewTurnEnd('solver', { completed: true, wroteText: true, model: refOf(solverModel), request })
-      assert.equal(f.track().last?.result, textOnly, 'only definite text can keep legacy result credit')
+      assert.equal(f.track().last?.result, resultCredit ?? textOnly, 'legacy RESULT credit follows the restored verdict history')
       assert.equal(f.track().delivered === true, textOnly)
       assert.equal(f.track().solver.visualReviewRequired === true, !textOnly)
       if (textOnly) return

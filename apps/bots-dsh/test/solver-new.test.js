@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { SOLVER_SHAPES } from '../src/client/characters.js'
 import { solverPayload } from '../src/client/solver-draft.js'
+import { nativeSwitchView } from '../src/client/native-tools-copy.js'
 import { solverInstructions } from '../src/shared/solver-method.js'
 import { fixture, serviceStub } from './caller-fixture.js'
 import { refusedSolverAgent, serve } from './fixtures/solver-agent-catalog.mjs'
@@ -140,7 +141,7 @@ test('Create makes the reviewer, then the Solver with its real name, then native
   assert.equal(solver.brief, undefined)
   // The name the reviewer's create-bot returned, not the one the dialog asked for.
   assert.ok(solver.instructions.includes('Message "Solver reviewer 7" with message_bot FIRST for every review, plan and result alike (reply_to "me").'))
-  assert.ok(solver.instructions.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'))
+  assert.ok(solver.instructions.includes('ONLY when your reviewer fails (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure. A slow reviewer has not failed: wait for it.'))
   assert.doesNotMatch(solver.instructions, /no reviewer/i)
   assert.deepEqual(calls[4], ['updateBot', 's-new', { nativeTools: true }])
   assert.deepEqual(calls[5], ['send', 's-new', 'Compare two libraries'])
@@ -200,7 +201,7 @@ test('(1) an existing Bot as reviewer is never deleted, whichever step fails', a
     const solver = ui.actions.calls.find(call => call[0] === 'createBot')[1]
     // An existing shared reviewer is named too, and asked first.
     assert.ok(solver.instructions.includes('Message "Ann" with message_bot FIRST for every review, plan and result alike (reply_to "me", when "queue").'))
-    assert.ok(solver.instructions.includes('ONLY when your reviewer fails or hangs (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure.'))
+    assert.ok(solver.instructions.includes('ONLY when your reviewer fails (message_bot errors, or a reply says it could not answer), and the delivery quotes that failure. A slow reviewer has not failed: wait for it.'))
     assert.doesNotMatch(solver.instructions, /no reviewer/i)
     assert.match(ui.alert(), /nothing was created/i)
   }
@@ -327,7 +328,7 @@ test('the folder menu is the working-folder menu: a picked folder can go back to
   for (const payload of creates) assert.equal(Object.hasOwn(payload, 'workDir'), false, payload.role)
 })
 
-test('(6) the tick: hidden where Details has no switch, locked where it is locked, omp says it can only chat', () => {
+test('#2134 H5 (6) new Solver excludes omp and an existing omp Solver keeps its Native tools switch', () => {
   const ui = dialog()
   assert.ok(ui.tick())
   assert.equal(ui.tick().props.checked, false)
@@ -351,10 +352,20 @@ test('(6) the tick: hidden where Details has no switch, locked where it is locke
   assert.equal(ui.tick().props.checked, false)
   assert.match(ui.text(), /This model can't turn its native tools off\./)
   assert.doesNotMatch(ui.text(), /Off by default/)
-  ui.pickModel(OMP)
-  assert.equal(ui.tick().props.disabled, false)
-  assert.match(ui.text(), /With this off, omp has no tools at all in any of this Bot's chats, so this Bot can only chat\./)
-  assert.doesNotMatch(ui.text(), /Off by default/)
+  const own = openAntigravity(ui.modelMenu('new-bot'), 'omp')
+  assert.match(text(own.agent), /Not available yet/)
+  for (const row of own.models) {
+    assert.equal(row.props['data-unavailable'], '')
+    row.props.onClick()
+  }
+  assert.equal(ui.modelMenu('new-bot').props.bot.model, KEPT)
+  const reviewer = openAntigravity(ui.modelMenu('new-reviewer'), 'omp')
+  assert.equal(reviewer.models.find(row => row.props.title === OMP)?.props['data-unavailable'], undefined)
+  assert.ok(reviewer.models.some(row => row.props.title === OMP))
+  const existing = nativeSwitchView({ id: 'omp-solver', role: 'Solver', model: OMP, nativeTools: false }, rosterOf())
+  assert.equal(existing.disabled, false)
+  assert.match(existing.hint.join(' '), /With this off, omp has no tools at all in any of this Bot's chats, so this Bot can only chat\./)
+  assert.doesNotMatch(existing.hint.join(' '), /Off by default/)
   ui.pickModel(HERMES)
   assert.match(ui.text(), /This model uses its Hermes profile's own instructions\./)
   assert.equal(ui.go().props.disabled, true)
@@ -424,14 +435,14 @@ test('the Review guard tick: on by default with a reviewer Bot, absent for a fre
   assert.equal(Object.hasOwn(unticked.actions.calls.filter(call => call[0] === 'createBot')[1][1], 'reviewGuard'), false)
 })
 
-test('the Review guard tick stays on where the guard holds nothing, with the not-held line beside it', () => {
+test('the Review guard tick stays on with the Codex plan gate and Claude approval details', () => {
   const ui = dialog()
   ui.pickModel(CODEX)
   ui.tickNative()
   assert.equal(ui.guard().props.checked, true)
-  assert.match(ui.text(), /Not held on this agent: its own tools run without asking\. Only the delivery mark shows unreviewed work\./)
+  assert.match(ui.text(), /Codex runs read-only inside this Bot's folder; then the chosen level applies\./)
   ui.pickModel(KEPT)
-  assert.match(ui.text(), /Not held on this agent/)
+  assert.match(ui.text(), /Codex runs read-only inside this Bot's folder; then the chosen level applies\./)
   ui.pickModel(CLAUDE)
   ui.tickNative()
   assert.match(ui.text(), /Held only for the steps Claude Code asks about\./)
@@ -539,7 +550,7 @@ test('New Solver can create on every offered agent and model with an independent
   const roster = rosterOf({ bots: [reviewer], models: rows, prefs: { defaultBotModel: CLAUDE } })
   const rendered = dialog({ roster })
   assert.equal(rendered.modelMenu('new-bot').props.bot.model, CLAUDE)
-  const offered = rows.filter(row => row.ref !== alias && row.ref !== AGY).map(row => row.ref)
+  const offered = rows.filter(row => row.ref !== alias && row.ref !== AGY && row.ref !== OMP).map(row => row.ref)
   assert.deepEqual(rendered.modelMenu('new-bot').props.roster.models.map(row => row.ref), offered)
   rendered.pickModel(opus)
   assert.ok(rendered.modelMenu('new-reviewer').props.roster.models.some(row => row.ref === nativeOpus))
@@ -553,7 +564,7 @@ test('New Solver can create on every offered agent and model with an independent
   }
 })
 
-function openAntigravity(menu) {
+function openAntigravity(menu, label = 'Antigravity') {
   const menuElement = menu.type(menu.props)
   const view = mount(menuElement.type, menuElement.props)
   const trigger = all(view.render(), node => node.type === 'button' && node.props['aria-haspopup'] === 'menu')[0]
@@ -569,7 +580,7 @@ function openAntigravity(menu) {
   const acp = all(steps(), node => node.props.role === 'menuitem' && node.props['data-route'] === 'acp')[0]
   assert.ok(acp)
   acp.props.onClick()
-  const agent = all(steps(), node => node.props.role === 'menuitem' && text(node).startsWith('Antigravity'))[0]
+  const agent = all(steps(), node => node.props.role === 'menuitem' && text(node).startsWith(label))[0]
   assert.ok(agent)
   agent.props.onClick()
   const models = all(steps(), node => node.props.role === 'menuitemradio')

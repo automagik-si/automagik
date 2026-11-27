@@ -32,6 +32,9 @@ const snapshot = home => readdirSync(home, { recursive: true }).sort().map(name 
   return [name, statSync(path).isDirectory() ? null : createHash('sha256').update(readFileSync(path)).digest('hex')]
 })
 
+const ordinaryIdentity = readDisplay => (id, options) =>
+  options?.policy ? { solverPolicy: { state: 'none' } } : readDisplay?.(id)
+
 function setEnv(t, values) {
   const previous = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]))
   Object.assign(process.env, values)
@@ -57,7 +60,7 @@ for (const location of ['adapter store default', 'catalog fallback', 'injected']
     const before = snapshot(home)
     const xdg = join(home, 'config')
     setEnv(t, { HOME: home, XDG_CONFIG_HOME: xdg, PI_AUTO_QA: '1', PI_CODING_AGENT_DIR: agentDir })
-    h.service.botIdentity(() => ({ name: 'Sofia' }))
+    h.service.botIdentity(ordinaryIdentity(() => ({ name: 'Sofia' })))
     const probe = await h.service.inspect(OMP)
     assert.equal(probe.signedIn, true)
     const probeStarts = h.events('start')
@@ -85,7 +88,7 @@ for (const [label, identity] of [
   test(label + ' launches plain omp acp with its inherited environment', async t => {
     const h = ompWorld(t)
     setEnv(t, { PI_AUTO_QA: '1' })
-    if (identity) h.service.botIdentity(identity)
+    if (identity) h.service.botIdentity(ordinaryIdentity(identity))
     await h.service.inspect(OMP)
     await h.chat().turn('plain on-control')
     const chat = h.conversation('on-control')
@@ -96,17 +99,15 @@ for (const [label, identity] of [
   })
 }
 
-for (const [label, identities, options] of [
-  ['a tag for Claude', [() => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: 'acp-claude' })], {}],
-  ['Read only', [() => ({ name: 'Sofia', nativeTools: true })], { readOnly: true }],
-  ['unknown level', [() => ({ name: 'Sofia', nativeTools: true })], { sandbox: false }],
-  ['a throwing reader', [() => { throw new Error('identity unavailable') }], {}],
-  ['competing readers', [() => ({ name: 'Sofia', nativeTools: true }), () => ({ name: 'Second', nativeTools: true })], {}],
-  ['a workspace session without a Bot', [() => undefined], {}],
+for (const [label, identity, options] of [
+  ['a tag for Claude', () => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: 'acp-claude' }), {}],
+  ['Read only', () => ({ name: 'Sofia', nativeTools: true }), { readOnly: true }],
+  ['unknown level', () => ({ name: 'Sofia', nativeTools: true }), { sandbox: false }],
+  ['a workspace session without a Bot', undefined, {}],
 ]) {
   test(label + ' starts OFF', async t => {
     const h = ompWorld(t, options)
-    for (const reader of identities) h.service.botIdentity(reader)
+    h.service.botIdentity(ordinaryIdentity(identity))
     const chat = h.chat()
     if (options.readOnly) chat.session.append('sandbox/mode', { mode: 'read-only' })
     await chat.turn('plain off-control')
@@ -114,8 +115,44 @@ for (const [label, identities, options] of [
   })
 }
 
+const throwingReader = () => { throw new Error('identity unavailable') }
+const secondOn = () => ({ ...nativeOn(), name: 'Second' })
+
+for (const [label, readers] of [
+  ['a throwing policy reader', [throwingReader]],
+  ['competing policy readers', [ordinaryIdentity(nativeOn), ordinaryIdentity(secondOn)]],
+]) {
+  test(label + ' refuses before starting a chat child', async t => {
+    const h = ompWorld(t)
+    await h.service.inspect(OMP)
+    const probeStarts = h.events('start')
+    for (const reader of readers) h.service.botIdentity(reader)
+    const chunks = await h.chat().turn('plain policy unavailable')
+    assert.deepEqual(chunks.at(-1).reason, {
+      kind: 'error',
+      failure: { code: 'ACP_AGENT', message: "The Bot team could not confirm this Session's rules, so nothing was sent. Send your message again." },
+    })
+    assert.deepEqual(h.events('start'), probeStarts)
+    assert.deepEqual(h.events('prompt'), [])
+  })
+}
+
+for (const [label, readers] of [
+  ['a throwing display reader', [ordinaryIdentity(throwingReader)]],
+  ['competing display readers', [ordinaryIdentity(nativeOn), (_id, request) => request?.policy ? undefined : secondOn()]],
+]) {
+  test(label + ' starts OFF when ordinary policy is confirmed', async t => {
+    const h = ompWorld(t)
+    for (const reader of readers) h.service.botIdentity(reader)
+    const chunks = await h.chat().turn('plain display unavailable')
+    assert.equal(chunks.at(-1).reason.kind, 'stop')
+    assert.deepEqual(h.conversation('display unavailable').args, offArgs(h.overlayPath))
+  })
+}
+
 test('an omp migration tag cannot enable Claude native tools after a provider change', async t => {
-  const h = nativeWorld(t, { identity: () => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: OMP }) })
+  const h = nativeWorld(t, { identity: ordinaryIdentity(nativeOn) })
+  h.adapter.policyState = h.identityReaders.readState
   await h.chat('changed-provider').turn('first Claude turn')
   h.assertToolset(0, false)
 })
@@ -123,7 +160,7 @@ test('an omp migration tag cannot enable Claude native tools after a provider ch
 test('an owner turn replaces the running OFF child and replays the same DSH Session', async t => {
   const h = ompWorld(t)
   let on = false
-  h.service.botIdentity(() => ({ ...nativeOn(), nativeTools: on }))
+  h.service.botIdentity(ordinaryIdentity(() => ({ ...nativeOn(), nativeTools: on })))
   const chat = h.chat()
   const { session } = chat
   session.append('user/message', ownerMessage('plain flip-first'), { surfaceOp: 'append' })
@@ -154,7 +191,7 @@ test('an owner turn replaces the running OFF child and replays the same DSH Sess
 // #1564 follow-up (E7-c): every turn of an ON Bot follows the switch, whoever sends it.
 test('a scheduled turn reuses the running ON child of an ON Bot', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(nativeOn)
+  h.service.botIdentity(ordinaryIdentity(nativeOn))
   const chat = h.chat()
   await chat.turn('plain owner-before-schedule')
   const owner = h.conversation('owner-before-schedule')
@@ -167,7 +204,7 @@ test('a scheduled turn reuses the running ON child of an ON Bot', async t => {
 
 test('a handoff with a user source opens ON for an ON Bot', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(nativeOn)
+  h.service.botIdentity(ordinaryIdentity(nativeOn))
   await h.chat().turn(createUserMessage({
     content: [{ type: 'text', text: 'plain resumed-relay' }],
     source: { kind: 'user', handoff: true, resume: true },
@@ -177,7 +214,7 @@ test('a handoff with a user source opens ON for an ON Bot', async t => {
 
 test('a member turn (a principal) opens ON for an ON Bot', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(nativeOn)
+  h.service.botIdentity(ordinaryIdentity(nativeOn))
   await h.chat().turn(createUserMessage({
     content: [{ type: 'text', text: 'plain member-turn' }],
     source: { kind: 'user', principal: { kind: 'person', id: 'member' } },
@@ -189,7 +226,7 @@ test('a member turn (a principal) opens ON for an ON Bot', async t => {
 test('a live ON child is remade OFF when the identity turns the switch off while still eligible', async t => {
   const h = ompWorld(t)
   let on = true
-  h.service.botIdentity(() => ({ ...nativeOn(), nativeTools: on, nativeToolsBlocked: false }))
+  h.service.botIdentity(ordinaryIdentity(() => ({ ...nativeOn(), nativeTools: on, nativeToolsBlocked: false })))
   const chat = h.chat()
   await chat.turn('plain live-on')
   const first = h.conversation('live-on')
@@ -204,7 +241,7 @@ test('a live ON child is remade OFF when the identity turns the switch off while
 // Its OFF meaning is kept through the identity: a Bot saved OFF opens every turn OFF.
 test('a scheduled turn of a Bot saved OFF opens OFF', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(() => ({ ...nativeOn(), nativeTools: false }))
+  h.service.botIdentity(ordinaryIdentity(() => ({ ...nativeOn(), nativeTools: false })))
   await h.chat().turn(createUserMessage({ content: [{ type: 'text', text: 'plain scheduled-off' }], source: { kind: 'schedule' } }))
   assert.deepEqual(h.conversation('scheduled-off').args, offArgs(h.overlayPath))
 })
@@ -213,7 +250,7 @@ for (const change of ['Read only', 'inherited preset', 'unknown level', 'throwin
   test(`a held ON start stops when policy changes to ${change}`, async t => {
     const h = ompWorld(t)
     let eligible = true
-    h.service.botIdentity(() => eligible ? nativeOn() : undefined)
+    h.service.botIdentity(ordinaryIdentity(() => eligible ? nativeOn() : undefined))
     const chat = h.chat()
     const hold = holdOmpStart(t, h, chat.session.id)
     const late = Promise.withResolvers()
@@ -270,7 +307,7 @@ for (const change of ['Read only', 'inherited preset', 'unknown level', 'throwin
 for (const concurrentPolicy of [false, true]) {
   test(`Stop during ON startup keeps the existing reason${concurrentPolicy ? ' even when policy changes' : ''}`, async t => {
     const h = ompWorld(t)
-    h.service.botIdentity(nativeOn)
+    h.service.botIdentity(ordinaryIdentity(nativeOn))
     const chat = h.chat()
     chat.session.append('user/message', ownerMessage('plain held-stop'), { surfaceOp: 'append' })
     const controller = new AbortController()
@@ -297,7 +334,7 @@ for (const concurrentPolicy of [false, true]) {
 
 test('an unchanged held ON start receives its prompt on the same child', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(nativeOn)
+  h.service.botIdentity(ordinaryIdentity(nativeOn))
   const chat = h.chat()
   const hold = holdOmpStart(t, h, chat.session.id)
   const turn = chat.turn('plain unchanged-start')
@@ -318,7 +355,7 @@ test('an unchanged held ON start receives its prompt on the same child', async t
 
 test('Read only immediately retires a live ON child and the next owner turn is OFF', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(nativeOn)
+  h.service.botIdentity(ordinaryIdentity(nativeOn))
   const chat = h.chat()
   const marker = 'hang before-read-only'
   const turn = chat.turn(marker)
@@ -352,7 +389,7 @@ test('Read only immediately retires a live ON child and the next owner turn is O
 test('loss of the native identity retires the ON child before the next prompt', async t => {
   const h = ompWorld(t)
   let identity = { name: 'Sofia', nativeTools: true, nativeToolsAgent: OMP }
-  h.service.botIdentity(() => identity)
+  h.service.botIdentity(ordinaryIdentity(() => identity))
   const chat = h.chat()
   await chat.turn('plain loss-first')
   const old = h.adapter.live.get('chat').run
@@ -373,7 +410,7 @@ test('an unusable overlay fails at the chat launch boundary without spawning a c
     mkdirSync(join(path, 'native-off.yml'), { recursive: true })
     return path
   } })
-  h.service.botIdentity(() => ({ name: 'Sofia' }))
+  h.service.botIdentity(ordinaryIdentity(() => ({ name: 'Sofia' })))
   await h.service.inspect(OMP)
   const before = h.events('start')
   assert.ok(before.length > 0, 'the catalog probe ran')
@@ -392,7 +429,7 @@ for (const [offer, answer] of [
 ]) {
   test(`OFF permission-first request with ${offer} is refused without a DSH dialog`, async t => {
     const h = ompWorld(t)
-    h.service.botIdentity(() => ({ name: 'Sofia' }))
+    h.service.botIdentity(ordinaryIdentity(() => ({ name: 'Sofia' })))
     const marker = 'omp-permission-first ' + offer
     const chunks = await h.chat().turn(marker)
     const conversation = h.conversation(marker)
@@ -406,7 +443,7 @@ for (const [offer, answer] of [
 for (const kind of ['tool_call', 'tool_call_update']) {
   test(`OFF stops once on a first ${kind} for an unseen ID and starts a fresh OFF child next time`, async t => {
     const h = ompWorld(t)
-    h.service.botIdentity(() => ({ name: 'Sofia' }))
+    h.service.botIdentity(ordinaryIdentity(() => ({ name: 'Sofia' })))
     const end = t.mock.method(h.adapter, 'endSession')
     const chat = h.chat()
     const marker = 'omp-first-' + kind
@@ -427,7 +464,7 @@ for (const kind of ['tool_call', 'tool_call_update']) {
 
 test('ON still asks through DSH for a tool and receives the result', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(() => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: OMP }))
+  h.service.botIdentity(ordinaryIdentity(() => ({ name: 'Sofia', nativeTools: true, nativeToolsAgent: OMP })))
   const chunks = await h.chat().turn('run it on-permission-control')
   assert.equal(h.approvals.length, 1)
   assert.match(textBlocks(chunks).join(''), /It printed hello/)
@@ -441,7 +478,7 @@ test('team registration during an asynchronous startup gate makes the first laun
   t.mock.method(h.adapter, 'access', async () => { entered.resolve(); await release.promise })
   const answer = h.chat().turn('plain late-registration')
   await entered.promise
-  h.service.botIdentity(() => undefined)
+  h.service.botIdentity(ordinaryIdentity())
   release.resolve()
   await answer
   assert.deepEqual(h.conversation('late-registration').args, offArgs(h.overlayPath))
@@ -467,7 +504,7 @@ for (const [label, identity, input, options] of [
       assert.ok(h.events('new-session').some(row => row.pid === run.child.pid))
       assert.equal(h.adapter.live.get(chat.session.id).nativeOff, undefined)
       assert.deepEqual(h.events('prompt'), [])
-      h.service.botIdentity(identity)
+      h.service.botIdentity(ordinaryIdentity(identity))
     } finally {
       hold.release()
     }
@@ -511,7 +548,7 @@ test('late team registration lets a held omp start go on for a Bot saved ON on a
   try {
     run = await hold.run(turn)
     assert.deepEqual(h.events('prompt'), [])
-    h.service.botIdentity(nativeOn)
+    h.service.botIdentity(ordinaryIdentity(nativeOn))
   } finally {
     hold.release()
   }
@@ -539,7 +576,7 @@ for (const [label, register, stop] of [
     let run
     try {
       run = await hold.run(turn)
-      if (register) h.service.botIdentity(register)
+      if (register) h.service.botIdentity(ordinaryIdentity(register))
       if (stop) controller.abort()
     } finally {
       hold.release()
@@ -567,7 +604,7 @@ for (const [label, register, stop] of [
 
 test('a forbidden notification from a retired OFF child cannot stop its replacement', async t => {
   const h = ompWorld(t)
-  h.service.botIdentity(() => ({ name: 'Sofia' }))
+  h.service.botIdentity(ordinaryIdentity(() => ({ name: 'Sofia' })))
   const chat = h.chat()
   await chat.turn('plain retired-child')
   const retired = h.adapter.live.get('chat').run

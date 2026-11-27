@@ -160,8 +160,11 @@ test('the whole chain is bound, and a subagent child of a task is that task', as
   const a = await from('g1')
   const b = await from(a)
   const c = await from(b)
-  const headers = { child: { origin: 'subagent', parentSession: c }, grandchild: { origin: 'subagent', parentSession: 'child' } }
-  ctx.sessions.get = id => (headers[id] ? { header: headers[id] } : undefined)
+  const headers = {
+    child: { id: 'child', origin: 'subagent', parentSession: c },
+    grandchild: { id: 'grandchild', origin: 'subagent', parentSession: 'child' },
+  }
+  ctx.sessions.get = id => (headers[id] ? { id, header: headers[id] } : undefined)
   const guard = ctx.listeners.get('tools/execute')[0]
   const d = await guard({ name: 'grant_wish', arguments: {}, agent: { id: 'grandchild', session: { id: 'grandchild' } } }, () => wish())
   for (const task of [b, c, d]) await setTo(presets, task, [WRITE])

@@ -75,6 +75,7 @@ function host(t, {
   }]))
   const warnings = []
   const reads = []
+  const policyReads = []
   const ctx = {
     agents: { get: id => sessions.get(id), list: () => [...sessions.values()] },
     on: () => () => {},
@@ -90,6 +91,7 @@ function host(t, {
   }]]), {
     dshTools, access, cancelWaitMs,
     botIdentity: id => { reads.push(id); return botIdentity ? botIdentity(id) : bots.get(id) },
+    policyState: id => { policyReads.push(id); return { ok: true, identity: bots.get(id) } },
     solverIdentity: id => bots.get(id),
   })
   const diagnostics = adapter.diagnostics = new PermissionDiagnostics()
@@ -127,7 +129,7 @@ function host(t, {
     assert.equal((await pending).at(-1)?.reason?.kind, 'aborted')
     await adapter.live.get(id)?.run.prompting
   }
-  return { ...f, adapter, appended, bots, diagnostics, reads, warnings, step, stream, turn,
+  return { ...f, adapter, appended, bots, diagnostics, reads, policyReads, warnings, step, stream, turn,
     stepAborted }
 }
 
@@ -138,6 +140,7 @@ for (const provider of ['acp-claude', 'acp-codex']) {
     assert.deepEqual(h.rows('new')[0].systemPrompt, append(text))
     assert.deepEqual(h.rows('prompt')[0].prompt, content('Hello'))
     assert.deepEqual(h.reads, ['ada'])
+    assert.ok(h.policyReads.length > 0 && h.policyReads.every(id => id === 'ada'))
     assert.ok(h.warnings.some(line => line.endsWith('Bot identity: systemPrompt')))
     assert.ok(h.warnings.every(line => !line.includes('Check files.') && !line.includes('Bot Browser')))
     if (AGENTS[provider].hardAsk) {

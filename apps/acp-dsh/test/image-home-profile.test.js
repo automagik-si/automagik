@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { AgentRun } from '../src/host/acp.js'
-import { chatProfileModes, chatProfileModesFor, chatProfilesConfig, ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
+import { chatProfileModes, chatProfileModesFor, chatProfilesConfig, ensureChatProfiles, gateProfileOf } from '../src/host/codex-chat-profiles.js'
 import { configArgs, drawImage, IMAGE_PROFILE_DESCRIPTION, IMAGE_PROFILE_GRANTS, IMAGE_TITLE, imageOverrides, imageProfileFor, imageSupport, UNAVAILABLE } from '../src/host/image.js'
 import { imageWith20261111Policy } from './support/image-policy-2026-11-11.mjs'
 
@@ -320,13 +320,17 @@ test('adding the image table preserves the complete chat tables, default, and mo
     `[permissions.automagik-workspace-${HEX}]`, "description = 'Automagik Workspace: work in the chat workspace'",
     `[permissions.automagik-workspace-${HEX}.filesystem]`,
     "':root' = 'deny'", "':minimal' = 'read'", "':workspace_roots' = 'write'", "':project_roots' = 'read'",
-    "':tmpdir' = 'write'", "':slash_tmp' = 'write'", `'${join('/chat/home', 'skills')}' = 'read'`, "'/codex/runtime' = 'read'", '',
+    "':tmpdir' = 'write'", "':slash_tmp' = 'write'", `'${join('/chat/home', 'skills')}' = 'read'`, "'/codex/runtime' = 'read'",
+    `[permissions.automagik-gate-${HEX}]`, 'description = "Automagik Solver plan: read the Solver workspace"',
+    `[permissions.automagik-gate-${HEX}.filesystem]`,
+    "':root' = 'deny'", "':minimal' = 'read'", "':workspace_roots' = 'read'", "'/codex/runtime' = 'read'", '',
   ].join('\n'))
   const modes = chatProfileModesFor(HEX)
   assert.deepEqual(modes, {
     'read-only': `permission-profile:automagik-read-${HEX}`,
     'workspace-write': `permission-profile:automagik-workspace-${HEX}`,
   })
+  assert.equal(gateProfileOf(modes), `permission-profile:automagik-gate-${HEX}`)
   assert.deepEqual(chatProfileModes(['read-only', 'workspace-write', 'agent'], modes), [
     modes['read-only'], 'read-only', modes['workspace-write'], 'workspace-write', 'agent',
   ])

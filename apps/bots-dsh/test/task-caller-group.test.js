@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
+import { POLICY_UNAVAILABLE_TEXT } from '../src/host/review-guard.js'
 import { fakeContext } from './fake-ctx.js'
 
 const FULL = 'danger-full-access'
@@ -69,8 +70,8 @@ function team(t, { auto = true, bots = {}, room = {}, tasks, custom = {}, defaul
     sessionController: {
       // As DSH does, a new Session is announced while it is made, before startTask knows
       // it as a task.
-      async create() {
-        const sessionId = `s${++sessions}`
+      async create(options) {
+        const sessionId = options?.sessionId ?? `s${++sessions}`
         open.add(sessionId)
         for (const listener of ctx.listeners.get('session/created') ?? []) void listener({ id: sessionId })
         return { sessionId }
@@ -157,8 +158,9 @@ test('a wider group never widens the task: it runs at its Bot\'s level', async (
 })
 
 test('outside a group tool call only the verified Bot opener adds private skill provenance', async (t) => {
-  const { rt, home, call, presets, settle, toolCall, wish, instructions } = team(t, { bots: { m1: { permission: FULL } }, room: { permission: WRITE } })
+  const { ctx, rt, home, call, presets, settle, toolCall, wish, instructions } = team(t, { bots: { m1: { permission: FULL } }, room: { permission: WRITE } })
   await call('state', {})
+  ctx.sessions.get = id => id === 'elsewhere' ? { id, header: { id } } : undefined
   // No tool call at all.
   const direct = await wish()
   // A tool call from the Bot's own chat, and one from a Session that is no group's.
@@ -437,27 +439,39 @@ test('an Auto that fails to set is not replaced by a level wider than its fallba
 test('a subagent child of a group Session carries that group; a child of the own chat does not', async (t) => {
   const { ctx, rt, call, presets, settle, wish } = team(t, { bots: { m1: { permission: FULL } }, room: { permission: WRITE } })
   await call('state', {})
+  const ownChat = rt.chatOf('m1')
   const headers = {
-    child: { origin: 'subagent', parentSession: 'g1' },
-    grandchild: { origin: 'subagent', parentSession: 'child' },
-    aside: { origin: 'subagent', parentSession: rt.chatOf('m1') },
-    lost: { origin: 'subagent', parentSession: 'nowhere' },
+    g1: { id: 'g1' },
+    [ownChat]: { id: ownChat },
+    child: { id: 'child', origin: 'subagent', parentSession: 'g1' },
+    grandchild: { id: 'grandchild', origin: 'subagent', parentSession: 'child' },
+    aside: { id: 'aside', origin: 'subagent', parentSession: ownChat },
+    elsewhere: { id: 'elsewhere' },
+    lost: { id: 'lost', origin: 'subagent', parentSession: 'nowhere' },
   }
-  ctx.sessions.get = id => (headers[id] ? { header: headers[id] } : undefined)
+  ctx.sessions.get = id => (headers[id] ? { id, header: headers[id] } : undefined)
   // The tool deny guard is the first listener; the child's agent carries its own header.
   const guard = ctx.listeners.get('tools/execute')[0]
   const from = (id, withHeader = true) => guard({ name: 'grant_wish', arguments: {}, agent: { id, session: { id, ...(withHeader ? { header: headers[id] } : {}) } } }, () => wish())
-  const tasks = { child: await from('child'), grandchild: await from('grandchild', false), aside: await from('aside'), lost: await from('lost') }
+  const tasks = { child: await from('child'), grandchild: await from('grandchild', false), aside: await from('aside'), elsewhere: await from('elsewhere') }
   await settle()
   assert.deepEqual(presets(tasks.child), [WRITE])
   assert.deepEqual(presets(tasks.grandchild), [WRITE])
   assert.deepEqual(presets(tasks.aside), [FULL])
-  assert.deepEqual(presets(tasks.lost), [FULL])
+  assert.deepEqual(presets(tasks.elsewhere), [FULL])
+  assert.equal(rt.state.tasks[tasks.elsewhere].levelRoomId, undefined)
+  const taskIds = Object.keys(rt.state.tasks)
+  const create = t.mock.method(ctx.sessionController, 'create')
+  await assert.rejects(from('lost'), { code: 'bot/refused', message: POLICY_UNAVAILABLE_TEXT })
+  assert.equal(create.mock.callCount(), 0)
+  assert.deepEqual(Object.keys(rt.state.tasks), taskIds)
 })
 
 test('a group Session indexed during the call is found when the task starts', async (t) => {
-  const { rt, call, presets, settle, toolCall, wish } = team(t, { bots: { m1: { permission: FULL } }, room: { permission: WRITE } })
+  const { ctx, rt, call, presets, settle, toolCall, wish } = team(t, { bots: { m1: { permission: FULL } }, room: { permission: WRITE } })
   await call('state', {})
+  ctx.sessions.get = id => id === 'g9' ? { id, header: { id } } : undefined
+  assert.equal(rt.groupOwners.has('g9'), false)
   const task = await toolCall('g9', async () => {
     rt.groupOwners.set('g9', { botId: 'm1', roomId: 'r1' })
     return wish()

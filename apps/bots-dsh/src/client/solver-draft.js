@@ -235,7 +235,7 @@ export function reviewGuardView(bot, roster, level) {
       : { on, disabled: true, lines: [t(REVIEW_GUARD_COPY.noReviewer, { name: bot.name })] }
   }
   const reach = reviewGuardReach(bot, level)
-  const lines = [reach === 'hard' ? t(REVIEW_GUARD_COPY.hard, { reviewer: reviewer.name }) : t(REVIEW_GUARD_COPY[reach])]
+  const lines = [t(REVIEW_GUARD_COPY[reach], { reviewer: reviewer.name })]
   if (on && typeof bot.reviewGuardWaitingSince === 'number' && Number.isFinite(bot.reviewGuardWaitingSince)) {
     const time = new Date(bot.reviewGuardWaitingSince).toLocaleTimeString(dateLocale(), { hour: 'numeric', minute: '2-digit' })
     lines.push(t(REVIEW_GUARD_COPY.waiting, { reviewer: reviewer.name, time }))

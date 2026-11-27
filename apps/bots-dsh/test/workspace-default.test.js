@@ -259,7 +259,7 @@ for (const guard of ['workFolder', 'group', 'read-only', 'private', 'approveFold
     if (guard === 'read-only') rt.readOnly = () => 'test read-only refusal'
     if (guard === 'private') rt.checkPrivacyChange = async () => { throw new Error('test private refusal') }
     if (guard === 'approveFolder') rt.approveFolder = async () => { throw new Error('test approveFolder refusal') }
-    const exec = { name: 'working_directory', arguments: { cd: target }, agent: { id, session: { id, header: { cwd: folder } } }, callId: 'test-working-directory' }
+    const exec = { name: 'working_directory', arguments: { cd: target }, agent: { id, session: { id, header: { id, cwd: folder } } }, callId: 'test-working-directory' }
     const run = rt.ctx.listeners.get('tools/execute').reduceRight((next, listener) => () => listener(exec, next), () => assert.fail('the guarded folder change must not reach the tool'))
     await assert.rejects(run, guard === 'group' ? /Every member.*works in/ : new RegExp(`test ${guard} refusal`))
   })

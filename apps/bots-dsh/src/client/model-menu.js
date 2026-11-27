@@ -10,7 +10,7 @@ import { HostModelMenu } from './host-model-menu.js'
 import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
 import { ACP_NAME, commandCapableAgent, crossesHarness, isHermesRoute, routeOf, selectorRouteOf } from '../shared/routes.js'
 import { OWN_TOOLS_MENU_HINT, OWN_TOOLS_MODEL_TEXT, ownToolsRefused } from '../shared/own-tools.js'
-import { hasSolverSetup, isAntigravityModel } from '../shared/solver-agent.js'
+import { hasSolverSetup, isUnofferedSolverModel } from '../shared/solver-agent.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { HermesRemoteConnect } from './hermes-remote.js'
 
@@ -36,7 +36,7 @@ export function connectionOf(model) {
 // agent signed in, and no CLI covers its route (the host's catalog marks).
 const usableModel = model => !model.needsKey && !model.needsSignIn && !model.covered
 const isSolver = bot => bot?.canCancelSolverWait === true || hasSolverSetup(bot)
-const solverModel = ({ ref }) => !isAntigravityModel(ref)
+const solverModel = ({ ref }) => !isUnofferedSolverModel(ref)
 // A model a Bot cannot run on: a key or a sign-in is missing, or its plan signs in only
 // through its CLI (Claude Code, Codex).
 export const unavailableModel = model => model?.needsKey === true || model?.needsSignIn === true || model?.covered === true

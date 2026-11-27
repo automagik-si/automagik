@@ -1,6 +1,6 @@
 // Chat profiles stay in the app's home; an older adapter still takes the legacy modes.
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -14,6 +14,7 @@ import { apply } from '../index.js'
 import { AcpAdapter } from '../src/host/adapter.js'
 import { AGENTS } from '../src/host/agents.js'
 import { canRunProfile, chatProfileModesFor, chatProfileModes, chatProfilesConfig, codexRuntimeRoot, ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
+import * as profiles from '../src/host/codex-chat-profiles.js'
 import { PermissionDiagnostics } from '../src/host/permission-diagnostics.js'
 
 const HEX = '0123456789abcdef0123456789abcdef'
@@ -57,8 +58,9 @@ test('chat config starts with the default and grants only the named roots', () =
   assert.ok(config.includes(BOTTOM))
   assert.ok(config.includes(`[permissions.automagik-read-${HEX}]\n`))
   assert.ok(config.includes(`[permissions.automagik-workspace-${HEX}]\n`))
-  assert.equal(config.split("':root' = 'deny'").length - 1, 3)
-  assert.equal(config.split("':minimal' = 'read'").length - 1, 2)
+  const previousTables = config.replace(/\[permissions\.automagik-gate-[^\n]+\n[^]*?(?=\[permissions\.automagik-image-)/, '')
+  assert.equal(previousTables.split("':root' = 'deny'").length - 1, 3)
+  assert.equal(previousTables.split("':minimal' = 'read'").length - 1, 2)
   assert.equal(config.split("':project_roots' = 'read'").length - 1, 2)
   const [read, write] = config.split(`[permissions.automagik-workspace-${HEX}]`)
   assert.ok(read.includes("':workspace_roots' = 'read'"))
@@ -67,6 +69,217 @@ test('chat config starts with the default and grants only the named roots', () =
   assert.equal(config.split("'/chat/codex/skills' = 'read'").length - 1, 2)
   assert.doesNotMatch(config, /network|config\.toml/)
   assert.equal(config.includes("'/chat/codex' ="), false)
+})
+
+test('#2134 K4a gate table grants only the workspace, minimal files and runtime', () => {
+  const config = chatProfilesConfig('/fake/chat', HEX, '/fake/runtime')
+  const match = config.match(new RegExp(`\\[permissions\\.automagik-gate-${HEX}\\.filesystem\\]\\n([^]*?)(?=\\[permissions\\.automagik-image-)`))
+  assert.ok(match, 'gate filesystem table immediately before image profile')
+  assert.deepEqual(match[1].trim().split('\n'), [
+    "':root' = 'deny'", "':minimal' = 'read'", "':workspace_roots' = 'read'", "'/fake/runtime' = 'read'",
+  ])
+  assert.deepEqual(Object.keys(PROFILE_MODES), ['read-only', 'workspace-write'])
+})
+
+function gateProbeFixture(t) {
+  const dir = directory(t)
+  const workspace = join(dir, 'workspace')
+  const protectedRoot = join(dir, 'protected')
+  mkdirSync(workspace)
+  mkdirSync(protectedRoot)
+  const control = join(workspace, 'marker')
+  const canary = join(protectedRoot, 'marker')
+  const inside = 'synthetic inside marker'
+  writeFileSync(control, inside)
+  writeFileSync(canary, 'synthetic distinct marker')
+  const inspect = run => profiles.gateProfileHolds('/fake/codex', `permission-profile:automagik-gate-${HEX}`,
+    { cwd: workspace, env: { PATH: '/fake' }, control, canary, run })
+  return { workspace, control, canary, inside, inspect }
+}
+
+test('#2134 K4b positive marker and conclusive denial through the same fake runner', t => {
+  const { workspace, control, canary, inside, inspect } = gateProbeFixture(t)
+  assert.equal(typeof profiles.gateProfileHolds, 'function', 'boundary check exists')
+  let mode = 'deny'
+  const calls = []
+  const run = (command, args, options) => {
+    calls.push({ command, args, options })
+    return args.at(-1) === control
+      ? { status: mode === 'no-control' ? 1 : 0, stdout: inside }
+      : mode === 'deny' ? { status: 1, stdout: '', stderr: `cat: ${canary}: Permission denied\n` }
+        : mode === 'timeout' ? { error: new Error('fake timeout'), status: null }
+          : { status: 0, stdout: 'fake outside result' }
+  }
+  assert.equal(inspect(run), true)
+  assert.deepEqual(calls.map(call => [call.command, call.args.at(-1), call.options.cwd]),
+    [['/fake/codex', control, workspace], ['/fake/codex', canary, workspace]])
+  for (mode of ['no-control', 'timeout', 'allowed']) assert.equal(inspect(run), false, mode)
+})
+
+for (const [name, deleted] of [
+  ['intact canary makes ENOENT a conclusive denial', false],
+  ['canary deleted during the probe makes ENOENT inconclusive', true],
+]) test(`#2134 K4b ${name}`, t => {
+  const { control, canary, inside, inspect } = gateProbeFixture(t)
+  const result = inspect((_command, args) => {
+    if (args.at(-1) === control) return { status: 0, stdout: inside }
+    if (deleted) unlinkSync(canary)
+    return { status: 1, stdout: '', stderr: `cat: ${canary}: No such file or directory\n` }
+  })
+  assert.equal(result, !deleted)
+  assert.equal(existsSync(canary), !deleted)
+})
+
+test('#2134 AW-R4 scope, full grant table and checked marker cleanup', t => {
+  const dir = directory(t)
+  const runtime = join(dir, 'runtime')
+  const workspace = join(dir, 'workspace')
+  const protectedRoot = join(dir, 'protected')
+  const home = join(dir, 'isolated')
+  for (const path of [runtime, workspace, protectedRoot, home]) mkdirSync(path)
+  const executable = join(runtime, 'fake-codex')
+  writeFileSync(executable, 'test executable placeholder')
+  const profile = `permission-profile:automagik-gate-${HEX}`
+  const config = join(home, 'config.toml')
+  const grants = chatProfilesConfig(home, HEX, runtime)
+  writeFileSync(config, grants)
+  assert.equal(typeof profiles.createGateBinding, 'function', 'workspace binding exists')
+  const seen = []
+  const bind = () => profiles.createGateBinding(executable, profile, { CODEX_HOME: home }, protectedRoot, {
+    run(_command, args) {
+      const marker = args.at(-1)
+      seen.push(marker)
+      if (marker.startsWith(workspace + '/')) return { status: 0, stdout: readFileSync(marker, 'utf8') }
+      return { status: 1, stdout: '', stderr: `cat: ${marker}: Permission denied\n` }
+    },
+  })
+  const binding = bind()
+  const scope = { cwd: workspace, protectedRoots: [protectedRoot], signInRoots: [protectedRoot] }
+  assert.equal(binding(workspace, scope), true)
+  assert.equal(seen.length, 2)
+  assert.ok(seen.every(marker => !existsSync(marker)))
+  assert.equal(binding(workspace, scope), true)
+  assert.equal(seen.length, 2)
+  assert.equal(binding(dir, scope), false)
+  assert.equal(binding(workspace), false)
+  assert.equal(binding(workspace, { ...scope, protectedRoots: [...scope.protectedRoots, join(workspace, 'private')] }), false)
+  writeFileSync(config, grants.replace('[permissions.automagik-image-', "'/fake/extra' = 'read'\n[permissions.automagik-image-"))
+  assert.equal(binding(workspace, scope), false, 'a changed config cannot authorize a running process')
+  assert.equal(bind()(workspace, scope), false, 'an appended grant at launch invalidates the proof before probing')
+  assert.equal(seen.length, 2)
+})
+
+test('#2134 managed runtime: exact program layout with protected roots and marker controls', { skip: process.platform === 'win32' }, async t => {
+  const dir = realpathSync.native(directory(t))
+  const app = join(dir, 'app')
+  const store = join(app, 'acp', 'clis')
+  const cliHomes = join(app, 'acp', 'cli-homes')
+  const workspace = join(dir, 'workspace')
+  const home = join(cliHomes, 'codex')
+  const runtime = join(store, 'codex', 'version')
+  for (const folder of [home, workspace]) mkdirSync(folder, { recursive: true })
+  const binary = layout => {
+    mkdirSync(join(layout, 'bin'), { recursive: true })
+    writeFileSync(join(layout, 'codex-package.json'), '{}')
+    const path = join(layout, 'bin', 'fake-codex')
+    writeFileSync(path, 'synthetic executable placeholder')
+    return path
+  }
+  const executable = binary(runtime)
+  const profile = profiles.gateProfileOf(PROFILE_MODES)
+  const env = { CODEX_HOME: home }
+  const scope = { cwd: workspace, protectedRoots: [app, cliHomes], signInRoots: [cliHomes] }
+  const bind = ({ command = executable, layout = runtime, managedClisHome = store } = {}) => {
+    writeFileSync(join(home, 'config.toml'), chatProfilesConfig(home, HEX, layout))
+    const seen = []
+    const binding = profiles.createGateBinding(command, profile, env, cliHomes, {
+      managedClisHome,
+      run(command, args, options) {
+        const marker = args.at(-1)
+        seen.push(marker)
+        assert.equal(command, realpathSync.native(executable))
+        assert.equal(options.cwd, workspace)
+        assert.equal(options.env, env)
+        assert.deepEqual(args.slice(0, -1), ['sandbox', '-P', profile.slice('permission-profile:'.length),
+          '-C', workspace, '--', 'env', 'LC_ALL=C', 'cat', '--'])
+        if (marker.startsWith(workspace + '/')) return { status: 0, stdout: readFileSync(marker, 'utf8') }
+        assert.ok(marker.startsWith(cliHomes + '/'))
+        assert.ok(readFileSync(marker, 'utf8'))
+        return { status: 1, stdout: '', stderr: `cat: ${marker}: Permission denied\n` }
+      },
+    })
+    return { binding, seen }
+  }
+  const refuses = (options, selection = scope, cwd = workspace) => {
+    const { binding, seen } = bind(options)
+    assert.equal(binding(cwd, selection), false)
+    assert.deepEqual(seen, [], 'refused before the probe')
+  }
+  await t.test('managed layout proves workspace read and CLI-home denial before caching', () => {
+    const appAlias = join(dir, 'app-alias')
+    symlinkSync(app, appAlias)
+    const { binding, seen } = bind({ managedClisHome: join(appAlias, 'acp', 'clis') })
+    assert.equal(binding(workspace, scope), true, 'managed layout under app root should reach the sandbox probe')
+    assert.equal(seen.length, 2)
+    assert.ok(seen.every(marker => !existsSync(marker)))
+    assert.equal(binding(workspace, scope), true)
+    assert.equal(seen.length, 2)
+    unlinkSync(appAlias)
+    assert.equal(binding(workspace, scope), false, 'an unavailable store cannot reuse cached authority')
+    assert.equal(seen.length, 2)
+  })
+  await t.test('CLI homes, distinct protected roots and workspace overlaps are refused', () => {
+    const privateRuntime = join(cliHomes, 'private-program')
+    refuses({ command: binary(privateRuntime), layout: privateRuntime })
+    const appData = join(store, 'codex')
+    const alias = join(dir, 'data-alias')
+    symlinkSync(appData, alias)
+    const protectedData = realpathSync.native(alias)
+    for (const root of [protectedData, join(runtime, 'bin')]) {
+      refuses({}, { ...scope, protectedRoots: [...scope.protectedRoots, root] })
+      refuses({}, { ...scope, protectedRoots: [...scope.protectedRoots, root], signInRoots: [cliHomes, root] })
+    }
+    refuses({}, { ...scope, signInRoots: [cliHomes, app] })
+    refuses({}, { ...scope, cwd: cliHomes, team: cliHomes }, cliHomes)
+    refuses({}, { ...scope, cwd: dir }, dir)
+    refuses({}, scope, join(dir, 'missing-workspace'))
+  })
+  await t.test('missing and linked-out stores and layouts outside the store are refused', () => {
+    refuses({ managedClisHome: null })
+    const otherApp = join(dir, 'other-app')
+    const linkedStore = join(otherApp, 'acp', 'clis')
+    mkdirSync(join(otherApp, 'acp'), { recursive: true })
+    symlinkSync(store, linkedStore)
+    refuses({ managedClisHome: linkedStore })
+    const sibling = join(app, 'acp', 'clis-sibling', 'codex')
+    refuses({ command: binary(sibling), layout: sibling })
+    const inStoreAlias = join(runtime, 'bin', 'outside-alias')
+    symlinkSync(join(sibling, 'bin', 'fake-codex'), inStoreAlias)
+    refuses({ command: inStoreAlias, layout: sibling })
+    const storeLayout = binary(store)
+    refuses({ command: storeLayout, layout: store })
+  })
+  await t.test('launch executable and selected native runtime must each be within the store', () => {
+    const triple = {
+      'linux-x64': 'x86_64-unknown-linux-musl', 'linux-arm64': 'aarch64-unknown-linux-musl',
+      'darwin-x64': 'x86_64-apple-darwin', 'darwin-arm64': 'aarch64-apple-darwin',
+    }[`${process.platform}-${process.arch}`]
+    if (triple === undefined) return
+    const launcher = (folder, layout) => {
+      const command = join(folder, 'bin', 'codex.js')
+      const native = join(folder, 'vendor', triple, 'bin')
+      mkdirSync(join(folder, 'bin'), { recursive: true })
+      mkdirSync(native, { recursive: true })
+      writeFileSync(command, '// synthetic launcher\n')
+      symlinkSync(join(layout, 'bin', 'fake-codex'), join(native, 'codex'))
+      assert.equal(codexRuntimeRoot(command), layout)
+      return command
+    }
+    const otherRuntime = join(app, 'other-runtime')
+    binary(otherRuntime)
+    refuses({ command: launcher(join(dir, 'external'), runtime) })
+    refuses({ command: launcher(join(store, 'launcher'), otherRuntime), layout: otherRuntime })
+  })
 })
 
 for (const [home, key] of [
@@ -467,7 +680,7 @@ for (const isolated of [true, false]) test(`chat spawn returns its isolated home
 
 // Linux's sandbox re-executes Codex's own binary for every command (bwrap execvp): a profile
 // that cannot read its folder runs no command at all.
-test('the Codex executable folder is readable in both profiles', { skip: process.platform === 'win32' }, t => {
+test('the Codex executable folder is readable in all three chat profiles', { skip: process.platform === 'win32' }, t => {
   const root = realpathSync(directory(t))
   const bin = join(root, 'release', 'bin')
   mkdirSync(bin, { recursive: true })
@@ -501,7 +714,12 @@ test('the Codex executable folder is readable in both profiles', { skip: process
   const modes = ensureChatProfiles(home, { codexPath: link, platform: 'linux' })
   assert.ok(modes)
   const text = readFileSync(join(home, 'config.toml'), 'utf8')
-  assert.equal(text.split('\n').filter(line => line === `'${bin}' = 'read'`).length, 2)
+  const sections = text.split(/^\[permissions\./m)
+  for (const kind of ['read', 'workspace', 'gate']) {
+    const profile = sections.find(section => section.startsWith(`automagik-${kind}-`) && section.split(']')[0].endsWith('.filesystem'))
+    assert.ok(profile?.split('\n').includes(`'${bin}' = 'read'`), kind)
+  }
+  assert.equal(text.split('\n').filter(line => line === `'${bin}' = 'read'`).length, 3)
 })
 
 test('an unresolvable Codex executable keeps the legacy modes and writes nothing', t => {

@@ -10,6 +10,8 @@ import { test } from 'node:test'
 import { apply } from '../index.js'
 import { ROUTE } from '../src/host/constants.js'
 import { isNotesPath, isNotesWrite, isWorkCall } from '../src/host/review-mark.js'
+import { resultSnapshot } from '../src/host/solver-progress.js'
+import { reviewMarkText } from '../src/client/solver-draft.js'
 import { answerSender } from '../src/host/turns.js'
 import { guardVerdictOf } from '../src/shared/review-guard.js'
 import { deliveryMark, verdictOf } from '../src/shared/review-mark.js'
@@ -19,6 +21,114 @@ import { fakeContext } from './fake-ctx.js'
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 // Each step a few ms apart, so the order of work and verdicts is never a tie.
 const step = () => wait(3)
+
+test('#2134 K7a AW-R7 result credit belongs to the current exchange and revision', async t => {
+  for (const invalidate of [false, true]) {
+    await t.test(invalidate ? 'invalidated result' : 'current result', async t => {
+      const { rt, reviewer, solver, designate } = bench(t)
+      const judge = await reviewer()
+      const bot = await solver({ reviewerId: judge.id })
+      let now = 100
+      t.mock.method(Date, 'now', () => ++now)
+      const request = await rt.reviewRequest(bot.id, { text: 'Fixture request' })
+      rt.reviewVerdict(judge.id, bot.id, undefined, 'SHIP', Date.now())
+      rt.reviewWork(bot, true, 'bash', { command: 'synthetic' })
+      designate('result', bot, judge, 'result')
+      await rt.reviewVerdict(judge.id, bot.id, undefined, 'RESULT SHIP', Date.now(),
+        { replyTo: 'result', reviewReceipt: 'fixture-receipt' }, 'acp-codex/fixture')
+      if (invalidate) {
+        bot.reviewTrack.solver.revision += 1
+        delete bot.reviewTrack.solver.review
+      }
+      rt.reviewTurnEnd(bot.id, { completed: true, wroteText: true, request, model: 'acp-claude/fixture' })
+      assert.equal(bot.reviewTrack.last.plan, false)
+      assert.equal(bot.reviewTrack.last.result, !invalidate)
+      assert.equal(bot.reviewTrack.last.done, undefined)
+    })
+  }
+})
+
+test('#2134 K7b AW-R7 settlement crossing a request or revision stays uncertain', async t => {
+  const { rt, solver } = bench(t)
+  const bot = await solver()
+  let now = 100
+  t.mock.method(Date, 'now', () => ++now)
+  await rt.reviewRequest(bot.id, { text: 'First fixture' })
+  const admit = () => ({
+    bot, requestAt: bot.reviewTrack.requestAt, request: bot.reviewTrack.solver.request,
+    revision: bot.reviewTrack.solver.revision, at: Date.now(),
+  })
+  const settle = token => rt.reviewWork(bot, true, 'acp_tool', { kind: 'execute', input: { command: 'synthetic' } },
+    undefined, undefined, { at: token.at, admit: token })
+  const a = admit()
+  bot.reviewTrack.delivered = true
+  await rt.reviewRequest(bot.id, { text: 'Second fixture' })
+  settle(a)
+  assert.equal(bot.reviewTrack.firstWorkAt, bot.reviewTrack.requestAt)
+  assert.ok(bot.reviewTrack.uncertainWorkAt > bot.reviewTrack.requestAt)
+  const b = admit()
+  bot.reviewTrack.solver.revision += 1
+  settle(b)
+  assert.ok(bot.reviewTrack.uncertainWorkAt > b.at)
+  assert.equal(bot.reviewTrack.solver.revision, 1)
+})
+
+test('#2134 source 7 the designated result survives reply-history eviction and reload', async t => {
+  for (const invalidate of [false, true]) {
+    await t.test(invalidate ? 'invalidated result' : 'current result', async t => {
+      const { rt, reviewer, solver, reply, resultReply, reload } = bench(t)
+      const judge = await reviewer()
+      const bot = await solver({ reviewerId: judge.id })
+      const request = await rt.reviewRequest(bot.id, { text: 'Synthetic delivery' })
+      rt.reviewWork(bot, true, 'write', { file_path: 'fixture.txt' })
+      await step()
+      await resultReply(bot, judge)
+      assert.equal(bot.reviewTrack.solver.review.verdict, 'SHIP')
+      for (let i = 0; i < 5; i += 1) reply(judge.id, bot.id, 'SHIP')
+      assert.equal(bot.reviewTrack.verdicts.length, 4)
+      assert.ok(bot.reviewTrack.verdicts.every(item => item.stage === undefined))
+      if (invalidate) bot.reviewTrack.solver.revision += 1
+      const recovered = await reload()
+      recovered.reviewTurnEnd(bot.id, { completed: true, wroteText: true, request })
+      assert.equal(recovered.botOf(bot.id).reviewTrack.last.result, !invalidate)
+    })
+  }
+})
+
+test('#2134 K7d a verified Done result cannot supply the unreviewed plan flag', async t => {
+  const { rt, reviewer, solver, home } = bench(t)
+  const judge = await reviewer()
+  const bot = await solver({ reviewerId: judge.id })
+  bot.workDir = join(home, 'fixture-work')
+  mkdirSync(bot.workDir)
+  writeFileSync(join(bot.workDir, 'marker.txt'), 'synthetic result')
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => ++now)
+  const request = await rt.reviewRequest(bot.id)
+  const plan = { checks: ['marker'], revision: 0, review: { exchangeId: 'plan', reviewerId: judge.id } }
+  bot.reviewTrack.solver.plan = plan
+  rt.reviewWork(bot, true, 'bash', { command: 'inert observation' })
+  rt.reviewVerdict(judge.id, bot.id, undefined, 'PLAN SHIP', Date.now(),
+    { replyTo: 'plan', reviewReceipt: 'receipt-plan' }, 'acp-codex/reviewer')
+  const progress = bot.reviewTrack.solver
+  const snapshot = resultSnapshot(bot.workDir)
+  assert.ok(snapshot)
+  progress.snapshot = snapshot
+  progress.passed = ['marker']
+  progress.passRuns = { marker: 'verified' }
+  progress.runs = { verified: { revision: progress.revision, evidence: { snapshot } } }
+  progress.review = { exchangeId: 'result', reviewerId: judge.id, revision: progress.revision, solverModel: 'acp-claude/solver' }
+  await rt.reviewVerdict(judge.id, bot.id, undefined, 'RESULT SHIP', Date.now(),
+    { replyTo: 'result', reviewReceipt: 'receipt-result' }, 'acp-codex/reviewer')
+  rt.reviewTurnEnd(bot.id, { completed: true, wroteText: true, request, model: 'acp-claude/solver' })
+  const { last, outcome } = bot.reviewTrack
+  assert.equal(outcome.done, true)
+  assert.equal(last.done, true)
+  assert.equal(last.result, true)
+  assert.equal(last.plan, false)
+  assert.equal(reviewMarkText({ ...bot, reviewMark: last }, { byId: rt.state.bots }),
+    `Plan unreviewed: ${judge.name} gave no verdict before the work started.\nDone: every check passed and ${judge.name} approved.`)
+})
 
 function bench(t) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-review-mark-'))
@@ -37,7 +147,12 @@ function bench(t) {
       create: async options => ({ sessionId: options.sessionId ?? `s${++created}` }),
       resolveAgent: async (sessionId) => {
         if (!agents.has(sessionId)) {
-          agents.set(sessionId, { session: sessions.get(sessionId) ?? { id: sessionId }, ctx: { tools: { restrict: () => () => {} }, effect: execute => execute() } })
+          const session = sessions.get(sessionId) ?? Session.create(sessionId, [], {
+            version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: Date.now(), isSeeded: false,
+          })
+          sessions.set(sessionId, session)
+          agents.set(sessionId, { id: sessionId, session,
+            ctx: { tools: { restrict: () => () => {} }, effect: execute => execute() } })
         }
         return { agent: agents.get(sessionId) }
       },
@@ -75,7 +190,10 @@ function bench(t) {
     return rt
   }
   const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))).json()
-  const guard = (exec) => (ctx.listeners.get('tools/execute') ?? [])[0](exec, async () => 'ran')
+  const guard = async exec => {
+    const { agent } = await ctx.sessionController.resolveAgent(exec.agent.id)
+    return (ctx.listeners.get('tools/execute') ?? [])[0]({ ...exec, agent }, async () => 'ran')
+  }
   let seq = 0
   const event = (sessionId, type, data) => {
     for (const listener of ctx.listeners.get('session/event') ?? []) listener({ id: sessionId }, { type, seq: ++seq, time: Date.now(), data })
@@ -118,11 +236,35 @@ function bench(t) {
   }
   // The reviewer answering the Solver's request (the path every reply takes, turns.js), on the work
   // message_bot opened for it now (`opened: false`: a reply whose work is gone; `exchangeId`: a given one).
-  const reply = (fromId, toId, value, { opened = true, exchangeId = `x${++seq}`, ...extra } = {}) => {
+  const reply = (fromId, toId, value, { opened = true, exchangeId = `x${++seq}`, model, ...extra } = {}) => {
     if (opened && rt.state.works?.[exchangeId] === undefined) rt.openWork(exchangeId, { from: toId, to: fromId })
-    const host = recordedReplies.has(toId) ? rt : { __proto__: rt, deliver: async () => {} }
-    return answerSender(host, fromId, { exchangeId, senderSessionId: toId, ...extra }, value)
+    let settled
+    const host = recordedReplies.has(toId) ? rt : { __proto__: rt, async deliver(_message, { onReplyRecorded, closeReviewWork }) {
+      if (closeReviewWork) settled = onReplyRecorded.ready.then(closeReviewWork)
+      return settled
+    } }
+    answerSender(host, fromId, { exchangeId, senderSessionId: toId, ...extra }, value, undefined, undefined, model)
+    return settled
   }
+  const designate = (stage, bot, reviewer, exchangeId = `designated-${++seq}`) => {
+    const progress = bot.reviewTrack.solver
+    assert.ok(progress?.request)
+    const identity = { exchangeId, reviewerId: reviewer.id }
+    if (stage === 'plan') progress.plan = { checks: ['fixture'], revision: progress.revision, review: identity }
+    else {
+      bot.workDir ??= mkdtempSync(join(home, 'result-fixture-'))
+      progress.snapshot = resultSnapshot(bot.workDir)
+      assert.ok(progress.snapshot)
+      progress.review = { ...identity, revision: progress.revision, solverModel: 'acp-claude/fixture' }
+    }
+    return exchangeId
+  }
+  const planReply = (bot, reviewer, value = 'PLAN SHIP', exchangeId) =>
+    reply(reviewer.id, bot.id, value, { exchangeId: designate('plan', bot, reviewer, exchangeId) })
+  const resultReply = (bot, reviewer, value = 'RESULT SHIP', exchangeId) =>
+    reply(reviewer.id, bot.id, value, {
+      exchangeId: designate('result', bot, reviewer, exchangeId), model: 'acp-codex/fixture',
+    })
   // A Solver as the dialog makes it, through the person's create-bot route.
   const solver = async ({ reviewerId, brief = '' } = {}) => {
     const answer = await call('create-bot', { name: `Solver ${++created}`, role: 'Solver', instructions: 'Method.', brief, ...(reviewerId ? { reviewerId } : {}) })
@@ -130,7 +272,7 @@ function bench(t) {
     return rt.botOf(answer.value.id)
   }
   const reviewer = async () => rt.createBot({ name: `Reviewer ${++created}`, role: 'Reviewer', instructions: 'Review.', pickModel: true })
-  return { ctx, rt, home, call, guard, person, endTurn, reply, solver, reviewer, sessions, event, replyInbox, takeReply, reload }
+  return { ctx, rt, home, call, guard, person, endTurn, reply, designate, planReply, resultReply, solver, reviewer, sessions, event, replyInbox, takeReply, reload }
 }
 
 // F9 (APP-TEST "Recheck on 262488524"): a Codex reviewer's replies, word for word with every name
@@ -242,7 +384,7 @@ test('deliveryMark: plan missing, result missing, both present, both missing, fr
 
 // APP-TEST F7 run 2: the Solver wrote its file before any plan review, then sent one combined review.
 test('a Solver that wrote before its plan review is marked plan unreviewed; the view shows the mark, never the timestamps', async (t) => {
-  const { rt, call, guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { rt, call, guard, person, endTurn, resultReply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   assert.equal(bot.reviewerId, ada.id)
@@ -255,8 +397,7 @@ test('a Solver that wrote before its plan review is marked plan unreviewed; the 
   endTurn(bot.id, 'Sent my plan and work for review.')
   assert.equal(bot.reviewTrack.last, undefined)
   await step()
-  rt.closeWork('w-review', ada.name, 'SHIP')
-  reply(ada.id, bot.id, 'SHIP\nThe comparison holds.')
+  await resultReply(bot, ada, 'RESULT SHIP\nThe comparison holds.', 'w-review')
   await step()
   endTurn(bot.id, 'Delivered: bom.md.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: true })
@@ -269,20 +410,20 @@ test('a Solver that wrote before its plan review is marked plan unreviewed; the 
 })
 
 test('plan and result reviewed, and a result without its second review, on a DSH tool route', async (t) => {
-  const { rt, guard, person, endTurn, reply, solver, reviewer, home } = bench(t)
+  const { rt, guard, person, endTurn, planReply, resultReply, solver, reviewer, home } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   person(bot.id, 'Fix the script.')
   await step()
-  reply(ada.id, bot.id, 'FIX-FIRST (plan)\nAdd a check.')
+  planReply(bot, ada, 'PLAN FIX-FIRST\nAdd a check.')
   await step()
-  reply(ada.id, bot.id, '**SHIP**')
+  planReply(bot, ada, '**SHIP**')
   await step()
   await guard({ name: 'write', arguments: { file_path: 'a.js' }, agent: { id: bot.id } })
   await step()
   await guard({ name: 'mcp__dsh__bash', arguments: { command: 'node a.js' }, agent: { id: bot.id } })
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  await resultReply(bot, ada)
   await step()
   endTurn(bot.id, 'Done.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
@@ -295,7 +436,7 @@ test('plan and result reviewed, and a result without its second review, on a DSH
   assert.deepEqual(bot.reviewTrack.verdicts, [])
   assert.equal(bot.reviewTrack.last.result, true, 'the last mark stays until the next delivery')
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   await step()
   await guard({ name: 'edit', arguments: {}, agent: { id: bot.id } })
   await step()
@@ -304,15 +445,14 @@ test('plan and result reviewed, and a result without its second review, on a DSH
 })
 
 test('a turn that ends with its review still out is not a delivery; a person asking first does not drop the plan review', async (t) => {
-  const { rt, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { rt, person, endTurn, planReply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   person(bot.id, 'Compare two libraries.')
   rt.openWork('w-plan', { from: bot.id, to: ada.id })
   endTurn(bot.id, 'Waiting for my reviewer.')
   assert.equal(bot.reviewTrack.last, undefined)
-  rt.closeWork('w-plan', ada.name, 'SHIP')
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada, 'PLAN SHIP', 'w-plan')
   rt.openWork('w-result', { from: bot.id, to: ada.id })
   endTurn(bot.id, 'Waiting for the result review.')
   assert.equal(bot.reviewTrack.last, undefined)
@@ -380,12 +520,16 @@ test('the brief it was made with is its first request; a greeting is not a deliv
 })
 
 test('a subagent under the Solver\'s own chat dates its work; a group Session, a task and another Bot do not', async (t) => {
-  const { rt, guard, person, endTurn, reply, solver, reviewer, sessions } = bench(t)
+  const { rt, guard, person, endTurn, planReply, resultReply, solver, reviewer, sessions } = bench(t)
+  const { folder } = notesFolder(t)
+  const marker = join(folder, 'fixture.txt')
+  writeFileSync(marker, 'synthetic research')
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
+  bot.workDir = folder
   person(bot.id, 'Build it.')
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   await step()
   const childId = 'child-of-solver'
   sessions.set(childId, Session.create(childId, [], {
@@ -395,15 +539,15 @@ test('a subagent under the Solver\'s own chat dates its work; a group Session, a
   assert.equal(typeof bot.reviewTrack.firstWorkAt, 'number')
   const first = bot.reviewTrack.firstWorkAt
   // Research never dates the work.
-  await guard({ name: 'read', arguments: {}, agent: { id: bot.id } })
-  await guard({ name: 'acp_tool', arguments: { kind: 'read', input: {} }, agent: { id: bot.id } })
+  await guard({ name: 'read', arguments: { file_path: marker }, agent: { id: bot.id } })
+  await guard({ name: 'acp_tool', arguments: { kind: 'read', input: { file_path: marker } }, agent: { id: bot.id } })
   assert.equal(bot.reviewTrack.lastWorkAt, first)
   // A task run of the Solver is not its own chat.
   rt.state.tasks = { ...rt.state.tasks, 'task-1': { from: bot.id, title: 'side' } }
   assert.equal(await guard({ name: 'write', arguments: {}, agent: { id: 'task-1' } }), 'ran')
   assert.equal(bot.reviewTrack.lastWorkAt, first)
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  await resultReply(bot, ada)
   endTurn(bot.id, 'Built.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
 })
@@ -428,7 +572,7 @@ test('another Bot is never tracked or marked, and the guard runs its calls as be
 // SR3-2: a verdict counts only for work the current request opened. Request 1's late SHIP, after
 // the wait for it was given up, never marks request 2's plan reviewed.
 test('a late verdict from an earlier request does not review the current one', async (t) => {
-  const { rt, guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { rt, guard, person, endTurn, reply, planReply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   person(bot.id, 'Request 1.')
@@ -458,7 +602,7 @@ test('a late verdict from an earlier request does not review the current one', a
   // Request 2's own review, on work it opened, still counts.
   person(bot.id, 'Request 3.')
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   assert.equal(bot.reviewTrack.verdicts.length, 1)
 })
 
@@ -484,7 +628,7 @@ test('a copy of a Solver keeps its reviewer id, checked again', async (t) => {
 
 // SR3-6: a corrupted stored track never throws on a reply, a tool call, a turn's end or the view.
 test('a corrupted stored review track is repaired, never thrown on', async (t) => {
-  const { call, guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { call, guard, person, endTurn, reply, planReply, resultReply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   for (const bad of ['garbage', 7, [], null, { verdicts: 5, last: 'x', firstWorkAt: {} }, { requested: true, requestAt: 'now', verdicts: [null, 7, { verdict: 'SHIP' }], last: [1] }]) {
@@ -505,11 +649,11 @@ test('a corrupted stored review track is repaired, never thrown on', async (t) =
   }
   // The repaired track marks the next delivery as usual.
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   await step()
   await guard({ name: 'write', arguments: {}, agent: { id: bot.id } })
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  await resultReply(bot, ada)
   endTurn(bot.id, 'Done.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
 })
@@ -530,12 +674,12 @@ test('only a Solver\'s tool calls reach the review mark', async (t) => {
 
 // SR3-8: the last mark stays in the view after the Bot's description changes.
 test('the last mark stays shown after the Solver\'s description changes', async (t) => {
-  const { rt, call, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { rt, call, person, endTurn, planReply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   person(bot.id, 'Do it.')
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   endTurn(bot.id, 'Done.')
   assert.equal(bot.reviewTrack.last.review, 'bot')
   assert.equal((await call('update-bot', { id: bot.id, role: 'Helper' })).ok, true)
@@ -580,7 +724,7 @@ test('a delivery the person asked for first is marked; the late verdict never ma
 
 // SR4-1: only reviewer work opened before the person's last message stops holding the delivery.
 test('a person\'s message before the Solver opens its review work still waits for the verdict', async (t) => {
-  const { rt, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { rt, person, endTurn, planReply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   person(bot.id, 'Request 1.')
@@ -592,8 +736,7 @@ test('a person\'s message before the Solver opens its review work still waits fo
   endTurn(bot.id, 'Sent my plan for review.')
   assert.equal(bot.reviewTrack.last, undefined)
   assert.equal(bot.reviewTrack.delivered, undefined)
-  rt.closeWork('w-plan', ada.name, 'SHIP')
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada, 'PLAN SHIP', 'w-plan')
   endTurn(bot.id, 'Delivered.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
 })
@@ -610,7 +753,7 @@ function notesFolder(t) {
 }
 
 test('a write to exactly the notes file before the plan verdict keeps the plan reviewed, on every route', async (t) => {
-  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { guard, person, endTurn, planReply, resultReply, solver, reviewer } = bench(t)
   const { folder } = notesFolder(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
@@ -630,11 +773,11 @@ test('a write to exactly the notes file before the plan verdict keeps the plan r
   await guard({ name: 'write', arguments: { file_path: '.solver/notes.md' }, agent: { id: bot.id } })
   assert.equal(bot.reviewTrack.firstWorkAt, undefined)
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   await step()
   await guard({ name: 'write', arguments: { file_path: 'compare.md' }, agent: { id: bot.id } })
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  await resultReply(bot, ada)
   await step()
   // SR5-1: a notes write after the result verdict is still work for the result side.
   await guard({ name: 'write', arguments: { file_path: '.solver/notes.md' }, agent: { id: bot.id } })
@@ -645,16 +788,16 @@ test('a write to exactly the notes file before the plan verdict keeps the plan r
 // SR5-1: an answer written only into the notes file after two plan verdicts, delivered with no
 // result review, reads result unreviewed (never "Plan and result reviewed").
 test('a notes-only deliverable with no result review reads result unreviewed', async (t) => {
-  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { guard, person, endTurn, planReply, solver, reviewer } = bench(t)
   const { folder } = notesFolder(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   bot.workDir = folder
   person(bot.id, 'Research two libraries and give me a one-page comparison.')
   await step()
-  reply(ada.id, bot.id, 'FIX-FIRST\nAdd a licence check to the plan.')
+  planReply(bot, ada, 'PLAN FIX-FIRST\nAdd a licence check to the plan.')
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   await step()
   assert.equal(await guard({ name: 'write', arguments: { file_path: '.solver/notes.md', content: '# Comparison' }, agent: { id: bot.id } }), 'ran')
   assert.equal(bot.reviewTrack.firstWorkAt, undefined)
@@ -667,7 +810,7 @@ test('a notes-only deliverable with no result review reads result unreviewed', a
 // SR6-1: an answer written only into the notes file, with no plan review, reviewed once after the
 // notes: the one verdict reviews the result, never the plan too.
 test('a notes-only delivery reviewed once, after the notes, reads plan unreviewed', async (t) => {
-  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { guard, person, endTurn, resultReply, solver, reviewer } = bench(t)
   const { folder } = notesFolder(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
@@ -677,7 +820,7 @@ test('a notes-only delivery reviewed once, after the notes, reads plan unreviewe
   assert.equal(await guard({ name: 'write', arguments: { file_path: '.solver/notes.md', content: '# Comparison' }, agent: { id: bot.id } }), 'ran')
   assert.equal(bot.reviewTrack.firstWorkAt, undefined)
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  await resultReply(bot, ada)
   await step()
   endTurn(bot.id, 'Delivered: the comparison is in .solver/notes.md.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: true })
@@ -686,7 +829,7 @@ test('a notes-only delivery reviewed once, after the notes, reads plan unreviewe
 // SR5-1: a delivered file that is a symlink into the notes file, changed through a notes write after
 // the result verdict, reads result unreviewed.
 test('a delivered symlink into the notes file changed after the result verdict reads result unreviewed', async (t) => {
-  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { guard, person, endTurn, planReply, resultReply, solver, reviewer } = bench(t)
   const { folder } = notesFolder(t)
   mkdirSync(join(folder, '.solver'))
   writeFileSync(join(folder, '.solver', 'notes.md'), 'reviewed text')
@@ -695,12 +838,12 @@ test('a delivered symlink into the notes file changed after the result verdict r
   bot.workDir = folder
   person(bot.id, 'Write report.md.')
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   await step()
   await guard({ name: 'bash', arguments: { command: 'ln -s .solver/notes.md report.md' }, agent: { id: bot.id } })
   symlinkSync('.solver/notes.md', join(folder, 'report.md'))
   await step()
-  reply(ada.id, bot.id, 'SHIP')
+  await resultReply(bot, ada)
   await step()
   assert.equal(isNotesPath('.solver/notes.md', folder, folder), true)
   await guard({ name: 'write', arguments: { file_path: '.solver/notes.md', content: 'unreviewed text' }, agent: { id: bot.id } })
@@ -709,7 +852,7 @@ test('a delivered symlink into the notes file changed after the result verdict r
 })
 
 test('any other write before the plan verdict marks the plan unreviewed: lookalikes, .., another folder, a symlink, a link', async (t) => {
-  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { home, guard, person, endTurn, planReply, resultReply, solver, reviewer } = bench(t)
   const { root, folder, outside } = notesFolder(t)
   // A second folder whose notes path leads out through a symlink, one whose notes file is a symlink, and
   // one whose notes file is a hard link to a file outside.
@@ -748,9 +891,11 @@ test('any other write before the plan verdict marks the plan unreviewed: lookali
     assert.equal(await guard({ ...exec, agent: { id: bot.id } }), 'ran', label)
     assert.equal(typeof bot.reviewTrack.firstWorkAt, 'number', label)
     await step()
-    reply(ada.id, bot.id, 'SHIP')
+    planReply(bot, ada)
     await step()
-    reply(ada.id, bot.id, 'SHIP')
+    // The hard-link work decision is recorded. Review a separate text-only result.
+    if (workDir === hardFile) bot.workDir = mkdtempSync(join(home, 'result-fixture-'))
+    await resultReply(bot, ada)
     endTurn(bot.id, 'Delivered.')
     assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: false, result: true }, label)
   }
@@ -780,18 +925,18 @@ test('isNotesPath and isNotesWrite: exact path only, relative to the call\'s fol
 // F9: a reviewer whose verdict follows its progress sentence (the Codex replies above) is counted,
 // so a Solver that followed the method is marked plan and result reviewed.
 test('a reviewer that opens with a progress sentence still reviews the plan and the result', async (t) => {
-  const { guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { guard, person, endTurn, planReply, resultReply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   person(bot.id, 'Write a three-line note.')
   await step()
-  reply(ada.id, bot.id, CODEX_REPLIES[2][0])
+  planReply(bot, ada, CODEX_REPLIES[2][0])
   await step()
-  reply(ada.id, bot.id, CODEX_REPLIES[0][0])
+  planReply(bot, ada, CODEX_REPLIES[0][0].replace('. SHIP', '.SHIP'))
   await step()
   await guard({ name: 'write', arguments: { file_path: 'note.md' }, agent: { id: bot.id } })
   await step()
-  reply(ada.id, bot.id, CODEX_REPLIES[3][0])
+  await resultReply(bot, ada, CODEX_REPLIES[3][0])
   assert.deepEqual(bot.reviewTrack.verdicts.map(entry => entry.verdict), ['FIX-FIRST', 'SHIP', 'SHIP'])
   endTurn(bot.id, 'Delivered: note.md.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: true })
@@ -801,7 +946,7 @@ test('a reviewer that opens with a progress sentence still reviews the plan and 
 // has the work. That delivery carries a mark that says so; a Solver with a reviewer Bot is never
 // marked "fresh" (the no-reviewer line).
 test('a delivery made while the reviewer still has the work is marked pending, never fresh, in the view', async (t) => {
-  const { rt, call, guard, person, endTurn, reply, solver, reviewer } = bench(t)
+  const { rt, call, guard, person, endTurn, reply, planReply, solver, reviewer } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   person(bot.id, 'Write a three-line note.')
@@ -826,7 +971,7 @@ test('a delivery made while the reviewer still has the work is marked pending, n
   await step()
   rt.openWork('w-stale', { from: bot.id, to: ada.id })
   rt.state.works['w-stale'].at = bot.reviewTrack.requestAt - 1
-  reply(ada.id, bot.id, 'SHIP')
+  planReply(bot, ada)
   endTurn(bot.id, 'Done.')
   assert.deepEqual({ ...bot.reviewTrack.last, at: 0 }, { at: 0, review: 'bot', plan: true, result: false })
 })
@@ -867,7 +1012,7 @@ async function until(predicate) {
 }
 
 async function run(t, { planAnsweredInsideTurn, resultAnsweredInsideTurn = false, clarification }) {
-  const { rt, guard, person, endTurn, reply, solver, reviewer, replyInbox, takeReply } = bench(t)
+  const { rt, guard, person, endTurn, reply, designate, solver, reviewer, replyInbox, takeReply } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   await rt.resolveAgent(bot.id)
@@ -902,6 +1047,7 @@ async function run(t, { planAnsweredInsideTurn, resultAnsweredInsideTurn = false
     takeReply(bot.id, inbox, 'x-clarification')
   }
   await step()
+  designate('plan', bot, ada, 'x-plan')
   rt.openWork('x-plan', { from: bot.id, to: ada.id })
   await step()
   if (planAnsweredInsideTurn) {
@@ -921,10 +1067,11 @@ async function run(t, { planAnsweredInsideTurn, resultAnsweredInsideTurn = false
   await step()
   await guard({ name: 'mcp__dsh__bash', arguments: { command: 'node --test average.test.mjs' }, agent: { id: bot.id } })
   await step()
+  designate('result', bot, ada, 'x-result')
   rt.openWork('x-result', { from: bot.id, to: ada.id })
   await step()
   const resultVerdictAt = Date.now()
-  const answerResult = () => reply(ada.id, bot.id, RESULT_REPLY, { exchangeId: 'x-result' })
+  const answerResult = () => reply(ada.id, bot.id, RESULT_REPLY, { exchangeId: 'x-result', model: 'acp-codex/fixture' })
   if (resultAnsweredInsideTurn) {
     answerResult()
     await until(() => record('x-result'))
@@ -1015,7 +1162,7 @@ test('TRACK1 LIFECYCLE: a queued reply survives inbox moves until the exact inpu
 })
 
 test('TRACK1 RELOAD: an accepted reply with a failed flush remains the sole actionable reply until consumed', async (t) => {
-  const { ctx, rt, event, person, endTurn, reply, solver, reviewer, replyInbox, takeReply, reload } = bench(t)
+  const { ctx, rt, event, person, endTurn, reply, designate, solver, reviewer, replyInbox, takeReply, reload } = bench(t)
   const ada = await reviewer()
   const bot = await solver({ reviewerId: ada.id })
   const agent = await rt.resolveAgent(bot.id)
@@ -1030,6 +1177,7 @@ test('TRACK1 RELOAD: an accepted reply with a failed flush remains the sole acti
   person(bot.id, 'Review a change.')
   endTurn(bot.id)
   await step()
+  designate('plan', bot, ada, 'x-plan')
   reply(ada.id, bot.id, PLAN_REPLY, { exchangeId: 'x-plan' })
   await until(() => flushFailed)
   const exact = inbox[0]

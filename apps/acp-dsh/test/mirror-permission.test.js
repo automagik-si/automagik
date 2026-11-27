@@ -8,6 +8,9 @@
 // is run with `log`), the mirror is admitted by a step's resolved tool set, and the permission
 // service reads Auto only while Auto review's `registerAuto` is live.
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applyAutoReview } from '@deepseek-ai/dsh-experimental-auto-review'
@@ -1318,7 +1321,7 @@ for (const [name, prepare] of [
   })
 }
 
-function guardedMirror(t, { provider = 'acp-claude', native = true, marked = true, auto = false } = {}) {
+function guardedMirror(t, { provider = 'acp-claude', native = true, marked = true, auto = false, questionGuard } = {}) {
   const session = Session.create('guarded-mirror')
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 1 })
@@ -1335,27 +1338,190 @@ function guardedMirror(t, { provider = 'acp-claude', native = true, marked = tru
       }[name]
     },
   }
-  const adapter = new AcpAdapter(ctx, new Map())
+  const adapter = new AcpAdapter(ctx, new Map(), { questionGuard })
   t.after(() => adapter.dispose())
   const run = new AgentRun({ name: 'Guarded ACP', provider })
   run.sessionId = 'guarded-acp'
-  const live = { name: 'Guarded ACP', run, native, dshAgent: agent, calls: new Set(['mirror']), toolIds: new Map([['mirror', 'parent']]) }
+  const live = { name: 'Guarded ACP', run, native, dshAgent: agent, calls: new Set(['mirror']), toolIds: new Map([['mirror', 'parent']]),
+    ...(questionGuard ? { policyManaged: true, provider, workspace: '/synthetic' } : {}) }
   adapter.live.set(session.id, live)
   const exec = { name: TOOL_NAME, callId: 'mirror', agent, signal: t.signal,
     ...(marked ? { reviewGuardUnheld: { reason: 'Held by the guard' } } : {}) }
   async function update(toolCallId, details, sessionId = run.sessionId) {
     return await run.onUpdate({ sessionUpdate: 'tool_call_update', toolCallId, ...details }, sessionId)
   }
-  const question = (id, extra = {}) => run.onPermission({
-    sessionId: run.sessionId, toolCall: { toolCallId: id, ...extra }, options: OPTIONS,
+  const question = (id, extra = {}, options = OPTIONS) => run.onPermission({
+    sessionId: run.sessionId, toolCall: { toolCallId: id, ...extra }, options,
   }, t.signal)
   const prepare = async (status = 'in_progress') => {
     await update('parent', { kind: 'execute', status, title: 'Parent', rawInput: { command: 'echo parent' } })
     return run.tools.get('parent')
   }
-  const execute = args => adapter.tool.execute(args ?? callArguments(run.tools.get('parent')), exec)
+  const execute = (args, executionArgs) => {
+    const input = args ?? callArguments(run.tools.get('parent'))
+    exec.arguments = executionArgs ?? input
+    return adapter.tool.execute(input, exec)
+  }
   return { adapter, run, live, exec, update, question, prepare, execute }
 }
+
+test('#2134 binds direct streamed permission to both earlier records and the complete live call', async t => {
+  const partial = { file_path: '/synthetic/marker', options: { create: true } }
+  const completed = { ...partial, content: 'fixture' }
+  for (const [variant, replace, checked] of [
+    ['added field', args => [args, { ...args, input: completed }], 1],
+    ['changed first-sight field', args => [{ ...args, input: { ...partial, options: {} } }, args], 0],
+    ['missing execution field', args => [args, { ...args, input: { ...partial, extra: true } }], 0],
+    ['different tool ID', args => [args, { ...args, id: 'other' }], 0],
+    ['different tool kind', args => [{ ...args, kind: 'read' }, args], 0],
+    ['lost known parent', args => [args, { ...args, parent: 'known-parent' }], 0],
+    ['changed before answer', args => [args, args], 1],
+  ]) {
+    await t.test(variant, async t => {
+      const guarded = []
+      const h = guardedMirror(t, { marked: false, questionGuard: request => {
+        guarded.push(request.args.input)
+        if (variant === 'changed before answer') h.run.tools.get('parent').rawInput = { ...completed, content: 'changed' }
+        return { decision: 'allow' }
+      } })
+      await h.update('parent', { kind: 'edit', status: 'pending', title: 'Write fixture', rawInput: partial,
+        _meta: { claudeCode: { toolName: 'Write' } },
+      })
+      const args = callArguments(h.run.tools.get('parent'))
+      await h.update('parent', { rawInput: completed })
+      const question = h.question('parent', {
+        rawInput: completed, content: [{ type: 'diff', path: completed.file_path, oldText: null, newText: completed.content }],
+      })
+      const result = await h.execute(...replace(args))
+      const allowed = variant === 'added field'
+      assert.deepEqual(await soon(question), picked(allowed ? 'yes' : 'no'))
+      assert.deepEqual(guarded, checked ? [completed] : [])
+      if (!allowed) assert.match(result.text, /permission question no longer matches this call/)
+    })
+  }
+})
+
+for (const [label, fixture] of [
+  ['allows a plain workspace literal', { allow: true }],
+  ['allows a single-quoted workspace literal', { allow: true, quote: "'", sameDirectory: true }],
+  ['allows a double-quoted workspace literal', { allow: true, quote: '"' }],
+  ['refuses another directory in the first mirror', { otherDirectory: true }],
+  ['refuses a same-physical workspace symlink alias', { workspaceAlias: true }],
+  ['refuses a changed tail in the execution record', { executionTail: 'fixture-other-check' }],
+  ['refuses a semicolon separator', { separator: ' ; ' }],
+  ['refuses a non-execute kind', { kind: 'other' }],
+  ['refuses an unrelated command', { completedCommand: 'fixture-unrelated' }],
+  ['refuses a conflicting cwd', { conflictingCwd: true }],
+  ['refuses an unproved workdir', { workdir: 'relative-fixture' }],
+  ['refuses another tool identity', { toolName: 'SyntheticExecute' }],
+]) {
+  test(`#2134 leading cd ${label}`, async t => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'mirror-cd-')))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    const { quote = '', allow = false, kind = 'execute', toolName = 'Bash', separator = ' && ' } = fixture
+    const workspace = join(root, quote ? 'fixture workspace' : 'workspace')
+    mkdirSync(workspace)
+    let directory = workspace
+    if (fixture.workspaceAlias) {
+      directory = join(root, 'workspace-alias')
+      symlinkSync(workspace, directory, 'junction')
+      assert.equal(realpathSync.native(directory), workspace)
+    }
+    const guarded = []
+    const h = guardedMirror(t, { marked: false, questionGuard: request => {
+      guarded.push(request.args.input)
+      return { decision: 'allow' }
+    } })
+    h.live.workspace = workspace
+    h.live.workspaceArgument = workspace
+    const tail = 'fixture-stream-check'
+    const command = (directory, suffix = tail) => `cd ${quote}${directory}${quote}${separator}${suffix}`
+    const partial = { command: command(fixture.otherDirectory ? root : directory),
+      ...(fixture.sameDirectory ? { cwd: workspace } : {}) }
+    const completed = { ...partial, command: fixture.completedCommand ?? tail, description: 'Synthetic Bash fixture',
+      ...(fixture.sameDirectory ? { workdir: workspace } : {}),
+      ...(fixture.conflictingCwd ? { cwd: root } : {}),
+      ...(fixture.workdir ? { workdir: fixture.workdir } : {}) }
+    await h.update('parent', { kind, status: 'pending', title: partial.command, rawInput: partial,
+      _meta: { claudeCode: { toolName } },
+    })
+    const args = callArguments(h.run.tools.get('parent'))
+    const executionArgs = { ...args, input: { ...partial, command: command(directory, fixture.executionTail) } }
+    await h.update('parent', { title: completed.command, rawInput: completed })
+    const question = h.question('parent', { rawInput: completed })
+    const result = await h.execute(args, executionArgs)
+    assert.deepEqual(await soon(question), picked(allow ? 'yes' : 'no'))
+    assert.deepEqual(guarded, allow ? [completed] : [])
+    if (!allow) assert.match(result.text, /permission question no longer matches this call/)
+  })
+}
+
+test('#2134 K6 AW-R6 one-shot decisions use the live child and its independent guard', async t => {
+  for (const [variant, expected] of [['in-folder', 'yes'], ['attempt-hold', 'no'], ['changed', 'no'], ['lasting-only', 'no']]) {
+    await t.test(variant, async t => {
+      let checked = 0
+      const h = guardedMirror(t, { marked: false, questionGuard: request => {
+        checked++
+        assert.equal(request.args.id, 'child')
+        assert.equal(request.name, variant === 'attempt-hold' ? 'Bash' : 'Read')
+        if (variant === 'attempt-hold') return { decision: 'refuse', text: 'Synthetic attempt hold' }
+        if (variant === 'changed') h.run.tools.get('child').rawInput = { file_path: 'changed fixture' }
+        return { decision: 'allow' }
+      } })
+      await h.prepare()
+      h.run.prompting = new Promise(() => {})
+      const work = variant === 'attempt-hold'
+      await h.update('child', { kind: work ? 'execute' : 'read', title: 'Fixture question', status: 'pending',
+        rawInput: work ? { command: 'synthetic' } : { file_path: '/synthetic/marker' },
+        _meta: { claudeCode: { toolName: work ? 'Bash' : 'Read', parentToolUseId: 'parent' } },
+      })
+      const question = h.question('child', {}, variant === 'lasting-only' ? [ALLOW_ALWAYS, OPTIONS[1]] : OPTIONS)
+      h.adapter.runNested = () => assert.fail('a decided child does not dispatch again')
+      const result = h.execute()
+      assert.deepEqual(await soon(question), picked(expected))
+      await h.update('parent', { status: 'completed' })
+      await result
+      assert.equal(checked, 1)
+    })
+  }
+})
+
+test('#2134 source 5 managed nested Auto decisions carry the exact pending question', async t => {
+  const h = guardedMirror(t, { marked: false, auto: true, questionGuard: () => undefined })
+  const parent = await h.prepare()
+  h.run.prompting = new Promise(() => {})
+  await h.update('child', { kind: 'read', title: 'Synthetic child', status: 'pending',
+    rawInput: { path: 'fixture.txt' }, _meta: { claudeCode: { toolName: 'Read', parentToolUseId: 'parent' } },
+  })
+  const child = h.run.tools.get('child')
+  const first = h.question('child')
+  const initial = child.permission
+  const review = Promise.withResolvers()
+  const bindings = []
+  h.adapter.runNested = async (_live, nested, _exec, bound) => {
+    bindings.push(bound)
+    if (bindings.length === 1) {
+      await review.promise
+      bound?.answer(picked('yes'))
+      return true
+    }
+    nested.permission.answer(picked('no'))
+    return true
+  }
+  const result = h.execute()
+  await until(() => bindings.length === 1)
+  assert.equal(bindings.length, 1)
+  const second = h.question('child')
+  const replacement = child.permission
+  review.resolve()
+  assert.deepEqual(await soon(first), CANCELLED)
+  assert.deepEqual(await soon(second), picked('no'))
+  await h.update(parent.id, { status: 'completed' })
+  await result
+  assert.equal(bindings[0], initial, 'the first review carries the original question')
+  assert.equal(bindings[1], replacement, 'the replacement has a distinct review')
+  assert.equal(bindings.length, 2)
+})
 
 test('#2132 T8 a marked mirror answers its own Full-access question with the guard refusal', async t => {
   const h = guardedMirror(t)

@@ -16,6 +16,7 @@ import { viaOf } from '../shared/im-platforms.js'
 import { BRIDGE_ACTIVITY_RECORD, bridgeOriginOf, toolEventOf } from '../shared/tool-activity.js'
 import { reminderText } from './schedules.js'
 import { modelOf, replyModel } from './solver-progress.js'
+import { actualSolver } from './review-guard.js'
 
 // What a running tool call is about, for an approval card.
 export const detailOfArgs = raw => {
@@ -67,6 +68,12 @@ export function capabilityOfArgs(raw, tool) {
 // person waits for. A Bot's request that lands inside one joins it rather than claiming it,
 // so its reply stays in the chat (issue #62).
 export const opensByItself = source => source?.kind === 'goal'
+
+const firstBotRequest = source => source?.role === 'request' && source.deferred !== true
+  && source.resumed !== true && source.resumedByUpdate !== true && source.retried !== true
+
+export const scopedBotRequest = (bot, source, direct) => direct && bot?.reviewGuard === true
+  && firstBotRequest(source) && actualSolver(bot)
 
 // DSH injects a schedule-change notice as context when a task changes elsewhere.
 const scheduleNotice = message => message?.source?.kind === 'schedule'
@@ -918,6 +925,67 @@ export function install(rt) {
     if (rt.groupOwners.has(info?.id)) void rt.goalSettled?.(rt.roomOf(rt.groupOwners.get(info.id).roomId)).catch(error => rt.warn('omni-ui: goal settle failed: %s', error))
   })
 
+  // DSH awaits this after claiming the input, before recording it or dispatching a provider.
+  const admittedRequests = new Map()
+  rt.retireBotAdmission = (session, message) => {
+    const receipt = admittedRequests.get(message?.id)
+    if (receipt && receipt.session === session && receipt.exchangeId === message.source?.exchangeId) {
+      admittedRequests.delete(message.id)
+    }
+  }
+  rt.admitBotRequest = (agent, message, { sendable, destination } = {}) => {
+    const source = message?.source
+    const session = agent?.session
+    const id = session?.id
+    const owner = rt.chatOwners.get(id)
+    const receipt = admittedRequests.get(message?.id)
+    if (receipt !== undefined) {
+      if (receipt.agent !== agent || receipt.session !== session || receipt.exchangeId !== source?.exchangeId) return false
+      return receipt.current() ? receipt : false
+    }
+    const bot = owner === undefined ? undefined : rt.botOf(owner)
+    if (source?.kind !== SOURCE_KIND || !scopedBotRequest(bot, source, owner !== undefined)) return
+    const team = rt.teamGeneration?.()
+    const { exchangeId } = source
+    const messageId = message.id
+    const current = () => agent.session === session && ctx.get?.('agents')?.get?.(id) === agent
+      && rt.chatOwners.get(id) === owner && rt.chatOf(owner) === id && rt.botOf(owner) === bot
+      && (team === undefined || rt.sameTeam(team)) && destination?.() !== false
+    const eligible = () => current() && sendable?.() !== false
+    if (!bot || typeof messageId !== 'string' || typeof exchangeId !== 'string' || !eligible()) return false
+    return Promise.resolve(rt.reviewBotRequest?.(owner, source.senderSessionId, {
+      noReply: source.noReply === true, exchangeId, eligible,
+    })).then(() => {
+      if (!eligible()) return false
+      // Arm the receipt only when recovery sends this input. DSH copies the input
+      // into its inbox, keeping its ID and exchange through claim and pre-step.
+      const accepted = { agent, session, exchangeId, current,
+        remember: () => admittedRequests.set(messageId, accepted) }
+      return accepted
+    })
+  }
+  ctx.on('agent/pre-step', async function admitBotStep({ agent, messages = [], signal }, next) {
+    const session = agent.session
+    const accepted = []
+    for (const message of messages) {
+      let admission
+      try {
+        admission = rt.admitBotRequest(agent, message, { sendable: () => signal?.aborted !== true })
+        if (admission !== undefined) admission = await admission
+      } catch (error) {
+        rt.warn('omni-ui: Solver request could not be saved: %s', error)
+        admission = false
+      }
+      rt.retireBotAdmission(session, message)
+      accepted.push({ message, admission })
+    }
+    const remaining = accepted.filter(({ admission }) => admission === undefined
+      || (admission !== false && admission.current())).map(({ message }) => message)
+    if (remaining.length === 0 && messages.length > 0) return { kind: 'reject' }
+    if (remaining.length < messages.length) messages.splice(0, messages.length, ...remaining)
+    return next()
+  })
+
   ctx.on('session/event', (session, event) => {
     const id = session?.id
     if (id === undefined) return
@@ -1142,11 +1210,9 @@ export function install(rt) {
             ...(source.goalId !== undefined ? { goalId: source.goalId } : {}),
           })
         } else if (source?.kind === SOURCE_KIND) {
-          // A Bot's request in a guarded Solver's own chat, at its first arrival (a handed-back,
-          // resumed or retried one was counted then, H7-3), may open a new review (review-mark.js).
-          if (source.role === 'request' && rt.chatOwners.get(id) !== undefined && source.deferred !== true && source.resumed !== true
-            && source.resumedByUpdate !== true && source.retried !== true) {
-            rt.reviewBotRequest?.(rt.chatOwners.get(id), source.senderSessionId, { noReply: source.noReply === true, exchangeId: source.exchangeId })
+          const owner = rt.chatOwners.get(id)
+          if (owner !== undefined && firstBotRequest(source) && !scopedBotRequest(rt.botOf(owner), source, true)) {
+            rt.reviewBotRequest?.(owner, source.senderSessionId, { noReply: source.noReply === true, exchangeId: source.exchangeId })
           }
           if (entry.turn === undefined) {
             entry.pending = source

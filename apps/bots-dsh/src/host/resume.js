@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { AGENT_INTERRUPTED, HISTORY_PAGE, HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT, cutByUpdate, switchCutBy } from './constants.js'
 import { syncDirectory, syncFile } from './files.js'
 import { recordedModelOf, replyModel } from './solver-progress.js'
-import { answerSender, cutOffText, failureLine, handBackRequests, turnFailure } from './turns.js'
+import { answerSender, cutOffText, failureLine, handBackRequests, scopedBotRequest, turnFailure } from './turns.js'
 import { rawTextOf, textOf } from './text.js'
 import { startUpdateRecovery } from './self-update-recovery.js'
 
@@ -715,6 +715,7 @@ export function install(rt) {
   // A message is done with once a turn takes it up, or once it leaves the inbox untaken
   // while Omni runs: the user stopped the Bot, or Omni moved or withdrew it.
   ctx.on('agent/inbox/discarded', ({ agent, message } = {}) => {
+    rt.retireBotAdmission?.(agent?.session, message)
     if (stopped || rt.updateShuttingDown?.()) return
     const id = agent?.session?.id ?? agent?.id
     const continuation = reviewInputNote(message?.source?.exchangeId)
@@ -750,6 +751,7 @@ export function install(rt) {
       firstTurn.set(id, { type: event.type, turn: event.data?.turn, reason: event.data?.reason })
     }
     const source = event.data?.source
+    if (event.type === 'user/message') rt.retireBotAdmission?.(session, event.data)
     const unconsumedReview = event.type === 'user/message' && source?.kind === SOURCE_KIND
       && source.exchangeId && reviewInputNote(source.exchangeId)
     if (event.type === 'user/message' && source?.kind === SOURCE_KIND && source.exchangeId && !unconsumedReview) {
@@ -767,6 +769,7 @@ export function install(rt) {
       }
     }
     if (event.type === 'turn/end') {
+      for (const message of claims.get(id)?.values() ?? []) rt.retireBotAdmission?.(session, message)
       const reason = event.data?.reason
       if (finished && !switchCutBy(reason) && (reason?.kind === 'error'
         || (reason?.kind === 'blocked' && rt.shellHoldOf?.(rt.chatOwners.get(id)) !== undefined)
@@ -1012,6 +1015,16 @@ export function install(rt) {
   }
 
   const sessionFor = (sessionId, args) => rt.sessionNow(sessionId, args?.toId, args?.roomId)
+  // The saved Session supplies the destination scope even when it has moved.
+  const deliveryRoom = id => rt.groupOwners.get(id)?.roomId ?? rt.pastOwners.get(id)?.roomId
+  const scopedDelivery = (id, args, bot) => scopedBotRequest(bot, args, deliveryRoom(id) === undefined
+    && !rt.taskOwners?.has(id) && !rt.state?.tasks?.[id])
+  const deliveryDestination = (savedId, args, scoped) => {
+    const destination = scoped ? rt.sessionNow(savedId, args.toId, undefined) : sessionFor(savedId, args)
+    if (destination === savedId) return destination
+    const past = rt.pastOwners.get(savedId)
+    if (past?.botId === args.toId && (!scoped || past.roomId === undefined)) return destination
+  }
 
   const waitingFor = agent => new Set([...(agent.inbox?.nextStep ?? []), ...(agent.inbox?.nextTurn ?? [])]
     .map(message => message.source?.exchangeId))
@@ -1023,16 +1036,30 @@ export function install(rt) {
     const started = (item, destination) => startedTurns?.has(item.recordId ?? item.oldId) || startedTurns?.has(destination)
     const received = item => recovery?.resumed(item.recordId === undefined ? 'delivery' : 'turn',
       item.recordId ?? item.args.exchangeId)
-    const sendable = (agent, item, destination) => {
-      if (!ownsTeam() || (item.recordId === undefined && sessionFor(item.oldId, item.args) !== destination)
+    const ownsDestination = (agent, session, item, destination) => {
+      const { args, bot } = item
+      const owner = rt.selfOf(destination)
+      if (!ownsTeam() || !bot || rt.botOf(args.toId) !== bot || session?.id !== destination
+        || agent.session !== session || ctx.get?.('agents')?.get?.(destination) !== agent
+        || (owner !== undefined && owner !== args.toId) || rt.chatOf(args.toId) !== destination) return false
+      return scopedDelivery(item.oldId, args, bot) && item.note.args === args && queued[item.savedId]?.includes(item.note) === true
+        && deliveryDestination(item.oldId, args, true) === destination
+    }
+    const sendable = (agent, session, item, destination) => {
+      if (!ownsTeam() || (item.scoped ? !ownsDestination(agent, session, item, destination)
+        : item.recordId === undefined && deliveryDestination(item.oldId, item.args, false) !== destination)
         || (item.args.resumedByUpdate !== true && item.args.resumed && started(item, destination))) return false
       const id = item.args.exchangeId
       if (taken?.has(id) === true) {
         received(item)
         return false
       }
-      if (((item.liveClaim || item.args.reviewReply != null) && rt.deliveryNote(id) === undefined)
-        || [...(claims.get(destination)?.values() ?? [])].some(message => message.source?.exchangeId === id)) return false
+      if (!item.scoped && item.recordId === undefined) {
+        const note = rt.deliveryNote(id)
+        if (note === undefined ? item.liveClaim || item.args.reviewReply != null
+          : note.sessionId !== item.savedId && note.sessionId !== destination) return false
+      }
+      if ([...(claims.get(destination)?.values() ?? [])].some(message => message.source?.exchangeId === id)) return false
       if (waitingFor(agent).has(id)) {
         received(item)
         return false
@@ -1049,7 +1076,7 @@ export function install(rt) {
         sent = await deliver({ ...item.args, sessionId: target, steer: false, resent: true }, {
           shouldSend(agent, destination) {
             deliveredTo = destination
-            return sendable(agent, item, destination)
+            return sendable(agent, agent.session, item, destination)
           },
         })
       } catch (error) {
@@ -1067,7 +1094,7 @@ export function install(rt) {
       const settled = deliver({ ...item.args, sessionId: target, steer: false, resent: item.recordId === undefined && !item.args.resumed }, {
         enqueue(agent, message) {
           const sent = Promise.withResolvers()
-          ready.resolve({ item, agent, message, sent })
+          ready.resolve({ item, agent, session: agent.session, message, sent })
           return sent.promise
         },
       }).then(sent => {
@@ -1090,9 +1117,9 @@ export function install(rt) {
       try { await batchAgent.whenIdle?.() } catch (error) { warn(error) }
     }
     const ids = new Set()
-    const batch = prepared.filter(({ agent, item, sent }) => {
+    const batch = prepared.filter(({ agent, session, item, sent }) => {
       const id = item.args.exchangeId
-      if (sendable(agent, item, target) && !ids.has(id)) {
+      if (sendable(agent, session, item, target) && !ids.has(id)) {
         ids.add(id)
         return true
       }
@@ -1101,23 +1128,61 @@ export function install(rt) {
     })
     if (batch.length > 0) {
       const { agent } = batch[0]
-      const inject = agent.status !== 'running' && typeof agent.inject === 'function'
       const resumeItem = batch.find(({ item }) => item.args.resumed === true)
       const send = async () => {
+        const ready = []
         try {
-          for (const [index, { item, message }] of batch.entries()) {
-            if (!ownsTeam()) throw new Error('The team changed before the resumed turn could be sent')
+          for (const staged of batch) {
+            const { item, message, sent, session } = staged
+            const eligible = () => (!item.scoped || staged.agent === agent) && sendable(staged.agent, session, item, target)
+            try {
+              if (!eligible()) {
+                sent.resolve(false)
+                continue
+              }
+              let admission
+              if (item.scoped) {
+                admission = await rt.admitBotRequest?.(agent, message, {
+                  sendable: eligible,
+                  destination: () => ownsDestination(agent, session, item, target),
+                })
+              }
+              if (admission === false) sent.resolve(false)
+              else ready.push({ ...staged, eligible, admission })
+            } catch (error) {
+              sent.reject(error)
+            }
+          }
+          // No await between the final eligibility check and the actual sends. The last
+          // surviving input still wakes the driver even when other candidates were skipped.
+          const canSend = ({ eligible, admission }) => eligible() && admission?.current() !== false
+          const delivered = []
+          const inject = agent.status !== 'running' && typeof agent.inject === 'function'
+          for (const [index, stage] of ready.entries()) {
+            const { item, message, session, admission, sent } = stage
+            if (!canSend(stage)) {
+              sent.resolve(false)
+              continue
+            }
             rt.assertShellChoice?.(target, item.args.toId)
             const input = item.args.consumedResult ? noteReviewContinuation(target, message, item.args) : message
             if (!item.args.consumedResult && item.recordId !== undefined) noteDelivery(target, item.args)
             if (!item.args.resumed && (item.args.role === 'request' || item.args.role === 'stopped')) rt.lateWork?.(item.args.exchangeId)
             // DSH claims next-step injections before the waking next-turn followup.
-            if (inject && index < batch.length - 1) agent.inject(input)
-            else agent.followup(input)
+            admission?.remember()
+            try {
+              if (inject && ready.slice(index + 1).some(canSend)) agent.inject(input)
+              else agent.followup(input)
+              delivered.push(stage)
+            } catch (error) {
+              rt.retireBotAdmission?.(session, message)
+              throw error
+            }
           }
+          if (delivered.length === 0) return
           if (await ctx.sessions.flush(agent.session) === false) throw new Error('Could not flush the resumed turn')
-          if (batch.some(({ item }) => !item.args.resumed)) resent.add(target)
-          for (const { sent } of batch) sent.resolve(true)
+          if (delivered.some(({ item }) => !item.args.resumed)) resent.add(target)
+          for (const { sent } of delivered) sent.resolve(true)
         } catch (error) {
           for (const { sent } of batch) sent.reject(error)
           throw error
@@ -1499,7 +1564,7 @@ export function install(rt) {
       if (!Array.isArray(list)) continue
       for (const item of list) {
         if (item?.args?.exchangeId === undefined || taken?.has(item.args.exchangeId) === true || rt.botOf(item.args.toId) === undefined) continue
-        const key = sessionFor(oldId, item.args) ?? oldId
+        const key = deliveryDestination(oldId, item.args, scopedDelivery(oldId, item.args, rt.botOf(item.args.toId))) ?? oldId
         queued = { ...queued, [key]: [...(queued[key] ?? []), item] }
       }
     }
@@ -1567,8 +1632,8 @@ export function install(rt) {
       add(target, { record, recordId: sessionId, done: pickedUp })
     }
     const notes = Object.entries(dropped).flatMap(([oldId, list]) => Array.isArray(list)
-      ? list.filter(item => item?.args?.exchangeId !== undefined).map(item => ({ ...item, oldId }))
-      : []).sort((a, b) => Number(Boolean(b.args.resumed)) - Number(Boolean(a.args.resumed)) || a.at - b.at)
+      ? list.filter(note => note?.args?.exchangeId !== undefined).map(note => ({ note, args: note.args, oldId }))
+      : []).sort((a, b) => Number(Boolean(b.args.resumed)) - Number(Boolean(a.args.resumed)) || a.note.at - b.note.at)
     // The sticky record owns any hand-back that did not finish last time.
     const pendingBack = new Set(Object.values(noted).filter(record => record.stoppedBy === 'update')
       .flatMap(record => [...(record.later ?? []), ...(record.trigger?.joined ?? [])]
@@ -1589,14 +1654,18 @@ export function install(rt) {
       if (pendingBack.has(args.exchangeId) || (liveClaims && !liveClaims.has(args.exchangeId))) continue
       if (taken?.has(args.exchangeId)) recovery?.resumed('delivery', args.exchangeId)
       if (args.wake === true && rt.wakeLog?.accountsFor(args.exchangeId)) continue
-      if (rt.botOf(args.toId) === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
-      const target = sessionFor(oldId, args)
+      const bot = rt.botOf(args.toId)
+      if (bot === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
+      const scoped = scopedDelivery(oldId, args, bot)
+      const target = deliveryDestination(oldId, args, scoped)
       if (target === undefined) {
         if (args.reviewReply && ownsTeam()) rt.retireReviewReply?.(args.toId, args.exchangeId)
         continue
       }
       seen.add(args.exchangeId)
-      add(target, liveClaims ? { ...item, liveClaim: true } : item)
+      // Boot rekeys existing notes before this pass. Live claims still use the
+      // saved key. In both cases the selected note and original route must survive.
+      add(target, { ...item, savedId: liveClaims ? oldId : target, liveClaim: !!liveClaims, scoped, bot })
     }
     const prepare = async (target, item) => {
       if (!ownsTeam()) return undefined
