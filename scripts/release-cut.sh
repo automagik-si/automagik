@@ -483,4 +483,5 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
   fi
 done
 
+echo "successor=$(git rev-parse origin/dev)" >> "${GITHUB_OUTPUT}"
 echo "::notice::dev moved on while this run cut v${version} on each of ${attempts} attempts; the run for the newer merge releases these changes too"

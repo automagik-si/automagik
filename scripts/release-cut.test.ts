@@ -788,6 +788,20 @@ describe('a merge that lands while the gates run', () => {
     }
   });
 
+  test('a verified cut hands a push race to the successor without gating inside the lock', () => {
+    const repo = repository();
+    try {
+      repo.move();
+      const run = repo.run({ RELEASE_CUT_ATTEMPTS: '1' });
+      expect(run.status).toBe(0);
+      expect(run.gates).toEqual([]);
+      expect(run.output.trim()).toBe('successor=' + repo.remote('rev-parse', 'dev'));
+      expect(repo.remote('tag', '--list')).toBe('v3.0.0');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
   test('a dev that keeps moving stops cleanly after the bounded attempts, with no tag', () => {
     const repo = repository();
     try {
@@ -932,17 +946,10 @@ describe('the workflow runs the gates and the cut from their scripts', () => {
 
   test('every pre-cut gate step calls release-gates.sh with its part', () => {
     const calls: [string, string][] = [
-      ['The gates the release stands on', 'base'],
       ['Which lane', 'lane'],
-      ["The herdr pack's gates", 'herdr'],
-      ["Every pack mod's import graph", 'herdr-imports'],
-      ['Every pack mod loads in herdr-app', 'herdr-app'],
       ["The herdr pack's signing key", 'herdr-key'],
-      ["The am part's gates", 'am'],
       ["The am lane's signing key", 'am-key'],
-      ["The meter's gates", 'meter'],
       ["The meter lane's signing key", 'meter-key'],
-      ["Pocket's gates", 'pocket'],
       ["Pocket's signing key is in the secrets", 'pocket-key'],
       ['Pack the add-ons the lane carries', 'addons release'],
     ];
@@ -953,8 +960,8 @@ describe('the workflow runs the gates and the cut from their scripts', () => {
     const cut = step('Version, commit and tag');
     expect(cut).toContain('run: bash scripts/release-cut.sh');
     for (const name of ['KIND', 'HERDR', 'POCKET', 'POCKET_SINCE', 'METER', 'METER_SINCE']) expect(cut).toContain(`${name}: \${{ steps.lane.outputs.`);
-    // The signing-key checks read the tree, so the retry needs the same secrets their steps got.
-    for (const name of ['HERDR_PACK_KEY', 'AM_LANE_KEY', 'METER_LANE_KEY', 'HAS_KEYSTORE', 'HAS_PASSWORD']) expect(cut).toContain(`${name}:`);
+    expect(cut).toContain('RELEASE_CUT_ATTEMPTS: 1');
+    expect(cut).not.toContain('secrets.');
   });
 
   test('release notes and downstream jobs use the successful cut flags', () => {
@@ -992,7 +999,7 @@ describe('the workflow runs the gates and the cut from their scripts', () => {
 
   test('the herdr key check, the cut and the signing step select the same slot, with no fallback to the primary', () => {
     const selected = "HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}";
-    for (const name of ["The herdr pack's signing key", 'Version, commit and tag', 'Sign and post the herdr lane']) {
+    for (const name of ["The herdr pack's signing key", 'Sign and post the herdr lane']) {
       const lines = step(name).split('\n').map(line => line.trim());
       expect(lines.filter(line => line.startsWith('HERDR_PACK_KEY:'))).toEqual([selected]);
       expect(lines).toContain('HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}');

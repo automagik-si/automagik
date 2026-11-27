@@ -165,6 +165,13 @@ gate_herdr() {
   (
     cd herdr
     node --test 'test/*.test.mjs'
+  )
+  gate_herdr_static
+}
+
+gate_herdr_static() {
+  (
+    cd herdr
     for f in mods/*/*.js mods/*/*.mjs mods/*/bin/*.mjs mods/*/pack/*.mjs scripts/*.mjs scripts/*/*.mjs; do
       node --check "$f"
     done
@@ -285,6 +292,7 @@ all() {
 case "${1:-}" in
   base) gate_base ;;
   herdr) gate_herdr ;;
+  herdr-static) gate_herdr_static ;;
   herdr-imports) gate_herdr_imports ;;
   herdr-app) gate_herdr_app ;;
   herdr-key) gate_herdr_key ;;

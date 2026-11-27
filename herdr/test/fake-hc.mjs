@@ -465,11 +465,9 @@ switch (words[0]) {
     save();
     // state.runDelayMs: the answer waits that long, as hc's own does for a template whose program
     // never reports a status (its first-status wait). The terminal is saved before the wait, so a
-    // call killed at its own timeout still leaves the terminal behind (#1262). state.runDelayDone
-    // names a file holding one line when the fake got to its answer, never when it was killed.
+    // call killed at its own timeout still leaves the terminal behind (#1262).
     if (state.runDelayMs) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.runDelayMs);
-      if (state.runDelayDone) appendLine(state.runDelayDone, name ?? "");
     }
     // state.runNoAddress: the pane starts, but the answer carries no address.
     if (state.runNoAddress) { out({}); break; }

@@ -1,4 +1,4 @@
-// The cut's "Anything new since the last release" step, run as release.yml writes it: the path
+// The cut's "Anything new since the last release" step, run as release-verify.yml writes it: the path
 // decision (`scripts/lane.ts ships <last>`) is authoritative, and the commit subjects only choose
 // the skip wording (#767). Every case below is a throwaway repository whose commits carry real
 // changed paths, with a fake `bun` answering `ships` from `git diff --name-only`.
@@ -9,11 +9,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 // The step's shell, exactly as the workflow writes it. The step is the unit under test: it is
-// extracted here rather than copied, so a change to release.yml is what the tests run.
+// extracted here rather than copied, so a change to release-verify.yml is what the tests run.
 function releaseStep(): string {
-  const lines = readFileSync(join(import.meta.dir, '..', '.github', 'workflows', 'release.yml'), 'utf8').split('\n');
+  const lines = readFileSync(join(import.meta.dir, '..', '.github', 'workflows', 'release-verify.yml'), 'utf8').split('\n');
   const start = lines.findIndex(line => line.trim() === '- name: Anything new since the last release');
-  if (start < 0) throw new Error('release.yml has no "Anything new since the last release" step');
+  if (start < 0) throw new Error('release-verify.yml has no "Anything new since the last release" step');
   const run = lines.findIndex((line, index) => index > start && /^\s*run: \|$/.test(line));
   if (run < 0) throw new Error('the step has no run: block');
   const body: string[] = [];
