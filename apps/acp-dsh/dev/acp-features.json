@@ -1,0 +1,419 @@
+{
+  "sdk": "2.12.0",
+  "note": "One decision per item of scripts/acp-features.mjs (the SDK's runtime exports). implemented/used/consumed/handled rows name what does it and, where one exists, the test; not-advertised/not-used/not-consumed/ignored rows say why.",
+  "features": {
+    "agent-capability:auth": {
+      "status": "consumed",
+      "how": "read for logout"
+    },
+    "agent-capability:auth.logout": {
+      "status": "consumed",
+      "how": "sign-out over ACP when offered",
+      "test": "test/consent.test.js"
+    },
+    "agent-capability:auth.status": {
+      "status": "not-consumed",
+      "reason": "unstable; sign-in state is read from the CLI (account.js)"
+    },
+    "agent-capability:loadSession": {
+      "status": "consumed",
+      "how": "session/load for native cold continuity, history quarantined",
+      "test": "test/continuity.test.js"
+    },
+    "agent-capability:mcpCapabilities": {
+      "status": "not-consumed",
+      "reason": "the bridge is a stdio MCP server, which every ACP agent must take"
+    },
+    "agent-capability:mcpCapabilities.acp": {
+      "status": "not-consumed",
+      "reason": "unstable MCP over ACP; the bridge is stdio"
+    },
+    "agent-capability:mcpCapabilities.http": {
+      "status": "not-consumed",
+      "reason": "the bridge is stdio"
+    },
+    "agent-capability:mcpCapabilities.sse": {
+      "status": "not-consumed",
+      "reason": "the bridge is stdio"
+    },
+    "agent-capability:promptCapabilities": {
+      "status": "consumed",
+      "how": "image support gates image blocks"
+    },
+    "agent-capability:promptCapabilities.audio": {
+      "status": "not-consumed",
+      "reason": "DSH sends no audio to ACP agents"
+    },
+    "agent-capability:promptCapabilities.embeddedContext": {
+      "status": "not-consumed",
+      "reason": "uploads go as text or images (upload-content.js); embedded resources are not sent"
+    },
+    "agent-capability:promptCapabilities.image": {
+      "status": "consumed",
+      "how": "image blocks only to an agent that takes them",
+      "test": "test/group-uploads.test.js"
+    },
+    "agent-capability:providers": {
+      "status": "not-consumed",
+      "reason": "unstable; provider choice is DSH's route"
+    },
+    "agent-capability:sessionCapabilities": {
+      "status": "consumed",
+      "how": "read for resume, systemPrompt, close and fork"
+    },
+    "agent-capability:sessionCapabilities.additionalDirectories": {
+      "status": "not-consumed",
+      "reason": "one workspace per DSH chat; extra roots would widen what the agent reaches beyond the chat's sandbox"
+    },
+    "agent-capability:sessionCapabilities.archive": {
+      "status": "not-consumed",
+      "reason": "unstable; DSH archive is its own"
+    },
+    "agent-capability:sessionCapabilities.close": {
+      "status": "consumed",
+      "how": "session/close after a fork or renew; called whatever is advertised and a refusal is left as it is (acp.js closeReplacedSession)"
+    },
+    "agent-capability:sessionCapabilities.delete": {
+      "status": "not-consumed",
+      "reason": "a DSH chat's deletion does not delete the CLI's own session store; that stays the CLI's"
+    },
+    "agent-capability:sessionCapabilities.fork": {
+      "status": "consumed",
+      "how": "Codex tool-set refresh by session/fork",
+      "test": "test/adapter.test.js"
+    },
+    "agent-capability:sessionCapabilities.list": {
+      "status": "not-consumed",
+      "reason": "DSH's chat list is the history; agent-side session lists are not shown"
+    },
+    "agent-capability:sessionCapabilities.options": {
+      "status": "not-consumed",
+      "reason": "unstable; configOptions on session answers are used instead"
+    },
+    "agent-capability:sessionCapabilities.resume": {
+      "status": "consumed",
+      "how": "session/resume first for native cold continuity on a qualified route",
+      "test": "test/continuity.test.js"
+    },
+    "agent-capability:sessionCapabilities.status": {
+      "status": "not-consumed",
+      "reason": "unstable; turn state comes from the prompt request"
+    },
+    "agent-capability:sessionCapabilities.systemPrompt": {
+      "status": "consumed",
+      "how": "Bot identity as systemPrompt append, else a preamble",
+      "test": "test/bot-identity.test.js"
+    },
+    "agent-capability:sessionCapabilities.title": {
+      "status": "not-consumed",
+      "reason": "unstable; DSH titles its chats"
+    },
+    "client-capability:auth": {
+      "status": "not-advertised",
+      "reason": "sign-in runs the agent's own auth methods (login.js); terminal auth would take over a terminal DSH does not own"
+    },
+    "client-capability:elicitation": {
+      "status": "not-advertised",
+      "reason": "DSH user questions are asked through the bridge's ask tool with its consent; an ACP elicitation has no DSH dialog mapping yet"
+    },
+    "client-capability:fs": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox"
+    },
+    "client-capability:plan": {
+      "status": "implemented",
+      "how": "plan_update and plan_removed become plugin:acp-dsh/plan records and the todo panel",
+      "test": "test/plan-usage.test.js"
+    },
+    "client-capability:session": {
+      "status": "not-advertised",
+      "reason": "no session-related client extension below is advertised"
+    },
+    "client-capability:session.compaction": {
+      "status": "not-advertised",
+      "reason": "DSH owns compaction of its own transcript; an agent's compaction updates have no DSH row yet"
+    },
+    "client-capability:session.configOptions": {
+      "status": "not-advertised",
+      "reason": "config options are read from session answers and config_option_update without the extension"
+    },
+    "client-capability:session.cursors": {
+      "status": "not-advertised",
+      "reason": "unstable; no DSH surface shows an agent cursor"
+    },
+    "client-capability:session.notices": {
+      "status": "not-advertised",
+      "reason": "no DSH notice row is defined for agent notices; advertising would invite updates nothing shows"
+    },
+    "client-capability:session.promptSuggestions": {
+      "status": "not-advertised",
+      "reason": "unstable; suggestions validate and are ignored (test/sdk-2-7-surface.test.js)"
+    },
+    "client-capability:subagents": {
+      "status": "not-advertised",
+      "reason": "subagent work is shown from tool calls (workersOf in acp.js); exposed subagent sessions would need their own routes and approvals"
+    },
+    "client-capability:terminal": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox"
+    },
+    "method:agent:auth/status": {
+      "status": "not-used",
+      "reason": "unstable; sign-in state is read from the CLI"
+    },
+    "method:agent:authenticate": {
+      "status": "used",
+      "test": "test/agy-isolation.test.js"
+    },
+    "method:agent:initialize": {
+      "status": "used",
+      "test": "test/sdk-2-7-surface.test.js"
+    },
+    "method:agent:logout": {
+      "status": "used",
+      "how": "sign-out",
+      "test": "test/consent.test.js"
+    },
+    "method:agent:mcp/message": {
+      "status": "not-used",
+      "reason": "unstable MCP over ACP; the bridge is stdio"
+    },
+    "method:agent:providers/disable": {
+      "status": "not-used",
+      "reason": "unstable; DSH routes choose the provider"
+    },
+    "method:agent:providers/list": {
+      "status": "not-used",
+      "reason": "unstable; DSH routes choose the provider"
+    },
+    "method:agent:providers/set": {
+      "status": "not-used",
+      "reason": "unstable; DSH routes choose the provider"
+    },
+    "method:agent:session/archive": {
+      "status": "not-used",
+      "reason": "unstable; DSH archives its own chats"
+    },
+    "method:agent:session/cancel": {
+      "status": "used",
+      "test": "test/wire-replay.test.js"
+    },
+    "method:agent:session/close": {
+      "status": "used",
+      "test": "test/real-adapters.test.js"
+    },
+    "method:agent:session/delete": {
+      "status": "not-used",
+      "reason": "the CLI keeps its own session store"
+    },
+    "method:agent:session/fork": {
+      "status": "used",
+      "test": "test/adapter.test.js"
+    },
+    "method:agent:session/list": {
+      "status": "not-used",
+      "reason": "DSH lists its own chats"
+    },
+    "method:agent:session/load": {
+      "status": "used",
+      "test": "test/continuity.test.js"
+    },
+    "method:agent:session/new": {
+      "status": "used",
+      "test": "test/replay.test.js"
+    },
+    "method:agent:session/options": {
+      "status": "not-used",
+      "reason": "unstable; session answers carry configOptions"
+    },
+    "method:agent:session/prompt": {
+      "status": "used",
+      "test": "test/wire-replay.test.js"
+    },
+    "method:agent:session/resume": {
+      "status": "used",
+      "test": "test/continuity.test.js"
+    },
+    "method:agent:session/set_config_option": {
+      "status": "used",
+      "test": "test/sdk.test.js"
+    },
+    "method:agent:session/set_mode": {
+      "status": "used",
+      "test": "test/adapter.test.js"
+    },
+    "method:agent:session/set_title": {
+      "status": "not-used",
+      "reason": "unstable; DSH titles its chats"
+    },
+    "method:agent:session/status": {
+      "status": "not-used",
+      "reason": "unstable; the prompt request is the turn state"
+    },
+    "method:agent:session/unarchive": {
+      "status": "not-used",
+      "reason": "unstable; DSH archives its own chats"
+    },
+    "method:client:auth/status_update": {
+      "status": "not-advertised",
+      "reason": "unstable; no auth status capability"
+    },
+    "method:client:elicitation/complete": {
+      "status": "not-advertised",
+      "reason": "no elicitation capability is advertised"
+    },
+    "method:client:elicitation/create": {
+      "status": "not-advertised",
+      "reason": "no elicitation capability is advertised"
+    },
+    "method:client:fs/read_text_file": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox; unanswered with Method Not Found"
+    },
+    "method:client:fs/write_text_file": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox; unanswered with Method Not Found"
+    },
+    "method:client:mcp/message": {
+      "status": "not-advertised",
+      "reason": "unstable MCP over ACP; the bridge is stdio"
+    },
+    "method:client:session/request_permission": {
+      "status": "implemented",
+      "how": "DSH approval dialog through the mirror tool",
+      "test": "test/wire-replay.test.js"
+    },
+    "method:client:session/update": {
+      "status": "implemented",
+      "test": "test/sdk-2-7-surface.test.js"
+    },
+    "method:client:terminal/create": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox; unanswered with Method Not Found"
+    },
+    "method:client:terminal/kill": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox; unanswered with Method Not Found"
+    },
+    "method:client:terminal/output": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox; unanswered with Method Not Found"
+    },
+    "method:client:terminal/release": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox; unanswered with Method Not Found"
+    },
+    "method:client:terminal/wait_for_exit": {
+      "status": "not-advertised",
+      "reason": "DSH's tools reach the agent through the dsh MCP bridge with DSH's approval; a client fs/terminal would run outside DSH's tool consent and sandbox; unanswered with Method Not Found"
+    },
+    "method:protocol:$/cancel_request": {
+      "status": "implemented",
+      "how": "a withdrawn permission request closes its DSH question (onPermission signal)",
+      "test": "test/unanswered.test.js"
+    },
+    "prompt-response:stopReason": {
+      "status": "consumed",
+      "test": "test/wire-replay.test.js"
+    },
+    "prompt-response:usage": {
+      "status": "consumed",
+      "how": "unstable; recorded once per prompt with completeness and per-route semantics, never a DSH usage chunk (meter owns cost, RFC 0018)",
+      "test": "test/plan-usage.test.js"
+    },
+    "update:agent_message_chunk": {
+      "status": "handled",
+      "how": "streamed as text",
+      "test": "test/wire-replay.test.js"
+    },
+    "update:agent_thought_chunk": {
+      "status": "handled",
+      "how": "streamed as reasoning",
+      "test": "test/adapter.test.js"
+    },
+    "update:available_commands_update": {
+      "status": "ignored",
+      "reason": "agent slash commands are not offered in DSH's composer"
+    },
+    "update:compaction_summary_chunk": {
+      "status": "ignored",
+      "reason": "no compaction capability advertised"
+    },
+    "update:compaction_update": {
+      "status": "ignored",
+      "reason": "no compaction capability advertised; DSH owns its transcript"
+    },
+    "update:config_option_update": {
+      "status": "handled",
+      "how": "model and effort state",
+      "test": "test/sdk.test.js"
+    },
+    "update:current_mode_update": {
+      "status": "handled",
+      "how": "permission mode state",
+      "test": "test/adapter.test.js"
+    },
+    "update:cursor_update": {
+      "status": "ignored",
+      "reason": "unstable; no cursor surface"
+    },
+    "update:notice": {
+      "status": "ignored",
+      "reason": "no client notices capability; no DSH row for it"
+    },
+    "update:plan": {
+      "status": "handled",
+      "how": "legacy whole plan, kept under id \"plan\"",
+      "test": "test/plan-usage.test.js"
+    },
+    "update:plan_removed": {
+      "status": "handled",
+      "how": "removes a known plan; an unknown id is ignored as ACP requires",
+      "test": "test/plan-usage.test.js"
+    },
+    "update:plan_update": {
+      "status": "handled",
+      "how": "plan records and the todo panel; markdown kept as text, its path never opened",
+      "test": "test/plan-usage.test.js"
+    },
+    "update:prompt_suggestions_update": {
+      "status": "ignored",
+      "reason": "unstable; validated and ignored, later text arrives (test/sdk-2-7-surface.test.js)"
+    },
+    "update:session_info_update": {
+      "status": "ignored",
+      "reason": "DSH titles its chats"
+    },
+    "update:session_message": {
+      "status": "ignored",
+      "reason": "sent to subagent-aware clients only; not advertised"
+    },
+    "update:session_message_chunk": {
+      "status": "ignored",
+      "reason": "sent to subagent-aware clients only; not advertised"
+    },
+    "update:subagent_update": {
+      "status": "ignored",
+      "reason": "no subagents capability advertised"
+    },
+    "update:tool_call": {
+      "status": "handled",
+      "how": "a DSH tool card (mirror) or the bridge's own card",
+      "test": "test/wire-replay.test.js"
+    },
+    "update:tool_call_update": {
+      "status": "handled",
+      "how": "the card's status and result",
+      "test": "test/wire-replay.test.js"
+    },
+    "update:usage_update": {
+      "status": "handled",
+      "how": "context occupancy, latest wins, recorded with the prompt's usage",
+      "test": "test/plan-usage.test.js"
+    },
+    "update:user_message_chunk": {
+      "status": "ignored",
+      "reason": "DSH writes the person's own rows; an agent echo would duplicate them (and is quarantined during load)"
+    }
+  }
+}
