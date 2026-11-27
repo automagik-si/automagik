@@ -55,6 +55,33 @@
       }
     },
     {
+      "route": "acp-claude",
+      "scenario": "synthetic-backend",
+      "backend": "loopback-stub",
+      "adapter": {
+        "name": "@agentclientprotocol/claude-agent-acp",
+        "version": "0.113.0"
+      },
+      "cli": {
+        "version": "2.1.332 (Claude Code)"
+      },
+      "platform": "darwin-arm64",
+      "node": "v24.13.1",
+      "phases": {
+        "initialize": "passed",
+        "session": "passed",
+        "reattach": "passed",
+        "prompt": "passed",
+        "toolApproval": "passed",
+        "stop": "unverified",
+        "recovery": "unverified",
+        "continuity": "passed",
+        "plan": "unverified",
+        "usage": "passed"
+      },
+      "advertised": {}
+    },
+    {
       "route": "acp-codex",
       "scenario": "real-unprompted",
       "adapter": {
@@ -104,6 +131,33 @@
       }
     },
     {
+      "route": "acp-codex",
+      "scenario": "synthetic-backend",
+      "backend": "loopback-stub",
+      "adapter": {
+        "name": "@agentclientprotocol/codex-acp",
+        "version": "2.12.1"
+      },
+      "cli": {
+        "version": "codex-cli 0.170.0"
+      },
+      "platform": "darwin-arm64",
+      "node": "v24.13.1",
+      "phases": {
+        "initialize": "passed",
+        "session": "passed",
+        "reattach": "passed",
+        "prompt": "passed",
+        "toolApproval": "passed",
+        "stop": "unverified",
+        "recovery": "unverified",
+        "continuity": "passed",
+        "plan": "unverified",
+        "usage": "passed"
+      },
+      "advertised": {}
+    },
+    {
       "route": "acp-fake",
       "scenario": "synthetic-replay",
       "platform": "darwin-arm64",
@@ -136,8 +190,8 @@
         "stop": "passed",
         "recovery": "passed",
         "continuity": "unverified",
-        "plan": "unverified",
-        "usage": "unverified"
+        "plan": "passed",
+        "usage": "passed"
       },
       "advertised": {}
     }

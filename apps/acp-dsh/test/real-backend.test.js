@@ -173,7 +173,7 @@ for (const real of REAL) {
     step('const ran = await')
     const ran = await promptOnce(before, 'CALL probe_alpha', counts)
     if (!/Done/.test(ran.said)) t.diagnostic(JSON.stringify(stub.requests.slice(-3).map(request => ({ last: request.lastUser.slice(0, 300), tools: request.tools, texts: request.texts.slice(-3).map(text => text.slice(0, 200)) }))))
-    assert.match(ran.said, /Done: .*ran probe_alpha/, ran.said)
+    assert.match(ran.said, /Done:[\s\S]*ran probe_alpha/, ran.said)
     assert.deepEqual(counts.executed, ['probe_alpha'], 'one call, one execution')
     assert.equal(counts.dshApprovals, 1, 'one DSH approval for one call')
     receipt({ prompt: 'passed', toolApproval: 'passed', usage: before.promptUsage?.completeness === 'complete' ? 'passed' : 'unverified' })
@@ -212,7 +212,10 @@ for (const real of REAL) {
     // fresh bridge's tool is offered. The CLI may still list a removed bridge tool it knew from
     // its history: calling it must never run it.
     const offered = sent.at(-1).tools
-    assert.deepEqual(offered.filter(name => !name.startsWith('mcp__') && name !== 'DeferredToolPlaceholder'), [], `no built-in tool is offered: ${offered.join(',')}`)
+    const builtIns = names => names.filter(name => !name.startsWith('mcp__') && name !== 'DeferredToolPlaceholder').sort()
+    const firstOffered = stub.requests.find(request => request.command === 'CALL probe_alpha')?.tools ?? []
+    assert.deepEqual(builtIns(offered), builtIns(firstOffered), 'the CLI\'s own tools are as they were before the restart')
+    if (spec.disableBuiltInTools === true) assert.deepEqual(builtIns(offered), [], `no built-in tool is offered: ${offered.join(',')}`)
     assert.equal(offered.some(name => name.endsWith('probe_beta')), true, `the added tool is offered: ${offered.join(',')}`)
     // The removed tool, asked of the fresh bridge by its own credential, is not DSH's to run.
     const asked = await fetch(backchannel.urlFor(second.record), { method: 'POST', headers: { authorization: `Bearer ${second.record.credential}`, 'content-type': 'application/json' }, body: JSON.stringify({ op: 'call', name: 'probe_alpha', arguments: {} }) })
@@ -222,7 +225,7 @@ for (const real of REAL) {
     t.diagnostic(`${real.id}: after resume the CLI still lists ${offered.filter(name => name.endsWith('probe_alpha')).join(',') || 'no'} removed bridge tool from its own history`)
     step('const added = await')
     const added = await promptOnce(after, 'CALL probe_beta', counts)
-    assert.match(added.said, /Done: .*ran probe_beta/, added.said)
+    assert.match(added.said, /Done:[\s\S]*ran probe_beta/, added.said)
     assert.deepEqual(counts.executed, ['probe_alpha', 'probe_beta'], 'the added tool ran once')
     assert.equal(counts.dshApprovals, 2, 'with one approval')
     receipt({ continuity: 'passed' })

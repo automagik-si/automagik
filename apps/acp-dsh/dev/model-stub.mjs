@@ -41,9 +41,14 @@ function lastUserText(body) {
   return typeof body.input === 'string' ? body.input : ''
 }
 
+// A Responses API namespace (Codex groups an MCP server's tools in one) lists as
+// `<namespace>__<tool>`, the name Claude Code gives the same tool.
 function toolNames(body) {
-  return (body.tools ?? []).map(tool => tool?.name ?? tool?.function?.name).filter(name => typeof name === 'string')
+  return (body.tools ?? []).flatMap(tool => (tool?.type === 'namespace' && Array.isArray(tool.tools)
+    ? tool.tools.map(inner => `${tool.name}__${inner?.name}`)
+    : [tool?.name ?? tool?.function?.name])).filter(name => typeof name === 'string')
 }
+const NAMESPACED = /^(mcp__[A-Za-z0-9_-]+?)__([A-Za-z0-9_-]+)$/
 
 const COMMAND = /^(REMEMBER [A-Z0-9-]{3,40}|RECALL|TOOLS|CALL [A-Za-z0-9_-]+)\s*$/
 
@@ -61,7 +66,7 @@ function lastToolResult(body) {
     if (Array.isArray(value)) value.forEach(walk)
     else if (value !== null && typeof value === 'object') {
       if (value.type === 'tool_result') results.push(textsOf(value.content).join(' ').trim())
-      else if (value.type === 'function_call_output') results.push(String(value.output ?? '').trim())
+      else if (value.type === 'function_call_output') results.push((typeof value.output === 'string' ? value.output : textsOf(value.output).join(' ')).trim())
       else for (const key of ['content', 'input', 'messages']) if (key in value) walk(value[key])
     }
   }
@@ -140,7 +145,8 @@ function anthropic(res, body, { text, call }) {
 
 function responses(res, body, { text = '', call }) {
   if (call !== undefined) {
-    const item = { id: `fc_stub_${calls += 1}`, type: 'function_call', status: 'completed', call_id: `call_stub_${calls}`, name: call, arguments: '{}' }
+    const spaced = (body.tools ?? []).some(tool => tool?.type === 'namespace') ? NAMESPACED.exec(call) : null
+    const item = { id: `fc_stub_${calls += 1}`, type: 'function_call', status: 'completed', call_id: `call_stub_${calls}`, name: spaced?.[2] ?? call, ...(spaced ? { namespace: spaced[1] } : {}), arguments: '{}' }
     const response = { id: 'resp_stub', object: 'response', status: 'completed', model: body.model ?? 'stub', output: [item], usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 } }
     sse(res, [
       ['response.created', { type: 'response.created', response: { ...response, status: 'in_progress', output: [] } }],

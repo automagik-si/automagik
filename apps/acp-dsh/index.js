@@ -27,7 +27,8 @@ import { answerAside, asideFailure, supportsAside } from './src/host/aside-run.j
 import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
-import { CliStore, CLI_CHECK_EVERY_MS, clisHome } from './src/host/clis.js'
+import { CliStore, CLI_CHECK_EVERY_MS, cliVersion, clisHome } from './src/host/clis.js'
+import { continuityFor, qualificationPath, readQualification } from './src/host/qualification.js'
 import { CliHomes, HOME_ENV, runCount, stopRuns } from './src/host/cli-homes.js'
 import { canRunProfile, createGateBinding, ensureChatProfiles, gateProfileOf } from './src/host/codex-chat-profiles.js'
 import { NATIVE_OFF_UNAVAILABLE, nativeOffLaunch } from './src/host/codex-native.js'
@@ -87,6 +88,12 @@ export const Config = z.object({
   // behaviour. A schema default would materialise true and erase the difference. Hidden from
   // settings forms (`.hidden()`): it is a rollback lever, not a preference, and stays writable
   // through DSH's settings service and the profile patch.
+  continuity: z.union([z.const('off'), z.const('qualified')]).default('off').hidden().description([
+    'Native cold continuity: after a restart, the same agent in the same chat takes back its own',
+    'session (session/resume) with a fresh bridge instead of a new session fed the transcript.',
+    "'qualified' turns it on only for the exact connector and CLI versions",
+    'scripts/acp-qualify.mjs recorded in acp-continuity.json; off by default and the rollback.',
+  ].join(' ')),
   dshTools: z.boolean().volatile().hidden().description([
     "Hand DSH's own tools to the agent over a per-session MCP bridge named dsh (the Session's",
     "preset, filtered by its level), approve every DSH tool call in DSH whatever the agent's own",
@@ -596,6 +603,25 @@ export function apply(ctx, config = {}, {
     const stack = lines.findIndex((line, index) => index > at && /^\s*Require stack:/.test(line))
     return [lines[at], ...(stack < 0 || lines[stack + 1] === undefined ? [] : [lines[stack + 1]])]
   }
+  // The CLI's version, read once per binary (`--version` only); unknown until read, and an
+  // unknown version qualifies nothing.
+  const cliVersions = new Map()
+  const versionOfCli = (cli) => {
+    if (typeof cli !== 'string') return undefined
+    const key = `${cli} ${cliStamp(cli)}`
+    if (!cliVersions.has(key)) {
+      cliVersions.set(key, undefined)
+      void cliVersion(cli).then(version => { cliVersions.set(key, version) }, () => {})
+    }
+    return cliVersions.get(key)
+  }
+  const continuityOf = (spec, id, cli) => {
+    if (config.continuity !== 'qualified' || isNative(spec)) return undefined
+    const automagik = process.env.AUTOMAGIK_HOME || join(homedir(), '.automagik')
+    return continuityFor(readQualification(qualificationPath(automagik)), {
+      setting: config.continuity, route: id, adapterVersion: store?.binOf?.(spec.adapter, spec.bin)?.version, cliVersion: versionOfCli(cli),
+    })
+  }
   const agentOf = (spec, cli, id = idOf(spec)) => ({
     name: spec.name,
     sessionFiles: homes && !isNative(spec) && spec.key === 'codex',
@@ -622,6 +648,9 @@ export function apply(ctx, config = {}, {
       : typeof spec.signInHint === 'string' ? { signInHint: signInHintOf(spec, cliDetails.get(id)) } : {}),
     ...(spec.modeFor === undefined ? { levelNotice: true } : {}),
     cli,
+    // Whether this launch may take a native session back (qualification.js): read at each start,
+    // so a revoke or the setting going off applies to the next one.
+    get continuity() { return continuityOf(spec, id, cli) },
     ...(id === 'acp-claude' ? { concreteClaude: true } : {}),
     // The agent's own models and efforts, read from the adapter release installed now.
     catalog: new Catalog({

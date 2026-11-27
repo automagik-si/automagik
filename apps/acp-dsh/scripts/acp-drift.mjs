@@ -125,6 +125,7 @@ export function recordFromReceipts({ pin, previous, receipts, packages = adapter
     }
     kept.push({
       route: receipt.route, scenario: receipt.scenario,
+      ...(receipt.backend === undefined ? {} : { backend: receipt.backend }),
       ...(receipt.adapter === undefined ? {} : { adapter: receipt.adapter }),
       ...(receipt.cli === undefined ? {} : { cli: receipt.cli }),
       platform: receipt.platform, node: receipt.node, phases: receipt.phases,

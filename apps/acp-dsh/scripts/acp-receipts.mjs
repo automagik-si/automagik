@@ -12,12 +12,15 @@
 // handshake, the session start (or that it stops at auth_required) and `reattach`: whether a
 // closed session comes back by resume and binds a fresh bridge. Everything a prompt is needed
 // for stays 'unverified', and a session the adapter opens with no sign-in is
-// 'opened-not-exercised' when nothing more was checked on it.
+// 'opened-not-exercised' when nothing more was checked on it. 'synthetic-backend' is the real
+// adapter and CLI on the loopback model stub (dev/model-stub.mjs, test/real-backend.test.js):
+// everything runs for real but the model, so it names its `backend` and never stands for a
+// signed-in run.
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export const RECEIPT_VERSION = 1
-export const SCENARIOS = new Set(['synthetic-replay', 'real-unprompted', 'real-signed-in'])
+export const SCENARIOS = new Set(['synthetic-replay', 'real-unprompted', 'synthetic-backend', 'real-signed-in'])
 export const OUTCOMES = new Set(['passed', 'failed', 'auth-required', 'unverified', 'skipped', 'refused', 'opened-not-exercised'])
 // The phases of a turn a person cares about, in order. A receipt names each one. `reattach` is
 // the session coming back with a fresh bridge; `continuity` is the agent remembering across it.
@@ -34,6 +37,7 @@ export function receiptProblems(receipt) {
   for (const phase of PHASES) {
     if (!OUTCOMES.has(receipt?.phases?.[phase])) problems.push(`phase ${phase} has no outcome`)
   }
+  if (receipt?.scenario === 'synthetic-backend' && (typeof receipt.backend !== 'string' || receipt.backend === '')) problems.push('a synthetic-backend run names no backend')
   if (receipt?.scenario === 'real-unprompted') {
     if (typeof receipt.adapter?.version !== 'string' || receipt.adapter.version === 'unknown') problems.push('a real run names no adapter version')
     // No prompt was sent: nothing a prompt proves can have passed.
