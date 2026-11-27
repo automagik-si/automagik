@@ -33,6 +33,7 @@ const hook = (make) => {
 const effects = []
 const react = {
   createElement: (type, props, ...children) => ({ type, props: { ...props, children } }), Fragment: Symbol('Fragment'),
+  createContext: value => ({ Provider: 'Provider', value }),
   useState(initial) {
     const slot = hook(() => ({ v: typeof initial === 'function' ? initial() : initial }))
     return [slot.v, (v) => { slot.v = typeof v === 'function' ? v(slot.v) : v }]
@@ -68,16 +69,17 @@ const walk = (node, match, out = []) => {
   walk(node.props?.children, match, out)
   return out
 }
-// Runs the function components in a tree, keeping each element with its output.
-const expand = (node) => {
-  if (Array.isArray(node)) return node.map(expand)
+// Keeps nested component elements with their output for the fixture's assertions.
+const expand = (node, keepComponent = true) => {
+  if (Array.isArray(node)) return node.map(child => expand(child, keepComponent))
   if (!node || typeof node !== 'object') return node
   if (typeof node.type !== 'function') return { ...node, props: { ...node.props, children: expand(node.props?.children) } }
   const outer = [scope, cursor]
   scope = `${scope}/${node.type.name}:${node.props.key ?? ''}`
   cursor = 0
   try {
-    return { ...node, props: { ...node.props, children: [expand(node.type(node.props))] } }
+    const output = expand(node.type(node.props), keepComponent)
+    return keepComponent ? { ...node, props: { ...node.props, children: [output] } } : output
   } finally {
     [scope, cursor] = outer
   }
@@ -126,7 +128,7 @@ function cell({ code, message = '', turn = 3, blocked, model = models[0].ref, la
   const render = () => {
     scope = ''
     cursor = 0
-    const tree = expand(FailureCell(props))
+    const tree = expand(FailureCell(props), false)
     for (const effect of effects.splice(0)) effect()
     return tree
   }

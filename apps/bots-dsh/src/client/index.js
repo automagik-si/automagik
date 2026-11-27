@@ -1,3 +1,4 @@
+import { createElement as h } from 'react'
 import { SKILLS_PANEL, SkillsScreen } from './skills-screen.js'
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
@@ -54,7 +55,8 @@ import { AnsweredReply, WidgetDock, WIDGET_CSS } from './widget-cell.js'
 import { HandoffDock, HANDOFF_CSS } from './handoff-card.js'
 import { AppAccessDock, ComputerHandoffDock, ComputerIndicator, COMPUTER_CSS } from './computer.js'
 import { headerNavigation, installHeaderNavigation } from './header-navigation.js'
-import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, registerSkillActivity, SkillActivityCell, SkillNoticeCell, TurnTailCell, OrderedToolCell, registerToolActivity, ToolActivityCell } from './cells.js'
+import { AssistantCell, GuardOffLine, TriggerCell, TurnProcessCell, Nothing, CellEmpty, registerSkillActivity, SkillActivityCell, SkillNoticeCell, TurnTailCell, OrderedToolCell, registerToolActivity, ToolActivityCell, roomOpeningTurn, useRoomOpeningTurn, watchRoomOpeningBinding, withoutOpeningTurn } from './cells.js'
+import { installOnboardingGate } from './onboarding-gate.js'
 import { TOOL_ACTIVITY } from '../shared/tool-activity.js'
 import { SKILL_ACTIVITY } from '../shared/skill-activity.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
@@ -118,6 +120,65 @@ import * as gatedShared from './gated-shared.js'
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
 const LIVE_OWN = new Set(['revision', 'unchanged', 'activity', 'work', 'memoryNews', 'memoryReviews', 'liveKey', 'computerLive'])
+
+// rc.2 wraps its turn navigation immediately before the transcript's scroll
+// container. Use the flow anchor and virtual row index, which survive locale and CSS builds.
+const ROOM_RAIL = 'div:has(+ div > div > [data-chat-flow]) > nav'
+const ROOM_OPENING_RAIL_CSS = `
+html[data-bot-opening="rail"] ${ROOM_RAIL},
+html[data-bot-opening="first"] ${ROOM_RAIL} button[data-index="0"] { display: none !important }
+`
+
+function installRoomOpeningRail({ roster, sessions, mainView, openingSessions = { list: sessions } }) {
+  const root = document.documentElement
+  const sync = () => {
+    const id = mainView()
+    if (roomOpeningTurn(roster.getSnapshot().roomsById?.[id], id, openingSessions) !== undefined) {
+      const list = sessions.getSnapshot()
+      const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline
+      if (Array.isArray(outline) && outline.length >= 2) {
+        root.setAttribute('data-bot-opening', outline.length === 2 ? 'rail' : 'first')
+        return
+      }
+    }
+    root.removeAttribute('data-bot-opening')
+  }
+  const style = installStyles(ROOM_OPENING_RAIL_CSS, 'room-opening-rail')
+  const offRoster = roster.subscribe(sync)
+  const offSessions = watchRoomOpeningBinding(openingSessions, mainView, sync)
+  return () => { offSessions(); offRoster(); root.removeAttribute('data-bot-opening'); style.remove() }
+}
+
+const RoomTurnProcess = withoutOpeningTurn(TurnProcessCell, ({ node }) => node?.location?.turn?.turn ?? node?.data?.turn)
+const RoomTurnTail = withoutOpeningTurn(TurnTailCell, ({ turn }) => turn.turn)
+
+function OpeningAwareHeader(props) {
+  const { sessionId: id, useSessions, useTurnClock } = props
+  const opened = useRoomOpeningTurn(props)
+  // The header uses the same outline for its first visible time as TriggerCell.
+  // Keep the projection unchanged everywhere else, including DSH's own rail.
+  const useVisibleSessions = select => useSessions(list => {
+    if (opened === undefined) return select(list)
+    const projection = list.projectionsBySession?.[id]
+    const summary = list.byId[id]
+    const visible = outline => outline.filter(entry => entry.turn !== opened)
+    if (Array.isArray(projection?.values?.turnOutline)) {
+      const values = { ...projection.values, turnOutline: visible(projection.values.turnOutline) }
+      return select({ ...list, projectionsBySession: { ...list.projectionsBySession, [id]: { ...projection, values } } })
+    }
+    if (Array.isArray(summary?.projectionValues?.turnOutline)) {
+      const projectionValues = { ...summary.projectionValues, turnOutline: visible(summary.projectionValues.turnOutline) }
+      return select({ ...list, byId: { ...list.byId, [id]: { ...summary, projectionValues } } })
+    }
+    return select(list)
+  })
+  const useVisibleClock = select => useTurnClock(state => {
+    if (opened === undefined || state[id]?.[opened] === undefined) return select(state)
+    const { [opened]: _opening, ...turns } = state[id]
+    return select({ ...state, [id]: turns })
+  })
+  return h(HeaderPill, { ...props, useSessions: useVisibleSessions, useTurnClock: useVisibleClock })
+}
 
 // What other Omni plugins build on (the channels and canvas plugins, which require this
 // bundle through `dsh.client.external`). They share this module instance: one interface
@@ -218,12 +279,30 @@ function applyOwner(ctx, { gated = false } = {}) {
   const pendingAdopt = new Map()
   // Bot ownership is distinct from standalone Agent ownership and native rendering.
   const pendingBot = new Map()
+  const adoption = createSource(0)
+  const hasPendingAdoption = id => pendingBot.has(id) || pendingAdopt.has(id)
+  const adoptionChanged = () => adoption.set(revision => revision + 1)
+  const clearAdoption = (pending, id, operation) => {
+    if (pending.get(id) !== operation) return
+    pending.delete(id)
+    adoptionChanged()
+  }
+  const reconcileAdoptions = (listed, snapshot) => {
+    for (const [id, operation] of pendingAdopt) {
+      if (snapshot?.agentOf[id] !== undefined || listed[id] === undefined) clearAdoption(pendingAdopt, id, operation)
+    }
+    for (const [id, operation] of pendingBot) {
+      if (operation.awaitingRoster && (snapshot?.byId[id] !== undefined || listed[id] === undefined)) {
+        clearAdoption(pendingBot, id, operation)
+      }
+    }
+  }
   let nativeDestination
   // A create can finish before the DSH list publishes its Session (#1225).
   const pendingAgentSession = new Map()
   const agentNewInFlight = new Map()
   const isAgentSessionId = id => isAgentSession(roster.getSnapshot(), agentSessionCache, id) || pendingAdopt.has(id) || pendingBot.has(id) || (id !== undefined && id === nativeDestination)
-  const agentOfSession = id => roster.getSnapshot().agentOf[id] ?? pendingAdopt.get(id)
+  const agentOfSession = id => roster.getSnapshot().agentOf[id] ?? pendingAdopt.get(id)?.agentId
   // The workspace a Session lives in, for follow-up creates and switch detection.
   const workspaces = ctx.get('workspaces')
   const workspaceOf = (sessionId) => {
@@ -356,7 +435,8 @@ function applyOwner(ctx, { gated = false } = {}) {
     }
     // On a browser with no visit record yet, everything already there counts as seen.
     if (Object.keys(seenAt).length === 0) leaveVisits([...value.bots, ...value.rooms].map(entry => entry.id))
-    roster.set(indexRoster(value))
+    const nextRoster = indexRoster(value)
+    roster.set(nextRoster)
     void drafts.run()
     try {
       const ids = (value.agents ?? []).flatMap(agent => agent.sessions ?? [])
@@ -365,9 +445,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     } catch { /* storage unavailable */ }
     // Adopted ids are known by the roster now; ones gone from the list were archived.
     const listed = ctx.sessions.list.getSnapshot().byId ?? {}
-    for (const id of pendingAdopt.keys()) {
-      if (roster.getSnapshot().agentOf[id] !== undefined || listed[id] === undefined) pendingAdopt.delete(id)
-    }
+    reconcileAdoptions(listed, nextRoster)
     for (const [agentId, sessionId] of pendingAgentSession) {
       if (listed[sessionId] !== undefined || roster.getSnapshot().agentOf[sessionId] !== agentId) pendingAgentSession.delete(agentId)
     }
@@ -389,6 +467,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     seenAt = savedPrefs = {}
     agentSessionCache.clear()
     for (const map of [pendingAdopt, pendingBot, pendingAgentSession, agentNewInFlight]) map.clear()
+    adoptionChanged()
   }), 'ds-bot: clear owner state on retirement')
 
   ctx.effect(() => {
@@ -599,7 +678,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     const snapshot = roster.getSnapshot()
     const agent = snapshot.agentsById[agentId]
     const ids = agent === undefined ? [] : [...agentRowSessions(agent, snapshot, Date.now())]
-    for (const [id, owner] of pendingAdopt) if (owner === agentId && !ids.includes(id)) ids.push(id)
+    for (const [id, operation] of pendingAdopt) if (operation.agentId === agentId && !ids.includes(id)) ids.push(id)
     return ids
   }
   const latestAgentSession = (agentId, list) => agentSessions(agentId)
@@ -1024,6 +1103,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     })
   }
   const face = () => ({ actions, hooks: { roster, ui, activity, work, memoryNews, registry, turnClock, live, computer, cards, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } })
+  const openingFace = () => ({ ...face(), openingSessions: ctx.sessions })
   const ownerViewer = gated ? requestViewer('whoami') : undefined
   const updateQueue = async (sessionId, itemId, action) => {
     if (ownerViewer) {
@@ -1180,7 +1260,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   }
   const controlSources = () => [ctx.sessions.list, ctx.get('sidebarRight')?.mounted]
   const simpleOnly = install => installSimpleControls({ roster, sources: controlSources(), sessionId: controlSession, install })
-  const installHeader = () => simpleOnly(() => ctx.slots.inject('conversation.session.header', () => installHeaderNavigation(ctx.slots, face, HeaderPill, BOT_PRIORITY)))
+  const installHeader = () => simpleOnly(() => ctx.slots.inject('conversation.session.header', () => installHeaderNavigation(ctx.slots, openingFace, OpeningAwareHeader, BOT_PRIORITY)))
   Object.assign(actions, sidebarActions({ sidebar: () => ctx.get('sidebarRight'), shown: mainView,
     teamSession: id => { const state = roster.getSnapshot(); return Boolean(state.byId[id] || state.roomsById[id] || state.tasks?.[id]) },
     closePanel: () => actions.closePanel(), reportError: (...args) => actions.reportError(...args) }))
@@ -1195,7 +1275,7 @@ function applyOwner(ctx, { gated = false } = {}) {
   }
   const installNativeBotHeader = () => ctx.slots.inject('conversation.session.header.actions', () => {
     // Share only navigation injection/store. Native header retains exclusive children ownership.
-    const navigation = headerNavigation(ctx.slots.entries('conversation.session.header').filter(entry => entry.component !== HeaderPill), face)
+    const navigation = headerNavigation(ctx.slots.entries('conversation.session.header').filter(entry => entry.component !== OpeningAwareHeader), face)
     return ctx.slots.register({ name: 'conversation.session.header.actions', id: 'bot-native-header', order: -100, ...navigation }, NativeBotHeader)
   })
 
@@ -1409,6 +1489,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     // composer card is two-row from its first paint, before DSH mounts its input slots (#322).
     () => markConversation(),
     () => installUserTimes(),
+    () => installRoomOpeningRail({ roster, sessions: ctx.sessions.list, mainView, openingSessions: ctx.sessions }),
     () => installCompiledStyles(COMPOSER_PACK_CSS, 'composer-packs'),
     () => installCompiledStyles(CONVERSATION_CSS, 'conversation'),
     () => installCompiledStyles(TURN_ERROR_CSS, 'turn-errors'),
@@ -1424,16 +1505,16 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => shadow('conversation.chat.node', { key: 'assistant-step', priority: BOT_PRIORITY, locale: 'chat', inject: assistantFace }, AssistantCell),
     () => registerSkillActivity(ctx),
     () => shadow('conversation.chat.node', { key: SKILL_ACTIVITY, priority: BOT_PRIORITY, locale: 'chat', inject: face }, SkillActivityCell),
-    () => shadow('conversation.chat.node', { key: 'turn-trigger', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TriggerCell),
+    () => shadow('conversation.chat.node', { key: 'turn-trigger', priority: BOT_PRIORITY, locale: 'chat', inject: openingFace }, TriggerCell),
     () => registerToolActivity(ctx),
     () => shadow('conversation.chat.node', { key: TOOL_ACTIVITY, priority: BOT_PRIORITY, locale: 'chat', inject: face }, ToolActivityCell),
     () => shadow('conversation.chat.node', { key: 'tool-call', priority: BOT_PRIORITY, locale: 'chat', inject: face }, OrderedToolCell),
-    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'turn-process', priority: BOT_PRIORITY, locale: 'chat', inject: face }, TurnProcessCell)),
+    () => simpleOnly(() => shadow('conversation.chat.node', { key: 'turn-process', priority: BOT_PRIORITY, locale: 'chat', inject: openingFace }, RoomTurnProcess)),
     // A failed turn shows what the user can do about it instead of the provider's raw text.
-    () => shadow('conversation.chat.node', { key: 'turn-error', priority: BOT_PRIORITY, locale: 'chat', inject: face }, FailureCell),
+    () => shadow('conversation.chat.node', { key: 'turn-error', priority: BOT_PRIORITY, locale: 'chat', inject: openingFace }, FailureCell),
     // DSH's own turn tail stays, so what other plugins add there shows, such as the
     // cards of the files a turn delivered; its copy and branch row is hidden.
-    () => shadow('conversation.chat.turnTail', { id: 'bot-turn-separators', order: 1000, inject: face }, TurnTailCell),
+    () => shadow('conversation.chat.turnTail', { id: 'bot-turn-separators', order: 1000, inject: openingFace }, RoomTurnTail),
     // A side question is not a transcript row. After its snapshot turn closes it
     // sits on that turn's tail, ahead of the time separator.
     () => shadow('conversation.chat.turnTail', { id: 'bot-btw', order: 800, priority: BOT_PRIORITY, inject: face }, BtwTurnTail),
@@ -1569,7 +1650,8 @@ function applyOwner(ctx, { gated = false } = {}) {
           while (required !== undefined && required !== operation) required = required.forkSource
           if ((current !== undefined && current !== main && required !== operation) || surface.getSnapshot().mode !== 'bot') return sourceSessionId
           await call('bot-session-adopt', { botId, sessionId: main, sourceSessionId })
-          await pull()
+          operation.awaitingRoster = true
+          await pull().catch(quietly('observe Bot adoption'))
           return main
         }).catch(error => {
           console.warn('[ds-bot] bot-session-adopt', error)
@@ -1579,11 +1661,13 @@ function applyOwner(ctx, { gated = false } = {}) {
           actions.reportError(error, 'bot-session-adopt')
           throw error
         }).finally(() => {
-          if (pendingBot.get(main) === operation) pendingBot.delete(main)
+          if (!operation.awaitingRoster || roster.getSnapshot().byId[main] !== undefined
+            || ctx.sessions.list.getSnapshot().byId[main] === undefined) clearAdoption(pendingBot, main, operation)
         })
         // A later destination can await this operation; an abandoned one must not
         // leave an unhandled rejection or navigate back on completion.
         void operation.done.catch(() => {})
+        adoptionChanged()
         return
       }
       const agentId = before !== undefined ? agentOfSession(before) : undefined
@@ -1601,17 +1685,22 @@ function applyOwner(ctx, { gated = false } = {}) {
       const parent = row?.parentId ?? row?.parentSessionId
       const forkedFromAgent = parent !== undefined && agentOfSession(parent) === agentId
       if (row?.blank !== true && !forkedFromAgent) return
-      pendingAdopt.set(main, agentId)
+      const operation = { agentId }
+      pendingAdopt.set(main, operation)
       setPlain(true)
+      adoptionChanged()
       void call('agent-adopt', { agentId, sessionId: main }).then(async () => {
-        await pull()
+        try { await pull() } catch (error) {
+          quietly('observe Agent adoption')(error)
+          return
+        }
         // Only a successful association may retire the empty source it replaced.
         const next = workspaceOf(main)
         if (list.byId[before]?.blank === true && next !== undefined && workspaceOf(before) !== next) {
           await call('agent-archive', { agentId, sessionId: before }).then(() => pull()).catch(() => {})
         }
       }).catch((error) => {
-        pendingAdopt.delete(main)
+        clearAdoption(pendingAdopt, main, operation)
         console.warn('[ds-bot] agent-adopt', error)
         // The Session never joined the Agent: the sync puts the team surface
         // back (a Map delete fires no subscription), and the user hears why.
@@ -1619,11 +1708,18 @@ function applyOwner(ctx, { gated = false } = {}) {
         actions.reportError(error, 'agent-adopt')
       })
     }
-    const offList = ctx.sessions.list.subscribe(sync)
+    const offList = ctx.sessions.list.subscribe(() => {
+      sync()
+      reconcileAdoptions(ctx.sessions.list.getSnapshot().byId ?? {})
+    })
     const offRoster = roster.subscribe(sync)
     sync()
     return () => { offList(); offRoster() }
   }, 'ds-bot: agent surface')
+  // The navigation observer marks a native destination pending before the gate classifies it.
+  ctx.effect(() => installOnboardingGate(ctx, {
+    roster, mainView, sessions: ctx.sessions.list, adoption, hasPendingAdoption,
+  }), 'ds-bot: gate Settings onboarding')
 
   // A reload consumes the marker once. A web reconnect can use the same validated open path.
   let chatReopen

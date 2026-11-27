@@ -26,6 +26,7 @@ import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_MODEL_TEXT, addsAcpToolDeny, deniesAcp
 import { avatarProblem, isSolverLooks } from '../shared/solver-look-policy.js'
 import { LOOK_INVALID, SOLVER_BY_PERSON, SOLVER_WEARS, solverDefaultShape } from '../shared/solver-looks.js'
 import { assertSolverAgent, assertSolverAssignment } from './solver-agent.js'
+import { openingEvents, OPENING_TURN } from './groups.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -172,7 +173,7 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false, guard, allocation } = {}) {
+  async function createSession(title, { dir, profile, group = false, botId, readScopeSource, continueReadScope = false, guard, allocation, opening = false } = {}) {
     guard?.()
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
@@ -202,22 +203,80 @@ export function install(rt) {
     if (allocation !== undefined) allocation.reserved = reserved
     rt.assertShellChoice?.(undefined, botId)
     guard?.()
+    if (opening) {
+      const opened = await createOpenedSession(place, preset, finish)
+      if (opened !== undefined) return opened
+    }
     const { sessionId } = await ctx.sessionController.create({
       ...place, ...preset, ...(reserved === undefined ? {} : { sessionId: reserved }),
     })
-    if (allocation !== undefined) allocation.id = sessionId
-    if (reserved !== undefined && sessionId !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
-    // A guarded create can use a new workspace before the team takes it. Keep a
-    // workspace chosen by another action while this Session was being allocated.
-    const pendingWorkspace = allocation?.pendingWorkspace
-    if (pendingWorkspace !== undefined && state.workspaceId === pendingWorkspace.previousId) {
-      guard?.()
-      await publishWorkspace(pendingWorkspace.id)
+    await finish(sessionId)
+    return opening ? { sessionId, opened: false } : sessionId
+
+    async function finish(id) {
+      if (allocation !== undefined) allocation.id = id
+      if (reserved !== undefined && id !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
+      // A guarded create can use a new workspace before the team takes it. Keep a
+      // workspace chosen by another action while this Session was being allocated.
+      const pendingWorkspace = allocation?.pendingWorkspace
+      if (pendingWorkspace !== undefined && state.workspaceId === pendingWorkspace.previousId) {
+        guard?.()
+        await publishWorkspace(pendingWorkspace.id)
+      }
+      if (blockedFolder) rt.sessionFolderWarnings?.set(id, blockedFolder)
+      const agent = await rt.resolveAgent(id)
+      await ctx.sessionTitle.rename(agent.session, title)
     }
-    if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
-    const agent = await rt.resolveAgent(sessionId)
-    await ctx.sessionTitle.rename(agent.session, title)
-    return sessionId
+  }
+
+  let warnedBlankRoom = false
+  async function createOpenedSession(place, preset, finish) {
+    // Match the pinned SessionController's agent composition, as its fork does.
+    // This controller field is not a public API. Older controllers still create rooms.
+    const agents = ctx.sessionController.agents
+    const registry = ctx.get?.('agents')
+    if (typeof agents?.composeAgent !== 'function' || typeof agents?.agentOptions !== 'function' || typeof registry?.create !== 'function') {
+      if (!warnedBlankRoom) rt.warn('omni-ui: rooms open blank: DSH has no seeded create')
+      warnedBlankRoom = true
+      return undefined
+    }
+    const workspace = place.workspaceId === undefined ? undefined : ctx.workspaceRegistry.get(place.workspaceId)
+    const cwd = workspace?.path ?? place.cwd
+    if (cwd === undefined) throw refusal('The team workspace is unavailable.')
+    const composition = await agents.composeAgent(preset.agentPreset)
+    await mkdir(cwd, { recursive: true })
+    const sessionId = `session-${randomUUID()}`
+    let handle
+    try {
+      handle = await registry.create({
+        sessionId,
+        seed: openingEvents(0),
+        agentOptions: agents.agentOptions(),
+        meta: { cwd, ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }) },
+        setup: composition.setup,
+      })
+      if (workspace !== undefined) await workspace.attachSession(sessionId)
+      await finish(sessionId)
+      return { sessionId, opened: true }
+    } catch (error) {
+      // The caller cannot archive an ID it never received. The factory cleans up
+      // its own handle if initialization fails, but its durable log may exist.
+      try {
+        await ctx.workspaceRegistry.archiveSession(sessionId)
+      } catch (cleanupError) {
+        if (cleanupError?.name !== 'WorkspaceUnknownSessionError') {
+          rt.warn('omni-ui: archiving the failed room Session %s failed: %s', sessionId, cleanupError)
+        }
+      } finally {
+        try {
+          await handle?.dispose()
+        } catch (cleanupError) {
+          rt.warn('omni-ui: releasing the failed room Session %s failed: %s', sessionId, cleanupError)
+        }
+        rt.sessionFolderWarnings?.delete(sessionId)
+      }
+      throw error
+    }
   }
 
   function cleanAvatar(input) {
@@ -1594,7 +1653,7 @@ export function install(rt) {
     const title = custom || autoRoomName(members)
     // The group's own Session only relays; like a member's it moves to a fresh part
     // in the group's folder once the group has one (parts.js).
-    const id = await createSession(title, { group: true })
+    const { sessionId: id, opened } = await createSession(title, { group: true, opening: true })
     let room
     try {
       // A member deleted while the Session was made stays out, and the group is checked
@@ -1608,6 +1667,7 @@ export function install(rt) {
       room = {
         id,
         name,
+        ...(opened ? { opened: { part: id, turn: OPENING_TURN } } : {}),
         ...(custom ? { named: true } : {}),
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
         members: live,
