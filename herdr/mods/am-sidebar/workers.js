@@ -748,6 +748,7 @@ export const WORKER_OWNER_QUESTION_LINE = "Waiting on the person: when you end y
  * (#1747, the standing rule), as for the bot line in briefingText.mjs. They keep the done line.
  */
 export const WORKER_OWNER_QUESTION_SKIP = Object.freeze(["hermes"]);
+export const WORKER_SKILLS_SKIP = Object.freeze(["hermes"]);
 
 /**
  * The instruction every worker task ends with (#1278 cause 5): before it reports done it commits
@@ -759,12 +760,13 @@ export const WORKER_DONE_LINE = "Before you report done: commit or discard every
   + "and leave the worktree clean (`git status --porcelain` prints nothing).";
 
 /**
- * A worker's task text: the task as given, then the needs-owner rule (#2057; not for an agent in
+ * A worker's task text: the task as given, its optional Automatic catalog, then the needs-owner rule (#2057; not for an agent in
  * WORKER_OWNER_QUESTION_SKIP, #1747), then the worktree-clean instruction last (#1278 cause 5).
  */
-export function workerTaskText(task, agentKey = null) {
+export function workerTaskText(task, agentKey = null, catalog = "") {
+  const skills = catalog && !WORKER_SKILLS_SKIP.includes(agentKey) ? `\n\n${catalog}` : "";
   const owner = WORKER_OWNER_QUESTION_SKIP.includes(agentKey) ? "" : `\n\n${WORKER_OWNER_QUESTION_LINE}`;
-  return `${task}${owner}\n\n${WORKER_DONE_LINE}`;
+  return `${task}${skills}${owner}\n\n${WORKER_DONE_LINE}`;
 }
 
 /**
@@ -876,10 +878,11 @@ const GENERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[
  * when the launch had no Bot login resolution (policy off, a legacy login, an unusable sequence,
  * or `am attach`). A seat's
  * worker-only fields are null or false. `agentHome` and `launch`: a worker on a chosen agent home
- * (#1208), its real home and launch id; a row with none has neither key.
+ * (#1208), its real home and launch id; a row with none has neither key. `skillTeam` is the
+ * physical team binding of a worker eligible for its Bot's skills, when selected at launch.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
-  template, role, swap, override, overrideRequested, core, createdMs, squad, session, env, generation, sequence, agentHome, launch, at }) {
+  template, role, swap, override, overrideRequested, core, createdMs, squad, session, env, generation, sequence, agentHome, launch, skillTeam, at }) {
   const requested = overrideRequested && Object.keys(overrideRequested).length ? { ...overrideRequested } : null;
   const home = env && typeof env === "object" && !Array.isArray(env)
     ? Object.fromEntries(Object.entries(env).filter(([, v]) => typeof v === "string" && v)) : null;
@@ -889,7 +892,8 @@ export function startRow({ kind, terminal, pid, botId, task, branch, project, le
     created: created === true, swap: swap === true, override: override === true, override_requested: requested,
     core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session),
     ...(home && Object.keys(home).length ? { env: home } : {}),
-    generation: orNull(generation), sequence: msOrNull(sequence), ...(agentHome ? { agentHome, launch: orNull(launch) } : {}), at: stamp(at) };
+    generation: orNull(generation), sequence: msOrNull(sequence), ...(agentHome ? { agentHome, launch: orNull(launch) } : {}),
+    ...(skillTeam ? { skillTeam } : {}), at: stamp(at) };
 }
 
 /**

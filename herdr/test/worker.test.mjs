@@ -6,7 +6,7 @@ import net from "node:net";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -147,6 +147,8 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   delete env.CODEX_HOME;
   // #1532: a generation pointer from the host must never leak into a scratch launch.
   delete env.AUTOMAGIK_BOT_CLI_POINTER;
+  delete env.AUTOMAGIK_HOME;
+  delete env.AUTOMAGIK_BOTS_HOME;
   // Every CLI call, including worker/reap, stays in this scratch world (#1135).
   const preflight = (extra = {}, cwd = project) => {
     const effective = { ...env, ...extra };
@@ -2934,6 +2936,170 @@ const OWNER_TAIL = `\n\n${OWNER_LINE}\n\n${DONE_LINE}`;
 /** A Hermes worker's tail (#1747, the lead's ruling Q-1): the done line only. */
 const DONE_TAIL = `\n\n${DONE_LINE}`;
 
+const SKILL_HEADING = "Your skills (load one with: am skill <name>):";
+const SKILL_DESCRIPTION = "Use the team's notes format.";
+const SKILL_MARKER = "MARK-NOTES-7f3a";
+const TEAM_BOT = "session-11111111-1111-4111-8111-111111111111";
+const skillUnavailable = name => `No skill named ${name} is available to this worker's Bot.`;
+const digestSkill = bytes => createHash("sha256").update(bytes).digest("hex");
+
+function skillRecord(name, content, description = SKILL_DESCRIPTION, frontmatter) {
+  const quoted = JSON.stringify(description).replace(/[\u2028\u2029\ufeff]/g, char => "\\u" + char.charCodeAt(0).toString(16));
+  const bytes = Buffer.from(frontmatter ?? `---\nname: ${name}\ndescription: ${quoted}\n---\n\n${content}\n`);
+  const hash = digestSkill(JSON.stringify(["SKILL.md", bytes.length, digestSkill(bytes)]) + "\n");
+  return { name, description, content, hash, source: frontmatter === undefined ? { kind: "text" } : { kind: "file", fileName: "SKILL.md" },
+    ...(frontmatter === undefined ? {} : { frontmatter }), review: { status: "done", hash, findings: [] },
+    reviewSeal: "a".repeat(64), check: { verdict: "pass" }, workerRevision: "private-revision" };
+}
+
+function publishSkills(s, { botId = ID.dev, home = join(s.env.HOME, ".automagik/desktop/bots"),
+  records = [skillRecord("notes", SKILL_MARKER), skillRecord("memo", "manual text"), skillRecord("ghost", "unassigned text")],
+  assignment = [{ name: "notes", mode: "automatic" }, { name: "memo", mode: "manual" }] } = {}) {
+  const snapshots = join(home, "skills/.bots");
+  const library = join(home, "skill-library/library.json");
+  const snapshot = join(snapshots, botId + ".json");
+  mkdirSync(join(home, "skills"), { recursive: true, mode: 0o700 });
+  mkdirSync(snapshots, { mode: 0o700 });
+  mkdirSync(dirname(library), { mode: 0o700 });
+  const data = { version: 1, skills: Object.fromEntries(records.map(record => [record.name, record])),
+    active: { [botId]: assignment.map(item => ({ ...item, assignment: "private-assignment" })) }, reviewBlocks: {} };
+  const pairs = assignment.map(({ name, mode }) => {
+    const { hash, description } = data.skills[name];
+    return { name, mode, hash, ...(mode === "automatic" ? { description } : {}) };
+  });
+  const key = join(home, "skill-review.key");
+  writeFileSync(key, Buffer.alloc(32), { mode: 0o600 });
+  const putLibrary = (value = data) => writeFileSync(library, JSON.stringify(value) + "\n", { mode: 0o600 });
+  putLibrary();
+  const putSnapshot = (id = botId) => {
+    rmSync(snapshot, { force: true });
+    writeFileSync(snapshot, JSON.stringify({ version: 1, botId: id, skills: pairs }, null, 2) + "\n", { mode: 0o444 });
+  };
+  putSnapshot();
+  for (let attempt = 0; statSync(snapshot, { bigint: true }).ctimeNs <= statSync(key, { bigint: true }).ctimeNs; attempt++) {
+    assert.ok(attempt < 50, "snapshot follows the synthetic key");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
+    putSnapshot();
+  }
+  return { data, home, library, snapshot, putLibrary, putSnapshot };
+}
+
+// Hold hc's real reply until the fake agent's CLI reads the ledger before its own row exists.
+// The scripts are written into this scene only. No model or installed am sees the task.
+function holdSkillLaunch(s, { neverLog = false } = {}) {
+  const bin = join(s.root, "bin"), prefix = join(s.root, "skill-agent");
+  const probe = prefix + "-probe.mjs", agent = prefix + ".mjs", wrapper = prefix + "-hc.mjs";
+  const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+  writeFileSync(probe, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const read = fs.readFileSync;
+    fs.readFileSync = function (path, ...args) {
+      if (path === ${JSON.stringify(ledger)} && !fs.existsSync(process.env.SKILL_FIRST_READ)) {
+        const pane = JSON.parse(read(process.env.HC_FAKE_STATE)).terminals.find(row => row.address === process.env.HC_TERMINAL_ID);
+        let before, error;
+        try { before = read(path, ...args); } catch (e) { if (e.code !== "ENOENT") throw e; error = e; }
+        fs.writeFileSync(process.env.SKILL_FIRST_READ, JSON.stringify({ address: pane.address, created: pane.created_ms,
+          bound: String(before ?? "").split("\\n").filter(Boolean).map(JSON.parse).some(row => row.event === "start" && row.terminal === pane.address) }));
+        if (error) throw error;
+        return before;
+      }
+      return read(path, ...args);
+    };
+    syncBuiltinESMExports();
+  `);
+  writeFileSync(agent, `
+    import { spawnSync } from "node:child_process";
+    import { writeFileSync } from "node:fs";
+    const [result, prompt] = process.argv.slice(2);
+    const row = prompt.split("\\n").findIndex(line => line === ${JSON.stringify(SKILL_HEADING)});
+    const name = row < 0 ? null : /^([a-z0-9-]+): /.exec(prompt.split("\\n")[row + 1])?.[1];
+    let outcome = { state: "no-catalog" };
+    if (name) {
+      const load = name => {
+        const r = spawnSync(process.execPath, ["--import", ${JSON.stringify(probe)}, ${JSON.stringify(CLI)}, "skill", name],
+          { encoding: "utf8", timeout: 40000 });
+        return { code: r.status, out: r.stdout, err: r.stderr };
+      };
+      outcome = { state: "loaded", name, load: load(name), manual: load("memo") };
+    }
+    writeFileSync(result, JSON.stringify(outcome));
+  `);
+  writeFileSync(wrapper, `
+    import { spawn, spawnSync } from "node:child_process";
+    import { existsSync, readFileSync } from "node:fs";
+    const args = process.argv.slice(2);
+    const r = spawnSync(process.execPath, [${JSON.stringify(FAKE_HC)}, ...args], { encoding: "utf8" });
+    if (args[0] === "run" && r.status === 0) {
+      const answer = JSON.parse(r.stdout);
+      const prompt = args.at(-1);
+      const result = ${JSON.stringify(prefix)} + "-" + answer.address + ".json";
+      const first = result + ".first-read";
+      const child = spawn(process.execPath, [${JSON.stringify(agent)}, result, prompt], {
+        env: { ...process.env, HC_TERMINAL_ID: answer.address, SKILL_FIRST_READ: first }, detached: true, stdio: "ignore" });
+      child.unref();
+      const deadline = Date.now() + 6000;
+      const signal = prompt.includes(${JSON.stringify(SKILL_HEADING)}) ? first : result;
+      while (!existsSync(signal) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      if (!existsSync(signal)) throw new Error("fake worker did not reach the held reply");
+      if (${neverLog}) process.kill(process.ppid, "SIGKILL");
+      answer.created_ms = JSON.parse(readFileSync(process.env.HC_FAKE_STATE)).terminals.find(row => row.address === answer.address).created_ms;
+      r.stdout = JSON.stringify(answer);
+    }
+    process.stdout.write(r.stdout);
+    process.stderr.write(r.stderr);
+    process.exitCode = r.status;
+  `);
+  exe(join(bin, "hc"), `#!/bin/sh\n# delegates to ${FAKE_HC}\nexec "${process.execPath}" "${wrapper}" "$@"\n`);
+  return async terminal => {
+    const path = `${prefix}-${terminal}.json`;
+    for (let i = 0; !existsSync(path) && i < 800; i++) await new Promise(resolve => setTimeout(resolve, 50));
+    const result = JSON.parse(readFileSync(path, "utf8"));
+    if (existsSync(path + ".first-read")) result.first = JSON.parse(readFileSync(path + ".first-read", "utf8"));
+    return result;
+  };
+}
+
+test("#2085 C1/C6/C7 fake worker reaches its final result from the first prompt", async t => {
+  const file = team();
+  file.bots.find(row => row.id === ID.dev).id = TEAM_BOT;
+  const s = scene(t, { file, templates: [...TEMPLATES, { name: "herm", command: "hermes" }] });
+  bindIn(s, "t1", TEAM_BOT, s.project);
+  const publication = publishSkills(s, { botId: TEAM_BOT });
+  const resultOf = holdSkillLaunch(s);
+  const direct = s.cli(["worker", "do it", "--branch", "fix/skills", "--json"]);
+  assert.equal(direct.code, 0, direct.err);
+  const first = direct.json().terminal;
+  const result = await resultOf(first);
+  const expected = `do it\n\n${SKILL_HEADING}\nnotes: ${SKILL_DESCRIPTION}${OWNER_TAIL}`;
+  assert.deepEqual({ word: s.runs()[0].at(-1), state: result.state }, { word: expected, state: "loaded" },
+    "first prompt carries the Automatic catalog and the fake agent finds it");
+  const checkResult = (terminal, result) => {
+    const pane = s.hcState().terminals.find(row => row.address === terminal);
+    const row = s.ledger().find(row => row.event === "start" && row.terminal === terminal);
+    assert.deepEqual(result.first, { address: terminal, created: pane.created_ms, bound: false });
+    assert.equal(row.core, "fakecore0000");
+    assert.equal(row.created_ms, pane.created_ms);
+    assert.equal(row.botId, TEAM_BOT);
+    assert.equal(row.skillTeam.path, publication.home);
+    assert.deepEqual(result.load, { code: 0, out: SKILL_MARKER + "\n", err: "" });
+    assert.deepEqual(result.manual, { code: 1, out: "", err: "am: " + skillUnavailable("memo") + "\n" });
+    t.diagnostic(JSON.stringify({ terminal, core: row.core, created: row.created_ms, final: result }));
+  };
+  checkResult(first, result);
+  const template = s.cli(["worker", "do it", "--branch", "fix/template", "--template", "dev-sol", "--json"]);
+  assert.equal(template.code, 0, template.err);
+  assert.equal(s.runs().at(-1).includes("--"), false);
+  assert.deepEqual(s.runs().at(-1).slice(-2), ["dev-sol", expected]);
+  checkResult(template.json().terminal, await resultOf(template.json().terminal));
+  const hermes = s.cli(["worker", "do it", "--branch", "fix/hermes", "--template", "herm", "--json"]);
+  assert.equal(hermes.code, 0, hermes.err);
+  assert.deepEqual(s.runs().at(-1).slice(-2), ["herm", "do it" + DONE_TAIL]);
+  assert.equal((await resultOf(hermes.json().terminal)).state, "no-catalog");
+  assert.equal(Object.hasOwn(s.ledger().find(row => row.terminal === hermes.json().terminal), "skillTeam"), false);
+  assert.match(s.cli(["skill", "notes"], { from: hermes.json().terminal }).err, /was not started with its Bot's skills/);
+});
+
 test("worker #2057: every worker's task teaches the needs-owner Question chip, before the clean-worktree line", (t) => {
   // The worker line is the bot line (briefingText.mjs) with exactly the two added sentences.
   const S1 = "For each new question, set it again with the new paraphrase. ";
@@ -4751,4 +4917,395 @@ process.stdout.write(JSON.stringify({
   assert.notEqual(pairC[0], pairB[0]);
   assert.ok(pairC[1] > pairB[1]);
   checkWorker(workerLaunch(pairC), panelC, "account-c", 3);
+});
+
+// #2085 controls use only the local synthetic core, even when the launch row is absent.
+function skillClock(s) {
+  const preload = join(s.root, "skill-clock.mjs");
+  writeFileSync(preload, `
+    if (process.argv[2] === "skill") {
+      const now = Date.now.bind(Date);
+      const start = now();
+      Date.now = () => start + (now() - start) * 25;
+    }
+  `);
+  return { NODE_OPTIONS: "--import=" + preload, AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "100" };
+}
+
+function skillRefusal(s, name, terminal, message, code = 1, env = {}) {
+  const r = s.cli(["skill", name], { from: terminal, env });
+  assert.equal(r.code, code, r.err);
+  assert.equal(r.out, "");
+  assert.match(r.err, message);
+}
+
+function startForSkills(s, branch, options = [], env = {}, from = "t1") {
+  const result = s.cli(["worker", "do it", "--branch", branch, ...options, "--json"], { from, env });
+  assert.equal(result.code, 0, result.err);
+  return { ...result.json(), stderr: result.err };
+}
+
+test("#2085 C2/C3/C4: refuse a seat, reused address, stale core and ambiguous or ended row", async t => {
+  const cases = [
+    { label: "C2 seat", terminal: "t1", kind: "seat", core: "fakecore0000", createdMs: 1 },
+    { label: "C3 reused", terminal: "t100", kind: "worker", core: "fakecore0000", createdMs: 1 },
+    { label: "C4 stale core", terminal: "t100", kind: "worker", core: "oldcore", createdMs: 2 },
+    { label: "C4 duplicate", terminal: "t100", kind: "worker", core: "fakecore0000", createdMs: 2, duplicate: true },
+    { label: "C4 ended", terminal: "t100", kind: "worker", core: "fakecore0000", createdMs: 2, ended: true },
+  ];
+  for (const { label, duplicate, ended, ...identity } of cases) await t.test(label, sub => {
+    const s = scene(sub);
+    const p = publishSkills(s);
+    const { terminal } = identity;
+    const st = s.hcState();
+    st.terminals.push({ ...term("t100", { cwd: s.project }), created_ms: 2 });
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+    const file = join(s.app, "automagik-herdr/workers.jsonl");
+    mkdirSync(dirname(file), { recursive: true });
+    const teamInfo = statSync(p.home, { bigint: true });
+    const row = startRow({ ...identity, botId: ID.dev, skillTeam: { path: p.home, dev: String(teamInfo.dev), ino: String(teamInfo.ino) } });
+    writeFileSync(file, JSON.stringify(row) + "\n", { mode: LEDGER_MODE });
+    if (duplicate) appendFileSync(file, JSON.stringify(row) + "\n");
+    if (ended) appendFileSync(file, JSON.stringify(endRow({ ...identity, reason: "finished" })) + "\n");
+    chmodSync(p.home, 0o000);
+    try {
+      const selfOnly = /Only a verified live local worker/;
+      const env = skillClock(s);
+      skillRefusal(s, "notes", terminal, selfOnly, 2, env);
+      const list = s.cli(["skill"], { from: terminal, env });
+      assert.equal(list.code, 2, list.err);
+      assert.equal(list.out, "");
+      assert.match(list.err, selfOnly);
+      assert.doesNotMatch(list.err, /Bot skills at|Permission denied/);
+      if (label === "C3 reused" || label === "C4 stale core") {
+        assert.ok(s.calls().filter(args => args[0] === "get" && args[1] === terminal).length >= 4, "both calls rechecked the pane");
+      }
+    } finally { chmodSync(p.home, 0o755); }
+  });
+});
+
+test("#2085 C5/C6: direct Hermes and unknown templates get no catalog or binding", t => {
+  const s = scene(t);
+  publishSkills(s);
+  exe(join(s.root, "bin", "hermes"), "#!/bin/sh\nexit 0\n");
+  for (const [label, options, tail] of [["hermes", ["--agent", "hermes"], DONE_TAIL],
+    ["unknown", ["--template", "mystery"], OWNER_TAIL]]) {
+    const r = startForSkills(s, "fix/" + label, options);
+    assert.equal(s.runs().at(-1).at(-1), "do it" + tail);
+    assert.equal(Object.hasOwn(s.ledger().find(row => row.terminal === r.terminal), "skillTeam"), false);
+    if (label === "unknown") assert.equal(r.warnings.filter(line => line.includes("won't receive its Bot's skills")).length, 1);
+    skillRefusal(s, "notes", r.terminal, /was not started with its Bot's skills/, 2);
+  }
+});
+
+test("#2085 C7: the first prompt refuses at its deadline when the held start row never lands", async t => {
+  const s = scene(t);
+  publishSkills(s);
+  const resultOf = holdSkillLaunch(s, { neverLog: true });
+  const launch = s.cli(["worker", "do it", "--branch", "fix/unlogged", "--json"], { env: {
+    ...skillClock(s), AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "10000",
+  } });
+  assert.equal(launch.code, null, launch.err);
+  const result = await resultOf("t100");
+  assert.deepEqual(result.first, { address: "t100", created: s.hcState().terminals.find(pane => pane.address === "t100").created_ms, bound: false });
+  assert.equal(s.ledger().length, 0);
+  assert.equal(result.load.code, 2, result.load.err);
+  assert.equal(result.load.out, "");
+  assert.match(result.load.err, /Only a verified live local worker/);
+});
+
+test("#2085 C8/C9/C10: explicit, empty and moved teams never fall back on load", t => {
+  const s = scene(t);
+  const a = publishSkills(s, { home: join(s.root, "team-a"), records: [skillRecord("notes", "MARK-A")],
+    assignment: [{ name: "notes", mode: "automatic" }] });
+  const b = publishSkills(s, { records: [skillRecord("notes", "MARK-B")], assignment: [{ name: "notes", mode: "automatic" }] });
+  const from = startForSkills(s, "fix/team-a", [], { AUTOMAGIK_BOTS_HOME: a.home }).terminal;
+  assert.equal(s.ledger().find(row => row.terminal === from).skillTeam.path, a.home);
+  assert.equal(s.cli(["skill", "notes"], { from }).out, "MARK-A\n");
+  const different = spawnSync(process.execPath, [CLI, "skill", "notes"], { cwd: s.project, encoding: "utf8",
+    env: { ...s.env, HOME: b.home, AUTOMAGIK_BOTS_HOME: b.home, HC_TERMINAL_ID: from } });
+  assert.equal(different.status, 0, different.stderr);
+  assert.equal(different.stdout, "MARK-A\n");
+  rmSync(a.snapshot);
+  const empty = s.cli(["skill"], { from, env: { AUTOMAGIK_BOTS_HOME: b.home } });
+  assert.equal(empty.code, 0, empty.err);
+  assert.equal(empty.out, "");
+  skillRefusal(s, "notes", from, /No skill named notes/);
+  const second = startForSkills(s, "fix/empty-a", [], { AUTOMAGIK_BOTS_HOME: a.home }).terminal;
+  assert.equal(s.runs().at(-1).at(-1), "do it" + OWNER_TAIL);
+  assert.equal(s.ledger().find(row => row.terminal === second).skillTeam.path, a.home);
+  skillRefusal(s, "notes", second, /No skill named notes/);
+
+  renameSync(a.home, a.home + ".moved");
+  publishSkills(s, { home: a.home, records: [skillRecord("notes", "MARK-REPLACEMENT")], assignment: [{ name: "notes", mode: "automatic" }] });
+  skillRefusal(s, "notes", from, /team is no longer where this worker started/);
+  const moved = s.cli(["skill"], { from });
+  assert.equal(moved.code, 1);
+  assert.equal(moved.out, "");
+});
+
+test("#2085 C12: exact stdout for typed, empty, JSON and reviewed imported bodies", t => {
+  const s = scene(t);
+  const content = "literal body 😀\nsecond line\n";
+  const imported = "---\r\n# comment\r\nname: imported\r\ndescription: >\r\n  Folded\r\n  description\r\nlicense: MIT\r\n---\r\n\r\nimported body\r\n";
+  const p = publishSkills(s, { records: [skillRecord("notes", content), skillRecord("empty", ""),
+    skillRecord("imported", "imported body", "Folded description", imported)],
+  assignment: ["notes", "empty", "imported"].map(name => ({ name, mode: "automatic" })) });
+  const from = startForSkills(s, "fix/exact-body").terminal;
+  const checks = [
+    [["skill", "notes"], content + "\n"],
+    [["skill", "empty"], "\n"],
+    [["skill", "imported"], "imported body\n"],
+    [["skill", "notes", "--json"], JSON.stringify({ name: "notes", content }, null, 2) + "\n"],
+    [["skill", "empty", "--json"], JSON.stringify({ name: "empty", content: "" }, null, 2) + "\n"],
+  ];
+  for (const [args, expected] of checks) {
+    const r = s.cli(args, { from });
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(Buffer.from(r.out), Buffer.from(expected));
+  }
+  p.data.skills.imported.content = "changed";
+  p.putLibrary();
+  skillRefusal(s, "imported", from, /imported changed since its Bot's skills were published/);
+});
+
+test("#2085 C1 readiness: stale assignment and durable block suppress prompt, list and body", t => {
+  const s = scene(t);
+  const p = publishSkills(s);
+  const from = startForSkills(s, "fix/current").terminal;
+  const original = readFileSync(p.library);
+  const check = (label, mutate) => {
+    mutate(JSON.parse(original));
+    startForSkills(s, "fix/" + label);
+    assert.equal(s.runs().at(-1).at(-1), "do it" + OWNER_TAIL);
+    const list = s.cli(["skill"], { from });
+    assert.deepEqual([list.code, list.out, list.err], [0, "", ""]);
+    skillRefusal(s, "notes", from, /No skill named notes/);
+  };
+  check("removed", data => { data.active[ID.dev].shift(); p.putLibrary(data); });
+  check("blocked", data => { data.reviewBlocks[data.skills.notes.hash] = {}; p.putLibrary(data); });
+  check("duplicate", data => { data.active[ID.dev].push(data.active[ID.dev][0]); p.putLibrary(data); });
+  check("invalid-source", data => { data.skills.notes.source.kind = "unknown"; p.putLibrary(data); });
+  const changed = JSON.parse(original);
+  writeFileSync(p.library, original);
+  assert.equal(s.cli(["skill", "notes"], { from }).out, SKILL_MARKER + "\n");
+  changed.skills.notes.content = "edited body with original hash";
+  p.putLibrary(changed);
+  skillRefusal(s, "notes", from, /notes changed since its Bot's skills were published/);
+  rmSync(p.snapshot);
+  startForSkills(s, "fix/no-snapshot");
+  assert.equal(s.runs().at(-1).at(-1), "do it" + OWNER_TAIL);
+  startForSkills(s, "fix/another-bot", [], {}, "t4");
+  assert.equal(s.runs().at(-1).at(-1), "do it" + OWNER_TAIL);
+  p.putSnapshot(ID.cap);
+  const badId = startForSkills(s, "fix/foreign-publication");
+  assert.equal(s.runs().at(-1).at(-1), "do it" + OWNER_TAIL);
+  assert.equal(badId.warnings.filter(line => line.includes(p.snapshot)).length, 1);
+  assert.equal(badId.stderr.split("\n").filter(line => line.includes(p.snapshot)).length, 1);
+});
+
+function workerBarrier(s, command, program, condition) {
+  const path = join(s.root, command + "-barrier.mjs");
+  const entered = path + ".entered", release = path + ".release";
+  writeFileSync(path, `
+    import { spawnSync } from "node:child_process";
+    import { existsSync, writeFileSync } from "node:fs";
+    const args = process.argv.slice(2);
+    if (${condition}) {
+      writeFileSync(${JSON.stringify(entered)}, JSON.stringify(args));
+      const deadline = Date.now() + 8000;
+      while (!existsSync(${JSON.stringify(release)}) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      if (!existsSync(${JSON.stringify(release)})) throw new Error("barrier never released");
+    }
+    const r = spawnSync(${JSON.stringify(program[0])}, [...${JSON.stringify(program.slice(1))}, ...args], { stdio: "inherit" });
+    process.exitCode = r.status ?? 1;
+  `);
+  exe(join(s.root, "bin", command), `#!/bin/sh\n# wraps ${program.join(" ")}\nexec "${process.execPath}" "${path}" "$@"\n`);
+  return { entered, release: () => writeFileSync(release, "") };
+}
+
+async function reachBarrier(barrier) {
+  for (let i = 0; i < 160 && !existsSync(barrier.entered); i++) await new Promise(resolve => setTimeout(resolve, 50));
+  return JSON.parse(readFileSync(barrier.entered, "utf8"));
+}
+
+test("#2085 readiness note 3: revoke before the run handoff while worktree setup holds the lock", async t => {
+  for (const template of [null, "dev-sol"]) await t.test(template ?? "direct", async sub => {
+    const s = scene(sub);
+    const p = publishSkills(s);
+    const gitPath = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const barrier = workerBarrier(s, "git", [gitPath], 'args[0] === "worktree" && args[1] === "add"');
+    const args = ["worker", "do it", "--branch", "fix/revoked", "--json", ...(template ? ["--template", template] : [])];
+    const launch = s.cliAsync(args);
+    try {
+      await reachBarrier(barrier);
+      assert.equal(s.runs().length, 0);
+      assert.ok(readdirSync(join(s.app, "automagik-herdr")).some(name => /^worktree-.*\.lock$/.test(name)));
+      p.data.active[ID.dev].shift();
+      p.putLibrary();
+    } finally { barrier.release(); }
+    const started = await launch;
+    assert.equal(started.code, 0, started.err);
+    const run = s.runs().at(-1);
+    assert.equal(run.at(-1), "do it" + OWNER_TAIL);
+    if (template) assert.deepEqual(run.slice(-2), [template, "do it" + OWNER_TAIL]);
+  });
+});
+
+test("#2085 readiness note 3: first-message delivery rechecks the pane and revocable publication", async t => {
+  for (const change of ["valid", "remove", "generation", "core"]) await t.test(change, async sub => {
+    const s = scene(sub);
+    const p = publishSkills(s);
+    exe(join(s.root, "bin", "kimi"), "#!/bin/sh\nexit 0\n");
+    const barrier = workerBarrier(s, "hc", [process.execPath, FAKE_HC], 'args[0] === "wait" && args[1] === "t100"');
+    const launch = s.cliAsync(["worker", "do it", "--agent", "kimi", "--branch", "fix/message", "--json"]);
+    try {
+      await reachBarrier(barrier);
+      const row = s.ledger().find(row => row.terminal === "t100");
+      assert.equal(row.skillTeam.path, p.home);
+      assert.equal(row.core, "fakecore0000");
+      const state = s.hcState();
+      const pane = state.terminals.find(row => row.address === "t100");
+      assert.equal(row.created_ms, pane.created_ms);
+      assert.equal(s.runs()[0].at(-1), "kimi");
+      assert.equal(state.sent, undefined);
+      if (change === "remove") {
+        p.data.active[ID.dev].shift();
+        p.putLibrary();
+      } else if (change === "generation") {
+        pane.created_ms += 1;
+        writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+      } else if (change === "core") {
+        writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...state, core: { id: "othercore" } }));
+      }
+    } finally { barrier.release(); }
+    const result = await launch;
+    assert.equal(result.code, 0, result.err);
+    const sent = s.calls().filter(args => args[0] === "send");
+    if (change === "generation" || change === "core") {
+      assert.deepEqual(sent, []);
+      assert.match(result.err, /started without its task.*Could not (identify|verify)/);
+    } else {
+      const block = change === "valid" ? `\n\n${SKILL_HEADING}\nnotes: ${SKILL_DESCRIPTION}` : "";
+      assert.deepEqual(sent, [["send", "t100", "do it" + block + OWNER_TAIL]]);
+    }
+  });
+});
+
+const C11_HEAD = "Your skills: run am skill to list them.";
+const C11_DESCRIPTION = "x".repeat(180);
+const c11Names = ["skill00", "skill01", "skill02", "skill03"];
+const c11Line = name => `${name}: ${C11_DESCRIPTION}`;
+const c11Catalog = count => count === 0 ? C11_HEAD : [SKILL_HEADING, ...c11Names.slice(0, count).map(c11Line),
+  ...(count === 4 ? [] : [`${4 - count} more: run am skill to list them all.`])].join("\n");
+const c11Word = (task, count) => task + (count < 0 ? "" : "\n\n" + c11Catalog(count)) + OWNER_TAIL;
+
+function c11Scene(t) {
+  const s = scene(t);
+  publishSkills(s, { records: c11Names.map(name => skillRecord(name, "body of " + name, C11_DESCRIPTION)),
+    assignment: c11Names.map(name => ({ name, mode: "automatic" })) });
+  const budget = join(s.root, "arg-max"), audit = join(s.root, "exec-audit.jsonl");
+  writeFileSync(budget, "2097152\n");
+  exe(join(s.root, "bin", "getconf"), `#!/bin/sh\ncase "$1" in ARG_MAX) cat "${budget}";; PAGESIZE) printf '4096\\n';; *) exit 1;; esac\n`);
+  const preload = join(s.root, "exec-audit.mjs");
+  writeFileSync(preload, `
+    import cp from "node:child_process";
+    import fs from "node:fs";
+    import { basename } from "node:path";
+    import { syncBuiltinESMExports } from "node:module";
+    const original = cp.execFile;
+    const rename = fs.renameSync;
+    const log = value => fs.appendFileSync(${JSON.stringify(audit)}, JSON.stringify(value) + "\\n");
+    if (process.argv[1] === ${JSON.stringify(CLI)}) {
+      cp.execFile = function (command, args, opts, callback) {
+        if (basename(command) === "git" && args[0] === "worktree" && args[1] === "add") log({ setup: "worktree" });
+        if (basename(command) === "hc" && args[0] === "run") {
+          const env = Object.entries(opts.env).filter(([, value]) => value !== undefined);
+          const bytes = value => Buffer.byteLength(value) + 1;
+          const frame = 2048 + bytes(command) * 2 + 8 * (env.length + 3)
+            + env.reduce((sum, [key, value]) => sum + bytes(key + "=" + value), 0)
+            + args.reduce((sum, word) => sum + bytes(word) + 8, 0);
+          log({ args, frame, maxWord: Math.max(...args.map(bytes), ...env.map(([key, value]) => bytes(key + "=" + value))) });
+          if (process.env.SKILL_SPAWN_MODE === "size" && args.at(-1).includes(${JSON.stringify(SKILL_HEADING)})) {
+            throw Object.assign(new Error("spawn E2BIG"), { code: "E2BIG", errno: -7, syscall: "spawn" });
+          }
+        }
+        return original(command, args, opts, callback);
+      };
+      fs.renameSync = function (from, to) {
+        if (typeof to === "string" && to.endsWith("/.claude/settings.local.json")) log({ setup: "hook" });
+        return rename(from, to);
+      };
+      syncBuiltinESMExports();
+    }
+  `);
+  return { s, budget, audit, env: { NODE_OPTIONS: "--import=" + preload } };
+}
+
+test("#2085 C11: fit the full, shortened, compact and original serialized argv", async t => {
+  if (process.platform !== "linux") return t.skip("Linux per-word limit");
+  const { s, env } = c11Scene(t);
+  const cases = [[900, 4], [500, 2], [240, 0], [40, -1]];
+  assert.deepEqual([4, 3, 2, 1, 0].map(n => Buffer.byteLength(c11Word("x", n)) - Buffer.byteLength(c11Word("x", -1))),
+    [807, 656, 466, 276, 41]);
+  for (const [margin, tier] of cases) await t.test("margin " + margin, () => {
+    const available = 131071 - margin - Buffer.byteLength(OWNER_TAIL);
+    const task = "界".repeat(Math.floor(available / 3)) + "x".repeat(available % 3);
+    const original = c11Word(task, -1);
+    assert.equal(Buffer.byteLength(original), 131071 - margin);
+    const result = s.cli(["worker", task, "--branch", "fix/fit-" + margin, "--json"], { env });
+    assert.equal(result.code, 0, result.err);
+    const frame = s.runs().at(-1);
+    assert.ok(frame.slice(frame.indexOf("--") + 1).find(word => word.startsWith("PATH=")).includes(KILL_GUARD_DIR));
+    assert.equal(frame.at(-1), c11Word(task, tier));
+    for (const larger of [4, 3, 2, 1, 0].filter(n => n > tier)) assert.ok(Buffer.byteLength(c11Word(task, larger)) > 131071);
+    const list = s.cli(["skill"], { from: result.json().terminal });
+    assert.equal(list.code, 0, list.err);
+    assert.equal(list.out, c11Names.map(c11Line).join("\n") + "\n");
+  });
+});
+
+test("#2085 C11: aggregate-only pressure applies to the actual serialized argv and environment", t => {
+  const { s, budget, audit, env } = c11Scene(t);
+  writeFileSync(budget, "unavailable\n");
+  startForSkills(s, "fix/base-z", [], env);
+  const original = readJsonLines(audit).filter(row => row.args).at(-1);
+  assert.equal(original.args.at(-1), c11Word("do it", -1));
+  const max = original.frame + 500;
+  writeFileSync(budget, max + "\n");
+  startForSkills(s, "fix/case-z", [], env);
+  const selected = readJsonLines(audit).filter(row => row.args).at(-1);
+  assert.equal(selected.args.at(-1), c11Word("do it", 2));
+  assert.equal(selected.frame - original.frame, 466);
+  assert.ok(selected.frame <= max && original.frame + 656 > max && original.frame + 807 > max);
+  assert.ok(selected.maxWord < 4096, "per-word fit has excess room");
+});
+
+test("#2085 C11: only definite pre-spawn E2BIG retries exact original argv after one setup", async t => {
+  for (const mode of ["size", "child", "timeout"]) await t.test(mode, sub => {
+    const { s, audit, env } = c11Scene(sub);
+    if (mode === "child") {
+      exe(join(s.root, "bin/hc"), `#!/bin/sh\n# ${FAKE_HC}\nif [ "$1" = run ]; then printf 'spawn E2BIG\\n' >&2; exit 1; fi\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+    } else if (mode === "timeout") {
+      writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), runDelayBeforeMs: 900 }));
+    }
+    const r = s.cli(["worker", "do it", "--agent", "claude", "--branch", "fix/spawn", "--json"], {
+      env: { ...env, SKILL_SPAWN_MODE: mode, AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: mode === "timeout" ? "200" : "30000" },
+    });
+    const events = readJsonLines(audit);
+    const attempts = events.filter(event => event.args).map(event => event.args);
+    assert.deepEqual(events.filter(event => event.setup).map(event => event.setup), ["worktree", "hook"]);
+    assert.equal(attempts[0].at(-1), c11Word("do it", 4));
+    if (mode === "size") {
+      assert.equal(r.code, 0, r.err);
+      assert.deepEqual(attempts, [attempts[0], [...attempts[0].slice(0, -1), c11Word("do it", -1)]]);
+      assert.deepEqual(s.runs(), attempts.slice(1));
+      assert.equal(s.ledger().filter(row => row.event === "start").length, 1);
+    } else {
+      assert.equal(r.code, 1, r.err);
+      assert.equal(attempts.length, 1);
+      assert.match(r.err, mode === "child" ? /spawn E2BIG/ : /didn't answer within/);
+      assert.equal(s.ledger().filter(row => row.event === "start").length, 0);
+    }
+  });
 });

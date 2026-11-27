@@ -96,6 +96,7 @@ import { APPROVAL_REVIEW, approvalProjectWord, approvedGrant, approvedProxyEnabl
 import { hooksNotice } from "../migrateHooks.mjs";
 import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
 import { fixNonVisual, readState, spacesOf } from "./state.mjs";
+import { bindWorkerSkillTeam, fitWorkerSkillArgs, readWorkerSkills, skillName, workerSkillLines } from "../workerSkills.mjs";
 
 const RELEASE = (() => {
   try { return readFileSync(new URL("../VERSION", import.meta.url), "utf8").trim() || "0.0.0"; }
@@ -138,16 +139,30 @@ async function slot(fn) {
 
 /** Runs a program: stderr falls back to the exec error, while rawStderr is the child's output.
  * Code 127 when it isn't there; killed: true when its timeout ended it. */
-export function runProgram(command, args, { cwd, env, timeout = 15000 } = {}) {
+export function runProgram(command, args, { cwd, env, timeout = 15000, prepareArgs } = {}) {
   return slot(() => new Promise((done) => {
-    try {
-      execFile(command, args, { cwd, env, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (!err) return done({ code: 0, stdout, stderr, rawStderr: stderr });
-        done({ code: err.code === "ENOENT" ? 127 : (typeof err.code === "number" ? err.code : 1), stdout: stdout ?? "", stderr: stderr || String(err.message),
-          rawStderr: stderr ?? "",
-          ...(err.killed ? { killed: true } : {}) });
-      });
-    } catch (e) { done({ code: 127, stdout: "", stderr: String(e?.message ?? e), rawStderr: "" }); }
+    const prepared = prepareArgs ? prepareArgs(command, args, env ?? process.env) : args;
+    const start = (words) => {
+      let child;
+      const originalOnSizeError = error => {
+        if (words === args || child?.pid != null || error?.code !== "E2BIG"
+            || !/^spawn(?: |$)/.test(error.syscall ?? "")) return false;
+        start(args);
+        return true;
+      };
+      try {
+        child = execFile(command, words, { cwd, env, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+          if (!err) return done({ code: 0, stdout, stderr, rawStderr: stderr });
+          if (originalOnSizeError(err)) return;
+          done({ code: err.code === "ENOENT" ? 127 : (typeof err.code === "number" ? err.code : 1), stdout: stdout ?? "", stderr: stderr || String(err.message),
+            rawStderr: stderr ?? "",
+            ...(err.killed ? { killed: true } : {}) });
+        });
+      } catch (e) {
+        if (!originalOnSizeError(e)) done({ code: 127, stdout: "", stderr: String(e?.message ?? e), rawStderr: "" });
+      }
+    };
+    start(prepared);
   }));
 }
 const git = async (args, cwd) => { const r = await runProgram("git", args, { cwd }); return r.code === 0 ? r.stdout : null; };
@@ -190,8 +205,8 @@ const localHcEnv = () => {
   return pinnedCoreSocket && !process.env.HC_SOCKET ? { ...process.env, HC_SOCKET: pinnedCoreSocket } : process.env;
 };
 
-async function hc(args, { timeout } = {}) {
-  const r = await runProgram(hcExecutable(programPath("hc")), args, { timeout, env: localHcEnv() });
+async function hc(args, { timeout, prepareArgs } = {}) {
+  const r = await runProgram(hcExecutable(programPath("hc")), args, { timeout, prepareArgs, env: localHcEnv() });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   return r;
 }
@@ -291,10 +306,16 @@ const localLaunchAddressRefusal = (address) =>
  * `get` carries the pane found during recovery for a late start. The caller can check it for
  * chosen-home evidence before continuing its regular start flow.
  */
-async function hcStartRun(run, args, name, recover = runStartedByName) {
+async function hcStartRun(run, args, name, recover = runStartedByName, prepareArgs) {
   const guardWhy = launchGuardProblem(args, name);
   if (guardWhy) throw new CliError(guardWhy);
-  const r = await run(args, { timeout: HC_RUN_TIMEOUT_MS });
+  const guardedPrepare = prepareArgs && ((command, original, env) => {
+    const final = prepareArgs(command, original, env);
+    const why = final === original ? null : launchGuardProblem(final, name);
+    if (why) throw new CliError(why);
+    return final;
+  });
+  const r = await run(args, { timeout: HC_RUN_TIMEOUT_MS, ...(guardedPrepare ? { prepareArgs: guardedPrepare } : {}) });
   let late = null;
   if (r.killed) {
     try { late = await recover(name); } catch (e) {
@@ -468,8 +489,8 @@ function realHcPath() {
   }
   return null;
 }
-async function hcReal(args, { timeout } = {}) {
-  const r = await runProgram(hcExecutable(realHcPath()), args, { timeout, env: localHcEnv() });
+async function hcReal(args, { timeout, prepareArgs } = {}) {
+  const r = await runProgram(hcExecutable(realHcPath()), args, { timeout, prepareArgs, env: localHcEnv() });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   return r;
 }
@@ -2214,6 +2235,7 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 project's main bot can end a plain hc run child, including after a
                                 handoff or restart. The CLI rechecks the ledger and target before
                                 kill. hc has no conditional kill.
+  skill [name]                  from a worker's pane: list its Bot's Automatic skills or load one body
   reap                          explicitly check all ended workers' created worktrees, across
                                 repositories. Remove only with verified ownership and current
                                 HEAD pushed or proven merged, including squash merges. Keep
@@ -7650,7 +7672,7 @@ async function rerunHelpers(plans, parent, say) {
       const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid: await pidOf(address), botId: w.botId, task: w.task, branch: w.branch,
         project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
         template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
-        core, createdMs, squad, env: homeEnv, session: p.agent === "claude" ? p.session : null, ...launchLogin(freshLogin) }));
+        core, createdMs, squad, env: homeEnv, skillTeam: w.skillTeam, session: p.agent === "claude" ? p.session : null, ...launchLogin(freshLogin) }));
       if (unlogged) say(unlogged);
     }
     if (p.binding) {
@@ -9042,10 +9064,10 @@ async function cmdDeliveryStatus(opts, [terminal, ...other]) {
   return deliveryStatus(terminal);
 }
 
-async function sendAutomatically(terminal, text, run = hc, expected = null) {
+async function sendAutomatically(terminal, text, run = hc, expected = null, prepareArgs) {
   try {
     const status = await deliveryStatus(terminal, run, expected);
-    if (!status.held) return run(["send", status.terminal, text]);
+    if (!status.held) return run(["send", status.terminal, text], prepareArgs ? { prepareArgs } : undefined);
     return { code: 1, held: true, stdout: "", stderr: "The terminal is waiting for a person. Automatic delivery was held." };
   } catch (error) {
     return { code: 1, held: true, stdout: "", stderr: firstSentence(error.message) };
@@ -12371,11 +12393,17 @@ const FIRST_TASK_WAIT_S = 30;
  * that started the pane. Never throws: null, or the warning when the task did not go in (the
  * pane is left as it is, to be read and sent to by hand).
  */
-async function sendFirstTask(address, task, run, created_ms) {
+async function sendFirstTask(address, task, run, created_ms, prepareArgs, core = null) {
   let said;
   try {
     await run(["wait", address, "--timeout", String(FIRST_TASK_WAIT_S), "--json"], { timeout: (FIRST_TASK_WAIT_S + 10) * 1000 });
-    const r = await sendAutomatically(address, task, run, { terminal: address, created_ms });
+    if (core) {
+      const current = run === hcReal
+        ? await workerProxyTransport(process.env.HC_SOCKET, process.env.HC_TERMINAL_ID)
+        : (await localCoreStatus()).status;
+      if (current?.core?.id !== core) throw new CliError("Could not verify the worker's core for automatic delivery.");
+    }
+    const r = await sendAutomatically(address, task, run, { terminal: address, created_ms }, prepareArgs);
     if (r.code === 0) return null;
     said = hcSaid((r.stderr || r.stdout).trim()).split("\n")[0] || `exit ${r.code}`;
   } catch (e) { said = e?.message ?? String(e); }
@@ -12710,6 +12738,85 @@ async function chosenWorkerHome({ opts, bot, project, plan, pick, agents, me }) 
   return { agent, home: checked.home, source: flag !== undefined ? "flag" : "roster", launch: randomUUID() };
 }
 
+function skillArgBudget(env) {
+  const platform = process.platform;
+  if (platform !== "linux" && platform !== "darwin") return null;
+  const limit = name => {
+    const answer = spawnSync("getconf", [name], { env: { PATH: env.PATH, LC_ALL: "C" }, encoding: "utf8", timeout: 1000, maxBuffer: 4096 });
+    const text = answer.stdout?.trim();
+    const value = /^\d+$/.test(text ?? "") ? Number(text) : 0;
+    return answer.status === 0 && Number.isSafeInteger(value) && value > 0 ? value : 0;
+  };
+  const aggregate = limit("ARG_MAX");
+  const perWord = platform === "linux" ? 32 * limit("PAGESIZE") : aggregate;
+  return aggregate && perWord && Number.isSafeInteger(perWord) ? { aggregate, perWord } : null;
+}
+
+function workerSkillTransport(team, botId, warnings, serialize) {
+  if (!team) return undefined;
+  return (command, original, env) => {
+    const budget = skillArgBudget(env);
+    if (!budget) return original;
+    const encoded = word => Buffer.byteLength(word) + 1;
+    const environment = Object.entries(env).filter(([, value]) => value !== undefined)
+      .map(([key, value]) => encoded(`${key}=${value}`));
+    if (environment.some(size => size > budget.perWord)) return original;
+    // Reserve space for the kernel's executable/auxiliary data and account for both null pointers.
+    const fixed = 2048 + encoded(command) * 2 + 8 * (environment.length + 3)
+      + environment.reduce((total, size) => total + size, 0);
+    const fits = argv => {
+      const words = argv.map(encoded);
+      return words.every(size => size <= budget.perWord)
+        && fixed + words.reduce((total, size) => total + size + 8, 0) <= budget.aggregate
+        && argv.every(word => !word.includes("\0"));
+    };
+    const current = readWorkerSkills(botId, { team });
+    const warning = current.warning ?? (current.moved ? `Its Bot's team is no longer where this worker started (${team.path}).` : null);
+    if (warning) warnings.push(warning);
+    return fitWorkerSkillArgs(original, current.entries, catalog => serialize(original, catalog), fits);
+  };
+}
+
+async function cmdSkill(opts, [name, ...extra]) {
+  if (extra.length || (name !== undefined && !skillName(name))) throw new CliError("Usage: am skill [name] [--json].", 2);
+  const terminal = process.env.HC_TERMINAL_ID;
+  const refusal = () => new CliError("Only a verified live local worker can use am skill from its own pane.", 2);
+  if (!isHcTerminalId(terminal)) throw refusal();
+  const core = await rowCore();
+  if (!core) throw refusal();
+  if (discoveredCoreSocket) pinnedCoreSocket = discoveredCoreSocket;
+  const deadline = Date.now() + HC_RUN_TIMEOUT_MS + 30_000;
+  let key;
+  let row;
+  for (;;) {
+    const pane = await hcGet(terminal, { timeout: Math.min(15_000, Math.max(1, deadline - Date.now())) }).catch(() => null);
+    if (pane?.address !== terminal || (pane.state !== undefined && pane.state !== "live") || pane.finished_ms != null) throw refusal();
+    const current = launchKey({ core, terminal, created_ms: pane.created_ms });
+    if (!current || (key && key !== current)) throw refusal();
+    key = current;
+    const rows = workerLedgerRows().filter(entry => launchKey(entry) === key);
+    const starts = rows.filter(entry => entry.event === "start");
+    if (rows.some(entry => entry.event === "end") || starts.length > 1 || (starts.length && starts[0].kind !== "worker")) throw refusal();
+    if (starts.length) { row = starts[0]; break; }
+    // The first prompt can run before its parent records the start. Wait for this launch only.
+    if (Date.now() >= deadline) throw refusal();
+    await sleep(Math.min(250, Math.max(0, deadline - Date.now())));
+  }
+  if (!row.skillTeam) throw new CliError("This worker was not started with its Bot's skills.", 2);
+  const current = readWorkerSkills(row.botId, { team: row.skillTeam, name });
+  if (current.moved) throw new CliError("Its Bot's team is no longer where this worker started.");
+  if (current.warning) report([current.warning]);
+  if (name === undefined) {
+    if (opts.json) return current.entries.map(({ name, description }) => ({ name, description }));
+    return workerSkillLines(current.entries).join("\n");
+  }
+  if (current.changed.has(name)) throw new CliError(`${name} changed since its Bot's skills were published. Try again shortly.`);
+  if (current.body === undefined) throw new CliError(`No skill named ${name} is available to this worker's Bot.`);
+  if (opts.json) return { name, content: current.body };
+  process.stdout.write(unprinted(`${current.body}\n`));
+  return PRINTED;
+}
+
 async function cmdWorker(opts, rest) {
   // `worker kill <pane>`: a task call always names --branch or --worktree, so the two never mix.
   if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) return cmdWorkerKill(opts, rest.slice(1));
@@ -12799,7 +12906,13 @@ async function cmdWorker(opts, rest) {
     || /^hermes(-agent)?$/.test(agentArgv(plan.argv ?? []).program)
     || (Boolean(plan.template) && runs === undefined
       && /(^|[\s'"`/;&|(=])hermes(-agent)?([\s'"`;&|)<>]|$)/.test(templateCommand ?? ""));
-  const prompt = workerTaskText(task, hermes ? "hermes" : runs);
+  const taskText = catalog => workerTaskText(task, hermes ? "hermes" : runs, catalog);
+  const prompt = taskText("");
+  const agentKnown = plan.template ? t?.runs !== undefined : Boolean(plan.agent ?? agentKeyOfArgv(plan.argv ?? [], agents));
+  const skillSelection = !hermes && agentKnown && isHcTerminalId(me.address) ? bindWorkerSkillTeam(bot.id, { home: home() }) : {};
+  if (skillSelection.warning) warnings.push(skillSelection.warning);
+  const skillTeam = skillSelection.team;
+  const messageFirst = !plan.template && promptByMessage(plan.agent);
   if (t && runs === "claude") {
     templateArgv = t.command?.trim() ? commandArgv({ shell: t.command }, [prompt]) : null;
     if (!templateArgv) {
@@ -12943,7 +13056,8 @@ async function cmdWorker(opts, rest) {
     // worker is no bot), but it ties the Claude session to the terminal (briefing.mjs).
     if (runs === undefined) {
       warnings.push(`Can't tell which agent template ${plan.template} runs, so no session hook was written in ${place.worktree}; `
-        + `if it runs Claude, the ${place.branch} worker's session won't be linked to usage.`);
+        + `if it runs Claude, the ${place.branch} worker's session won't be linked to usage.`
+        + (hermes ? "" : " This worker won't receive its Bot's skills."));
     } else if (runs === "claude") {
       const lost = `The ${place.branch} worker's Claude session won't be linked to usage`;
       warnings.push(...(await writeBriefingHook(bot, place.worktree, appHome(), { lost })).warnings);
@@ -12993,9 +13107,8 @@ async function cmdWorker(opts, rest) {
       if (trust.args.length) workerArgv = withCodexTrust(workerArgv, place.worktree);
       else warnings.push(codexTrustWarning(`${bot.name}'s Codex worker`, trust.withheld));
     }
-    const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
-      agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task: prompt, template: plan.template,
-      templateArgv,
+    const launch = { botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
+      agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, template: plan.template,
       // #1208: a chosen home's words replace the Claude Accounts login (and unset the keys that would outrank it);
       // under the Bot login policy (#1509) a chosen home is the reader's own folder (checked above).
       login: chosen ? chosenHomeWords(chosen.agent, chosen.home, chosen.launch) : freshLogin?.words ?? claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
@@ -13007,7 +13120,11 @@ async function cmdWorker(opts, rest) {
       ...(proxied ? { killGuard: stableKillDir(stableRootOf()) } : {}),
       sandbox: plan.agent === "dsh-tui" && proxyEnabled(
         approvedProxyState({ project: project.key, bot }), process.platform,
-        (warning) => warnings.push(warning)) });
+        (warning) => warnings.push(warning)) };
+    // commandArgv places the task after the shell's fixed command and its positional arguments.
+    const serialize = text => workerArgs({ ...launch, task: text,
+      templateArgv: templateArgv ? [...templateArgv.slice(0, -1), text] : null });
+    const args = serialize(prompt);
     // #1262: hc answers a run with a task only once the new terminal reports its first status,
     // waiting 60 s for a program that never does; the run gets its own timeout above that wait.
     // One the timeout still ends after hc made the terminal is a start whose task didn't go in,
@@ -13037,7 +13154,9 @@ async function cmdWorker(opts, rest) {
           + "and a worker on a chosen agent home never starts without it.");
       }
     }
-    const started = await hcStartRun(proxied ? hcReal : hc, args, name);
+    const prepare = messageFirst ? undefined : workerSkillTransport(skillTeam, bot.id, warnings,
+      (_original, catalog) => serialize(taskText(catalog)));
+    const started = await hcStartRun(proxied ? hcReal : hc, args, name, undefined, prepare);
     const { address } = started;
     // #1208: the pane is this launch only when its argv carries this launch's id; checked on every reply.
     const pane = chosen ? await verifiedChosenSpawn(chosen, address, started.late ? started.get : null, name, core) : null;
@@ -13060,21 +13179,33 @@ async function cmdWorker(opts, rest) {
   const workerHc = started.proxied ? hcReal : hc;
   // The ledger row first, as launchSeat writes its rows before anything waits on the window.
   // #1208: a chosen launch's row is the pane its check read, and names its home and launch id.
-  const { pid, createdMs } = started.pane
+  let observed = started.pane;
+  const { pid, createdMs } = observed
     ? { pid: started.pane.foreground?.pid ?? started.pane.pid ?? null, createdMs: Number.isSafeInteger(started.pane.created_ms) ? started.pane.created_ms : null }
-    : await launchOf(terminal, started.proxied ? address => hcRealJson(["get", address]) : hcGet);
+    : await launchOf(terminal, async address => {
+      observed = await (started.proxied ? hcRealJson(["get", address]) : hcGet(address));
+      return observed;
+    });
+  const core = await rowCore();
+  const replyCreated = paneCreated(started.answer);
+  const boundTeam = skillTeam && core && isHcTerminalId(terminal) && observed?.address === terminal && createdMs !== null
+    && (replyCreated === null || replyCreated === createdMs) && (!started.name || observed.name === started.name)
+    && observed.labels?.[WORKER_OF_LABEL] === bot.id && observed.cwd === place.worktree && observed.parent === me.address
+    ? skillTeam : undefined;
   const unlogged = appendLedger(startRow({ kind: "worker", terminal, pid, botId: bot.id, task: taskId, branch: place.branch,
     project: project.key, lead, worktree, base, created: place.created, agent: plan.agent, model: plan.model, effort: plan.effort,
-    template: plan.template, role, swap, override, overrideRequested, core: await rowCore(), createdMs, env: started.homeEnv, squad: squadOf(project.file, bot.id),
-    session, ...ledgerLogin, ...(chosen ? { agentHome: chosen.home, launch: chosen.launch } : {}) }));
+    template: plan.template, role, swap, override, overrideRequested, core, createdMs, env: started.homeEnv, squad: squadOf(project.file, bot.id),
+    session, skillTeam: boundTeam, ...ledgerLogin, ...(chosen ? { agentHome: chosen.home, launch: chosen.launch } : {}) }));
   if (unlogged) warnings.push(unlogged);
   // An agent that takes no first prompt on its command line (kimi, #1032) started bare: its task
   // goes in as its first message, through the hc that started it, outside the worktree's lock.
-  if (!plan.template && promptByMessage(plan.agent)) {
+  if (messageFirst) {
     // Pin to the launch reply when it carries a generation, then check the live pane on the
     // same transport. An address reused before the first get cannot receive the task.
-    const generation = paneCreated(started.answer) ?? createdMs;
-    const why = await sendFirstTask(terminal, prompt, workerHc, generation);
+    const generation = replyCreated ?? createdMs;
+    const prepare = workerSkillTransport(unlogged ? undefined : boundTeam, bot.id, warnings,
+      (original, catalog) => [...original.slice(0, -1), taskText(catalog)]);
+    const why = await sendFirstTask(terminal, prompt, workerHc, generation, prepare, prepare ? core : null);
     if (why) warnings.push(why);
   }
   // Herdr shows a labelled worker at once, so the sidebar's tab setup (workerTab.js) never
@@ -15413,7 +15544,7 @@ function cmdLoginEnv(opts, rest) {
 
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
-  tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
+  tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, skill: cmdSkill, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
   proxy: cmdProxy, "launch-path": cmdLaunchPath, accounts: cmdAccounts, revive: cmdRevive, "rate-limit": cmdRateLimit, "delivery-status": cmdDeliveryStatus, holders: cmdHolders, login: cmdLogin, "login-env": cmdLoginEnv };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 

@@ -426,6 +426,10 @@
       "to": "am/workers.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/workerSkills.mjs",
+      "to": "am/workerSkills.mjs"
+    },
+    {
       "from": "herdr/mods/am-sidebar/workerTab.js",
       "to": "am/workerTab.js"
     }
