@@ -24,7 +24,7 @@ import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
 import { CATALOG_MAX_AGE_MS, ensureCatalog, keptModel, modelPart, NATIVE_OFF_UNAVAILABLE, NATIVE_OFF_UNVERIFIABLE } from './codex-native.js'
 import { IDENTITY_PROVIDERS, identityText, readIdentity, rolePromptOf } from './identity.js'
-import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, HISTORY_TOOL_NAME, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
+import { AGENT_INTERRUPTED, agyRunServerName, BRIDGE_NAME, CREDENTIAL_ENV, HISTORY_TOOL_NAME, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import {
   agentRoute, answered, boundaryNotice, CONTEXT_KINDS, isHandoff, lastProviderOf, missedBy, NOTICE_KIND, renderMessage,
@@ -1001,6 +1001,7 @@ export class AcpAdapter extends LlmAdapter {
         }),
       }),
     })
+    if (record.restrictedRequest !== undefined) record.serverName = agyRunServerName()
     return record
   }
 
@@ -1462,12 +1463,13 @@ export class AcpAdapter extends LlmAdapter {
     this.endSession(sessionId, undefined, undefined, candidate => candidate === entry || candidate === entry.startup)
   }
 
-  /** The `session/new` server entry for one bridge: the adapter spawns it with this env only. */
+  /** One bridge entry for `session/new` or renewal, with the same name in its child handshake. */
   bridgeServer(record) {
+    const name = record.serverName ?? BRIDGE_NAME
     return {
-      name: BRIDGE_NAME,
+      name,
       command: process.execPath,
-      args: [BRIDGE_PATH],
+      args: [BRIDGE_PATH, '--server-name', name],
       env: [
         ...(process.versions.electron ? [{ name: 'ELECTRON_RUN_AS_NODE', value: '1' }] : []),
         { name: CREDENTIAL_ENV, value: record.credential },
@@ -1530,6 +1532,7 @@ export class AcpAdapter extends LlmAdapter {
       run.spec.skillTools = next?.only
       run.spec.skillRefusal = next?.skillRefusal
       run.spec.agyHistoryRequest = next?.restrictedRequest !== undefined
+      run.spec.agyServer = next?.serverName
     }
     // The source is done running tools before the fork starts.
     if (previous) this.backchannel.revoke(previous)
@@ -2371,7 +2374,7 @@ export class AcpAdapter extends LlmAdapter {
               mcpServers: state.bridge === undefined ? [] : [this.bridgeServer(state.bridge)],
               // Native-tools mode: the built-in tools stay on (`disableBuiltInTools: false`), with
               // the hard ask rules unless the level is Full.
-              ...(agySkills ? { sessionMeta: { antigravity: { eagerMcpServers: [BRIDGE_NAME] } } }
+              ...(agySkills ? { sessionMeta: { antigravity: { eagerMcpServers: [state.bridge?.serverName ?? BRIDGE_NAME] } } }
                 : spawnNative && !codexRow
                 ? { sessionMeta: { ...(spawnAsks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
                 : bridged && agent.disableBuiltInTools === true
@@ -2381,6 +2384,7 @@ export class AcpAdapter extends LlmAdapter {
               skillBridge: state.bridge !== undefined && SKILL_BRIDGE_PROVIDERS.has(options.provider),
               skillTools: state.bridge?.only,
               agyHistoryRequest: state.bridge?.restrictedRequest !== undefined,
+              agyServer: state.bridge?.serverName,
               ...(omp && nativeOff === true ? {
                 refuseTools: true,
                 onForbiddenTool: () => {

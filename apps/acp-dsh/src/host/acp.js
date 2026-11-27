@@ -49,21 +49,22 @@ function skillIdentity(spec, tool, update) {
   if (!spec.skillBridge) return undefined
   const { provider, skillTools } = spec
   const agy = provider === 'acp-antigravity'
-  const exact = (name, op) => name === mcpName(BRIDGE_NAME, op) ||
-    (agy && name === agyBridgeName(op)) || (provider === 'acp-omp' && name === ompBridgeName(op))
+  const bridge = spec.agyServer ?? BRIDGE_NAME
+  const exact = (name, op) => name === mcpName(bridge, op) ||
+    (agy && name === agyBridgeName(op, bridge)) || (provider === 'acp-omp' && name === ompBridgeName(op))
   const names = [update?.name, update?._meta?.claudeCode?.toolName]
     .filter(name => typeof name === 'string' && name !== '')
   const { server, serverName, tool: rawTool, toolName } = update?.rawInput ?? {}
-  const pair = op => server === BRIDGE_NAME && rawTool === op
-  const agyPair = op => pair(op) || (serverName === BRIDGE_NAME && toolName === op)
+  const pair = op => server === bridge && rawTool === op
+  const agyPair = op => pair(op) || (serverName === bridge && toolName === op)
   const op = tool.skillOperation ?? SKILL_OPERATIONS.find(op => names.some(name => exact(name, op)) ||
     pair(op) || (agy && agyPair(op)))
   // History on a full bridge has the same routing as other ordinary DSH tools.
   if (op === undefined || (op === HISTORY_TOOL_NAME && skillTools === undefined)) return undefined
   const disagrees = !names.every(name => exact(name, op)) ||
     (tool.skillOperation === undefined && tool.structuredName !== undefined && !exact(tool.structuredName, op)) ||
-    (server !== undefined && server !== BRIDGE_NAME) ||
-    (serverName !== undefined && serverName !== BRIDGE_NAME) ||
+    (server !== undefined && server !== bridge) ||
+    (serverName !== undefined && serverName !== bridge) ||
     (rawTool !== undefined && rawTool !== op) ||
     (toolName !== undefined && toolName !== op)
   const refusal = op === 'load_skill' && spec.skillRefusal === true
@@ -72,25 +73,28 @@ function skillIdentity(spec, tool, update) {
   // supplies the server and operation outside the tool's own arguments.
   // Antigravity's flat MCP name can collide with a different server/tool pair.
   // Require the exact pair alongside that spelling, or a previously verified call.
-  if (tool.skillOperation !== undefined || names.includes(mcpName(BRIDGE_NAME, op)) ||
+  if (tool.skillOperation !== undefined || names.includes(mcpName(bridge, op)) ||
       (provider === 'acp-omp' && names.includes(ompBridgeName(op))) ||
-      (agy && names.includes(agyBridgeName(op)) && agyPair(op)) ||
+      (agy && names.includes(agyBridgeName(op, bridge)) && agyPair(op)) ||
       (op === 'load_skill' && pair(op) && update?._meta?.is_mcp_tool_call === true)) return op
 }
 
 const verifiedSkill = identity => identity !== undefined && identity !== 'conflict'
 
-const AGY_HISTORY_NAME = agyBridgeName(HISTORY_TOOL_NAME)
-const AGY_HISTORY_TITLE = `Run ${AGY_HISTORY_NAME}`
+const agyHistoryName = spec => agyBridgeName(HISTORY_TOOL_NAME, spec.agyServer)
+const agyHistoryTitle = spec => `Run ${agyHistoryName(spec)}`
 
 function agyHistoryClaim(spec, tool, update, title = update.title) {
-  if (spec.agyHistoryRequest !== true || !spec.skillTools?.has(HISTORY_TOOL_NAME) || title !== AGY_HISTORY_TITLE) return
+  const { agyServer } = spec
+  if (agyServer === undefined || spec.agyHistoryRequest !== true || !spec.skillTools?.has(HISTORY_TOOL_NAME) ||
+      title !== agyHistoryTitle(spec)) return
+  const historyName = agyHistoryName(spec)
   const names = [update.name, update._meta?.claudeCode?.toolName, tool.structuredName]
-  const conflicts = raw => (raw?.server !== undefined && raw.server !== BRIDGE_NAME) ||
-    (raw?.serverName !== undefined && raw.serverName !== BRIDGE_NAME) ||
+  const conflicts = raw => (raw?.server !== undefined && raw.server !== agyServer) ||
+    (raw?.serverName !== undefined && raw.serverName !== agyServer) ||
     (raw?.tool !== undefined && raw.tool !== HISTORY_TOOL_NAME) ||
     (raw?.toolName !== undefined && raw.toolName !== HISTORY_TOOL_NAME)
-  if (names.some(name => name !== undefined && name !== AGY_HISTORY_NAME) ||
+  if (names.some(name => name !== undefined && name !== historyName) ||
       conflicts(update.rawInput) || conflicts(tool.rawInput) || skillIdentity(spec, tool, update) === 'conflict') return 'conflict'
   return HISTORY_TOOL_NAME
 }
@@ -1117,7 +1121,7 @@ export class AgentRun {
   }
 
   checkSkillClaim(tool, update, notify = true) {
-    const agyTitle = tool.agyHistoryClaim === true ? AGY_HISTORY_TITLE : update.title ?? tool.title
+    const agyTitle = tool.agyHistoryClaim === true ? agyHistoryTitle(this.spec) : update.title ?? tool.title
     if (agyHistoryClaim(this.spec, tool, update, agyTitle) === 'conflict') {
       this.retireRestrictedCall(tool.id, update.status)
       return false
@@ -1262,8 +1266,8 @@ export class AgentRun {
     // which would let the agent record a standing rule nobody approved (RFC 0039). The ACP
     // request raises no DSH dialog. The bridge's own `approval/request` is the one dialog the
     // person sees (RFC 0003, amendment, "One dialog per call").
-    // Antigravity's flat name can collide with a user-added MCP server (#2125). With no
-    // wire link, this ACP answer grants no bridge read. The actual bridge request is checked.
+    // The per-registration name makes accidental flat-name matches improbable (#2125).
+    // Antigravity sends no MCP call identity here. The actual bridge request is checked.
     if (agyHistory || tool.skillBridge === true || (!tool.skillConflict && this.spec.dshTools === true && tool.bridge === true)) {
       const once = (params.options ?? []).find(option => option.kind === 'allow_once')
       return Promise.resolve(once === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: once.optionId } })
