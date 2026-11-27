@@ -622,6 +622,15 @@ const implementation = {
     if (FAST_ID !== undefined) trace({ event: 'prompt-speed', sessionId, model: session.model, fast: session.fast === true && fastOffered(session) })
     const update = u => conn.sessionUpdate({ sessionId, update: u })
     keep(sessionId, session)
+    // The agent turns its own speed on or off (a `/fast` typed in its own terminal) and says so.
+    const selfFast = /\bself-fast (on|off)\b/.exec(current)
+    if (FAST_ID !== undefined && selfFast !== null) {
+      session.fast = selfFast[1] === 'on'
+      keep(sessionId, session)
+      await update({ sessionUpdate: 'config_option_update', configOptions: configOptions(session) })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `fast ${selfFast[1]}` } })
+      return { stopReason: 'end_turn' }
+    }
     // Native context only this session holds (continuity.test.js): never in DSH's transcript.
     const remember = /\bnative-remember (\S+)/.exec(current)
     if (remember !== null) {

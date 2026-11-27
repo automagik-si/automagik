@@ -51,6 +51,23 @@ test('a cleared choice gives back the speed the session had before; an unset Bot
   assert.deepEqual(w.served(), [false, true, false])
 })
 
+test('a cleared choice is restored once: the agent changing its own speed later is left alone', async t => {
+  const w = world(t)
+  const chat = w.chat('speed-released')
+  w.set({ model: `${CODEX}/fake-large`, value: 'fast' })
+  await chat.turn(person('plain: fast'), CODEX, [], 'fake-large')
+  w.set(undefined)
+  await chat.turn(person('plain: cleared'), CODEX, [], 'fake-large')
+  assert.deepEqual(w.speedSets(), ['on', 'off'], 'cleared: the speed before is given back')
+  // The agent turns Fast on by itself; the next unset turns send nothing and keep it on.
+  await chat.turn(person('self-fast on'), CODEX, [], 'fake-large')
+  await chat.turn(person('plain: after one'), CODEX, [], 'fake-large')
+  await chat.turn(person('plain: after two'), CODEX, [], 'fake-large')
+  assert.deepEqual(w.speedSets(), ['on', 'off'], 'nothing is restored again after the release')
+  assert.deepEqual(w.served(), [true, false, false, true, true])
+  assert.equal(w.events('new-session').length, 1)
+})
+
 test('Fast saved for one model or provider never reaches another', async t => {
   const w = world(t)
   const chat = w.chat('speed-scope')

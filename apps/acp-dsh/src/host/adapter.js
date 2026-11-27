@@ -702,9 +702,14 @@ export async function chooseSpeed(run, speed, { signal } = {}) {
   const option = run.option('speed')
   const saved = run.speedBefore
   const before = saved !== undefined && saved.sessionId === run.sessionId ? saved.value : undefined
+  if (saved !== undefined && before === undefined) run.speedBefore = undefined
   if (speed !== 'fast' && speed !== 'standard') {
-    if (option !== undefined && before !== undefined && option.currentValue !== before
-      && valuesOf(option).some(choice => choice.value === before)) await run.setOption('speed', before, { signal })
+    // Restored once, then released: a later change the agent makes itself is the agent's own.
+    if (option === undefined || before === undefined) return
+    if (option.currentValue !== before && valuesOf(option).some(choice => choice.value === before)) {
+      await run.setOption('speed', before, { signal })
+    }
+    run.speedBefore = undefined
     return
   }
   if (option === undefined) {
