@@ -874,3 +874,29 @@ test('#2079 source link create preview renders declared key names before Save', 
   assert.match(text(card), /Declared key names.*FIXTURE_KEY/)
   assert.ok(match(card, 'Save'))
 })
+
+test('2160 fallback review names the model in the library row and confirmation report', async t => {
+  const f = fixture(t, 'owner')
+  const fallback = { status: 'done', via: 'fallback', model: 'fixture/model', modelName: 'Fixture Model' }
+  const owner = f.mount(f.SkillsScreen, {
+    actions: {
+      skillLibrary: async () => ({ active: {}, skills: [
+        { name: 'fallback-item', description: 'Fixture.', review: fallback },
+        { name: 'background-item', description: 'Fixture.', review: { status: 'done', model: 'fixture/background' } },
+      ] }),
+      saveSkill: async () => ({ needsConfirm: 'fixture-receipt', findings: [{ severity: 'medium', reason: 'Fixture warning.' }], review: fallback }),
+    },
+    rosterSource: { subscribe() {}, getSnapshot: () => ({}) },
+  })()
+  const render = f.mount(owner.type, owner.props)
+  render()
+  await flush()
+  assert.match(text(render()), /Reviewed by Fixture Model \(fallback\)/)
+  assert.match(text(render()), /Reviewed by a model/)
+  match(render(), 'New skill').props.onClick()
+  const form = walk(render(), node => node.type?.name === 'SkillForm')[0]
+  const renderForm = f.mount(form.type, form.props)
+  await renderForm().props.onSubmit({ preventDefault() {} })
+  assert.match(text(renderForm()), /Reviewed by Fixture Model \(fallback\)/)
+  assert.match(text(renderForm()), /Fixture warning/)
+})

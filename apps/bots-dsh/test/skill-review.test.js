@@ -475,3 +475,110 @@ test('a team change during reviewer selection dispatches nothing and cannot publ
   assert.equal(f.calls.length, 0)
   assert.equal(fs.existsSync(f.path), false)
 })
+
+const nativeFixture = (background, lead) => {
+  const bot = { id: 'first', model: 'fixture-lead/lead-model' }
+  const calls = []
+  const blocked = []
+  const rt = {
+    state: { mainBotIds: [bot.id, 'next'] },
+    botOf: id => id === bot.id ? bot : undefined,
+    hostOwned: () => false,
+    catalog: async () => [{ ref: bot.model, name: 'Lead model' }],
+    skillReviewModel: async () => 'fixture-background/review-model',
+    async assembleLlm(request, { dispatch, onAttempt }) {
+      dispatch.check()
+      calls.push(request.provider)
+      if (request.provider === 'fixture-lead') return lead?.(request) ?? answer()
+      return background(request, onAttempt)
+    },
+  }
+  const run = (entries = entriesFor(form.name), hash = skillHash(entries)) =>
+    reviewer.runSkillReview(rt, { name: form.name, entries, hash }, {
+      check() {}, block: findings => { blocked.push(...findings) },
+    })
+  return { rt, bot, calls, blocked, run }
+}
+
+test('2160 fallback eligibility is limited to unavailability', async t => {
+  for (const [why, response] of [
+    ['no-model', () => assert.fail('no background route')],
+    ['provider-error', () => assembledReview('', 'error')],
+    ['timeout', async request => { await new Promise(resolve => request.signal.addEventListener('abort', resolve, { once: true })); throw new Error('Fixture deadline') }],
+    ['incomplete', () => assembledReview('partial', 'max-tokens')],
+    ['malformed', () => assembledReview('Fixture malformed reply.')],
+    ['overflow', () => answer([], true)],
+    ['coverage', () => assert.fail('bad coverage')],
+  ]) {
+    const f = nativeFixture(response)
+    if (why === 'no-model') f.rt.skillReviewModel = () => undefined
+    if (why === 'timeout') {
+      const timeout = AbortSignal.timeout
+      let calls = 0
+      t.mock.method(AbortSignal, 'timeout', () => ++calls === 1
+        ? AbortSignal.abort(new DOMException('Fixture deadline', 'TimeoutError')) : timeout(10_000))
+    }
+    const result = why === 'coverage' ? await f.run(entriesFor(form.name), 'different-hash') : await f.run()
+    if (['malformed', 'overflow', 'coverage'].includes(why)) {
+      assert.equal(result.why, why)
+      assert.equal(f.calls.includes('fixture-lead'), false)
+    } else {
+      assert.equal(result.fallbackFrom, why)
+      assert.equal(result.status, 'done')
+      assert.equal(f.calls.filter(provider => provider === 'fixture-lead').length, 1)
+    }
+  }
+})
+
+test('2160 Q2 order A completed disqualifying answers keep the background refusal', async () => {
+  for (const [why, response] of [['malformed', () => assembledReview('Incomplete fixture JSON.')], ['overflow', () => answer([], true)]]) {
+    const release = Promise.withResolvers()
+    const f = nativeFixture(async request => {
+      if (/^SKR\w+ chunk [^\n]* path=references\/a\.md$/m.test(request.messages[0].content[0].text)) {
+        await release.promise
+        return assembledReview('', 'error')
+      }
+      return response()
+    })
+    const entries = entriesFor(form.name, [entry('references/a.md', 'A fixture reference.')])
+    const result = await f.run(entries).finally(release.resolve)
+    assert.equal(result.why, why)
+    assert.deepEqual(f.calls, ['fixture-background', 'fixture-background'])
+  }
+})
+
+test('2160 background injection before interruption takes precedence over fallback', async () => {
+  for (const kind of ['stop', 'max-tokens']) {
+    const f = nativeFixture(() => assembledReview(JSON.stringify({
+      findings: [finding({ line: null, area: 'prompt-injection' })], overflow: false,
+    }), kind))
+    await f.run()
+    assert.equal(f.blocked.length, 1)
+    assert.deepEqual(f.calls, ['fixture-background'])
+  }
+})
+
+test('2160 unavailable native lead candidates never dispatch', async () => {
+  for (const reason of ['same-ref', 'host-owned', 'quota-held', 'reserved', 'missing-key', 'needs-sign-in']) {
+    const f = nativeFixture(() => assembledReview('', 'error'))
+    if (reason === 'same-ref') f.bot.model = 'fixture-background/review-model'
+    if (reason === 'host-owned') f.rt.hostOwned = () => true
+    if (reason === 'quota-held') f.rt.quotaHeld = () => true
+    if (reason === 'reserved') f.rt.machineReservations = { held: () => true }
+    if (reason === 'missing-key' || reason === 'needs-sign-in') {
+      f.rt.catalog = async () => [{ ref: f.bot.model, needsKey: reason === 'missing-key', needsSignIn: reason === 'needs-sign-in' }]
+    }
+    assert.equal((await f.run()).why, 'provider-error')
+    assert.deepEqual(f.calls, ['fixture-background'])
+  }
+})
+
+test('2160 native lead loses credit when its bound model changes', async () => {
+  const f = nativeFixture(() => assembledReview('', 'error'), () => {
+    f.bot.model = 'fixture-lead/other'
+    return answer()
+  })
+  const result = await f.run()
+  assert.equal(result.why, 'reviewer-changed')
+  assert.equal(result.status, 'failed')
+})

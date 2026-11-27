@@ -23,7 +23,7 @@ import { accountEvidenceOf, accountOf, accountView } from './src/host/account.js
 import { AcpAdapter, aside, BRIDGE_PATH, POLICY_UNAVAILABLE_TEXT, SIDE_MODEL } from './src/host/adapter.js'
 import { AgentRun, isUnanswered } from './src/host/acp.js'
 import { AGENTS, cliIdOf, findCommand, isNative, isolatedSignInHintOf, isSignInUrl, launchOf, signedInOf, signInHintOf } from './src/host/agents.js'
-import { answerAside, asideFailure, supportsAside } from './src/host/aside-run.js'
+import { answerAside, asideFailure, supportsAside, supportsReview } from './src/host/aside-run.js'
 import { Backchannel } from './src/host/backchannel.js'
 import { batchSafe } from './src/host/batch-spawn.js'
 import { Catalog, cliStamp, DEFAULT_MODEL } from './src/host/catalog.js'
@@ -2257,10 +2257,11 @@ export function apply(ctx, config = {}, {
   const generateImage = request => makeImage(request)
   const asideLifetime = new AbortController()
   const asideAccountGeneration = provider => authVersions.get(provider) ?? 0
-  const answerMemory = (request) => {
+  const reviewAccounts = new WeakMap()
+  const answerVia = (purpose, supports) => request => {
     const { provider } = request
-    if (!supportsAside(provider)) {
-      throw asideFailure('unavailable', 'A tools-off memory session is unavailable.')
+    if (!supports(provider)) {
+      throw asideFailure('unavailable', `A tools-off ${purpose} session is unavailable.`)
     }
     const spec = AGENTS[provider]
     const generation = request.accountGeneration ?? asideAccountGeneration(provider)
@@ -2287,7 +2288,7 @@ export function apply(ctx, config = {}, {
         reconcile({ kick: false })
         const selected = agents.get(provider)
         if (selected?.installed?.() !== true) {
-          throw asideFailure('unavailable', 'The memory agent is unavailable.')
+          throw asideFailure('unavailable', `The ${purpose} agent is unavailable.`)
         }
         if (!isNative(spec)) {
           if (signIns.get(provider) === undefined) await inspect(provider)
@@ -2301,14 +2302,20 @@ export function apply(ctx, config = {}, {
         }
         context.signal.throwIfAborted()
         if (agents.get(provider) !== selected) {
-          throw asideFailure('unavailable', 'The memory agent changed.')
+          throw asideFailure('unavailable', `The ${purpose} agent changed.`)
         }
         accountId = accountsSeen.get(provider)?.id
+        if (purpose === 'review' && request.binding) {
+          if (reviewAccounts.has(request.binding) && reviewAccounts.get(request.binding) !== accountId) {
+            throw asideFailure('signed-out', 'The Bot account changed or is unavailable.')
+          }
+          reviewAccounts.set(request.binding, accountId)
+        }
         agent = selected
         check()
         return selected.spawn(context)
       },
-    }, { ...request, signal: request.signal
+    }, { ...request, purpose, signal: request.signal
       ? AbortSignal.any([request.signal, asideLifetime.signal]) : asideLifetime.signal })
   }
   const editImage = (request = {}) => {
@@ -2544,8 +2551,10 @@ export function apply(ctx, config = {}, {
     /** Bind a queued tools-off response to the account present before the wait. */
     asideAccountGeneration,
     /** One tools-off ACP response beside the chat, with the prompt read after admission. */
-    answerAside: answerMemory,
+    answerAside: answerVia('memory', supportsAside),
     supportsAside,
+    answerReview: answerVia('review', supportsReview),
+    supportsReview,
     /**
      * Edits one uploaded picture with Codex: generateImage's fields plus
      * image: { base64, mimeType }, accountGeneration? -> { base64, mimeType }.

@@ -187,7 +187,8 @@ above stays the **gate**: only its verdict decides block, warn or pass.
 - **A different model, when one is available.** The reviewer is the model the person already
   uses for work beside the chats, picked once by the existing background-model selection: the
   background model chosen in Settings (`prefs.backgroundModel`), else DSH's default background
-  pick (`apps/bots-dsh/src/host/models.js:451-464`). There is no second pick. That model is
+  pick (`apps/bots-dsh/src/host/models.js:451-464`). When the background reviewer is unavailable,
+  the whole review restarts on the first Main Bot's model. The background model is
   **available** for the review when it answers beside the chats (not an ACP agent and not a remote
   Hermes, `models.js:454,466`) and it needs no missing key (`needsKey` false). The author's model
   is recorded at save for a Bot's save and a learned skill (the saving Bot's model); a skill the
@@ -390,8 +391,9 @@ future loads only.
   folders 0555; the record lives in `state.json` beside today's capability. `state.json` no
   longer carries skill bodies, so the whole-file save stays small.
 - The gate check stays local: it runs on the machine and sends nothing. Skill content reaches a
-  model provider on two occasions only: the background model review, to the provider of the person's
-  own reviewing model ("The model review"); and a Bot's use, to the provider of that Bot's model
+  model provider on two occasions only: the model review, to the background provider and, if the
+  background reviewer is unavailable, to the first Main Bot's model provider; and a Bot's use,
+  to the provider of that Bot's model
   (its catalog of names and descriptions, and each body or file the Bot loads, as any other
   context). Besides those, only the link fetch goes out, to the link's own host: credential-free,
   HTTPS only, public addresses only (checked on the address actually connected, reusing

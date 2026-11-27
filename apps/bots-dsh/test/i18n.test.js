@@ -287,3 +287,18 @@ test('the Solver look refusals have their Chinese dictionary entries', () => {
     ['That look is not valid. Choose another character.', '这个形象无效。请选择其他角色。'],
   ]) assert.equal(DICTIONARY.zh[key], text)
 })
+
+test('2160 fallback copy has Brazilian Portuguese and Chinese with matching placeholders', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const holes = text => [...text.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort()
+  for (const key of [
+    'Reviewed by {model} (fallback)',
+    "Not saved: the model review did not finish on the background model or on the Main Bot's model, and every skill needs one. Try again.",
+    "Not saved: every skill needs a model review. The background model failed, and the Main Bot's agent cannot run it in a separate session without tools.",
+  ]) {
+    assert.equal(typeof DICTIONARY.zh[key], 'string', key)
+    assert.equal(typeof pt[key], 'string', key)
+    assert.deepEqual(holes(DICTIONARY.zh[key]), holes(key), key)
+    assert.deepEqual(holes(pt[key]), holes(key), key)
+  }
+})
