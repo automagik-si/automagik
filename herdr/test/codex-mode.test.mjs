@@ -1115,7 +1115,11 @@ function scene(t, { programs = null, templates = [], env: more = {} } = {}) {
 }
 /** What an `hc run` call launches, past `/usr/bin/env NAME=value…` and the seat's briefing. */
 const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
-  + "clean (`git status --porcelain` prints nothing).";
+  + "clean (`git status --porcelain` prints nothing).\n"
+  + "Write your final report to a .md file in the system temp folder, then run "
+  + "`am worker done --report <file>`.\n"
+  + "If you cannot finish, write what is blocking you and run "
+  + "`am worker done --report <file> --state blocked`.";
 // #2057: the needs-owner rule every non-Hermes worker task carries before the done line,
 // written out (never imported), so a wording change shows here.
 const OWNER_LINE = "Waiting on the person: when you end your turn because only the person can unblock you (a "

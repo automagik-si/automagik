@@ -27,15 +27,17 @@ test('the fingerprint includes each checker source and the installed dependency 
   const paths = [...reached].sort()
   assert.deepEqual(paths, [
     'src/host/memory-entries.js', 'src/host/redact.js', 'src/host/skill-check.js',
-    'src/host/skill-library-rules.js', 'src/shared/roles.js', 'src/shared/skill-rule-reasons.js',
+    'src/host/skill-library-rules.js', 'src/shared/skill-rule-reasons.js', 'src/shared/windows-names.js',
   ])
   const sources = paths.map(path => [path, sha(source(path))])
   assert.equal(fingerprint(sources, version), SKILL_CHECK_FINGERPRINT)
   assert.equal(SKILL_CHECK_FINGERPRINT, SKILL_CHECK_HISTORY[SKILL_CHECK_VERSION])
   assert.notEqual(fingerprint(sources, `${version}-fixture`), SKILL_CHECK_FINGERPRINT)
-  const edit = sources.map(([path, hash]) => [path, path === 'src/host/memory-entries.js'
-    ? sha(source(path).toString().replace('PASSWORD_GIVEN', 'PASSWORD_given')) : hash])
-  assert.notEqual(fingerprint(edit, version), SKILL_CHECK_FINGERPRINT)
+  for (const changed of paths) {
+    const edit = sources.map(([path, hash]) => [path, path === changed
+      ? sha(Buffer.concat([source(path), Buffer.from('\n')])) : hash])
+    assert.notEqual(fingerprint(edit, version), SKILL_CHECK_FINGERPRINT, changed)
+  }
 })
 
 test('the collector identifies a synthetic encoded sample after exhausting the displayed findings', () => {

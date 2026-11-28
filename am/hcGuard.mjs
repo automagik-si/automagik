@@ -1052,7 +1052,8 @@ function rmProblem(real, args, env, terminal) {
   if (!at) return null;
   const caller = callerOf(real, env, terminal);
   if (typeof caller === "string") return caller;
-  if (caller.worker) return "a worker pane ends no panes; its bot ends it";
+  if (caller.worker) return "a worker pane ends no panes through hc rm; "
+    + "finish your pane with am worker done --report <file>";
   const hit = checkedTargetOf(real, at.word, null, env);
   if (hit.why) return hit.why;
   if (!hit.get) return `the target ${at.word} is not resolvable with hc`;
@@ -1082,7 +1083,8 @@ function killProblem(real, args, env, terminal) {
   const caller = callerOf(real, env, terminal);
   if (typeof caller === "string") return caller;
   const own = "end a worker you started with am worker kill <pane>";
-  if (caller.worker) return `hc kill is for a project's main bot only, never a worker; ${own}`;
+  if (caller.worker) return "hc kill is for a project's main bot only, never a worker; "
+    + "finish your pane with am worker done --report <file>";
   const file = readBots(caller.project);
   const bot = file?.bots?.find((row) => row.id === caller.bot) ?? null;
   if (!bot) return "the caller's bot is not in its project's bots.json";

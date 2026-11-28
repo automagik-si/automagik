@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { isWindowsReservedName } from '../shared/roles.js'
+import { isWindowsReservedName } from '../shared/windows-names.js'
 
 export const LIMITS = Object.freeze({
   skillMd: 65536, files: 256, file: 1048576, total: 5242880, pathBytes: 200, depth: 8, description: 1024,

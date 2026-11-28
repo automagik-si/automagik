@@ -89,7 +89,7 @@ function repo() {
     'scripts/lane.ts', 'scripts/role-pack.ts', 'scripts/version.ts', 'am/part.json', 'meter/usagemeter/part.json',
     ...['acp-dsh', 'bots-dsh', 'locale-pt-br-dsh', 'multiuser-dsh', 'vault-dsh', 'welcome-dsh'].map(plugin => 'apps/' + plugin + '/package.json'),
     ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js', 'bounded-get.js', 'no-runner.js', 'bundled-roles.js', 'bundled-roles.json', 'lane-verify.js'].map(file => PLUGIN + '/src/host/' + file),
-    PLUGIN + '/src/shared/roles.js', PLUGIN + '/src/shared/solver-method.js',
+    PLUGIN + '/src/shared/roles.js', PLUGIN + '/src/shared/solver-method.js', PLUGIN + '/src/shared/windows-names.js',
   ]) copy(root, path);
   put(root, '.gitignore', '/out/\n/' + PLUGIN + '/src/host/bundled-roles.json\n');
   git(root, 'init', '-q');
@@ -707,7 +707,7 @@ test('a plugin upgrade keeps unchanged role pins attachable and flags byte-chang
         'host/bundled-roles.js', 'host/bundled-roles.json', 'host/lane-verify.js', 'host/session-route.js', 'host/solver-progress.js',
         'host/solver-check-command.js', 'shared/solver-agent.js', 'shared/solver-model.js',
         'shared/review-guard.js', 'shared/review-mark.js', 'shared/native-tools.js', 'shared/permission-levels.js',
-        'shared/roles.js', 'shared/solver-method.js', 'shared/routes.js', 'shared/machine-reservations.js', 'shared/own-tools.js', 'client/role-shop.js', 'client/i18n.js',
+        'shared/roles.js', 'shared/solver-method.js', 'shared/windows-names.js', 'shared/routes.js', 'shared/machine-reservations.js', 'shared/own-tools.js', 'client/role-shop.js', 'client/i18n.js',
         'shared/guard-groups.js', 'shared/solver-looks.js',
       ]) {
         put(plugin, 'src/' + file, readFileSync(join(ROOT, PLUGIN, 'src', file)));

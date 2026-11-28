@@ -364,6 +364,9 @@ var addsAcpToolDeny = (before, next) => deniesAcpTool(next) && !deniesAcpTool(be
 var ownToolsRefused = (bot, entry) => entry?.ownTools === true && deniesAcpTool(bot?.denyTools) && entry.ref !== (bot.model ?? bot.appliedModel);
 var ownToolsNotice = (bot) => bot?.ownTools === true && deniesAcpTool(bot.denyTools);
 
+// src/shared/windows-names.js
+var isWindowsReservedName = (name) => /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
+
 // src/shared/roles.js
 var BUILTIN_ROLES = Object.freeze({
   genie: Object.freeze({
@@ -379,7 +382,6 @@ var GENIE_ATTACH_REFUSAL = "Genie can be given to another Bot after the next Gen
 var ROLES_OFF_REASON = "roles-off";
 var rolesOn = (prefs) => prefs?.roles !== false;
 var RESERVED_ROLE_IDS = Object.freeze(["data"]);
-var isWindowsReservedName = (name) => /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
 var isRoleId = (id) => typeof id === "string" && /^[a-z0-9][a-z0-9-]{0,40}$/.test(id) && !RESERVED_ROLE_IDS.includes(id) && !isWindowsReservedName(id);
 var isRoleVersion = (version) => typeof version === "string" && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(version);
 var isPackageRoleId = (id) => isRoleId(id) && !Object.hasOwn(BUILTIN_ROLES, id);

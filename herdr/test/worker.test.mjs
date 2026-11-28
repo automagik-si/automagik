@@ -3,14 +3,20 @@ import { startFakeCore as startStatusCore } from "./fake-core.mjs";
 // pane, in the task's worktree. Run as a program against scratch git projects under $TMPDIR,
 // with the fake `hc` first on PATH (test/fake-hc.mjs). The real hc is never run.
 import net from "node:net";
+import { createInterface } from "node:readline";
 import { test } from "node:test";
+import { once } from "node:events";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
+  readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { applyBotEdit, checkBots, parseBots, swapProblem } from "../mods/am-sidebar/model.js";
 import { AGENTS, AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir, agySettingsFile, effortArgs, promptArgs } from "../mods/am-sidebar/models.js";
@@ -31,11 +37,13 @@ import { fixturePaneEdit } from "./fixture-pane-edit.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { chosenHomeWords } from "../mods/am-sidebar/agentHome.js";
 import { envWords } from "../mods/am-sidebar/logins.js";
+import { workerCallerProven } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
 import { assertScratchProject, scratchProject, scratchRoot, shortSocketDir }
   from "./scratch-project.mjs";
 const createHashOf = (text) => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
+const FAKE_REPORT_PS = new URL("./worker-report-processes.mjs", import.meta.url).href;
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
 const FAKE_APP = new URL("./fake-herdr-app.mjs", import.meta.url).pathname;
 const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", stray: "b-zzzzzzzzzz" };
@@ -47,6 +55,7 @@ const GEN = {
 };
 
 const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
+const gitBin = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
 const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
 /**
  * The attach ledger a test writes by hand is the owner's alone, as attach writes it: set here, not
@@ -153,13 +162,10 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   const preflight = (extra = {}, cwd = project) => {
     const effective = { ...env, ...extra };
     assertScratchProject(project, { ceiling: root, env: effective });
-    assert.equal(effective.HERDR_APP_HOME, app);
     assert.equal(effective.HOME, home);
     assert.equal(effective.HC_FAKE_STATE, statePath);
     assert.ok(realpathSync(cwd).startsWith(`${root}/`) || realpathSync(cwd) === root);
-    assert.ok(realpathSync(app).startsWith(`${root}/`));
-    assert.equal(join(effective.HERDR_APP_HOME, "automagik-herdr/workers.jsonl"),
-      join(app, "automagik-herdr/workers.jsonl"));
+    assert.ok(realpathSync(effective.HERDR_APP_HOME).startsWith(`${root}/`));
     const executable = (path) => {
       try { return statSync(path).isFile() && (statSync(path).mode & 0o111) !== 0; }
       catch { return false; }
@@ -248,7 +254,11 @@ const withoutPerson = (words) => {
   return i < 0 || words[i + 1] !== CLAUDE_PERSON_SETTINGS ? words : [...words.slice(0, i), ...words.slice(i + 2)];
 };
 const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
-  + "clean (`git status --porcelain` prints nothing).";
+  + "clean (`git status --porcelain` prints nothing).\n"
+  + "Write your final report to a .md file in the system temp folder, then run "
+  + "`am worker done --report <file>`.\n"
+  + "If you cannot finish, write what is blocking you and run "
+  + "`am worker done --report <file> --state blocked`.";
 // #2057: the needs-owner rule every non-Hermes worker task carries before the done line,
 // written out (never imported), so a wording change shows here.
 const OWNER_LINE = "Waiting on the person: when you end your turn because only the person can unblock you (a "
@@ -577,10 +587,13 @@ test("a dsh-tui worker reads its bot's approved switch; other agents keep the or
   assert.ok(helper > 0, words.join(" "));
   assert.deepEqual(words.slice(helper + 1, helper + 7),
     ["--bot", ID.dev, "--project", s.project, "--worker", "--"]);
+  assert.match(words.at(-1), /Before you report done: commit or discard/);
+  assert.doesNotMatch(words.at(-1), /am worker done/);
   const plain = s.cli(["worker", "do another task", "--branch", "feat/plain", "--agent", "codex",
     "--json"]);
   assert.equal(plain.code, 0, plain.err);
   assert.equal(s.runs().at(-1).some((word) => word.endsWith("/hcPane.mjs")), false);
+  assert.match(s.runs().at(-1).at(-1), /am worker done --report/);
 });
 
 // #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
@@ -696,6 +709,1127 @@ test("worker kill succeeds and gives one manual rm line when hc refuses removal"
   assert.equal(r.json().ended, true);
   assert.deepEqual(r.err.trim().split("\n"), [`am: ${terminal} was left listed. Run hc rm ${terminal}`]);
   assert.equal(s.hcState().terminals.find((p) => p.address === terminal).state, "finished");
+});
+
+function doneScene(t) {
+  const s = scene(t);
+  const start = s.cli(["worker", "finish", "--branch", "fix/report", "--json"]);
+  assert.equal(start.code, 0, start.err);
+  const { terminal, worktree, branch } = start.json();
+  const pane = () => s.hcState().terminals.find((p) => p.address === terminal);
+  const patch = (change) => {
+    const state = s.hcState();
+    Object.assign(state.terminals.find((p) => p.address === terminal), change);
+    writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  };
+  const amHome = join(s.root, "am-home");
+  patch({ pid: 7001 });
+  const loginEnv = {
+    HC_SOCKET: s.env.HC_SOCKET, HC_FAKE_STATE: s.env.HC_FAKE_STATE,
+    HC_FAKE_LOG: s.env.HC_FAKE_LOG, HERDR_APP_HOME: s.app, AM_HOME: amHome,
+    AUTOMAGIK_HERDR_TEST_ROOTS: s.env.AUTOMAGIK_HERDR_TEST_ROOTS,
+    GIT_CEILING_DIRECTORIES: s.root,
+    NODE_OPTIONS: "--import=" + FAKE_REPORT_PS,
+    HC_FAKE_REPORT_PROCESSES: [
+      "7001 1 Ss worker shell", "7002 7001 S node am worker done",
+      "7003 7002 S node -e process.stdin.resume() <token>",
+    ].join("\n"),
+  };
+  const helperEnv = (overrides = {}) => hcStateExtra(s, { localExec: {
+    home: s.env.HOME,
+    execPath: `${join(s.root, "bin")}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    env: { ...loginEnv, ...overrides },
+  } });
+  helperEnv();
+  const reports = join(amHome, "projects", "proj", "reports");
+  const name = pane().name;
+  const report = join(reports, `${name}.md`);
+  const input = join(s.root, "temp-report.md");
+  writeFileSync(input, "# Finished\n");
+  const done = (file = input, { from = terminal, state, env } = {}) =>
+    s.cli(["worker", "done", "--report", file, ...(state ? ["--state", state] : []), "--json"],
+      { from, cwd: worktree, env, coreEnv: {} });
+  const retirement = () => s.calls().filter(([verb]) => ["send", "kill", "rm"].includes(verb));
+  return { ...s, terminal, worktree, branch, pane, patch, name, amHome, reports, report, input,
+    done, retirement, helperEnv, loginEnv };
+}
+
+// Talk to the outside helper directly so the CLI's input checks can't mask a missing guard.
+function startReportHelper(s, callerToken = randomUUID()) {
+  const code = `import { startWorkerRetirement } from ${JSON.stringify(CLI)};
+    await startWorkerRetirement(...JSON.parse(process.argv[1]));`;
+  const identity = ["fakecore0000", s.terminal, s.pane().created_ms, callerToken];
+  const args = ["exec", "--json", "--timeout", "15", "--",
+    process.execPath, "--input-type=module", "-e", code, JSON.stringify(identity)];
+  const child = spawnSync(join(s.root, "bin", "hc"), args,
+    { env: s.env, cwd: s.root, encoding: "utf8", timeout: 20_000 });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.code, 0, Buffer.from(result.stderr, "base64").toString());
+  return JSON.parse(Buffer.from(result.stdout, "base64").toString());
+}
+
+function reportHelper(t, s) {
+  const ready = startReportHelper(s);
+  assert.equal(ready.host, "127.0.0.1", ready.error);
+  const connect = () => {
+    const socket = net.createConnection(ready.port, ready.host);
+    socket.setTimeout(20_000, () => socket.destroy(new Error("report fixture timed out")));
+    t.after(() => socket.destroy());
+    const frames = createInterface({ input: socket })[Symbol.asyncIterator]();
+    const read = async () => {
+      const { value } = await frames.next();
+      return value === undefined ? undefined : JSON.parse(value);
+    };
+    const send = (frame) => socket.write(JSON.stringify(frame) + "\n");
+    return { send, read, close: () => socket.end() };
+  };
+  const submit = async (request = {}) => {
+    const handover = connect();
+    handover.send({ token: ready.token });
+    assert.deepEqual(await handover.read(), { proof: ready.proof });
+    handover.send({ state: "done", source: s.input,
+      contents: Buffer.from("# Finished\n").toString("base64"), ...request });
+    return handover;
+  };
+  return { connect, submit, ready };
+}
+
+for (const [guard, input] of [
+  ["source-extension", (s) => ({ source: join(s.root, "report.txt") })],
+  ["contents-size", () => ({ contents: Buffer.alloc(64 * 1024 + 1).toString("base64") })],
+  ["allowed-state", () => ({ state: "forged" })],
+]) {
+  test(`worker report helper rejects ${guard}`, async (t) => {
+    const s = doneScene(t);
+    const handover = await reportHelper(t, s).submit(input(s));
+    assert.match((await handover.read())?.error ?? "", /readable .md file up to 64 KiB/);
+    assert.equal(s.pane().state, "live");
+    assert.equal(existsSync(s.report), false);
+    assert.deepEqual(s.retirement(), []);
+  });
+}
+
+test("worker report helper rejects a wrong handover token", async (t) => {
+  const s = doneScene(t);
+  const helper = reportHelper(t, s);
+  const wrong = helper.connect();
+  wrong.send({ token: randomUUID() });
+  assert.equal(await wrong.read(), undefined);
+  const right = helper.connect();
+  right.send({ token: helper.ready.token });
+  assert.deepEqual(await right.read(), { proof: helper.ready.proof });
+  right.close();
+  assert.equal(await right.read(), undefined);
+  assert.deepEqual(s.retirement(), []);
+  assert.equal(existsSync(s.report), false);
+});
+
+test("worker report helper refuses a dirty worktree", async (t) => {
+  const s = doneScene(t);
+  writeFileSync(join(s.worktree, "dirty.txt"), "Keep me");
+  const handover = await reportHelper(t, s).submit();
+  assert.match((await handover.read())?.error ?? "", /uncommitted changes.*--state blocked/);
+  assert.equal(existsSync(s.report), false);
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker report helper ignores the repository's fsmonitor program", async (t) => {
+  const s = doneScene(t);
+  const hit = join(s.root, "fsmonitor-ran");
+  const hook = join(s.root, "fsmonitor");
+  exe(hook, `#!/bin/sh\n: > "${hit}"\n`);
+  git(s.project, "config", "core.fsmonitor", hook);
+  const handover = await reportHelper(t, s).submit();
+  assert.equal((await handover.read())?.data?.report, s.report);
+  handover.send({ retire: false });
+  assert.deepEqual(await handover.read(), { warnings: [] });
+  assert.equal(existsSync(hit), false, "the helper must not run the configured fsmonitor");
+});
+
+test("worker report helper waits for acknowledgement before killing", async (t) => {
+  const s = doneScene(t);
+  const handover = await reportHelper(t, s).submit();
+  assert.equal((await handover.read())?.data?.report, s.report);
+  handover.send({ retire: false });
+  assert.deepEqual(await handover.read(), { warnings: [] });
+  assert.equal(s.pane()?.state, "live");
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send"]);
+  assert.ok(s.ledger().every((row) => row.event !== "end"));
+});
+
+test("worker report helper rejects a symlinked reports folder", async (t) => {
+  const s = doneScene(t);
+  const target = join(s.root, "redirected");
+  mkdirSync(target);
+  mkdirSync(dirname(s.reports), { recursive: true });
+  symlinkSync(target, s.reports);
+  const handover = await reportHelper(t, s).submit();
+  assert.match((await handover.read())?.error ?? "", /reports is a symlink/);
+  assert.deepEqual(readdirSync(target), []);
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker report helper rejects a public project marker", async (t) => {
+  const s = doneScene(t);
+  const projectHome = dirname(s.reports);
+  mkdirSync(projectHome, { recursive: true });
+  const marker = join(projectHome, "project.json");
+  writeFileSync(marker, JSON.stringify({ key: s.project }));
+  chmodSync(marker, 0o644);
+  const handover = await reportHelper(t, s).submit();
+  assert.match((await handover.read())?.error ?? "", /verify private project marker/);
+  assert.equal(existsSync(s.reports), false);
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker done rejects K1 when one worker names another worker's pane", (t) => {
+  const s = doneScene(t);
+  const start = s.cli(["worker", "other task", "--branch", "fix/other", "--json"]);
+  assert.equal(start.code, 0, start.err);
+  const { terminal } = start.json();
+  const state = s.hcState();
+  state.terminals.find((pane) => pane.address === terminal).pid = 8001;
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  s.helperEnv({ HC_FAKE_REPORT_PROCESSES:
+    s.loginEnv.HC_FAKE_REPORT_PROCESSES + "\n8001 1 Ss other worker shell" });
+  const ledger = s.ledger();
+  const refused = s.done(s.input, { from: terminal, state: "blocked" });
+  assert.equal(refused.code, 2, refused.err);
+  assert.match(refused.err, /^am: Only a verified am worker.*am worker kill <pane>\.\n$/);
+  assert.equal(s.pane().state, "live");
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === terminal).state, "live");
+  assert.ok(s.calls().some(([verb]) => verb === "exec"));
+  assert.deepEqual(s.ledger(), ledger);
+  assert.equal(existsSync(s.reports), false);
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker done requires its exact token in a live descendant's last argument", (t) => {
+  const s = doneScene(t);
+  s.helperEnv({ HC_FAKE_REPORT_PROCESSES: [
+    "7001 1 Ss worker shell", "7002 7001 S node x<token>",
+    "7003 7001 Z node <token>", "7004 1 S node <token>",
+    "7005 7001 S node <token> another-word",
+  ].join("\n") });
+  const refused = s.done();
+  assert.equal(refused.code, 2, refused.err);
+  assert.match(refused.err, /^am: Only a verified am worker/);
+  assert.equal(existsSync(s.reports), false);
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker report helper refuses a caller token with the wrong shape", (t) => {
+  const s = doneScene(t);
+  const reply = startReportHelper(s, "not-a-uuid");
+  assert.equal(reply.code, 2);
+  assert.match(reply.error, /^Only a verified am worker/);
+});
+
+test("worker caller proof stops at a cycle in the parent walk", () => {
+  const code = `import { workerCallerProven } from ${JSON.stringify(CLI)};
+    const token = JSON.parse(process.argv[1])[3];
+    console.log(await workerCallerProven(7001, token, process.pid));`;
+  const result = execFileSync(process.execPath, [
+    "--import", FAKE_REPORT_PS, "--input-type=module", "-e", code,
+    JSON.stringify([null, null, null, randomUUID()]),
+  ], {
+    env: { ...process.env, HC_FAKE_REPORT_PROCESSES: [
+      "7001 1 Ss worker shell", "7002 7003 S node <token>", "7003 7002 S shell",
+    ].join("\n") },
+    encoding: "utf8", timeout: 5000, killSignal: "SIGKILL",
+  });
+  assert.equal(result.trim(), "false");
+});
+
+for (const [name, pid, processes] of [
+  ["pid 1", 1, "1 0 Ss init\n7002 1 S node <token>"],
+  ["a core ancestor", 7001, [
+    "7001 1 Ss core", "7002 7001 S node <token>",
+    "7003 7001 S starter", "<helper> 7003 S helper",
+  ].join("\n")],
+]) {
+  test(`worker done refuses a pane reporting ${name}`, (t) => {
+    const s = doneScene(t);
+    s.patch({ pid });
+    s.helperEnv({ HC_FAKE_REPORT_PROCESSES: processes });
+    const refused = s.done();
+    assert.equal(refused.code, 2, refused.err);
+    assert.match(refused.err, /^am: Only a verified am worker/);
+    assert.deepEqual(s.retirement(), []);
+  });
+}
+
+test("worker caller proof uses real ps to find its descendant (skips only without /bin/ps)",
+  { skip: !existsSync("/bin/ps") }, async (t) => {
+    const token = randomUUID();
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()", token],
+      { stdio: ["pipe", "ignore", "ignore"] });
+    const unrelated = spawn(process.execPath, ["-e", "process.stdin.resume()"],
+      { stdio: ["pipe", "ignore", "ignore"] });
+    t.after(() => { child.kill(); unrelated.kill(); });
+    await Promise.all([once(child, "spawn"), once(unrelated, "spawn")]);
+    const helperPid = process.ppid;
+    assert.equal(await workerCallerProven(process.pid, token, helperPid), true);
+    assert.equal(await workerCallerProven(unrelated.pid, token, helperPid), false);
+  });
+
+test("worker done ignores K2 when the caller puts a planted gh first on PATH", (t) => {
+  const s = doneScene(t);
+  const planted = join(s.root, "planted");
+  const hit = join(planted, "ran");
+  mkdirSync(planted);
+  exe(join(planted, "gh"), `#!/bin/sh\ntouch "${hit}"\necho '{"number":999}'\n`);
+  writeFileSync(join(s.root, "gh.json"), '{"number":42}');
+  const result = s.done(s.input, { env: { PATH: `${planted}:${s.env.PATH}` } });
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.json().pr, 42);
+  assert.equal(existsSync(hit), false);
+});
+
+test("worker done ignores K3 when the caller chooses a copied app home and forged lead", (t) => {
+  const s = doneScene(t);
+  const copy = join(s.root, "copied-app");
+  cpSync(s.app, copy, { recursive: true });
+  const ledger = join(copy, "automagik-herdr/workers.jsonl");
+  const forged = s.ledger().map((row) => row.terminal === s.terminal
+    ? { ...row, branch: "forged-branch", lead: ID.cap } : row);
+  writeFileSync(ledger, forged.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const copies = readFileSync(ledger, "utf8");
+  const result = s.done(s.input, { env: { HERDR_APP_HOME: copy } });
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.json().branch, s.branch);
+  assert.equal(readFileSync(ledger, "utf8"), copies);
+  assert.deepEqual(s.hcState().sent.map(({ to }) => to), ["t1"]);
+  assert.ok(s.ledger().some((row) => row.event === "end" && row.terminal === s.terminal));
+});
+
+test("worker done ignores K4 when caller AM_HOME has an expired report", (t) => {
+  const s = doneScene(t);
+  const amHome = join(s.root, "caller-am");
+  const reports = join(amHome, "projects", "proj", "reports");
+  mkdirSync(reports, { recursive: true });
+  const old = join(reports, "old.md");
+  writeFileSync(old, "Keep me");
+  const stamp = new Date(Date.now() - 40 * 86_400_000);
+  utimesSync(old, stamp, stamp);
+  const result = s.done(s.input, { env: { AM_HOME: amHome } });
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.json().report, s.report);
+  assert.deepEqual(readdirSync(dirname(reports)), ["reports"]);
+  assert.deepEqual(readdirSync(reports), ["old.md"]);
+  assert.equal(readFileSync(old, "utf8"), "Keep me");
+});
+
+test("worker done points a worker without a core-local start row to am worker kill", (t) => {
+  const s = doneScene(t);
+  s.helperEnv({ HERDR_APP_HOME: undefined });
+  const result = s.done();
+  assert.equal(result.code, 2, result.err);
+  assert.match(result.err, /^am: No worker launch.*am worker kill <pane>\.\n$/);
+  assert.equal(s.pane().state, "live");
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker done uses the core login's default app home and AM_HOME", (t) => {
+  const s = doneScene(t);
+  const defaultApp = join(s.env.HOME, ".config", "herdr-app");
+  cpSync(join(s.app, "automagik-herdr"), join(defaultApp, "automagik-herdr"), { recursive: true });
+  s.helperEnv({ HERDR_APP_HOME: undefined, AM_HOME: undefined });
+  const result = s.done();
+  const report = join(s.env.HOME, ".automagik", "projects", "proj", "reports", s.name + ".md");
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.json().report, report);
+  assert.equal(readFileSync(report, "utf8"), "# Finished\n");
+  assert.equal(s.ledger().some(({ event }) => event === "end"), false);
+});
+
+test("worker done hands off app-home writes and reports acceptance before kill", async (t) => {
+  const s = doneScene(t);
+  // Include Git and the fixture tools only. The core has no node on PATH.
+  symlinkSync(gitBin, join(s.root, "bin", "git"));
+  s.helperEnv({ PATH: join(s.root, "bin") });
+  const ack = join(s.root, "receipt");
+  // Keep the permission restriction on the worker CLI, as Codex confines its shell.
+  // The fake local core exec launches its own process without those permissions.
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+unset NODE_OPTIONS
+if [ "$1" = exec ]; then
+  mv "${s.input}" "${s.input}.hidden" || exit 89
+fi
+if [ "$1" = kill ]; then
+  for tries in 1 2 3 4 5; do
+    [ -f "${ack}" ] && break
+    sleep 0.1
+  done
+  [ -f "${ack}" ] || exit 88
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const permissions = "--permission --allow-fs-read=* --allow-child-process";
+  const probe = spawnSync(process.execPath, ["-e",
+    "require('node:fs').mkdirSync(process.argv[1])", join(s.app, "blocked")],
+  { env: { ...s.env, NODE_OPTIONS: permissions }, encoding: "utf8" });
+  assert.match(probe.stderr, /ERR_ACCESS_DENIED/);
+  const child = s.spawnCli(["worker", "done", "--report", s.input], {
+    from: s.terminal, env: { AM_HOME: s.amHome, NODE_OPTIONS: permissions, NODE_NO_WARNINGS: "1" },
+  });
+  let receipt = "", err = "";
+  child.stdout.on("data", (chunk) => {
+    receipt += chunk;
+    if (receipt.includes("Report hand-over accepted.")) writeFileSync(ack, receipt);
+  });
+  child.stderr.on("data", (chunk) => { err += chunk; });
+  const status = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(status, 0, err);
+  assert.equal(receipt.trim(), `Report hand-over accepted. Saved at ${s.report}.`);
+  assert.equal(readFileSync(s.report, "utf8"), "# Finished\n");
+  assert.equal(readFileSync(s.input + ".hidden", "utf8"), "# Finished\n");
+  assert.equal(s.pane(), undefined);
+  const coreExec = s.calls().find((call) => call[0] === "exec");
+  assert.deepEqual(coreExec.slice(0, -2),
+    ["exec", "--json", "--timeout", "15", "--", process.execPath, "--input-type=module", "-e"]);
+  assert.equal(coreExec.length, 10);
+  assert.match(coreExec.at(-2), /startWorkerRetirement/);
+  const [core, terminal, created, token] = JSON.parse(coreExec.at(-1));
+  assert.deepEqual([core, terminal, created], ["fakecore0000", s.terminal,
+    s.ledger().find((row) => row.event === "start" && row.terminal === s.terminal).created_ms]);
+  assert.match(token, /^[a-f0-9-]{36}$/);
+});
+
+test("worker done says why the outside helper cannot start and keeps the report and pane", (t) => {
+  const s = doneScene(t);
+  hcStateExtra(s, { localExec: false });
+  const r = s.done();
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /^am: The local core could not start .* am worker kill <pane>\.\n$/);
+  assert.equal(r.out, "");
+  assert.equal(readFileSync(s.input, "utf8"), "# Finished\n");
+  assert.equal(existsSync(s.report), false);
+  assert.equal(s.pane().state, "live");
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker done refuses bot seats, unlabeled terminals and a worker label without a launch", (t) => {
+  const s = doneScene(t);
+  for (const from of ["t1", "t2", null]) {
+    const r = s.done(s.input, { from });
+    assert.equal(r.code, 2, r.err);
+    assert.match(r.err, /am worker kill <pane>/);
+  }
+  const state = s.hcState();
+  state.terminals.find((p) => p.address === "t2").labels = { [WORKER_OF_LABEL]: ID.dev };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  assert.equal(s.done(s.input, { from: "t2" }).code, 2);
+  assert.deepEqual(s.retirement(), []);
+  assert.equal(existsSync(s.reports), false);
+});
+
+test("worker done rejects a registered worker with changed ownership, generation or bot label", (t) => {
+  const s = doneScene(t);
+  const original = s.pane();
+  for (const patch of [
+    { labels: {} },
+    { labels: { ...original.labels, [WORKER_OF_LABEL]: ID.cap } },
+    { created_ms: original.created_ms + 1 },
+    { labels: { ...original.labels, bot: ID.dev } },
+  ]) {
+    s.patch({ ...original, ...patch });
+    assert.equal(s.done().code, 2);
+    assert.equal(s.pane().state, "live");
+  }
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker done refuses a worker that the attach ledger binds as a bot", (t) => {
+  const s = doneScene(t);
+  const row = {
+    v: 1, event: "attach", bot: ID.cap, project: s.project, terminal: s.terminal,
+    core: "fakecore0000", created_ms: s.pane().created_ms, machine: null,
+    at: new Date().toISOString(), by: "attach",
+  };
+  appendFileSync(join(s.app, "automagik-herdr/attach.jsonl"), `${JSON.stringify(row)}\n`);
+  assert.equal(s.done().code, 2);
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker report helper requires the core's attach ledger", (t) => {
+  const s = doneScene(t);
+  rmSync(join(s.app, "automagik-herdr", "attach.jsonl"));
+  const reply = startReportHelper(s);
+  assert.equal(reply.code, 2);
+  assert.match(reply.error, /core's Herdr app home has no readable attach ledger/);
+});
+
+test("worker done refuses a pane whose cwd differs from the ledger worktree", (t) => {
+  const s = doneScene(t);
+  s.patch({ cwd: s.project });
+  assert.equal(s.done().code, 2);
+  assert.equal(s.pane().state, "live");
+  assert.equal(existsSync(s.report), false);
+});
+
+test("worker done refuses a socket different from the pane endpoint", (t) => {
+  const s = doneScene(t);
+  const r = s.done(s.input, { env: { HC_TERMINAL_SOCKET: join(s.root, "different.sock") } });
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /verified am worker/);
+  assert.equal(s.calls().some(([verb]) => verb === "exec"), false);
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker done refuses a readable report without the .md extension before handing off", (t) => {
+  const s = doneScene(t);
+  const source = join(s.root, "report.txt");
+  writeFileSync(source, "# Readable\n");
+  const r = s.done(source);
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /readable .md file/);
+  assert.equal(s.calls().some(([verb]) => verb === "exec"), false);
+  assert.equal(readFileSync(source, "utf8"), "# Readable\n");
+});
+
+test("worker done leaves the input and pane when the outside worktree check refuses", (t) => {
+  const s = doneScene(t);
+  const source = join(s.worktree, "input.md");
+  writeFileSync(source, "# Keep me\n");
+  exe(join(s.root, "bin/git"), `#!/bin/sh
+case " $* " in
+  *" worktree list --porcelain "*) printf 'worktree %s\n' "${s.project}"; exit 0 ;;
+esac
+exec "${gitBin}" "$@"
+`);
+  const r = s.done(source, { state: "blocked" });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /^am: Couldn't verify the worker's worktree. Nothing was ended.\n$/);
+  assert.equal(r.out, "");
+  assert.equal(readFileSync(source, "utf8"), "# Keep me\n");
+  assert.equal(s.pane().state, "live");
+  assert.equal(existsSync(s.report), false);
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker done keeps a report file replaced between reading and removal", (t) => {
+  const s = doneScene(t);
+  const source = join(s.worktree, "replace.md");
+  writeFileSync(source, "# Original\n");
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1" = kill ]; then
+  printf '# Replaced\n' > "${source}.new" && mv "${source}.new" "${source}" || exit 88
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.done(source, { state: "blocked" });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(readFileSync(s.report, "utf8"), "# Original\n");
+  assert.equal(readFileSync(source, "utf8"), "# Replaced\n");
+});
+
+test("worker done refuses when the source equals the save destination", (t) => {
+  const s = doneScene(t);
+  const amHome = join(s.worktree, "reports-home");
+  const projectHome = join(amHome, "projects", "proj");
+  const report = join(projectHome, "reports", s.name + ".md");
+  mkdirSync(dirname(report), { recursive: true });
+  writeFileSync(report, "# Existing\n");
+  const before = statSync(report);
+  s.helperEnv({ AM_HOME: amHome });
+  const r = s.done(report, { state: "blocked" });
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /outside its save destination/);
+  assert.equal(readFileSync(report, "utf8"), "# Existing\n");
+  assert.equal(statSync(report).ino, before.ino);
+  assert.equal(existsSync(join(projectHome, "project.json")), false);
+  assert.deepEqual(s.retirement(), []);
+  assert.equal(s.pane().state, "live");
+});
+
+test("worker done does not end a pane after losing its report lock token", (t) => {
+  const s = doneScene(t);
+  const locks = join(s.app, "automagik-herdr/locks");
+  const lock = join(locks, `worker-done-${s.terminal}-${s.pane().created_ms}.lock`);
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1" = send ]; then printf 'other token' > "${lock}"; fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.done();
+  assert.equal(r.code, 1, r.err);
+  assert.equal(readFileSync(lock, "utf8"), "other token");
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send"]);
+  assert.equal(s.pane().state, "live");
+});
+
+test("worker done will not look up its own terminal as a candidate lead", (t) => {
+  const s = doneScene(t);
+  const broken = { v: 1, event: "attach", bot: ID.dev, project: s.project,
+    terminal: s.terminal, core: "fakecore0000", created_ms: s.pane().created_ms + 1,
+    machine: null, at: new Date().toISOString(), by: "attach" };
+  appendFileSync(join(s.app, "automagik-herdr/attach.jsonl"), `${JSON.stringify(broken)}\n`);
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /lead was not told/);
+  const between = s.calls().slice(s.calls().findLastIndex(([verb]) => verb === "ls"));
+  // After the helper list, only the pre-save, pre-acceptance and pre-kill identity checks
+  // may look up the worker. The stale lead binding must never cause a fourth lookup.
+  assert.equal(between.slice(0, between.findIndex(([verb]) => verb === "kill"))
+    .filter(([verb, address]) => verb === "get" && address === s.terminal).length, 3);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["kill", "rm"]);
+});
+
+test("worker done respects a socket bound to a different pane", (t) => {
+  const s = doneScene(t);
+  const state = s.hcState();
+  state.boundTerminal = "t1";
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  assert.equal(s.done().code, 2);
+  assert.deepEqual(s.retirement(), []);
+  assert.equal(existsSync(s.report), false);
+});
+
+test("worker done requires a worker name that fits a report filename", (t) => {
+  const s = doneScene(t);
+  for (const name of [null, "../outside"]) {
+    s.patch({ name });
+    const r = s.done();
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /report filename/);
+  }
+  assert.deepEqual(s.retirement(), []);
+  assert.equal(existsSync(s.reports), false);
+});
+
+test("worker done leaves Herdr's managed files alone", (t) => {
+  const s = doneScene(t);
+  const mods = join(s.app, "mods");
+  const alias = join(s.root, "mods-alias");
+  symlinkSync(mods, alias);
+  s.helperEnv({ AM_HOME: join(alias, "am") });
+  const r = s.done();
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /outside Herdr's managed folders/);
+  assert.equal(existsSync(join(mods, "am")), false);
+  assert.deepEqual(s.retirement(), []);
+
+  const layouts = join(s.app, "layouts");
+  const projectHome = dirname(s.reports);
+  s.helperEnv();
+  mkdirSync(projectHome, { recursive: true });
+  symlinkSync(projectHome, layouts);
+  const managed = s.done();
+  assert.equal(managed.code, 1, managed.err);
+  assert.match(managed.err, /outside Herdr's managed folders/);
+  assert.equal(existsSync(join(projectHome, "project.json")), false);
+  unlinkSync(layouts);
+
+  symlinkSync(s.worktree, layouts);
+  const source = join(s.worktree, "report.md");
+  writeFileSync(source, "# A shared path\n");
+  const done = s.done(source, { state: "blocked" });
+  assert.equal(done.code, 0, done.err);
+  assert.equal(readFileSync(s.report, "utf8"), "# A shared path\n");
+  assert.ok(existsSync(source), "the report under Herdr's layouts stays in place");
+  assert.equal(readFileSync(source, "utf8"), "# A shared path\n");
+});
+
+test("worker done neither unlinks reports tracked in a nested repo nor changes that repo", (t) => {
+  const s = doneScene(t);
+  const nested = join(s.worktree, "nested");
+  mkdirSync(nested);
+  git(nested, "init", "-q");
+  const source = join(nested, "report.md");
+  writeFileSync(source, "# Nested\n");
+  git(nested, "add", "report.md");
+  git(nested, "commit", "-qm", "nested repo");
+  const r = s.done(source, { state: "blocked" });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(readFileSync(s.report, "utf8"), "# Nested\n");
+  assert.equal(readFileSync(source, "utf8"), "# Nested\n");
+  assert.equal(git(nested, "status", "--porcelain"), "");
+});
+
+test("worker done refuses a folder at the report path and leaves no temporary file", (t) => {
+  const s = doneScene(t);
+  mkdirSync(s.report, { recursive: true });
+  const r = s.done();
+  assert.equal(r.code, 1, r.err);
+  assert.deepEqual(readdirSync(s.reports), [s.name + ".md"]);
+  assert.equal(s.pane().state, "live");
+  assert.equal(readFileSync(s.input, "utf8"), "# Finished\n");
+});
+
+test("worker done adopts an unmarked report folder and writes a private full-key marker", (t) => {
+  const s = doneScene(t);
+  mkdirSync(s.reports, { recursive: true });
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  const marker = join(dirname(s.reports), "project.json");
+  assert.deepEqual(JSON.parse(readFileSync(marker, "utf8")), { key: s.project });
+  assert.equal(statSync(marker).mode & 0o777, 0o600);
+});
+
+test("worker done gives one plain line for a broken marker or a file in place of a folder", (t) => {
+  const s = doneScene(t);
+  const projectHome = dirname(s.reports);
+  mkdirSync(projectHome, { recursive: true });
+  const marker = join(projectHome, "project.json");
+  writeFileSync(marker, "{bad json", { mode: 0o600 });
+  assert.equal(s.done().err, `am: Invalid project marker ${marker}.\n`);
+  rmSync(projectHome, { recursive: true });
+  writeFileSync(projectHome, "Keep me");
+  assert.equal(s.done().err, `am: Couldn't create report folder ${projectHome}.\n`);
+  assert.equal(readFileSync(projectHome, "utf8"), "Keep me");
+  assert.deepEqual(s.retirement(), []);
+});
+
+for (const occupied of [false, true]) {
+  test(`worker done checks the fallback project marker (occupied: ${occupied})`, (t) => {
+    const s = doneScene(t);
+    const base = dirname(s.reports);
+    const suffix = createHash("sha256").update(s.project).digest("hex").slice(0, 12);
+    const alternate = `${base}-${suffix}`;
+    const forOtherProject = (dir) => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "project.json"), JSON.stringify({ key: join(s.root, "other") }),
+        { mode: 0o600 });
+    };
+    forOtherProject(base);
+    if (occupied) forOtherProject(alternate);
+    const r = s.done();
+    if (occupied) {
+      assert.equal(r.code, 1, r.err);
+      assert.match(r.err, /Project report folders collide/);
+      assert.deepEqual(s.retirement(), []);
+    } else {
+      assert.equal(r.code, 0, r.err);
+      assert.equal(r.json().report, join(alternate, "reports", s.name + ".md"));
+      assert.deepEqual(JSON.parse(readFileSync(join(alternate, "project.json"), "utf8")),
+        { key: s.project });
+    }
+    assert.deepEqual(JSON.parse(readFileSync(join(base, "project.json"), "utf8")),
+      { key: join(s.root, "other") });
+  });
+}
+
+test("worker done refuses symlinks in the report directory path and its marker", (t) => {
+  const s = doneScene(t);
+  const elsewhere = join(s.root, "elsewhere");
+  mkdirSync(elsewhere);
+  const alias = join(s.root, "state-alias");
+  symlinkSync(elsewhere, alias);
+  s.helperEnv({ AM_HOME: join(alias, "state") });
+  assert.match(s.done().err, /symlink/);
+  s.helperEnv();
+  const base = dirname(s.reports);
+  mkdirSync(base, { recursive: true });
+  const marker = join(base, "project.json");
+  const target = join(elsewhere, "marker.json");
+  writeFileSync(target, JSON.stringify({ key: s.project }), { mode: 0o600 });
+  symlinkSync(target, marker);
+  assert.match(s.done().err, /verify private project marker/);
+  rmSync(marker);
+  symlinkSync(elsewhere, s.reports);
+  assert.match(s.done().err, /symlink/);
+  assert.equal(s.pane().state, "live");
+  assert.deepEqual(s.retirement(), []);
+  assert.deepEqual(readdirSync(elsewhere), ["marker.json"]);
+});
+
+for (const kind of ["nonregular", "nonmarkdown"]) {
+  test(`worker done expiry keeps old ${kind} entries`, (t) => {
+    const s = doneScene(t);
+    mkdirSync(s.reports, { recursive: true });
+    const file = join(s.reports, kind === "nonregular" ? "old.md" : "old.txt");
+    if (kind === "nonregular") mkdirSync(file);
+    else writeFileSync(file, "keep");
+    const stamp = new Date(Date.now() - 31 * 86_400_000);
+    utimesSync(file, stamp, stamp);
+    const r = s.done();
+    assert.equal(r.code, 0, r.err);
+    assert.equal(existsSync(file), true);
+  });
+}
+
+test("worker done refuses a dirty tree, then blocked saves and unlinks the untracked report", (t) => {
+  const s = doneScene(t);
+  const file = join(s.worktree, "blocker.md");
+  writeFileSync(file, "# Waiting for access\nMore information\n");
+  const dirty = s.done(file);
+  assert.equal(dirty.code, 1, dirty.err);
+  assert.match(dirty.err, /uncommitted changes.*--state blocked/);
+  assert.deepEqual(s.retirement(), []);
+  assert.equal(existsSync(s.report), false);
+  assert.equal(s.pane().state, "live");
+  const r = s.done(file, { state: "blocked" });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(existsSync(file), false);
+  assert.equal(existsSync(s.worktree), true);
+  assert.equal(s.pane(), undefined);
+  const line = `[am] worker ${s.name} blocked · branch fix/report · report ${s.report}`
+    + " · # Waiting for access";
+  assert.deepEqual(s.hcState().sent, [{ to: "t1", text: line }]);
+});
+
+test("worker done keeps a tracked report and a failed PR lookup cannot stop retirement", (t) => {
+  const s = doneScene(t);
+  const file = join(s.worktree, "tracked.md");
+  writeFileSync(file, "# Tracked\n");
+  git(s.worktree, "add", "tracked.md");
+  git(s.worktree, "commit", "-m", "track report");
+  const r = s.done(file);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(readFileSync(s.report, "utf8"), "# Tracked\n");
+  assert.equal(readFileSync(file, "utf8"), "# Tracked\n");
+  assert.equal(Object.hasOwn(r.json(), "pr"), false);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send", "kill", "rm"]);
+});
+
+test("worker done refuses oversized reports and paths outside the allowed roots", (t) => {
+  const s = doneScene(t);
+  const outsideFile = join(s.root, "elsewhere.md");
+  writeFileSync(outsideFile, "# Outside the allowed roots\n");
+  writeFileSync(s.input, Buffer.alloc(64 * 1024 + 1));
+  // Set the process temp folder to a sibling of the candidate so outside is genuinely outside.
+  const temp = join(s.root, "allowed-temp");
+  mkdirSync(temp);
+  const opts = { env: { TMPDIR: temp } };
+  const input = join(temp, "input.md");
+  writeFileSync(input, "# Within the allowed roots\n");
+  const pointsOut = join(temp, "points-out.md");
+  const pointsIn = join(s.root, "points-in.md");
+  symlinkSync(outsideFile, pointsOut);
+  symlinkSync(input, pointsIn);
+  for (const r of [
+    s.done(outsideFile, opts), s.done(pointsOut, opts), s.done(pointsIn, opts), s.done(),
+  ]) {
+    assert.equal(r.code, 2, r.err);
+    assert.match(r.err, /readable .md file up to 64 KiB/);
+  }
+  assert.equal(s.pane().state, "live");
+  assert.deepEqual(s.retirement(), []);
+});
+
+test("worker done replaces and expires reports, wakes once and records the end", (t) => {
+  const s = doneScene(t);
+  withOrigin(s);
+  const old = join(s.reports, "old.md"), kept = join(s.reports, "kept.md");
+  const unrelated = join(dirname(s.reports), "keep.md");
+  mkdirSync(s.reports, { recursive: true });
+  for (const [path, days] of [[old, 31], [kept, 29], [unrelated, 31], [s.report, 60]]) {
+    writeFileSync(path, "previous");
+    const stamp = new Date(Date.now() - days * 86_400_000);
+    utimesSync(path, stamp, stamp);
+  }
+  chmodSync(s.report, 0o644);
+  writeFileSync(join(s.root, "gh.json"), '{"number":42}');
+  const summary = "é".repeat(120);
+  const body = `${summary}end\r\nSecond line\n`;
+  writeFileSync(s.input, body);
+  const bin = join(s.root, "bin/hc");
+  const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+  exe(bin, `#!/bin/sh
+case "$1" in
+  send|kill|rm) cmp -s "${s.input}" "${s.report}" || exit 88 ;;
+esac
+case "$1" in
+  send) [ ! -e "${old}" ] && grep -q '"event":"report"' "${ledger}" || exit 89 ;;
+  rm) grep -q '"event":"end"' "${ledger}" || exit 90 ;;
+esac
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.equal(readFileSync(s.report, "utf8"), body);
+  assert.equal(statSync(s.report).mode & 0o777, 0o600);
+  assert.equal(existsSync(old), false);
+  assert.equal(readFileSync(kept, "utf8"), "previous");
+  assert.equal(readFileSync(unrelated, "utf8"), "previous");
+  assert.equal(existsSync(s.input), true);
+  assert.equal(existsSync(s.worktree), true);
+  const header = `[am] worker ${s.name} done · branch fix/report · PR #42 · report ${s.report} · `;
+  const line = header + summary.slice(0, 240 - header.length);
+  assert.equal(line.length, 240);
+  assert.deepEqual(s.hcState().sent, [{ to: "t1", text: line }]);
+  assert.deepEqual(s.retirement().map((call) => call.slice(0, 2)),
+    [["send", "t1"], ["kill", s.terminal], ["rm", s.terminal]]);
+  const end = s.ledger().find((row) => row.event === "end" && row.terminal === s.terminal);
+  assert.equal(end.hc_reason, "killed");
+  assert.ok(Date.now() - Date.parse(end.at) < 15 * 60_000);
+  assert.equal(s.pane(), undefined);
+  const reap = s.cli(["reap", "--json"], { from: null });
+  assert.equal(reap.code, 0, reap.err);
+  assert.equal(reap.json().waiting, 1);
+  assert.equal(existsSync(s.worktree), true);
+});
+
+test("worker done removes its own helpers and leaves another bot's descendants listed", (t) => {
+  const s = doneScene(t);
+  const state = s.hcState();
+  const child = (address, properties = {}) => ({
+    ...term(address, { cwd: s.project }), parent: s.terminal, die_with_parent: true, ...properties,
+  });
+  state.terminals.push(child("t501"), child("t502", { labels: { [WORKER_OF_LABEL]: ID.cap } }),
+    child("t503", { die_with_parent: false }), child("t504", { parent: "t503" }),
+    child("t505", { parent: "t502" }));
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.retirement().filter(([verb]) => verb === "rm").map(([, address]) => address),
+    ["t501", s.terminal]);
+  const current = s.hcState().terminals;
+  assert.equal(current.find((p) => p.address === "t502")?.state, "finished");
+  assert.equal(current.find((p) => p.address === "t505")?.state, "finished");
+  for (const address of ["t503", "t504"]) {
+    assert.equal(current.find((p) => p.address === address)?.state, "live");
+  }
+});
+
+test("worker done leaves one fallback line and a killable pane when retirement fails", (t) => {
+  const s = doneScene(t);
+  s.patch({ status: { state: "idle" } });
+  const state = s.hcState();
+  state.failKill = s.terminal;
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.done();
+  assert.equal(r.code, 1, r.err);
+  assert.equal(existsSync(s.report), true);
+  assert.deepEqual(r.err.trim().split("\n"), [
+    `am: Report saved at ${s.report}. Couldn't end ${s.terminal}. `
+      + `Ask its bot to run am worker kill ${s.terminal}.`,
+  ]);
+  assert.equal(s.pane().state, "live");
+  assert.equal(s.hcState().sent.length, 1);
+  const refreshed = s.hcState();
+  delete refreshed.failKill;
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(refreshed));
+  const retry = s.done();
+  assert.equal(retry.code, 0, retry.err);
+  assert.equal(s.hcState().sent.length, 1);
+  assert.equal(s.pane(), undefined);
+});
+
+test("worker done reports failed lead delivery and still ends the pane", (t) => {
+  const s = doneScene(t);
+  const state = s.hcState();
+  state.failSend = ["t1"];
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.err.trim(), `am: The lead was not told. Report saved at ${s.report}.`);
+  assert.equal(existsSync(s.report), true);
+  assert.equal(s.pane(), undefined);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send", "kill", "rm"]);
+  assert.equal(s.hcState().sent, undefined);
+});
+
+test("worker done rechecks its generation after notification and before killing", (t) => {
+  const s = doneScene(t);
+  const change = patchWorkerPaneCommand(s, s.terminal, { created_ms: s.pane().created_ms + 1 });
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1" = send ]; then
+  "${process.execPath}" "${FAKE_HC}" "$@" && ${change}
+  exit $?
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.done();
+  assert.equal(r.code, 1, r.err);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send"]);
+  assert.equal(s.pane().state, "live");
+});
+
+test("worker done rechecks the core after notification and before killing", (t) => {
+  const s = doneScene(t);
+  const script = join(s.root, "change-core.mjs");
+  writeFileSync(script, `import { readFileSync, writeFileSync } from "node:fs";
+const file = ${JSON.stringify(s.env.HC_FAKE_STATE)};
+const state = JSON.parse(readFileSync(file, "utf8"));
+state.core = { id: "othercore0000", name: "other-core" };
+writeFileSync(file, JSON.stringify(state));
+`);
+  exe(join(s.root, "bin/hc"), `#!/bin/sh
+if [ "$1" = send ]; then
+  "${process.execPath}" "${FAKE_HC}" "$@" && "${process.execPath}" "${script}"
+  exit $?
+fi
+exec "${process.execPath}" "${FAKE_HC}" "$@"
+`);
+  const r = s.done();
+  assert.equal(r.code, 1, r.err);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send"]);
+  assert.equal(s.pane().state, "live");
+});
+
+test("worker done resolves session leads through the worker ledger's bot", (t) => {
+  const s = doneScene(t);
+  const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+  const rows = s.ledger();
+  const worker = rows.find((row) => row.terminal === s.terminal);
+  worker.lead = "session-00000000-0000-4000-8000-000000000000";
+  writeFileSync(ledger, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.retirement().map(([verb, address]) => [verb, address]),
+    [["send", "t1"], ["kill", s.terminal], ["rm", s.terminal]]);
+});
+
+test("worker done strips terminal controls and bidi characters from the wake fields", (t) => {
+  const s = doneScene(t);
+  const ledger = join(s.app, "automagik-herdr/workers.jsonl");
+  const rows = s.ledger();
+  rows.find((row) => row.terminal === s.terminal).branch = "fix/re\u202eport";
+  writeFileSync(ledger, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  writeFileSync(s.input, "Re\x1bport\u2069 ready\u2028another line");
+  const amHome = join(s.root, "am-\u200fhome");
+  s.helperEnv({ AM_HOME: amHome });
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  const path = join(s.root, "am-home/projects/proj/reports", s.name + ".md");
+  assert.deepEqual(s.hcState().sent, [{ to: "t1",
+    text: `[am] worker ${s.name} done · branch fix/report · report ${path} · Report ready` }]);
+});
+
+for (const summary of ["A result", undefined]) {
+  test(`worker done skips blank lines in the summary (${summary ?? "empty"})`, (t) => {
+    const s = doneScene(t);
+    writeFileSync(s.input, `\n \r\n\u2069\n${summary ?? ""}\n`);
+    const r = s.done();
+    assert.equal(r.code, 0, r.err);
+    assert.equal(r.json().summary, summary);
+    const line = `[am] worker ${s.name} done · branch ${s.branch} · report ${s.report}`;
+    assert.deepEqual(s.hcState().sent, [{ to: "t1",
+      text: summary ? `${line} · ${summary}` : line,
+    }]);
+  });
+}
+
+for (const fullPathFits of [true, false]) {
+  test(`worker done wakes the lead with a long report path (fits: ${fullPathFits})`, (t) => {
+    const s = doneScene(t);
+    const prefix = `[am] worker ${s.name} done · branch ${s.branch} · report `;
+    const base = join(s.root, "a", "projects", "proj", "reports", s.name + ".md");
+    const filler = fullPathFits ? 240 - prefix.length - base.length + 1 : 248;
+    const amHome = join(s.root, "a".repeat(filler));
+    s.helperEnv({ AM_HOME: amHome });
+    const r = s.done();
+    assert.equal(r.code, 0, r.err);
+    const report = join(amHome, "projects", "proj", "reports", s.name + ".md");
+    assert.equal(r.json().report, report);
+    assert.deepEqual(s.hcState().sent, [{ to: "t1",
+      text: prefix + (fullPathFits ? report : s.name + ".md"),
+    }]);
+  });
+}
+
+for (const kind of ["gone", "reused", "held"]) {
+  test(`worker done still ends when its lead is ${kind}`, (t) => {
+    const s = doneScene(t);
+    const state = s.hcState();
+    const lead = state.terminals.find((p) => p.address === "t1");
+    if (kind === "gone") state.terminals = state.terminals.filter((p) => p !== lead);
+    if (kind === "reused") lead.created_ms += 1;
+    if (kind === "held") lead.status = { state: "blocked" };
+    writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+    const r = s.done();
+    assert.equal(r.code, 0, r.err);
+    assert.equal(r.err.trim(), `am: The lead was not told. Report saved at ${s.report}.`);
+    assert.deepEqual(s.retirement().map(([verb]) => verb), ["kill", "rm"]);
+    assert.equal(s.pane(), undefined);
+  });
+}
+
+test("worker done keeps a pane with changed identity at the removal recheck", (t) => {
+  const s = doneScene(t);
+  const state = s.hcState();
+  state.afterKill = { terminal: s.terminal, patch: { created_ms: s.pane().created_ms + 1 } };
+  // The kill result still identifies the worker originally checked.
+  state.killReply = { [s.terminal]: {
+    address: s.terminal, created_ms: s.pane().created_ms, state: "finished",
+    reason: "killed", finished_ms: Date.now() + 60_000,
+  } };
+  state.afterKill.patch.finished_ms = state.killReply[s.terminal].finished_ms;
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send", "kill"]);
+  assert.equal(s.pane().state, "finished");
+});
+
+test("worker done keeps a cascade child whose generation changed", (t) => {
+  const s = doneScene(t);
+  const state = s.hcState();
+  state.terminals.push({ ...term("t501", { cwd: s.project }),
+    parent: s.terminal, die_with_parent: true });
+  state.afterKill = { terminal: "t501", patch: { created_ms: 2 } };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.retirement().map(([verb, address]) => [verb, address]),
+    [["send", "t1"], ["kill", s.terminal], ["rm", s.terminal]]);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t501")?.state, "finished");
+});
+
+test("worker done keeps the pane and source when the kill replies for another generation", (t) => {
+  const s = doneScene(t);
+  const source = join(s.worktree, "untracked-report.md");
+  writeFileSync(source, "Keep me");
+  const state = s.hcState();
+  const changed = { created_ms: s.pane().created_ms + 1, finished_ms: Date.now() + 60_000 };
+  state.afterKill = { terminal: s.terminal, patch: changed };
+  state.killReply = { [s.terminal]: {
+    address: s.terminal, state: "finished", reason: "killed", ...changed,
+  } };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.done(source, { state: "blocked" });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send", "kill"]);
+  assert.equal(s.pane().state, "finished");
+  assert.ok(existsSync(source), "keep the source until this pane's kill is confirmed");
+  assert.equal(readFileSync(source, "utf8"), "Keep me");
+});
+
+test("worker done keeps a pane whose finish reason changed at the removal recheck", (t) => {
+  const s = doneScene(t);
+  const state = s.hcState();
+  const finished_ms = Date.now() + 60_000;
+  state.afterKill = { terminal: s.terminal, patch: { reason: "exited", finished_ms } };
+  state.killReply = { [s.terminal]: {
+    address: s.terminal, created_ms: s.pane().created_ms, state: "finished",
+    reason: "killed", finished_ms,
+  } };
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send", "kill"]);
+  assert.equal(s.pane().state, "finished");
+});
+
+test("worker done leaves one manual removal line when hc refuses removal", (t) => {
+  const s = doneScene(t);
+  const state = s.hcState();
+  state.failRm = s.terminal;
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  const r = s.done();
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.err.trim().split("\n"),
+    [`am: ${s.terminal} was left listed. Run hc rm ${s.terminal}`]);
+  assert.equal(s.pane().state, "finished");
+});
+
+test("concurrent worker done calls keep one report and send one wake", async (t) => {
+  const s = doneScene(t);
+  const second = join(s.root, "other-report.md");
+  writeFileSync(second, "# Other outcome\n");
+  writeFileSync(join(s.root, "gh-hook.sh"), "sleep 0.5\n");
+  const done = (file) => s.cliAsync(["worker", "done", "--report", file, "--json"],
+    { from: s.terminal, env: { AM_HOME: s.amHome } });
+  const results = await Promise.all([done(s.input), done(second)]);
+  assert.deepEqual(results.map((r) => r.code).sort(), [0, 2]);
+  const result = JSON.parse(results.find((r) => r.code === 0).out);
+  assert.equal(readFileSync(s.report, "utf8"), `${result.summary}\n`);
+  const text = `[am] worker ${s.name} done · branch fix/report · report ${s.report}`
+    + ` · ${result.summary}`;
+  assert.deepEqual(s.hcState().sent, [{ to: "t1", text }]);
+  assert.deepEqual(s.retirement().map(([verb]) => verb), ["send", "kill", "rm"]);
 });
 
 test("worker kill reports a live reply without claiming it ended", (t) => {
@@ -1996,7 +3130,8 @@ test("the bot briefing says a bot doesn't code: one worker per task, checked, en
   const text = briefingText({ self: { ...file.bots[2], instructions: "x".repeat(4000) }, file });
   assert.ok(text.includes(WORKER_LINE));
   assert.match(WORKER_LINE, /am worker/);
-  assert.match(WORKER_LINE, /end it with `am worker kill <terminal>` once the task merges/);
+  assert.match(WORKER_LINE, /reports and closes its pane with `am worker done --report <file>`/);
+  assert.match(WORKER_LINE, /still listed once the task merges, end it with `am worker kill <terminal>`/);
   assert.doesNotMatch(WORKER_LINE, /hc kill/, "hc kill is the main bot's only (#955)");
   assert.ok(text.length <= BRIEFING_LIMIT);
 });
@@ -4683,7 +5818,9 @@ test("unproxied worker CLI stays on the guard path with switch off and forged en
     "an unproxied pane retains server.status for core id");
 });
 
-async function startOneShotTransportServer(t, socketPath, result, { status = { core: { id: "fakecore0000" } } } = {}) {
+async function startOneShotTransportServer(t, socketPath, result, {
+  status = { core: { id: "fakecore0000" } }, proxyStatus,
+} = {}) {
   const requests = [];
   const sockets = new Set();
   const server = net.createServer((socket) => {
@@ -4699,6 +5836,7 @@ async function startOneShotTransportServer(t, socketPath, result, { status = { c
       const { id, method } = JSON.parse(input.slice(0, newline));
       requests.push(method);
       const answer = method === "server.status" && status ? { result: status }
+        : method === "proxy.status" && proxyStatus ? { result: proxyStatus }
         : method === "proxy.workerTransport" && result ? { result } : { error: { code: -32601, message: "unknown method" } };
       socket.end(JSON.stringify({ jsonrpc: "2.0", id, ...answer }) + "\n");
     });
@@ -4723,6 +5861,25 @@ async function startOneShotTransportServer(t, socketPath, result, { status = { c
   });
   return { calls: (method) => requests.filter((request) => request === method).length, closeServer };
 }
+
+test("worker done names the per-pane proxy's missing exec route", async (t) => {
+  const s = doneScene(t);
+  const dir = shortSocketDir(t, "hw-");
+  const socket = join(dir, "proxy.sock");
+  const proxy = await startOneShotTransportServer(t, socket, null, {
+    proxyStatus: { v: 1, terminal: s.terminal },
+  });
+  const r = await s.cliAsync(["worker", "done", "--report", s.input], { from: s.terminal, env: {
+    HC_SOCKET: socket, HC_TERMINAL_SOCKET: socket, AM_HOME: s.amHome,
+    AUTOMAGIK_HERDR_TEST_ROOTS: `${s.env.AUTOMAGIK_HERDR_TEST_ROOTS}:${dir}`,
+  } });
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /per-pane hc proxy cannot start.*am worker kill/);
+  assert.equal(proxy.calls("proxy.status"), 1);
+  assert.equal(s.calls().some(([verb]) => verb === "exec"), false);
+  assert.equal(s.pane().state, "live");
+  assert.equal(existsSync(s.report), false);
+});
 
 test("worker transport rejects a mismatched terminal for core id and routing", async (t) => {
   const s = scene(t);
