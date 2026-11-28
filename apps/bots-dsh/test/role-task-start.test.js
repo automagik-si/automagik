@@ -745,3 +745,41 @@ test('D3 final: refused allocation cleanup survives same-team writer adoption', 
   assert.deepEqual(h.dispatched, [kept])
   assert.deepEqual(await scopedIds(), baseline)
 })
+
+test('registry grants keep legacy task refusals until the task admission migration', async t => {
+  const h = await fixture(t)
+  const declaration = { id: 'operator', name: 'Operator', capabilities: ['task-start', 'route-policy'] }
+  h.rt.hooks.role(declaration)
+  await h.rt.attachRole('solver', declaration.id)
+  const legacy = /Only a Main Bot or the Omni Bot starts tasks/
+  assert.match(await h.execute('solver'), legacy)
+  for (const capability of declaration.capabilities) await h.grant('solver', capability)
+  assert.equal(h.rt.roleRuntime.grantOf('solver', 'task-start'), 'granted')
+  assert.match(await h.execute('solver'), legacy)
+  const named = { ...task, model: 'native-a/one' }
+  assert.match(await h.execute('solver', named), /Naming a model for a task is not allowed/)
+  assert.deepEqual(h.created, [])
+  assert.deepEqual(h.dispatched, [])
+  await h.attach('tasker')
+  await h.rt.grantRole({ id: 'solver', role: 'tasker', capability: 'task-start', on: true })
+  assert.match(await h.execute('solver', named), /Naming a model for a task is not allowed/)
+  assert.match(await h.execute('solver'), /^Started task/)
+})
+
+test('dispatch refuses a provider identity change with identical role IDs and grants', async t => {
+  const h = await fixture(t)
+  await h.attach('tasker')
+  await h.grant('solver', 'task-start')
+  const definition = { id: 'operator', name: 'Operator', capabilities: [], tools: [] }
+  const dispose = h.rt.hooks.role(definition)
+  await h.rt.attachRole('solver', definition.id)
+  h.rt.modelAccess = async () => {
+    dispose()
+    h.rt.hooks.role(definition)
+    assert.equal(h.rt.roleRuntime.grantOf('solver', 'task-start'), 'granted')
+    return { ready: true }
+  }
+  assert.match(await h.execute('solver'), changed)
+  assert.deepEqual(h.created, [])
+  assert.deepEqual(h.dispatched, [])
+})

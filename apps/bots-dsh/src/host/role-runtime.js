@@ -1,5 +1,5 @@
 import { defineTool, parameterSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
-import { packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
+import { attachedRoles, isPackageRoleId, packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
 import { SOLVER_ROLE_ID, solverLimitsPart, solverReviewPart } from '../shared/solver-method.js'
 import { solverTracked } from './solver-progress.js'
 import { routeOf } from '../shared/routes.js'
@@ -45,26 +45,39 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     : rt.chatOwners?.get(sessionId) ?? rt.groupOwners?.get(sessionId)?.botId
   const promptOwner = sessionId => rt.roomOwners?.has(sessionId) ? undefined : rt.selfOf?.(sessionId)
   const ownBot = id => rt.own?.(state.bots, id)
-  const enabled = () => !disposed && rolesOn(state.prefs) && rt.readOnly?.() === undefined && rt.holdsLock?.() === true
-  const current = (id, held) => enabled() && attachments.get(id) === held && ownBot(id) === held.bot
-    && sameRolePin(packageAttachment(held.bot), held.pin) && packages.recordOf(held.pin.id) === held.record
-    && !packages.damaged(held.record)
-  const active = id => {
-    const held = attachments.get(id)
-    return held?.runtime && current(id, held) ? held : undefined
+  const enabled = () => !disposed && rt.readOnly?.() === undefined && rt.holdsLock?.() === true
+  const keyOf = (id, pin) => JSON.stringify([id, pin.id])
+  const identityOf = ({ id, version, attachedAt, source }) => ({ id, version, attachedAt, ...(source ? { source } : {}) })
+  const pinOf = held => attachedRoles(held.bot).find(pin => sameRolePin(pin, held.pin))
+  const current = (id, held) => enabled() && id === held.bot.id
+    && attachments.get(keyOf(id, held.pin)) === held && ownBot(id) === held.bot && pinOf(held)
+    && (held.pin.source === 'registry'
+      ? rt.hasCommittedRole?.(id, held.pin.id) === true && rt.roleRegistry?.of(held.pin.id) === held.record
+      : rolesOn(state.prefs) && (attachedRoles(held.bot).length < 2 || rt.hasCommittedRole?.(id, held.pin.id) === true)
+        && packages.recordOf(held.pin.id) === held.record && !packages.damaged(held.record))
+  const heldsOf = id => attachedRoles(ownBot(id)).flatMap(pin => {
+    const held = attachments.get(keyOf(id, pin))
+    return held?.manifest && current(id, held) ? [held] : []
+  })
+  const heldOf = (id, roleId) => heldsOf(id).find(held => held.pin.id === (roleId ?? packageAttachment(ownBot(id))?.id))
+  const active = (id, roleId) => {
+    const held = heldOf(id, roleId)
+    return held?.runtime ? held : undefined
   }
-  const capabilitiesOf = held => BUNDLED_ROLE_IDS.includes(held.pin.id) && packages.verifiedBundled(held.record)
-    ? BUNDLED_ROLE_CAPABILITIES[held.pin.id] : held.manifest?.capabilities ?? []
-  const heldOf = id => {
-    const held = attachments.get(id)
-    return held?.manifest && current(id, held) ? held : undefined
-  }
+  const capabilitiesOf = held => held.pin.source === undefined && BUNDLED_ROLE_IDS.includes(held.pin.id)
+    && packages.verifiedBundled(held.record) ? BUNDLED_ROLE_CAPABILITIES[held.pin.id] : held.manifest?.capabilities ?? []
   const granted = (held, capability) => current(held.bot.id, held)
-    && capabilitiesOf(held).includes(capability) && held.bot.roles[0].grants.includes(capability)
+    && capabilitiesOf(held).includes(capability) && pinOf(held).grants.includes(capability)
   const grantOf = (id, capability) => {
+    const candidates = heldsOf(id).filter(held => capabilitiesOf(held).includes(capability))
+    if (candidates.some(held => granted(held, capability))) return 'granted'
+    if (candidates.length) return 'declared'
+  }
+
+  // Until the task-admission migration, start_task uses the legacy catalog projection.
+  const legacyTaskGrant = (id, capability) => {
     const held = heldOf(id)
-    if (held === undefined || !capabilitiesOf(held).includes(capability)) return undefined
-    return held.bot.roles[0].grants.includes(capability) ? 'granted' : 'declared'
+    if (held && capabilitiesOf(held).includes(capability)) return granted(held, capability) ? 'granted' : 'declared'
   }
 
   async function moduleFor(details, sha256) {
@@ -179,41 +192,52 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
 
   function reconcile() {
-    for (const [id, held] of attachments) if (!current(id, held)) drop(id, held)
+    for (const [key, held] of attachments) if (!current(held.bot.id, held)) drop(key, held)
     for (const [sessionId, snapshot] of turnPrompts) {
       if (promptOwner(sessionId) !== snapshot.id || ownBot(snapshot.id) !== snapshot.bot) turnPrompts.delete(sessionId)
     }
     voice.cancelInvalid()
     if (!enabled()) return
     for (const [id, bot] of Object.entries(state.bots ?? {})) {
-      if (attachments.has(id)) continue
-      const pin = packageAttachment(bot)
-      if (!pin) continue
-      const record = packages.recordOf(pin.id)
-      if (!record || record.version !== pin.version || packages.damaged(record)) continue
-      if (rt.botRunnerRequired !== undefined && !warnedRunner) {
-        warnedRunner = true
-        rt.warn('ds-bot: Bot role modules skipped: %s', NO_BOT_RUNNER_REASON)
+      for (const pin of attachedRoles(bot)) {
+        const key = keyOf(id, pin)
+        if (attachments.has(key)) continue
+        if (pin.source === 'registry') {
+          const record = rt.roleRegistry?.of(pin.id)
+          if (!record || record.version !== pin.version || rt.hasCommittedRole?.(id, pin.id) !== true) continue
+          const manifest = { ...record, settings: record.settings ?? [] }
+          const runtime = { manifest, prompt: record.prompt, tools: [], dispose() {} }
+          attachments.set(key, { pin, record, bot, manifest, runtime })
+          continue
+        }
+        if (!rolesOn(state.prefs) || !isPackageRoleId(pin.id)) continue
+        const record = packages.recordOf(pin.id)
+        if (!record || record.version !== pin.version || packages.damaged(record)) continue
+        if (rt.botRunnerRequired !== undefined && !warnedRunner) {
+          warnedRunner = true
+          rt.warn('ds-bot: Bot role modules skipped: %s', NO_BOT_RUNNER_REASON)
+        }
+        const held = { pin, record, bot }
+        attachments.set(key, held)
+        held.ready = load(held)
       }
-      const held = { pin, record, bot }
-      attachments.set(id, held)
-      held.ready = load(held)
     }
   }
 
   function tools(agent, existing) {
     const sessionId = agent.session?.id ?? agent.id
     const id = owner(sessionId)
-    const held = id === undefined ? undefined : active(id)
-    if (!held?.runtime.tools.length) return undefined
-    if (held === existing) return { key: held }
+    const holders = heldsOf(id).filter(held => held.runtime?.tools.length)
+    if (!holders.length) return undefined
+    if (Array.isArray(existing) && holders.length === existing.length
+      && holders.every((held, i) => held === existing[i])) return { key: existing }
     let registered = true
     let lastTurn
     const executions = new Map()
     return {
-      key: held,
+      key: holders,
       dispose() { registered = false; voice.cancelInvalid() },
-      definitions: held.runtime.tools.map(({ definition, bounds, handler }) => defineTool({
+      definitions: holders.flatMap(held => held.runtime.tools.map(({ definition, bounds, handler }) => defineTool({
         ...definition,
         output,
         execute(args, exec) {
@@ -235,7 +259,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
           }
           return result
         },
-      })),
+      }))),
     }
   }
 
@@ -284,7 +308,8 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
   const savedWarning = bot => [bot.appliedModel, bot.model].map(providerOf).map(providerWarning).find(Boolean)
   const sessionsOf = bot => [rt.chatOf?.(bot.id), ...(rt.groupSessionsOf?.(bot.id) ?? [])].filter(Boolean)
-  const isWaitingSolver = held => held.pin.id === SOLVER_ROLE_ID && held.bot.waitingRole?.id === SOLVER_ROLE_ID
+  const isCatalogSolver = held => held?.pin.id === SOLVER_ROLE_ID && held.pin.source !== 'registry'
+  const isWaitingSolver = held => isCatalogSolver(held) && held.bot.waitingRole?.id === SOLVER_ROLE_ID
   function liveProvider(sessionId, session) {
     try {
       const agent = ctx.get?.('agents')?.get?.(sessionId)
@@ -329,17 +354,34 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       if (warning) return warning
     }
   }
-  function partOf(sessionId, held, bot) {
-    const limits = solverTracked(bot) && rt.chatOwners?.get(sessionId) === bot.id ? solverLimitsPart(bot) : undefined
-    const role = held?.runtime.prompt?.trim() && (owner(sessionId) !== undefined || promptOnly(held.manifest))
+  function partOf(sessionId, held, bot, includeLimits = true) {
+    const limits = includeLimits && solverTracked(bot) && rt.chatOwners?.get(sessionId) === bot.id ? solverLimitsPart(bot) : undefined
+    let text = held?.runtime.prompt
+    if (typeof text === 'function') {
+      try { text = text(bot.id, sessionId) } catch { text = undefined }
+      if (!current(bot.id, held)) text = undefined
+    }
+    const role = typeof text === 'string' && text.trim()
+      && (owner(sessionId) !== undefined || promptOnly(held.manifest))
     if (!role) return limits ? `<role-prompt id="solver">\n${limits}\n</role-prompt>` : undefined
-    const solver = held.pin.id === SOLVER_ROLE_ID
-    const pieces = [held.runtime.prompt.trimEnd(), ...(solver ? [solverReviewPart(held.bot, ownBot)] : []), ...(limits ? [limits] : [])]
+    const solver = isCatalogSolver(held)
+    const pieces = [text.trimEnd(), ...(solver ? [solverReviewPart(held.bot, ownBot)] : []), ...(limits ? [limits] : [])]
     return `<role-prompt id="${held.pin.id}">\n${pieces.join('\n')}\n</role-prompt>`
   }
+  function partsOf(sessionId, id, bot) {
+    const holders = heldsOf(id).filter(held => held.runtime)
+    const lead = holders.find(isCatalogSolver) ?? holders[0]
+    if (!lead) return partOf(sessionId, undefined, bot)
+    return holders.map(held => partOf(sessionId, held, bot, held === lead)).filter(Boolean).join('\n') || undefined
+  }
+  const registryHolders = id => heldsOf(id).filter(held => held.pin.source === 'registry')
   function partFor(sessionId, id) {
     const turn = turnPrompts.get(sessionId)
-    return turn?.id === id ? turn.part : partOf(sessionId, active(id), ownBot(id))
+    if (turn?.id === id) {
+      const current = registryHolders(id)
+      if (current.length === turn.registry.length && current.every((held, index) => held === turn.registry[index])) return turn.part
+    }
+    return partsOf(sessionId, id, ownBot(id))
   }
   function prompt(sessionId, agent) {
     const id = promptOwner(sessionId)
@@ -371,49 +413,58 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       const id = promptOwner(sessionId)
       const bot = ownBot(id)
       if (!bot) return
-      const held = active(id)
-      const part = partOf(sessionId, held, bot)
+      const held = active(id, SOLVER_ROLE_ID)
+      const part = partsOf(sessionId, id, bot)
       // A greeting may begin before attachment. Keep its complete method if
       // writing the new pin later clears the instructions on the live Bot.
       let instructions
       if (bot.waitingRole?.id === SOLVER_ROLE_ID) {
         const provider = liveProvider(sessionId, session)
-        if (!held?.runtime.prompt?.trim() || (provider ? providerWarning(provider) : savedWarning(bot))) instructions = bot.instructions
+        if (!isCatalogSolver(held) || !held.runtime?.prompt?.trim() || (provider ? providerWarning(provider) : savedWarning(bot))) instructions = bot.instructions
       }
-      turnPrompts.set(sessionId, { id, bot, part, instructions })
+      turnPrompts.set(sessionId, { id, bot, part, instructions, registry: registryHolders(id) })
     }
   }
 
   function requireAttachment(id, pin) {
     if (!ownBot(id)) throw refusal('No such Bot')
-    const held = attachments.get(id)
+    const held = heldOf(id, pin?.id)
     if (!held?.manifest || !current(id, held) || !sameRolePin(held.pin, pin)) throw refusal(inactive)
     return held
   }
 
-  function view(routes) {
-    return Object.fromEntries([...attachments].flatMap(([id, held]) => {
-      if (!current(id, held) || !held.manifest
-        || (held.pin.id === SOLVER_ROLE_ID && !held.runtime?.prompt?.trim())) return []
+  function view(routes, byRole = false) {
+    const entries = [...attachments].flatMap(([, held]) => {
+      const id = held.bot.id
+      if ((!byRole && heldOf(id) !== held) || !current(id, held) || !held.manifest
+        || (isCatalogSolver(held) && !held.runtime?.prompt?.trim())) return []
       const warning = isWaitingSolver(held) ? deliveryWarning(held.bot, routes) : undefined
-      const acp = warning === acpWarning || (held.pin.id !== SOLVER_ROLE_ID
+      const acp = warning === acpWarning || (!isCatalogSolver(held)
         && providerWarning(providerOf(held.bot.appliedModel ?? held.bot.model)) === acpWarning)
-      return [[id, {
-        pin: held.pin, settings: held.manifest.settings,
+      return [[id, held.pin.id, {
+        pin: identityOf(held.pin), settings: held.manifest.settings,
         capabilities: capabilitiesOf(held),
-        tools: held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp,
+        tools: held.pin.source === 'registry' ? held.record.tools : held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp,
         ...(warning && warning !== acpWarning ? { promptWarning: warning } : {}),
       }]]
+    })
+    if (!byRole) return Object.fromEntries(entries.map(([id, , value]) => [id, value]))
+    const keyed = new Map(entries.map(([id, role, value]) => [keyOf(id, { id: role }), value]))
+    return Object.fromEntries(Object.entries(state.bots ?? {}).flatMap(([id, bot]) => {
+      const pins = attachedRoles(bot)
+      if (!pins.length) return []
+      return [[id, Object.fromEntries(pins.map(pin =>
+        [pin.id, keyed.get(keyOf(id, pin)) ?? { pin: identityOf(pin), status: 'missing' }]))]]
     }))
   }
 
   return {
-    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings, capabilitiesOf, heldOf, grantOf,
-    readDeliveryRoutes, view,
+    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings, capabilitiesOf, heldOf, heldsOf, grantOf, legacyTaskGrant,
+    readDeliveryRoutes, view, viewByRole: () => view(undefined, true),
     copyWarning: bot => savedWarning(bot) ?? providerWarning(liveProvider(bot.sessionId ?? bot.id)),
     async publicView() {
-      const waitingSolvers = () => [...attachments].flatMap(([id, held]) =>
-        held.manifest && isWaitingSolver(held) && current(id, held) ? [held.bot] : [])
+      const waitingSolvers = () => [...attachments].flatMap(([, held]) =>
+        held.manifest && isWaitingSolver(held) && current(held.bot.id, held) ? [held.bot] : [])
       if (waitingSolvers().length === 0) return view()
       // Roster windows can poll at the same time. Share the read limit across their polls.
       const read = displayReads.then(() => readDeliveryRoutes(waitingSolvers(), DISPLAY_READ_LIMIT))
@@ -421,8 +472,8 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       return view(await read)
     },
     serving(id, record, pin, routes) {
-      const held = active(id)
-      return held?.record === record && sameRolePin(held?.pin, pin) && Boolean(held.runtime.prompt?.trim())
+      const held = active(id, SOLVER_ROLE_ID)
+      return isCatalogSolver(held) && held.record === record && sameRolePin(held.pin, pin) && Boolean(held.runtime.prompt?.trim())
         && !deliveryWarning(held.bot, routes)
     },
     async prepare(details, sha256) {
@@ -440,7 +491,10 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     reset(record) {
       if (record) pins.delete(record)
     },
-    ready: id => id === undefined ? Promise.all([...attachments.values()].map(held => held.ready)) : attachments.get(id)?.ready,
+    ready(id) {
+      const pending = [...attachments.values()].filter(held => held.ready && (id === undefined || held.bot.id === id))
+      return id === undefined || pending.length ? Promise.all(pending.map(held => held.ready)) : undefined
+    },
     dispose() {
       disposed = true
       turnPrompts.clear()

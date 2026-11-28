@@ -17,6 +17,7 @@ import { installRoles } from '../src/host/roles.js'
 import { fakeContext } from './fake-ctx.js'
 import { entryOf, INDEX, manifestOf, packageOf, SHA256, SIGNATURE, VERSION as PLUGIN_VERSION, signer, solverCutHistory } from './role-fixture.js'
 import { AGY, refusedSolverAgent, serve } from './fixtures/solver-agent-catalog.mjs'
+import { activationIds, rosterBytes } from './fixtures/w1-format-profile.mjs'
 
 const ID = 'sample-role'
 const VERSION = '1.0.0'
@@ -29,7 +30,7 @@ const stateOf = extra => ({
 const missing = async path => assert.rejects(fs.lstat(path), { code: 'ENOENT' })
 const clock = Date.UTC(2026, 10, 20)
 
-async function fixture(t, { bytes, entry, extra, readOnly, offline = false, roleDeps } = {}) {
+async function fixture(t, { bytes, entry, extraPackages = [], extra, readOnly, offline = false, roleDeps } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), 'ds-bot-role-package-'))
   const statePath = join(home, 'state.json')
   const rolesDir = join(home, 'roles')
@@ -41,11 +42,12 @@ async function fixture(t, { bytes, entry, extra, readOnly, offline = false, role
   const pkgDir = join(rolesDir, entry.id)
   const verDir = join(pkgDir, entry.version)
   const { key, index } = signer()
-  const signed = index([entry])
+  const signed = index([entry, ...extraPackages.map(pkg => pkg.entry)])
   const paths = new Map([
     [INDEX, () => offline ? new Response(null, { status: 404 }) : new Response(signed.bytes)],
     [SIGNATURE, () => new Response(signed.signature)],
     [entry.source, () => new Response(bytes)],
+    ...extraPackages.map(pkg => [pkg.entry.source, () => new Response(pkg.bytes)]),
   ])
   const fetches = []
   const fsCalls = []
@@ -2020,3 +2022,47 @@ test('D2 the settler finishes a waiting Solver in one pass and rechecks a stale 
   assert.equal(bot.instructions, BOT.instructions)
   assert.deepEqual(bot.roles, [])
 })
+
+test('ordinary duplicate and reload preserve the activated source and sticky roster stamp', async t => {
+  const f = await fixture(t, { roleDeps: {} })
+  const def = { id: 'operator', name: 'Operator', tools: [], capabilities: [] }
+  f.rt.hooks.role(def)
+  assert.equal((await attachTo(f, BOT.id, def.id)).ok, true)
+  const activated = await f.disk()
+  const duplicate = await f.call('duplicate-bot', { id: BOT.id })
+  assert.equal(duplicate.ok, true, JSON.stringify(duplicate))
+  const saved = await f.disk()
+  assert.equal(saved.version, 4)
+  assert.deepEqual(saved.stateActivations, ['w1-registry-pin-v1'])
+  assert.deepEqual(saved.bots[BOT.id].roles, activated.bots[BOT.id].roles)
+  assert.equal(saved.bots[duplicate.value.id].roles, undefined)
+  await f.close()
+  const reload = await f.start()
+  assert.equal(await reload.rt.save({ required: true, durable: true }), true)
+  const reloaded = await f.disk()
+  assert.equal(reloaded.version, 4)
+  assert.deepEqual(reloaded.stateActivations, saved.stateActivations)
+  assert.deepEqual(reloaded.bots[BOT.id].roles, saved.bots[BOT.id].roles)
+})
+
+for (const format of [2, 3]) {
+  test('a second catalog package activates just the stack on format ' + format, async t => {
+    const id = 'second-package'
+    const bytes = packageOf(manifestOf({ id }))
+    const f = await fixture(t, { bytes: packageOf(), extraPackages: [{ entry: entryOf(bytes, { id }), bytes }],
+      extra: { version: format, connectors: JSON.parse(rosterBytes(format)).connectors } })
+    for (const name of [ID, id]) assert.equal((await f.install({ id: name })).ok, true)
+    await f.rt.attachRole(BOT.id, ID)
+    const before = await fs.readFile(f.statePath)
+    assert.equal(JSON.parse(before).version, format)
+    await f.rt.attachRole(BOT.id, id)
+    const stacked = await f.disk()
+    assert.equal(stacked.version, format + 2)
+    assert.deepEqual(stacked.stateActivations, [activationIds.stack])
+    assert.deepEqual(stacked.bots[BOT.id].roles.map(pin => pin.id), [ID, id])
+    assert.deepEqual(await fs.readFile(f.statePath + '.pre-roles-' + SHA256(before)), before)
+    await f.rt.detachRole(BOT.id, id)
+    assert.deepEqual((await f.disk()).stateActivations, [activationIds.stack])
+    assert.equal((await f.disk()).version, format + 2)
+  })
+}

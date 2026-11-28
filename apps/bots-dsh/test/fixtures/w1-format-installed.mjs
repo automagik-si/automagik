@@ -7,14 +7,15 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { verifyLane } from '../../src/host/lane-verify.js'
+import { compareVersions, verifyLane } from '../../src/host/lane-verify.js'
 import { ROLE_KEYS } from '../../src/host/supervisor/release.js'
 import { VENDOR } from '../../src/host/supervisor/stage.js'
 import { prepareStore, writeJsonAtomic } from '../../src/host/supervisor/store.js'
 import { BOTS, read, write } from './supervisor.mjs'
-import { assertLegacyCell, assertRollbackBytes, legacyCells, prepareRollback, rollbackCells } from './w1-format-predecessor.mjs'
-import { LEGACY_CONTRACT, readFormatContract, scratch, sha256 } from './w1-format-profile.mjs'
+import { assertCleanCell, assertRefusedCell, assertLegacyCell, assertRollbackBytes, legacyCells, prepareRollback, rollbackCells } from './w1-format-predecessor.mjs'
+import { activationIds, LEGACY_CONTRACT, pins, readFormatContract, rosterBytes, scratch, sha256 } from './w1-format-profile.mjs'
 
 const checkout = fileURLToPath(new URL('../../', import.meta.url))
 const manifest = 'package.json'
@@ -25,6 +26,23 @@ const deps = join(checkout, 'node_modules')
 const dsh = join(harness, '@deepseek-ai/dsh')
 const web = '@deepseek-ai/dsh-web-app'
 const base = '@deepseek-ai/dsh-base'
+
+const guardedPredecessors = new Map([
+  ['3.178.9', {
+    classification: 'guarded-f',
+    commit: 'ba2883ab1d4ab15f23bf3821567d854d529e98d8',
+    hash: 'd275d5c364662ec56c66a6847ff0890277d1f41f61e363a303271e39dace1ae5',
+  }],
+  ['3.178.11', {
+    classification: 'guarded-skills-v4',
+    commit: '1c4b5bcc7e8a007233d1217f837bc376bdd393db',
+    hash: '886ebc74ea192bacd654f819a884d1f4831fa177f6bfa74b0687fd3a9d90b23d',
+  }],
+])
+const historical = new Map([
+  ['3.178.5', 'bf4337a2426da90f29be9ce6361477213641a284'],
+  ['3.178.8', 'd0fe59de8bd5b29ef712675ae7cdaaaf7308dd8e'],
+])
 
 function verifyArtifact({ tarball, lane, supervisor, commit, hash }) {
   assert.match(commit, /^[a-f0-9]{40}$/)
@@ -43,9 +61,13 @@ function verifyArtifact({ tarball, lane, supervisor, commit, hash }) {
   assert.equal(sha256(bytes), hash)
   assert.equal('sha512-' + createHash('sha512').update(bytes).digest('base64'), row.integrity)
   assert.equal(supervisor.endsWith('/' + main), true, 'Expected the supplied supervisor/main.js')
+  const guarded = guardedPredecessors.get(release.version)
+  const classification = guarded?.commit === commit && guarded.hash === hash
+    ? guarded.classification : historical.get(release.version) === commit ? 'historical-pre-f' : undefined
+  assert.ok(classification, 'No approved predecessor class for this signed version and commit')
   return {
     bytes, supervisor: dirname(dirname(supervisor)),
-    provenance: { commit, version: release.version, tarballSha256: hash, feedSha256: sha256(feed), signature: 'verified', keyId: release.keyId,
+    provenance: { classification, commit, version: release.version, tarballSha256: hash, feedSha256: sha256(feed), signature: 'verified', keyId: release.keyId,
       checkoutInputs: ['prepareStore', 'writeJsonAtomic', 'VENDOR', 'lane verifier and public keys', 'plugin runtime dependencies', 'DSH harness and expected DSH pin'],
     },
   }
@@ -95,6 +117,11 @@ function profileFor(t, artifact) {
   for (const leaf of fs.readdirSync(join(harness, '@deepseek-ai'))) {
     linkDependency(modules, harness, '@deepseek-ai/' + leaf)
   }
+  const dependencyPins = Object.fromEntries(Object.entries(dependencies).map(([name, expected]) => {
+    const version = read(join(modules, name, manifest)).version
+    assert.equal(version, expected, 'Locked production dependency ' + name)
+    return [name, version]
+  }))
   const runtimePins = Object.fromEntries([base, web].map(name => [name, read(join(modules, name, manifest)).version]))
   write(join(profileDir, manifest), {
     name: 'w1-format-fixture', private: true,
@@ -102,14 +129,16 @@ function profileFor(t, artifact) {
     dsh: { profile: { bundles: [base, web, BOTS] } },
   })
   fs.writeFileSync(join(profileDir, 'pnpm-lock.yaml'), `lockfileVersion: '9.0'\n# Fixture pin: ${pin}\n`)
-  assert.deepEqual(readFormatContract(plugin).contract, LEGACY_CONTRACT)
+  const contract = readFormatContract(plugin)
+  if (artifact.candidate) assert.equal(contract.legacy, false)
+  else assert.deepEqual(contract.contract, LEGACY_CONTRACT)
   const store = prepareStore(profileDir)
   const dshVersion = read(join(dsh, manifest)).version
   const expectedDsh = read(join(checkout, 'dev/harness', manifest)).dependencies['@deepseek-ai/dsh']
   assert.equal(dshVersion, expectedDsh)
   const command = [process.execPath, join(dsh, 'lib/bin.js'), 'web', '--no-open', '--host', '127.0.0.1', '--port', '0']
   const candidateVersion = version.replace(/\d+$/, patch => String(Number(patch) + 1))
-  return { home, profile, profileDir, store, botsHome, plugin, env, command, version, candidateVersion, dshVersion, runtimePins }
+  return { home, profile, profileDir, store, botsHome, plugin, env, command, version, candidateVersion, dshVersion, runtimePins, dependencyPins }
 }
 
 function installedSupervisor(f, artifact) {
@@ -131,10 +160,74 @@ function installedSupervisor(f, artifact) {
   return { entry: join(copy, main), sha256: hashes[main], closureSha256: sha256(JSON.stringify(hashes)) }
 }
 
-async function replayInstalled(t, artifact, from, to) {
+async function writeCandidateTrial(t, candidate, f, rollback, from, to) {
+  const trial = profileFor(t, candidate)
+  const path = join(trial.botsHome, 'state.json')
+  const original = JSON.parse(rollback.original)
+  const source = rosterBytes(from, { roles: [], revision: original.revision, connectors: original.connectors })
+  fs.writeFileSync(path, source)
+  const name = 'w1-fixture-provider'
+  const packageDir = join(trial.profileDir, 'node_modules', name)
+  fs.mkdirSync(packageDir)
+  write(join(packageDir, 'package.json'), { name, version: '1.0.0', type: 'module', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } })
+  fs.writeFileSync(join(packageDir, 'cordis.patch.yml'), '- insert:\n    - id: w1-fixture-provider\n      name: w1-fixture-provider\n')
+  fs.writeFileSync(join(packageDir, 'index.js'), `
+    export const name = 'w1-fixture-provider'
+    export const inject = ['omniTeam']
+    export async function apply(ctx) {
+      const rt = ctx.get('omniTeam')
+      await rt.load()
+      for (const id of ['operator', 'guide']) {
+        rt.hooks.role({ id, name: id, tools: [], capabilities: [] })
+        await rt.attachRole('a', id)
+      }
+    }
+  `)
+  const pkgPath = join(trial.profileDir, 'package.json')
+  const pkg = read(pkgPath)
+  pkg.dependencies[name] = '1.0.0'
+  pkg.dsh.profile.bundles.push(name)
+  write(pkgPath, pkg)
+  const { startChild, answers } = await import(pathToFileURL(join(trial.plugin, 'src/host/supervisor/child.js')).href)
+  const child = startChild(trial.command, trial.env, () => {})
+  try {
+    assert.equal(await answers(child, { signal: t.signal, timeout: 10_000 }), true, 'Packed candidate DSH serves HTTP')
+    let active = false
+    for (let i = 0; i < 40 && !child.result; i++) {
+      if (read(path).stateActivations?.includes(activationIds.stack)) { active = true; break }
+      await delay(100, undefined, { signal: t.signal })
+    }
+    assert.equal(active, true, 'The fixture provider activated a real stack through the installed plugin')
+    const saved = fs.readFileSync(path)
+    const state = JSON.parse(saved)
+    assert.equal(state.version, to)
+    assert.deepEqual(state.stateActivations, [activationIds.registry, activationIds.stack])
+    assert.deepEqual(state.bots.a.roles.map(pin => pin.id), ['operator', 'guide'])
+    assert.deepEqual(state.connectors, original.connectors)
+    assert.deepEqual(fs.readFileSync(path + '.pre-roles-' + sha256(source)), source)
+    assert.deepEqual(trial.dependencyPins, f.dependencyPins)
+    assert.deepEqual(trial.runtimePins, f.runtimePins)
+    rollback.trial = saved
+    fs.writeFileSync(rollback.path, saved)
+    t.diagnostic(JSON.stringify({ candidate: candidate.provenance, writer: 'packed host in actual DSH process with synthetic provider addon',
+      dependencies: trial.dependencyPins, dsh: trial.dshVersion, runtimePins: trial.runtimePins,
+      addons: [{ name, version: '1.0.0' }], health: 'loopback HTTP answered', trial: sha256(saved) }))
+  } finally {
+    await child.stop()
+  }
+}
+
+async function replayInstalled(t, artifact, from, to, { guarded = false, held = false, candidate } = {}) {
   const f = profileFor(t, artifact)
   const supervisor = installedSupervisor(f, artifact)
-  const rollback = await prepareRollback(t, f.plugin, from, to, f)
+  if (candidate && compareVersions(candidate.provenance.version, f.version) > 0) {
+    f.candidateVersion = candidate.provenance.version
+  }
+  const rollback = await prepareRollback(t, f.plugin, from, to, f, guarded ? {
+    switchTimeBytes: rosterBytes(from, { roles: held ? [pins.solver, pins.voice] : [pins.solver], revision: 42 }),
+    trialRoles: to >= 4 ? [pins.solver, pins.registry] : [pins.solver],
+  } : undefined)
+  if (candidate && to >= 4) await writeCandidateTrial(t, candidate, f, rollback, from, to)
   const state = join(f.store, 'state.json')
   writeJsonAtomic(state, rollback.run, { profileDir: f.profileDir, durable: true })
   const { runSupervisor } = await import(pathToFileURL(supervisor.entry).href)
@@ -156,18 +249,20 @@ async function replayInstalled(t, artifact, from, to) {
   })
   try {
     await Promise.race([done.promise, running])
-    assert.equal(verdict?.phase, 'rolledBack', 'The restored DSH child must pass the real supervisor health gate')
+    assert.equal(verdict?.phase, held ? 'manualRecovery' : 'rolledBack')
+    assert.equal(verdict.reason, 'health-failed')
+    if (held) assert.equal(verdict.rollback.previousFailed, 'plugins')
     assert.equal(verdict.rollback.starts, 1)
     assert.equal(launches, 1)
-    assert.equal(read(state).phase, 'rolledBack')
+    assert.equal(read(state).phase, verdict.phase)
     assert.equal(read(join(f.store, 'supervisor.json')).bootId, verdict.bootId)
-    assert.equal(read(join(f.store, 'listener.json')).listener, 'verified')
+    if (!held) assert.equal(read(join(f.store, 'listener.json')).listener, 'verified')
     const bytes = assertRollbackBytes(rollback, verdict)
     assert.equal(read(join(f.plugin, manifest)).version, f.version)
     t.diagnostic(JSON.stringify({
       ...artifact.provenance, supervisorVersion: f.version, supervisorSha256: supervisor.sha256,
       supervisorClosureSha256: supervisor.closureSha256, node: process.version, dsh: f.dshVersion,
-      homeBinding: 'explicit isolated AUTOMAGIK_BOTS_HOME', runtimePins: f.runtimePins, addons: [], loadedPlugin: { name: BOTS, version: f.version },
+      homeBinding: 'explicit isolated AUTOMAGIK_BOTS_HOME', runtimePins: f.runtimePins, dependencyPins: f.dependencyPins, entry: supervisor.entry, addons: [], loadedPlugin: { name: BOTS, version: f.version },
       health: verdict.phase, bootId: verdict.bootId, runId: verdict.runId, bytes,
       input: 'synthetic failed trial and journal; real copied supervisor, restored plugin and DSH HTTP health',
     }))
@@ -179,19 +274,42 @@ async function replayInstalled(t, artifact, from, to) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [tarball, lane, supervisor, commit, hash, ...extra] = process.argv.slice(2)
-  assert.ok(tarball && lane && supervisor && commit && hash && !extra.length,
-    'Usage: w1-format-installed.mjs <bots.tgz> <lane.json> <supervisor/main.js> <commit> <sha256>')
+  const [tarball, lane, supervisor, commit, hash, candidatePath, candidateCommit, ...extra] = process.argv.slice(2)
+  assert.ok(tarball && lane && supervisor && commit && hash && !extra.length
+    && Boolean(candidatePath) === Boolean(candidateCommit),
+    'Usage: w1-format-installed.mjs <bots.tgz> <lane.json> <supervisor/main.js> <commit> <sha256> [candidate.tgz candidate-commit]')
   const artifact = verifyArtifact({ tarball: resolve(tarball), lane: resolve(lane), supervisor: resolve(supervisor), commit, hash })
+  const guarded = guardedPredecessors.has(artifact.provenance.version)
+  let candidate
+  if (candidatePath) {
+    assert.ok(guarded)
+    assert.match(candidateCommit, /^[a-f0-9]{40}$/)
+    const bytes = fs.readFileSync(candidatePath)
+    const { name, version } = JSON.parse(execFileSync('/usr/bin/tar', [
+      '-xzOf', resolve(candidatePath), 'package/package.json',
+    ], { timeout: 10_000 }))
+    assert.equal(name, BOTS)
+    assert.equal(typeof version, 'string')
+    const order = compareVersions(version, artifact.provenance.version)
+    assert.ok(Number.isFinite(order) && order >= 0, 'The candidate must be the same version or newer than the predecessor')
+    candidate = { candidate: true, bytes, provenance: { version,
+      commit: candidateCommit, tarballSha256: sha256(bytes) } }
+  }
   test('verified installed predecessor store and role writer', async t => {
     const f = profileFor(t, artifact)
     t.diagnostic(JSON.stringify({ ...artifact.provenance, node: process.version, dsh: f.dshVersion, lifecycle: 'direct module calls' }))
     for (const cell of legacyCells) {
-      await t.test(cell.shape + ' in roster format ' + cell.format, sub => assertLegacyCell(sub, f.plugin, cell))
+      await t.test(cell.shape + ' in roster format ' + cell.format,
+        sub => (guarded ? assertRefusedCell : assertLegacyCell)(sub, f.plugin, cell))
+    }
+    if (guarded) for (const format of [0, 1, 2, 3]) {
+      await t.test('clean control ' + format, sub => assertCleanCell(sub, f.plugin, format))
     }
   })
   for (const [from, to] of rollbackCells) {
     test('installed predecessor rollback with roster ' + from + ' → ' + to, { timeout: 45_000 },
-      t => replayInstalled(t, artifact, from, to))
+      t => replayInstalled(t, artifact, from, to, { guarded, candidate }))
+    if (guarded && to >= 4) test('guarded predecessor restores held roster ' + from + ' → ' + to, { timeout: 45_000 },
+      t => replayInstalled(t, artifact, from, to, { guarded, held: true, candidate }))
   }
 }

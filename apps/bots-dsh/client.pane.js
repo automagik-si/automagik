@@ -9072,20 +9072,19 @@ function attachedRoleIds(bot) {
   if (!Object.hasOwn(bot ?? {}, "roles") || !Array.isArray(bot.roles)) return [];
   return bot.roles.flatMap((entry) => typeof entry?.id === "string" && Object.hasOwn(entry, "id") ? [entry.id] : []);
 }
-var ownPackageId = (entry) => Object.hasOwn(entry ?? {}, "id") && isPackageRoleId(entry.id);
-var singlePackageRole = (bot) => Object.hasOwn(bot ?? {}, "roles") && Array.isArray(bot.roles) && bot.roles.length === 1 && ownPackageId(bot.roles[0]) ? bot.roles[0] : void 0;
-function packageAttachment(bot) {
-  const entry = singlePackageRole(bot);
-  if (entry && ["version", "attachedAt", "grants"].every((key) => Object.hasOwn(entry, key)) && isRoleVersion(entry.version) && typeof entry.attachedAt === "string" && Array.isArray(entry.grants)) {
-    return { id: entry.id, version: entry.version, attachedAt: entry.attachedAt };
-  }
-}
+var ownPackageId = (entry) => Object.hasOwn(entry ?? {}, "id") && isPackageRoleId(entry.id) && !Object.hasOwn(entry, "source");
+var rawRoles = (bot) => Object.hasOwn(bot ?? {}, "roles") && Array.isArray(bot.roles) ? bot.roles : [];
+var validPin = (entry) => ["id", "version", "attachedAt", "grants"].every((key) => Object.hasOwn(entry ?? {}, key)) && isRoleId(entry.id) && isRoleVersion(entry.version) && typeof entry.attachedAt === "string" && Array.isArray(entry.grants);
+var registryAttachment = (entry) => validPin(entry) && Object.hasOwn(entry, "source") && entry.source === "registry";
+var attachedRoles = (bot) => rawRoles(bot).filter((entry) => validPin(entry) && (registryAttachment(entry) || !Object.hasOwn(entry, "source")));
+var packageAttachments = (bot) => attachedRoles(bot).filter(ownPackageId).map(({ id, version, attachedAt }) => ({ id, version, attachedAt }));
+var packageAttachment = (bot, id) => packageAttachments(bot).find((pin) => id === void 0 || pin.id === id);
 var SOLVER_DESCRIPTION = "Solver";
 var SOLVER_ROLE_ID = "solver";
-var hasSolverRole = (bot) => packageAttachment(bot)?.id === SOLVER_ROLE_ID;
+var hasSolverRole = (bot) => packageAttachment(bot, SOLVER_ROLE_ID) !== void 0;
 var isSolverBot = (bot) => bot?.role === SOLVER_DESCRIPTION || hasSolverRole(bot);
-var sameRolePin = (a, b2) => Boolean(a && b2 && a.id === b2.id && a.version === b2.version && a.attachedAt === b2.attachedAt);
-var packageRecoveryId = (bot) => singlePackageRole(bot)?.id;
+var sameRolePin = (a, b2) => Boolean(a && b2 && a.id === b2.id && a.version === b2.version && a.attachedAt === b2.attachedAt && a.source === b2.source);
+var packageRecoveryId = (bot) => rawRoles(bot).length === 1 ? rawRoles(bot).find(ownPackageId)?.id : rawRoles(bot).every((pin) => registryAttachment(pin) || validPin(pin) && ownPackageId(pin)) && new Set(attachedRoleIds(bot)).size === rawRoles(bot).length ? packageAttachment(bot)?.id : void 0;
 function attachmentStatus(attachment, records) {
   if (!Object.hasOwn(records ?? {}, attachment.id)) return "missing";
   const record = records[attachment.id];
@@ -9101,7 +9100,7 @@ function packageDeclarations({ id, version }, roster) {
   const row = roster.roleCatalog?.roles?.find((role) => role.id === id && role.version === version);
   if (row) return { ...catalog, name: row.name, capabilities: row.capabilities, fromCatalog: true };
 }
-var isAttachment = (entry) => typeof entry?.id === "string" && Object.hasOwn(BUILTIN_ROLES, entry.id) && typeof entry.version === "string" && entry.version.length > 0 && typeof entry.attachedAt === "string" && Array.isArray(entry.grants);
+var isAttachment = (entry) => !Object.hasOwn(entry ?? {}, "source") && typeof entry?.id === "string" && Object.hasOwn(BUILTIN_ROLES, entry.id) && typeof entry.version === "string" && entry.version.length > 0 && typeof entry.attachedAt === "string" && Array.isArray(entry.grants);
 var storedRoles = (bot) => {
   if (!Object.hasOwn(bot ?? {}, "roles")) return void 0;
   const entry = Array.isArray(bot.roles) ? bot.roles.find(isAttachment) : void 0;
@@ -9110,6 +9109,9 @@ var storedRoles = (bot) => {
 function effectiveRoleIds(bot, prefs) {
   const stored = rolesOn(prefs) ? storedRoles(bot) : void 0;
   return stored?.map((entry) => entry.id) ?? (bot?.kind === "genie" ? ["genie"] : []);
+}
+function hasRole(bot, id, prefs) {
+  return attachedRoles(bot).some((pin) => pin.id === id && (registryAttachment(pin) || rolesOn(prefs))) || effectiveRoleIds(bot, prefs).includes(id);
 }
 var genieDetached = (bot, prefs) => bot?.kind === "genie" && rolesOn(prefs) && !effectiveRoleIds(bot, prefs).includes("genie");
 function roleTagOf(bot, prefs, roster, localize = (name) => name) {

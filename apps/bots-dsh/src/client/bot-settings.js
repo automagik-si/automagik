@@ -215,7 +215,7 @@ function RoleControls({ bot, runtime, actions, run, readOnly }) {
       setDirty(false)
     }).finally(() => setSaving(false)))
   }
-  const grants = bot.roles[0].grants
+  const grants = bot.roles?.find(entry => sameRolePin(entry, pin))?.grants ?? []
   const taskStart = grants.includes('task-start')
   const routePolicy = grants.includes('route-policy')
   return h(Fragment, null,

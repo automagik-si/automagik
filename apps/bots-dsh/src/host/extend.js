@@ -27,7 +27,9 @@
 // register through `windowEndpoint`, which is not on `rt`: only those get the route's proof of
 // the desktop window (desktop-window.js). An endpoint added through `rt.hooks` never does.
 import { isPromise } from 'node:util/types'
+import { TEAM_TOOLS } from './constants.js'
 import { OMNI_KIND } from './roster.js'
+import { BUILTIN_ROLES, genieDetached, isRoleId, isRoleVersion } from '../shared/roles.js'
 
 const registrars = new WeakMap()
 const windowEntries = new WeakSet()
@@ -109,7 +111,57 @@ export function install(rt) {
     return () => { if (endpoints.get(name) === entry) endpoints.delete(name) }
   }
   registrars.set(rt, register)
+  const roles = new Map()
+  const toolOwners = new Map()
+  const changedRoles = () => {
+    rt.roleRuntime?.reconcile()
+    rt.syncScopedTools?.()
+    rt.reapplyToolMasks?.()
+  }
+  rt.roleRegistry = {
+    of: id => roles.get(id),
+    all: () => [...roles.values()].sort((a, b) => a.order - b.order),
+    toolsWithheldFrom(bot) {
+      const withheld = new Set(genieDetached(bot, rt.state.prefs) ? BUILTIN_ROLES.genie.tools : [])
+      const held = bot ? rt.roleRuntime?.heldsOf(bot.id) ?? [] : []
+      for (const [tool, owners] of toolOwners) {
+        const registry = held.some(entry => entry.pin.source === 'registry' && owners.has(entry.pin.id)
+          && entry.record.tools.includes(tool))
+        const catalog = held.some(entry => entry.pin.source === undefined
+          && entry.runtime?.tools.some(candidate => candidate.definition.name === tool))
+        const genie = owners.has('genie') && BUILTIN_ROLES.genie.tools.includes(tool)
+          && bot?.kind === 'genie' && !genieDetached(bot, roles.has('genie') ? undefined : rt.state.prefs)
+        if (registry || catalog || genie) withheld.delete(tool)
+        else withheld.add(tool)
+      }
+      return [...withheld]
+    },
+  }
   rt.hooks = {
+    role(def) {
+      const strings = list => Array.isArray(list) && list.every(item => typeof item === 'string' && item.length)
+        && new Set(list).size === list.length
+      const { id, name, version = '1.0.0', tools = [], capabilities = [], prompt, attachable = true, order = 0 } = def ?? {}
+      if (!isRoleId(id) || typeof name !== 'string' || !name.trim() || !isRoleVersion(version)
+        || !strings(tools) || !strings(capabilities) || (prompt !== undefined && !['string', 'function'].includes(typeof prompt))
+        || !['boolean', 'function'].includes(typeof attachable) || !Number.isFinite(order) || roles.has(id)) throw new Error('Invalid or duplicate Bot role provider')
+      const reserved = tools.find(tool => TEAM_TOOLS.includes(tool)
+        || Object.values(BUILTIN_ROLES).some(owner => owner.id !== id && owner.tools.includes(tool)))
+      if (reserved) throw new Error(`Bot role tool ${reserved} is reserved.`)
+      const role = Object.freeze({ id, name, version, tools: Object.freeze([...tools]),
+        capabilities: Object.freeze([...capabilities]), prompt, attachable, order })
+      roles.set(id, role)
+      for (const tool of tools) {
+        if (!toolOwners.has(tool)) toolOwners.set(tool, new Set())
+        toolOwners.get(tool).add(id)
+      }
+      changedRoles()
+      return () => {
+        if (roles.get(id) !== role) return
+        roles.delete(id)
+        changedRoles()
+      }
+    },
     endpoint: (name, fn, { read = false } = {}) => register(name, fn, read, false),
     around(name, fn) {
       if (around.has(name)) throw new Error(`ds-bot: endpoint ${name} is already wrapped`)

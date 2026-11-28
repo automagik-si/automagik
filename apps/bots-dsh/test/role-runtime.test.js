@@ -1418,3 +1418,82 @@ test('D2 a turn opened before the pin keeps the written method through clear', a
   h.events(FIRST, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
   assert.match(h.prompt(FIRST), solverPart)
 })
+
+test('stock Voice stacks with a registry role, retains settings and blocks uninstall in second position', async t => {
+  const f = await fixture(t)
+  const h = await f.start()
+  const { rt } = h
+  const operator = { id: 'operator', name: 'Operator', tools: [], capabilities: ['task-start'],
+    prompt: (id, session) => `Operate for ${id} in ${session}.` }
+  rt.hooks.role(operator)
+  await h.ok('role-install', { id: ID })
+  await h.ok('role-attach', { id: FIRST, role: operator.id })
+  await h.ok('role-attach', { id: FIRST, role: ID })
+  const [first, voice] = rt.botOf(FIRST).roles
+  await rt.grantRole({ id: FIRST, role: first, capability: 'task-start', on: true })
+  await rt.grantRole({ id: FIRST, role: voice, capability: 'audio-out', on: true })
+  assert.deepEqual(rt.roleRuntime.heldsOf(FIRST).map(held => held.pin.id), [operator.id, ID])
+  assert.equal(rt.roleRuntime.heldOf(FIRST).pin.id, ID)
+  assert.equal(rt.roleRuntime.grantOf(FIRST, 'task-start'), 'granted')
+  assert.equal(rt.roleRuntime.grantOf(FIRST, 'audio-out'), 'granted')
+  const prompt = rt.roleRuntime.prompt(FIRST, h.agentOf(FIRST))
+  assert.ok(prompt.includes('Operate for'))
+  assert.ok(prompt.indexOf('id="operator"') < prompt.indexOf('id="voice-mouth"'))
+  const live = await h.ok('state')
+  assert.equal(live.roleRuntime[FIRST].pin.id, ID)
+  assert.deepEqual(live.roleRuntimeByRole[FIRST][ID].tools, ['speak'])
+  assert.ok(live.roleRuntimeByRole[FIRST][ID].settings.length)
+  await h.ok('set-prefs', { roles: false })
+  assert.deepEqual(await h.ok('role-grant', { id: FIRST, role: operator.id, capability: 'task-start', on: false }), [])
+  assert.deepEqual(await h.ok('role-settings', { id: FIRST, role: operator.id }), {})
+  for (const endpoint of ['role-grant', 'role-settings', 'role-settings-set']) {
+    const result = await h.call(endpoint, { id: FIRST, role: ID, capability: 'audio-out', on: false, values: {} })
+    assert.equal(result.ok, false)
+    assert.match(result.error.message, /Roles are turned off/)
+  }
+  await h.ok('set-prefs', { roles: true })
+  await assert.rejects(rt.uninstallRole(ID), /Detach this role/)
+  await rt.detachRole(FIRST)
+  assert.deepEqual(rt.botOf(FIRST).roles.map(pin => pin.id), [operator.id])
+  assert.equal(rt.roleRuntime.grantOf(FIRST, 'audio-out'), undefined)
+  assert.deepEqual(await rt.uninstallRole(ID), { removed: true })
+})
+
+for (const [first, granted] of [['operator', ID], ['operator', 'operator'], [ID, ID]]) {
+  test(`Settings controls the Voice grant with ${first} first and speech granted to ${granted}`, async t => {
+    const f = await fixture(t)
+    const h = await f.start()
+    h.rt.hooks.role({ id: 'operator', name: 'Operator', capabilities: ['audio-out'] })
+    await h.ok('role-install', { id: ID })
+    for (const role of first === ID ? [ID, 'operator'] : ['operator', ID]) {
+      await h.ok('role-attach', { id: FIRST, role })
+    }
+    await h.ok('role-grant', { id: FIRST, role: granted, capability: 'audio-out', on: true })
+    const card = await mountRoleSettings(t, h, FIRST)
+    const checked = () => card.document.querySelector('[role="switch"][aria-label="Allow speech"]').getAttribute('aria-checked')
+    const hasSpeech = role => h.rt.botOf(FIRST).roles.find(pin => pin.id === role).grants.includes('audio-out')
+    assert.equal(checked(), String(granted === ID))
+    await card.click('Allow speech')
+    await until(() => hasSpeech(ID) === (granted !== ID))
+    await card.refresh()
+    assert.equal(checked(), String(granted !== ID))
+    assert.equal(hasSpeech('operator'), granted === 'operator')
+  })
+}
+
+test('Voice tool collisions refuse both orders without modifying the roster', async t => {
+  const f = await fixture(t)
+  const h = await f.start()
+  const { rt } = h
+  const provider = { id: 'speaker', name: 'Speaker', tools: ['speak'], capabilities: [] }
+  rt.hooks.role(provider)
+  await h.ok('role-install', { id: ID })
+  await rt.attachRole(FIRST, ID)
+  await rt.attachRole(SECOND, provider.id)
+  for (const [id, add, owner] of [[FIRST, provider.id, ID], [SECOND, ID, provider.id]]) {
+    const path = join(f.home, 'state.json')
+    const before = await fs.readFile(path)
+    await assert.rejects(rt.attachRole(id, add), new RegExp(`Tool speak is already supplied by ${owner}`))
+    assert.deepEqual(await fs.readFile(path), before)
+  }
+})
