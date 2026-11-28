@@ -675,6 +675,7 @@ test("linked worker scope: launch uses the linked project's git state and code s
 
 test("am worker leaves the report command out of a linked worker's brief", (t) => {
   const s = scene(t);
+  exe(join(s.root, "bin", "claude"), "#!/bin/sh\nexit 0\n");
   packAt(vmApp(s));
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t",
     "commit", "-qm", "initial", "--allow-empty"], { cwd: s.project });

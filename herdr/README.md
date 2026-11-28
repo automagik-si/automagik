@@ -2262,6 +2262,9 @@ one notice starting with `[am] worker …`. Read the named report and check the 
 before acting on the notice. The worker sees the hand-over receipt before the helper ends its
 pane. The existing sweep handles worktree cleanup. Workers behind the per-pane hc proxy or
 on a linked machine leave their report for their bot, who can use `am worker kill`.
+The outside step's Git calls ignore the repository's hooks, file monitor, pager and external diff,
+but a clean or smudge filter named in the repository's Git config can still run because Git has no
+switch to disable filters.
 
 `hc kill` is for the seat of a project's main bot only (`kind: "main"` in `bots.json`). Every
 other bot, a member that leads a squad included, ends a worker it started with:
