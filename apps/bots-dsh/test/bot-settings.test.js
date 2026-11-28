@@ -121,6 +121,11 @@ test('stacked settings address each exact attachment, in both pin orders', async
     assert.deepEqual(calls.shift(), ['role-attach', bot.id, 'extra', undefined, undefined])
   }
   assert.deepEqual(calls, [])
+  const genieForm = form({ ...bot, kind: 'genie' })
+  const genieChoices = expand(genieForm.find(node => node.type?.name === 'StackedRolePicker'))
+  const extra = genieChoices.find(node => node.type?.name === 'Row' && node.props.children[0]?.props['aria-label'] === 'Attach Extra')
+  assert.equal(extra.props.children[0].props.disabled, true)
+  assert.equal(extra.props.hint, 'Detach Genie first.')
   const stacked = withRoles([guide, voice])
   const missing = { ...host, roleRuntimeByRole: { [bot.id]: { [guide.id]: { pin: guide, status: 'missing' } } } }
   assert.deepEqual(cards(form(stacked, missing)).map(controls), [undefined, undefined], 'a present by-role view cannot fall back to the stale old projection')
@@ -138,6 +143,39 @@ test('stacked settings address each exact attachment, in both pin orders', async
   assert.equal(controls(oldCard).props.runtime, runtime[voice.id])
   expand(oldCard).find(node => node.props?.children.includes('Detach')).props.onClick()
   assert.deepEqual(calls.shift(), ['role-detach', bot.id, undefined, undefined, undefined])
+})
+
+test('Solver wait cancellation preserves other attachments on stacked and legacy hosts', () => {
+  const voice = { id: 'voice-mouth', version: '1.0.0', attachedAt: 'first', grants: ['audio-out'] }
+  const guide = { ...voice, id: 'guide', source: 'registry' }
+  for (const roles of [true, false]) {
+    function render(fields, stacked = true) {
+      const record = { ...bot, ...fields, canCancelSolverWait: true }
+      const roster = { bots: [record], prefs: { roles }, ...(stacked && { roleRuntimeByRole: {} }) }
+      const posted = []
+      const actions = module.exports.teamActions({ after: work => work,
+        call: (endpoint, payload) => posted.push([endpoint, { ...payload }]) })
+      const form = walk(BotSettingsForm({ bot: record, roster, actions, run: work => work }))
+      const none = form.filter(node => node.type === 'button' && node.props.children.includes('None'))
+      return { form, none, posted }
+    }
+    for (const pins of [[voice], [guide], [voice, guide], [guide, voice], [{ id: 'legacy' }], [], undefined]) {
+      const { none, posted } = render(pins ? { roles: pins } : {})
+      assert.equal(none.length, 1)
+      assert.equal(none[0].props.disabled, false)
+      none[0].props.onClick()
+      assert.deepEqual(posted, [['role-detach', pins?.length ? { id: bot.id, role: 'solver' } : { id: bot.id }]])
+    }
+    const old = render({ roles: [voice] }, false)
+    assert.equal(old.none.length, 1)
+    old.none[0].props.onClick()
+    assert.deepEqual(old.posted, [['role-detach', { id: bot.id }]])
+    const genie = render({ kind: 'genie' })
+    assert.equal(genie.none.length, 0)
+    assert.equal(genie.form.some(node => node.props['aria-label'] === 'Detach Genie'), roles)
+    assert.deepEqual(genie.posted, [])
+    assert.equal(render({ roles: [{ ...voice, id: 'solver' }] }).none.length, 0)
+  }
 })
 
 test('the mounted picker updates its only attach choice for a conflicting provider', async t => {
@@ -195,6 +233,8 @@ test('role contributions follow the matching Bot and restore the current Genie a
     assert.equal(shopRoles(roster)[0].provider, provider)
   } finally { off(); settingsOff() }
   const oldRoster = { bots: [legacy], byId: { legacy } }
+  assert.ok(roleContributionVisible('toolCards', 'grant_wish', { ...legacy, roles: [] }, oldRoster))
+  assert.ok(roleContributionVisible('toolCards', 'grant_wish', undefined, oldRoster))
   assert.ok(roleContributionVisible('botChildren', 'genie-wishes', legacy, oldRoster))
   assert.equal(roleContributionVisible('botChildren', 'genie-wishes', { ...legacy, roles: [] }, oldRoster), false)
   assert.equal(suggestionsFor([entry], { bot: legacy, roster: oldRoster })[0].label, 'Wish')

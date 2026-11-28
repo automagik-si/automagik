@@ -109,6 +109,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const nativeRunning = useWork ? useWork(work => runningWorkers(work, id)) : 0
   const threads = runningTasksOf(roster, id).length + nativeRunning
   const threadsLine = threads === 0 ? '' : threads === 1 ? t('Working on 1 thing') : t('Working on {n} things', { n: threads })
+  const definitions = useEntries(roleContributions)
   if (bot.hidden && !active && !main) return null
   const onContextMenu = (event) => {
     event.preventDefault()
@@ -116,7 +117,6 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   }
   const pinned = bot.pinned === true && !crowned
   const role = crowned ? bot.role : ''
-  const definitions = useEntries(roleContributions)
   const tags = roleTags(roster, bot, definitions)
   const label = [bot.name, ...tags.map(tag => tag.name), role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', notInstalled ? notInstalledText : running || away ? t('Working') : '', notInstalled ? '' : waitsFor, notInstalled ? '' : stoppedLine, notInstalled ? '' : approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {

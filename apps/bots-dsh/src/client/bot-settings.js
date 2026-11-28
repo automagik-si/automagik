@@ -309,7 +309,9 @@ function StackedRolePicker({ bot, roster, pins, implicitGenie, actions, run, def
       const reason = unconfirmed ? t(ROLE_SOURCE_UNCONFIRMED)
         : legacy && attached.length ? t('Detach {name} first.', { name: roleName(roster, attached[0], pins.find(pin => pin.id === attached[0]), definitions) })
           : legacy && bot.kind !== BUILTIN_ROLES.genie.kind ? t(GENIE_ATTACH_REFUSAL)
-            : implicitGenie && id !== 'genie' ? t(roleProvider(roster, 'genie') ? 'Attach Genie first to keep it, or detach it before choosing another role.' : CHOOSE_NONE_FIRST)
+            : implicitGenie && id !== 'genie' ? (roleProvider(roster, 'genie')
+              ? t('Attach Genie first to keep it, or detach it before choosing another role.')
+              : t('Detach {name} first.', { name: t('Genie') }))
               : clash ? t('Tool {tool} is already supplied by {name}.', { tool: clash.tool, name: roleName(roster, clash.pin.id, clash.pin, definitions) }) : undefined
       const name = legacy ? t('Genie') : offered.get(id).name ?? roleName(roster, id, undefined, definitions)
       return h(Row, { key: id, hint: reason },
@@ -360,6 +362,7 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
   const activeRole = effective[0] ?? pin?.id ?? rawIds[0]
   const detach = () => void run(actions.detachRole(bot.id))
   const detachPin = id => void run(id === undefined ? actions.detachRole(bot.id) : actions.detachRole(bot.id, id))
+  const carrying = Array.isArray(bot.roles) && bot.roles.length > 0
   const implicitGenie = teamBot && !Object.hasOwn(bot, 'roles') && bot.kind === 'genie'
   const readOnly = roleReadOnly(roster)
   const detachReason = id => t('Detach {name} first.', {
@@ -438,8 +441,8 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
               onClick: () => { if (!pressed && !reason && !readOnly) void run(actions.attachRole(bot.id, id)) } },
             installed?.verified && installed.version === version ? installed.name : id)
           }))) : null,
-      stacked && canCancelSolverWait && !pins.some(pin => pin.id === 'solver') ? h(Row, { label: t('Solver') },
-        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: readOnly, onClick: detach }, t('None'))) : null),
+      stacked && canCancelSolverWait && !implicitGenie && !pins.some(pin => pin.id === 'solver') ? h(Row, { label: t('Solver') },
+        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: readOnly, onClick: () => detachPin(carrying ? 'solver' : undefined) }, t('None'))) : null),
     ...pins.map(pin => h(PackageAttachmentCard, {
       key: JSON.stringify([bot.id, pin.id, pin.version, pin.attachedAt, pin.source]), roster, bot, pin, definitions, actions, run,
       onDetach: () => detachPin(stacked ? pin.id : undefined),

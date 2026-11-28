@@ -8041,7 +8041,7 @@ function roleContributionVisible(outlet, id, bot, roster, definitions = allRoles
   const owners = definitions.filter((role) => role[outlet]?.includes(id));
   if (owners.length) return owners.some((role) => holdsRole(roster, bot, role.id));
   const genie = BUILTIN_ROLES.genie;
-  const legacyIds = outlet === "toolCards" ? genie.tools : genie[outlet];
+  const legacyIds = genie[outlet];
   return !roster || !rolesOn(roster.prefs) || !legacyIds?.includes(id) || holdsRole(roster, bot, genie.id);
 }
 function roleName(roster, id, pin, definitions = allRoles()) {
@@ -21353,7 +21353,7 @@ function StackedRolePicker({ bot, roster, pins, implicitGenie, actions, run: run
     choices.map(([id, { tools, unconfirmed }]) => {
       const legacy = offered.get(id) === BUILTIN_ROLES.genie;
       const clash = pins.flatMap((pin) => (runtimeForRole(roster, bot.id, pin)?.tools ?? []).filter((tool) => tools?.includes(tool)).map((tool) => ({ pin, tool })))[0];
-      const reason = unconfirmed ? t(ROLE_SOURCE_UNCONFIRMED) : legacy && attached.length ? t("Detach {name} first.", { name: roleName(roster, attached[0], pins.find((pin) => pin.id === attached[0]), definitions) }) : legacy && bot.kind !== BUILTIN_ROLES.genie.kind ? t(GENIE_ATTACH_REFUSAL) : implicitGenie && id !== "genie" ? t(roleProvider(roster, "genie") ? "Attach Genie first to keep it, or detach it before choosing another role." : CHOOSE_NONE_FIRST) : clash ? t("Tool {tool} is already supplied by {name}.", { tool: clash.tool, name: roleName(roster, clash.pin.id, clash.pin, definitions) }) : void 0;
+      const reason = unconfirmed ? t(ROLE_SOURCE_UNCONFIRMED) : legacy && attached.length ? t("Detach {name} first.", { name: roleName(roster, attached[0], pins.find((pin) => pin.id === attached[0]), definitions) }) : legacy && bot.kind !== BUILTIN_ROLES.genie.kind ? t(GENIE_ATTACH_REFUSAL) : implicitGenie && id !== "genie" ? roleProvider(roster, "genie") ? t("Attach Genie first to keep it, or detach it before choosing another role.") : t("Detach {name} first.", { name: t("Genie") }) : clash ? t("Tool {tool} is already supplied by {name}.", { tool: clash.tool, name: roleName(roster, clash.pin.id, clash.pin, definitions) }) : void 0;
       const name = legacy ? t("Genie") : offered.get(id).name ?? roleName(roster, id, void 0, definitions);
       return (0, import_react43.createElement)(
         Row,
@@ -21407,6 +21407,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
   const activeRole = effective[0] ?? pin?.id ?? rawIds[0];
   const detach = () => void run3(actions.detachRole(bot.id));
   const detachPin = (id) => void run3(id === void 0 ? actions.detachRole(bot.id) : actions.detachRole(bot.id, id));
+  const carrying = Array.isArray(bot.roles) && bot.roles.length > 0;
   const implicitGenie = teamBot && !Object.hasOwn(bot, "roles") && bot.kind === "genie";
   const readOnly = roleReadOnly(roster);
   const detachReason = (id) => t("Detach {name} first.", {
@@ -21535,10 +21536,10 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
           })
         )
       ) : null,
-      stacked && canCancelSolverWait && !pins.some((pin2) => pin2.id === "solver") ? (0, import_react43.createElement)(
+      stacked && canCancelSolverWait && !implicitGenie && !pins.some((pin2) => pin2.id === "solver") ? (0, import_react43.createElement)(
         Row,
         { label: t("Solver") },
-        (0, import_react43.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: readOnly, onClick: detach }, t("None"))
+        (0, import_react43.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: readOnly, onClick: () => detachPin(carrying ? "solver" : void 0) }, t("None"))
       ) : null
     ),
     ...pins.map((pin2) => (0, import_react43.createElement)(PackageAttachmentCard, {
@@ -30678,6 +30679,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const nativeRunning = useWork ? useWork((work) => runningWorkers(work, id)) : 0;
   const threads = runningTasksOf(roster, id).length + nativeRunning;
   const threadsLine = threads === 0 ? "" : threads === 1 ? t("Working on 1 thing") : t("Working on {n} things", { n: threads });
+  const definitions = useEntries(roleContributions);
   if (bot.hidden && !active2 && !main) return null;
   const onContextMenu = (event) => {
     event.preventDefault();
@@ -30685,7 +30687,6 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   };
   const pinned = bot.pinned === true && !crowned;
   const role = crowned ? bot.role : "";
-  const definitions = useEntries(roleContributions);
   const tags = roleTags(roster, bot, definitions);
   const label = [bot.name, ...tags.map((tag) => tag.name), role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", notInstalled ? notInstalledText : running2 || away ? t("Working") : "", notInstalled ? "" : waitsFor, notInstalled ? "" : stoppedLine, notInstalled ? "" : approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
   return (0, import_react63.createElement)(

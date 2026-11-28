@@ -1994,6 +1994,51 @@ test('D2S Details sends None for an unpinned waiter, including with roles turned
   })
 })
 
+test('D2S canceling a Solver wait from Settings keeps every saved role pin', async t => {
+  const voice = { id: 'voice-mouth', version: VERSION, attachedAt: '2026-11-20', grants: ['audio-out'] }
+  const guide = { id: 'guide', source: 'registry', version: VERSION, attachedAt: '2026-11-21', grants: ['task-start'] }
+  const surfaces = await mountRoleSurfaces()
+  for (const roles of [true, false]) {
+    for (const pins of [[voice], [guide], [voice, guide], [guide, voice]]) {
+      await t.test(`roles=${roles}, ${pins.map(pin => pin.id).join(' + ')}`, async t => {
+        const activations = [activationIds.registry, ...(pins.length > 1 ? [activationIds.stack] : [])]
+        const waiter = { ...BOT, roles: pins, waitingRole: waitFor(BOT.instructions, BOT.role) }
+        const f = await fixture(t, { offline: true, roleDeps: {}, extra: {
+          ...(pins.includes(guide) ? { version: 4, stateActivations: activations } : { version: 2 }),
+          bots: { [BOT.id]: waiter }, prefs: { roles },
+        } })
+        f.rt.hooks.role({ id: guide.id, name: 'Guide', capabilities: ['task-start'] })
+        const roster = (await f.call('state')).value
+        const shown = roster.bots.find(bot => bot.id === BOT.id)
+        assert.equal(shown.canCancelSolverWait, true)
+        assert.deepEqual(shown.roles, pins)
+        const posted = []
+        const operations = []
+        const actions = teamActions({ after: work => work, async call(endpoint, payload) {
+          posted.push([endpoint, payload])
+          const reply = await f.call(endpoint, payload)
+          assert.equal(reply.ok, true, reply.error?.message)
+          return reply.value
+        } })
+        actions.roleCatalog = undefined
+        actions.refreshModels = undefined
+        const { form } = surfaces.settings({ roster, bot: shown, actions, run: work => operations.push(work) })
+        surfaceButton(form, 'None').props.onClick()
+        await Promise.all(operations)
+        assert.deepEqual(posted, [['role-detach', { id: BOT.id, role: 'solver' }]])
+        const stored = (await f.disk()).bots[BOT.id]
+        assert.equal(stored.waitingRole, undefined)
+        assert.equal(stored.instructions, BOT.instructions)
+        assert.deepEqual(stored.roles, pins)
+        const refreshed = (await f.call('state')).value
+        assert.equal(refreshed.bots.find(bot => bot.id === BOT.id).canCancelSolverWait, undefined)
+        for (const pin of pins) assert.deepEqual(refreshed.roleRuntimeByRole[BOT.id][pin.id].pin,
+          roster.roleRuntimeByRole[BOT.id][pin.id].pin)
+      })
+    }
+  }
+})
+
 test('D2 manual attachment preserves an edit already present at Phase B', async t => {
   const f = await catalogSolverFixture(t)
   await officialSolver(f)

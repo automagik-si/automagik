@@ -66,7 +66,8 @@ export function roleContributionVisible(outlet, id, bot, roster, definitions = a
   if (owners.length) return owners.some(role => holdsRole(roster, bot, role.id))
   // Current Genie bundles use the existing outlets without a client registration.
   const genie = BUILTIN_ROLES.genie
-  const legacyIds = outlet === 'toolCards' ? genie.tools : genie[outlet]
+  // Legacy tool cards render historical calls even after a Bot loses the role.
+  const legacyIds = genie[outlet]
   return !roster || !rolesOn(roster.prefs) || !legacyIds?.includes(id) || holdsRole(roster, bot, genie.id)
 }
 
