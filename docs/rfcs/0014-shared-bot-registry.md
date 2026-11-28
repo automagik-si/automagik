@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (delivery 1: #260; universal-Bot amendment: #666, #670, #674, #684; 2-9 unconfirmed; every question answered) |
+| Status | In delivery (delivery 1: #260; universal-Bot amendment: #666, #670, #674, #684; 2-9 unconfirmed; every question answered) · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), desktop (3.N), herdr (3.N.P, [RFC 0011](0011-monorepo-parts-and-releases.md)) |
 | Created | 2026-11-03 |
@@ -581,3 +581,13 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
   `apps/bots-dsh/src/client/pet.js`; `herdr/mods/am-sidebar/{model,bots,create,briefing}.js`,
   `bin/automagik-herdr.mjs`; `apps/automagik-pets/`.
 - Issues: #206, #226, #227, #230, #234.
+
+## Amendment: the home registry's chief and identity (2026-11-28, #2176)
+
+[RFC 0050](0050-teams-positions-roles.md) specifies two projection changes for the compatibility cleanup. The original Q4 and
+version 2 table describe the legacy inputs and can still be used to read old state.
+
+| Earlier wording | Replacement |
+|---|---|
+| Q4 and the `main` row, “a team Main Bot”, from `mainBotIds` | In the home file `main` marks the chief of staff from `chiefId`, falling back to `mainBotIds` for legacy state without that field. An explicit null chief means no chief. The project's main Bot and Herdr's seat `kind: "main"` retain their meanings. |
+| The `identity` row, “the Bot's character”, from `kind` | Use `kind` when present. After `positions: 2` removes migrated Omni and Genie kinds, derive the compatibility identity from the role attachments, preferring Genie when both are attached. |
