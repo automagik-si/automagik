@@ -868,6 +868,7 @@ export function install(rt) {
 
   const connectorEndpoint = async (endpoint, body) => {
     await rt.loadSecrets()
+    if (endpoint === 'mail-account-add' || endpoint === 'mail-account-remove') requireConnectorWrite()
     if (endpoint.startsWith('mail-')) return mailApi.endpoint(endpoint, body)
     return endpoints[endpoint](body ?? {})
   }

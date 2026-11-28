@@ -29,6 +29,43 @@ test('a direct connector mutation cannot create a key or publish a roster during
   assert.equal(rt.state.connectors, undefined)
 })
 
+test('a hold refuses new mail accounts and removal, and lets an admitted login finish', async t => {
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const home = scratch(t)
+  writeFileSync(join(home, 'state.json'), rosterBytes(2))
+  let proof = 'steady'
+  const connect = t.mock.fn(async () => {
+    proof = 'held'
+    return { close: async () => {} }
+  })
+  const fetch = t.mock.fn(() => assert.fail('Held Google sign-in reached discovery'))
+  const rt = createRuntime(ctx, { home, github: false, mail: { connect, fetch } })
+  await rt.load()
+  rt.stateWriteProof = () => proof
+  const existing = 'existing@example.test'
+  const password = 'fixture-existing-password'
+  const add = address => rt.connectorEndpoint('mail-account-add', { address, provider: 'qq', password })
+  await add(existing)
+  const name = mailSecretName(existing, 'PASSWORD')
+  assert.equal(rt.secretValue(name), password)
+  const roster = readFileSync(rt.statePath)
+  const secretsFile = join(home, 'secrets.json')
+  const secrets = readFileSync(secretsFile)
+  assert.equal(Object.values(JSON.parse(roster).connectors.mail.accounts)[0].address, existing)
+  assert.equal(JSON.parse(secrets).secrets.find(row => row.name === name)?.value, password)
+
+  const refused = { code: 'bot/refused', message: 'Connectors can be changed after the update commits.' }
+  await assert.rejects(add('second@example.test'), refused)
+  await assert.rejects(rt.connectorEndpoint('mail-account-add', { google: true }), refused)
+  await assert.rejects(rt.connectorEndpoint('mail-account-remove', { address: existing }), refused)
+  assert.equal(connect.mock.callCount(), 1)
+  assert.equal(fetch.mock.callCount(), 0)
+  assert.deepEqual(readFileSync(rt.statePath), roster)
+  assert.deepEqual(readFileSync(secretsFile), secrets)
+  assert.equal(rt.secretValue(name), password)
+})
+
 async function refreshAcrossHold(t, failRosterSave = false) {
   const ctx = fakeContext()
   t.after(() => ctx.dispose())
