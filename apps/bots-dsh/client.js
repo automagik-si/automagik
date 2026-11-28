@@ -21563,7 +21563,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         onClick: () => detachPin("genie")
       }, t("Detach"))
     )) : null,
-    stacked && teamBot ? (0, import_react43.createElement)(StackedRolePicker, { key: bot.id, bot, roster, pins, implicitGenie, actions, run: run3, definitions }) : null,
+    stacked && teamBot ? (0, import_react43.createElement)(StackedRolePicker, { key: `role-picker:${bot.id}`, bot, roster, pins, implicitGenie, actions, run: run3, definitions }) : null,
     showingRoles ? (0, import_react43.createElement)(RolePackagesCard, { key: `role-packages:${bot.id}`, roster, actions, run: run3 }) : null,
     (0, import_react43.createElement)(
       Card2,
@@ -39084,11 +39084,11 @@ function shopRoles(roster) {
   const rows2 = (roster?.roleProviders ?? []).map((provider) => ({
     key: `role:registry:${provider.id}`,
     id: provider.id,
-    name: roleName(roster, provider.id),
+    name: provider.name,
     provider
   }));
   if (!rolesOn(roster?.prefs)) return rows2;
-  if (!roleProvider(roster, "genie") && bots.some((bot) => bot.kind === BUILTIN_ROLES.genie.kind)) {
+  if (!rows2.some((row2) => row2.id === "genie") && bots.some((bot) => bot.kind === BUILTIN_ROLES.genie.kind)) {
     rows2.push({ key: BUILTIN_KEY, id: "genie", name: t("Genie"), builtIn: true });
   }
   for (const id of /* @__PURE__ */ new Set([...catalog.keys(), ...Object.keys(roster?.roles ?? {})])) {

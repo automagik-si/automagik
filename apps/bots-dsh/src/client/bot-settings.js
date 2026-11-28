@@ -448,7 +448,7 @@ export function BotSettingsForm({ bot, roster = {}, actions, run }) {
     stacked && implicitGenie && showingRoles ? h(Card, { title: t('Role') }, h(Row, { label: t('Genie') },
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: readOnly || !showingRoles,
         'aria-label': t('Detach {name}', { name: t('Genie') }), onClick: () => detachPin('genie') }, t('Detach')))) : null,
-    stacked && teamBot ? h(StackedRolePicker, { key: bot.id, bot, roster, pins, implicitGenie, actions, run, definitions }) : null,
+    stacked && teamBot ? h(StackedRolePicker, { key: `role-picker:${bot.id}`, bot, roster, pins, implicitGenie, actions, run, definitions }) : null,
     showingRoles ? h(RolePackagesCard, { key: `role-packages:${bot.id}`, roster, actions, run }) : null,
     h(Card, { title: t('Model') },
       h('div', { className: 'bt-set-row bt-bs-row' },

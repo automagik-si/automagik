@@ -140,6 +140,35 @@ test('stacked settings address each exact attachment, in both pin orders', async
   assert.deepEqual(calls.shift(), ['role-detach', bot.id, undefined, undefined, undefined])
 })
 
+test('the mounted picker updates its only attach choice for a conflicting provider', async t => {
+  const { mountRoleSettings } = await import('./role-runtime-client.js')
+  const provider = { id: 'guide', name: 'Guide', version: '1.0.0', tools: ['route'], capabilities: [] }
+  const rival = { ...provider, id: 'rival', name: 'Rival' }
+  const pin = { id: provider.id, version: provider.version, source: 'registry', attachedAt: 'first', grants: [] }
+  const roster = { bots: [{ ...bot, roles: [] }], rooms: [], memory: false, roleProviders: [provider, rival], roleRuntimeByRole: {} }
+  const attaches = []
+  const page = await mountRoleSettings(t, { async ok(endpoint, payload) {
+    if (endpoint === 'role-attach') attaches.push(payload)
+    if (endpoint === 'state') return roster
+  } }, bot.id)
+  function rivalButton() {
+    const buttons = page.document.querySelectorAll('button[aria-label="Attach Rival"]')
+    assert.equal(buttons.length, 1, 'the mounted form has one current choice for Rival')
+    return buttons[0]
+  }
+  assert.equal(rivalButton().disabled, false)
+  roster.bots = [{ ...bot, roles: [pin] }]
+  roster.roleRuntimeByRole = { [bot.id]: { [pin.id]: { ...provider, pin, settings: [] } } }
+  await page.refresh()
+  assert.equal(rivalButton().disabled, true)
+  rivalButton().click()
+  assert.deepEqual(attaches, [])
+  roster.bots = [{ ...bot, roles: [] }]
+  roster.roleRuntimeByRole = {}
+  await page.refresh()
+  assert.equal(rivalButton().disabled, false)
+})
+
 test('role contributions follow the matching Bot and restore the current Genie and Omni outlets', () => {
   const { clientRoles, roleContributionVisible, suggestionsFor, botSettings, BotMark, shopRoles } = module.exports
   const pin = { id: 'genie', version: '1.0.0', source: 'registry', attachedAt: 'fixture', grants: [] }

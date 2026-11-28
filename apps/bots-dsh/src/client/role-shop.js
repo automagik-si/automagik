@@ -2,7 +2,6 @@ import { createElement as h } from 'react'
 import { attachedRoleIds, BUILTIN_ROLES, packageDeclarations, rolesOn } from '../shared/roles.js'
 import { Card, Row, roleHealth, roleReadOnly } from './bot-settings.js'
 import { t } from './i18n.js'
-import { roleName, roleProvider } from './team-actions.js'
 
 const BUILTIN_KEY = 'role:builtin:genie'
 const COMMUNITY_REASON = 'Community roles can be installed once their isolated runtime ships.'
@@ -18,10 +17,10 @@ export function shopRoles(roster) {
   const attached = new Set(bots.flatMap(attachedRoleIds))
   const catalog = new Map((roster?.roleCatalog?.roles ?? []).map(role => [role.id, role]))
   const rows = (roster?.roleProviders ?? []).map(provider => ({
-    key: `role:registry:${provider.id}`, id: provider.id, name: roleName(roster, provider.id), provider,
+    key: `role:registry:${provider.id}`, id: provider.id, name: provider.name, provider,
   }))
   if (!rolesOn(roster?.prefs)) return rows
-  if (!roleProvider(roster, 'genie') && bots.some(bot => bot.kind === BUILTIN_ROLES.genie.kind)) {
+  if (!rows.some(row => row.id === 'genie') && bots.some(bot => bot.kind === BUILTIN_ROLES.genie.kind)) {
     rows.push({ key: BUILTIN_KEY, id: 'genie', name: t('Genie'), builtIn: true })
   }
   for (const id of new Set([...catalog.keys(), ...Object.keys(roster?.roles ?? {})])) {
