@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-28, under the owner's delegated authority, effective on merge) |
+| Status | In delivery (accepted 2026-11-28 by the owner's delegate, #2177; delivery 1 merged in #2187; amended 2026-11-28 in #2188 for admission results and judgment reads, effective on merge) |
 | Milestone | none |
 | Lanes | Docs only for this RFC. Deliveries use the plugin lane (3.N.P), with desktop deliveries for DSH profile and install wiring. |
 | Created | 2026-11-28 |
@@ -21,7 +21,8 @@ positions come from [RFC 0050](https://github.com/automagik-dev/automagik/pull/2
 Orchestrator. [RFC 0052](https://github.com/automagik-dev/automagik/pull/2174) covers voice.
 Author and review the Decisions contracts, service and adapters after this RFC takes
 effect. Only the pure contracts, ledger and lint rule may merge before the voice delivery.
-The service, adapter install wiring and user-facing work follow voice.
+That includes delivery 1's inert follow-up. The service, adapter install wiring and
+user-facing work follow voice.
 
 ## Motivation
 
@@ -72,22 +73,23 @@ The read-only route card shows each candidate's probability against τ, slot sta
 question and member description, provider, model, latency, attempts, and a short failure
 reason when applicable. The card distinguishes uncalibrated results and possible provider
 truncation. Score details are read-only. Alongside them the owner sees the current hard
-judgment, if any, and **Relevant** and **Not relevant** controls beside each scored
-candidate, whether called or not. These controls call `route-judge`, record or replace
-the owner's human judgment, and refresh the read-only card without changing recipients
-or Bot turns. Other readers with room access see the score details without judging controls.
+judgment, if any, and **Relevant** and **Not relevant** controls beside each candidate
+whose score is still in the ledger, whether called or not. These controls call `route-judge`
+to record or replace the owner's human judgment, then refresh the card without changing
+recipients or Bot turns. Other readers with room access see the score details without
+judging controls.
 
-**That was for {name}** calls a current member for the original posted message and records
-a hard positive overturn if that member has a score. An unscored correction still calls
-the member. **Call {name} again** calls a member who passed and appends the group-book
-overturn event without writing a ledger label. The host checks the caller, room, route
+**That was for {name}** calls a current member for the original posted message. The ledger
+admits a hard positive overturn if it still has that member's score. **Call {name} again**
+calls a member who passed and appends the group-book overturn event without writing a
+ledger label. The host checks the caller, room, route
 and current membership before waking a Bot. A stale or inaccessible target is refused.
 
 The group book `group-<roomId>` appends UI records with `kind: 'route'` and
 `event: 'decided' | 'slot' | 'overturn'`. A `decided` event links the message sequence
-and optional DSH message id to a decision id, outcome, sanitized rubric and options, scores,
-thresholds and routed member ids. `slot` and `overturn` events carry the route id, member id
-and time, with a status for slot events. Route events stay outside the conversational
+and optional DSH message id to a decision id, outcome, routing question id, sanitized rubric
+and options, scores, thresholds and routed member ids. `slot` and `overturn` events carry
+the route id, member id and time, with a status for slot events. Route events stay outside the conversational
 sequence, room log, search, `read_group_chat` and Bot context.
 
 ## Decisions service
@@ -125,9 +127,17 @@ Saved purpose settings use the tighter deadline range in Q4.
   model, HTTP status and retry timing. A malformed service request raises a validation
   error before ledger or network activity. Provider errors return an unavailable outcome
   without raw response bodies.
-- `recordExposure(decisionId, { questionId, option })` appends a confirmed router start
-  for a scored recipient. `label(decisionId, label: DecisionLabel)` appends a typed label.
-  `evaluation(purpose, { sinceMs }?)` returns decision counts, failure reasons, latency,
+- `recordExposure(decisionId, { questionId, option }): Promise<boolean>` appends a
+  confirmed router start for a scored recipient. `label(decisionId, label: DecisionLabel):
+  Promise<boolean>` appends a typed label. Both resolve `true` when one record was
+  appended and `false` when admission was refused. I/O failures reject the promise.
+- `judgments(decisionId): Promise<readonly DecisionJudgment[] | undefined>` reads the
+  same 90-day ledger fold. `DecisionJudgment` extends `DecisionKey` (`{ readonly
+  questionId: QuestionId; readonly option?: string }`) with `readonly value: boolean | null`.
+  It returns one entry per scored key, with `null` for a key without a hard label. A
+  `yes-no` entry omits `option`. A retained unavailable decision returns `[]`. A missing
+  or expired decision returns `undefined`. The read performs no ledger writes or pruning.
+- `evaluation(purpose, { sinceMs }?)` returns decision counts, failure reasons, latency,
   label coverage and the cohort statistics below.
 
 The owner explicitly selects one provider and one model in **Settings → Decisions**.
@@ -240,7 +250,7 @@ instructions, message excerpts, keys and provider bodies stay out of the ledger.
 Pruning runs at startup and daily. Group-book route cards are separate local UI records.
 
 `DecisionLabel` combines `{ questionId, option? }` with one of these typed variants.
-The service rejects any other combination and the host checks who supplied the label.
+The service rejects any other variant with `TypeError`. The host checks who supplied the label.
 
 | `source` | `value` | `strength` | Admission |
 |---|---|---|---|
@@ -251,12 +261,16 @@ The service rejects any other combination and the host checks who supplied the l
 
 Scored exposure requires the router to actually start a recipient with a recorded score.
 A planned call, an explicit mention and a call started by an overturn contribute no
-router exposure. Unscored corrections still carry out the routing action and stay
-outside calibration. Silence, passes and someone else's overturn supply no human negative.
+router exposure. Admission returns `false` for a missing, expired or unavailable decision,
+an unscored key, or a soft label without a confirmed exposure. On `false`, the router start
+produces no behavioral sample or retry, and a soft answer or pass is dropped. An authorized
+**That was for {name}** correction still calls the member and writes no label. Silence,
+passes and someone else's overturn supply no human negative.
 
 Evaluation joins scores, labels and confirmed exposures on the decision, question and
 option ids. The latest valid hard label in ledger append order wins for each key,
-whether it is a judgment or an overturn. Replacing a label changes the effective sign
+whether it is a judgment or an overturn. `judgments()` projects those same effective hard
+labels and excludes soft labels. Replacing a label changes the effective sign
 and the statistics while the earlier event remains in the append-only ledger. Count the
 key once in the human population and once in the separate behavioral population if it
 has a valid observation. Partition by purpose, provider, answered model and rubric version.
@@ -352,11 +366,22 @@ are owner-only.
 | `decisions-test` | `{ providerId?, model? }` → typed outcome for the canned test. Explicit selection is required. |
 | `decisions-eval` | `{ purpose, sinceMs? }` → the purpose's evaluation with cohort coverage and optional suggestion. |
 | `update-room` | Extends the room update with `{ id, route?: boolean, teamId?: string \| null }`. The owner sets routing and room ownership through Settings. |
-| `route-card` | `{ roomId, routeId }` → authorized read-only route detail and member slot status. For the owner, optional `judgments` maps Bot ids to their effective hard judgment where available. |
-| `route-judge` | Closed body `{ roomId, routeId, botId, value: boolean }` → `{ ok: true }` after appending a hard `user` label without waking a Bot. Resolves a scored candidate in the specified room and recorded route, called or uncalled. Refuses an unauthorized caller, invalid value, wrong room or unavailable score. |
-| `route-overturn` | `{ roomId, routeId, botId }` → confirmation after the action is admitted and queued. **That was for {name}** records a hard positive overturn for a scored candidate. **Call {name} again** adds only the group-book event. |
+| `route-card` | `{ roomId, routeId }` → read-only route detail and member slot status after the caller passes the room access check. `RouteCardView.judgments?: Readonly<Record<string, boolean \| null>>` is present for the owner only. |
+| `route-judge` | Closed body `{ roomId, routeId, botId, value: boolean }`. Resolves an eligible candidate in the specified room and recorded route, called or uncalled. Returns `{ ok: true }` only when `label()` returns `true` for the hard `user` label. For a `false` result, the routing host adds `no-score` to the channel refusal reasons and returns it. Refuses an unauthorized caller, invalid value, wrong room, unknown route or Bot outside the recorded candidates. Judging writes no group-book record, live event or behavioral sample and wakes nobody. |
+| `route-overturn` | `{ roomId, routeId, botId }` → confirmation after the action is admitted and queued. **That was for {name}** calls the member even if `label()` returns `false`. **Call {name} again** adds only the group-book event. |
 | Live `routes` | Per room, compact marks keyed by message sequence and mapped from DSH message ids. Keeps the last 50 marks per room and fetches card detail on demand. |
 | `create-team`, `update-team`, `delete-team` | Owner Settings writes. Create takes `{ name, handle?, leader?, members?, notice? }`, update takes `{ id, ...patch }`, and delete takes `{ id }`. The roster's `teams` view supplies team records with leader and member names and group ids. |
+
+For an authorized owner card, resolve the decision id and routing question id from that
+room's `decided` event and call `judgments()` once when the service and decision reference
+are present. Include only scored candidate Bot ids for that question that still have a
+score in the ledger. `null` means unjudged. An absent key means the UI offers no judge
+controls. The owner receives `{}` when the service or decision is missing, the decision
+expired, or no candidate is judgeable. Other room readers receive no `judgments` field
+and make no service call. The card read wakes nobody and writes no exposure, label,
+behavioral sample, group-book record or live event. The ledger is the only source of
+judgments. The group book and live `routes` carry no judgment state. After a successful
+`route-judge`, the client fetches the card again.
 
 ## Answers recorded 2026-11-28
 
@@ -398,11 +423,14 @@ evaluation.
 
 ## Deliveries and acceptance
 
-After this RFC merges, author and review deliveries 1–3 in isolation. The contracts and
-ledger feed the service. Adapter authoring can use the reviewed service interface.
+The amendment to admission results and judgment reads takes
+effect on merge under the owner's delegated authority. Delivery 1's original contracts,
+ledger and lint rule merged in #2187. Merge the amendment, then land the inert delivery 1
+follow-up before authoring delivery 2. Adapter authoring can use the reviewed service
+interface in isolation.
 
-Only delivery 1 may merge before the voice delivery. It contains the pure contracts,
-ledger and lint rule, with no route, setting, install field or UI.
+Only delivery 1, including its follow-up, may merge before the voice delivery. It contains
+the pure contracts, ledger and lint rule, with no route, setting, install field or UI.
 
 After the voice delivery merges, integrate the two desktop install-field changes
 in order (deliveries 2 and 3), then the user-visible work (deliveries 4–9). Decisions
@@ -415,11 +443,12 @@ combined head.
 | Delivery and lane | Acceptance | Rollback |
 |---|---|---|
 | 1. Decision contracts, purposes and ledger · plugin | Reject invalid label variants. Prove ledger privacy, retention, exact coverage and scored exposure. Check effective labels, counts, bins and Brier before and after both directions of hard-label replacement, including across `user` and `overturn`, without double counting or erasing history. Exercise each sufficiency boundary independently (20 per sign, 30 distinct decisions, 5 per sign on each side of current τ), expiry and mixed cohorts. Only a qualifying cohort produces τ and F1, with no apply path. | Stop ledger writes. Saved local rows remain subject to the retention policy when the service next runs. |
-| 2. Decisions service and profile wiring · desktop | Fake providers prove that unset, failing and disposed selections never send to a second provider, that identical requests call twice, and that queueing, retries, cancellation and the breaker observe the service limits. | Remove the service profile entry and stop new decisions. Prior network requests have already crossed the boundary. |
+| 1 (follow-up). Judgment projection and admission types · plugin | Change only the types, ledger and focused tests. Assert `true` for one append, `false` on refusal, `TypeError` for an invalid label variant and propagation of I/O errors. Assert all scored keys start at `null`, latest hard wins in both append orders across `user` and `overturn`, soft labels stay out, and yes-no omits `option`. A retained unavailable decision returns `[]`. Missing and 91-day-old decisions return `undefined`, and labels for them return `false`. Verify identical ledger bytes after reads. | Revert the inert follow-up before the service consumes it. Existing ledger records need no migration. |
+| 2. Decisions service and profile wiring · desktop | Fake providers prove that unset, failing and disposed selections never send to a second provider, that identical requests call twice, and that queueing, retries, cancellation and the breaker observe the service limits. Verify the service preserves admission booleans, rejected errors and the read-only ledger projection. | Remove the service profile entry and stop new decisions. Prior network requests have already crossed the boundary. |
 | 3. Provider adapters and profile wiring · desktop | Each codec encodes and decodes first-party fixtures and rejects refusals, wrong kinds, missing or extra answers and invalid probabilities. Check Gemini's range, Cloudflare truncation, fixed recipients, credential headers and absence of credentials in errors. | Remove the adapter entry. Registered selections become unavailable and previous provider requests remain subject to their terms. |
 | 4. Decisions settings · plugin | Prove explicit selection, acknowledgment of unknown terms, owner-only writes, write-only keys and the canned test. Check numeric bounds, integer-only counts and deadlines, rejection of an inverted partial threshold update and applicable provider bounds. Check that an evaluation result cannot apply its suggestion. | Remove the Settings surface. The saved choice and credentials can be managed before rollback. |
-| 5. Routing host · plugin | Test owner opt-in, zero decisions for explicit mentions, one decision for eligible plain messages, and no wake on failure, no match, opt-out or membership removal. Test the serialized card allowlist and show that visible room work changes availability while hidden threads, other rooms and calls cannot. Prove route events stay out of Bot context and only scored router starts admit behavioral labels. | Disable routing per group or revert dispatch to the room's existing mode. Posted chat history and past requests persist. |
-| 6. Routing marks, card and group switch · plugin | Verify main and mid-round views, slot ticks, read-only score details and separate owner-only judge controls for scored called and uncalled candidates. Test both boolean actions, changes to the displayed judgment, zero wakes on judging, and denial for read-only callers, Bots and unscored candidates. Test the scored overturn, unscored correction and repeat call: all wake as entitled, and only the scored overturn writes a label. Check zh and pt-BR strings and rebuilt bundles. | Turn off routing before reverting the Settings and marks UI. Stored route records and calls already made persist. |
+| 5. Routing host · plugin | Test owner opt-in, zero decisions for explicit mentions, one decision for eligible plain messages, and no wake on failure, no match, opt-out or membership removal. Test the serialized card allowlist and show that visible room work changes availability while hidden threads, other rooms and calls cannot. Prove route events stay out of Bot context and only scored router starts admit behavioral labels. Exercise both judge signs, `no-score` on refusal, corrections that still call when label admission fails, and refused exposure and soft labels leaving no sample. Verify read-only callers and Bots cannot judge. Test the scored overturn, unscored correction and repeat call: each wakes the authorized member, and only the scored overturn appends a hard positive overturn label. Prove judging adds no wake or route event. | Disable routing per group or revert dispatch to the room's existing mode. Posted chat history and past requests persist. |
+| 6. Routing marks, card and group switch · plugin | Verify main and mid-round views, slot ticks and the room access check before any judgment read. Verify one owner read from the room event, `null` and both hard signs for scored called and uncalled candidates, filtering by question and candidate, and `{}` when no result is available. Authorized non-owners see read-only scores, with the field omitted and zero service calls. Verify refresh after judging and no wake, write, sample or live event from reading the card. Check zh and pt-BR strings and rebuilt bundles. | Turn off routing before reverting the Settings and marks UI. Stored route records and calls already made persist. |
 | 7. Team state, tools, goals and memory · plugin | In `team-powers`, stop a dual member's other-team work and check the count-only result, follow-up read scope and notices. Verify `list_threads` hides the unreadable work. Repeat after member removal, leader replacement and deletion, with and without an independent grant. Test chief resolution, group deletion confirmation and archives, and refusal to add a private Bot or make a member private with the blocking team named. Team deletion preserves groups, clears ownership and archives team memory. | Remove team tool grants. Saved team goals, memory and group history remain on disk. |
 | 8. Team mentions · plugin | Verify leader and chief resolution, an unreachable leader, handle collisions, stored team ids, and agreement between the host and the client. | Remove team mention dispatch. Saved posts remain readable. |
 | 9. Teams settings and sidebar · plugin | Verify the owner can manage teams, attach groups and reach the team goal and memory from Settings. Check the sidebar, zh and pt-BR strings and rebuilt bundles. | Remove the Teams UI. The host retains team records and their access rules. |
