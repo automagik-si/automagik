@@ -2,39 +2,45 @@
 import { forgeHost } from "../workers.js";
 
 const WATCH_RUNS = 20;
+export const WATCH_RATE_HOLD = 24 * 60 * 60_000;
+const RATE_LIMIT = /HTTP 429|secondary rate.limit|rate.limit(ed|[ _-](exceeded|reached))/i;
 const CI_STEP = /(?:^|[^a-z0-9])(?:build(?:ing)?|tests?|testing)(?:$|[^a-z0-9])/i;
 const AUXILIARY = /^(?:upload|download|publish|report|collect|cache|restore|setup|set up)\b/i;
 const buildOrTest = (name) => typeof name === "string" && !AUXILIARY.test(name.trim())
   && CI_STEP.test(name);
 const positive = (value) => Number.isSafeInteger(value) && value > 0;
-const date = (value) => Date.parse(value) || 0;
-const shaOf = (value) => /^[0-9a-f]{40,64}$/.test(value ?? "") ? value : null;
+const date = (value) => typeof value === "string" ? Math.max(0, Date.parse(value) || 0) : 0;
+export const watchNumber = (value) => positive(value) && value <= 2_147_483_647;
+export const watchSha = (value) => typeof value === "string"
+  && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value);
+export const watchBranch = (value) => typeof value === "string" && value.length <= 1024
+  && /^[^\s\p{Cc}\p{Bidi_Control}]+$/u.test(value);
 const nodes = (connection) =>
   Array.isArray(connection?.nodes) ? connection.nodes.filter(Boolean) : [];
 const literal = JSON.stringify;
 
 export function watchRepository(tool, remote) {
   const host = forgeHost(remote);
-  if (!tool || !host || !/^[a-z0-9.-]+$/i.test(host)) return null;
+  if (!tool || !host || host.length > 253 || !/^[a-z0-9.-]+$/i.test(host)) return null;
   let path;
   try { path = new URL(remote).pathname; } catch { path = remote.split(/:(.*)/s)[1]; }
   path = path?.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
   const parts = path?.split("/");
-  if (!parts || (tool === "gh" ? parts.length !== 2 : parts.length < 2)
+  if (!parts || path.length > 1024 || (tool === "gh" ? parts.length !== 2 : parts.length < 2)
       || parts.some((part) => !/^[a-z0-9_.-]+$/i.test(part) || /^\.{1,2}$/.test(part))) return null;
   return { tool, host, path, base: `https://${host}/${path}`, github: tool === "gh" };
 }
 
 function rateLimit(headers, status, result, data, now) {
-  const failure = result.code !== 0 || data?.errors?.length;
+  const failure = result.code !== 0 || status >= 400 || data?.errors?.length;
   const text = failure ? `${result.stderr}\n${literal(data?.errors ?? data)}` : "";
-  const limited = /HTTP 429|rate.limit(ed|[ _-](?:exceeded|reached))|too many requests/i;
   const remaining = headers["x-ratelimit-remaining"] ?? headers["ratelimit-remaining"];
-  if (status !== 429 && remaining !== "0" && !limited.test(text)) return 0;
+  if (status !== 429 && remaining !== "0" && !(status === 403 && headers["retry-after"])
+      && !RATE_LIMIT.test(text) && !/too many requests/i.test(text)) return 0;
   const reset = Number(headers["x-ratelimit-reset"] ?? headers["ratelimit-reset"]) * 1000;
   const retry = headers["retry-after"];
   const until = Math.max(reset || 0, Number(retry) * 1000 + now || date(retry));
-  return until > now ? Math.min(until, now + 86_400_000) : now + 15 * 60_000;
+  return until > now ? Math.min(until, now + WATCH_RATE_HOLD) : now + 15 * 60_000;
 }
 
 export function watchApi(repo, exec, state, now, out) {
@@ -50,10 +56,13 @@ export function watchApi(repo, exec, state, now, out) {
     let data;
     try { data = JSON.parse(status ? tail.join("\n\n") : result.stdout); } catch {}
     const until = rateLimit(headers, status, result, data, now);
-    if (until) state.rateLimitUntil = until;
-    if (result.code !== 0 || !data || data.errors?.length) {
+    if (until) {
+      state.rateLimitUntil = until;
+      out.forgeBackoff = true;
+    }
+    if (result.code !== 0 || status >= 400 || !data || data.errors?.length) {
       // GitHub can return data for other aliases when an explicitly followed number is missing.
-      const missing = Array.isArray(data?.errors) && data.errors.length
+      const missing = !(status >= 400) && Array.isArray(data?.errors) && data.errors.length
         && data.errors.every((error) =>
           error.type === "NOT_FOUND" && /^p\d+$/.test(error.path?.at(-1) ?? ""));
       if (!missing) {
@@ -86,7 +95,8 @@ const GL_FIELDS = `
   approvedBy(first:20) { nodes { id username } }
   changeRequesters(first:20) { nodes { id username } }
 `;
-const GH_BRANCH_FIELDS = "number state createdAt closedAt mergedAt headRefName isCrossRepository";
+const GH_BRANCH_FIELDS =
+  "number state createdAt closedAt mergedAt headRefName headRefOid isCrossRepository";
 const GL_RUN_FIELDS = "id createdAt updatedAt status";
 
 const chunks = (values, size) => Array.from({ length: Math.ceil(values.length / size) },
@@ -98,7 +108,7 @@ function githubReads(repo, branches, numbers, after, first) {
     ${after ? `,after:${literal(after)}` : ""}) { ${PAGE} nodes { ${GH_FIELDS} } }` : "";
   const watched = numbers.map((n) => `p${n}:pullRequest(number:${n}) { ${GH_FIELDS} }`);
   const workers = branches.map((branch, i) => `
-    w${i}:pullRequests(first:1, headRefName:${literal(branch)},orderBy:{
+    w${i}:pullRequests(first:5, headRefName:${literal(branch)},orderBy:{
       field:CREATED_AT,direction:DESC
     }) { nodes { ${GH_BRANCH_FIELDS} } }`);
   return `query Watch { viewer { login } repo:repository(owner:${owner},name:${name}) {
@@ -111,13 +121,13 @@ function gitlabReads(repo, branches, numbers, after, first, branch) {
     ${after ? `,after:${literal(after)}` : ""}) { ${PAGE} nodes { ${GL_FIELDS} } }` : "";
   const known = numbers.length ? `known:mergeRequests(first:${numbers.length},
     iids:${literal(numbers.map(String))}) { nodes { ${GL_FIELDS} } }` : "";
-  const workers = branches.length ? `workers:mergeRequests(first:100,
-    sourceBranches:${literal(branches)}) { nodes {
-      iid state createdAt closedAt mergedAt sourceBranch sourceProject { fullPath }
-    } }` : "";
+  const workers = branches.map((head, i) => `w${i}:mergeRequests(first:5, sort:CREATED_DESC,
+    sourceBranches:${literal([head])}) { nodes {
+      iid state createdAt closedAt mergedAt sourceBranch diffHeadSha sourceProject { fullPath }
+    } }`);
   const ci = first && branch ? gitlabRunsQuery(branch) : "";
   return `query Watch { currentUser { username } repo:project(fullPath:${literal(repo.path)}) {
-    repository { rootRef } ${open} ${known} ${workers} ${ci}
+    repository { rootRef } ${open} ${known} ${workers.join(" ")} ${ci}
   } }`;
 }
 
@@ -155,22 +165,26 @@ function activity(connection, author, timeKey) {
 
 function projectPr(item, repo, normalizedPr, full) {
   const gh = repo.github;
-  const pr = normalizedPr(gh ? item : { ...item, iid: Number(item.iid), sha: item.diffHeadSha });
-  if (!pr || !positive(pr.number)) return null;
+  const iid = typeof item.iid === "string" && /^\d{1,10}$/.test(item.iid)
+    ? Number(item.iid) : item.iid;
+  const pr = normalizedPr(gh ? item : { ...item, iid, sha: item.diffHeadSha });
+  if (!pr || !watchNumber(pr.number) || !["OPEN", "CLOSED", "MERGED"].includes(pr.state)) {
+    return null;
+  }
   const author = item.author?.login ?? item.author?.username;
-  const sha = shaOf(pr.headRefOid);
+  const sha = watchSha(pr.headRefOid) ? pr.headRefOid : null;
   const match = gh ? item.isCrossRepository === false : item.sourceProject?.fullPath === repo.path;
   const branch = item.headRefName ?? item.sourceBranch;
   const merge = item.mergeable ?? item.detailedMergeStatus;
   return { number: pr.number, state: pr.state, sha, author, branch, match, full,
     created: date(pr.createdAt), closed: date(pr.mergedAt ?? pr.closedAt),
-    checks: normalizeChecks(item, gh, sha),
+    checks: full ? normalizeChecks(item, gh, sha) : null,
     merge: ["CONFLICTING", "CONFLICT"].includes(merge) ? "conflicting"
       : ["MERGEABLE", "MERGEABLE_WITH_WARNINGS"].includes(merge) ? "mergeable" : null,
     reviews: activity(item.reviews, author, "submittedAt"),
     comments: activity(item.comments ?? item.notes, author, "createdAt"),
     approvals: ["approvedBy", "changeRequesters"].flatMap((key) =>
-      nodes(item[key]).filter((user) => user.username && user.username !== author)
+      nodes(item[key]).slice(0, 20).filter((user) => user.username && user.username !== author)
         .map(({ id }) => `${key}:${id}`)),
   };
 }
@@ -182,7 +196,7 @@ export async function watchPullRequests(repo, api, normalizedPr, options) {
   const gh = repo.github;
   const makeQuery = gh ? githubReads : gitlabReads;
   const n = chunks(numbers, gh ? 60 : 10);
-  const b = chunks([...recent], gh ? 40 : 25);
+  const b = chunks([...recent].filter(watchBranch), gh ? 40 : 25);
   const result = new Map();
   let after, login, defaultBranch, pipelines;
   const pages = Math.max(n.length, b.length, 1);
@@ -190,9 +204,10 @@ export async function watchPullRequests(repo, api, normalizedPr, options) {
     const query = makeQuery(repo, b[i] ?? [], n[i] ?? [], after, i === 0, branch);
     const response = await api("graphql", query);
     const data = response?.data?.repo;
-    if (!data) return null;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
     login ??= response.data.viewer?.login ?? response.data.currentUser?.username;
-    defaultBranch ??= data.defaultBranchRef?.name ?? data.repository?.rootRef;
+    const head = data.defaultBranchRef?.name ?? data.repository?.rootRef;
+    if (watchBranch(head)) defaultBranch ??= head;
     pipelines ??= data.runs;
     const add = (item, full) => {
       const pr = projectPr(item, repo, normalizedPr, full);
@@ -201,12 +216,13 @@ export async function watchPullRequests(repo, api, normalizedPr, options) {
     for (const [key, entry] of Object.entries(data)) {
       if (key === "open" || key === "known") nodes(entry).forEach((item) => add(item, true));
       else if (/^p\d+$/.test(key) && entry) add(entry, true);
-      else if (key === "workers" || /^w\d+$/.test(key)) {
+      else if (/^w\d+$/.test(key)) {
         nodes(entry).forEach((item) => add(item, false));
       }
     }
     const next = data.open?.pageInfo;
-    if (next?.hasNextPage && (!next.endCursor || next.endCursor === after || i >= 99)) return null;
+    if (next?.hasNextPage && (typeof next.endCursor !== "string" || !next.endCursor
+        || next.endCursor.length > 4096 || next.endCursor === after || i >= 99)) return null;
     after = next?.hasNextPage ? next.endCursor : null;
   }
   const explicit = new Set(followed);
@@ -236,7 +252,7 @@ export async function watchRuns(repo, api, { branch, pipelines }) {
     list = pipelines?.nodes;
   }
   if (!Array.isArray(list)) return null;
-  return list.flatMap((run) => {
+  return list.slice(0, WATCH_RUNS).flatMap((run) => {
     const id = repo.github ? run.id : Number(/\/(\d+)$/.exec(run.id)?.[1]);
     const attempt = repo.github && positive(run.run_attempt) ? run.run_attempt : 1;
     const created = date(run.run_started_at ?? run.created_at ?? run.createdAt);
@@ -246,7 +262,10 @@ export async function watchRuns(repo, api, { branch, pipelines }) {
       : { SUCCESS: "success", FAILED: "failure" }[run.status];
     const result = state === "success" ? "green" : state === "failure" ? "red" : null;
     const key = `${id}:${repo.github ? attempt : finished}`;
-    return [{ id, attempt, created, result, key }];
+    // GitLab returns one default-branch pipeline stream. GitHub interleaves workflows.
+    const workflow = repo.github && positive(run.workflow_id) ? run.workflow_id
+      : repo.github ? key : "pipelines";
+    return [{ id, attempt, created, result, key, workflow }];
   }).sort((a, b) => b.created - a.created || b.id - a.id);
 }
 

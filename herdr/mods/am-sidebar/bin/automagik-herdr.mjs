@@ -51,7 +51,8 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, keptLaunch, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
 import {
-  watchApi, watchBuildFailed, watchPullRequests, watchRepository, watchRuns,
+  WATCH_RATE_HOLD, watchApi, watchBranch, watchBuildFailed, watchNumber, watchPullRequests,
+  watchRepository, watchRuns, watchSha,
 } from "./watch-forge.mjs";
 import { screenLines } from "../dialog.js";
 import { automaticDelivery, hasRateLimitHold } from "../delivery.mjs";
@@ -1085,16 +1086,23 @@ class LockHeld extends Error {}
 // (15 s each) never reads as stale; a holder that dies stops touching it (#225, #223).
 const LOCK_REFRESH = Math.max(10, Math.floor(LOCK_STALE / 3));
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const stale = (path) => { try { return Date.now() - statSync(path).mtimeMs > LOCK_STALE; } catch { return false; } };
+const stale = (path, maxFuture = Infinity) => {
+  try {
+    const age = Date.now() - statSync(path).mtimeMs;
+    return age > LOCK_STALE || age < -maxFuture;
+  } catch { return false; }
+};
 
 // A stale lock is moved aside first, so of two waiters only one takes it. Aside, it is checked
 // again: a lock made fresh in between goes back (by link, which never replaces a newer one).
-function takeOverStale(lock) {
-  if (!stale(lock)) return;
+function takeOverStale(lock, maxFuture) {
+  if (!stale(lock, maxFuture)) return false;
   const aside = `${lock}.${process.pid}`;
-  try { renameSync(lock, aside); } catch { return; } // another waiter moved it first
-  if (!stale(aside)) { try { linkSync(aside, lock); } catch { /* a newer lock is there */ } }
+  try { renameSync(lock, aside); } catch { return false; } // another waiter moved it first
+  const expired = stale(aside, maxFuture);
+  if (!expired) { try { linkSync(aside, lock); } catch { /* a newer lock is there */ } }
   try { unlinkSync(aside); } catch { /* gone already */ }
+  return expired;
 }
 
 /**
@@ -1119,7 +1127,11 @@ function tryLock(lock, w) {
   try { writeFileSync(lock, w.token, { flag: "wx" }); return true; } catch (e) {
     if (e?.code !== "EEXIST") throw e;
   }
-  takeOverStale(lock);
+  if (takeOverStale(lock, w.maxFuture)) {
+    try { writeFileSync(lock, w.token, { flag: "wx" }); return true; } catch (e) {
+      if (e?.code !== "EEXIST") throw e;
+    }
+  }
   if (Date.now() > w.start + w.wait) {
     const who = lockHolder(lock);
     throw new LockHeld(`${w.what ? `${w.what} (${lock})` : lock} is held by another am${who ? ` (${who})` : ""}`
@@ -1146,8 +1158,9 @@ function takeLock(lock, wait = LOCK_WAIT, what = null) {
  * this CLI already holds (a task's name lock while it waits for its worktree's, #552) keeps
  * being refreshed and never goes stale under a long wait.
  */
-async function takeLockAsync(lock, wait = LOCK_WAIT, what = null) {
+async function takeLockAsync(lock, wait = LOCK_WAIT, what = null, maxFuture = Infinity) {
   const w = waiter(wait, what);
+  w.maxFuture = maxFuture;
   while (!tryLock(lock, w)) await new Promise((resolve) => setTimeout(resolve, retryIn()));
   return w.token;
 }
@@ -1175,8 +1188,8 @@ function keepFresh(lock, token) {
  * `wait` ms for it without holding the event loop (takeLockAsync), a long wait named as
  * `what` on stderr.
  */
-async function withLockAsync(lock, fn, { wait = LOCK_WAIT, what = null } = {}) {
-  const token = await takeLockAsync(lock, wait, what);
+async function withLockAsync(lock, fn, { wait = LOCK_WAIT, what = null, maxFuture } = {}) {
+  const token = await takeLockAsync(lock, wait, what, maxFuture);
   const stop = keepFresh(lock, token);
   try { return await fn(); } finally { stop(); dropLock(lock, token); }
 }
@@ -13210,25 +13223,94 @@ const WATCH_FOLLOW = 100;
 const WATCH_PENDING = 1024;
 const WATCH_LINE = 240;
 const WATCH_MESSAGE = 8000;
+const WATCH_ATTEMPTS = 6;
+const WATCH_PRS = 320;
+const WATCH_PANES = 1024;
 const WATCH_OPTIONS = new Set(["pass", "dry-run", "project", "json"]);
 const WATCH_USAGE = "Use am watch --pass or am watch follow|unfollow <number>.";
 const watchState = () => ({ version: 1, followed: [], pending: [], prs: {}, workers: {},
   blocked: [], runs: {}, prsSeenAt: 0, seatsSeen: false, runsSeen: false, rateLimitUntil: 0 });
 
-function readWatchState(file) {
+const watchTime = (value) => Number.isSafeInteger(value) && value >= 0;
+const watchString = (value, limit) => typeof value === "string" && value.length <= limit;
+const watchArray = (value, limit, valid) =>
+  Array.isArray(value) && value.length <= limit && value.every(valid);
+const watchObject = (value) => value && typeof value === "object" && !Array.isArray(value);
+const watchEntries = (value, limit, valid) => watchObject(value)
+  && Object.keys(value).length <= limit
+  && Object.entries(value).every(([key, entry]) => valid(key, entry));
+const watchOptional = (value, valid) => value == null || valid(value);
+const watchBool = (value) => typeof value === "boolean";
+const watchHashes = (value, limit) => watchArray(value, limit,
+  (id) => typeof id === "string" && /^[a-f0-9]{16}$/.test(id));
+const watchMark = (value) =>
+  watchObject(value) && watchTime(value.time) && watchHashes(value.seen, 30);
+const watchSeat = (value) =>
+  watchString(value, 128) && /^t[0-9a-z]+:\d+$/.test(value);
+const WATCH_KEEP = ["kept (head differs)", "kept (head unverified)"];
+const WATCH_WORKER_STATES = ["blocked", "ended", "working", "kept", ...WATCH_KEEP,
+  "dirty", "idle", "removed", "baseline"];
+
+function validWatchState(state) {
+  return watchObject(state) && state.version === 1
+    && watchArray(state.followed, WATCH_FOLLOW, watchNumber)
+    && watchArray(state.pending, WATCH_PENDING, (line) => watchString(line, WATCH_LINE))
+    && watchEntries(state.prs, WATCH_PRS, (key, pr) =>
+      /^[1-9]\d{0,9}$/.test(key) && watchNumber(Number(key)) && watchObject(pr)
+      && ["OPEN", "CLOSED", "MERGED"].includes(pr.state)
+      && watchTime(pr.closed) && watchTime(pr.seenAt)
+      && watchOptional(pr.sha, watchSha)
+      && watchOptional(pr.checks, (value) => ["pending", "red", "green"].includes(value))
+      && watchOptional(pr.merge, (value) => ["mergeable", "conflicting"].includes(value))
+      && watchMark(pr.reviews) && watchMark(pr.comments)
+      && watchOptional(pr.approvals, (value) => watchHashes(value, 40))
+      && watchOptional(pr.unfollowed, watchBool))
+    && watchEntries(state.workers, WATCH_PANES, (key, value) => {
+      const [core, seat, extra] = key.split("/");
+      const [n, prState, status, tail] = watchString(value, 80) ? value.split(":") : [];
+      return extra === undefined && core && watchString(core, 128) && watchSeat(seat)
+        && tail === undefined && /^[1-9]\d{0,9}$/.test(n) && watchNumber(Number(n))
+        && ["CLOSED", "MERGED"].includes(prState) && WATCH_WORKER_STATES.includes(status);
+    })
+    && watchEntries(state.runs, 20, (key, value) =>
+      /^\d{1,16}:\d{1,16}$/.test(key) && value === true)
+    && watchArray(state.blocked, WATCH_PANES, watchSeat)
+    && watchTime(state.prsSeenAt) && watchTime(state.rateLimitUntil)
+    && watchBool(state.seatsSeen) && watchBool(state.runsSeen)
+    && watchOptional(state.seatCore, (value) => watchString(value, 128))
+    && watchOptional(state.repository, (value) => watchString(value, 1286))
+    && watchOptional(state.branch, watchBranch)
+    && watchOptional(state.noRemote, watchBool)
+    && watchOptional(state.delivery, (value) => watchObject(value)
+      && Number.isSafeInteger(value.count) && value.count > 0 && value.count <= state.pending.length
+      && Number.isSafeInteger(value.attempts)
+      && value.attempts > 0 && value.attempts <= WATCH_ATTEMPTS);
+}
+
+function readWatchState(file, warnings, dry) {
   const info = lstatSync(file, { throwIfNoEntry: false });
   if (!info) return watchState();
   if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0) {
     throw new CliError("Couldn't verify private watch state.");
   }
-  const state = JSON.parse(readBoundedFile(file, WATCH_BYTES, { noFollow: true }));
-  if (state?.version !== 1 || !Array.isArray(state.followed) || !Array.isArray(state.pending)) {
-    throw new CliError("Invalid watch state.");
+  try {
+    const state = JSON.parse(readBoundedFile(file, WATCH_BYTES, { noFollow: true }));
+    if (validWatchState(state)) return state;
+  } catch (error) {
+    if (!(error instanceof SyntaxError) && error.code !== "INVALID_BOUNDED_FILE") throw error;
   }
-  return state;
+  if (dry) warnings.push("Watch found corrupt state.");
+  else {
+    const stamp = new Date().toISOString().replaceAll(":", "-");
+    const aside = `${file}.corrupt-${stamp}-${randomUUID()}`;
+    renameSync(file, aside);
+    chmodSync(aside, 0o600);
+    warnings.push(`Watch moved corrupt state to ${basename(aside)}.`);
+  }
+  return watchState();
 }
 
-function saveWatchState(file, state) {
+export function saveWatchState(file, state) {
   const text = JSON.stringify(state) + "\n";
   if (Buffer.byteLength(text) > WATCH_BYTES) {
     throw new CliError("Watch state exceeds its size limit.");
@@ -13236,9 +13318,27 @@ function saveWatchState(file, state) {
   writePrivateStateFile(file, text);
 }
 
-function watchLine(...fields) {
+const cleanWatchLine = (text) => cutNotice(workerReportText(text), WATCH_LINE);
+export function watchLine(...fields) {
   const line = `[am] watch ${fields.filter(Boolean).join(" ")}`;
-  return cutNotice(workerReportText(line), WATCH_LINE);
+  return cleanWatchLine(line);
+}
+
+// The queue is local state. Only watch's fact vocabulary goes back into a terminal.
+const WATCH_LINK = / https:\/\/[a-zA-Z0-9_.\/-]+$/;
+const WATCH_PR_FACT = /^(?:head [a-f0-9]{8}|checks (?:red|green)|conflicting|closed|merged)$/;
+
+function watchFact(line) {
+  if (/^\[am\] watch pane t[0-9a-z]+ blocked$/.test(line)) return true;
+  const link = WATCH_LINK.exec(line);
+  if (!link) return false;
+  const fact = line.slice(0, link.index);
+  const pr = /^\[am\] watch PR #(\d+) (.*)$/.exec(fact);
+  if (pr) return watchNumber(Number(pr[1]))
+    && (WATCH_PR_FACT.test(pr[2]) || /^(?:review|comment) \d+$/.test(pr[2]));
+  const worker = /^\[am\] watch worker t[0-9a-z]+ #(\d+) (?:merged|closed) (.*)$/.exec(fact);
+  if (worker) return watchNumber(Number(worker[1])) && WATCH_WORKER_STATES.includes(worker[2]);
+  return /^\[am\] watch CI #\d+ red$/.test(fact);
 }
 
 const watchPrLink = (repo, number) =>
@@ -13301,20 +13401,24 @@ function watchPrChanges(state, repo, prs, now, add) {
   state.prsSeenAt = now;
 }
 
-async function watchCiChanges(state, repo, api, runs, now, add) {
+async function watchCiChanges(state, repo, api, runs, now, add, out) {
   const next = {};
-  let green = false;
-  let red = false;
+  const workflows = new Map();
   for (const run of runs) {
-    if (run.result === "green") green = true;
+    if (!workflows.has(run.workflow)) workflows.set(run.workflow, { green: false, red: false });
+    const workflow = workflows.get(run.workflow);
+    if (run.result === "green") workflow.green = true;
     if (run.result !== "red") continue;
-    const qualifies = !green && (red || now - run.created > 2 * 60 * 60_000);
-    red = true;
+    const qualifies = !workflow.green && (workflow.red || now - run.created > 2 * 60 * 60_000);
+    workflow.red = true;
     if (state.runs[run.key]) next[run.key] = true;
     if (!qualifies || next[run.key]) continue;
     if (state.runsSeen) {
       const failed = await watchBuildFailed(repo, api, run);
-      if (failed === null) continue;
+      if (failed === null) {
+        if (state.rateLimitUntil <= now) out.forgeUnavailable = true;
+        continue;
+      }
       if (failed) add(watchLine("CI", `#${run.id}`, "red", watchRunLink(repo, run.id)));
     }
     next[run.key] = true;
@@ -13361,19 +13465,23 @@ async function watchBlocked(state, { terms, project, core, byTerminal }, add) {
       add(watchLine("pane", pane.address, "blocked"));
     }
   }
-  state.blocked = blocked.slice(-1024);
+  state.blocked = blocked.slice(-WATCH_PANES);
   state.seatsSeen = true;
   state.seatCore = core;
 }
 
-async function watchWorktree(row, pane) {
+async function watchWorktree(row, pane, sha) {
   const dir = row.worktree;
   if (!isAbsolute(dir ?? "") || dir === row.project || nativeDir(dir) !== dir
       || pane.cwd !== dir || !await stillWorktree(dir, row.project, workerReportGit)) return "kept";
   const branch = await workerReportGit(["symbolic-ref", "--quiet", "--short", "HEAD"], dir);
   if (branch?.trim() !== row.branch) return "kept";
   const status = await workerReportGit(["--no-optional-locks", "status", "--porcelain"], dir);
-  return status === null ? "kept" : status ? "dirty" : null;
+  if (status === null) return "kept";
+  if (status) return "dirty";
+  const head = (await workerReportGit(["rev-parse", "--verify", "HEAD"], dir))?.trim();
+  if (!watchSha(sha) || !watchSha(head)) return "kept (head unverified)";
+  return head === sha ? null : "kept (head differs)";
 }
 
 function workerPaneState(pane) {
@@ -13383,10 +13491,10 @@ function workerPaneState(pane) {
   return status === "working" ? status : pane.state === "live" && status === "idle" ? null : "kept";
 }
 
-async function watchRetire(row, pane, project, view, dry) {
+async function watchRetire(row, pane, project, view, dry, sha) {
   const status = workerPaneState(pane);
   if (status) return status;
-  const worktree = await watchWorktree(row, pane);
+  const worktree = await watchWorktree(row, pane, sha);
   if (worktree) return worktree;
   const bot = project.file.bots.find(({ id, planned }) => id === row.botId && !planned);
   const owner = bot && await watchBinding(bot, project.key, view.core, view.path);
@@ -13400,7 +13508,7 @@ async function watchRetire(row, pane, project, view, dry) {
     const result = await killWorker(pane.address, {
       bot, self: owner.terminal, view, say: () => {},
       async beforeKill(current, children) {
-        const problem = workerPaneState(current) || await watchWorktree(row, current);
+        const problem = workerPaneState(current) || await watchWorktree(row, current, sha);
         if (problem) throw new CliError("Worker changed.", 1, { watchState: problem });
         if (children.length || heldTarget(realHcPath(), { get: current, address: current.address },
           localHcEnv()) || await freshCoreId() !== view.core) throw new CliError("Worker held.");
@@ -13441,7 +13549,7 @@ async function watchWorkers(state, repo, prs, workers, project, view, terms, bas
     if (!pane && state.workers[id]) next[id] = state.workers[id];
     if (pane?.address !== row.terminal || pane.created_ms !== row.created_ms
         || pane.labels?.[WORKER_OF_LABEL] !== row.botId) continue;
-    const status = baseline ? "baseline" : await watchRetire(row, pane, project, view, dry);
+    const status = baseline ? "baseline" : await watchRetire(row, pane, project, view, dry, pr.sha);
     const value = `${pr.number}:${pr.state}:${status}`;
     next[id] = value;
     if (state.workers[id] !== value && status !== "baseline") {
@@ -13449,10 +13557,21 @@ async function watchWorkers(state, repo, prs, workers, project, view, terms, bas
         status, watchPrLink(repo, pr.number)));
     }
   }
-  state.workers = next;
+  state.workers = Object.fromEntries(Object.entries(next).slice(-WATCH_PANES));
 }
 
-async function deliverWatch(file, state, out, project, main, view, save) {
+async function deliverWatch(file, state, out, project, main, view) {
+  const dropBatch = (count) => {
+    state.pending.splice(0, count);
+    delete state.delivery;
+  };
+  const abandon = (count) => {
+    dropBatch(count);
+    saveWatchState(file, state);
+    out.warnings.push("Watch dropped a batch after six unconfirmed delivery attempts.");
+  };
+  const previous = state.delivery;
+  if (previous?.attempts === WATCH_ATTEMPTS) return abandon(previous.count);
   const binding = await watchBinding(main, project, view.core, view.path);
   if (!binding) return;
   // Delivery resolves the roster again and checks the current generation and screen.
@@ -13464,27 +13583,44 @@ async function deliverWatch(file, state, out, project, main, view, save) {
   if (!currentBinding || attachKey(currentBinding) !== attachKey(binding)
       || currentBinding.project !== binding.project) return;
   let length = 0;
+  let count = 0;
   const batch = [];
-  for (const line of state.pending) {
+  for (const pending of state.pending.slice(0, previous?.count)) {
+    const line = cleanWatchLine(pending);
+    if (!watchFact(line)) { count++; continue; }
     length += line.length + 1;
     if (length > WATCH_MESSAGE) break;
+    count++;
     batch.push(line);
   }
-  // Like worker done, commit the attempt before handing the text to hc. A timeout is ambiguous.
-  state.pending.splice(0, batch.length);
-  save(file, state);
+  if (!batch.length) {
+    dropBatch(count);
+    saveWatchState(file, state);
+    return;
+  }
+  // Persist the attempt and its batch boundary before handing text to hc.
+  // An ambiguous reply leaves the facts queued, even when another sweep adds new facts.
+  state.delivery = { count, attempts: (previous?.attempts ?? 0) + 1 };
+  saveWatchState(file, state);
   const result = await sendWorkerNotice(binding.terminal, batch.join("\n")).catch(() => null);
-  if (result?.code === 0) out.sent = true;
-  else if (result && ["blocked", "not_found", "finished"].includes(hcErrorKind(result))) {
-    state.pending.unshift(...batch);
-    save(file, state);
-  } else out.deliveryUnconfirmed = true;
+  if (result?.code === 0) {
+    out.sent = true;
+    dropBatch(count);
+  } else if (result && ["blocked", "not_found", "finished"].includes(hcErrorKind(result))) {
+    if (previous) state.delivery = previous;
+    else delete state.delivery;
+  } else {
+    out.deliveryUnconfirmed = true;
+    if (state.delivery.attempts === WATCH_ATTEMPTS) return abandon(count);
+    out.warnings.push("Watch delivery was unconfirmed.");
+  }
+  saveWatchState(file, state);
 }
 
-async function watchPass(file, state, project, main, dry) {
+async function watchPass(file, state, project, main, dry, warnings) {
   const now = Date.now();
   const before = JSON.stringify(state);
-  const out = { forgeCalls: 0, sent: false, lines: [] };
+  const out = { forgeCalls: 0, sent: false, lines: [], warnings };
   const add = (line) => out.lines.push(line);
   const core = await pinIdentityCore().then(() => coreId()).catch(() => null);
   const path = attachPath(appHome());
@@ -13502,6 +13638,9 @@ async function watchPass(file, state, project, main, dry) {
   const { tool, remote } = await projectForge(project.key);
   const repo = watchRepository(tool, remote);
   const forge = tool && programPath(tool);
+  if (state.rateLimitUntil > now + WATCH_RATE_HOLD) state.rateLimitUntil = 0;
+  const hasHost = Boolean(forgeHost(remote));
+  if (hasHost) delete state.noRemote;
   if (repo && forge) {
     if (state.repository !== repo.base) Object.assign(state, {
       repository: repo.base, prs: {}, prsSeenAt: 0, runs: {}, runsSeen: false, rateLimitUntil: 0,
@@ -13531,21 +13670,29 @@ async function watchPass(file, state, project, main, dry) {
       }
       state.branch = sample.branch ?? null;
       const runs = await watchRuns(repo, api, sample);
-      if (runs) await watchCiChanges(state, repo, api, runs, now, add);
+      if (runs) await watchCiChanges(state, repo, api, runs, now, add, out);
+      else if (state.rateLimitUntil <= now) out.forgeUnavailable = true;
       if (terms) await watchWorkers(state, repo, sample.prs, workers, project, view, terms,
         baseline, dry, add);
-    }
-  } else if (repo) out.forgeUnavailable = true;
+    } else if (state.rateLimitUntil <= now) out.forgeUnavailable = true;
+  } else if (hasHost) out.forgeUnavailable = true;
+  else if (!state.noRemote) {
+    warnings.push("Watch found no forge remote.");
+    state.noRemote = true;
+  }
+  if (out.forgeUnavailable) warnings.push("Watch could not read the forge.");
+  else if (out.forgeBackoff) warnings.push("Watch paused forge reads after a rate limit.");
   const prs = Object.entries(state.prs)
     .filter(([, pr]) => !pr.closed || now - pr.closed < WATCH_WEEK);
-  state.prs = Object.fromEntries(prs.sort(([, a], [, b]) => b.seenAt - a.seenAt).slice(0, 320));
+  prs.sort(([, a], [, b]) => b.seenAt - a.seenAt);
+  state.prs = Object.fromEntries(prs.slice(0, WATCH_PRS));
   state.pending.push(...out.lines);
   out.dropped = Math.max(0, state.pending.length - WATCH_PENDING);
   state.pending.splice(WATCH_PENDING);
   if (!dry) {
     if (before !== JSON.stringify(state) || !existsSync(file)) saveWatchState(file, state);
     if (state.pending.length && core) {
-      await deliverWatch(file, state, out, project.key, main, view, saveWatchState);
+      await deliverWatch(file, state, out, project.key, main, view);
     }
   }
   out.pending = state.pending.length;
@@ -13560,7 +13707,7 @@ async function cmdWatch(opts, rest) {
   const n = Number(number);
   if (Object.keys(opts).some((key) => !WATCH_OPTIONS.has(key))
       || (pass ? rest.length : !["follow", "unfollow"].includes(op) || rest.length !== 2
-        || dry || !/^[1-9]\d*$/.test(number) || n > 2_147_483_647)) {
+        || dry || !/^[1-9]\d*$/.test(number) || !watchNumber(n))) {
     throw new CliError(WATCH_USAGE, 2);
   }
   const project = loadProject(await commandKeyOf(opts));
@@ -13568,23 +13715,22 @@ async function cmdWatch(opts, rest) {
   if (!main) return opts.json ? { skipped: "no-main", forgeCalls: 0, sent: false, lines: [] } : "";
   const projectHome = workerProjectHome(project.key, { create: !dry });
   const dir = join(projectHome, "state");
-  if (!dry) ensureWorkerReportDir(dir);
   for (const path of [projectHome, dir]) {
     const info = lstatSync(path, { throwIfNoEntry: false });
     if (info && (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077))) {
       throw new CliError("Couldn't verify private watch folder.");
     }
   }
+  if (!dry) ensureWorkerReportDir(dir);
   const file = join(dir, "watch.json");
   const run = async () => {
-    const state = readWatchState(file);
+    const warnings = [];
+    const state = readWatchState(file, warnings, dry);
     if (pass) {
-      const result = await watchPass(file, state, project, main, dry);
+      const result = await watchPass(file, state, project, main, dry, warnings);
       if (opts.json) return result;
-      if (dry) return result.lines.join("\n");
-      if (result.deliveryUnconfirmed) return "Watch delivery was unconfirmed.";
-      if (result.forgeUnavailable) return "Watch could not read the forge.";
-      return result.sent ? "Watch notified the lead." : "";
+      const lines = dry ? result.lines : result.sent ? ["Watch notified the lead."] : [];
+      return [...warnings, ...lines].join("\n");
     }
     const followed = new Set(state.followed);
     if (op === "follow") followed.add(n);
@@ -13594,13 +13740,13 @@ async function cmdWatch(opts, rest) {
     }
     state.followed = [...followed].sort((a, b) => a - b);
     saveWatchState(file, state);
-    return opts.json ? { followed: state.followed }
-      : `PR #${n} ${op === "follow" ? "followed" : "unfollowed"}.`;
+    return opts.json ? { followed: state.followed, ...(warnings.length ? { warnings } : {}) }
+      : [...warnings, `PR #${n} ${op === "follow" ? "followed" : "unfollowed"}.`].join("\n");
   };
   if (dry) return run();
   try {
     return await withLockAsync(`${file}.lock`, run,
-      { wait: pass ? 0 : LOCK_WAIT, what: "this watch" });
+      { wait: pass ? 0 : LOCK_WAIT, what: "this watch", maxFuture: 60_000 });
   } catch (error) {
     if (!pass || !(error instanceof LockHeld)) throw error;
     return opts.json ? { skipped: "locked", forgeCalls: 0, sent: false, lines: [] } : "";

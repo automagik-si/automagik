@@ -155,6 +155,8 @@ export const ALLOWLIST = [
     "a copied, untracked worker report in its worktree, outside Herdr's mods/ and layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(old)", 1,
     "an expired Markdown file in the worker's reports directory, outside mods/ and layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(file, aside)", 1,
+    "quarantine watch.json beside itself in am's checked state folder, outside mods/ and layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(temp)", 1,
     "the temporary project marker in am's checked projects directory, outside mods/ and layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(path)", 5, "the CLI's own files: .herdr/bots.json, its lock and temp files, and the failed refresh's own Antigravity cache temp file under <app home>/automagik-herdr/ (#809); and RFC 0043 delivery 2's own private preview and request files under <app home>/automagik-herdr/accounts-previews and <app home>/data/am-quota/plan-requests, expired, stale or committed"],
