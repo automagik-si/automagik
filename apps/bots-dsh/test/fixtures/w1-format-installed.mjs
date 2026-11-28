@@ -45,7 +45,9 @@ function verifyArtifact({ tarball, lane, supervisor, commit, hash }) {
   assert.equal(supervisor.endsWith('/' + main), true, 'Expected the supplied supervisor/main.js')
   return {
     bytes, supervisor: dirname(dirname(supervisor)),
-    provenance: { commit, version: release.version, tarballSha256: hash, feedSha256: sha256(feed), signature: 'verified', keyId: release.keyId },
+    provenance: { commit, version: release.version, tarballSha256: hash, feedSha256: sha256(feed), signature: 'verified', keyId: release.keyId,
+      checkoutInputs: ['prepareStore', 'writeJsonAtomic', 'VENDOR', 'lane verifier and public keys', 'plugin runtime dependencies', 'DSH harness and expected DSH pin'],
+    },
   }
 }
 

@@ -8,7 +8,7 @@ const installedRunner = 'test/fixtures/w1-format-installed.mjs'
 const { legacy } = readFormatContract(plugin)
 
 for (const cell of legacyCells) {
-  test('legacy ' + cell.shape + ' in roster format ' + cell.format, {
+  test('checkout with 0–3 contract: ' + cell.shape + ' in roster format ' + cell.format, {
     skip: legacy ? false : 'The checkout reads 4/5. Run ' + installedRunner + ' with a verified 0–3 artifact.',
   }, t => assertLegacyCell(t, plugin, cell))
 }

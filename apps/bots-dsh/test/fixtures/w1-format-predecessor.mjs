@@ -165,6 +165,8 @@ export function assertRollbackBytes(f, run) {
   const snapshot = fs.readFileSync(join(archive, 'bots-state.json'))
   const index = fs.readFileSync(join(archive, 'data.json'))
   const trialPath = join(archive, 'trial-bots-state.json')
+  const { why } = run.rollback.data
+  assert.equal(why, incompatible ? undefined : 'same-format')
   assert.equal(run.rollback.data.restored, incompatible)
   assert.equal(run.rollback.data.trialKept, incompatible)
   assert.deepEqual(live, incompatible ? f.original : f.trial)
@@ -174,7 +176,7 @@ export function assertRollbackBytes(f, run) {
   const displaced = incompatible ? fs.readFileSync(trialPath) : null
   if (displaced) assert.deepEqual(displaced, f.trial)
   return {
-    before: sha256(f.original), trial: sha256(f.trial), live: sha256(live), snapshot: sha256(snapshot),
+    why: why ?? null, before: sha256(f.original), trial: sha256(f.trial), live: sha256(live), snapshot: sha256(snapshot),
     index: sha256(index), displaced: displaced ? sha256(displaced) : null,
   }
 }
