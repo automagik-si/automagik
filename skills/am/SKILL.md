@@ -98,6 +98,7 @@ A Bot starts a worker from its own pane. Nothing else can.
 am worker "<task>" --branch <branch>      # in the branch's worktree, made if there is none
 am worker "<task>" --worktree <folder>    # in a worktree that already exists
 am worker kill <terminal>                 # end a worker you started, once its turn is over
+am worker done --report <file> [--state done|blocked]  # finish your own worker pane
 ```
 
 The pane starts first. Then am records the worker in the workers ledger and, for an agent that
@@ -109,8 +110,10 @@ Read the warnings: a terminal alone does not prove the task arrived. Check the p
 `hc read <terminal>` before starting another. If the launch itself fails, am exits non-zero and
 prints no receipt. `am history <bot>` lists a Bot's workers.
 
-- The worker belongs to the Bot that started it (`worker.of`); only that Bot ends it.
-  A Bot starts workers only in its own project.
+- A Bot owns the workers it starts in its project (`worker.of`). A worker can finish its own
+  pane with `am worker done` and a Markdown report. Use a file in the system temp folder to keep
+  the worktree clean. Use `--state blocked` to report a blocker, including from a dirty worktree.
+  am saves the report, wakes the task lead, and retires the pane.
 - `--base <ref>` goes with `--branch` and sets where a new branch starts.
 - `--agent`, `--model` and `--effort` choose the worker's agent. Without them the Bot's own worker
   defaults apply.

@@ -12,13 +12,15 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
   readSync, renameSync, rmdirSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
-import { homedir, hostname, uptime } from "node:os";
-import { basename, dirname, isAbsolute, join, relative as relativePath, resolve as resolvePath } from "node:path";
+import { homedir, hostname, tmpdir, uptime } from "node:os";
+import { basename, dirname, extname, isAbsolute, join, relative as relativePath,
+  resolve as resolvePath, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
-import { coreSocketDiscovery, coreSockets, coreStatus, inTestRoots, inTestRootsReal, readBoundedFile, userCoreSockets } from "../coreSocket.mjs";
+import { coreSocketDiscovery, coreSockets, coreStatus, inTestRoots, inTestRootsReal,
+  readBoundedFile, realPathPrefix, userCoreSockets } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId, rateLimitModeOf,
@@ -85,6 +87,7 @@ import { paneLogin } from "../loginProbe.js";
 import { DIRECT_LOGIN_PROBLEM, VENDORS, botLoginWords, directLoginVendor, loginLaunchHome, loginLaunchProblem, loginPolicyActive, loginPolicyEnv, loginPolicyForward, loginReadIo, resolveLogin } from "../loginRecord.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
+import { heldTarget } from "../hcGuard.mjs";
 import { SHARED_ROLES, SHARED_SEND_RANKS } from "../hcGuard.mjs";
 import { isInstalledGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
@@ -139,7 +142,9 @@ async function slot(fn) {
 
 /** Runs a program: stderr falls back to the exec error, while rawStderr is the child's output.
  * Code 127 when it isn't there; killed: true when its timeout ended it. */
-export function runProgram(command, args, { cwd, env, timeout = 15000, prepareArgs } = {}) {
+export function runProgram(command, args, {
+  cwd, env, timeout = 15000, killSignal, prepareArgs,
+} = {}) {
   return slot(() => new Promise((done) => {
     const prepared = prepareArgs ? prepareArgs(command, args, env ?? process.env) : args;
     const start = (words) => {
@@ -151,7 +156,8 @@ export function runProgram(command, args, { cwd, env, timeout = 15000, prepareAr
         return true;
       };
       try {
-        child = execFile(command, words, { cwd, env, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const options = { cwd, env, timeout, killSignal, maxBuffer: 16 * 1024 * 1024 };
+        child = execFile(command, words, options, (err, stdout, stderr) => {
           if (!err) return done({ code: 0, stdout, stderr, rawStderr: stderr });
           if (originalOnSizeError(err)) return;
           done({ code: err.code === "ENOENT" ? 127 : (typeof err.code === "number" ? err.code : 1), stdout: stdout ?? "", stderr: stderr || String(err.message),
@@ -673,17 +679,23 @@ export async function retireSelfRestart(terminal, createdMs, core, children) {
   }
 }
 
-async function endSelfRestart(terminal, createdMs, core, children) {
-  const code = `import { retireSelfRestart } from ${JSON.stringify(import.meta.url)};
-    await retireSelfRestart(...JSON.parse(process.argv[1])).catch(() => { process.exitCode = 1; });`;
-  try {
-    await new Promise((done, reject) => {
-      const args = [terminal, createdMs, core, children];
-      const child = spawn(process.execPath, ["--input-type=module", "-e", code, JSON.stringify(args)],
-        { env: localHcEnv(), detached: true, stdio: ["ignore", "ignore", "inherit"] });
-      child.once("error", reject);
-      child.once("exit", (status) => status === 0 ? done() : reject(new Error("retirement process failed")));
+function detachedRetirement(action, args) {
+  const code = `import { ${action} } from ${JSON.stringify(import.meta.url)};
+    await ${action}(...JSON.parse(process.argv[1])).catch(() => { process.exitCode = 1; });`;
+  return new Promise((done, reject) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", code, JSON.stringify(args)],
+      { env: localHcEnv(), detached: true, stdio: ["ignore", "ignore", "inherit"] });
+    child.once("error", reject);
+    child.once("exit", (status) => {
+      if (status === 0) done();
+      else reject(new Error("retirement process failed"));
     });
+  });
+}
+
+async function endSelfRestart(terminal, createdMs, core, children) {
+  try {
+    await detachedRetirement("retireSelfRestart", [terminal, createdMs, core, children]);
   } catch {
     report([`Couldn't confirm ${terminal} ended. Check it with hc get ${terminal}.`]);
   }
@@ -2166,6 +2178,7 @@ const OPTIONS = {
   "worker-template": { type: "string" }, template: { type: "string" },
   "agent-home": { type: "string" }, "worker-agent-home": { type: "string" },
   branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" }, tier: { type: "string" },
+  report: { type: "string" }, state: { type: "string" },
   task: { type: "string" }, bot: { type: "string" }, move: { type: "boolean" },
   queued: { type: "boolean" }, cancel: { type: "boolean" }, "run-queued": { type: "string" },
   fresh: { type: "boolean" }, force: { type: "boolean" }, save: { type: "boolean" }, tree: { type: "boolean" }, "fresh-shared": { type: "boolean" },
@@ -2412,6 +2425,10 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 project's main bot can end a plain hc run child, including after a
                                 handoff or restart. The CLI rechecks the ledger and target before
                                 kill. hc has no conditional kill.
+  worker done --report <file> [--state done|blocked]
+                                from a worker's pane: save its Markdown report, notify its task
+                                lead and end this worker. Use a clean worktree for done. Put
+                                the report in the worktree or the system temp folder (64 KiB).
   skill [name]                  from a worker's pane: list its Bot's Automatic skills or load one body
   reap                          explicitly check all ended workers' created worktrees, across
                                 repositories. Remove only with verified ownership and current
@@ -4059,7 +4076,7 @@ function retirementChildren(root, panes, bindings) {
 }
 
 /** Some hc versions omit the launch identity and die-with-parent flag from ls. */
-async function readRetirementChildren(root, listed, bindings) {
+async function readRetirementChildren(root, listed, bindings, worker) {
   const edges = Map.groupBy(listed.filter((pane) => pane?.address && pane.state !== "finished"),
     (pane) => pane.parent);
   const seen = new Set([root]);
@@ -4073,7 +4090,9 @@ async function readRetirementChildren(root, listed, bindings) {
       if (pane?.address !== address || pane.parent !== parent
         || pane.state !== "live" || pane.die_with_parent !== true) continue;
       panes.push(pane);
-      parents.push(address);
+      if (edges.has(address) && (!worker || !await protectedWorkerChild({
+        ...pane, kind: bindings?.get(address)?.binding ? "seat" : undefined,
+      }, pane, worker))) parents.push(address);
     }
   }
   return retirementChildren(root, panes, bindings);
@@ -12750,7 +12769,8 @@ async function cmdWorkerKill(opts, panes) {
   let children = [];
   if (!target.state || target.state === "live") {
     const listed = await hcTerminals(false).catch(() => null);
-    children = await readRetirementChildren(address, listed ?? [], view.byTerminal);
+    children = await readRetirementChildren(address, listed ?? [], view.byTerminal,
+      { workerOf: bot.id, core: view.core });
     // Read the ledger again without importing, sweeping or locking it. The first view is cached.
     try {
       const { byKey } = foldAttach(readAttachFile(view.path) ?? []);
@@ -12781,6 +12801,206 @@ async function cmdWorkerKill(opts, panes) {
   const r = await hcKill(address, { before: current, kind: "worker", core: view.core, children });
   if (r.code !== 0) throw new CliError(`hc kill ${address} failed: ${hcSaid((r.stderr || r.stdout).trim())}`);
   return opts.json ? { terminal: address, ended: true, branch: target.labels?.branch ?? null } : `${address} ended (${bot.name}'s worker${target.labels?.branch ? ` on ${target.labels.branch}` : ""}).`;
+}
+
+const WORKER_REPORT_BYTES = 64 * 1024;
+const WORKER_REPORT_AGE_MS = 30 * 24 * 60 * 60_000;
+const workerDoneRefusal = () => new CliError(
+  "Only a verified am worker can finish its own pane. Its bot can use am worker kill <pane>.", 2);
+
+async function workerDoneCore() {
+  const { HC_TERMINAL_ID: terminal, HC_TERMINAL_SOCKET: endpoint } = process.env;
+  if (!isHcTerminalId(terminal)) throw workerDoneRefusal();
+  const core = await rowCore();
+  const socket = discoveredCoreSocket;
+  if (!core || !socket || (endpoint && endpoint !== socket)) throw workerDoneRefusal();
+  pinnedCoreSocket = socket;
+  const hello = await linkedOriginRpc({ socket }, "hello");
+  if ((hello?.you?.terminal && hello.you.terminal !== terminal) || await freshCoreId() !== core) {
+    throw workerDoneRefusal();
+  }
+  return core;
+}
+
+/** Match the local caller to a single worker launch and rule out an attached bot seat. */
+async function workerDonePane(core, expected) {
+  const terminal = process.env.HC_TERMINAL_ID;
+  if (!isHcTerminalId(terminal) || !core) throw workerDoneRefusal();
+  const pane = await retirementGet(terminal).catch(() => null);
+  const created = expected ?? pane?.created_ms;
+  if (!sameLivePane(pane, terminal, created) || pane.labels?.[BOT_LABEL]
+      || !pane.labels?.[WORKER_OF_LABEL]) throw workerDoneRefusal();
+  const identity = { core, terminal, created_ms: created };
+  const row = workerStartForLaunch(workerLedgerRows(), launchKey(identity));
+  const bindings = foldAttach(readAttachFile() ?? []);
+  if (!row || !isAbsolute(row.project ?? "") || !isAbsolute(row.worktree ?? "") || !row.branch
+      || row.botId !== pane.labels[WORKER_OF_LABEL] || row.worktree !== pane.cwd
+      || bindings.byKey.has(attachKey(identity))) throw workerDoneRefusal();
+  return { pane, row, bindings };
+}
+
+function workerReportsDir(project) {
+  const slug = basename(project).replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 64) || "project";
+  const digest = createHash("sha256").update(project).digest("hex");
+  const state = realPathPrefix(resolvePath(process.env.AM_HOME || join(home(), ".automagik")));
+  if (!state) throw new Error("Couldn't verify AM_HOME.");
+  const projects = join(state, "projects");
+  const projectHome = join(projects, `${slug}-${digest}`);
+  const reports = join(projectHome, "reports");
+  if (insideHerdrFiles(reports)) throw new Error("Reports belong outside Herdr's managed folders.");
+  for (const dir of [projects, projectHome, reports]) ensurePrivateStateDir(dir);
+  return reports;
+}
+
+function insideReportRoot(file, root) {
+  if (!root) return false;
+  const rel = relativePath(root, file);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+function insideHerdrFiles(file) {
+  return [appHome(), appHome({})].some((base) => ["mods", "layouts"].some((name) => {
+    const root = resolvePath(base, name);
+    return insideReportRoot(file, root) || insideReportRoot(file, realDir(root));
+  }));
+}
+
+async function saveWorkerReport(file, state, row, name) {
+  const worktree = realDir(row.worktree);
+  if (!worktree || !await stillWorktree(worktree, row.project)) {
+    throw new CliError("Couldn't verify the worker's worktree. Nothing was ended.");
+  }
+  const input = resolvePath(file);
+  const source = join(realDir(dirname(input)) ?? dirname(input), basename(input));
+  const temp = realDir(tmpdir());
+  const inWorktree = insideReportRoot(source, worktree);
+  const allowed = inWorktree || insideReportRoot(source, temp);
+  let contents, before;
+  try {
+    if (!allowed || extname(source) !== ".md") throw new Error("invalid report path");
+    before = lstatSync(source);
+    const real = realpathSync(source);
+    if (!insideReportRoot(real, worktree) && !insideReportRoot(real, temp)) {
+      throw new Error("report target outside the allowed roots");
+    }
+    contents = readBoundedFile(real, WORKER_REPORT_BYTES, { noFollow: true });
+  } catch {
+    throw new CliError("Use a readable .md file up to 64 KiB inside the worktree "
+      + "or the system temp folder.", 2);
+  }
+  const status = await git(["status", "--porcelain"], worktree);
+  if (status === null) throw new CliError("Couldn't read git status. Nothing was ended.");
+  if (status !== "" && state !== "blocked") {
+    throw new CliError("The worktree has uncommitted changes. Commit or discard them, move any "
+      + "untracked report to the system temp folder, or run am worker done with --state blocked.");
+  }
+  if (typeof name !== "string" || !/^[a-zA-Z0-9_-]{1,32}$/.test(name)) {
+    throw new CliError("Couldn't verify the worker's report filename. Nothing was ended.");
+  }
+  const dir = workerReportsDir(row.project);
+  const path = join(dir, `${name}.md`);
+  writePrivateStateFile(path, contents);
+  if (inWorktree && source !== path && !insideHerdrFiles(source)) {
+    const tracked = await git(
+      ["--literal-pathspecs", "ls-files", "--cached", "--", source], worktree);
+    if (tracked === "") {
+      const current = lstatSync(source, { throwIfNoEntry: false });
+      if (current?.ino === before.ino && current.dev === before.dev
+          && current.mtimeMs === before.mtimeMs && current.size === before.size) unlinkSync(source);
+    }
+  }
+  const cutoff = Date.now() - WORKER_REPORT_AGE_MS;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || extname(entry.name) !== ".md" || entry.name === basename(path)) continue;
+    const old = join(dir, entry.name);
+    const info = lstatSync(old, { throwIfNoEntry: false });
+    if (info?.isFile() && info.mtimeMs < cutoff) {
+      try { unlinkSync(old); } catch (e) { if (e?.code !== "ENOENT") throw e; }
+    }
+  }
+  const first = contents.toString("utf8").split(/\r\n?|\n|\u2028|\u2029/u)
+    .find((line) => line.trim()) ?? "";
+  const summary = Array.from(first).slice(0, 120).join("");
+  return { path, summary, worktree };
+}
+
+/** Run beyond the worker PTY, using the same retirement checks and finish record as worker kill. */
+async function endCompletedWorker(core, created, line) {
+  if (await workerDoneCore() !== core) throw workerDoneRefusal();
+  const first = await workerDonePane(core, created);
+  const address = first.pane.address;
+  const listed = await hcTerminals(false);
+  if (!listed) throw new CliError("Couldn't check the worker's helpers.");
+  const children = await readRetirementChildren(address, listed, undefined,
+    { workerOf: first.row.botId, core });
+  const { row, bindings } = await workerDonePane(core, created);
+  const binding = heldIn(bindings, row.lead ?? row.botId);
+  const lead = binding?.core === core && await retirementGet(binding.terminal);
+  if (!sameLivePane(lead, binding?.terminal, binding?.created_ms) || lead.address === address
+      || heldTarget(realHcPath(), { address: lead.address, get: lead }, localHcEnv())) {
+    throw new CliError("Couldn't reach the worker's lead.");
+  }
+  // hc's parent notices carry its own facts. Send the report line once, without --wait/--force.
+  const sent = await hcReal(["send", lead.address, line, "--json"], { timeout: 65_000 });
+  if (sent.code !== 0) throw new CliError("Couldn't notify the worker's lead.");
+  if (await freshCoreId() !== core) throw workerDoneRefusal();
+  const { pane } = await workerDonePane(core, created);
+  const killed = await hcKill(address, { before: pane, kind: "worker", core, children });
+  if (killed.code !== 0) throw new CliError("Couldn't end the worker.");
+}
+
+export async function retireSelfWorker(core, created, line, { lock, token }) {
+  if (!token || readText(lock) !== token) throw workerDoneRefusal();
+  // The initiating CLI's PTY may disappear before it can refresh or release the lock.
+  const stop = keepFresh(lock, token);
+  try { await endCompletedWorker(core, created, line); }
+  finally { stop(); dropLock(lock, token); }
+}
+
+async function cmdWorkerDone(opts, rest) {
+  const state = opts.state ?? "done";
+  if (rest.length || !opts.report || !["done", "blocked"].includes(state)) {
+    throw new CliError("Use am worker done --report <file> [--state done|blocked].", 2);
+  }
+  const core = await workerDoneCore();
+  const { pane } = await workerDonePane(core);
+  const lockDir = join(appHome(), "automagik-herdr", "locks");
+  ensurePrivateStateDir(lockDir);
+  const lock = join(lockDir, `worker-done-${pane.address}-${pane.created_ms}.lock`);
+  const token = await takeLockAsync(lock, LOCK_WAIT, "this worker's report").catch((error) => {
+    throw new CliError(error.message);
+  });
+  const stop = keepFresh(lock, token);
+  try {
+    const { row } = await workerDonePane(core, pane.created_ms);
+    return await finishWorkerReport(opts, { state, core, pane, row, lease: { lock, token } });
+  } finally { stop(); dropLock(lock, token); }
+}
+
+async function finishWorkerReport(opts, { state, core, pane, row, lease }) {
+  const saved = await saveWorkerReport(opts.report, state, row, pane.name).catch((e) => {
+    if (e instanceof CliError) throw e;
+    throw new CliError(`Couldn't finish saving the report: ${e.message}`);
+  });
+  const gh = programPath("gh");
+  const pr = gh && await runProgram(gh, ["pr", "view", "--json", "number", "--", row.branch],
+    { cwd: saved.worktree, timeout: GH_TIMEOUT, killSignal: "SIGKILL" }).then((r) => {
+    if (r.code !== 0) return null;
+    const number = terminalReply(r)?.number;
+    return Number.isSafeInteger(number) && number > 0 ? number : null;
+  });
+  const data = { worker: pane.name, state, branch: row.branch, ...(pr ? { pr } : {}),
+    report: saved.path, summary: saved.summary };
+  const line = `am worker done ${JSON.stringify(data).replace(/[\u007f-\u009f\u2028\u2029]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}`;
+  try {
+    await detachedRetirement("retireSelfWorker", [core, pane.created_ms, line, lease]);
+  } catch {
+    throw new CliError(`Report saved at ${escapeForTerminal(saved.path)}. `
+      + `Couldn't confirm ${pane.address} ended. `
+      + `Ask its bot to run am worker kill ${pane.address}.`);
+  }
+  return opts.json ? data : saved.path;
 }
 
 /** How long a worker that takes its task as a message may take to say it is ready, in seconds (hc wait's check-in). */
@@ -13236,6 +13456,7 @@ async function cmdSkill(opts, [name, ...extra]) {
 }
 
 async function cmdWorker(opts, rest) {
+  if (isWorkerDone("worker", rest, opts)) return cmdWorkerDone(opts, rest.slice(1));
   // `worker kill <pane>`: a task call always names --branch or --worktree, so the two never mix.
   if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) return cmdWorkerKill(opts, rest.slice(1));
   const task = rest.join(" ").trim();
@@ -13655,6 +13876,9 @@ async function cmdWorker(opts, rest) {
     ...swapped,
     `End it once the task merges: am worker kill ${terminal}`].join("\n");
 }
+
+const isWorkerDone = (command, rest, opts) => command === "worker" && rest[0] === "done"
+  && opts.branch === undefined && opts.worktree === undefined;
 
 // ---- updates (A14) ----
 
@@ -16035,8 +16259,14 @@ async function dispatch(argv, io) {
   // #1208: --agent-home starts one new worker (am worker "<task>") on a chosen login folder, and
   // --worker-agent-home is a create or edit field. Anywhere else (help, worker kill, any other
   // verb) each is refused before anything runs, as an unknown option is.
+  const endingWorker = isWorkerDone(command, rest, opts);
+  if (!endingWorker && (opts.report !== undefined || opts.state !== undefined)) {
+    report(["--report and --state go with am worker done only."]);
+    return 2;
+  }
   const killing = command === "worker" && rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined;
-  if (!linkedInstall && opts["agent-home"] !== undefined && (command !== "worker" || killing || opts.help || opts.version)) {
+  if (!linkedInstall && opts["agent-home"] !== undefined
+      && (command !== "worker" || killing || endingWorker || opts.help || opts.version)) {
     process.stderr.write(`am: --agent-home goes with am worker "<task>" only: it starts one new worker on a chosen login folder.\n\n${USAGE}\n`);
     return 2;
   }
@@ -16051,7 +16281,8 @@ async function dispatch(argv, io) {
     // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either;
     // nor does the reader's read-only login --check (#1509), nor a linked machine's install (#206).
     // A caller's linked launch may be refused, including after automatic holder selection.
-    if (!preview && !callerAction && command !== "accounts" && command !== "proxy" && (command !== "login" || !opts.check))
+    if (!preview && !callerAction && !endingWorker && command !== "accounts" && command !== "proxy"
+        && (command !== "login" || !opts.check))
       io.repairCliLinks?.();
   }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).

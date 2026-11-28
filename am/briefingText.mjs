@@ -12,7 +12,8 @@ import { OLD_PACK_NAME, PACK_NAME } from "./release.js";
 /** How a bot works (bot workers): it writes no code; one worker per task does. */
 export const WORKER_LINE = "You write no code yourself: for each task start one worker with "
   + "`am worker \"<task>\" --branch <branch>` (it runs in the task's worktree, under your pane), "
-  + "check its result, and end it with `am worker kill <terminal>` once the task merges.";
+  + "and check its result. It reports and closes its pane with `am worker done --report <file>`. "
+  + "If it is still listed once the task merges, end it with `am worker kill <terminal>`.";
 
 const PLAIN_RUN_START = "A plain `hc run` starts an ordinary terminal.";
 const PLAIN_RUN_CLEANUP = "Only the project's main bot can end it, including after a handoff or restart.";
