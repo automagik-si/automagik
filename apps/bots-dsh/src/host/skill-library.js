@@ -361,13 +361,14 @@ export function install(rt, { holdPreexistingTyped = HOLD_PREEXISTING_TYPED, pla
     const review = verifies(key, check.hash, record.review, record.reviewSeal) ? record.review : undefined
     if (review?.findings.some(finding => finding.area === 'prompt-injection')) return { name, held: HELD_INJECTION, ...tree }
     // An old import copied the library verbatim. Only a proof bound to this home
-    // and record can establish local origin for a legacy typed record.
+    // and record can establish local origin for a typed record from checker 1 or 2.
+    const stamp = record.check
     const legacy = !holdPreexistingTyped && key && !stat(importMark) &&
       record.source.kind === 'text' && record.review === undefined &&
-      record.reviewSeal === undefined && SKILL_CHECK_HISTORY[record.check?.version] === record.check?.fingerprint &&
-      record.check?.fingerprint !== undefined && record.check.fingerprint !== SKILL_CHECK_FINGERPRINT &&
+      record.reviewSeal === undefined && (stamp?.version === 1 || stamp?.version === 2) &&
+      SKILL_CHECK_HISTORY[stamp.version] === stamp.fingerprint &&
       check.verdict === 'pass' && equalMac(record.localProvenance, mac(key, 'local-legacy-v1',
-        fs.realpathSync(rt.home), name, check.hash, record.check.fingerprint))
+        fs.realpathSync(rt.home), name, check.hash, stamp.fingerprint))
     const digest = review && hashJson(review)
     const needsConfirm = review && (check.verdict === 'warn' || review.findings.length) &&
       (record.accepted !== check.hash || record.acceptedReview !== digest ||
