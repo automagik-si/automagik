@@ -346,44 +346,44 @@ the same thread. New UI strings ship in zh and pt-BR.
 
 ### Right pane
 
-On the native path, the tab kind is `botthread`, with resource address
-`dsh-resource://botthread/thread/<id>` (the ID is URL-encoded). Opening the tab
-selects the parent conversation and closes the plugin drawer. The resource
-retains the root Session by string ID and releases it on close or loss of
-access. A Session provider binds `sidebar.chat.conversation` to that Session.
+The thread resource uses kind `botthread` and address
+`dsh-resource://botthread/thread/<id>` (the ID is URL-encoded). Opening it
+selects the parent conversation. On the native path, it closes the drawer and
+retains the root Session by string ID until close or loss of access. A
+session-scoped entry owned by the tab calls the `conversation.content` factory
+with `variant: 'embedded'` under that Session's provider.
 The header shows the title, member and state, with Stop, Open full and Back to
 anchor. A `bot-dm` thread shows the stored exchanges by ID and an Open chat link.
 The pane displays those exchanges read-only.
 
-**Composer check, 2026-11-28.** The installed Automagik 3.178.0 bundle identifies DSH
-as `0.2.2-rc.2`. Its installed `@deepseek-ai/dsh-client-ui-subagent` package is also
-`0.2.2-rc.2`. In its `lib/client.js`, `SidebarChatTab` supplies a Session reference
-to `sidebar.chat.conversation`. `ConversationSlotPanel` invokes
-`conversation.content` with `variant: 'embedded'`. The installed
-`@deepseek-ai/dsh-client-ui-conversation` declares `conversation.composer` and
-`conversation.composer.bar` in that factory and renders the stock composer bar.
-The subagent composer's read-only replacement selects only `one-shot` and `unknown`
-subagent addresses. The installed subagent plugin declares the embedded slot as a
-child of its own `sidebar.right.pane.tab` registration. The offline probe covered
-that plugin's Session reference, the embedded factory call and the composer selector
-with a root Session and the two read-only modes. Composition inside a bots-dsh
-`botthread` tab remains unverified.
+**Installed composer check, 2026-11-28.** On Automagik and Bots 3.178.0, DSH
+`0.2.2-rc.2`, live Cordis `client` `Slots.listSubTree` found an active occupant
+at `sidebar.chat.conversation` and both composer entries under
+`factory:conversation.content`. A deliberately missing root returned
+`available: false`. The installed subagent plugin owns the conversation child
+slot. A new entry could neither render it across that boundary nor acquire its
+occupant by redeclaring it. Those attempts produced an undeclared-slot error
+and a blank pane, respectively.
 
-**`composer: unverified`.** A read-only accessibility check found the ordinary
-message field. No Cordis inspector was exposed there, and the installed
-`cordis_inspect_query` tool requires an Agent-backed Session. Both live checks
-remain pending. Group 5 ships the drawer unless its PR records live proof in an
-isolated GUI: run `client` `Slots.listSubTree` for `sidebar.chat.conversation`
-and `factory:conversation.content` with a root Session open in the bots-dsh
-`botthread` tab. Verify that the composer can send and that retaining the root
-Session obeys the access and admission rules below.
+The public `conversation.content` factory rendered the native composer in a
+disposable right-pane tab bound to a second root Session. The fixture inserted
+a synthetic draft through the editor and activated the native Send button.
+The embedded Session journal had one matching `user/message`. The main Session
+journal had zero. Keyboard entry and a model response were unverified.
+
+**`composer: thread-say-drawer`.** The fixture proved composition and message
+placement. Group 5 ships the drawer unless the installed W2 candidate proves
+person keyboard entry and an authorized send and reopen through the native
+factory. It must also prove that stale or unauthorized input cannot write a
+message or change the round, and that retained reads, Open full and revocation
+enforce the same caller, membership, read-scope and permission rules as the
+route-backed path.
 
 The fallback opens a `BotPanel` view named `'thread'` in
 `src/client/browser-pane.js`. It opens the drawer over the selected parent
 conversation and preserves the anchor and controls. Its composer posts to
-`thread-say`. Thread cards and result links target the stable thread ID through
-the app's open action on either path. The DSH tab kind and resource address are
-reserved on the drawer path and become public when native support ships.
+`thread-say`. Thread cards, result links and direct opens resolve the same
+resource address in either mode, subject to current thread access.
 
 ### Person access and turn admission
 
@@ -404,14 +404,14 @@ sends to a Session-backed thread as the person with `when: 'now'`.
 `{ ok: true, text }` on success or `{ ok: false, code }` on refusal. Missing or
 inaccessible threads use `thread/not-found`.
 
-At turn start, native pane input and Open full input pass the same host checks
-as `thread-say`: authenticated person access, current membership, saved caller
-read scope and a reapplied effective permission bound. Recheck queued input at
-admission too. A failed check holds the turn before work starts and makes the
-composer read-only for a viewer who can still see the thread. Only admitted
-input reopens an ended thread, as a person round. The membership hold still
-allows an otherwise authorized stop. It prevents delivery of a stop reason into
-a held Session.
+At submit and reopen, native pane input and Open full input pass the same host
+checks as `thread-say`: authenticated person access, current membership, saved
+caller read scope and a reapplied effective permission bound. Recheck at turn
+start, including queued input. A failed check holds the turn before work starts
+and makes the composer read-only for a viewer who can still see the thread.
+Only admitted input reopens an ended thread, as a person round. The membership
+hold still allows an otherwise authorized stop. It prevents delivery of a stop
+reason into a held Session.
 
 ## Contracts introduced
 
@@ -422,7 +422,7 @@ a held Session.
 | `thread-report`, `thread:<id>:<round>` | Session-backed reports deduplicate by round. Keep support for legacy `task-report` intents and `task:<id>` keys, including migrated round one. Bot DMs keep exchange deduplication. |
 | `thread-done`, `threadId` on `reply` | Readers still accept `task-done` and keep `taskSessionId` on the task result. Ordinary replies retain their shape and accept the optional ID. |
 | `thread-say`, `thread-stop` | Add authenticated routes. Existing routes and clients keep their inputs. The native composer shares the send route's admission rules. |
-| `botthread`, `dsh-resource://botthread/thread/<id>` | Reserved until the native path ships. The drawer path keeps the same thread IDs and in-app links. |
+| `botthread`, `dsh-resource://botthread/thread/<id>` | Both paths keep the resource address, thread IDs and links. Direct opens enforce the same access rules. |
 | `delegate`, `list_threads`, `read_thread`, `message_thread`, `stop_thread`, `thread/*` | Add the tool IDs and refusal codes above. Keep `start_task` and its texts for the release that introduces them. `message_bot` keeps its existing inputs and replies. |
 | `rt.startTask` option `thread` | Existing plugin calls keep their inputs and Session ID result. The optional kind selects a helper or wish. |
 
@@ -498,10 +498,10 @@ docs PR merges.
    deletion invalidates admission, in the order specified under Membership and
    deletion. Enforce revocation independently at turn, tool, schedule and report
    boundaries. A fresh, admitted reopen keeps the saved permission cap.
-2. **Native composer.** Ship the drawer unless Group 5 records live proof that
-   the native tab can retain a root Session and send under the same access and
-   admission rules. The installed bundle probe established the slot wiring in
-   the subagent plugin. Live composition in a bots-dsh tab remains unverified.
+2. **Native composer.** The installed fixture confirmed the public embedded
+   factory and the embedded-only send. The subagent conversation slot remains
+   specific to its own tab entry. Ship the drawer unless the W2 candidate
+   proves live person entry and the full native authority path.
 
 ## Links
 
