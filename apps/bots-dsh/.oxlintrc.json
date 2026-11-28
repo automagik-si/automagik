@@ -4,5 +4,16 @@
   "rules": {
     "no-undef": "error",
     "no-unused-vars": ["error", { "ignoreRestSiblings": true }]
-  }
+  },
+  "overrides": [{
+    "files": ["src/decisions/**"],
+    "rules": {
+      "no-restricted-imports": ["error", {
+        "patterns": [{
+          "group": ["../host/**", "./host/**", "../../**/host/**"],
+          "message": "Decisions must stay independent of the Bot host."
+        }]
+      }]
+    }
+  }]
 }
