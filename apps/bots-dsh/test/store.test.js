@@ -203,6 +203,25 @@ test('a deferred migration recomputes once against the team the matching healthy
   assert.equal(decoded(statePath).prefs.appliedTo, 'Restored Fixture')
 })
 
+test('a protected activation that needs a connector key waits for trial commit', async t => {
+  const source = JSON.parse(rosterBytes(2))
+  source.connectors = structuredClone(protectedTeam.connectors)
+  const { rt, home, statePath } = runtime(t, source, installProtected)
+  let safe = false
+  rt.stateWriteProof = ({ compare } = {}) => safe ? 'steady' : compare ? 'compare' : 'held'
+  const key = join(home, 'connector-key')
+  const afterWrite = t.mock.fn(data => { rt.botOf('a').roles = data.bots.a.roles })
+  assert.equal(await rt.commitStateActivation([activationIds.registry], addRegistry, { retry: true, afterWrite }), false)
+  assert.equal(fs.existsSync(key), false)
+  assert.equal(decoded(statePath).version, 2)
+  assert.equal(afterWrite.mock.callCount(), 0)
+  safe = true
+  await rt.committedUpdate()
+  assert.equal(afterWrite.mock.callCount(), 1)
+  assert.equal(decoded(statePath).version, 5)
+  assert.equal(savedToken(fs.readFileSync(statePath)).enc, 'v1')
+})
+
 test('a general save cannot initialize a key even with activation comparison', async t => {
   const { rt, home, statePath } = runtime(t, { version: 2 })
   await rt.load()

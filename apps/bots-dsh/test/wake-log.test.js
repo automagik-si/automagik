@@ -119,7 +119,9 @@ function taskHome(t, ids = ['t1']) {
 test('give-back replays a saved task report but gives no authority to a trial-only producer', async t => {
   startup(t)
   const home = taskHome(t)
-  writeLines(home, [intent(taskFields('pre-trial')), intent(taskFields('trial-only', 't2'))])
+  writeLines(home, [intent(taskFields('pre-trial')), intent({
+    ...taskFields('trial-only', 't2', 'a', 'ga'), roomId: 'r1', returnRoomId: 'r1',
+  })])
   const host = await start(t, { home })
   host.rt.stateWriteProof = () => 'returned'
   await runReplay(t, host)

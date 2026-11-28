@@ -90,7 +90,8 @@ export function stateWriteProof(rt, env = { ...process.env }) {
     if (run === null) return 'held'
     // Delivery 5b supplied a live record but no RUN in the child's environment.
     if (!steady && bootRun === undefined) bootRun = run.runId
-    if (steady && ['checking', 'downloading', 'verifying', 'staging'].includes(run.phase)) return 'steady'
+    // An early refusal leaves the original child in place with its team unchanged.
+    if (steady && ['checking', 'downloading', 'verifying', 'staging', 'notUpdated'].includes(run.phase)) return 'steady'
     if (run.runId !== bootRun || rt.statePath !== join(teamHomeOf(env), 'state.json')) return 'held'
     if (run.phase === 'healthy' && run.reason === 'health-check-finished' && current?.live?.version === run.to
       && current.live.sequence === records.runRecord.sequence) return 'steady'

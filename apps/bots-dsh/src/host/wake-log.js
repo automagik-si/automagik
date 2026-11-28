@@ -128,7 +128,8 @@ export function install(rt) {
   }
   const known = report => report !== undefined && !report.foreign && !report.headless
   const open = report => known(report) && report.open && reports.get(report.id) === report
-    && savedReportApplies(rt, report.botId, report.intent.report?.taskSessionId, report.intent.roomId)
+    && savedReportApplies(rt, report.botId, report.intent.report?.taskSessionId,
+      report.kind === 'group-report' ? report.intent.roomId : undefined)
   const old = report => Date.now() - report.intent.at > WEEK_MS
   const unmarked = id => diskUnmarked.has(id) || rt.deliveryNote(id)?.marked === false
   const pending = id => firstSends.get(id) === rt.lockTerm()

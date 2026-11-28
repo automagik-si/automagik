@@ -14,7 +14,7 @@ import { ACTIVATION_COMPARE } from '../src/host/state-format.js'
 import { requestOf } from '../src/host/supervisor/request.js'
 import { fakeContext } from './fake-ctx.js'
 import { prepareRollback } from './fixtures/w1-format-predecessor.mjs'
-import { write } from './fixtures/supervisor.mjs'
+import { fixture, write } from './fixtures/supervisor.mjs'
 import { fileURLToPath } from 'node:url'
 
 test('bound write proof follows replay snapshots and the matching durable healthy current', async t => {
@@ -51,6 +51,29 @@ test('bound write proof follows replay snapshots and the matching durable health
   write(join(store, 'current.json'), { version: 1, live: { version: run.to, sequence: run.sequence },
     kept: { version: run.from }, lastSequence: run.sequence })
   assert.equal(lagging(), 'steady')
+})
+
+test('steady host resumes sidecar writes when an update is refused before stopping it', t => {
+  const { env, profileDir, store, botsHome } = fixture(t)
+  const bootId = 'unchanged-host'
+  const runId = 'refused-run'
+  const team = { ctx: { get: () => ({ dir: profileDir }) }, statePath: join(botsHome, 'state.json') }
+  const supervisor = { ...env, AUTOMAGIK_SUPERVISOR_BOOT: bootId, AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8' }
+  const proof = stateWriteProof(team, supervisor)
+  const announce = id => write(join(store, 'supervisor.json'), { version: 1, bootId, runId: id })
+  const phase = (phase, reason) => write(join(store, 'state.json'), {
+    version: 1, bootId, runId, phase, reason, from: null, to: null, requestId: 'owner-request',
+    startedBy: 'owner-route', startedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+  })
+  announce(null)
+  assert.equal(proof(), 'steady')
+  phase('checking', null)
+  announce(runId)
+  assert.equal(proof(), 'steady')
+  phase('notUpdated', 'listener-unknown')
+  assert.equal(proof(), 'steady')
+  // A child started for the run cannot use this refusal as proof of a committed candidate.
+  assert.equal(stateWriteProof(team, { ...supervisor, AUTOMAGIK_SUPERVISOR_RUN: runId })(), 'returned')
 })
 
 const bootId = 'd5b-fixture-boot'

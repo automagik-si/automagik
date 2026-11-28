@@ -132,11 +132,16 @@ export function connectorState(home, mayCreateKey) {
     let refused = false
     let encrypted = false
     let pending = false
+    let keyDeferred = false
     const keyIds = new Set([...committed.values()].filter(entry => entry.envelope).map(entry => entry.value.kid))
     const loadKeyForWrite = () => {
       if (key !== undefined) return
       key = readConnectorKey(path)
-      if (key.missing && initializeKey && mayCreateKey() && keyIds.size === 0) {
+      if (key.missing && initializeKey && keyIds.size === 0) {
+        if (!mayCreateKey()) {
+          keyDeferred = true
+          return
+        }
         try { publishConnectorKey(path) } catch (error) {
           if (error?.code !== 'EEXIST') return
         }
@@ -187,7 +192,7 @@ export function connectorState(home, mayCreateKey) {
         }
       }
     }
-    return { bytes: JSON.stringify(copy), encrypted, refused, pending,
+    return { bytes: JSON.stringify(copy), encrypted, refused, pending, keyDeferred,
       format: copy.version,
       keyIsCurrent: () => {
         if (!usedKey && !(protectedState && key !== undefined)) return true

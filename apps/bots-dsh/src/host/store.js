@@ -1135,7 +1135,7 @@ export function install(rt, { contract = updateContract } = {}) {
         if (durable && sameGeneration(generation)) pendingDurability = generation
         await mkdir(home, { recursive: true })
         const ensureLock = () => {
-          const owned = lockBroken || lock.owns()
+          const owned = lockBroken ? !strict : lock.owns()
           const current = lockBroken ? '' : stamp()
           // An outside edit is adopted instead of overwritten; deletion can be saved again.
           const changed = owned && (strict || current !== '') && current !== seen
@@ -1168,6 +1168,7 @@ export function install(rt, { contract = updateContract } = {}) {
         }
         const snapshot = credentials.encode(data, { protectedState: strict })
         const savedPins = pinsIn(data)
+        if (activating && snapshot.keyDeferred && !sidecarAllowed()) throw activationError()
         if (snapshot.refused || (strict && snapshot.pending)) throw refusal(KEY_ERROR)
         if (!contract.stateFormats.includes(snapshot.format)) throw refusal('Unsupported Bot team state format.')
         if (snapshot.pending && !warnedCredentialSave) {
