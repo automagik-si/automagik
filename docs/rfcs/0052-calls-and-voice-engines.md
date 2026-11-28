@@ -2,10 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed |
+| Status | Accepted |
 | Milestone | none |
 | Lanes | plugin (3.N.P) for Automagik delivery |
 | Created | 2026-11-28 |
+
+The owner's delegated acceptance is recorded on 2026-11-28 and takes effect on merge.
 
 ## Summary
 
@@ -20,14 +22,16 @@ The browser's voice chat and the urs plugin provide separate paths for talking t
 ### Voice and the call
 
 - Keep role id `voice-mouth` and display it as **Voice**. The proposed bots-dsh registry role declares `engine: { transport: 'unix', path: '~/.soundbar/automagik-call.sock', protocol: 'automagik-call/1' }` and `capabilities: ['call-engine']`. The planned RFC 0050 adds `call-engine` to RFC 0037 contract 8.
-- A Bot is eligible while roles are enabled and it has the current registry Voice attachment and its owner's per-Bot `call-engine` grant. Read its attachment and grant in `roleRuntimeByRole[botId]['voice-mouth']`. The old `roleRuntime[botId]` remains available to existing clients and cannot establish Voice eligibility. The host checks the current Voice attachment and grant on each operation.
+- A Bot is eligible when its current registry Voice attachment has the owner's per-Bot `call-engine` grant. The grant is absent by default and belongs to Voice's own attachment. The host checks that attachment and grant on each operation. The client reads `roleRuntimeByRole[botId]['voice-mouth']`. Keep `roleRuntime[botId]` as the legacy first-package view for existing clients. That projection cannot establish Voice eligibility. The `prefs.roles` switch gates catalog pins only.
 - The only call setting is **Answers soundbar calls** (`answers-soundbar`, a team-scoped boolean toggle, default off). The host refuses a second enabled Bot for the team and names the current one. The value is advertised in `hello` only. Incoming soundbar calls and the wake word are deferred.
 - Show the call button in the eligible Bot's own chat. It becomes the native red hang-up during the call. The right-pane Voice tab shows both waveforms, streaming text from both sides, handoffs linked to their thread, past calls and an opt-in Debug view. One active call row sits below the Bot in the left menu. Deliver the tab and gated button before retiring plain browser voice chat. Keep dictation and move the composer's Enter-to-send ref off `.bt-voice` to an element that always renders.
 - The Voice tools take only `{ text }`, a string of 1–2,000 characters. `speak` sends `say` in `exact` mode through the hub's configured speech path with a `Playback` hold over live audio. `tell` sends `say` in `rephrase` mode. `note` adds silent context. During delegated work, the voice agent may give a short acknowledgement before reporting idle. Its other speech during that work comes from the Bot's tools. A written reply does not become speech by itself. After hang-up the Bot can post the result in its chat and use an exact `say` with `callId: null`, subject to the engine's local speak policy and quiet hours. `tell` and `note` require an active call.
 
 ### Voice upgrade
 
-Existing catalog Voice pins and their `audio-out` grant keep the legacy `ctx.speak` path through W1 and during W3 integration. Resolve the shared `voice-mouth` id by the stored pin source. For a pin that predates the source field, validate its package identity from the existing attachment metadata. A catalog pin uses the legacy package and a registry pin uses the new definition. Only one definition supplies `speak` for the attachment. Back up the attachment before conversion. At the approved cutover, replace only the matching catalog pin once, in its existing position, and load the same registry attachment on restart. Preserve unrelated attachments, grants, settings and learned preferences. An existing `audio-out` grant carries no `call-engine` authority. The owner grants `call-engine` through the existing grant screen before the registry Voice tools can use the engine. Exercise rollback on a copied profile by restoring the old pin and the matching legacy runtime and engine, retaining unrelated state.
+Existing catalog Voice pins and their `audio-out` grant keep speaking through the legacy `ctx.speak` path until the owner consents to the upgrade. A catalog pin stays inert while `prefs.roles === false`. Refuse conversion in that state and leave the pin inert. Resolve the shared `voice-mouth` id by stored pin source. For a pin that predates the source field, validate its package identity from the existing attachment metadata. A catalog pin uses the legacy package and a registry pin uses the new definition. Only one definition supplies `speak` for the attachment.
+
+At cutover, use the existing per-Bot grant screen for the owner's explicit consent to `call-engine` and conversion of the matching catalog pin. The old `audio-out` grant carries no `call-engine` authority. Back up the attachment, replace it in its existing position once after consent, and load the same registry attachment on restart. Preserve unrelated attachments, grants, settings and learned preferences. Exercise rollback on a copied profile by restoring the old pin and matching legacy runtime and engine, retaining unrelated state.
 
 ### Handoff into the Bot's own chat
 
@@ -123,9 +127,9 @@ Use the existing owner/device admission at `POST /api/omni-ui` and its read-only
 | `call-start` | `sessionId: string`, the Bot's current own chat Session | `{ ok: true, callId }`. A group or unrelated Session is refused with `bot/invalid`. |
 | `call-end` | `botId: string`, `callId` | `{ ok: true, ended: boolean }`. Idempotent and scoped to the matching Bot and call. |
 | `voice-history` | `botId: string`, `before?: number`, `limit: number` (≤100) | `{ items, cursor: number or null, parts: [{ number, at, note }] }`, newest entries first. |
-| `voice-forget` | `botId: string` | `{ ok: true }` after archiving the active voice history. |
+| `voice-archive` | `botId: string` | `{ ok: true }` after archiving the active voice history. |
 
-Label `voice-forget` **Archive voice history** in every locale. Serialize the move to `<team home>/voice/archive/<id>-<iso>/` with record and parts writes. Clear the active history and recap and reset its review cursor in the same transition. Pending work from the archived record cannot write to the fresh record or advance its cursor. The next call can be reviewed from its first new user line. The pane's live stream continues until hang-up. Existing chat briefs and separately learned `voice` preferences remain in place. Bot deletion also archives the record and clears its voice review cursor as part of deleting the Bot's memory scope.
+Label `voice-archive` **Archive voice history** in every locale. Serialize the move to `<team home>/voice/archive/<id>-<iso>/` with record and parts writes. The active history and recap start fresh. The per-Bot record sequence never resets. The next record entry continues above both the old record sequence and the review cursor so the first new user line is eligible for review. Pending work from the archived record cannot write into the fresh record or advance the review cursor. The pane's live stream continues until hang-up. Existing chat briefs and separately learned `voice` preferences remain in place. The archived files stay on disk with no expiry and are excluded from context, review and egress. This RFC introduces no retention or deletion path for them. Bot deletion follows the existing memory-scope archival path.
 
 Retire the legacy `voice-pane`, `voice-wait` and `voice-spoken` operations on `POST /api/omni-ui` in Group 11, after the verified whole call on the newly delivered path.
 
@@ -149,7 +153,7 @@ Count `seq` per call. Use `<callId>:<seq>` as the SSE id for replayable events. 
 
 ## Deliveries
 
-Owner acceptance of this proposed RFC precedes implementation. Automagik integration waits for W1 and W2 to merge. Stage breaking changes on integration branches and run the full gates on the matching candidates before delivery. For QA, the owner removes `urs-automagik` 0.1.4 from the authorized disposable candidate profile before proving the new path. Use a copied profile to exercise the legacy Voice upgrade, the new grant and rollback. QA leaves the real profile untouched.
+Implementation starts after this RFC merges. Automagik integration waits for W1 and W2 to merge. Stage breaking changes on integration branches and run the full gates on the matching candidates before delivery. For QA, the owner removes `urs-automagik` 0.1.4 from the authorized disposable candidate profile before proving the new path. Use a copied profile to exercise the legacy Voice upgrade, the new grant and rollback. The merge of this RFC does not authorize touching an installed owner profile.
 
 Deliver in this order. First ship the urs hub with both interfaces, then Automagik Group 10. The owner then uninstalls `urs-automagik` from the target profile and verifies one whole call with the matching releases. Uninstall is an owner action and is never part of migration or automatic update. Until that whole call is verified, rollback is reinstalling the old plugin. Keep the legacy hub interface and browser voice path available for that rollback. Only after the verified call do Groups 11 and 12 retire their respective legacy paths in separate cleanup.
 
@@ -163,11 +167,19 @@ Deliver in this order. First ship the urs hub with both interfaces, then Automag
 | 6. Browser voice cleanup | plugin (3.N.P) | Group 11 retires the old browser voice UI and its three route operations after the whole-call receipt. Check dictation and Enter-to-send. | Restore the previous browser voice release if needed. |
 | 7. urs legacy cleanup | urs | Group 12 removes `ctl.sock`, `bridge.rs` and the legacy plugin source after the whole-call receipt. Record the installed evidence in the urs delivery receipt. | Restore the matching legacy hub and plugin if rollback is needed after cleanup. |
 
+## Answers (2026-11-28)
+
+These decisions are recorded under the owner's delegated authority and take effect when this RFC merges.
+
+- **Voice eligibility and upgrade.** The registry role reads its own grant. Catalog Voice keeps the legacy path while enabled and converts in place only with the owner's explicit consent. Catalog opt-out stays inert through upgrade.
+- **Protocol and handoffs.** The 65,536-byte limit covers the entire frame. `/1` delivers a brief alone. Excerpt sharing requires a later decision on selection authority.
+- **History.** The owner action is `voice-archive`. Archiving clears current history and recap while retaining files, learned preferences and the monotonic sequence.
+- **Call lifecycle.** Detach and revoke close the connection with distinct reasons. Speech confirmation timeout returns `unconfirmed`. Late confirmation can update the record only.
+- **Release and duplex.** Keep both hub interfaces through the verified whole call. Follow the delivery order and owner-controlled uninstall above. Half duplex remains the default and full duplex requires qualifying evidence on a built-in output.
+
 ## Open questions
 
-- **Excerpt authority.** Which explicit signal authorizes selected excerpts? Recommend an authenticated owner action in the Voice pane that confirms a text selection from finalized utterances for one named handoff on the current call. The host binds the selection to that call and handoff and verifies each excerpt against the corresponding final. Model selection and the existing call grant alone carry no excerpt authority. Keep `/1` brief-only until the signal and any UI are approved.
-- **RFC and release authorization.** Owner acceptance of this RFC and authorization for the coordinated release are pending. The proposed release gate is a passing matched-candidate proof, copied-profile upgrade and rollback, and the owner's explicit uninstall step at cutover.
-- **Full-duplex evidence.** The default remains half duplex. The qualifying built-in-output receipt and interruption proof are pending. Enable full duplex only under the built-in-output conditions in the delivery table.
+- **Excerpt selection.** Decide what signal and interface authorize an excerpt. The recommendation is an authenticated owner confirmation for a text selection from finalized utterances for one handoff on the current call. The existing call grant and model selection alone confer no excerpt authority. Leave sharing disabled until that decision is recorded.
 
 ## Links
 
