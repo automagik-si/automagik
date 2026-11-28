@@ -40,6 +40,14 @@ const VERSION_TIMEOUT_MS = 1500;
 const PROBE_TIMEOUT_MS = 5000;
 // The daemon checks the file every 30 seconds. Give it two ticks with no observed busy runs.
 const RESTART_WAIT_MS = 60000;
+const MAX_RESTART_WAIT_MS = 600000;
+const DEFAULT_RUN_TIMEOUT_MINUTES = 60;
+const RUN_TIMEOUT_MARGIN_MINUTES = 2;
+const NATIVE_HEADERS = new Set([
+  "7f454c46", // ELF
+  "feedface", "cefaedfe", "feedfacf", "cffaedfe", // Mach-O
+  "cafebabe", "bebafeca", "cafebabf", "bfbafeca", // Universal Mach-O
+]);
 
 async function probe(bin, args, timeout = PROBE_TIMEOUT_MS) {
   try {
@@ -170,16 +178,17 @@ export default class Automations extends View {
     const stamp = asset && await probe("stat", [...asset.stat, bin]);
     const cached = stamp && this.build?.bin === bin && this.build.stamp === stamp
       ? this.build : null;
-    const [version, kind] = await Promise.all([
+    const [version, header] = await Promise.all([
       cached?.version ?? probe(bin, ["version"], VERSION_TIMEOUT_MS),
-      cached?.kind ?? (stamp && probe("file", ["-b", bin])),
+      cached?.header ?? (stamp && probe("od", ["-An", "-tx1", "-N", "4", bin])),
     ]);
     this.schedulerVersion = version ?? "";
-    this.build = { bin, found, stamp, version, kind };
+    this.build = { bin, found, stamp, version, header };
     if (!asset) return;
     const unchecked = `Could not check the scheduler build at ${bin}.`;
-    if (!resolved || !stamp || !kind) { this.build.notice = unchecked; return; }
-    if (!/^(?:ELF\b.*\bexecutable\b|Mach-O\b.*\bexecutable\b)/s.test(kind)) {
+    if (!resolved || !stamp || header === null) { this.build.notice = unchecked; return; }
+    // A "#!" launcher (23 21) and other unrecognized formats belong to their own install.
+    if (!NATIVE_HEADERS.has(header.replace(/\s/g, ""))) {
       this.build.notice = `The scheduler at ${bin} is managed by another install. Update it there.`;
       return;
     }
@@ -419,13 +428,16 @@ export default class Automations extends View {
     this.running = null;
     if (!Number.isSafeInteger(pid) || pid <= 0 || !schedulerAsset(machine, os)) return;
     if (!image) {
-      this.running = { message: "Could not check which build the running scheduler is using." };
+      this.running = {
+        message: "Could not check which build the running scheduler is using."
+          + " Reopen Automations to try again.",
+      };
       return;
     }
     if (image.path !== bin) {
       this.running = {
         message: `The running scheduler uses a different file (${image.path}).`
-          + ` This panel checks ${bin}.`,
+          + ` This panel checks ${bin}. Check how the scheduler was started and update it there.`,
       };
       return;
     }
@@ -434,23 +446,37 @@ export default class Automations extends View {
     // the same PID and disk stamp because the daemon switches builds without changing its PID.
     const same = previous?.pid === pid && previous.bin === bin
       && previous.stamp === stamp && previous.loaded === image.stamp;
+    const now = Date.now();
+    const since = same ? previous.since : now;
+    const timeouts = new Map(this.list.automations.map((a) => [a.name, a.timeout_minutes]));
     const idle = Array.isArray(history)
-      && !history.some((r) => r.status === "running" || r.status === "scheduled");
-    const idleSince = idle ? (same ? previous.idleSince : null) ?? Date.now() : null;
+      && !history.some((r) => {
+        if (r.status !== "running" && r.status !== "scheduled") return false;
+        const timeout = timeouts.get(r.automation);
+        const minutes = timeout > 0 && Number.isFinite(timeout) ? timeout : DEFAULT_RUN_TIMEOUT_MINUTES;
+        return now - Date.parse(r.at) < (minutes + RUN_TIMEOUT_MARGIN_MINUTES) * 60000;
+      });
+    const idleSince = idle ? (same ? previous.idleSince : null) ?? now : null;
     let message = "The scheduler switches to the new build when no run is busy.";
-    if (idleSince !== null && Date.now() - idleSince >= RESTART_WAIT_MS) {
+    if ((idleSince !== null && now - idleSince >= RESTART_WAIT_MS)
+        || now - since >= MAX_RESTART_WAIT_MS) {
       const status = await probe(bin, ["service", "status"]);
       const installed = status?.match(/^service installed: (true|false)$/m)?.[1];
-      const how = installed === "false"
-        ? `run kill -TERM ${pid}. Once it stops, run ${quote(bin)} daemon`
-        : os === "Darwin"
-          ? `run ${quote(bin)} service install`
-          : "run systemctl --user restart herdr-automations.service";
+      message = `The scheduler is still using the old build. Run ${quote(bin)} service status`
+        + " to check it before restarting.";
       if (installed && status.split("\n").includes(`scheduler running: true (pid ${pid})`)) {
-        message = `The scheduler is still using the old build. After your runs finish, ${how}.`;
+        const how = installed === "false"
+          ? `run kill -TERM ${pid}. Once it stops, start it the same way if you know how it was`
+            + ` launched, or run ${quote(bin)} service install to start it as a login service.`
+            + ` If you run ${quote(bin)} daemon in a terminal, it will stop when that terminal closes.`
+          : os === "Darwin"
+            ? `run ${quote(bin)} service install.`
+            : "run systemctl --user restart herdr-automations.service.";
+        message = `The scheduler is still using the old build. After your runs finish, ${how}`
+          + " Restarting stops running commands and the scheduler loses track of agent runs in progress.";
       }
     }
-    this.running = { pid, bin, stamp, loaded: image.stamp, idleSince, message };
+    this.running = { pid, bin, stamp, loaded: image.stamp, since, idleSince, message };
   }
 
   // hc's templates, or null when hc gave no list: a failure is never kept as an empty list, so

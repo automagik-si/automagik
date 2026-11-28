@@ -195,8 +195,11 @@ Update verifies the download before replacing the file and leaves the login serv
 The panel checks the running scheduler each time it refreshes, including after reopening. It
 names a different executable if the scheduler runs from another file. When the running scheduler
 still uses the previous build of the same file, the panel says it switches once no run is busy.
-If it still uses the old build after a minute with no busy runs observed, the panel can show the
-restart command for your setup.
+A record left running by a cut-off run stops counting as busy once its timeout and a two-minute
+margin pass. If the panel sees the same old image for a minute with no busy runs, or for ten
+minutes regardless of run history, it checks the scheduler's status and can show the restart
+command for your setup. Restarting stops running commands and the scheduler loses track of agent
+runs in progress.
 
 With 0.12.1-am.4 and `AFTER A RUN` set to never close, a finished run keeps its terminal until that
 automation's next run starts. The scheduler removes terminals it opened for failed, timed-out or

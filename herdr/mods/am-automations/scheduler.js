@@ -57,11 +57,13 @@ export function repairCommand(machine, os = "Darwin", { bin, stamp } = {}) {
       + ' || { echo "The scheduler changed during the update. Try again." >&2; exit 1; }'
     : '[ ! -e "$bin" ] || { echo "A scheduler is already installed." >&2; exit 1; }';
   const move = os === "Linux" ? "mv -fT" : "mv -fh";
+  const blocked = bin ? "The scheduler path is a link or directory. Check the path and try again."
+    : "The scheduler path is a link or directory. Move it aside, then try Install again.";
   const script = [
     `bin=${target}; dir="\${bin%/*}"`,
     'plain_target() {',
     '  if [ -L "$bin" ] || [ -d "$bin" ]; then',
-    '    echo "The scheduler path is a link or directory." >&2; exit 1',
+    `    echo "${blocked}" >&2; exit 1`,
     '  fi',
     '}',
     'plain_target',
