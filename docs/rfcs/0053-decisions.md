@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed |
+| Status | Accepted (2026-11-28, under the owner's delegated authority, effective on merge) |
 | Milestone | none |
 | Lanes | Docs only for this RFC. Deliveries use the plugin lane (3.N.P), with desktop deliveries for DSH profile and install wiring. |
 | Created | 2026-11-28 |
@@ -19,8 +19,9 @@ members' work. The team handle reaches its leader in a group chat. The team reco
 positions come from [RFC 0050](https://github.com/automagik-dev/automagik/pull/2176).
 [RFC 0051](https://github.com/automagik-dev/automagik/pull/2175) covers visible threads and
 Orchestrator. [RFC 0052](https://github.com/automagik-dev/automagik/pull/2174) covers voice.
-These proposals are the integration sequence. The Decisions contracts, service and adapters
-can be written in isolation once this RFC is accepted.
+Author and review the Decisions contracts, service and adapters after this RFC takes
+effect. Only the pure contracts, ledger and lint rule may merge before the voice delivery.
+The service, adapter install wiring and user-facing work follow voice.
 
 ## Motivation
 
@@ -63,18 +64,24 @@ rechecks current group membership and the routing switch before calling the sele
 
 Marks appear next to the message time. Routed members show an avatar, faded below the
 display-only `sure` threshold. While deciding, the mark shows progress. After a result,
-`◌` means nobody was called and `⊘` means routing failed. Q5 proposes how `tau0` (τ₀)
-changes the opacity of `◌`. One combined progress tick reflects the slots, in order of
+`◌` means nobody was called and `⊘` means routing failed. `tau0` (τ₀) changes the
+opacity of `◌` as recorded in Q5. One combined progress tick reflects the slots, in order of
 precedence: running, failed, needs you, stopped, done. A pass contributes no tick.
 
 The read-only route card shows each candidate's probability against τ, slot status,
 question and member description, provider, model, latency, attempts, and a short failure
 reason when applicable. The card distinguishes uncalibrated results and possible provider
-truncation. **That was for {name}** calls a current member for the original posted message
-and supplies a positive human judgment when that member has a recorded score. A member
-who passed has **Call {name} again**. Both actions append an overturn to the record. An
-unscored correction can still call a member. The host checks the caller, room, route and
-current membership before starting a turn. A stale or inaccessible target is refused.
+truncation. Score details are read-only. Alongside them the owner sees the current hard
+judgment, if any, and **Relevant** and **Not relevant** controls beside each scored
+candidate, whether called or not. These controls call `route-judge`, record or replace
+the owner's human judgment, and refresh the read-only card without changing recipients
+or Bot turns. Other readers with room access see the score details without judging controls.
+
+**That was for {name}** calls a current member for the original posted message and records
+a hard positive overturn if that member has a score. An unscored correction still calls
+the member. **Call {name} again** calls a member who passed and appends the group-book
+overturn event without writing a ledger label. The host checks the caller, room, route
+and current membership before waking a Bot. A stale or inaccessible target is refused.
 
 The group book `group-<roomId>` appends UI records with `kind: 'route'` and
 `event: 'decided' | 'slot' | 'overturn'`. A `decided` event links the message sequence
@@ -104,7 +111,8 @@ Choice and score can carry provider confidence separately from probabilities. A 
 `{ purpose, rubricVersion, state, questions, deadlineMs, signal?, subject? }`. State is text,
 a JSON object or a JSON array. Change the rubric version when the question instructions
 change. `subject: { book, ref }` is a local ledger reference. The deadline covers credential
-lookup, queueing, calls and retry delays, and accepts 50–30,000 ms.
+lookup, queueing, calls and retry delays. The low-level request accepts 50–30,000 ms.
+Saved purpose settings use the tighter deadline range in Q4.
 
 - `register(provider)` and `registerPurpose(spec)` return disposers.
   `listProviders()`, `snapshot()` and `follow(signal)` expose catalog, readiness and
@@ -203,13 +211,12 @@ information.
 
 The outgoing and saved member card uses a closed field list. A non-private Bot supplies
 its display name, display title, bare availability (`idle` or `working`), and an optional
-public `bot.handles` line written and saved by the owner. `working` means the room's members can
-already see the Bot working in a turn in this room or in a thread started here. Work
-in the Bot's own chat, another room or team, or a call contributes no availability
-signal. If there is no visible work, the value is `idle`. A private Bot supplies its
-display name and title only. Q3 proposes a limit of 140 characters and omits blank
-handles. Role lists, task and other group names, paths and work updates stay outside
-the card. The local book reference and credential reference stay on the host.
+public `bot.handles` line written and saved by the owner. `working` means the room's
+members can already see the Bot working in a turn in this room or in a thread started
+here. Otherwise the value is `idle`. A private Bot supplies its display name and title
+only. Handles are at most 140 characters and blank handles are omitted. Role lists,
+task and other group names, paths and work updates stay outside the card. The local
+book reference and credential reference stay on the host.
 
 | Recipient of routing input | Documented data handling |
 |---|---|
@@ -237,8 +244,8 @@ The service rejects any other combination and the host checks who supplied the l
 
 | `source` | `value` | `strength` | Admission |
 |---|---|---|---|
-| `overturn` | `true` | `hard` | Owner-authorized correction with a score for the member. |
-| `user` | `true` or `false` | `hard` | Reserved for an explicit RFC-approved human action. This proposal defers that action and its write route. |
+| `overturn` | `true` | `hard` | Owner-authorized **That was for {name}** correction with a score for the member. |
+| `user` | `true` or `false` | `hard` | Owner's explicit `route-judge` action on a scored candidate. |
 | `answered` | `true` | `soft` | Bot answer from a confirmed scored router start. |
 | `passed` | `false` | `soft` | Bot pass from a confirmed scored router start. |
 
@@ -248,8 +255,12 @@ router exposure. Unscored corrections still carry out the routing action and sta
 outside calibration. Silence, passes and someone else's overturn supply no human negative.
 
 Evaluation joins scores, labels and confirmed exposures on the decision, question and
-option ids. Count each key once per population using its latest valid label. Partition
-by purpose, provider, answered model and rubric version. Human coverage is the number
+option ids. The latest valid hard label in ledger append order wins for each key,
+whether it is a judgment or an overturn. Replacing a label changes the effective sign
+and the statistics while the earlier event remains in the append-only ledger. Count the
+key once in the human population and once in the separate behavioral population if it
+has a valid observation. Partition by purpose, provider, answered model and rubric version.
+Human coverage is the number
 of scored options with explicit human judgments divided by all scored options. Behavior
 coverage is the number of exposed options with an answer or pass divided by all scored
 options the router actually started. Report both denominators, distinct decisions with
@@ -259,10 +270,21 @@ expired and unscored records contribute no inferred judgments. The synthetic Set
 test is excluded from routing evaluation.
 
 Reliability bins and Brier use only scored human judgments from a cohort with both
-human signs. Until both signs exist, report counts and coverage. Suggest τ and its F1
-only when that same cohort meets the documented sample sufficiency criteria for
-**both** signs. Since the current user action supplies only positives, it cannot produce
-a suggestion by itself. The owner edits settings manually to change a threshold.
+human signs. Until both signs exist, report counts and coverage. Suggest τ by F1 only
+when all of the following hold for the effective hard labels in the same cohort within
+the 90-day window.
+
+- At least 20 positive and 20 negative labels.
+- Labels from at least 30 distinct scored decisions.
+- At least 5 positives and 5 negatives below the current τ, and at least 5 positives
+  and 5 negatives at or above it.
+
+The score-side rule requires evidence on both sides of the threshold the router actually
+uses. Corrections otherwise tend to collect missed positives below τ and judgments
+above τ, which can bias the suggested threshold downward. Any unmet condition suppresses
+both the suggestion and its F1. Report the per-side counts and distinct scored decision
+count used for eligibility. A requested evaluation window can narrow the 90 days.
+The owner edits settings manually to change a threshold.
 
 ## Teams and positions
 
@@ -283,6 +305,9 @@ leader, only when that Bot is a member of the group. Otherwise the team mention 
 nobody and posts one notice. Other valid mentions in the same message are handled normally.
 
 The owner and chief can create or delete a team and change its name, handle or leader.
+A private Bot cannot join or lead a team. Reject a visibility change that would make
+a current team member or leader private and identify the blocking team. Membership is
+changed explicitly through the team controls.
 The chief or current leader can maintain the team's membership, notice, goal and memory.
 Members can read the goal and team memory. A chief or the relevant leader can create a
 team-owned group. Settings → Teams and the sidebar's Teams block expose teams, leaders,
@@ -316,7 +341,8 @@ cannot read.
 
 The host derives authority from the caller. The Decisions settings endpoints are
 owner-scoped. Configuration changes, writes, tests and evaluation requests are refused
-for read-only callers. Route card reads respect room access. Overturns are owner-only.
+for read-only callers. Route card reads respect room access. Judging and overturns
+are owner-only.
 
 | Channel route or view | Input and result |
 |---|---|
@@ -326,73 +352,74 @@ for read-only callers. Route card reads respect room access. Overturns are owner
 | `decisions-test` | `{ providerId?, model? }` → typed outcome for the canned test. Explicit selection is required. |
 | `decisions-eval` | `{ purpose, sinceMs? }` → the purpose's evaluation with cohort coverage and optional suggestion. |
 | `update-room` | Extends the room update with `{ id, route?: boolean, teamId?: string \| null }`. The owner sets routing and room ownership through Settings. |
-| `route-card` | `{ roomId, routeId }` → authorized route detail and member slot status. |
-| `route-overturn` | `{ roomId, routeId, botId }` → confirmation after the user action is admitted and queued. |
+| `route-card` | `{ roomId, routeId }` → authorized read-only route detail and member slot status. For the owner, optional `judgments` maps Bot ids to their effective hard judgment where available. |
+| `route-judge` | Closed body `{ roomId, routeId, botId, value: boolean }` → `{ ok: true }` after appending a hard `user` label without waking a Bot. Resolves a scored candidate in the specified room and recorded route, called or uncalled. Refuses an unauthorized caller, invalid value, wrong room or unavailable score. |
+| `route-overturn` | `{ roomId, routeId, botId }` → confirmation after the action is admitted and queued. **That was for {name}** records a hard positive overturn for a scored candidate. **Call {name} again** adds only the group-book event. |
 | Live `routes` | Per room, compact marks keyed by message sequence and mapped from DSH message ids. Keeps the last 50 marks per room and fetches card detail on demand. |
 | `create-team`, `update-team`, `delete-team` | Owner Settings writes. Create takes `{ name, handle?, leader?, members?, notice? }`, update takes `{ id, ...patch }`, and delete takes `{ id }`. The roster's `teams` view supplies team records with leader and member names and group ids. |
 
-## Open questions
+## Answers recorded 2026-11-28
 
-Status stays Proposed pending owner acceptance. Fable concurred on the named-only Bot
-post rule, shared credential notice, owner-saved handles, `sure` and the τ₀ mark.
-The remaining numeric defaults and the feedback and team authority choices below
-await rulings.
+These decisions take effect on merge under the owner's delegated authority.
 
-1. **Q1. Which members can a Bot's ordinary post call in a routed group?** Recommend
-   named recipients only. Without a named recipient the post calls nobody.
-2. **Q2. Should Decisions reuse the credential reference already used in Models?**
-   Recommend reusing the same reference where it matches, with a visible **Shared with
-   Models** note naming Models and Decisions. Setting, rotating or removing it affects both.
-3. **Q3. How should the member card describe what a Bot handles?** Recommend a public,
-   owner-saved, optional one-line `handles` field of at most 140 characters. Omit the
-   line when the user leaves the field empty. A Bot write needs a separate authorization
-   decision and has no route in this proposal.
-4. **Q4. What numeric purpose defaults should Settings offer?** Recommend the values in
-   the table below as review inputs. Fable concurred on `sure = 0.8` for avatar opacity.
-   The other values await rulings. Test fixtures carry their own values.
-5. **Q5. What should τ₀ mean when nobody is called?** Recommend solid `◌` when every
-   score is below τ₀, and faded `◌` when at least one is in [τ₀, τ). Both mean no
-   member was called and neither changes selection.
+1. **Q1. Bot posts.** A Bot's ordinary post calls named recipients only in a routed
+   group. Without a named recipient the post calls nobody.
+2. **Q2. Shared credentials.** Reuse the same credential reference where it matches.
+   Show a **Shared with Models** note naming Models and Decisions. Setting, rotating
+   or removing the key affects both.
+3. **Q3. Public handles.** The owner may save a public optional one-line
+   `handles` field of at most 140 characters. Blank values are omitted. A Bot cannot
+   write it.
+4. **Q4. Purpose defaults.** Use the values below. `sure` affects avatar opacity only.
+5. **Q5. Nobody mark.** Use solid `◌` when every score is below τ₀ and faded `◌` when
+   at least one is in [τ₀, τ). Both mean no member was called and neither changes selection.
 
-| Purpose | Proposed `tau` | Proposed `k` | Proposed `tau0` | Proposed `deadlineMs` | Proposed `sure` |
+| Purpose | `tau` | `k` | `tau0` | `deadlineMs` | `sure` |
 |---|---:|---:|---:|---:|---:|
 | `group-routing` | 0.5 | 3 | 0.2 | 2500 | 0.8 |
 | `settings-test` | 0.5 | 1 | 0.2 | 5000 | 0.8 |
 
-- **Negative human feedback.** Recommend deferring a negative-label action and
-  its write authority. `route-overturn` supplies the positive path for a scored member.
-  Calibration may report coverage while the cohort lacks qualifying judgments of both signs.
-- **Group deletion (RFC 0050 Q3).** Should the responsible group member be allowed
-  to delete their group, or should deletion be reserved for the owner, chief and
-  relevant leader? Recommend allowing the responsible member, as RFC 0050 proposes.
-  Keep current group deletion admission until the question is resolved. Team deletion
-  keeps its groups and confers no separate group deletion authority.
-- **Private team members (RFC 0050 Q4).** Recommend excluding private Bots from both
-  team membership and leadership. Supporting them would require deciding who can see
-  membership and when a team mention can reach them. Resolve this before team admission ships.
+These are tunable initial values. Accept finite `tau` in [0.01, 0.99], `tau0` in
+[0, `tau`], and `sure` in [0.01, 1]. Accept integer `k` in [1, 64] and integer
+`deadlineMs` in [500, 30000]. Validate the effective settings after applying a patch
+and any stricter selected-provider bounds before saving. The provider selection starts
+at **None**. A Settings test sends fixed canned text only and stays outside routing
+evaluation.
 
-## Proposed deliveries and acceptance
+- **Human feedback.** The owner can judge any scored candidate with `route-judge`.
+  A scored **That was for {name}** overturn supplies a positive judgment.
+  **Call {name} again** supplies no judgment. Append history and use the latest hard
+  label for calibration.
+- **Group deletion (RFC 0050 Q3).** The responsible group member may delete their group
+  with the current confirmation and data rules, including archiving its history.
+  Team deletion keeps its groups and confers no separate group deletion authority.
+- **Private team members (RFC 0050 Q4).** Private Bots are ineligible for both team
+  membership and leadership.
 
-Owner acceptance gates implementation. After acceptance, author deliveries 1–3 in
-isolated worktrees while the prerequisite RFCs advance. Contracts and ledger feed the service.
-Adapters can use the reviewed service interface before its integration. Sequence the
-two desktop install-field changes in delivery order and keep any earlier merge inert.
-Integrate Settings and the shared host and client changes in deliveries 4–9 on the
-merged RFC 0050–0052 bases, with voice delivery clear. The voice dependency is shared
-files and bundles. Team deliveries depend on RFC 0050's chief, positions and
-`state.teams`. Keep user-visible releases in prerequisite order and hold routing behind
-its per-group switch throughout. Run the integrated lane gates and installed acceptance
-checks on the combined head. DSH profile and package install changes use the desktop
-lane. The remaining implementation uses the plugin lane.
+## Deliveries and acceptance
+
+After this RFC merges, author and review deliveries 1–3 in isolation. The contracts and
+ledger feed the service. Adapter authoring can use the reviewed service interface.
+
+Only delivery 1 may merge before the voice delivery. It contains the pure contracts,
+ledger and lint rule, with no route, setting, install field or UI.
+
+After the voice delivery merges, integrate the two desktop install-field changes
+in order (deliveries 2 and 3), then the user-visible work (deliveries 4–9). Decisions
+has no functional dependence on voice. The sequence protects shared files and bundles
+and keeps the user-visible release order. Teams (deliveries 7–9) also need the roles
+and positions and threads deliveries from RFCs 0050 and 0051. Keep routing behind its
+per-group switch and run the integrated lane gates and installed acceptance on the
+combined head.
 
 | Delivery and lane | Acceptance | Rollback |
 |---|---|---|
-| 1. Decision contracts, purposes and ledger · plugin | Fixtures prove state and keys stay out of ledger rows, expired months are pruned, and invalid labels fail admission. Verify exact denominators, latest valid labels, scored starts and unscored corrections. One-class samples show coverage only. Sufficient two-class human fixtures show metrics and a suggestion for that cohort without applying it. | Stop ledger writes. Saved local rows remain subject to the retention policy when the service next runs. |
+| 1. Decision contracts, purposes and ledger · plugin | Reject invalid label variants. Prove ledger privacy, retention, exact coverage and scored exposure. Check effective labels, counts, bins and Brier before and after both directions of hard-label replacement, including across `user` and `overturn`, without double counting or erasing history. Exercise each sufficiency boundary independently (20 per sign, 30 distinct decisions, 5 per sign on each side of current τ), expiry and mixed cohorts. Only a qualifying cohort produces τ and F1, with no apply path. | Stop ledger writes. Saved local rows remain subject to the retention policy when the service next runs. |
 | 2. Decisions service and profile wiring · desktop | Fake providers prove that unset, failing and disposed selections never send to a second provider, that identical requests call twice, and that queueing, retries, cancellation and the breaker observe the service limits. | Remove the service profile entry and stop new decisions. Prior network requests have already crossed the boundary. |
 | 3. Provider adapters and profile wiring · desktop | Each codec encodes and decodes first-party fixtures and rejects refusals, wrong kinds, missing or extra answers and invalid probabilities. Check Gemini's range, Cloudflare truncation, fixed recipients, credential headers and absence of credentials in errors. | Remove the adapter entry. Registered selections become unavailable and previous provider requests remain subject to their terms. |
-| 4. Decisions settings · plugin | Prove explicit selection, acknowledgment of unknown terms, owner-only writes, write-only keys, synthetic test and per-purpose settings. Check that an evaluation result cannot apply its suggestion. | Remove the Settings surface. The saved choice and credentials can be managed before rollback. |
+| 4. Decisions settings · plugin | Prove explicit selection, acknowledgment of unknown terms, owner-only writes, write-only keys and the canned test. Check numeric bounds, integer-only counts and deadlines, rejection of an inverted partial threshold update and applicable provider bounds. Check that an evaluation result cannot apply its suggestion. | Remove the Settings surface. The saved choice and credentials can be managed before rollback. |
 | 5. Routing host · plugin | Test owner opt-in, zero decisions for explicit mentions, one decision for eligible plain messages, and no wake on failure, no match, opt-out or membership removal. Test the serialized card allowlist and show that visible room work changes availability while hidden threads, other rooms and calls cannot. Prove route events stay out of Bot context and only scored router starts admit behavioral labels. | Disable routing per group or revert dispatch to the room's existing mode. Posted chat history and past requests persist. |
-| 6. Routing marks, card and group switch · plugin | Verify main and mid-round views, slot ticks, view-only cards and a scored overturn that calls a current member and records a positive human judgment. An unscored correction calls the member without adding a calibration sample. Check zh and pt-BR strings and rebuilt bundles. | Turn off routing before reverting the Settings and marks UI. Stored route records and calls already made persist. |
-| 7. Team state, tools, goals and memory · plugin | In `team-powers`, stop a dual member's other-team work and check the count-only result, follow-up read scope and notices. Verify `list_threads` hides the unreadable work. Repeat after member removal, leader replacement and deletion, with and without an independent grant. Verify chief resolution, the approved group-delete and private-Bot rules, and team deletion preserving groups while clearing ownership and archiving memory. | Remove team tool grants. Saved team goals, memory and group history remain on disk. |
+| 6. Routing marks, card and group switch · plugin | Verify main and mid-round views, slot ticks, read-only score details and separate owner-only judge controls for scored called and uncalled candidates. Test both boolean actions, changes to the displayed judgment, zero wakes on judging, and denial for read-only callers, Bots and unscored candidates. Test the scored overturn, unscored correction and repeat call: all wake as entitled, and only the scored overturn writes a label. Check zh and pt-BR strings and rebuilt bundles. | Turn off routing before reverting the Settings and marks UI. Stored route records and calls already made persist. |
+| 7. Team state, tools, goals and memory · plugin | In `team-powers`, stop a dual member's other-team work and check the count-only result, follow-up read scope and notices. Verify `list_threads` hides the unreadable work. Repeat after member removal, leader replacement and deletion, with and without an independent grant. Test chief resolution, group deletion confirmation and archives, and refusal to add a private Bot or make a member private with the blocking team named. Team deletion preserves groups, clears ownership and archives team memory. | Remove team tool grants. Saved team goals, memory and group history remain on disk. |
 | 8. Team mentions · plugin | Verify leader and chief resolution, an unreachable leader, handle collisions, stored team ids, and agreement between the host and the client. | Remove team mention dispatch. Saved posts remain readable. |
 | 9. Teams settings and sidebar · plugin | Verify the owner can manage teams, attach groups and reach the team goal and memory from Settings. Check the sidebar, zh and pt-BR strings and rebuilt bundles. | Remove the Teams UI. The host retains team records and their access rules. |
