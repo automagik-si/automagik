@@ -20,7 +20,8 @@ const bootCheck = "Boot / Boot with Omni's plugins";
 // The check-run names for every job in ci.yml, including every matrix leg
 // and the called job in boot-check.yml.
 const matrixJobs = [
-  ...nodeVersions.ci.map(node => `herdr pack (Node ${node})`),
+  ...nodeVersions.ci.flatMap(node =>
+    [1, 2].map(shard => `herdr pack (Node ${node}, shard ${shard}/2)`)),
   ...nodeVersions.ci.map(node => `am (Node ${node})`),
   linuxLink,
   'Pocket Link bridge (macos-latest)',

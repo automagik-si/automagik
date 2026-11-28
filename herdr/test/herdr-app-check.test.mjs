@@ -300,9 +300,11 @@ test("CI hands the standalone check the kept herdr-app on the Node 24 leg only; 
   };
   const app = step("Every pack mod loads in herdr-app");
   assert.match(app, /^        id: app$/m);
-  assert.match(app, /^        if: matrix.node == '24'$/m);
+  assert.match(app, /^        if: matrix.node == '24' && matrix.shard == 1$/m);
   const tests = step("Tests");
-  assert.ok(tests.includes("AUTOMAGIK_HERDR_APP_CHECK: ${{ matrix.node == '24' && steps.app.outputs.outcome != 'unverified' && '1' || '' }}"));
+  assert.ok(tests.includes("AUTOMAGIK_HERDR_APP_CHECK: >-\n"
+    + "            ${{ matrix.node == '24' && matrix.shard == 1 &&\n"
+    + "                steps.app.outputs.outcome != 'unverified' && '1' || '' }}"));
   assert.ok(tests.includes("HERDR_APP_BIN: ${{ steps.app.outputs.bin }}"));
   for (const file of [".github/workflows/release.yml", ".github/workflows/release-verify.yml", "scripts/release-verification.mjs", "scripts/release-gates.sh"]) {
     assert.doesNotMatch(readFileSync(join(REPO, file), "utf8"), /AUTOMAGIK_HERDR_APP_CHECK|--keep-app/, file);
