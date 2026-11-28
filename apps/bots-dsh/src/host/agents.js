@@ -1076,12 +1076,18 @@ export function install(rt) {
 
   function taskAdmission(botId, sessionId, roomId, named) {
     const roles = rt.roleRuntime
-    const held = roles?.heldOf(botId)
+    const held = roles?.heldsOf?.(botId) ?? [roles?.heldOf(botId)]
+    const pins = JSON.stringify(rt.botOf(botId)?.roles)
+    const generation = rt.teamGeneration?.()
     const measure = () => {
       const bot = rt.botOf(botId)
       if (bot === undefined || !rt.isBotSession(sessionId) || rt.selfOf(sessionId) !== botId
         || rt.callerSessionId?.() !== sessionId || rt.groupOwners.get(sessionId)?.roomId !== roomId
-        || roles?.heldOf(botId) !== held) return undefined
+        || rt.roleRuntime !== roles || JSON.stringify(bot.roles) !== pins) return undefined
+      const current = roles?.heldsOf?.(botId) ?? [roles?.heldOf(botId)]
+      const liveGeneration = rt.teamGeneration?.()
+      if (current.length !== held.length || current.some((role, i) => role !== held[i])
+        || (generation && (!liveGeneration || Object.keys(generation).some(key => generation[key] !== liveGeneration[key])))) return undefined
       const opener = rt.callerLevel({ proven: true })
       const openerRank = rt.taskOpenerRank(opener)
       const parent = rt.callerTask?.()

@@ -1418,3 +1418,51 @@ test('D2 a turn opened before the pin keeps the written method through clear', a
   h.events(FIRST, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
   assert.match(h.prompt(FIRST), solverPart)
 })
+
+test('stock Voice stacks with a registry role, retains settings and blocks uninstall in second position', async t => {
+  const f = await fixture(t)
+  const h = await f.start()
+  const { rt } = h
+  const operator = { id: 'operator', name: 'Operator', tools: [], capabilities: ['task-start'],
+    prompt: (id, session) => `Operate for ${id} in ${session}.` }
+  rt.hooks.role(operator)
+  await h.ok('role-install', { id: ID })
+  await h.ok('role-attach', { id: FIRST, role: operator.id })
+  await h.ok('role-attach', { id: FIRST, role: ID })
+  const [first, voice] = rt.botOf(FIRST).roles
+  await rt.grantRole({ id: FIRST, role: first, capability: 'task-start', on: true })
+  await rt.grantRole({ id: FIRST, role: voice, capability: 'audio-out', on: true })
+  assert.deepEqual(rt.roleRuntime.heldsOf(FIRST).map(held => held.pin.id), [operator.id, ID])
+  assert.equal(rt.roleRuntime.heldOf(FIRST).pin.id, ID)
+  assert.equal(rt.roleRuntime.grantOf(FIRST, 'task-start'), 'granted')
+  assert.equal(rt.roleRuntime.grantOf(FIRST, 'audio-out'), 'granted')
+  const prompt = rt.roleRuntime.prompt(FIRST, h.agentOf(FIRST))
+  assert.ok(prompt.includes('Operate for'))
+  assert.ok(prompt.indexOf('id="operator"') < prompt.indexOf('id="voice-mouth"'))
+  const live = await h.ok('state')
+  assert.equal(live.roleRuntime[FIRST].pin.id, ID)
+  assert.deepEqual(live.roleRuntimeByRole[FIRST][ID].tools, ['speak'])
+  assert.ok(live.roleRuntimeByRole[FIRST][ID].settings.length)
+  await assert.rejects(rt.uninstallRole(ID), /Detach this role/)
+  await rt.detachRole(FIRST)
+  assert.deepEqual(rt.botOf(FIRST).roles.map(pin => pin.id), [operator.id])
+  assert.equal(rt.roleRuntime.grantOf(FIRST, 'audio-out'), undefined)
+  assert.deepEqual(await rt.uninstallRole(ID), { removed: true })
+})
+
+test('Voice tool collisions refuse both orders without modifying the roster', async t => {
+  const f = await fixture(t)
+  const h = await f.start()
+  const { rt } = h
+  const provider = { id: 'speaker', name: 'Speaker', tools: ['speak'], capabilities: [] }
+  rt.hooks.role(provider)
+  await h.ok('role-install', { id: ID })
+  await rt.attachRole(FIRST, ID)
+  await rt.attachRole(SECOND, provider.id)
+  for (const [id, add, owner] of [[FIRST, provider.id, ID], [SECOND, ID, provider.id]]) {
+    const path = join(f.home, 'state.json')
+    const before = await fs.readFile(path)
+    await assert.rejects(rt.attachRole(id, add), new RegExp(`Tool speak is already supplied by ${owner}`))
+    assert.deepEqual(await fs.readFile(path), before)
+  }
+})

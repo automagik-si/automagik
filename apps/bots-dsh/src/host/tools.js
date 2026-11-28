@@ -147,7 +147,8 @@ export function install(rt) {
   // Only the Bot's own chat and its group Sessions take the role mask and guard.
   // Genie itself refuses calls from task runs, subagents and fresh schedule Sessions.
   const roleBotOf = id => (rt.chatOwners?.has(id) || rt.groupOwners?.has(id) ? rt.botOf(rt.selfOf(id)) : undefined)
-  const withheldRoleTools = bot => (genieDetached(bot, state.prefs) ? BUILTIN_ROLES.genie.tools : [])
+  const withheldRoleTools = bot => rt.roleRegistry?.toolsWithheldFrom(bot)
+    ?? (genieDetached(bot, state.prefs) ? BUILTIN_ROLES.genie.tools : [])
   const callerRoom = (exec) => {
     const roomId = rt.groupOwners.get(exec.agent?.id)?.roomId
     return roomId ? { fromRoomId: roomId } : {}
@@ -1561,7 +1562,10 @@ export function install(rt) {
     if (!rt.isBotSession(exec.agent?.id) || nativeDshSession(exec.agent?.id)) return undefined
     if (exec.name === BLOCKING_QUESTION_TOOL) return `Bots cannot use ${BLOCKING_QUESTION_TOOL}. Ask with ask_user in your own chat, or ask in your reply.`
     const bot = roleBotOf(exec.agent?.id)
-    if (withheldRoleTools(bot).includes(exec.name)) return `${bot.name} does not have the ${exec.name} tool: its Genie role is off.`
+    if (withheldRoleTools(bot).includes(exec.name)) {
+      const role = BUILTIN_ROLES.genie.tools.includes(exec.name) ? 'Genie role' : 'role'
+      return `${bot?.name ?? 'This Bot'} does not have the ${exec.name} tool: its ${role} is off.`
+    }
     const target = exec.arguments?.target
     return SCHEDULE_TARGET_TOOLS.includes(exec.name) && target !== undefined && target !== 'this_session' ? SCHEDULE_TARGET_REFUSAL : undefined
   })

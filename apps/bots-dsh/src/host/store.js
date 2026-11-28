@@ -22,7 +22,7 @@ import { effectiveMarkOf, nativeToolsOn, restrictedBot } from '../shared/native-
 import { TASK_ROUTE_DEFAULT } from '../shared/route-policy.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import { GUARD_OFF_NOTICE } from '../shared/guard-groups.js'
-import { packageAttachment } from '../shared/roles.js'
+import { packageAttachment, registryAttachment } from '../shared/roles.js'
 import updateContract from './update-contract.json' with { type: 'json' }
 
 // The saved team's format. A file may carry an older version this build still reads and
@@ -39,10 +39,10 @@ function attachmentProblem(team, active) {
     const pins = bot.roles
     // ID-only legacy recovery entries are not package pins. They continue to
     // follow the old reader, including the built-in Genie carrier.
-    const stack = pins.length > 1 && pins.some(pin => packageAttachment({ roles: [pin] }))
+    const stack = pins.length > 1 && pins.some(pin => registryAttachment(pin) || packageAttachment({ roles: [pin] }))
     if (stack && (!active.includes('w1-role-stack-v1') || new Set(pins.map(pin => pin?.id)).size !== pins.length)) return true
     if (pins.some(pin => Object.hasOwn(pin ?? {}, 'source')
-      && (pin.source !== 'registry' || !active.includes('w1-registry-pin-v1')))) return true
+      && (!registryAttachment(pin) || !active.includes('w1-registry-pin-v1')))) return true
   }
   return false
 }

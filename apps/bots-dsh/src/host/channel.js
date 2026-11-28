@@ -401,6 +401,9 @@ export function install(rt) {
     roleCatalog: rt.roleCatalogView(),
     roleDetails: rt.roleDetailsView(),
     roleRuntime,
+    roleRuntimeByRole: rt.roleRuntime.viewByRole(),
+    roleProviders: rt.roleRegistry.all().map(({ id, name, version, tools, capabilities, order }) =>
+      ({ id, name, version, tools, capabilities, order })),
     // File checks may change a record's status without a state write.
     roles,
   })
@@ -915,7 +918,7 @@ export function install(rt) {
           return ok(await rt.attachRole(body.id, body.role))
         case 'role-detach':
           if (readOnly !== undefined) return fail(readOnly, 'bot/read-only')
-          return ok(await rt.detachRole(body.id))
+          return ok(await rt.detachRole(body.id, body.role))
         case 'role-catalog':
           return ok(await rt.roleCatalog())
         case 'role-install':

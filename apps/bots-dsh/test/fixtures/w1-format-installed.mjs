@@ -13,8 +13,8 @@ import { ROLE_KEYS } from '../../src/host/supervisor/release.js'
 import { VENDOR } from '../../src/host/supervisor/stage.js'
 import { prepareStore, writeJsonAtomic } from '../../src/host/supervisor/store.js'
 import { BOTS, read, write } from './supervisor.mjs'
-import { assertLegacyCell, assertRollbackBytes, legacyCells, prepareRollback, rollbackCells } from './w1-format-predecessor.mjs'
-import { LEGACY_CONTRACT, readFormatContract, scratch, sha256 } from './w1-format-profile.mjs'
+import { assertCleanCell, assertRefusedCell, assertLegacyCell, assertRollbackBytes, legacyCells, prepareRollback, rollbackCells } from './w1-format-predecessor.mjs'
+import { LEGACY_CONTRACT, pins, readFormatContract, rosterBytes, scratch, sha256 } from './w1-format-profile.mjs'
 
 const checkout = fileURLToPath(new URL('../../', import.meta.url))
 const manifest = 'package.json'
@@ -25,6 +25,15 @@ const deps = join(checkout, 'node_modules')
 const dsh = join(harness, '@deepseek-ai/dsh')
 const web = '@deepseek-ai/dsh-web-app'
 const base = '@deepseek-ai/dsh-base'
+
+const guardedF = {
+  version: '3.178.9',
+  commit: 'ba2883ab1d4ab15f23bf3821567d854d529e98d8',
+  hash: 'd275d5c364662ec56c66a6847ff0890277d1f41f61e363a303271e39dace1ae5',
+}
+const historical = new Map([
+  ['3.178.5', 'bf4337a2426da90f29be9ce6361477213641a284'],
+])
 
 function verifyArtifact({ tarball, lane, supervisor, commit, hash }) {
   assert.match(commit, /^[a-f0-9]{40}$/)
@@ -43,9 +52,12 @@ function verifyArtifact({ tarball, lane, supervisor, commit, hash }) {
   assert.equal(sha256(bytes), hash)
   assert.equal('sha512-' + createHash('sha512').update(bytes).digest('base64'), row.integrity)
   assert.equal(supervisor.endsWith('/' + main), true, 'Expected the supplied supervisor/main.js')
+  const classification = release.version === guardedF.version && commit === guardedF.commit && hash === guardedF.hash
+    ? 'guarded-f' : historical.get(release.version) === commit ? 'historical-pre-f' : undefined
+  assert.ok(classification, 'No approved predecessor class for this signed version and commit')
   return {
     bytes, supervisor: dirname(dirname(supervisor)),
-    provenance: { commit, version: release.version, tarballSha256: hash, feedSha256: sha256(feed), signature: 'verified', keyId: release.keyId,
+    provenance: { classification, commit, version: release.version, tarballSha256: hash, feedSha256: sha256(feed), signature: 'verified', keyId: release.keyId,
       checkoutInputs: ['prepareStore', 'writeJsonAtomic', 'VENDOR', 'lane verifier and public keys', 'plugin runtime dependencies', 'DSH harness and expected DSH pin'],
     },
   }
@@ -95,6 +107,11 @@ function profileFor(t, artifact) {
   for (const leaf of fs.readdirSync(join(harness, '@deepseek-ai'))) {
     linkDependency(modules, harness, '@deepseek-ai/' + leaf)
   }
+  const dependencyPins = Object.fromEntries(Object.entries(dependencies).map(([name, expected]) => {
+    const version = read(join(modules, name, manifest)).version
+    assert.equal(version, expected, 'Locked production dependency ' + name)
+    return [name, version]
+  }))
   const runtimePins = Object.fromEntries([base, web].map(name => [name, read(join(modules, name, manifest)).version]))
   write(join(profileDir, manifest), {
     name: 'w1-format-fixture', private: true,
@@ -109,7 +126,7 @@ function profileFor(t, artifact) {
   assert.equal(dshVersion, expectedDsh)
   const command = [process.execPath, join(dsh, 'lib/bin.js'), 'web', '--no-open', '--host', '127.0.0.1', '--port', '0']
   const candidateVersion = version.replace(/\d+$/, patch => String(Number(patch) + 1))
-  return { home, profile, profileDir, store, botsHome, plugin, env, command, version, candidateVersion, dshVersion, runtimePins }
+  return { home, profile, profileDir, store, botsHome, plugin, env, command, version, candidateVersion, dshVersion, runtimePins, dependencyPins }
 }
 
 function installedSupervisor(f, artifact) {
@@ -131,10 +148,13 @@ function installedSupervisor(f, artifact) {
   return { entry: join(copy, main), sha256: hashes[main], closureSha256: sha256(JSON.stringify(hashes)) }
 }
 
-async function replayInstalled(t, artifact, from, to) {
+async function replayInstalled(t, artifact, from, to, { guarded = false, held = false } = {}) {
   const f = profileFor(t, artifact)
   const supervisor = installedSupervisor(f, artifact)
-  const rollback = await prepareRollback(t, f.plugin, from, to, f)
+  const rollback = await prepareRollback(t, f.plugin, from, to, f, guarded ? {
+    switchTimeBytes: rosterBytes(from, { roles: held ? [pins.solver, pins.voice] : [pins.solver], revision: 42 }),
+    trialRoles: to >= 4 ? [pins.solver, pins.registry] : [pins.solver],
+  } : undefined)
   const state = join(f.store, 'state.json')
   writeJsonAtomic(state, rollback.run, { profileDir: f.profileDir, durable: true })
   const { runSupervisor } = await import(pathToFileURL(supervisor.entry).href)
@@ -156,18 +176,19 @@ async function replayInstalled(t, artifact, from, to) {
   })
   try {
     await Promise.race([done.promise, running])
-    assert.equal(verdict?.phase, 'rolledBack', 'The restored DSH child must pass the real supervisor health gate')
+    assert.equal(verdict?.phase, held ? 'manualRecovery' : 'rolledBack')
+    assert.equal(verdict.reason, 'health-failed')
     assert.equal(verdict.rollback.starts, 1)
     assert.equal(launches, 1)
-    assert.equal(read(state).phase, 'rolledBack')
+    assert.equal(read(state).phase, verdict.phase)
     assert.equal(read(join(f.store, 'supervisor.json')).bootId, verdict.bootId)
-    assert.equal(read(join(f.store, 'listener.json')).listener, 'verified')
+    if (!held) assert.equal(read(join(f.store, 'listener.json')).listener, 'verified')
     const bytes = assertRollbackBytes(rollback, verdict)
     assert.equal(read(join(f.plugin, manifest)).version, f.version)
     t.diagnostic(JSON.stringify({
       ...artifact.provenance, supervisorVersion: f.version, supervisorSha256: supervisor.sha256,
       supervisorClosureSha256: supervisor.closureSha256, node: process.version, dsh: f.dshVersion,
-      homeBinding: 'explicit isolated AUTOMAGIK_BOTS_HOME', runtimePins: f.runtimePins, addons: [], loadedPlugin: { name: BOTS, version: f.version },
+      homeBinding: 'explicit isolated AUTOMAGIK_BOTS_HOME', runtimePins: f.runtimePins, dependencyPins: f.dependencyPins, entry: supervisor.entry, addons: [], loadedPlugin: { name: BOTS, version: f.version },
       health: verdict.phase, bootId: verdict.bootId, runId: verdict.runId, bytes,
       input: 'synthetic failed trial and journal; real copied supervisor, restored plugin and DSH HTTP health',
     }))
@@ -183,15 +204,22 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   assert.ok(tarball && lane && supervisor && commit && hash && !extra.length,
     'Usage: w1-format-installed.mjs <bots.tgz> <lane.json> <supervisor/main.js> <commit> <sha256>')
   const artifact = verifyArtifact({ tarball: resolve(tarball), lane: resolve(lane), supervisor: resolve(supervisor), commit, hash })
+  const guarded = artifact.provenance.classification === 'guarded-f'
   test('verified installed predecessor store and role writer', async t => {
     const f = profileFor(t, artifact)
     t.diagnostic(JSON.stringify({ ...artifact.provenance, node: process.version, dsh: f.dshVersion, lifecycle: 'direct module calls' }))
     for (const cell of legacyCells) {
-      await t.test(cell.shape + ' in roster format ' + cell.format, sub => assertLegacyCell(sub, f.plugin, cell))
+      await t.test(cell.shape + ' in roster format ' + cell.format,
+        sub => (guarded ? assertRefusedCell : assertLegacyCell)(sub, f.plugin, cell))
+    }
+    if (guarded) for (const format of [0, 1, 2, 3]) {
+      await t.test('clean control ' + format, sub => assertCleanCell(sub, f.plugin, format))
     }
   })
   for (const [from, to] of rollbackCells) {
     test('installed predecessor rollback with roster ' + from + ' → ' + to, { timeout: 45_000 },
-      t => replayInstalled(t, artifact, from, to))
+      t => replayInstalled(t, artifact, from, to, { guarded }))
+    if (guarded && to >= 4) test('guarded F restores held roster ' + from + ' → ' + to, { timeout: 45_000 },
+      t => replayInstalled(t, artifact, from, to, { guarded, held: true }))
   }
 }

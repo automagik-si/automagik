@@ -819,7 +819,7 @@ export function install(rt) {
     // A folder that went away since leaves the copy in the team workspace.
     const workDir = bot.workDir !== undefined && await rt.isFolder(bot.workDir) ? bot.workDir : undefined
     // No await from here to createBot's check, so two copies at once get different names.
-    const pin = packageAttachment(bot)
+    const pin = packageAttachment(bot, SOLVER_ROLE_ID)
     const solverPin = pin?.id === SOLVER_ROLE_ID
     const waiting = bot.waitingRole?.id === SOLVER_ROLE_ID
     const text = bot.instructions ?? ''

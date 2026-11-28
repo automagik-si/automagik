@@ -1,5 +1,6 @@
 {
   "version": 1,
-  "stateFormats": [0, 1, 2, 3],
+  "stateFormats": [0, 1, 2, 3, 4, 5],
+  "activations": ["w1-registry-pin-v1", "w1-role-stack-v1"],
   "holdRun": true
 }

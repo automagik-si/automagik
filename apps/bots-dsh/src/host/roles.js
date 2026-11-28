@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
-  attachedRoleIds, BUILTIN_ROLES, CHOOSE_NONE_FIRST, detachRoleFirst, effectiveRoleIds,
+  attachedRoleIds, attachedRoles, BUILTIN_ROLES, CHOOSE_NONE_FIRST, detachRoleFirst, effectiveRoleIds, hasRole, registryAttachment,
   GENIE_ATTACH_REFUSAL, isPackageRoleId, packageAttachment, packageDeclarations, packageRecoveryId, ROLES_OFF_REASON, rolesOn, sameRolePin,
 } from '../shared/roles.js'
 import { SOLVER_ROLE_ID } from '../shared/solver-method.js'
@@ -9,6 +9,13 @@ import { createRoleCatalog } from './role-catalog.js'
 import { createRolePackages } from './role-package.js'
 import { createRoleRuntime } from './role-runtime.js'
 import { assertSolverAssignment } from './solver-agent.js'
+
+const REGISTRY_ACTIVATION = 'w1-registry-pin-v1'
+const STACK_ACTIVATION = 'w1-role-stack-v1'
+const activationFor = pins => [
+  ...(pins.some(registryAttachment) ? [REGISTRY_ACTIVATION] : []),
+  ...(pins.length > 1 ? [STACK_ACTIVATION] : []),
+]
 
 let roleQueue = Promise.resolve()
 const serialize = (edit) => {
@@ -71,7 +78,7 @@ function createSolverSettler(rt, packages, timers, dropMarker) {
     for (const bot of waiters()) {
       if (!eligible()) return
       const expect = waitingSnapshot(bot)
-      const pin = packageAttachment(bot)
+      const pin = packageAttachment(bot, SOLVER_ROLE_ID)
       const marker = solverMarker(bot)
       if (!marker) continue
       if (bot.role !== marker.role || otherRole(bot, state.prefs)
@@ -158,12 +165,14 @@ export function installRoles(rt, deps = {}) {
     runtime.reconcile()
     return result
   })
-  const commit = async (apply, beforeCommit) => {
-    await rt.saveCopy(apply, { beforeCommit, afterWrite: () => {
+  const commit = async (apply, beforeCommit, ids = []) => {
+    const afterWrite = () => {
       apply(state)
       runtime.reconcile()
       rt.syncScopedTools?.()
-    } })
+    }
+    if (ids.length) await rt.commitStateActivation(ids, apply, { beforeCommit, afterWrite })
+    else await rt.saveCopy(apply, { beforeCommit, afterWrite })
     rt.reapplyToolMasks?.()
   }
   function dropMarker(id, expect) {
@@ -200,7 +209,7 @@ export function installRoles(rt, deps = {}) {
       const target = rt.own(team.bots, id)
       if (team !== state && !sameWaiter(target, expect)) throw changedRole()
       if (!target || (team === state && target !== expect.bot)
-        || JSON.stringify(solverMarker(target)) !== expect.marker || !sameRolePin(packageAttachment(target), pin)) return
+        || JSON.stringify(solverMarker(target)) !== expect.marker || !sameRolePin(packageAttachment(target, SOLVER_ROLE_ID), pin)) return
       if (mayClear && sameWaiter(target, expect)) target.instructions = ''
       delete target.waitingRole
     }, check)
@@ -211,17 +220,22 @@ export function installRoles(rt, deps = {}) {
     await rt.load()
     const bot = typeof id === 'string' ? rt.own(state.bots, id) : undefined
     if (bot === undefined) throw refusal('No such Bot')
+    if (!attach && roleId !== undefined && typeof roleId !== 'string') throw refusal('Unknown role')
+    const provider = attach ? rt.roleRegistry?.of(roleId) : undefined
+    const raw = Array.isArray(bot.roles) ? bot.roles : []
+    const detachId = !attach ? roleId ?? packageRecoveryId(bot) : undefined
+    const detaching = raw.find(pin => pin?.id === detachId)
     const waiting = solverMarker(bot)
-    const detachedMarker = !attach && waiting ? JSON.stringify(waiting) : undefined
+    const detachedMarker = !attach && waiting && (roleId === undefined || roleId === SOLVER_ROLE_ID) ? JSON.stringify(waiting) : undefined
     const requireRoles = () => {
       const cancelWait = detachedMarker !== undefined && JSON.stringify(solverMarker(bot)) === detachedMarker
-      if (!rolesOn(state.prefs) && (attach || (!packageRecoveryId(bot) && !cancelWait))) throw rolesOff()
+      if (!rolesOn(state.prefs) && !provider && !registryAttachment(detaching) && (attach || (!packageRecoveryId(bot) && !cancelWait))) throw rolesOff()
     }
     requireRoles()
     packages.requireWriter()
     const hasSlot = Object.hasOwn(bot, 'roles')
     const slot = hasSlot ? JSON.stringify(bot.roles) : undefined
-    const transition = attach && roleId === SOLVER_ROLE_ID && waiting ? expect ?? waitingSnapshot(bot) : undefined
+    const transition = attach && !provider && roleId === SOLVER_ROLE_ID && waiting ? expect ?? waitingSnapshot(bot) : undefined
     const mayClear = Boolean(transition && instructionsDigest(transition.instructions) === waiting.instructions)
     const checkSlot = () => {
       packages.requireWriter()
@@ -233,54 +247,100 @@ export function installRoles(rt, deps = {}) {
     }
     checkSlot()
     const effective = effectiveRoleIds(bot, state.prefs)
-    let next = []
+    let next = detachId === undefined ? [] : raw.filter(pin => pin?.id !== detachId)
     let check = checkSlot
     let solverRecord
     if (attach) {
       if (typeof roleId !== 'string') throw refusal('Unknown role')
-      const builtIn = Object.hasOwn(BUILTIN_ROLES, roleId) ? BUILTIN_ROLES[roleId] : undefined
-      if (!builtIn && !isPackageRoleId(roleId)) throw refusal('Unknown role')
+      const builtIn = !provider && Object.hasOwn(BUILTIN_ROLES, roleId) ? BUILTIN_ROLES[roleId] : undefined
+      if (!provider && !builtIn && !isPackageRoleId(roleId)) throw refusal('Unknown role')
       const rawIds = attachedRoleIds(bot)
       const occupied = rawIds.find(rawId => rawId !== roleId)
-      const pin = packageAttachment(bot)
-      const record = builtIn ? undefined : packages.recordOf(roleId)
+      const pin = packageAttachment(bot, roleId)
+      const record = provider ?? (builtIn ? undefined : packages.recordOf(roleId))
       const detachFirst = rawId => {
-        const declarations = pin?.id === rawId && packageDeclarations(pin, {
+        const occupiedPin = packageAttachment(bot, rawId)
+        const declarations = occupiedPin && packageDeclarations(occupiedPin, {
           roleDetails: packages.detailsView(), roleCatalog: catalog.view(),
         })
         const name = Object.hasOwn(BUILTIN_ROLES, rawId) ? BUILTIN_ROLES[rawId].name : declarations?.name
         throw refusal(detachRoleFirst(name ?? rawId))
       }
-      if (occupied !== undefined) detachFirst(occupied)
       if (builtIn) {
+        if (occupied !== undefined) detachFirst(occupied)
         if (bot.kind !== builtIn.kind) throw refusal(GENIE_ATTACH_REFUSAL)
         if (effective.includes(roleId)) return effective
         // P1a restores the legacy kind-based role on reattach.
         next = undefined
       } else {
-        if (pin?.id === roleId && pin.version === record?.version && bot.roles.length === 1) {
+        if (pin?.id === roleId && pin.version === packages.recordOf(roleId)?.version) {
           if (!transition) return [roleId]
           runtime.reconcile()
           await runtime.ready(id)
           return finishSolverAttach(id, record, pin, transition, mayClear)
         }
-        if (rawIds.length) detachFirst(rawIds[0])
-        if (!packages.hasRecord(roleId)) throw refusal('Unknown role')
-        if (effective.length) throw refusal(CHOOSE_NONE_FIRST)
-        await packages.requireAttachable(roleId, record)
+        const existing = raw.find(pin => pin?.id === roleId)
+        if (existing) {
+          if (provider && registryAttachment(existing) && existing.version === provider.version) return [roleId]
+          detachFirst(roleId)
+        }
+        if (raw.length !== attachedRoles(bot).length) detachFirst(rawIds[0] ?? 'the current role')
+        if (provider) {
+          if (provider.attachable === false) throw refusal('This role cannot be attached.')
+        } else {
+          if (!packages.hasRecord(roleId)) {
+            if (occupied !== undefined) detachFirst(occupied)
+            throw refusal('Unknown role')
+          }
+          await packages.requireAttachable(roleId, record)
+        }
+        if (effective.includes('genie') && !rt.roleRegistry?.of('genie') && !raw.length && roleId !== 'genie') {
+          throw refusal(CHOOSE_NONE_FIRST)
+        }
         if (transition) solverRecord = record
+        const proofOf = async pin => {
+          if (registryAttachment(pin)) return rt.roleRegistry?.of(pin.id)
+          const installed = packages.recordOf(pin.id)
+          if (!installed || installed.version !== pin.version) return undefined
+          const details = await packages.authenticate(pin.id, installed)
+          return { tools: details.manifest.tools, installed }
+        }
+        const candidate = provider ?? (raw.length ? await proofOf({ id: roleId, version: record.version }) : undefined)
+        const existingProofs = await Promise.all(raw.map(proofOf))
+        const names = new Set(candidate?.tools.map(tool => typeof tool === 'string' ? tool : tool.name))
         check = () => {
           checkSlot()
-          packages.expectRecord(roleId, true, record)
-          if (transition && packages.damaged(record)) throw changedRole()
-          packages.requireOfficial(roleId, record)
+          if (provider) {
+            if (rt.roleRegistry?.of(roleId) !== provider) throw changedRole()
+            if (typeof provider.attachable === 'function') {
+              const reason = provider.attachable(bot)
+              if (reason !== undefined) throw refusal(typeof reason === 'string' ? reason : 'This role cannot be attached.')
+            }
+          } else {
+            packages.expectRecord(roleId, true, record)
+            if (transition && packages.damaged(record)) throw changedRole()
+            packages.requireOfficial(roleId, record)
+          }
+          for (const [i, pin] of raw.entries()) {
+            const proof = existingProofs[i]
+            const live = registryAttachment(pin) ? rt.roleRegistry?.of(pin.id) : packages.recordOf(pin.id)
+            if (!proof || live !== (proof.installed ?? proof) || live.version !== pin.version) throw changedRole()
+            const clash = proof.tools.map(tool => typeof tool === 'string' ? tool : tool.name).find(name => names.has(name))
+            if (clash) throw refusal(`Tool ${clash} is already supplied by ${pin.id}.`)
+          }
         }
         check()
         const time = Math.max((deps.now ?? Date.now)(), (lastAttachmentTime.get(id) ?? -Infinity) + 1)
-        next = [{ id: roleId, version: record.version, attachedAt: new Date(time).toISOString(), grants: [] }]
+        next = [...raw, { id: roleId, version: record.version, attachedAt: new Date(time).toISOString(), grants: [],
+          ...(provider ? { source: 'registry' } : {}) }]
+
       }
     } else if (!waiting && ((hasSlot && Array.isArray(bot.roles) && bot.roles.length === 0)
       || (!hasSlot && bot.kind !== BUILTIN_ROLES.genie.kind))) return effective
+    if (!attach && roleId === undefined && detachId === undefined && raw.some(registryAttachment)) return effective
+    if (!attach && roleId !== undefined && !detaching && !effective.includes(roleId)
+      && detachedMarker === undefined) return effective
+    const ids = activationFor(attach ? next ?? [] : raw)
     const write = () => commit((team) => {
       const target = rt.own(team.bots, id)
       if (target === undefined) {
@@ -295,16 +355,16 @@ export function installRoles(rt, deps = {}) {
       else target.roles = next
     }, () => {
       check()
-      if (attach && roleId === SOLVER_ROLE_ID) assertSolverAssignment(rt, bot, bot.model ?? bot.appliedModel)
-    })
+      if (attach && !provider && roleId === SOLVER_ROLE_ID) assertSolverAssignment(rt, bot, bot.model ?? bot.appliedModel)
+    }, ids)
     // Verification can await a package read. Acquire the model slot for the actual
     // write and re-read the Bot there, including any conversation crossing under way.
-    if (attach && roleId === SOLVER_ROLE_ID) await rt.withModelChange(id, write, true)
+    if (attach && !provider && roleId === SOLVER_ROLE_ID) await rt.withModelChange(id, write, true)
     else await write()
     if (attach && next?.length) {
-      lastAttachmentTime.set(id, Date.parse(next[0].attachedAt))
+      lastAttachmentTime.set(id, Date.parse(next.at(-1).attachedAt))
       await runtime.ready(id)
-      if (transition) return finishSolverAttach(id, solverRecord, packageAttachment({ roles: next }), {
+      if (transition) return finishSolverAttach(id, solverRecord, packageAttachment({ roles: next }, SOLVER_ROLE_ID), {
         ...transition, slot: JSON.stringify(next),
       }, mayClear)
       return [roleId]
@@ -320,7 +380,7 @@ export function installRoles(rt, deps = {}) {
   rt.attachRole = (id, roleId, options) => editRole(id, true, roleId, options)
   rt.withSolverCopy = (source, make) => {
     const expect = waitingSnapshot(source)
-    const pin = packageAttachment(source)
+    const pin = packageAttachment(source, SOLVER_ROLE_ID)
     return serialize(async () => {
       const id = SOLVER_ROLE_ID
       if (!rolesOn(state.prefs)) throw rolesOff()
@@ -344,34 +404,41 @@ export function installRoles(rt, deps = {}) {
       return make({ pin: pinForCopy, check })
     })
   }
-  rt.detachRole = id => editRole(id, false)
+  rt.hasRole = (id, role) => {
+    const bot = rt.own(state.bots, id)
+    return hasRole(bot, role, state.prefs)
+      && (bot?.roles?.some(pin => pin?.id === role && registryAttachment(pin))
+        ? runtime.heldOf(id, role) !== undefined : true)
+  }
+  rt.detachRole = (id, role) => editRole(id, false, role)
   const roleWrite = work => serialize(async () => {
     await rt.load()
     packages.requireWriter()
-    if (!rolesOn(state.prefs)) throw rolesOff()
     return work()
   })
   rt.grantRole = ({ id, role, capability, on }) => roleWrite(async () => {
     if (typeof id !== 'string' || typeof on !== 'boolean') throw refusal('Invalid role grant.')
+    if (!rolesOn(state.prefs) && role?.source !== 'registry') throw rolesOff()
     await runtime.ready(id)
     const held = runtime.requireAttachment(id, role)
     if (!runtime.capabilitiesOf(held).includes(capability)) throw refusal('This role does not declare that capability.')
-    const before = held.bot.roles[0]
+    const before = held.bot.roles.find(pin => sameRolePin(pin, held.pin))
     const check = () => {
       packages.requireWriter()
-      if (runtime.requireAttachment(id, role) !== held || held.bot.roles[0] !== before) {
+      if (runtime.requireAttachment(id, role) !== held || !held.bot.roles.includes(before)) {
         throw refusal("This Bot's role changed. Try again.")
       }
     }
     check()
     if (before.grants.includes(capability) === on) return before.grants
     const grants = on ? [...before.grants, capability] : before.grants.filter(grant => grant !== capability)
-    const next = [{ ...before, grants }]
-    await commit(team => { team.bots[id].roles = next }, check)
+    const next = held.bot.roles.map(pin => pin === before ? { ...before, grants } : pin)
+    await commit(team => { team.bots[id].roles = next }, check, activationFor(next))
     return grants
   })
   const roleSettings = (id, role, values, write) => roleWrite(async () => {
     if (typeof id !== 'string') throw refusal('No such Bot')
+    if (!rolesOn(state.prefs) && role?.source !== 'registry') throw rolesOff()
     await runtime.ready(id)
     const held = runtime.requireAttachment(id, role)
     const declarations = held.manifest.settings

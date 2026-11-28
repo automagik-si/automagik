@@ -23,27 +23,34 @@ export function attachedRoleIds(bot) {
 }
 
 const ownPackageId = entry => Object.hasOwn(entry ?? {}, 'id') && isPackageRoleId(entry.id)
-const singlePackageRole = bot => Object.hasOwn(bot ?? {}, 'roles') && Array.isArray(bot.roles)
-  && bot.roles.length === 1 && ownPackageId(bot.roles[0]) ? bot.roles[0] : undefined
+  && !Object.hasOwn(entry, 'source')
+const rawRoles = bot => Object.hasOwn(bot ?? {}, 'roles') && Array.isArray(bot.roles) ? bot.roles : []
+const validPin = entry => ['id', 'version', 'attachedAt', 'grants'].every(key => Object.hasOwn(entry ?? {}, key))
+  && isRoleId(entry.id) && isRoleVersion(entry.version) && typeof entry.attachedAt === 'string'
+  && Array.isArray(entry.grants)
 
-export function packageAttachment(bot) {
-  const entry = singlePackageRole(bot)
-  if (entry && ['version', 'attachedAt', 'grants'].every(key => Object.hasOwn(entry, key))
-    && isRoleVersion(entry.version) && typeof entry.attachedAt === 'string' && Array.isArray(entry.grants)) {
-    return { id: entry.id, version: entry.version, attachedAt: entry.attachedAt }
-  }
-}
+export const registryAttachment = entry => validPin(entry)
+  && Object.hasOwn(entry, 'source') && entry.source === 'registry'
+
+export const attachedRoles = bot => rawRoles(bot).filter(entry =>
+  validPin(entry) && (registryAttachment(entry) || !Object.hasOwn(entry, 'source')))
+export const packageAttachments = bot => attachedRoles(bot).filter(ownPackageId)
+  .map(({ id, version, attachedAt }) => ({ id, version, attachedAt }))
+export const packageAttachment = (bot, id) => packageAttachments(bot).find(pin => id === undefined || pin.id === id)
 
 export const SOLVER_DESCRIPTION = 'Solver'
 export const SOLVER_ROLE_ID = 'solver'
-export const hasSolverRole = bot => packageAttachment(bot)?.id === SOLVER_ROLE_ID
+export const hasSolverRole = bot => packageAttachment(bot, SOLVER_ROLE_ID) !== undefined
 
 // This identity is cosmetic or bookkeeping. Task-start checks the actual role pin.
 export const isSolverBot = bot => bot?.role === SOLVER_DESCRIPTION || hasSolverRole(bot)
 
-export const sameRolePin = (a, b) => Boolean(a && b && a.id === b.id && a.version === b.version && a.attachedAt === b.attachedAt)
+export const sameRolePin = (a, b) => Boolean(a && b && a.id === b.id && a.version === b.version && a.attachedAt === b.attachedAt && a.source === b.source)
 
-export const packageRecoveryId = bot => singlePackageRole(bot)?.id
+export const packageRecoveryId = bot => rawRoles(bot).length === 1
+  ? rawRoles(bot).find(ownPackageId)?.id
+  : rawRoles(bot).every(pin => registryAttachment(pin) || (validPin(pin) && ownPackageId(pin)))
+    && new Set(attachedRoleIds(bot)).size === rawRoles(bot).length ? packageAttachment(bot)?.id : undefined
 
 export function attachmentStatus(attachment, records) {
   if (!Object.hasOwn(records ?? {}, attachment.id)) return 'missing'
@@ -63,7 +70,7 @@ export function packageDeclarations({ id, version }, roster) {
   if (row) return { ...catalog, name: row.name, capabilities: row.capabilities, fromCatalog: true }
 }
 
-const isAttachment = entry => typeof entry?.id === 'string' && Object.hasOwn(BUILTIN_ROLES, entry.id)
+const isAttachment = entry => !Object.hasOwn(entry ?? {}, 'source') && typeof entry?.id === 'string' && Object.hasOwn(BUILTIN_ROLES, entry.id)
   && typeof entry.version === 'string' && entry.version.length > 0
   && typeof entry.attachedAt === 'string' && Array.isArray(entry.grants)
 
@@ -77,6 +84,11 @@ export const storedRoles = (bot) => {
 export function effectiveRoleIds(bot, prefs) {
   const stored = rolesOn(prefs) ? storedRoles(bot) : undefined
   return stored?.map(entry => entry.id) ?? (bot?.kind === 'genie' ? ['genie'] : [])
+}
+
+export function hasRole(bot, id, prefs) {
+  return attachedRoles(bot).some(pin => pin.id === id && (registryAttachment(pin) || rolesOn(prefs)))
+    || effectiveRoleIds(bot, prefs).includes(id)
 }
 
 export const genieDetached = (bot, prefs) => bot?.kind === 'genie' && rolesOn(prefs)
