@@ -50753,7 +50753,7 @@ var MIGRATION_NOTICE_CSS = `
 .bt-migration-card ul{padding-inline-start:20px}
 .bt-migration-card form{display:grid;gap:8px}
 .bt-migration-card button{justify-self:start}
-.bt-migration-card [role=alert]{color:var(--bt-danger)}
+.bt-migration-card [role=alert]{color:var(--st-bad-strong,var(--bt-danger))}
 `;
 
 // src/client/index.js
