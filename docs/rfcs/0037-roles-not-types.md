@@ -382,6 +382,9 @@ process, and this RFC does not claim they do. That is why community roles wait f
    capability never widens the Bot's permission, folder, shell, channels, memory or Sessions.
    RFC 0048 delivery 3 enforces `task-start` and `route-policy` at `start_task`. A verified
    bundled role uses the running plugin's capability list for that role ID.
+   Under [RFC 0051](0051-threads-and-the-orchestrator.md), `task-start` is
+   enforced at `delegate` (helper and member) and at the `start_task` alias.
+   `route-policy` is required to name a model for a helper.
 9. **Kind stays a stored field.** `state.json`'s `kind: 'genie'` is read as the built-in role from
    P1 and as the installed package from P6. No product may add a new crew kind; a role is the
    extension point. Herdr's roster has its own seat `kind` (contract 12), which is not a crew
