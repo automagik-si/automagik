@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-19, approved by the owner's delegate: one Bot, roles make the difference; the P1-P6 order as written; Q1-Q10 answered with this RFC's own recommendations, see Answers; no delivery merged) |
+| Status | Accepted (2026-11-19, approved by the owner's delegate: one Bot, roles make the difference; the P1-P6 order as written; Q1-Q10 answered with this RFC's own recommendations, see Answers; no delivery merged) · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-19 |
@@ -382,9 +382,6 @@ process, and this RFC does not claim they do. That is why community roles wait f
    capability never widens the Bot's permission, folder, shell, channels, memory or Sessions.
    RFC 0048 delivery 3 enforces `task-start` and `route-policy` at `start_task`. A verified
    bundled role uses the running plugin's capability list for that role ID.
-   Under [RFC 0051](0051-threads-and-the-orchestrator.md), `task-start` is
-   enforced at `delegate` (helper and member) and at the `start_task` alias.
-   `route-policy` is required to name a model for a helper.
 9. **Kind stays a stored field.** `state.json`'s `kind: 'genie'` is read as the built-in role from
    P1 and as the installed package from P6. No product may add a new crew kind; a role is the
    extension point. Herdr's roster has its own seat `kind` (contract 12), which is not a crew
@@ -596,3 +593,24 @@ none needed a fallback. The questions above stay as they were asked.
 - [RFC 0014](0014-shared-bot-registry.md): the Bot record and the team's state.
 - [RFC 0020](0020-unfold-plugins-leave.md): why `unfold` remains a kind and is not part of this
   plan.
+
+## Amendment: positions and the shared role registry (2026-11-28, #2176)
+
+These replacements take effect as the corresponding [RFC 0050](0050-teams-positions-roles.md) deliveries land.
+The original P1–P6 plan and its approved answers above record the earlier design.
+
+| Earlier wording and location | Replacement |
+|---|---|
+| Rule 1, “The Main Bot stays a team-level power” | Assign the chief of staff for the instance and a leader for a team. Every Bot still uses the same record and runtime. |
+| Rule 2, “Sessions or Main Bot powers” | A role adds only its own abilities. It cannot change a position or remove a base tool. The owner controls Terminal, Files and Computer use per Bot. |
+| Rule 3, “One role per Bot through P6”, and Q1, “Recommend one through P6” | Roles stack. Compose one prompt part per attachment in attachment order, union tools, and keep grants, settings and UI per attachment. Refuse an attach when a tool name clashes and preserve the existing attachments. |
+| Q2, “It stays a team-level power” | The chief of staff holds the instance position and team leaders hold scoped positions. Orchestrator is a separate role. |
+| “What a role is not”, “a DSH plugin”, and Q6, “official Automagik roles only” | An official role may be provided by bots-dsh, by a reviewed official-lane DSH plugin, or by the signed catalog. All use the same registry. Host extension and role attachment are distinct operations. Community execution still waits for P5. |
+| Contract 2, “A list of attachments”, formerly limited to one role | Read the existing list in order and append new attachments. Keep the existing pin fields and accept provider source metadata. Detach and grant operations are per attachment. Add `roleRuntimeByRole[botId][roleId]` and retain the package-first `roleRuntime[botId]` with its legacy-kind fallback through `positions: 2`. |
+| Contract 4, “The package manifest described above” | Package manifests retain their ID, version and capability checks. There is no `conflicts` field. The registry enforces the tool-name clash rule at attach. |
+| Contract 6, “a role whose package ships inside the Bot team plugin” | Catalog installation stays verified. First-party and plugin definitions attach from the registry without installing a bundled package. The Solver exception remains available to support upgrades until Solver is migrated, then its carrier is removed. |
+| Contract 8, “`audio-out`, `task-start`, `route-policy`, `history-read`” and “enforces `task-start` and `route-policy` at `start_task`” | Add `call-engine` to the closed capability list for Voice in W3. A current attachment must declare a granted capability. After W1’s task cutover, `start_task` requires its grant and a named model also requires `route-policy`. [RFC 0051](0051-threads-and-the-orchestrator.md) enforces `task-start` at `delegate` for helpers and members and at its `start_task` alias. Selecting a model for a helper also requires `route-policy`. |
+| “What changes for Bots”, “Main Bot” and “a team-level power” | The chief holds the crown and instance powers. Team leaders hold team powers in W4. A position and a role can change independently. |
+| Contract 9, “Kind stays a stored field”, and Q10, “Whether either follows Genie into roles is a separate RFC after P6” | Omni and Genie kinds migrate to registry roles. Keep their stored kinds for compatibility, then remove those kinds at `positions: 2`. Unfold keeps its kind, and Herdr's seat kind keeps its meaning. |
+| P4, “The first product, on the voice chat the app already has” | Keep working Voice / Mouth pins, settings, grants and `speak` through W1. W3 delivers the registry Voice role, `speak` and a separate `call-engine` grant. Existing catalog pins upgrade with owner consent. A disabled catalog pin stays inert until enabled and consented. |
+| P6, “an official role package built from the Genie project's release” and “restore `kind` from the record” | The official Genie plugin release supplies the role through the registry. Before a write, copy the original state to `state.json.pre-positions-<pluginVersion>`. Preserve wishes, look and Session. Use `positionsFrom` to diagnose the original positions and kinds. Stop writers and restore the compatible snapshot with its matching profile data before using an older host. Old Genie exclusivity applies only to the legacy carrier. An explicit detach survives the provider transition. |
