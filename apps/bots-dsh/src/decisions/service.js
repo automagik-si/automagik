@@ -401,7 +401,8 @@ export default class Decisions extends Service {
       try {
         this.openLedger().appendDecision(ledgerRequest, outcome, { wireQuestions: wire, protocol: reg?.info.protocol })
       } catch {
-        // A ledger outage cannot change the provider result or masquerade as an admission refusal.
+        // Preserve the outcome. Later admission checks need the missing history row.
+        console.warn(`[decisions] Could not record decision ${decisionId} in local history.`)
       } finally {
         this.ledgerPurposes = undefined
       }

@@ -324,14 +324,25 @@ test('admission preserves append, refusal and errors; judgment reads never prune
   const moved = join(dir, '..', dir.split('/').at(-1) + '-moved')
   renameSync(dir, moved)
   writeFileSync(dir, '')
+  const warn = t.mock.method(console, 'warn', () => {})
+  let lostId
   try {
     for (const operation of [
       () => decisions.recordExposure(ok.decisionId, keyA), () => decisions.label(ok.decisionId, hard),
       () => decisions.judgments(ok.decisionId), () => decisions.evaluation('group-routing'),
     ]) await assert.rejects(operation, { code: 'ENOTDIR' })
-    assert.equal((await decisions.decide(routing())).status, 'ok')
+    const lost = await decisions.decide(routing())
+    assert.equal(lost.status, 'ok')
+    lostId = lost.decisionId
+    assert.deepEqual(warn.mock.calls.map(call => call.arguments),
+      [[`[decisions] Could not record decision ${lostId} in local history.`]])
   } finally {
     rmSync(dir)
     renameSync(moved, dir)
   }
+  assert.equal(await decisions.judgments(lostId), undefined)
+  assert.equal(await decisions.recordExposure(lostId, keyA), false)
+  const recovered = await decisions.decide(routing())
+  assert.ok(rows().some(row => row.id === recovered.decisionId))
+  assert.equal(warn.mock.callCount(), 1)
 })
