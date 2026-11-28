@@ -208,6 +208,21 @@ test('Voice / Mouth card and recovery copy has Chinese and Brazilian Portuguese 
   }
 })
 
+test('the tool clash refusal keeps both names in English and Brazilian Portuguese', () => {
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const key = 'Tool {tool} is already supplied by {name}.'
+  const english = 'Tool speak is already supplied by voice-mouth.'
+  assert.equal(hostTemplateOf(english), key)
+  assert.equal(hostText(english), english)
+  const locale = fakeLocale('pt')
+  locale.bind = () => (key, params) => pt[key]?.replace(/\{(\w+)\}/g, (_, name) => params[name]) ?? key
+  const off = installLocale(locale)
+  try {
+    assert.equal(hostText(english), 'A ferramenta speak já é fornecida por voice-mouth.')
+    assert.equal(t('Detach {name}', { name: 'Voice / Mouth' }), 'Remover Voice / Mouth')
+  } finally { off() }
+})
+
 test('rfc0039 [P] I1 Chinese withdrawn and stale texts', async () => {
   const clientApprovals = await import('../src/client/approvals.js')
   const off = installLocale(fakeLocale('zh'))

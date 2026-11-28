@@ -2,6 +2,7 @@ import { createElement as h } from 'react'
 import { attachedRoleIds, BUILTIN_ROLES, packageDeclarations, rolesOn } from '../shared/roles.js'
 import { Card, Row, roleHealth, roleReadOnly } from './bot-settings.js'
 import { t } from './i18n.js'
+import { roleName, roleProvider } from './team-actions.js'
 
 const BUILTIN_KEY = 'role:builtin:genie'
 const COMMUNITY_REASON = 'Community roles can be installed once their isolated runtime ships.'
@@ -13,12 +14,14 @@ const checksum = sha256 => h('code', null, sha256.match(/.{1,16}/g).map((part, i
   h('span', { key: index }, index ? h('wbr') : null, part)))
 
 export function shopRoles(roster) {
-  if (!rolesOn(roster?.prefs)) return []
   const bots = roster?.bots ?? Object.values(roster?.byId ?? {})
   const attached = new Set(bots.flatMap(attachedRoleIds))
   const catalog = new Map((roster?.roleCatalog?.roles ?? []).map(role => [role.id, role]))
-  const rows = []
-  if (bots.some(bot => bot.kind === BUILTIN_ROLES.genie.kind)) {
+  const rows = (roster?.roleProviders ?? []).map(provider => ({
+    key: `role:registry:${provider.id}`, id: provider.id, name: roleName(roster, provider.id), provider,
+  }))
+  if (!rolesOn(roster?.prefs)) return rows
+  if (!roleProvider(roster, 'genie') && bots.some(bot => bot.kind === BUILTIN_ROLES.genie.kind)) {
     rows.push({ key: BUILTIN_KEY, id: 'genie', name: t('Genie'), builtIn: true })
   }
   for (const id of new Set([...catalog.keys(), ...Object.keys(roster?.roles ?? {})])) {
@@ -32,12 +35,12 @@ export function shopRoles(roster) {
     })
   }
   // Keep catalog order within each group, followed by records absent from the catalog.
-  const rank = row => row.builtIn ? 0 : row.listed?.installable ? 1 : row.listed ? 2 : 3
+  const rank = row => row.builtIn || row.provider ? 0 : row.listed?.installable ? 1 : row.listed ? 2 : 3
   return rows.sort((a, b) => rank(a) - rank(b))
 }
 
 function roleAction(row, roster, actions, operation, className) {
-  if (row.builtIn) return null
+  if (row.builtIn || row.provider) return null
   const { id, record } = row
   const action = record ? actions.uninstallRole : actions.installRole
   const reason = actionReason(row)
@@ -49,13 +52,13 @@ function roleAction(row, roster, actions, operation, className) {
 }
 
 function RoleTile({ row, roster, actions, operation, open }) {
-  const { name, builtIn, record, listed, declarations } = row
+  const { name, builtIn, provider, record, listed, declarations } = row
   const tag = builtIn ? t('Built in') : listed ? t(listed.installable ? 'Official' : 'Community') : t('Installed')
   const reason = actionReason(row)
   const status = [record && (record.status === 'ok' ? t('Installed') : roleHealth(record.status)),
-    record ? record.version : listed?.version, declarations?.description].filter(Boolean).join(' · ')
+    record ? record.version : listed?.version ?? provider?.version, declarations?.description].filter(Boolean).join(' · ')
   return h('div', null,
-    h('div', { className: 'bt-app', 'data-state': record || builtIn ? 'ready' : 'off' },
+    h('div', { className: 'bt-app', 'data-state': record || builtIn || provider ? 'ready' : 'off' },
       h('button', { type: 'button', className: 'bt-app-main', onClick: () => open(row.key) },
         h('span', { className: 'bt-app-text' },
           h('span', { className: 'bt-app-name' }, name, h('span', { className: 'bt-tag' }, tag)),
@@ -82,6 +85,10 @@ function newerVersion(candidate, installed) {
 }
 
 export function RoleShopCard({ row, roster, actions, operation }) {
+  if (row.provider) return h(Card, null,
+    h(Row, { label: t('Installed'), hint: t('Attach it from the Bot’s settings.') }),
+    h(Row, { label: t('Declared tools'), hint: row.provider.tools.join(', ') || t('None') }),
+    h(Row, { label: t('Grants requested'), hint: row.provider.capabilities.join(', ') || t('None') }))
   if (row.builtIn) return h(Card, null,
     h(Row, { label: t('Built in'), hint: t("Attach it from a Genie Bot's settings") }))
   const { record, listed, details, declarations } = row

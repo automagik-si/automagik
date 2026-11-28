@@ -54,7 +54,7 @@ test('client.js registers a factory that exports apply and inject', () => {
   assert.deepEqual(Object.keys(exports.omni).sort(), [
     'addStrings', 'badges', 'botChannels', 'botChildren', 'botSettings', 'call', 'chatSuggestions',
     'dateLocale', 'face', 'genui', 'headerButtons', 'hostText', 'language', 'nav',
-    'officialInstall', 'onShell', 'registerComposerPack', 'setCanvasRenderer', 'sidebarTools',
+    'officialInstall', 'onShell', 'registerComposerPack', 'roles', 'setCanvasRenderer', 'sidebarTools',
     't', 'toolCards', 'ui',
   ])
   assert.deepEqual(Object.keys(exports.omni.ui).sort(), ['BotMark', 'CHARACTERS', 'MAIN_LOOK', 'OmniMark', 'createSource', 'icons', 'relativeShort'])
@@ -70,6 +70,37 @@ test('client.js registers a factory that exports apply and inject', () => {
   assert.deepEqual(Object.keys(exports.omni.genui.model).sort(), ['backfillDay', 'backfillRange', 'backfillSummaryText', 'backfillView', 'canCancel', 'countText', 'coverageLine', 'coverageOf', 'parseReadingNote', 'percentOf', 'personView', 'proposalView', 'rowView', 'runView', 'shortDate', 'spanOf', 'stateId', 'stateWord'])
   assert.ok(Object.isFrozen(exports.omni))
   assert.equal(exports.omni.face(), null)
+  const { roles, toolCards } = exports.omni
+  assert.deepEqual(Object.keys(roles).sort(), ['all', 'hasRole', 'of', 'register'])
+  const pin = { id: 'guide', version: '1.0.0', attachedAt: 'fixture', source: 'registry' }
+  const bot = { id: 'bot', roles: [{ ...pin, grants: [] }] }
+  const roster = { byId: { bot, part: bot }, prefs: { roles: false }, roleRuntimeByRole: { bot: { guide: { pin } } } }
+  const fixture = { id: 'guide', name: 'Guide', toolCards: ['guide_tool'] }
+  const off = roles.register(fixture)
+  assert.throws(() => roles.register(fixture), /duplicate/)
+  fixture.toolCards.push('changed')
+  assert.deepEqual(Array.from(roles.of('guide').toolCards), ['guide_tool'])
+  assert.equal(roles.all()[0], roles.of('guide'))
+  assert.equal(roles.hasRole(roster, 'part', 'guide'), true)
+  assert.equal(roles.hasRole(roster, 'other', 'guide'), false)
+  const offCard = toolCards.register('guide_tool', () => 'Guide card', { asks: true })
+  const paint = (sessionId, roster) => toolCards.renderer('guide_tool')({ tool: 'guide_tool', sessionId, roster })
+  assert.equal(paint('part', roster), 'Guide card')
+  assert.equal(paint('other', roster), null)
+  const disposed = { ...roster, roleRuntimeByRole: { bot: { guide: { pin, status: 'missing' } } } }
+  assert.equal(roles.hasRole(disposed, 'bot', 'guide'), false)
+  assert.equal(paint('bot', disposed), null)
+  const beforeDispose = toolCards.source.getSnapshot()
+  off()
+  assert.notEqual(toolCards.source.getSnapshot(), beforeDispose)
+  assert.equal(roles.of('guide'), undefined)
+  assert.equal(paint('other', roster), 'Guide card', 'the separately registered renderer still serves the existing outlet')
+  const removeReplacement = roles.register(fixture)
+  off()
+  assert.equal(roles.all().length, 1, 'an earlier disposer cannot remove a replacement')
+  removeReplacement()
+  offCard()
+  assert.equal(toolCards.renderer('guide_tool'), undefined)
   // No `configForms`: the client never writes the user's DSH settings, such as the
   // work-details mode it once held at `verbose`.
   assert.deepEqual(Array.from(exports.inject), ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout'])

@@ -22,7 +22,7 @@ import { BotPills, pillLabels } from './capability-pills.js'
 import { LeftBar } from './left-bar.js'
 import { localSeatByKey, seatBotId, seatChatView, seatWithFreshPane, useSeatRoster, useSeats } from './seat-chat.js'
 import { NATIVE_WORKERS_CSS, NativeWorkers, runningWorkers } from './native-workers.js'
-import { roleOutletVisible, roleTagOf } from '../shared/roles.js'
+import { roleContributions, roleContributionVisible, roleTags } from './team-actions.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
@@ -116,17 +116,20 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   }
   const pinned = bot.pinned === true && !crowned
   const role = crowned ? bot.role : ''
-  const tag = roleTagOf(bot, roster.prefs, roster, t)
-  const label = [bot.name, tag, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', notInstalled ? notInstalledText : running || away ? t('Working') : '', notInstalled ? '' : waitsFor, notInstalled ? '' : stoppedLine, notInstalled ? '' : approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
+  const definitions = useEntries(roleContributions)
+  const tags = roleTags(roster, bot, definitions)
+  const label = [bot.name, ...tags.map(tag => tag.name), role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', notInstalled ? notInstalledText : running || away ? t('Working') : '', notInstalled ? '' : waitsFor, notInstalled ? '' : stoppedLine, notInstalled ? '' : approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: crowned ? 'bt-row bt-row-crowned' : 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
     'data-bot-id': id, title: wide ? undefined : bot.name,
     onMouseEnter: wide ? nameIfCut : undefined, onClick: () => actions.openSession(id), onContextMenu,
   },
-  h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
+  h(BotAvatar, { bot, roster, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
-    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), tag ? h('span', { className: 'bt-tag' }, tag) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
+    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name),
+      tags.length ? h('span', { className: 'bt-row-role-tags' }, tags.map(tag => h('span', { key: tag.id, className: 'bt-tag' }, tag.name))) : null,
+      role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
     // What to ask this Bot for, on a line of its own: the name line has no room for it.
     h(BotPills, { roster, bot, className: 'bt-row-caps' }),
     blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)
@@ -151,8 +154,9 @@ function RowBadges(props) {
 // actions that fold the sidebar below 1024 px when a row opens.
 function BotChildren({ wide, ...props }) {
   const entries = useEntries(botChildren)
+  const definitions = useEntries(roleContributions)
   if (!wide || entries.length === 0) return null
-  return entries.filter(entry => roleOutletVisible('botChildren', entry.id, props.bot, props.roster))
+  return entries.filter(entry => roleContributionVisible('botChildren', entry.id, props.bot, props.roster, definitions))
     .map(entry => h(entry.Component, { key: entry.id, ...props, wide }))
 }
 
@@ -1013,6 +1017,7 @@ export function BrandName() {
 // FooterAccount only shows when the seat went to no one. The shell's footer classes
 // are CSS-module names, so they match on their stems.
 export const SIDEBAR_CSS = `
+.bt-row-role-tags{display:flex;gap:6px;min-width:0;overflow:hidden}
 .bt-confirm{width:260px;max-width:72vw;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px}
 .bt-confirm-text{margin:0;font-size:13px;line-height:19px;color:var(--bt-ink-2)}
 .bt-confirm-error{margin:0;font-size:12px;line-height:17px;color:var(--st-bad-strong,var(--bt-danger));overflow-wrap:anywhere}

@@ -3,6 +3,87 @@ import { noteClientError } from './diagnostics.js'
 import { CROSSING_DEADLINE_MS, crossesHarness, routeOfRef } from '../shared/routes.js'
 import { SIGN_IN_NAMES, cliLoginBotOf, signInProviderOf } from './cli-login-model.js'
 import { checkViewer, mountedViewer, requestViewer } from './viewer.js'
+import {
+  attachedRoles, BUILTIN_ROLES, effectiveRoleIds, isRoleId, packageDeclarations, registryAttachment, rolesOn, sameRolePin,
+} from '../shared/roles.js'
+import { t } from './i18n.js'
+
+export const ownRole = (table, id) => Object.hasOwn(table ?? {}, id) ? table[id] : undefined
+export const stackedRoles = roster => Object.hasOwn(roster ?? {}, 'roleRuntimeByRole')
+export const roleProvider = (roster, id) => roster?.roleProviders?.find(provider => provider.id === id)
+
+export function runtimeForRole(roster, botId, pin) {
+  const candidate = stackedRoles(roster)
+    ? ownRole(ownRole(roster.roleRuntimeByRole, botId), pin.id)
+    : ownRole(roster?.roleRuntime, botId)
+  return sameRolePin(pin, candidate?.pin) && !candidate.status ? candidate : undefined
+}
+
+const roleDefinitions = createSource(Object.freeze([]))
+const outlets = ['botChildren', 'botSettings', 'suggestions', 'toolCards']
+const allRoles = roleDefinitions.getSnapshot
+const clientRole = id => allRoles().find(def => def.id === id)
+
+function holdsRole(roster, bot, id) {
+  if (!bot) return false
+  const pin = attachedRoles(bot).find(pin => pin.id === id)
+  if (id === 'genie' && !registryAttachment(pin)) return effectiveRoleIds(bot, roster?.prefs).includes(id)
+  if (pin) return (registryAttachment(pin) || rolesOn(roster?.prefs)) && Boolean(runtimeForRole(roster, bot.id, pin))
+  return id === 'omni' && !roleProvider(roster, id) && bot.kind === 'omni'
+}
+
+export const clientRoles = Object.freeze({
+  register(def) {
+    const { id, name } = def ?? {}
+    if (!isRoleId(id) || typeof name !== 'string' || !name.trim() || clientRole(id)) {
+      throw new Error('Invalid or duplicate Bot role contribution')
+    }
+    const contribution = { id, name }
+    for (const outlet of outlets) {
+      if (!Object.hasOwn(def, outlet)) continue
+      const ids = def[outlet]
+      if (!Array.isArray(ids) || !ids.every(id => typeof id === 'string' && id.length) || new Set(ids).size !== ids.length) {
+        throw new Error(`Invalid Bot role outlet: ${outlet}`)
+      }
+      contribution[outlet] = Object.freeze([...ids])
+    }
+    Object.freeze(contribution)
+    roleDefinitions.set(list => Object.freeze([...list, contribution]))
+    return () => {
+      if (clientRole(id) === contribution) roleDefinitions.set(list => Object.freeze(list.filter(item => item !== contribution)))
+    }
+  },
+  all: allRoles,
+  of: clientRole,
+  hasRole: (roster, botId, id) => holdsRole(roster,
+    ownRole(roster?.byId, botId) ?? roster?.bots?.find(bot => bot.id === botId), id),
+})
+
+export const roleContributions = { source: roleDefinitions }
+
+export function roleContributionVisible(outlet, id, bot, roster, definitions = allRoles()) {
+  const owners = definitions.filter(role => role[outlet]?.includes(id))
+  if (owners.length) return owners.some(role => holdsRole(roster, bot, role.id))
+  // Current Genie bundles use the existing outlets without a client registration.
+  const genie = BUILTIN_ROLES.genie
+  const legacyIds = outlet === 'toolCards' ? genie.tools : genie[outlet]
+  return !roster || !rolesOn(roster.prefs) || !legacyIds?.includes(id) || holdsRole(roster, bot, genie.id)
+}
+
+export function roleName(roster, id, pin, definitions = allRoles()) {
+  const fallback = id === 'genie' ? t('Genie') : id
+  if (pin && !registryAttachment(pin)) return packageDeclarations(pin, roster)?.name ?? fallback
+  return roleProvider(roster, id)?.name ?? definitions.find(def => def.id === id)?.name ?? fallback
+}
+
+export function roleTags(roster, bot, definitions) {
+  const pins = attachedRoles(bot).filter(pin => registryAttachment(pin) || rolesOn(roster.prefs))
+  const tags = pins.map(pin => ({ id: pin.id, name: roleName(roster, pin.id, pin, definitions) }))
+  if (rolesOn(roster.prefs) && effectiveRoleIds(bot, roster.prefs).includes('genie') && !tags.some(tag => tag.id === 'genie')) {
+    tags.unshift({ id: 'genie', name: roleName(roster, 'genie', undefined, definitions) })
+  }
+  return tags
+}
 
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
 const unfinishedSave = error => error.code === 'NETWORK' || error.code === 'bot/retired' || /^HTTP_50[234]$/.test(error.code ?? '') ||
@@ -348,7 +429,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     setBotAuto: (id, rev) => after(call('set-bot-auto', { id, rev })),
     updateBot: (id, patch) => picked(pickFor(id, patch?.model), call('update-bot', { id, ...patch })),
     attachRole: (id, role) => after(call('role-attach', { id, role })),
-    detachRole: id => after(call('role-detach', { id })),
+    detachRole: (id, role) => after(call('role-detach', role === undefined ? { id } : { id, role })),
     roleCatalog: () => after(call('role-catalog')),
     installRole: id => after(call('role-install', { id })),
     uninstallRole: id => after(call('role-uninstall', { id })),

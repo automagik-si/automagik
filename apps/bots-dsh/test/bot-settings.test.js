@@ -6,7 +6,14 @@ import { SOLVER_SHAPES } from '../src/client/characters.js'
 import { build } from 'esbuild'
 
 const { outputFiles } = await build({
-  entryPoints: [fileURLToPath(new URL('../src/client/bot-settings.js', import.meta.url))],
+  stdin: { resolveDir: fileURLToPath(new URL('../src/client/', import.meta.url)), contents: `
+    export * from './bot-settings.js'
+    export { clientRoles, roleContributionVisible, teamActions } from './team-actions.js'
+    export { botSettings } from './extend.js'
+    export { BotMark } from './mark.js'
+    export { shopRoles } from './role-shop.js'
+    export { suggestionsFor } from './suggestions.js'
+  ` },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
@@ -20,7 +27,7 @@ const react = {
 }
 const module = { exports: {} }
 runInNewContext(outputFiles[0].text, {
-  module, exports: module.exports,
+  module, exports: module.exports, URLSearchParams,
   require: name => (name === 'react' ? react : name === 'react-dom' ? { createPortal: node => node } : {}),
 })
 const { BotSettingsForm } = module.exports
@@ -63,6 +70,108 @@ test('task grants are separate switches and a route grant can always be cleared'
   assert.equal(enabled.disabled, false)
   enabled.onChange(false)
   assert.deepEqual(calls.map(([id, , capability, on]) => [id, capability, on]), [[bot.id, 'route-policy', false]])
+})
+
+test('stacked settings address each exact attachment, in both pin orders', async () => {
+  const { teamActions } = module.exports
+  const voice = { id: 'voice-mouth', version: '1.0.0', attachedAt: 'first' }
+  const guide = { id: 'guide', version: '1.0.0', attachedAt: 'second', source: 'registry' }
+  const runtime = {
+    [voice.id]: { pin: voice, settings: [{ key: 'voice', kind: 'voice', label: 'Voice' }], tools: ['speak'], capabilities: ['audio-out'] },
+    [guide.id]: { pin: guide, settings: [], tools: ['guide_tool'], capabilities: ['audio-out', 'task-start'] },
+  }
+  const calls = []
+  const actions = teamActions({ after: value => value, call: async (endpoint, payload) => {
+    calls.push([endpoint, payload.id, payload.role, payload.capability, payload.on])
+    return endpoint === 'role-settings' ? { voice: '' } : undefined
+  } })
+  const withRoles = pins => ({ ...bot, roles: pins.map(pin => ({ ...pin, grants: pin.id === voice.id ? ['audio-out'] : [] })) })
+  const host = {
+    roleRuntime: { [bot.id]: runtime[voice.id] }, roleRuntimeByRole: { [bot.id]: runtime },
+    roles: { [voice.id]: { version: voice.version, status: 'ok' } },
+    roleProviders: [{ id: guide.id, name: 'Guide', version: guide.version, tools: ['guide_tool'] },
+      { id: 'duplicate', name: 'Duplicate', tools: ['speak'] }, { id: 'extra', name: 'Extra', tools: [] }],
+  }
+  const form = (record, live = host) => walk(BotSettingsForm({ bot: record, roster: { ...live, bots: [record] }, actions, run: value => value }))
+  const cards = tree => tree.filter(node => node.type?.name === 'PackageAttachmentCard')
+  const expand = node => walk(node.type(node.props))
+  const controls = card => expand(card).find(node => node.type?.name === 'RoleControls')
+  for (const order of [[voice, guide], [guide, voice]]) {
+    const tree = form(withRoles(order))
+    assert.deepEqual(cards(tree).map(card => card.props.pin.id), order.map(pin => pin.id))
+    for (const [index, card] of cards(tree).entries()) {
+      const pin = order[index]
+      const own = controls(card)
+      assert.equal(own.props.runtime, runtime[pin.id])
+      const useEffect = react.useEffect
+      react.useEffect = (fn, deps) => { if (deps?.includes(pin.attachedAt)) fn() }
+      let speech
+      try { speech = expand(own).find(node => node.props?.label === 'Allow speech') } finally { react.useEffect = useEffect }
+      assert.equal(speech.props.on, pin.id === voice.id)
+      speech.props.onChange(!speech.props.on)
+      expand(card).find(node => node.props?.children.includes('Detach')).props.onClick()
+      if (pin.id === voice.id) assert.deepEqual(calls.shift(), ['role-settings', bot.id, voice, undefined, undefined])
+      assert.deepEqual(calls.shift(), ['role-grant', bot.id, pin, 'audio-out', pin.id !== voice.id])
+      assert.deepEqual(calls.shift(), ['role-detach', bot.id, pin.id, undefined, undefined])
+    }
+    const picker = expand(tree.find(node => node.type?.name === 'StackedRolePicker'))
+    assert.ok(picker.some(node => node.props?.hint === 'Tool speak is already supplied by voice-mouth.'))
+    assert.equal(picker.find(node => node.props?.['aria-label'] === 'Attach Duplicate').props.disabled, true)
+    picker.find(node => node.props?.['aria-label'] === 'Attach Extra').props.onClick()
+    assert.deepEqual(calls.shift(), ['role-attach', bot.id, 'extra', undefined, undefined])
+  }
+  assert.deepEqual(calls, [])
+  const stacked = withRoles([guide, voice])
+  const missing = { ...host, roleRuntimeByRole: { [bot.id]: { [guide.id]: { pin: guide, status: 'missing' } } } }
+  assert.deepEqual(cards(form(stacked, missing)).map(controls), [undefined, undefined], 'a present by-role view cannot fall back to the stale old projection')
+  const stale = { ...host, roleRuntimeByRole: { [bot.id]: { ...runtime, [guide.id]: { ...runtime.guide, pin: { ...guide, attachedAt: 'old' } } } } }
+  assert.equal(controls(cards(form(stacked, stale))[0]), undefined)
+  const off = cards(form(stacked, { ...host, prefs: { roles: false } }))
+  assert.ok(controls(off[0]))
+  assert.equal(controls(off[1]), undefined)
+  const readOnly = cards(form(stacked, { ...host, readOnly: true }))
+  assert.ok(readOnly.every(card => controls(card).props.readOnly))
+  assert.ok(readOnly.every(card => expand(card).find(node => node.props?.children.includes('Detach')).props.disabled))
+
+  const { roleRuntimeByRole: _byRole, roleProviders: _providers, ...oldHost } = host
+  const [oldCard] = cards(form(withRoles([voice]), oldHost))
+  assert.equal(controls(oldCard).props.runtime, runtime[voice.id])
+  expand(oldCard).find(node => node.props?.children.includes('Detach')).props.onClick()
+  assert.deepEqual(calls.shift(), ['role-detach', bot.id, undefined, undefined, undefined])
+})
+
+test('role contributions follow the matching Bot and restore the current Genie and Omni outlets', () => {
+  const { clientRoles, roleContributionVisible, suggestionsFor, botSettings, BotMark, shopRoles } = module.exports
+  const pin = { id: 'genie', version: '1.0.0', source: 'registry', attachedAt: 'fixture', grants: [] }
+  const member = { ...bot, roles: [pin] }
+  const legacy = { id: 'legacy', kind: 'genie' }
+  const ordinary = { ...bot, roles: [] }
+  const provider = { id: 'genie', name: 'Genie', version: pin.version, tools: ['grant_wish'], capabilities: [] }
+  const roster = { byId: { b: member, legacy }, bots: [member, legacy], prefs: { roles: false },
+    roleProviders: [provider], roleRuntimeByRole: { b: { genie: { pin } } } }
+  const entry = { id: 'genie', items: () => [{ label: 'Wish', text: 'Wish ' }] }
+  const Component = () => null
+  const settingsOff = botSettings.register({ id: 'guide-settings', Component })
+  const off = clientRoles.register({ id: 'genie', name: 'Genie', botChildren: ['genie-wishes'], suggestions: ['genie'], botSettings: ['guide-settings'] })
+  try {
+    assert.ok(roleContributionVisible('botChildren', 'genie-wishes', member, roster))
+    assert.equal(roleContributionVisible('botChildren', 'genie-wishes', ordinary, roster), false)
+    assert.equal(suggestionsFor([entry], { bot: member, roster })[0].label, 'Wish')
+    assert.notEqual(suggestionsFor([entry], { bot: ordinary, roster })[0].label, 'Wish')
+    const settings = subject => walk(BotSettingsForm({ bot: subject, roster, actions: {}, run: value => value }))
+    assert.ok(settings(member).some(node => node.type === Component))
+    assert.ok(!settings(ordinary).some(node => node.type === Component))
+    assert.equal(BotMark({ bot: member, roster, size: 40 }).type.name, 'PetMark')
+    assert.equal(BotMark({ bot: { ...member, avatar: { shape: 'moon' } }, roster, size: 40 }).type.name, 'DrawnMark')
+    assert.equal(shopRoles(roster)[0].provider, provider)
+  } finally { off(); settingsOff() }
+  const oldRoster = { bots: [legacy], byId: { legacy } }
+  assert.ok(roleContributionVisible('botChildren', 'genie-wishes', legacy, oldRoster))
+  assert.equal(roleContributionVisible('botChildren', 'genie-wishes', { ...legacy, roles: [] }, oldRoster), false)
+  assert.equal(suggestionsFor([entry], { bot: legacy, roster: oldRoster })[0].label, 'Wish')
+  assert.equal(BotMark({ bot: legacy, size: 40 }).type.name, 'PetMark')
+  assert.equal(shopRoles(oldRoster)[0].builtIn, true)
+  assert.ok(roleContributionVisible('botSettings', 'omni-permissions', ordinary, oldRoster))
 })
 
 test('the role picker serves team Bots, keeps Description, and follows the current role', () => {

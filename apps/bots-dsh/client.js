@@ -2252,6 +2252,14 @@ var ZH2 = {
   "Its tools arrive with the role runtime.": "角色运行环境推出后，这些工具即可使用。",
   "Detach it from every Bot, uninstall, then install again.": "从所有 Bot 移除此角色后，卸载并重新安装。",
   "Detach": "移除角色",
+  "Add a role": "添加角色",
+  "Attach {name}": "添加 {name}",
+  "Detach {name}": "移除 {name}",
+  "{label} ({name})": "{label}（{name}）",
+  "Attach it from the Bot’s settings.": "请在 Bot 的设置中添加此角色。",
+  "Attach Genie first to keep it, or detach it before choosing another role.": "要保留 Genie，请先添加 Genie，也可以先移除 Genie，再选择其他角色。",
+  "This role cannot be attached.": "无法添加此角色。",
+  "Tool {tool} is already supplied by {name}.": "工具 {tool} 已由 {name} 提供。",
   "Missing": "缺失",
   "Version mismatch": "版本不匹配",
   "Choose None first.": "请先选择“无”。",
@@ -4806,6 +4814,7 @@ var HOST_TEMPLATES = [
   "The name {name} is reserved for the /{name} command. Choose another name.",
   { template: "{name} is held: {reason} Open it on the Skills screen and save it again.", host: ["reason"] },
   "Detach {name} first.",
+  "Tool {tool} is already supplied by {name}.",
   "{name} is already moving to a new conversation.",
   "{name} is still handing on earlier messages; try again shortly.",
   "Answer or dismiss {name}'s open card first.",
@@ -7894,6 +7903,848 @@ function genieTint(color) {
   return Math.abs(turn) < 6 ? EXTRA[color]?.trim() || void 0 : `hue-rotate(${turn}deg)${EXTRA[color] ?? ""}`;
 }
 
+// src/shared/cli-login.js
+var SIGN_IN_TEXT_MAX = 1e6;
+
+// src/client/cli-login-model.js
+var CLI_NAMES = Object.freeze({ "acp-codex": "Codex", "acp-claude": "Claude Code" });
+var cliProviderOf = (ref) => {
+  const provider = typeof ref === "string" ? ref.split("/")[0] : void 0;
+  return Object.hasOwn(CLI_NAMES, provider) ? provider : void 0;
+};
+var SIGN_IN_NAMES = Object.freeze({ ...CLI_NAMES, "acp-antigravity": "Antigravity" });
+var signInProviderOf = (ref) => {
+  const provider = typeof ref === "string" ? ref.split("/")[0] : void 0;
+  return Object.hasOwn(SIGN_IN_NAMES, provider) ? provider : void 0;
+};
+var cliLoginBotOf = (roster, id) => typeof id === "string" ? roster?.byId?.[id] : void 0;
+var KNOWN = /* @__PURE__ */ new Set();
+var STATE = /^[A-Za-z0-9_-]{8,512}$/;
+function rememberLinkState(url) {
+  let state2;
+  try {
+    state2 = new URL(url).searchParams.get("state");
+  } catch {
+    return false;
+  }
+  if (typeof state2 !== "string" || !STATE.test(state2)) return false;
+  KNOWN.add(state2);
+  return true;
+}
+var KNOWN_CALLBACK = /* @__PURE__ */ new Set();
+var CALLBACK_STATE = /^[^\p{Cc}\s]{8,512}$/u;
+function rememberCallbackState(url) {
+  let states2;
+  try {
+    states2 = new URL(url).searchParams.getAll("state");
+  } catch {
+    return false;
+  }
+  if (states2.length !== 1 || !CALLBACK_STATE.test(states2[0])) return false;
+  KNOWN_CALLBACK.add(states2[0]);
+  return true;
+}
+var knowsStates = () => KNOWN.size > 0 || KNOWN_CALLBACK.size > 0;
+var squeeze = (text2) => text2.slice(0, SIGN_IN_TEXT_MAX).replace(/[\s\p{Cf}]+/gu, "");
+var CALLBACK_OCCURRENCES = 64;
+var CALLBACK_TOKEN = 3 * 512;
+function authorityBefore(reading2, at) {
+  const scheme = reading2.lastIndexOf("://", at - 3);
+  if (scheme < 0) return void 0;
+  const rest2 = reading2.slice(scheme + 3, scheme + 3 + 64);
+  const end = rest2.search(/[/?#\\\s]/u);
+  return (end < 0 ? rest2 : rest2.slice(0, end)).toLowerCase();
+}
+var decodeRuns = (token) => token.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run3) => {
+  try {
+    return decodeURIComponent(run3);
+  } catch {
+    return run3;
+  }
+});
+function carriesCallbackState(reading2) {
+  let count = 0;
+  for (const match of reading2.matchAll(/state(?:=|%3d)/giu)) {
+    if (++count > CALLBACK_OCCURRENCES) break;
+    if (authorityBefore(reading2, match.index) === "accounts.google.com") continue;
+    const start2 = match.index + match[0].length;
+    const token = reading2.slice(start2, start2 + CALLBACK_TOKEN);
+    for (const form of [token, decodeRuns(token)]) {
+      for (const state2 of KNOWN_CALLBACK) if (form.startsWith(state2)) return true;
+    }
+  }
+  return false;
+}
+function carriesKnownState(text2) {
+  if (typeof text2 !== "string" || text2 === "" || KNOWN.size === 0 && KNOWN_CALLBACK.size === 0) return false;
+  const flat = squeeze(text2);
+  for (const state2 of KNOWN) if (flat.includes(`#${state2}`)) return true;
+  return KNOWN_CALLBACK.size > 0 && carriesCallbackState(flat);
+}
+function forgetKnownStates() {
+  KNOWN.clear();
+  KNOWN_CALLBACK.clear();
+}
+var DONE_MS = 3e3;
+var APPLY_FAILED_MS = 8e3;
+
+// src/client/team-actions.js
+var ownRole = (table, id) => Object.hasOwn(table ?? {}, id) ? table[id] : void 0;
+var stackedRoles = (roster) => Object.hasOwn(roster ?? {}, "roleRuntimeByRole");
+var roleProvider = (roster, id) => roster?.roleProviders?.find((provider) => provider.id === id);
+function runtimeForRole(roster, botId, pin) {
+  const candidate = stackedRoles(roster) ? ownRole(ownRole(roster.roleRuntimeByRole, botId), pin.id) : ownRole(roster?.roleRuntime, botId);
+  return sameRolePin(pin, candidate?.pin) && !candidate.status ? candidate : void 0;
+}
+var roleDefinitions = createSource(Object.freeze([]));
+var outlets = ["botChildren", "botSettings", "suggestions", "toolCards"];
+var allRoles = roleDefinitions.getSnapshot;
+var clientRole = (id) => allRoles().find((def) => def.id === id);
+function holdsRole(roster, bot, id) {
+  if (!bot) return false;
+  const pin = attachedRoles(bot).find((pin2) => pin2.id === id);
+  if (id === "genie" && !registryAttachment(pin)) return effectiveRoleIds(bot, roster?.prefs).includes(id);
+  if (pin) return (registryAttachment(pin) || rolesOn(roster?.prefs)) && Boolean(runtimeForRole(roster, bot.id, pin));
+  return id === "omni" && !roleProvider(roster, id) && bot.kind === "omni";
+}
+var clientRoles = Object.freeze({
+  register(def) {
+    const { id, name } = def ?? {};
+    if (!isRoleId(id) || typeof name !== "string" || !name.trim() || clientRole(id)) {
+      throw new Error("Invalid or duplicate Bot role contribution");
+    }
+    const contribution = { id, name };
+    for (const outlet of outlets) {
+      if (!Object.hasOwn(def, outlet)) continue;
+      const ids = def[outlet];
+      if (!Array.isArray(ids) || !ids.every((id2) => typeof id2 === "string" && id2.length) || new Set(ids).size !== ids.length) {
+        throw new Error(`Invalid Bot role outlet: ${outlet}`);
+      }
+      contribution[outlet] = Object.freeze([...ids]);
+    }
+    Object.freeze(contribution);
+    roleDefinitions.set((list) => Object.freeze([...list, contribution]));
+    return () => {
+      if (clientRole(id) === contribution) roleDefinitions.set((list) => Object.freeze(list.filter((item) => item !== contribution)));
+    };
+  },
+  all: allRoles,
+  of: clientRole,
+  hasRole: (roster, botId, id) => holdsRole(
+    roster,
+    ownRole(roster?.byId, botId) ?? roster?.bots?.find((bot) => bot.id === botId),
+    id
+  )
+});
+var roleContributions = { source: roleDefinitions };
+function roleContributionVisible(outlet, id, bot, roster, definitions = allRoles()) {
+  const owners = definitions.filter((role) => role[outlet]?.includes(id));
+  if (owners.length) return owners.some((role) => holdsRole(roster, bot, role.id));
+  const genie = BUILTIN_ROLES.genie;
+  const legacyIds = outlet === "toolCards" ? genie.tools : genie[outlet];
+  return !roster || !rolesOn(roster.prefs) || !legacyIds?.includes(id) || holdsRole(roster, bot, genie.id);
+}
+function roleName(roster, id, pin, definitions = allRoles()) {
+  const fallback = id === "genie" ? t("Genie") : id;
+  if (pin && !registryAttachment(pin)) return packageDeclarations(pin, roster)?.name ?? fallback;
+  return roleProvider(roster, id)?.name ?? definitions.find((def) => def.id === id)?.name ?? fallback;
+}
+function roleTags(roster, bot, definitions) {
+  const pins = attachedRoles(bot).filter((pin) => registryAttachment(pin) || rolesOn(roster.prefs));
+  const tags = pins.map((pin) => ({ id: pin.id, name: roleName(roster, pin.id, pin, definitions) }));
+  if (rolesOn(roster.prefs) && effectiveRoleIds(bot, roster.prefs).includes("genie") && !tags.some((tag) => tag.id === "genie")) {
+    tags.unshift({ id: "genie", name: roleName(roster, "genie", void 0, definitions) });
+  }
+  return tags;
+}
+var hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+var unfinishedSave = (error) => error.code === "NETWORK" || error.code === "bot/retired" || /^HTTP_50[234]$/.test(error.code ?? "") || error.name === "AbortError" || error instanceof SyntaxError;
+function teamActions({
+  call: call2,
+  after,
+  partFor,
+  roster,
+  ui: ui2,
+  live,
+  cards: cards2,
+  heldCards,
+  turnClock,
+  openSession,
+  loginState,
+  panelFolded,
+  work,
+  storage = (() => {
+    try {
+      return globalThis.localStorage;
+    } catch {
+      return null;
+    }
+  })(),
+  skillStorage = (() => {
+    try {
+      return globalThis.sessionStorage;
+    } catch {
+      return null;
+    }
+  })()
+}) {
+  const skillSaves = /* @__PURE__ */ new Map();
+  const skillScope = () => `automagik.skill-saves.${mountedViewer()?.id ?? "local"}`;
+  function storedSaves(scope) {
+    try {
+      const jobs = JSON.parse(skillStorage?.getItem(scope) ?? "[]");
+      if (Array.isArray(jobs)) return jobs.filter((job) => job && /^[a-f0-9]{32}$/.test(job.id));
+    } catch {
+    }
+    return [];
+  }
+  function rememberSave(scope, job, keep = true) {
+    try {
+      const jobs = storedSaves(scope).filter((entry) => entry.id !== job.id);
+      if (keep) jobs.push(job);
+      if (jobs.length) skillStorage?.setItem(scope, JSON.stringify(jobs));
+      else skillStorage?.removeItem(scope);
+    } catch {
+    }
+  }
+  async function finishSave(scope, job, input, signal, viewerGuard) {
+    const poll = { operation: job.id, poll: true, ...input === void 0 ? { recover: true } : {} };
+    const check = () => {
+      signal?.throwIfAborted();
+      checkViewer(viewerGuard);
+      if (scope !== skillScope()) throw Object.assign(new Error("The team viewer changed."), { code: "bot/retired" });
+    };
+    const request = (body) => {
+      check();
+      return call2("skill-library-save", body, signal);
+    };
+    try {
+      let result = await request(input && !job.started ? { ...input, operation: job.id } : poll);
+      while (result.pending) {
+        signal?.throwIfAborted();
+        if (!job.started) {
+          job.started = true;
+          rememberSave(scope, job);
+        }
+        await new Promise((resolve2) => setTimeout(resolve2, 750));
+        result = await request(poll);
+      }
+      check();
+      rememberSave(scope, job, false);
+      return result;
+    } catch (error) {
+      if (!unfinishedSave(error) && !signal?.aborted) rememberSave(scope, job, false);
+      throw error;
+    }
+  }
+  async function saveSkill(skill, signal) {
+    signal?.throwIfAborted();
+    const viewerGuard = requestViewer("skill-library-save");
+    const scope = skillScope();
+    const input = skill.reviewHash === void 0 ? skill : Object.fromEntries(
+      Object.entries(skill).filter(([field]) => ["name", "edit", "reviewHash", "confirm"].includes(field))
+    );
+    const key = JSON.stringify(input);
+    const existing = storedSaves(scope);
+    const digest = skillStorage && globalThis.crypto.subtle ? hex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)))) : void 0;
+    signal?.throwIfAborted();
+    let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find((entry) => entry.digest === digest));
+    if (!job) {
+      job = { id: hex(globalThis.crypto.getRandomValues(new Uint8Array(16))), digest, started: false };
+      rememberSave(scope, job);
+    }
+    skillSaves.set(key, job);
+    try {
+      const result = await finishSave(scope, job, input, signal, viewerGuard);
+      skillSaves.delete(key);
+      return result;
+    } catch (error) {
+      if (!signal?.aborted && !unfinishedSave(error)) skillSaves.delete(key);
+      throw error;
+    }
+  }
+  function resumeSkillSaves(signal) {
+    const scope = skillScope();
+    return Promise.allSettled(storedSaves(scope).map(async (job) => {
+      const result = await finishSave(scope, job, void 0, signal, requestViewer("skill-library-save"));
+      for (const [key, current] of skillSaves) if (current.id === job.id) skillSaves.delete(key);
+      return result;
+    }));
+  }
+  const forgetDrafts = (ids) => {
+    if (!Array.isArray(ids)) return;
+    for (const id of ids) {
+      if (typeof id !== "string" || id === "") continue;
+      try {
+        storage?.removeItem(`dsh.conversation.${id}`);
+      } catch {
+      }
+    }
+  };
+  const picks = createSource({});
+  const pickEntries = /* @__PURE__ */ new Map();
+  let unwatchPicks;
+  const dropPick = (part, entry) => {
+    if (pickEntries.get(part) !== entry) return;
+    clearTimeout(entry.timer);
+    pickEntries.delete(part);
+    picks.set((state2) => {
+      const next = { ...state2 };
+      delete next[part];
+      return next;
+    });
+    if (pickEntries.size === 0 && unwatchPicks !== void 0) {
+      const stop3 = unwatchPicks;
+      unwatchPicks = void 0;
+      stop3();
+    }
+  };
+  const syncPicks = () => {
+    const snapshot2 = work?.getSnapshot?.();
+    for (const [part, entry] of pickEntries) {
+      const noting = snapshot2?.noting?.[part] === true;
+      if (noting || entry.settled && snapshot2?.models?.[entry.botId]?.switching === void 0) dropPick(part, entry);
+    }
+  };
+  const noPick = { mark: () => {
+  }, end: () => {
+  } };
+  const pickFor = (id, ref) => {
+    if (typeof ref !== "string") return noPick;
+    const bot = roster?.getSnapshot?.()?.byId?.[id];
+    const current = bot?.model ?? bot?.appliedModel;
+    if (typeof current !== "string" || ref === current || !crossesHarness(current, ref)) return noPick;
+    if (routeOfRef(current).route !== "acp") return noPick;
+    const part = partFor(id);
+    let entry;
+    return {
+      mark: () => {
+        const older = pickEntries.get(part);
+        if (older !== void 0) clearTimeout(older.timer);
+        const own3 = { botId: bot.id, settled: false, timer: void 0 };
+        entry = own3;
+        own3.timer = setTimeout(() => dropPick(part, own3), CROSSING_DEADLINE_MS);
+        own3.timer?.unref?.();
+        pickEntries.set(part, own3);
+        if (older === void 0 && pickEntries.size === 1 && typeof work?.subscribe === "function") unwatchPicks = work.subscribe(syncPicks);
+        picks.set((state2) => state2[part] === true ? state2 : { ...state2, [part]: true });
+      },
+      end: (ok) => {
+        if (entry === void 0) return;
+        if (ok === true) {
+          entry.settled = true;
+          syncPicks();
+        } else dropPick(part, entry);
+      }
+    };
+  };
+  const picked = (pick4, request) => pick4 === noPick ? after(request) : after(request.then((value) => {
+    pick4.mark();
+    return value;
+  })).then((value) => {
+    pick4.end(true);
+    return value;
+  }, (error) => {
+    pick4.end(false);
+    throw error;
+  });
+  const openCliLogin = (botId, provider, ref, attemptId, { fresh } = {}) => {
+    const bot = cliLoginBotOf(roster.getSnapshot(), botId);
+    const manager = loginState?.();
+    if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
+    openSession?.(bot.id);
+    void manager.open({
+      botId: bot.id,
+      provider,
+      ref: signInProviderOf(ref) === provider ? ref : void 0,
+      ...typeof attemptId === "string" ? { attemptId } : {},
+      ...fresh === true ? { fresh } : {}
+    });
+    return true;
+  };
+  const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra });
+  const stopping = (options) => options?.stopReply === true ? { stopReply: true } : {};
+  const memoryOf = (id) => roster.getSnapshot().roomsById[id] ? { roomId: id } : { botId: id };
+  const yieldTo = (state2, view) => state2.panelYield === true || panelFolded?.(view) === true;
+  let panelInstance;
+  const openPanel = (update) => ui2.set((state2) => {
+    const next = update(state2);
+    if (next !== state2) panelInstance = {};
+    return next;
+  });
+  const openSideChat = (sessionId, chatId) => {
+    openPanel((state2) => ({ ...state2, details: sessionId, view: "side", side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state2, "side") }));
+  };
+  const openSettings = (page = "general", id = null) => {
+    ui2.set((state2) => ({ ...state2, settings: { page, id }, menu: null, palette: null, newChat: null }));
+  };
+  return {
+    // The pane starts at the rail's edge, so a floating drawer would stick out from under it.
+    // The instance distinguishes two opens on the same mode and section.
+    openNewChat: (mode, sectionId = null) => {
+      ui2.set((state2) => ({ ...state2, newChat: mode, newChatInstance: {}, newChatSection: sectionId ?? null, menu: null, palette: null }));
+    },
+    closeNewChat: (mode, sectionId, instance) => {
+      ui2.set((state2) => state2.newChat === mode && (state2.newChatSection ?? null) === sectionId && state2.newChatInstance === instance ? { ...state2, newChat: null, newChatSection: null } : state2);
+    },
+    openPalette: (query = "") => {
+      ui2.set((state2) => ({ ...state2, palette: { query, token: Date.now() }, newChat: null, menu: null }));
+    },
+    // The token keeps a late exit timer from closing a palette opened again since.
+    closePalette: (token, palette) => {
+      ui2.set((state2) => state2.palette && (token === void 0 || state2.palette.token === token) && (palette === void 0 || state2.palette === palette) ? { ...state2, palette: null } : state2);
+    },
+    openExchange: (a, b) => {
+      if (a && b) ui2.set((state2) => ({ ...state2, exchange: [a, b] }));
+    },
+    closeExchange: (pair) => {
+      ui2.set((state2) => state2.exchange === pair ? { ...state2, exchange: null } : state2);
+    },
+    openVoice: (id) => {
+      if (id) ui2.set((state2) => ({ ...state2, voice: id, voiceInstance: {}, menu: null }));
+    },
+    closeVoice: (id, instance) => {
+      ui2.set((state2) => state2.voice && (id === void 0 || state2.voice === id && state2.voiceInstance === instance) ? { ...state2, voice: null } : state2);
+    },
+    getPanelInstance: () => panelInstance,
+    toggleDetails: (id, force) => {
+      ui2.set((state2) => {
+        const snap = roster?.getSnapshot?.();
+        const same = state2.details != null && detailsSubject(snap, state2.details) === detailsSubject(snap, id);
+        const details = force || !same || state2.view !== "details" ? id : null;
+        if (details === null && panelFolded?.("details") === true) {
+          panelInstance = {};
+          return { ...state2, renaming: false, tab: null, details: id, view: "details", panelYield: true };
+        }
+        panelInstance = details ? {} : null;
+        return { ...state2, renaming: false, tab: null, details, view: "details" };
+      });
+    },
+    // The open panel follows the main view; a subject with no browser (a group
+    // chat, an outside Session) settles on the details view. So does one that
+    // does not own the open side chat.
+    followPanel: (id) => {
+      openPanel((state2) => {
+        if (!state2.details || state2.details === id) return state2;
+        const snap = roster.getSnapshot();
+        const view = state2.view === "browser" && snap.byId[id] === void 0 ? "details" : state2.view === "side" && !(snap.sideChats?.[snap.byId[id]?.id] ?? []).some((chat) => chat?.id === state2.side) ? "details" : state2.view;
+        return { ...state2, details: id, view, renaming: false, tab: null };
+      });
+    },
+    showDetails: (id, tab = null) => {
+      openPanel((state2) => ({ ...state2, details: id, view: "details", renaming: false, tab, panelYield: yieldTo(state2, "details") }));
+    },
+    // Opening the conversation would move focus to its composer and blur the name field.
+    renameBot: (id) => {
+      openPanel((state2) => ({ ...state2, details: id, view: "details", renaming: true, tab: null, panelYield: yieldTo(state2, "details") }));
+    },
+    showBrowserPanel: (id, { resetDetails = false } = {}) => {
+      ui2.set((state2) => {
+        const next = { ...state2, details: id, view: "browser", panelYield: yieldTo(state2, "browser") };
+        if (resetDetails) {
+          next.renaming = false;
+          next.tab = null;
+        }
+        panelInstance = state2.details === id && state2.view === "browser" ? panelInstance ?? {} : {};
+        return next;
+      });
+    },
+    openSettings,
+    // Omni's own Models page: the providers DSH serves, their keys and models.
+    openModels: () => openSettings("models"),
+    closeSettings: (settings) => {
+      ui2.set((state2) => state2.settings && (settings === void 0 || state2.settings === settings) ? { ...state2, settings: null } : state2);
+    },
+    openMemory: (id) => {
+      ui2.set((state2) => ({ ...state2, memory: id, memoryInstance: {}, menu: null, palette: null }));
+    },
+    closeMemory: (id, instance) => {
+      ui2.set((state2) => state2.memory && (id === void 0 || state2.memory === id && state2.memoryInstance === instance) ? { ...state2, memory: null } : state2);
+    },
+    openConnectors: () => {
+      ui2.set((state2) => ({ ...state2, settings: { page: "connectors", id: null }, menu: null, palette: null, newChat: null }));
+    },
+    setPanelView: (view) => {
+      if (view !== "details" && view !== "browser" && view !== "side") return;
+      ui2.set((state2) => state2.details && state2.view !== view ? { ...state2, view, panelYield: yieldTo(state2, view) } : state2);
+    },
+    // A side chat on the panel's own view, opened from the strip, the `···`
+    // menus or `/side`. Closing the panel keeps the chats; only a tab's × deletes.
+    openSideChat,
+    // The roster is pulled before the panel opens on a new chat: a view on a chat
+    // the roster does not hold yet folds back into details.
+    newSideChat: async (sessionId) => {
+      const value = await after(call2("side-new", { sessionId }));
+      openSideChat(sessionId, value?.chatId);
+      return value;
+    },
+    sideCall: (name, body) => after(call2(name, body)),
+    askSide: (sessionId, chatId, text2) => after(call2("side-ask", { sessionId, chatId, text: text2 })),
+    cancelSide: (chatId, entryId) => after(call2("side-cancel", { chatId, entryId })),
+    closeSideChat: (chatId) => {
+      ui2.set((state2) => state2.details && state2.view === "side" && state2.side === chatId ? { ...state2, view: "details", side: null } : state2);
+      return after(call2("side-close", { chatId }));
+    },
+    closePanel: (pane) => {
+      ui2.set((state2) => {
+        if (!state2.details) return state2;
+        if (pane !== void 0 && (panelInstance !== pane.instance || state2.details !== pane.id || (state2.view ?? "details") !== pane.view || state2.renaming !== pane.renaming || state2.tab !== pane.tab || state2.side !== pane.side)) return state2;
+        return { ...state2, details: null, view: "details", renaming: false, tab: null, side: null };
+      });
+    },
+    quote: (sessionId, text2) => ui2.set((state2) => ({ ...state2, quote: { sessionId, text: text2, token: Date.now() } })),
+    clearQuote: (token) => ui2.set((state2) => state2.quote?.token === token ? { ...state2, quote: null } : state2),
+    setFlags: (id, flags) => after(call2("set-flags", { id, ...flags })),
+    saveSection: (payload) => after(call2("section-save", payload)),
+    reorderSections: (ids) => after(call2("section-order", { ids })),
+    deleteSection: (id) => after(call2("section-delete", { id })),
+    beginSectionRename: (id) => ui2.set((state2) => ({ ...state2, renameSection: id })),
+    endSectionRename: () => ui2.set((state2) => state2.renameSection ? { ...state2, renameSection: null } : state2),
+    deleteRoom: (id) => after(call2("delete-room", { id })),
+    openMenu: (menu) => {
+      ui2.set((state2) => ({ ...state2, menu, palette: null }));
+    },
+    closeMenu: (menu) => {
+      ui2.set((state2) => state2.menu && (menu === void 0 || state2.menu === menu) ? { ...state2, menu: null } : state2);
+    },
+    closeOverlay: () => {
+      ui2.set((state2) => ({ ...state2, newChat: null, newChatSection: null, exchange: null, details: state2.newChat || state2.exchange ? state2.details : null }));
+    },
+    createBot: (payload) => after(call2("create-bot", payload)),
+    // The team's full view, read once with no pull after it (the New Solver dialog's check of what a
+    // failed create left behind).
+    teamState: () => call2("state", {}),
+    // genie-dsh's: the folder's repository's Genie, made in a free color when it has none.
+    createGenie: (folder) => after(call2("genie-create", { folder })),
+    // welcome-dsh's: the Omni Bot again, after it was deleted (the team view's omniAddable).
+    addOmni: () => after(call2("omni-add")),
+    // The avatar library: photos the user imported once, kept by the host.
+    avatarLibrary: (options = {}) => call2("avatar-library", options),
+    importAvatars: (items) => call2("avatar-import", { items }),
+    deleteAvatar: (id) => call2("avatar-delete", { id }),
+    createRoom: (members, options = {}) => after(call2("create-room", { members, ...options })),
+    setBotAuto: (id, rev) => after(call2("set-bot-auto", { id, rev })),
+    updateBot: (id, patch) => picked(pickFor(id, patch?.model), call2("update-bot", { id, ...patch })),
+    attachRole: (id, role) => after(call2("role-attach", { id, role })),
+    detachRole: (id, role) => after(call2("role-detach", role === void 0 ? { id } : { id, role })),
+    roleCatalog: () => after(call2("role-catalog")),
+    installRole: (id) => after(call2("role-install", { id })),
+    uninstallRole: (id) => after(call2("role-uninstall", { id })),
+    grantRole: (id, role, capability, on) => after(call2("role-grant", { id, role, capability, on })),
+    roleSettings: (id, role) => call2("role-settings", { id, role }),
+    setRoleSettings: (id, role, values) => call2("role-settings-set", { id, role, values }),
+    voicePane: (sessionId, paneId, open, active2) => call2("voice-pane", { sessionId, paneId, open, active: active2 }),
+    voiceWait: (sessionId, paneId, callId, signal) => call2("voice-wait", { sessionId, paneId, callId }, signal),
+    voiceSpoken: (sessionId, paneId, callId, outcome) => call2("voice-spoken", { sessionId, paneId, callId, outcome }),
+    // A model on another route: the host changes it in place on a chat with nothing said, else
+    // in a new part with a handoff (RFC 0030, Handoff note). `patch` carries the thinking level
+    // picked with it. `options.stopReply`: the person's Switch on "This stops the current reply",
+    // the only consent that lets the host stop a running reply; without it the host answers
+    // reason reply-running while one runs.
+    switchRoute: (id, ref, patch = {}, options) => picked(pickFor(id, ref), call2("switch-route", { id, ...patch, model: ref, ...stopping(options) })),
+    switchRouteInChat: async (id, ref, patch = {}, options) => {
+      try {
+        return await picked(pickFor(id, ref), call2("switch-route", { id, ...patch, model: ref, ...stopping(options) }));
+      } catch (error) {
+        const provider = signInProviderOf(ref);
+        if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider)) return void 0;
+        if (error?.code === "bot/account-confirm-required" && provider && openCliLogin(id, provider)) return void 0;
+        throw error;
+      }
+    },
+    // A model chosen in a Bot's chat (rule 2): an agent that is signed out opens the sign-in row
+    // in that chat instead of failing; the Bot keeps its model until the sign-in is done.
+    // `patch` goes with the model in the same update (its thinking level); `options.stopReply`
+    // as for switchRoute.
+    chooseModelInChat: async (id, ref, patch = {}, options) => {
+      try {
+        return await picked(pickFor(id, ref), call2("update-bot", { id, ...patch, model: ref, ...stopping(options) }));
+      } catch (error) {
+        const provider = signInProviderOf(ref);
+        if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider, ref)) return void 0;
+        if (error?.code === "bot/account-confirm-required" && provider && openCliLogin(id, provider, ref)) return void 0;
+        throw error;
+      }
+    },
+    // The activity row reads the mark like the host's `noting`.
+    subscribePicks: (listener) => picks.subscribe(listener),
+    picking: (part) => picks.getSnapshot()[part] === true,
+    openCliLogin,
+    async recoverCliLogin(botId, provider) {
+      const bot = cliLoginBotOf(roster.getSnapshot(), botId);
+      const manager = loginState?.();
+      if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
+      const recovered = await manager.recover({ botId: bot.id, provider });
+      if (recovered && cliLoginBotOf(roster.getSnapshot(), bot.id)) openSession?.(bot.id);
+      return recovered;
+    },
+    cliLoginStart: (botId, provider, model) => call2("cli-login-start", loginPayload(botId, provider, model === void 0 ? {} : { model })),
+    cliLoginCurrent: (botId, provider, { fresh } = {}) => call2("cli-login-current", loginPayload(botId, provider, fresh === true ? { fresh } : {})),
+    cliLoginStatus: (botId, provider, attemptId, signal) => call2("cli-login-status", loginPayload(botId, provider, { attemptId }), signal),
+    cliLoginAnswer: (botId, provider, attemptId, value) => call2("cli-login-answer", loginPayload(botId, provider, { attemptId, value })),
+    cliLoginCancel: (botId, provider, attemptId) => call2("cli-login-cancel", loginPayload(botId, provider, { attemptId })),
+    cliLoginConnections: () => call2("cli-login-connections", {}),
+    cliLoginConfirm: (botId, provider, ref, model) => call2("cli-login-confirm", loginPayload(botId, provider, { ...ref === void 0 ? {} : { ref }, ...model === void 0 ? {} : { model } })),
+    cliLoginAccounts: (options) => call2("cli-login-accounts", options?.reservations === true ? { reservations: true } : {}),
+    cliLoginReserve: (offerId, label, claim) => call2("cli-login-reserve", {
+      offerId,
+      label,
+      ...claim?.machineId ? { machineId: claim.machineId } : claim === void 0 ? {} : { claimId: claim.claimId, rev: claim.rev }
+    }),
+    cliLoginRelease: (claimId, rev) => call2("cli-login-release", { claimId, rev }),
+    cliLoginReleaseMachine: (machineId) => call2("cli-login-release", { machineId }),
+    cliLoginSwitch: (botId, provider, { keep, fresh } = {}, { confirmed: confirmed2, model } = {}) => call2("cli-login-switch", loginPayload(botId, provider, {
+      ...keep === void 0 ? {} : { keep },
+      ...fresh === true ? { fresh } : {},
+      ...confirmed2 === false ? { withoutWarning: true } : {},
+      ...model ? { model } : {}
+    })),
+    cliLoginReset: (botId, provider) => call2("cli-login-reset", loginPayload(botId, provider)),
+    cliLoginSignOut: (botId, provider) => call2(
+      "cli-login-signout",
+      loginPayload(botId, provider)
+    ),
+    cliLoginNoticed: (provider) => call2("cli-login-noticed", { provider }),
+    contextStatus: (botId) => call2("context-status", { botId }),
+    usageStats: (botId, sessionId) => call2("usage-stats", { botId, sessionId }),
+    memoryReviewStatus: (botId) => call2("memory-review-status", { botId }),
+    // Do not remap the expected Session: the backend must reject a stale snapshot.
+    checkpointBot: (botId, sessionId) => after(call2("checkpoint-bot", { botId, sessionId })),
+    // Give up one wait the Bot has on a hand-off that will not come back.
+    abandonWork: (id) => after(call2("abandon-work", { id })),
+    refreshModels: () => after(call2("models")).catch(() => {
+    }),
+    // One local agent's models: the first look starts its CLI, later ones read what it said.
+    agentModels: (route) => after(call2("local-agent-models", { route })).catch(() => {
+    }),
+    efforts: (ref) => call2("efforts", { ref }),
+    speed: (ref) => call2("speed", { ref }),
+    // Model providers and their API keys; DSH keeps them, and a key only travels to the host.
+    providers: () => call2("providers"),
+    setProviderKey: (provider, value) => after(call2("provider-key", { provider, value })),
+    addProvider: (body) => after(call2("provider-add", body)),
+    providerModels: (body) => call2("provider-models", body),
+    removeProvider: (provider) => after(call2("provider-remove", { provider })),
+    // After a failed turn: the Bot answers the user's last unanswered message, which is never sent again.
+    resume: (botId) => after(call2("resume", { botId })),
+    folders: () => call2("folders"),
+    folderProbe: (path2) => call2("folder-probe", { path: path2 ?? "" }),
+    folderPick: () => call2("folder-pick"),
+    folderList: (path2) => call2("folder-list", { path: path2 ?? "" }),
+    setTeamWorkspace: (path2) => after(call2("team-workspace", { path: path2 })),
+    deleteBot: (id) => after(call2("delete-bot", { id })).then((value) => {
+      forgetDrafts(value?.deletedParts);
+      return value;
+    }),
+    rollbackAdoption: (agentId) => after(call2("agent-bot-rollback", { agentId })),
+    releasePrivate: (id) => after(call2("private-release", { id })),
+    duplicateBot: (id) => after(call2("duplicate-bot", { id })),
+    setPrefs: (prefs) => after(call2("set-prefs", prefs)),
+    setMain: (id, main = true, options = {}) => after(call2("set-main", { id, main, ...options })),
+    updateRoom: (id, patch) => after(call2("update-room", { id, ...patch })),
+    send: (sessionId, text2, voicePane) => after(call2("send", { sessionId: partFor(sessionId), text: text2, ...voicePane ? { voicePane } : {} })),
+    answerQuestion: (sessionId, questionId, answer) => after(call2("answer-question", { sessionId: partFor(sessionId), questionId, answer })),
+    dismissQuestion: (sessionId) => after(call2("dismiss-question", { sessionId })),
+    answerView: (sessionId, viewId, action, values) => after(call2("view-reply", { sessionId: partFor(sessionId), viewId, action, values })),
+    dismissView: (sessionId) => after(call2("dismiss-view", { sessionId: partFor(sessionId) })),
+    deleteBtw: (sessionId, cardId) => after(call2("btw-delete", { sessionId, cardId })),
+    grantApproval: (id, offer) => after(call2("grant-approval", { id, offer })),
+    revokeGrant: (id) => after(call2("grant-revoke", { id })),
+    answerApproval: (id, choice) => after(call2("approval-answer", { id, choice, client: "web" })),
+    computerSetEnabled: (enabled2) => after(call2("computer-set-enabled", { enabled: enabled2 })),
+    computerSetLevel: (botId, level) => after(call2("computer-set-level", { botId, level })),
+    computerRevokeApp: (botId, appKey) => after(call2("computer-revoke-app", { botId, appKey })),
+    computerProviderRetry: () => after(call2("computer-provider-retry", {})),
+    computerSystemStatus: () => call2("computer-system-status", {}),
+    computerPermission: (permission) => call2("computer-permission", { permission }),
+    computerStop: (botId, all = false) => after(call2("computer-stop", all ? { all: true } : { botId })),
+    computerTakeover: (botId) => after(call2("computer-takeover", { botId })),
+    computerHandback: (botId) => after(call2("computer-handback", { botId })),
+    computerAllowForeground: (botId) => call2("computer-allow-foreground", { botId }),
+    computerAppAnswer: (id, answer) => call2("computer-app-answer", { id, answer }),
+    computerHoldAnswer: (botId, { callId, outcome } = {}) => after(call2("computer-hold-answer", { botId, ...callId !== void 0 ? { callId } : {}, outcome })),
+    computerShot: (attachmentId) => call2("computer-shot", { attachmentId }),
+    computerUserActive: (idleSeconds) => call2("computer-user-active", { idleSeconds }),
+    stopMemberWork: (roomId, botId) => after(call2("stop-member-work", { roomId, botId })),
+    stopRoomWork: (roomId) => after(call2("stop-room-work", { roomId })),
+    goalDraft: (roomId, text2) => after(call2("goal-draft", { roomId, text: text2 })),
+    goalControl: (roomId, goalId, action, stopWork) => after(call2("goal-control", { roomId, goalId, action, ...stopWork ? { stopWork: true } : {} })),
+    // The goal island: `goalCompose` holds the room whose draft form is open,
+    // `goalOpen` the room whose panel is open.
+    composeGoal: (roomId) => ui2.set((state2) => ({ ...state2, goalCompose: roomId, goalOpen: roomId })),
+    closeGoalCompose: () => ui2.set((state2) => state2.goalCompose ? { ...state2, goalCompose: null } : state2),
+    toggleGoal: (roomId) => ui2.set((state2) => ({ ...state2, goalOpen: state2.goalOpen === roomId ? null : roomId })),
+    closeGoal: () => ui2.set((state2) => state2.goalOpen ? { ...state2, goalOpen: null } : state2),
+    // Values go out in these requests and never come back in a response.
+    secretSet: (payload) => after(call2("secret-set", payload)),
+    secretAllow: (requestId, approval) => after(call2("secret-allow", { ...approval, requestId })),
+    secretSourceDetail: (requestId) => call2("secret-source-detail", { requestId }),
+    vaultStatus: (signal, provider) => call2("vault-status", provider === void 0 ? void 0 : { provider }, signal),
+    vaultUnlock: (password, connection, provider = "bitwarden") => call2(
+      "vault-unlock",
+      provider === "macos-keychain" || provider === "windows-credential" ? { provider } : { provider, password, connection }
+    ),
+    vaultUnlockSecretService: () => call2("vault-unlock", { provider: "secret-service" }),
+    vaultUnlockSaved: (provider, connection, credentialRevision) => call2("vault-unlock", {
+      provider,
+      connection,
+      ...credentialRevision === void 0 ? {} : { credentialRevision }
+    }),
+    vaultLock: (provider) => provider === void 0 ? call2("vault-lock") : call2("vault-lock", { provider }),
+    vaultItems: (search, provider, project) => call2("vault-items", provider === "hashicorp-vault" || provider === "macos-keychain" || provider === "windows-credential" ? { provider, ...search } : {
+      search,
+      ...provider === void 0 ? {} : { provider },
+      ...project === void 0 ? {} : { project }
+    }),
+    vaultFields: (provider, mount, path2) => call2("vault-fields", { provider, mount, path: path2 }),
+    vaultTokenSet: (provider, token, connection, server, credentialRevision) => call2("vault-token-set", provider === "hashicorp-vault" ? { provider, token, ...connection } : {
+      provider,
+      token,
+      connection,
+      ...server === void 0 ? {} : { server },
+      ...credentialRevision === void 0 ? {} : { credentialRevision }
+    }),
+    vaultTokenClear: (provider, connection, credentialRevision) => call2("vault-token-clear", {
+      provider,
+      ...connection === void 0 ? {} : { connection },
+      ...credentialRevision === void 0 ? {} : { credentialRevision }
+    }),
+    secretSourceSet: (mapping) => after(call2("secret-source-set", mapping)),
+    secretCancel: (requestId) => after(call2("secret-cancel", { requestId })),
+    secretUpdate: (name, { scope, purpose } = {}) => after(call2("secret-update", { name, scope, purpose })),
+    secretDelete: (name) => after(call2("secret-delete", { name })),
+    secretSourceClear: (name) => after(call2("secret-source-clear", { name })),
+    connectorConnect: (id, payload = {}) => after(call2("connector-connect", { id, ...payload })),
+    connectorDisconnect: (id) => after(call2("connector-disconnect", { id })),
+    connectorRetry: (id) => after(call2("connector-retry", { id })),
+    connectorSignInCode: (id, input) => after(call2("connector-sign-in-code", { id, input })),
+    connectorCancel: (id) => after(call2("connector-cancel", { id })),
+    connectorClient: (id, clientId, clientSecret) => after(call2("connector-client", { id, clientId, clientSecret })),
+    connectorSet: (id, patch) => after(call2("connector-set", { id, ...patch })),
+    connectorAdd: (spec) => after(call2("connector-add", spec)),
+    connectorRemove: (id) => after(call2("connector-remove", { id })),
+    connectorImportScan: () => call2("connector-import-scan", {}),
+    connectorImport: (items) => after(call2("connector-import", { items })),
+    connectorRequestCancel: (requestId) => after(call2("connector-request-cancel", { requestId })),
+    mailAccountAdd: (payload) => after(call2("mail-account-add", payload)),
+    mailAccountRemove: (id) => after(call2("mail-account-remove", { id })),
+    mailRuleSet: (payload) => after(call2("mail-rule-set", payload)),
+    mailSendAnswer: (requestId, choice, extra = {}) => after(call2("mail-send-answer", { requestId, choice, ...extra })),
+    mailSignInCode: (payload) => after(call2("mail-sign-in-code", payload)),
+    imAdd: (payload) => after(call2("im-add", payload)),
+    imUpdate: (id, patch) => after(call2("im-update", { id, ...patch })),
+    imRemove: (id) => after(call2("im-remove", { id })),
+    imPair: (id, senderId, allow) => after(call2("im-pair", { id, senderId, allow })),
+    imUnpair: (id, senderId) => after(call2("im-unpair", { id, senderId })),
+    imChat: (id, body) => after(call2("im-chat", { id, ...body })),
+    imRetry: (id) => after(call2("im-retry", { id })),
+    imLoginStart: (payload) => call2("im-login-start", payload),
+    imLoginWait: (payload) => call2("im-login-wait", payload),
+    skillLibrary: (signal) => call2("skill-library", {}, signal),
+    getSkill: (name, signal) => call2("skill-library-get", { name }, signal),
+    // The panel-scoped Check refreshes its own rows. Hand it the result before a team pull can delay delivery.
+    saveSkill: (skill, signal) => signal ? saveSkill(skill, signal) : after(saveSkill(skill)),
+    resumeSkillSaves,
+    deleteSkill: (name) => after(call2("skill-library-delete", { name })),
+    setBotSkill: (id, name, attached, mode) => after(call2(attached ? "bot-skill-add" : "bot-skill-remove", { id, name, mode })),
+    setBotSkillMode: (id, name, mode) => after(call2("bot-skill-mode", { id, name, mode })),
+    saveCapability: (capability) => after(call2("capability-save", capability)),
+    deleteCapability: (name) => after(call2("capability-delete", { name })),
+    approveCapability: (name) => after(call2("capability-approve", { name })),
+    setBotCapability: (botId, name, attached) => after(call2("bot-capability", { botId, name, attached })),
+    schedules: () => call2("schedules"),
+    scheduleCreate: (task) => call2("schedule-create", task),
+    scheduleDelete: (sessionId, id) => call2("schedule-delete", { sessionId, id }),
+    exchange: (a, b) => call2("exchange", { a, b }).catch(() => []),
+    exchangeText: (id, a, b) => call2("exchange-text", { id, ...a !== void 0 && b !== void 0 ? { a, b } : {} }).catch(() => void 0),
+    fileText: (file) => call2("file-text", { file }).catch(() => void 0),
+    roomProgress: (roomId) => call2("room-progress", { roomId }).catch(() => []),
+    groupRows: (roomId, from, to, anchor) => call2("group-rows", { roomId, from, ...to === void 0 ? {} : { to }, ...anchor === void 0 ? {} : { anchor } }).catch(() => null),
+    earlier: (sessionId, cursor) => call2("earlier", { sessionId, cursor: cursor ?? null }),
+    // Hours come back in this browser's time zone, so days start at local midnight.
+    usage: () => call2("usage", { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+    // `summarize` starts a summary when the entries changed; `regenerate` always does.
+    memoryView: (id, flags = {}) => call2("memory-view", { ...memoryOf(id), ...flags }),
+    memoryAsk: (id, text2) => call2("memory-ask", { ...memoryOf(id), text: text2 }),
+    memoryLayer: (id, entry, always) => call2("memory-layer", { ...memoryOf(id), topic: entry.topic, text: entry.text, always }),
+    memoryMove: (id, entry, to) => call2("memory-move", { ...memoryOf(id), scope: entry.scope, topic: entry.topic, text: entry.text, to }),
+    memoryTidyUndo: (id, scope, batch) => call2("memory-tidy-undo", { ...memoryOf(id), scope, batch }),
+    memoryPin: (id, entry, pin) => call2("memory-pin", { ...memoryOf(id), scope: entry.scope, topic: entry.topic, text: entry.text, pin }),
+    memoryForget: (id, entry) => call2("memory-forget", { ...memoryOf(id), scope: entry.scope, topic: entry.topic, text: entry.text }),
+    memoryHistory: (id, before) => call2("memory-history", { ...memoryOf(id), ...before === void 0 ? {} : { before } }),
+    memoryRestore: (id, rowId) => call2("memory-restore", { ...memoryOf(id), id: rowId }),
+    diagnostics: (payload) => call2("diagnostics", payload),
+    // Pets (pets.js): those on this computer, a page of codex-pets.net, and one put on a Bot.
+    pets: () => call2("pets"),
+    petsBrowse: (query, page, sort) => call2("pets-browse", { query, page, sort }),
+    petUse: (botId, source, id) => after(call2("pet-use", { botId, source, id })),
+    agentAccess: () => call2("agent-access"),
+    agentTokenCreate: (name) => call2("agent-token-create", { name }),
+    agentTokenRevoke: (id) => call2("agent-token-revoke", { id }),
+    privacy: () => call2("privacy"),
+    privacySet: (share, on) => call2("privacy-set", { share, on }),
+    diagnosticsLog: () => call2("diagnostics-log"),
+    diagnosticsClear: () => call2("diagnostics-clear"),
+    diagnosticsPermissions: () => call2("diagnostics-permissions"),
+    repoStars: () => call2("repo-stars"),
+    checkSelfUpdate: (body) => call2("self-update-check", body),
+    selfUpdateResult: (runId) => call2("self-update-check-result", { runId }),
+    selfUpdateStatus: (signal) => call2("self-update-status", void 0, signal),
+    startSelfUpdate: (body) => call2("self-update-start", body),
+    // A failed action away from any form (a menu, the palette) shows as a toast.
+    reportError: (error, where = "action") => {
+      noteClientError(where, error);
+      ui2.set((state2) => ({ ...state2, toast: { text: error?.message ?? String(error), token: Date.now() } }));
+    },
+    // A notice that is no failure (a refused paste of a sign-in code): a toast, not a diagnostic.
+    showNotice: (text2) => ui2.set((state2) => ({ ...state2, toast: { text: text2, token: Date.now() } })),
+    dismissToast: (token) => ui2.set((state2) => state2.toast && (token === void 0 || state2.toast.token === token) ? { ...state2, toast: null } : state2),
+    noteTurnTime: (sessionId, turn, key, time) => {
+      if (sessionId === void 0 || !Number.isFinite(turn) || !Number.isFinite(time)) return;
+      turnClock.set((state2) => {
+        const turns = state2[sessionId] ?? {};
+        const entry = turns[turn] ?? {};
+        const next = key === "first" && entry.first !== void 0 ? Math.min(entry.first, time) : time;
+        if (entry[key] === next) return state2;
+        return { ...state2, [sessionId]: { ...turns, [turn]: { ...entry, [key]: next } } };
+      });
+    },
+    noteTurnPeer: (sessionId, turn, peerId) => {
+      if (sessionId === void 0 || !Number.isFinite(turn)) return;
+      turnClock.set((state2) => {
+        const turns = state2[sessionId] ?? {};
+        const entry = turns[turn] ?? {};
+        if (entry.peer === peerId) return state2;
+        return { ...state2, [sessionId]: { ...turns, [turn]: { ...entry, peer: peerId } } };
+      });
+    },
+    noteLive: (sessionId, id, entry) => {
+      if (sessionId === void 0) return;
+      live.set((state2) => {
+        const own3 = state2[sessionId] ?? {};
+        const prev = own3[id];
+        if (entry === null ? prev === void 0 : prev !== void 0 && JSON.stringify({ ...prev, at: 0 }) === JSON.stringify({ ...entry, at: 0 })) return state2;
+        const next = { ...own3 };
+        if (entry === null) delete next[id];
+        else next[id] = { ...entry, at: prev?.at ?? Date.now() };
+        return { ...state2, [sessionId]: next };
+      });
+    },
+    noteCards: (sessionId, callIds, delta) => {
+      if (sessionId !== void 0) cards2.set((state2) => countCards(state2, sessionId, callIds, delta));
+    },
+    noteHeldCard: (sessionId, kind, requestId, delta) => {
+      if (sessionId !== void 0) heldCards.set((state2) => countCards(state2, sessionId, [heldCardKey(kind, requestId)], delta));
+    },
+    clearLive: (sessionId) => live.set((state2) => {
+      if (!state2[sessionId]) return state2;
+      const next = { ...state2 };
+      delete next[sessionId];
+      return next;
+    })
+  };
+}
+
 // src/client/mark.js
 var import_react8 = require("react");
 var STATES = ["idle", "thinking", "searching", "working", "sending", "orbit", "waiting", "alert", "done", "failed", "review", "not-installed", "sleeping"];
@@ -7974,12 +8825,15 @@ function useBaked(wanted) {
 }
 function BotMark(props) {
   const look = props.look ?? botLookOf(props.bot);
+  const bot = props.bot;
+  const genie = bot?.kind === "genie" || !props.look && !bot?.avatar?.shape && bot?.kind !== "unfold" && clientRoles.hasRole(props.roster, bot?.id, "genie");
+  const markBot = genie && bot.kind !== "genie" ? { ...bot, kind: "genie" } : bot;
   const size = props.size ?? 36;
-  const wants = petOf(props.bot, look, { live: props.live === true, size });
+  const wants = petOf(markBot, look, { live: props.live === true, size });
   const baked2 = useBaked(wants?.bake);
   const pet = wants?.served ? servedPet(wants.served) : baked2;
-  const tint = props.bot?.kind === "genie" && !look.image && !look.pet ? genieTint(props.bot.color) : void 0;
-  return pet ? (0, import_react8.createElement)(PetMark, { ...props, look, size, pet, tint }) : (0, import_react8.createElement)(DrawnMark, { ...props, look, size, tint });
+  const tint = genie && !look.image && !look.pet ? genieTint(bot.color) : void 0;
+  return pet ? (0, import_react8.createElement)(PetMark, { ...props, look, size, pet, tint }) : (0, import_react8.createElement)(DrawnMark, { ...props, bot: markBot, look, size, tint });
 }
 function PetMark({ size, state: state2 = "idle", live = false, gaze = false, pokeable = false, label, pet, tint }) {
   const [poked, setPoked] = (0, import_react8.useState)(false);
@@ -8087,14 +8941,14 @@ function Crown() {
     )
   );
 }
-function BotAvatar({ bot, look, size, state: state2 = "idle", count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
+function BotAvatar({ bot, roster, look, size, state: state2 = "idle", count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state2);
   if (bot === void 0) return (0, import_react8.createElement)(BotMark, { size });
   const badgeKind = !badge ? null : state2 === "not-installed" ? "missing" : state2 === "alert" ? "alert" : WORK.includes(state2) ? "working" : admin ? "admin" : main && !crown ? "main" : null;
   return (0, import_react8.createElement)(
     "span",
     { className: "bt-mark", style: { width: size, height: size, "--bt-size": `${size}px` } },
-    (0, import_react8.createElement)(BotMark, { bot, look, size, state: settled ? "done" : state2, live, gaze, pokeable }),
+    (0, import_react8.createElement)(BotMark, { bot, roster, look, size, state: settled ? "done" : state2, live, gaze, pokeable }),
     crown ? (0, import_react8.createElement)(Crown) : null,
     badgeKind === "working" ? (0, import_react8.createElement)("span", { className: "bt-badge bt-badge-working", "aria-label": t("Working"), role: "img" }) : null,
     badgeKind === "missing" ? (0, import_react8.createElement)(
@@ -12974,91 +13828,6 @@ body[data-bt-motion=quiet] :is(.op-task,.op-task-said,.op-task-summary,.op-orbit
 
 // src/client/dsh-primitives.js
 var import_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
-
-// src/shared/cli-login.js
-var SIGN_IN_TEXT_MAX = 1e6;
-
-// src/client/cli-login-model.js
-var CLI_NAMES = Object.freeze({ "acp-codex": "Codex", "acp-claude": "Claude Code" });
-var cliProviderOf = (ref) => {
-  const provider = typeof ref === "string" ? ref.split("/")[0] : void 0;
-  return Object.hasOwn(CLI_NAMES, provider) ? provider : void 0;
-};
-var SIGN_IN_NAMES = Object.freeze({ ...CLI_NAMES, "acp-antigravity": "Antigravity" });
-var signInProviderOf = (ref) => {
-  const provider = typeof ref === "string" ? ref.split("/")[0] : void 0;
-  return Object.hasOwn(SIGN_IN_NAMES, provider) ? provider : void 0;
-};
-var cliLoginBotOf = (roster, id) => typeof id === "string" ? roster?.byId?.[id] : void 0;
-var KNOWN = /* @__PURE__ */ new Set();
-var STATE = /^[A-Za-z0-9_-]{8,512}$/;
-function rememberLinkState(url) {
-  let state2;
-  try {
-    state2 = new URL(url).searchParams.get("state");
-  } catch {
-    return false;
-  }
-  if (typeof state2 !== "string" || !STATE.test(state2)) return false;
-  KNOWN.add(state2);
-  return true;
-}
-var KNOWN_CALLBACK = /* @__PURE__ */ new Set();
-var CALLBACK_STATE = /^[^\p{Cc}\s]{8,512}$/u;
-function rememberCallbackState(url) {
-  let states2;
-  try {
-    states2 = new URL(url).searchParams.getAll("state");
-  } catch {
-    return false;
-  }
-  if (states2.length !== 1 || !CALLBACK_STATE.test(states2[0])) return false;
-  KNOWN_CALLBACK.add(states2[0]);
-  return true;
-}
-var knowsStates = () => KNOWN.size > 0 || KNOWN_CALLBACK.size > 0;
-var squeeze = (text2) => text2.slice(0, SIGN_IN_TEXT_MAX).replace(/[\s\p{Cf}]+/gu, "");
-var CALLBACK_OCCURRENCES = 64;
-var CALLBACK_TOKEN = 3 * 512;
-function authorityBefore(reading2, at) {
-  const scheme = reading2.lastIndexOf("://", at - 3);
-  if (scheme < 0) return void 0;
-  const rest2 = reading2.slice(scheme + 3, scheme + 3 + 64);
-  const end = rest2.search(/[/?#\\\s]/u);
-  return (end < 0 ? rest2 : rest2.slice(0, end)).toLowerCase();
-}
-var decodeRuns = (token) => token.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run3) => {
-  try {
-    return decodeURIComponent(run3);
-  } catch {
-    return run3;
-  }
-});
-function carriesCallbackState(reading2) {
-  let count = 0;
-  for (const match of reading2.matchAll(/state(?:=|%3d)/giu)) {
-    if (++count > CALLBACK_OCCURRENCES) break;
-    if (authorityBefore(reading2, match.index) === "accounts.google.com") continue;
-    const start2 = match.index + match[0].length;
-    const token = reading2.slice(start2, start2 + CALLBACK_TOKEN);
-    for (const form of [token, decodeRuns(token)]) {
-      for (const state2 of KNOWN_CALLBACK) if (form.startsWith(state2)) return true;
-    }
-  }
-  return false;
-}
-function carriesKnownState(text2) {
-  if (typeof text2 !== "string" || text2 === "" || KNOWN.size === 0 && KNOWN_CALLBACK.size === 0) return false;
-  const flat = squeeze(text2);
-  for (const state2 of KNOWN) if (flat.includes(`#${state2}`)) return true;
-  return KNOWN_CALLBACK.size > 0 && carriesCallbackState(flat);
-}
-function forgetKnownStates() {
-  KNOWN.clear();
-  KNOWN_CALLBACK.clear();
-}
-var DONE_MS = 3e3;
-var APPLY_FAILED_MS = 8e3;
 
 // src/client/cli-login-guard.js
 var showSignInCodeNotice = (actions) => actions.showNotice(t("This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step."));
@@ -20293,8 +21062,8 @@ function Switch({ on, label, disabled, onChange }) {
     (0, import_react43.createElement)("span", { className: "bt-switch-knob", "aria-hidden": true })
   );
 }
-function SwitchRow({ label, hint: hint3, notes, on, disabled, onChange, details = false }) {
-  const toggle = (0, import_react43.createElement)(Switch, { on, label, disabled, onChange });
+function SwitchRow({ label, controlLabel = label, hint: hint3, notes, on, disabled, onChange, details = false }) {
+  const toggle = (0, import_react43.createElement)(Switch, { on, label: controlLabel, disabled, onChange });
   if (details) return (0, import_react43.createElement)(
     "div",
     null,
@@ -20429,7 +21198,7 @@ function RolePackagesCard({ roster, actions, run: run3 }) {
 var roleHealthLabels = { broken: "Broken", damaged: "Damaged", missing: "Missing", "version-mismatch": "Version mismatch" };
 var roleHealth = (status) => t(roleHealthLabels[status] ?? "Details unavailable");
 var roleReadOnly = (roster) => Boolean(roster.readOnly) || roster.roleCatalog?.reason === "read-only";
-function RoleControls({ bot, runtime, actions, run: run3, readOnly }) {
+function RoleControls({ bot, runtime, actions, run: run3, readOnly, name }) {
   const { pin } = runtime;
   const voices = useVoices();
   const [values, setValues] = (0, import_react43.useState)();
@@ -20459,17 +21228,20 @@ function RoleControls({ bot, runtime, actions, run: run3, readOnly }) {
   const grants = bot.roles?.find((entry) => sameRolePin(entry, pin))?.grants ?? [];
   const taskStart = grants.includes("task-start");
   const routePolicy = grants.includes("route-policy");
+  const grantLabel2 = (label) => name ? t("{label} ({name})", { label, name }) : label;
   return (0, import_react43.createElement)(
     import_react43.Fragment,
     null,
     runtime.capabilities.includes("audio-out") ? (0, import_react43.createElement)(SwitchRow, {
       label: t("Allow speech"),
+      controlLabel: grantLabel2(t("Allow speech")),
       on: grants.includes("audio-out"),
       disabled: readOnly,
       onChange: (on) => void run3(actions.grantRole(bot.id, pin, "audio-out", on))
     }) : null,
     runtime.capabilities.includes("task-start") ? (0, import_react43.createElement)(SwitchRow, {
       label: t("Allow starting tasks"),
+      controlLabel: grantLabel2(t("Allow starting tasks")),
       on: taskStart,
       disabled: readOnly,
       hint: bot.reviewGuard === true ? t("Tasks require the review guard to be off.") : void 0,
@@ -20477,16 +21249,17 @@ function RoleControls({ bot, runtime, actions, run: run3, readOnly }) {
     }) : null,
     runtime.capabilities.includes("route-policy") ? (0, import_react43.createElement)(SwitchRow, {
       label: t("Allow its tasks to run on another model"),
+      controlLabel: grantLabel2(t("Allow its tasks to run on another model")),
       on: routePolicy,
       disabled: readOnly || !taskStart && !routePolicy,
       onChange: (on) => void run3(actions.grantRole(bot.id, pin, "route-policy", on))
     }) : null,
     values ? runtime.settings.map(({ key, kind, label }) => {
-      const name = label === "Voice" ? t("Voice") : label === "Speed" ? t("Speed") : label;
+      const name2 = label === "Voice" ? t("Voice") : label === "Speed" ? t("Speed") : label;
       const value = values[key];
       return (0, import_react43.createElement)(
         Row,
-        { key, label: name },
+        { key, label: name2 },
         kind === "voice" ? (0, import_react43.createElement)(
           "span",
           { className: "bt-voice-set" },
@@ -20494,7 +21267,7 @@ function RoleControls({ bot, runtime, actions, run: run3, readOnly }) {
             "select",
             {
               className: "bt-input",
-              "aria-label": name,
+              "aria-label": name2,
               value,
               disabled: readOnly || saving,
               onChange: (event) => change(key, event.target.value)
@@ -20512,7 +21285,7 @@ function RoleControls({ bot, runtime, actions, run: run3, readOnly }) {
             max: 2,
             step: 0.1,
             value,
-            "aria-label": name,
+            "aria-label": name2,
             disabled: readOnly || saving,
             onChange: (event) => change(key, Number(event.target.value))
           }),
@@ -20523,32 +21296,79 @@ function RoleControls({ bot, runtime, actions, run: run3, readOnly }) {
     dirty ? (0, import_react43.createElement)(Row, null, (0, import_react43.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: readOnly || saving, onClick: save }, t("Save"))) : null
   );
 }
-function PackageAttachmentCard({ roster, bot, pin, recoveryId, onDetach, actions, run: run3 }) {
-  const declarations2 = pin && packageDeclarations(pin, roster);
-  const health = pin && attachmentStatus(pin, roster.roles);
+function PackageAttachmentCard({ roster, bot, pin, recoveryId, onDetach, actions, run: run3, definitions }) {
+  const registry3 = registryAttachment(pin);
+  const legacyGenie = !registry3 && pin?.id === "genie";
+  const provider = registry3 && roleProvider(roster, pin.id);
+  const declarations2 = registry3 ? provider?.version === pin.version ? provider : void 0 : legacyGenie ? BUILTIN_ROLES.genie : pin && packageDeclarations(pin, roster);
+  const runtime = pin && (registry3 || rolesOn(roster.prefs)) ? runtimeForRole(roster, bot.id, pin) : void 0;
+  const health = registry3 ? runtime ? "ok" : provider && provider.version !== pin.version ? "version-mismatch" : "missing" : legacyGenie ? "ok" : pin && attachmentStatus(pin, roster.roles);
   const recover = !pin || health !== "ok";
-  const candidate = Object.hasOwn(roster.roleRuntime ?? {}, bot.id) ? roster.roleRuntime[bot.id] : void 0;
-  const runtime = !recover && rolesOn(roster.prefs) && sameRolePin(pin, candidate?.pin) ? candidate : void 0;
-  const healthReason = pin && Object.hasOwn(roster.roles ?? {}, pin.id) ? roster.roles[pin.id].reason : void 0;
+  const active2 = recover ? void 0 : runtime;
+  const legacy = ownRole(roster.roleRuntime, bot.id);
+  const diagnostic = active2 && sameRolePin(active2.pin, legacy?.pin) ? legacy : active2;
+  const healthReason = !registry3 && pin && ownRole(roster.roles, pin.id)?.reason;
+  const name = registry3 || legacyGenie ? roleName(roster, pin.id, pin, definitions) : declarations2?.name;
+  const id = pin?.id ?? recoveryId;
   return (0, import_react43.createElement)(
     Card2,
     { title: t("Role") },
     (0, import_react43.createElement)(Row, {
-      label: declarations2?.name ?? (pin ? `${pin.id}@${pin.version}` : recoveryId),
-      hint: [declarations2?.name && `${pin.id}@${pin.version}`, recover && roleHealth(health ?? "damaged")].filter(Boolean).join(" · ")
-    }, (0, import_react43.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: roleReadOnly(roster), onClick: onDetach }, t("Detach"))),
+      label: name ?? (pin ? `${id}@${pin.version}` : id),
+      hint: [name && `${id}@${pin.version}`, recover && roleHealth(health ?? "damaged")].filter(Boolean).join(" · ")
+    }, (0, import_react43.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: roleReadOnly(roster), "aria-label": t("Detach {name}", { name: name ?? id }), onClick: onDetach }, t("Detach"))),
     (0, import_react43.createElement)(
       Row,
-      { label: runtime ? t("Active tools") : t("Declared tools"), hint: runtime ? void 0 : t("Declared, not active yet"), stack: true },
-      (runtime?.tools ?? declarations2?.tools)?.join(", ") || (runtime || declarations2?.tools ? t("None") : t("Details unavailable"))
+      { label: active2 || legacyGenie ? t("Active tools") : t("Declared tools"), hint: active2 || legacyGenie ? void 0 : t("Declared, not active yet"), stack: true },
+      (active2?.tools ?? declarations2?.tools)?.join(", ") || (active2 || declarations2?.tools ? t("None") : t("Details unavailable"))
     ),
-    runtime ? (0, import_react43.createElement)(RoleControls, { key: `${bot.id}:${pin.attachedAt}`, bot, runtime, actions, run: run3, readOnly: roleReadOnly(roster) }) : (0, import_react43.createElement)(Row, { label: t("Grants requested"), hint: declarations2 ? declarations2.capabilities.join(", ") || t("None") : t("Details unavailable") }),
-    !runtime && declarations2?.fromCatalog ? (0, import_react43.createElement)(Row, { label: t("From the catalog") }) : null,
-    runtime?.promptWarning ? (0, import_react43.createElement)(Row, { label: hostText(runtime.promptWarning) }) : runtime?.acp ? (0, import_react43.createElement)(Row, { label: t("ACP coding agents do not receive this role’s prompt.") }) : null,
-    !runtime ? (0, import_react43.createElement)(Row, {
+    active2 ? (0, import_react43.createElement)(RoleControls, { bot, runtime: active2, name: registry3 ? name : void 0, actions, run: run3, readOnly: roleReadOnly(roster) }) : (0, import_react43.createElement)(Row, { label: t("Grants requested"), hint: declarations2 ? declarations2.capabilities?.join(", ") || t("None") : t("Details unavailable") }),
+    !active2 && declarations2?.fromCatalog ? (0, import_react43.createElement)(Row, { label: t("From the catalog") }) : null,
+    diagnostic?.promptWarning ? (0, import_react43.createElement)(Row, { label: hostText(diagnostic.promptWarning) }) : diagnostic?.acp ? (0, import_react43.createElement)(Row, { label: t("ACP coding agents do not receive this role’s prompt.") }) : null,
+    !active2 && !legacyGenie ? (0, import_react43.createElement)(Row, {
       label: healthReason ? hostText(healthReason) : t("Its tools arrive with the role runtime."),
-      hint: recover ? t("Detach it from every Bot, uninstall, then install again.") : void 0
+      hint: recover && !registry3 ? t("Detach it from every Bot, uninstall, then install again.") : void 0
     }) : null
+  );
+}
+function StackedRolePicker({ bot, roster, pins, implicitGenie, actions, run: run3, definitions }) {
+  const readOnly = roleReadOnly(roster);
+  const catalogOn = rolesOn(roster.prefs);
+  const attached = attachedRoleIds(bot);
+  const offered = new Map((roster.roleProviders ?? []).map((provider) => [provider.id, provider]));
+  if (catalogOn && !offered.has("genie")) offered.set("genie", BUILTIN_ROLES.genie);
+  if (catalogOn) {
+    for (const [id, record] of Object.entries(roster.roles ?? {})) {
+      if (isPackageRoleId(id) && record.status === "ok" && !offered.has(id)) {
+        const proof = ownRole(roster.roleDetails, id)?.installed;
+        offered.set(id, { ...packageDeclarations({ id, version: record.version }, roster), unconfirmed: proof?.attachable !== true });
+      }
+    }
+  }
+  const choices = [...offered].filter(([id]) => !attached.includes(id) && (id !== "genie" || !implicitGenie || offered.get(id) !== BUILTIN_ROLES.genie));
+  if (!choices.length) return null;
+  return (0, import_react43.createElement)(
+    Card2,
+    { title: t("Add a role") },
+    choices.map(([id, { tools, unconfirmed }]) => {
+      const legacy = offered.get(id) === BUILTIN_ROLES.genie;
+      const clash = pins.flatMap((pin) => (runtimeForRole(roster, bot.id, pin)?.tools ?? []).filter((tool) => tools?.includes(tool)).map((tool) => ({ pin, tool })))[0];
+      const reason = unconfirmed ? t(ROLE_SOURCE_UNCONFIRMED) : legacy && attached.length ? t("Detach {name} first.", { name: roleName(roster, attached[0], pins.find((pin) => pin.id === attached[0]), definitions) }) : legacy && bot.kind !== BUILTIN_ROLES.genie.kind ? t(GENIE_ATTACH_REFUSAL) : implicitGenie && id !== "genie" ? t(roleProvider(roster, "genie") ? "Attach Genie first to keep it, or detach it before choosing another role." : CHOOSE_NONE_FIRST) : clash ? t("Tool {tool} is already supplied by {name}.", { tool: clash.tool, name: roleName(roster, clash.pin.id, clash.pin, definitions) }) : void 0;
+      const name = legacy ? t("Genie") : offered.get(id).name ?? roleName(roster, id, void 0, definitions);
+      return (0, import_react43.createElement)(
+        Row,
+        { key: id, hint: reason },
+        (0, import_react43.createElement)("button", {
+          type: "button",
+          className: "bt-soft bt-soft-sm",
+          disabled: readOnly || Boolean(reason),
+          "aria-label": t("Attach {name}", { name }),
+          onClick: () => {
+            if (!readOnly && !reason) void run3(actions.attachRole(bot.id, id));
+          }
+        }, name)
+      );
+    })
   );
 }
 function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
@@ -20569,6 +21389,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
   const save = (patch) => run3(actions.updateBot(bot.id, patch));
   const teamBot = roster.bots?.some((item) => item.id === bot.id) ?? (Object.hasOwn(roster.byId ?? {}, bot.id) && roster.byId[bot.id]?.id === bot.id);
   const showingRoles = teamBot && rolesOn(roster.prefs);
+  const stacked = stackedRoles(roster);
   const canCancelSolverWait = teamBot && bot.canCancelSolverWait === true;
   const requestedRoleCatalog = (0, import_react43.useRef)();
   (0, import_react43.useEffect)(() => {
@@ -20577,12 +21398,16 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
     void run3(actions.roleCatalog());
   }, [showingRoles, bot.id]);
   const pin = teamBot ? packageAttachment(bot) : void 0;
-  const recoveryId = teamBot ? packageRecoveryId(bot) : void 0;
-  const roleTag = showingRoles ? roleTagOf(bot, roster.prefs, roster, t) : void 0;
+  const recoveryId = teamBot && !pin ? packageRecoveryId(bot) : void 0;
+  const definitions = useEntries(roleContributions);
+  const tags = teamBot ? roleTags(roster, bot, definitions) : [];
+  const pins = teamBot ? attachedRoles(bot) : [];
   const rawIds = showingRoles ? attachedRoleIds(bot) : [];
   const effective = showingRoles ? effectiveRoleIds(bot, roster.prefs) : [];
   const activeRole = effective[0] ?? pin?.id ?? rawIds[0];
   const detach = () => void run3(actions.detachRole(bot.id));
+  const detachPin = (id) => void run3(id === void 0 ? actions.detachRole(bot.id) : actions.detachRole(bot.id, id));
+  const implicitGenie = teamBot && !Object.hasOwn(bot, "roles") && bot.kind === "genie";
   const readOnly = roleReadOnly(roster);
   const detachReason = (id) => t("Detach {name} first.", {
     name: id === "genie" ? t("Genie") : (pin?.id === id ? packageDeclarations(pin, roster)?.name : void 0) ?? id
@@ -20634,7 +21459,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         (0, import_react43.createElement)(
           "button",
           { type: "button", className: "bt-avatar-trigger", "aria-label": t("Choose a character"), "aria-haspopup": "dialog", "aria-expanded": editing, onClick: () => setEditing(true) },
-          (0, import_react43.createElement)(BotMark, { bot, size: 64, live: true }),
+          (0, import_react43.createElement)(BotMark, { bot, roster, size: 64, live: true }),
           (0, import_react43.createElement)("span", { className: "bt-avatar-pencil", "aria-hidden": true }, (0, import_react43.createElement)(PencilIcon))
         ),
         editing ? (0, import_react43.createElement)(CharacterSelect, { bot, actions, run: run3, onClose: closeEditor, avatarImage }) : null
@@ -20646,7 +21471,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
           "span",
           { className: "bt-row-name" },
           (0, import_react43.createElement)("span", { className: "bt-bs-name" }, bot.name),
-          roleTag ? (0, import_react43.createElement)("span", { className: "bt-tag" }, roleTag) : null
+          tags.map((tag) => (0, import_react43.createElement)("span", { key: tag.id, className: "bt-tag" }, tag.name))
         ),
         (0, import_react43.createElement)("span", { className: "bt-bs-sub" }, [bot.role, isMainBot ? t("Main Bot") : ""].filter(Boolean).join(" · ") || t("Bot"))
       )
@@ -20656,7 +21481,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
       { title: t("Profile") },
       (0, import_react43.createElement)(Row, { label: t("Name") }, (0, import_react43.createElement)(InlineText, { label: t("Name"), value: bot.name, placeholder: "Bob", required: true, maxLength: 40, onSave: (name) => save({ name }) })),
       (0, import_react43.createElement)(Row, { label: t("Description"), hint: t("A few words on what it does.") }, (0, import_react43.createElement)(InlineText, { label: t("Description"), value: bot.role, placeholder: t("Research, admin…"), maxLength: 24, onSave: (role) => save({ role }) })),
-      showingRoles || canCancelSolverWait ? (0, import_react43.createElement)(
+      !stacked && (showingRoles || canCancelSolverWait) ? (0, import_react43.createElement)(
         "div",
         { className: choices.size ? "bt-set-row bt-bs-row bt-bs-stack" : "bt-set-row bt-bs-row" },
         (0, import_react43.createElement)(
@@ -20709,9 +21534,36 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
             );
           })
         )
+      ) : null,
+      stacked && canCancelSolverWait && !pins.some((pin2) => pin2.id === "solver") ? (0, import_react43.createElement)(
+        Row,
+        { label: t("Solver") },
+        (0, import_react43.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: readOnly, onClick: detach }, t("None"))
       ) : null
     ),
-    (showingRoles ? pin || recoveryId : recoveryId) ? (0, import_react43.createElement)(PackageAttachmentCard, { roster, bot, pin, recoveryId, onDetach: detach, actions, run: run3 }) : null,
+    ...pins.map((pin2) => (0, import_react43.createElement)(PackageAttachmentCard, {
+      key: JSON.stringify([bot.id, pin2.id, pin2.version, pin2.attachedAt, pin2.source]),
+      roster,
+      bot,
+      pin: pin2,
+      definitions,
+      actions,
+      run: run3,
+      onDetach: () => detachPin(stacked ? pin2.id : void 0)
+    })),
+    recoveryId && !pins.some((pin2) => pin2.id === recoveryId) ? (0, import_react43.createElement)(PackageAttachmentCard, { roster, bot, recoveryId, onDetach: () => detachPin(stacked ? recoveryId : void 0), actions, run: run3 }) : null,
+    stacked && implicitGenie && showingRoles ? (0, import_react43.createElement)(Card2, { title: t("Role") }, (0, import_react43.createElement)(
+      Row,
+      { label: t("Genie") },
+      (0, import_react43.createElement)("button", {
+        type: "button",
+        className: "bt-soft bt-soft-sm",
+        disabled: readOnly || !showingRoles,
+        "aria-label": t("Detach {name}", { name: t("Genie") }),
+        onClick: () => detachPin("genie")
+      }, t("Detach"))
+    )) : null,
+    stacked && teamBot ? (0, import_react43.createElement)(StackedRolePicker, { key: bot.id, bot, roster, pins, implicitGenie, actions, run: run3, definitions }) : null,
     showingRoles ? (0, import_react43.createElement)(RolePackagesCard, { key: `role-packages:${bot.id}`, roster, actions, run: run3 }) : null,
     (0, import_react43.createElement)(
       Card2,
@@ -20811,7 +21663,7 @@ function BotSettingsForm({ bot, roster = {}, actions, run: run3 }) {
         }
       }))
     ),
-    ...extraCards.map((entry) => (0, import_react43.createElement)(entry.Component, { key: entry.id, bot, roster, actions, run: run3, Card: Card2, Row, SwitchRow })),
+    ...extraCards.filter((entry) => roleContributionVisible("botSettings", entry.id, bot, roster, definitions)).map((entry) => (0, import_react43.createElement)(entry.Component, { key: entry.id, bot, roster, actions, run: run3, Card: Card2, Row, SwitchRow })),
     (0, import_react43.createElement)(BotComputerCard, { bot, roster, actions, run: run3, Card: Card2, Row }),
     roster.memory === false ? null : (0, import_react43.createElement)(MemoryCard, { bot, actions }),
     (0, import_react43.createElement)(BotSchedules, { bot, roster, actions }),
@@ -20871,6 +21723,7 @@ var BOT_SETTINGS_CSS = ADVANCED_SETTINGS_CSS + `
 .bt-bs{display:flex;flex-direction:column;gap:18px}
 .bt-bs-hero{display:flex;align-items:center;gap:14px;padding:2px 4px}
 .bt-bs-who{display:flex;flex-direction:column;min-width:0;gap:2px}
+.bt-bs-who .bt-row-name{flex-wrap:wrap}
 .bt-bs-name{font-size:17px;line-height:24px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bt-bs-sub{font-size:13px;line-height:18px;color:var(--bt-ink-2)}
 .bt-bs .bt-avedit{left:0;transform:none;width:min(284px,calc(100vw - 32px))}
@@ -25736,695 +26589,6 @@ function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, clo
   };
 }
 
-// src/client/team-actions.js
-var hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-var unfinishedSave = (error) => error.code === "NETWORK" || error.code === "bot/retired" || /^HTTP_50[234]$/.test(error.code ?? "") || error.name === "AbortError" || error instanceof SyntaxError;
-function teamActions({
-  call: call2,
-  after,
-  partFor,
-  roster,
-  ui: ui2,
-  live,
-  cards: cards2,
-  heldCards,
-  turnClock,
-  openSession,
-  loginState,
-  panelFolded,
-  work,
-  storage = (() => {
-    try {
-      return globalThis.localStorage;
-    } catch {
-      return null;
-    }
-  })(),
-  skillStorage = (() => {
-    try {
-      return globalThis.sessionStorage;
-    } catch {
-      return null;
-    }
-  })()
-}) {
-  const skillSaves = /* @__PURE__ */ new Map();
-  const skillScope = () => `automagik.skill-saves.${mountedViewer()?.id ?? "local"}`;
-  function storedSaves(scope) {
-    try {
-      const jobs = JSON.parse(skillStorage?.getItem(scope) ?? "[]");
-      if (Array.isArray(jobs)) return jobs.filter((job) => job && /^[a-f0-9]{32}$/.test(job.id));
-    } catch {
-    }
-    return [];
-  }
-  function rememberSave(scope, job, keep = true) {
-    try {
-      const jobs = storedSaves(scope).filter((entry) => entry.id !== job.id);
-      if (keep) jobs.push(job);
-      if (jobs.length) skillStorage?.setItem(scope, JSON.stringify(jobs));
-      else skillStorage?.removeItem(scope);
-    } catch {
-    }
-  }
-  async function finishSave(scope, job, input, signal, viewerGuard) {
-    const poll = { operation: job.id, poll: true, ...input === void 0 ? { recover: true } : {} };
-    const check = () => {
-      signal?.throwIfAborted();
-      checkViewer(viewerGuard);
-      if (scope !== skillScope()) throw Object.assign(new Error("The team viewer changed."), { code: "bot/retired" });
-    };
-    const request = (body) => {
-      check();
-      return call2("skill-library-save", body, signal);
-    };
-    try {
-      let result = await request(input && !job.started ? { ...input, operation: job.id } : poll);
-      while (result.pending) {
-        signal?.throwIfAborted();
-        if (!job.started) {
-          job.started = true;
-          rememberSave(scope, job);
-        }
-        await new Promise((resolve2) => setTimeout(resolve2, 750));
-        result = await request(poll);
-      }
-      check();
-      rememberSave(scope, job, false);
-      return result;
-    } catch (error) {
-      if (!unfinishedSave(error) && !signal?.aborted) rememberSave(scope, job, false);
-      throw error;
-    }
-  }
-  async function saveSkill(skill, signal) {
-    signal?.throwIfAborted();
-    const viewerGuard = requestViewer("skill-library-save");
-    const scope = skillScope();
-    const input = skill.reviewHash === void 0 ? skill : Object.fromEntries(
-      Object.entries(skill).filter(([field]) => ["name", "edit", "reviewHash", "confirm"].includes(field))
-    );
-    const key = JSON.stringify(input);
-    const existing = storedSaves(scope);
-    const digest = skillStorage && globalThis.crypto.subtle ? hex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)))) : void 0;
-    signal?.throwIfAborted();
-    let job = skillSaves.get(key) ?? (digest && [...existing, ...storedSaves(scope)].find((entry) => entry.digest === digest));
-    if (!job) {
-      job = { id: hex(globalThis.crypto.getRandomValues(new Uint8Array(16))), digest, started: false };
-      rememberSave(scope, job);
-    }
-    skillSaves.set(key, job);
-    try {
-      const result = await finishSave(scope, job, input, signal, viewerGuard);
-      skillSaves.delete(key);
-      return result;
-    } catch (error) {
-      if (!signal?.aborted && !unfinishedSave(error)) skillSaves.delete(key);
-      throw error;
-    }
-  }
-  function resumeSkillSaves(signal) {
-    const scope = skillScope();
-    return Promise.allSettled(storedSaves(scope).map(async (job) => {
-      const result = await finishSave(scope, job, void 0, signal, requestViewer("skill-library-save"));
-      for (const [key, current] of skillSaves) if (current.id === job.id) skillSaves.delete(key);
-      return result;
-    }));
-  }
-  const forgetDrafts = (ids) => {
-    if (!Array.isArray(ids)) return;
-    for (const id of ids) {
-      if (typeof id !== "string" || id === "") continue;
-      try {
-        storage?.removeItem(`dsh.conversation.${id}`);
-      } catch {
-      }
-    }
-  };
-  const picks = createSource({});
-  const pickEntries = /* @__PURE__ */ new Map();
-  let unwatchPicks;
-  const dropPick = (part, entry) => {
-    if (pickEntries.get(part) !== entry) return;
-    clearTimeout(entry.timer);
-    pickEntries.delete(part);
-    picks.set((state2) => {
-      const next = { ...state2 };
-      delete next[part];
-      return next;
-    });
-    if (pickEntries.size === 0 && unwatchPicks !== void 0) {
-      const stop3 = unwatchPicks;
-      unwatchPicks = void 0;
-      stop3();
-    }
-  };
-  const syncPicks = () => {
-    const snapshot2 = work?.getSnapshot?.();
-    for (const [part, entry] of pickEntries) {
-      const noting = snapshot2?.noting?.[part] === true;
-      if (noting || entry.settled && snapshot2?.models?.[entry.botId]?.switching === void 0) dropPick(part, entry);
-    }
-  };
-  const noPick = { mark: () => {
-  }, end: () => {
-  } };
-  const pickFor = (id, ref) => {
-    if (typeof ref !== "string") return noPick;
-    const bot = roster?.getSnapshot?.()?.byId?.[id];
-    const current = bot?.model ?? bot?.appliedModel;
-    if (typeof current !== "string" || ref === current || !crossesHarness(current, ref)) return noPick;
-    if (routeOfRef(current).route !== "acp") return noPick;
-    const part = partFor(id);
-    let entry;
-    return {
-      mark: () => {
-        const older = pickEntries.get(part);
-        if (older !== void 0) clearTimeout(older.timer);
-        const own3 = { botId: bot.id, settled: false, timer: void 0 };
-        entry = own3;
-        own3.timer = setTimeout(() => dropPick(part, own3), CROSSING_DEADLINE_MS);
-        own3.timer?.unref?.();
-        pickEntries.set(part, own3);
-        if (older === void 0 && pickEntries.size === 1 && typeof work?.subscribe === "function") unwatchPicks = work.subscribe(syncPicks);
-        picks.set((state2) => state2[part] === true ? state2 : { ...state2, [part]: true });
-      },
-      end: (ok) => {
-        if (entry === void 0) return;
-        if (ok === true) {
-          entry.settled = true;
-          syncPicks();
-        } else dropPick(part, entry);
-      }
-    };
-  };
-  const picked = (pick4, request) => pick4 === noPick ? after(request) : after(request.then((value) => {
-    pick4.mark();
-    return value;
-  })).then((value) => {
-    pick4.end(true);
-    return value;
-  }, (error) => {
-    pick4.end(false);
-    throw error;
-  });
-  const openCliLogin = (botId, provider, ref, attemptId, { fresh } = {}) => {
-    const bot = cliLoginBotOf(roster.getSnapshot(), botId);
-    const manager = loginState?.();
-    if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
-    openSession?.(bot.id);
-    void manager.open({
-      botId: bot.id,
-      provider,
-      ref: signInProviderOf(ref) === provider ? ref : void 0,
-      ...typeof attemptId === "string" ? { attemptId } : {},
-      ...fresh === true ? { fresh } : {}
-    });
-    return true;
-  };
-  const loginPayload = (botId, provider, extra = {}) => ({ botId, provider, ...extra });
-  const stopping = (options) => options?.stopReply === true ? { stopReply: true } : {};
-  const memoryOf = (id) => roster.getSnapshot().roomsById[id] ? { roomId: id } : { botId: id };
-  const yieldTo = (state2, view) => state2.panelYield === true || panelFolded?.(view) === true;
-  let panelInstance;
-  const openPanel = (update) => ui2.set((state2) => {
-    const next = update(state2);
-    if (next !== state2) panelInstance = {};
-    return next;
-  });
-  const openSideChat = (sessionId, chatId) => {
-    openPanel((state2) => ({ ...state2, details: sessionId, view: "side", side: chatId ?? null, renaming: false, tab: null, panelYield: yieldTo(state2, "side") }));
-  };
-  const openSettings = (page = "general", id = null) => {
-    ui2.set((state2) => ({ ...state2, settings: { page, id }, menu: null, palette: null, newChat: null }));
-  };
-  return {
-    // The pane starts at the rail's edge, so a floating drawer would stick out from under it.
-    // The instance distinguishes two opens on the same mode and section.
-    openNewChat: (mode, sectionId = null) => {
-      ui2.set((state2) => ({ ...state2, newChat: mode, newChatInstance: {}, newChatSection: sectionId ?? null, menu: null, palette: null }));
-    },
-    closeNewChat: (mode, sectionId, instance) => {
-      ui2.set((state2) => state2.newChat === mode && (state2.newChatSection ?? null) === sectionId && state2.newChatInstance === instance ? { ...state2, newChat: null, newChatSection: null } : state2);
-    },
-    openPalette: (query = "") => {
-      ui2.set((state2) => ({ ...state2, palette: { query, token: Date.now() }, newChat: null, menu: null }));
-    },
-    // The token keeps a late exit timer from closing a palette opened again since.
-    closePalette: (token, palette) => {
-      ui2.set((state2) => state2.palette && (token === void 0 || state2.palette.token === token) && (palette === void 0 || state2.palette === palette) ? { ...state2, palette: null } : state2);
-    },
-    openExchange: (a, b) => {
-      if (a && b) ui2.set((state2) => ({ ...state2, exchange: [a, b] }));
-    },
-    closeExchange: (pair) => {
-      ui2.set((state2) => state2.exchange === pair ? { ...state2, exchange: null } : state2);
-    },
-    openVoice: (id) => {
-      if (id) ui2.set((state2) => ({ ...state2, voice: id, voiceInstance: {}, menu: null }));
-    },
-    closeVoice: (id, instance) => {
-      ui2.set((state2) => state2.voice && (id === void 0 || state2.voice === id && state2.voiceInstance === instance) ? { ...state2, voice: null } : state2);
-    },
-    getPanelInstance: () => panelInstance,
-    toggleDetails: (id, force) => {
-      ui2.set((state2) => {
-        const snap = roster?.getSnapshot?.();
-        const same = state2.details != null && detailsSubject(snap, state2.details) === detailsSubject(snap, id);
-        const details = force || !same || state2.view !== "details" ? id : null;
-        if (details === null && panelFolded?.("details") === true) {
-          panelInstance = {};
-          return { ...state2, renaming: false, tab: null, details: id, view: "details", panelYield: true };
-        }
-        panelInstance = details ? {} : null;
-        return { ...state2, renaming: false, tab: null, details, view: "details" };
-      });
-    },
-    // The open panel follows the main view; a subject with no browser (a group
-    // chat, an outside Session) settles on the details view. So does one that
-    // does not own the open side chat.
-    followPanel: (id) => {
-      openPanel((state2) => {
-        if (!state2.details || state2.details === id) return state2;
-        const snap = roster.getSnapshot();
-        const view = state2.view === "browser" && snap.byId[id] === void 0 ? "details" : state2.view === "side" && !(snap.sideChats?.[snap.byId[id]?.id] ?? []).some((chat) => chat?.id === state2.side) ? "details" : state2.view;
-        return { ...state2, details: id, view, renaming: false, tab: null };
-      });
-    },
-    showDetails: (id, tab = null) => {
-      openPanel((state2) => ({ ...state2, details: id, view: "details", renaming: false, tab, panelYield: yieldTo(state2, "details") }));
-    },
-    // Opening the conversation would move focus to its composer and blur the name field.
-    renameBot: (id) => {
-      openPanel((state2) => ({ ...state2, details: id, view: "details", renaming: true, tab: null, panelYield: yieldTo(state2, "details") }));
-    },
-    showBrowserPanel: (id, { resetDetails = false } = {}) => {
-      ui2.set((state2) => {
-        const next = { ...state2, details: id, view: "browser", panelYield: yieldTo(state2, "browser") };
-        if (resetDetails) {
-          next.renaming = false;
-          next.tab = null;
-        }
-        panelInstance = state2.details === id && state2.view === "browser" ? panelInstance ?? {} : {};
-        return next;
-      });
-    },
-    openSettings,
-    // Omni's own Models page: the providers DSH serves, their keys and models.
-    openModels: () => openSettings("models"),
-    closeSettings: (settings) => {
-      ui2.set((state2) => state2.settings && (settings === void 0 || state2.settings === settings) ? { ...state2, settings: null } : state2);
-    },
-    openMemory: (id) => {
-      ui2.set((state2) => ({ ...state2, memory: id, memoryInstance: {}, menu: null, palette: null }));
-    },
-    closeMemory: (id, instance) => {
-      ui2.set((state2) => state2.memory && (id === void 0 || state2.memory === id && state2.memoryInstance === instance) ? { ...state2, memory: null } : state2);
-    },
-    openConnectors: () => {
-      ui2.set((state2) => ({ ...state2, settings: { page: "connectors", id: null }, menu: null, palette: null, newChat: null }));
-    },
-    setPanelView: (view) => {
-      if (view !== "details" && view !== "browser" && view !== "side") return;
-      ui2.set((state2) => state2.details && state2.view !== view ? { ...state2, view, panelYield: yieldTo(state2, view) } : state2);
-    },
-    // A side chat on the panel's own view, opened from the strip, the `···`
-    // menus or `/side`. Closing the panel keeps the chats; only a tab's × deletes.
-    openSideChat,
-    // The roster is pulled before the panel opens on a new chat: a view on a chat
-    // the roster does not hold yet folds back into details.
-    newSideChat: async (sessionId) => {
-      const value = await after(call2("side-new", { sessionId }));
-      openSideChat(sessionId, value?.chatId);
-      return value;
-    },
-    sideCall: (name, body) => after(call2(name, body)),
-    askSide: (sessionId, chatId, text2) => after(call2("side-ask", { sessionId, chatId, text: text2 })),
-    cancelSide: (chatId, entryId) => after(call2("side-cancel", { chatId, entryId })),
-    closeSideChat: (chatId) => {
-      ui2.set((state2) => state2.details && state2.view === "side" && state2.side === chatId ? { ...state2, view: "details", side: null } : state2);
-      return after(call2("side-close", { chatId }));
-    },
-    closePanel: (pane) => {
-      ui2.set((state2) => {
-        if (!state2.details) return state2;
-        if (pane !== void 0 && (panelInstance !== pane.instance || state2.details !== pane.id || (state2.view ?? "details") !== pane.view || state2.renaming !== pane.renaming || state2.tab !== pane.tab || state2.side !== pane.side)) return state2;
-        return { ...state2, details: null, view: "details", renaming: false, tab: null, side: null };
-      });
-    },
-    quote: (sessionId, text2) => ui2.set((state2) => ({ ...state2, quote: { sessionId, text: text2, token: Date.now() } })),
-    clearQuote: (token) => ui2.set((state2) => state2.quote?.token === token ? { ...state2, quote: null } : state2),
-    setFlags: (id, flags) => after(call2("set-flags", { id, ...flags })),
-    saveSection: (payload) => after(call2("section-save", payload)),
-    reorderSections: (ids) => after(call2("section-order", { ids })),
-    deleteSection: (id) => after(call2("section-delete", { id })),
-    beginSectionRename: (id) => ui2.set((state2) => ({ ...state2, renameSection: id })),
-    endSectionRename: () => ui2.set((state2) => state2.renameSection ? { ...state2, renameSection: null } : state2),
-    deleteRoom: (id) => after(call2("delete-room", { id })),
-    openMenu: (menu) => {
-      ui2.set((state2) => ({ ...state2, menu, palette: null }));
-    },
-    closeMenu: (menu) => {
-      ui2.set((state2) => state2.menu && (menu === void 0 || state2.menu === menu) ? { ...state2, menu: null } : state2);
-    },
-    closeOverlay: () => {
-      ui2.set((state2) => ({ ...state2, newChat: null, newChatSection: null, exchange: null, details: state2.newChat || state2.exchange ? state2.details : null }));
-    },
-    createBot: (payload) => after(call2("create-bot", payload)),
-    // The team's full view, read once with no pull after it (the New Solver dialog's check of what a
-    // failed create left behind).
-    teamState: () => call2("state", {}),
-    // genie-dsh's: the folder's repository's Genie, made in a free color when it has none.
-    createGenie: (folder) => after(call2("genie-create", { folder })),
-    // welcome-dsh's: the Omni Bot again, after it was deleted (the team view's omniAddable).
-    addOmni: () => after(call2("omni-add")),
-    // The avatar library: photos the user imported once, kept by the host.
-    avatarLibrary: (options = {}) => call2("avatar-library", options),
-    importAvatars: (items) => call2("avatar-import", { items }),
-    deleteAvatar: (id) => call2("avatar-delete", { id }),
-    createRoom: (members, options = {}) => after(call2("create-room", { members, ...options })),
-    setBotAuto: (id, rev) => after(call2("set-bot-auto", { id, rev })),
-    updateBot: (id, patch) => picked(pickFor(id, patch?.model), call2("update-bot", { id, ...patch })),
-    attachRole: (id, role) => after(call2("role-attach", { id, role })),
-    detachRole: (id) => after(call2("role-detach", { id })),
-    roleCatalog: () => after(call2("role-catalog")),
-    installRole: (id) => after(call2("role-install", { id })),
-    uninstallRole: (id) => after(call2("role-uninstall", { id })),
-    grantRole: (id, role, capability, on) => after(call2("role-grant", { id, role, capability, on })),
-    roleSettings: (id, role) => call2("role-settings", { id, role }),
-    setRoleSettings: (id, role, values) => call2("role-settings-set", { id, role, values }),
-    voicePane: (sessionId, paneId, open, active2) => call2("voice-pane", { sessionId, paneId, open, active: active2 }),
-    voiceWait: (sessionId, paneId, callId, signal) => call2("voice-wait", { sessionId, paneId, callId }, signal),
-    voiceSpoken: (sessionId, paneId, callId, outcome) => call2("voice-spoken", { sessionId, paneId, callId, outcome }),
-    // A model on another route: the host changes it in place on a chat with nothing said, else
-    // in a new part with a handoff (RFC 0030, Handoff note). `patch` carries the thinking level
-    // picked with it. `options.stopReply`: the person's Switch on "This stops the current reply",
-    // the only consent that lets the host stop a running reply; without it the host answers
-    // reason reply-running while one runs.
-    switchRoute: (id, ref, patch = {}, options) => picked(pickFor(id, ref), call2("switch-route", { id, ...patch, model: ref, ...stopping(options) })),
-    switchRouteInChat: async (id, ref, patch = {}, options) => {
-      try {
-        return await picked(pickFor(id, ref), call2("switch-route", { id, ...patch, model: ref, ...stopping(options) }));
-      } catch (error) {
-        const provider = signInProviderOf(ref);
-        if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider)) return void 0;
-        if (error?.code === "bot/account-confirm-required" && provider && openCliLogin(id, provider)) return void 0;
-        throw error;
-      }
-    },
-    // A model chosen in a Bot's chat (rule 2): an agent that is signed out opens the sign-in row
-    // in that chat instead of failing; the Bot keeps its model until the sign-in is done.
-    // `patch` goes with the model in the same update (its thinking level); `options.stopReply`
-    // as for switchRoute.
-    chooseModelInChat: async (id, ref, patch = {}, options) => {
-      try {
-        return await picked(pickFor(id, ref), call2("update-bot", { id, ...patch, model: ref, ...stopping(options) }));
-      } catch (error) {
-        const provider = signInProviderOf(ref);
-        if (error?.code === "bot/sign-in-required" && provider && openCliLogin(id, provider, ref)) return void 0;
-        if (error?.code === "bot/account-confirm-required" && provider && openCliLogin(id, provider, ref)) return void 0;
-        throw error;
-      }
-    },
-    // The activity row reads the mark like the host's `noting`.
-    subscribePicks: (listener) => picks.subscribe(listener),
-    picking: (part) => picks.getSnapshot()[part] === true,
-    openCliLogin,
-    async recoverCliLogin(botId, provider) {
-      const bot = cliLoginBotOf(roster.getSnapshot(), botId);
-      const manager = loginState?.();
-      if (!bot || !manager || !Object.hasOwn(SIGN_IN_NAMES, provider)) return false;
-      const recovered = await manager.recover({ botId: bot.id, provider });
-      if (recovered && cliLoginBotOf(roster.getSnapshot(), bot.id)) openSession?.(bot.id);
-      return recovered;
-    },
-    cliLoginStart: (botId, provider, model) => call2("cli-login-start", loginPayload(botId, provider, model === void 0 ? {} : { model })),
-    cliLoginCurrent: (botId, provider, { fresh } = {}) => call2("cli-login-current", loginPayload(botId, provider, fresh === true ? { fresh } : {})),
-    cliLoginStatus: (botId, provider, attemptId, signal) => call2("cli-login-status", loginPayload(botId, provider, { attemptId }), signal),
-    cliLoginAnswer: (botId, provider, attemptId, value) => call2("cli-login-answer", loginPayload(botId, provider, { attemptId, value })),
-    cliLoginCancel: (botId, provider, attemptId) => call2("cli-login-cancel", loginPayload(botId, provider, { attemptId })),
-    cliLoginConnections: () => call2("cli-login-connections", {}),
-    cliLoginConfirm: (botId, provider, ref, model) => call2("cli-login-confirm", loginPayload(botId, provider, { ...ref === void 0 ? {} : { ref }, ...model === void 0 ? {} : { model } })),
-    cliLoginAccounts: (options) => call2("cli-login-accounts", options?.reservations === true ? { reservations: true } : {}),
-    cliLoginReserve: (offerId, label, claim) => call2("cli-login-reserve", {
-      offerId,
-      label,
-      ...claim?.machineId ? { machineId: claim.machineId } : claim === void 0 ? {} : { claimId: claim.claimId, rev: claim.rev }
-    }),
-    cliLoginRelease: (claimId, rev) => call2("cli-login-release", { claimId, rev }),
-    cliLoginReleaseMachine: (machineId) => call2("cli-login-release", { machineId }),
-    cliLoginSwitch: (botId, provider, { keep, fresh } = {}, { confirmed: confirmed2, model } = {}) => call2("cli-login-switch", loginPayload(botId, provider, {
-      ...keep === void 0 ? {} : { keep },
-      ...fresh === true ? { fresh } : {},
-      ...confirmed2 === false ? { withoutWarning: true } : {},
-      ...model ? { model } : {}
-    })),
-    cliLoginReset: (botId, provider) => call2("cli-login-reset", loginPayload(botId, provider)),
-    cliLoginSignOut: (botId, provider) => call2(
-      "cli-login-signout",
-      loginPayload(botId, provider)
-    ),
-    cliLoginNoticed: (provider) => call2("cli-login-noticed", { provider }),
-    contextStatus: (botId) => call2("context-status", { botId }),
-    usageStats: (botId, sessionId) => call2("usage-stats", { botId, sessionId }),
-    memoryReviewStatus: (botId) => call2("memory-review-status", { botId }),
-    // Do not remap the expected Session: the backend must reject a stale snapshot.
-    checkpointBot: (botId, sessionId) => after(call2("checkpoint-bot", { botId, sessionId })),
-    // Give up one wait the Bot has on a hand-off that will not come back.
-    abandonWork: (id) => after(call2("abandon-work", { id })),
-    refreshModels: () => after(call2("models")).catch(() => {
-    }),
-    // One local agent's models: the first look starts its CLI, later ones read what it said.
-    agentModels: (route) => after(call2("local-agent-models", { route })).catch(() => {
-    }),
-    efforts: (ref) => call2("efforts", { ref }),
-    speed: (ref) => call2("speed", { ref }),
-    // Model providers and their API keys; DSH keeps them, and a key only travels to the host.
-    providers: () => call2("providers"),
-    setProviderKey: (provider, value) => after(call2("provider-key", { provider, value })),
-    addProvider: (body) => after(call2("provider-add", body)),
-    providerModels: (body) => call2("provider-models", body),
-    removeProvider: (provider) => after(call2("provider-remove", { provider })),
-    // After a failed turn: the Bot answers the user's last unanswered message, which is never sent again.
-    resume: (botId) => after(call2("resume", { botId })),
-    folders: () => call2("folders"),
-    folderProbe: (path2) => call2("folder-probe", { path: path2 ?? "" }),
-    folderPick: () => call2("folder-pick"),
-    folderList: (path2) => call2("folder-list", { path: path2 ?? "" }),
-    setTeamWorkspace: (path2) => after(call2("team-workspace", { path: path2 })),
-    deleteBot: (id) => after(call2("delete-bot", { id })).then((value) => {
-      forgetDrafts(value?.deletedParts);
-      return value;
-    }),
-    rollbackAdoption: (agentId) => after(call2("agent-bot-rollback", { agentId })),
-    releasePrivate: (id) => after(call2("private-release", { id })),
-    duplicateBot: (id) => after(call2("duplicate-bot", { id })),
-    setPrefs: (prefs) => after(call2("set-prefs", prefs)),
-    setMain: (id, main = true, options = {}) => after(call2("set-main", { id, main, ...options })),
-    updateRoom: (id, patch) => after(call2("update-room", { id, ...patch })),
-    send: (sessionId, text2, voicePane) => after(call2("send", { sessionId: partFor(sessionId), text: text2, ...voicePane ? { voicePane } : {} })),
-    answerQuestion: (sessionId, questionId, answer) => after(call2("answer-question", { sessionId: partFor(sessionId), questionId, answer })),
-    dismissQuestion: (sessionId) => after(call2("dismiss-question", { sessionId })),
-    answerView: (sessionId, viewId, action, values) => after(call2("view-reply", { sessionId: partFor(sessionId), viewId, action, values })),
-    dismissView: (sessionId) => after(call2("dismiss-view", { sessionId: partFor(sessionId) })),
-    deleteBtw: (sessionId, cardId) => after(call2("btw-delete", { sessionId, cardId })),
-    grantApproval: (id, offer) => after(call2("grant-approval", { id, offer })),
-    revokeGrant: (id) => after(call2("grant-revoke", { id })),
-    answerApproval: (id, choice) => after(call2("approval-answer", { id, choice, client: "web" })),
-    computerSetEnabled: (enabled2) => after(call2("computer-set-enabled", { enabled: enabled2 })),
-    computerSetLevel: (botId, level) => after(call2("computer-set-level", { botId, level })),
-    computerRevokeApp: (botId, appKey) => after(call2("computer-revoke-app", { botId, appKey })),
-    computerProviderRetry: () => after(call2("computer-provider-retry", {})),
-    computerSystemStatus: () => call2("computer-system-status", {}),
-    computerPermission: (permission) => call2("computer-permission", { permission }),
-    computerStop: (botId, all = false) => after(call2("computer-stop", all ? { all: true } : { botId })),
-    computerTakeover: (botId) => after(call2("computer-takeover", { botId })),
-    computerHandback: (botId) => after(call2("computer-handback", { botId })),
-    computerAllowForeground: (botId) => call2("computer-allow-foreground", { botId }),
-    computerAppAnswer: (id, answer) => call2("computer-app-answer", { id, answer }),
-    computerHoldAnswer: (botId, { callId, outcome } = {}) => after(call2("computer-hold-answer", { botId, ...callId !== void 0 ? { callId } : {}, outcome })),
-    computerShot: (attachmentId) => call2("computer-shot", { attachmentId }),
-    computerUserActive: (idleSeconds) => call2("computer-user-active", { idleSeconds }),
-    stopMemberWork: (roomId, botId) => after(call2("stop-member-work", { roomId, botId })),
-    stopRoomWork: (roomId) => after(call2("stop-room-work", { roomId })),
-    goalDraft: (roomId, text2) => after(call2("goal-draft", { roomId, text: text2 })),
-    goalControl: (roomId, goalId, action, stopWork) => after(call2("goal-control", { roomId, goalId, action, ...stopWork ? { stopWork: true } : {} })),
-    // The goal island: `goalCompose` holds the room whose draft form is open,
-    // `goalOpen` the room whose panel is open.
-    composeGoal: (roomId) => ui2.set((state2) => ({ ...state2, goalCompose: roomId, goalOpen: roomId })),
-    closeGoalCompose: () => ui2.set((state2) => state2.goalCompose ? { ...state2, goalCompose: null } : state2),
-    toggleGoal: (roomId) => ui2.set((state2) => ({ ...state2, goalOpen: state2.goalOpen === roomId ? null : roomId })),
-    closeGoal: () => ui2.set((state2) => state2.goalOpen ? { ...state2, goalOpen: null } : state2),
-    // Values go out in these requests and never come back in a response.
-    secretSet: (payload) => after(call2("secret-set", payload)),
-    secretAllow: (requestId, approval) => after(call2("secret-allow", { ...approval, requestId })),
-    secretSourceDetail: (requestId) => call2("secret-source-detail", { requestId }),
-    vaultStatus: (signal, provider) => call2("vault-status", provider === void 0 ? void 0 : { provider }, signal),
-    vaultUnlock: (password, connection, provider = "bitwarden") => call2(
-      "vault-unlock",
-      provider === "macos-keychain" || provider === "windows-credential" ? { provider } : { provider, password, connection }
-    ),
-    vaultUnlockSecretService: () => call2("vault-unlock", { provider: "secret-service" }),
-    vaultUnlockSaved: (provider, connection, credentialRevision) => call2("vault-unlock", {
-      provider,
-      connection,
-      ...credentialRevision === void 0 ? {} : { credentialRevision }
-    }),
-    vaultLock: (provider) => provider === void 0 ? call2("vault-lock") : call2("vault-lock", { provider }),
-    vaultItems: (search, provider, project) => call2("vault-items", provider === "hashicorp-vault" || provider === "macos-keychain" || provider === "windows-credential" ? { provider, ...search } : {
-      search,
-      ...provider === void 0 ? {} : { provider },
-      ...project === void 0 ? {} : { project }
-    }),
-    vaultFields: (provider, mount, path2) => call2("vault-fields", { provider, mount, path: path2 }),
-    vaultTokenSet: (provider, token, connection, server, credentialRevision) => call2("vault-token-set", provider === "hashicorp-vault" ? { provider, token, ...connection } : {
-      provider,
-      token,
-      connection,
-      ...server === void 0 ? {} : { server },
-      ...credentialRevision === void 0 ? {} : { credentialRevision }
-    }),
-    vaultTokenClear: (provider, connection, credentialRevision) => call2("vault-token-clear", {
-      provider,
-      ...connection === void 0 ? {} : { connection },
-      ...credentialRevision === void 0 ? {} : { credentialRevision }
-    }),
-    secretSourceSet: (mapping) => after(call2("secret-source-set", mapping)),
-    secretCancel: (requestId) => after(call2("secret-cancel", { requestId })),
-    secretUpdate: (name, { scope, purpose } = {}) => after(call2("secret-update", { name, scope, purpose })),
-    secretDelete: (name) => after(call2("secret-delete", { name })),
-    secretSourceClear: (name) => after(call2("secret-source-clear", { name })),
-    connectorConnect: (id, payload = {}) => after(call2("connector-connect", { id, ...payload })),
-    connectorDisconnect: (id) => after(call2("connector-disconnect", { id })),
-    connectorRetry: (id) => after(call2("connector-retry", { id })),
-    connectorSignInCode: (id, input) => after(call2("connector-sign-in-code", { id, input })),
-    connectorCancel: (id) => after(call2("connector-cancel", { id })),
-    connectorClient: (id, clientId, clientSecret) => after(call2("connector-client", { id, clientId, clientSecret })),
-    connectorSet: (id, patch) => after(call2("connector-set", { id, ...patch })),
-    connectorAdd: (spec) => after(call2("connector-add", spec)),
-    connectorRemove: (id) => after(call2("connector-remove", { id })),
-    connectorImportScan: () => call2("connector-import-scan", {}),
-    connectorImport: (items) => after(call2("connector-import", { items })),
-    connectorRequestCancel: (requestId) => after(call2("connector-request-cancel", { requestId })),
-    mailAccountAdd: (payload) => after(call2("mail-account-add", payload)),
-    mailAccountRemove: (id) => after(call2("mail-account-remove", { id })),
-    mailRuleSet: (payload) => after(call2("mail-rule-set", payload)),
-    mailSendAnswer: (requestId, choice, extra = {}) => after(call2("mail-send-answer", { requestId, choice, ...extra })),
-    mailSignInCode: (payload) => after(call2("mail-sign-in-code", payload)),
-    imAdd: (payload) => after(call2("im-add", payload)),
-    imUpdate: (id, patch) => after(call2("im-update", { id, ...patch })),
-    imRemove: (id) => after(call2("im-remove", { id })),
-    imPair: (id, senderId, allow) => after(call2("im-pair", { id, senderId, allow })),
-    imUnpair: (id, senderId) => after(call2("im-unpair", { id, senderId })),
-    imChat: (id, body) => after(call2("im-chat", { id, ...body })),
-    imRetry: (id) => after(call2("im-retry", { id })),
-    imLoginStart: (payload) => call2("im-login-start", payload),
-    imLoginWait: (payload) => call2("im-login-wait", payload),
-    skillLibrary: (signal) => call2("skill-library", {}, signal),
-    getSkill: (name, signal) => call2("skill-library-get", { name }, signal),
-    // The panel-scoped Check refreshes its own rows. Hand it the result before a team pull can delay delivery.
-    saveSkill: (skill, signal) => signal ? saveSkill(skill, signal) : after(saveSkill(skill)),
-    resumeSkillSaves,
-    deleteSkill: (name) => after(call2("skill-library-delete", { name })),
-    setBotSkill: (id, name, attached, mode) => after(call2(attached ? "bot-skill-add" : "bot-skill-remove", { id, name, mode })),
-    setBotSkillMode: (id, name, mode) => after(call2("bot-skill-mode", { id, name, mode })),
-    saveCapability: (capability) => after(call2("capability-save", capability)),
-    deleteCapability: (name) => after(call2("capability-delete", { name })),
-    approveCapability: (name) => after(call2("capability-approve", { name })),
-    setBotCapability: (botId, name, attached) => after(call2("bot-capability", { botId, name, attached })),
-    schedules: () => call2("schedules"),
-    scheduleCreate: (task) => call2("schedule-create", task),
-    scheduleDelete: (sessionId, id) => call2("schedule-delete", { sessionId, id }),
-    exchange: (a, b) => call2("exchange", { a, b }).catch(() => []),
-    exchangeText: (id, a, b) => call2("exchange-text", { id, ...a !== void 0 && b !== void 0 ? { a, b } : {} }).catch(() => void 0),
-    fileText: (file) => call2("file-text", { file }).catch(() => void 0),
-    roomProgress: (roomId) => call2("room-progress", { roomId }).catch(() => []),
-    groupRows: (roomId, from, to, anchor) => call2("group-rows", { roomId, from, ...to === void 0 ? {} : { to }, ...anchor === void 0 ? {} : { anchor } }).catch(() => null),
-    earlier: (sessionId, cursor) => call2("earlier", { sessionId, cursor: cursor ?? null }),
-    // Hours come back in this browser's time zone, so days start at local midnight.
-    usage: () => call2("usage", { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
-    // `summarize` starts a summary when the entries changed; `regenerate` always does.
-    memoryView: (id, flags = {}) => call2("memory-view", { ...memoryOf(id), ...flags }),
-    memoryAsk: (id, text2) => call2("memory-ask", { ...memoryOf(id), text: text2 }),
-    memoryLayer: (id, entry, always) => call2("memory-layer", { ...memoryOf(id), topic: entry.topic, text: entry.text, always }),
-    memoryMove: (id, entry, to) => call2("memory-move", { ...memoryOf(id), scope: entry.scope, topic: entry.topic, text: entry.text, to }),
-    memoryTidyUndo: (id, scope, batch) => call2("memory-tidy-undo", { ...memoryOf(id), scope, batch }),
-    memoryPin: (id, entry, pin) => call2("memory-pin", { ...memoryOf(id), scope: entry.scope, topic: entry.topic, text: entry.text, pin }),
-    memoryForget: (id, entry) => call2("memory-forget", { ...memoryOf(id), scope: entry.scope, topic: entry.topic, text: entry.text }),
-    memoryHistory: (id, before) => call2("memory-history", { ...memoryOf(id), ...before === void 0 ? {} : { before } }),
-    memoryRestore: (id, rowId) => call2("memory-restore", { ...memoryOf(id), id: rowId }),
-    diagnostics: (payload) => call2("diagnostics", payload),
-    // Pets (pets.js): those on this computer, a page of codex-pets.net, and one put on a Bot.
-    pets: () => call2("pets"),
-    petsBrowse: (query, page, sort) => call2("pets-browse", { query, page, sort }),
-    petUse: (botId, source, id) => after(call2("pet-use", { botId, source, id })),
-    agentAccess: () => call2("agent-access"),
-    agentTokenCreate: (name) => call2("agent-token-create", { name }),
-    agentTokenRevoke: (id) => call2("agent-token-revoke", { id }),
-    privacy: () => call2("privacy"),
-    privacySet: (share, on) => call2("privacy-set", { share, on }),
-    diagnosticsLog: () => call2("diagnostics-log"),
-    diagnosticsClear: () => call2("diagnostics-clear"),
-    diagnosticsPermissions: () => call2("diagnostics-permissions"),
-    repoStars: () => call2("repo-stars"),
-    checkSelfUpdate: (body) => call2("self-update-check", body),
-    selfUpdateResult: (runId) => call2("self-update-check-result", { runId }),
-    selfUpdateStatus: (signal) => call2("self-update-status", void 0, signal),
-    startSelfUpdate: (body) => call2("self-update-start", body),
-    // A failed action away from any form (a menu, the palette) shows as a toast.
-    reportError: (error, where = "action") => {
-      noteClientError(where, error);
-      ui2.set((state2) => ({ ...state2, toast: { text: error?.message ?? String(error), token: Date.now() } }));
-    },
-    // A notice that is no failure (a refused paste of a sign-in code): a toast, not a diagnostic.
-    showNotice: (text2) => ui2.set((state2) => ({ ...state2, toast: { text: text2, token: Date.now() } })),
-    dismissToast: (token) => ui2.set((state2) => state2.toast && (token === void 0 || state2.toast.token === token) ? { ...state2, toast: null } : state2),
-    noteTurnTime: (sessionId, turn, key, time) => {
-      if (sessionId === void 0 || !Number.isFinite(turn) || !Number.isFinite(time)) return;
-      turnClock.set((state2) => {
-        const turns = state2[sessionId] ?? {};
-        const entry = turns[turn] ?? {};
-        const next = key === "first" && entry.first !== void 0 ? Math.min(entry.first, time) : time;
-        if (entry[key] === next) return state2;
-        return { ...state2, [sessionId]: { ...turns, [turn]: { ...entry, [key]: next } } };
-      });
-    },
-    noteTurnPeer: (sessionId, turn, peerId) => {
-      if (sessionId === void 0 || !Number.isFinite(turn)) return;
-      turnClock.set((state2) => {
-        const turns = state2[sessionId] ?? {};
-        const entry = turns[turn] ?? {};
-        if (entry.peer === peerId) return state2;
-        return { ...state2, [sessionId]: { ...turns, [turn]: { ...entry, peer: peerId } } };
-      });
-    },
-    noteLive: (sessionId, id, entry) => {
-      if (sessionId === void 0) return;
-      live.set((state2) => {
-        const own3 = state2[sessionId] ?? {};
-        const prev = own3[id];
-        if (entry === null ? prev === void 0 : prev !== void 0 && JSON.stringify({ ...prev, at: 0 }) === JSON.stringify({ ...entry, at: 0 })) return state2;
-        const next = { ...own3 };
-        if (entry === null) delete next[id];
-        else next[id] = { ...entry, at: prev?.at ?? Date.now() };
-        return { ...state2, [sessionId]: next };
-      });
-    },
-    noteCards: (sessionId, callIds, delta) => {
-      if (sessionId !== void 0) cards2.set((state2) => countCards(state2, sessionId, callIds, delta));
-    },
-    noteHeldCard: (sessionId, kind, requestId, delta) => {
-      if (sessionId !== void 0) heldCards.set((state2) => countCards(state2, sessionId, [heldCardKey(kind, requestId)], delta));
-    },
-    clearLive: (sessionId) => live.set((state2) => {
-      if (!state2[sessionId]) return state2;
-      const next = { ...state2 };
-      delete next[sessionId];
-      return next;
-    })
-  };
-}
-
 // src/client/draft-sweep.js
 var sessionKeys = (id) => [`dsh.conversation.${id}`, `dsh.sidebar-right.v1.${id}`];
 var NAMING_MAX = 200;
@@ -30521,8 +30685,9 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   };
   const pinned = bot.pinned === true && !crowned;
   const role = crowned ? bot.role : "";
-  const tag = roleTagOf(bot, roster.prefs, roster, t);
-  const label = [bot.name, tag, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", notInstalled ? notInstalledText : running2 || away ? t("Working") : "", notInstalled ? "" : waitsFor, notInstalled ? "" : stoppedLine, notInstalled ? "" : approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
+  const definitions = useEntries(roleContributions);
+  const tags = roleTags(roster, bot, definitions);
+  const label = [bot.name, ...tags.map((tag) => tag.name), role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", notInstalled ? notInstalledText : running2 || away ? t("Working") : "", notInstalled ? "" : waitsFor, notInstalled ? "" : stoppedLine, notInstalled ? "" : approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
   return (0, import_react63.createElement)(
     "button",
     {
@@ -30536,12 +30701,19 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
       onClick: () => actions.openSession(id),
       onContextMenu
     },
-    (0, import_react63.createElement)(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state: state2, count: waitingCount, main, crown: crowned }),
+    (0, import_react63.createElement)(BotAvatar, { bot, roster, size: crowned && wide ? 42 : 36, state: state2, count: waitingCount, main, crown: crowned }),
     pinned && !wide ? (0, import_react63.createElement)(PinMark) : null,
     wide ? (0, import_react63.createElement)(
       "span",
       { className: "bt-row-body" },
-      (0, import_react63.createElement)("span", { className: "bt-row-name" }, (0, import_react63.createElement)("span", { className: "bt-row-title" }, bot.name), tag ? (0, import_react63.createElement)("span", { className: "bt-tag" }, tag) : null, role ? (0, import_react63.createElement)("span", { className: "bt-role" }, role) : null, pinned ? (0, import_react63.createElement)(PinMark) : null),
+      (0, import_react63.createElement)(
+        "span",
+        { className: "bt-row-name" },
+        (0, import_react63.createElement)("span", { className: "bt-row-title" }, bot.name),
+        tags.length ? (0, import_react63.createElement)("span", { className: "bt-row-role-tags" }, tags.map((tag) => (0, import_react63.createElement)("span", { key: tag.id, className: "bt-tag" }, tag.name))) : null,
+        role ? (0, import_react63.createElement)("span", { className: "bt-role" }, role) : null,
+        pinned ? (0, import_react63.createElement)(PinMark) : null
+      ),
       // What to ask this Bot for, on a line of its own: the name line has no room for it.
       (0, import_react63.createElement)(BotPills, { roster, bot, className: "bt-row-caps" }),
       blockedLine || stoppedLine ? (0, import_react63.createElement)("span", { className: "bt-row-preview bt-row-preview-ask" }, blockedLine || stoppedLine) : runningLine ? (0, import_react63.createElement)("span", { className: "bt-row-preview" }, runningLine) : awayLine ? (0, import_react63.createElement)("span", { className: "bt-row-preview" }, awayLine) : waitsFor ? (0, import_react63.createElement)("span", { className: "bt-row-preview" }, waitsFor) : threadsLine ? (0, import_react63.createElement)("span", { className: "bt-row-preview" }, threadsLine) : preview ? (0, import_react63.createElement)("span", { className: "bt-row-preview" }, preview) : null
@@ -30557,8 +30729,9 @@ function RowBadges(props) {
 }
 function BotChildren({ wide, ...props }) {
   const entries2 = useEntries(botChildren);
+  const definitions = useEntries(roleContributions);
   if (!wide || entries2.length === 0) return null;
-  return entries2.filter((entry) => roleOutletVisible("botChildren", entry.id, props.bot, props.roster)).map((entry) => (0, import_react63.createElement)(entry.Component, { key: entry.id, ...props, wide }));
+  return entries2.filter((entry) => roleContributionVisible("botChildren", entry.id, props.bot, props.roster, definitions)).map((entry) => (0, import_react63.createElement)(entry.Component, { key: entry.id, ...props, wide }));
 }
 function threadAge(ms, now = Date.now()) {
   const minutes = Math.floor(Math.max(0, now - ms) / 6e4);
@@ -31511,6 +31684,7 @@ function BrandName() {
   return (0, import_react63.createElement)("span", { className: "bt-brand-name" }, (0, import_react63.createElement)(Wordmark, { height: 25 }));
 }
 var SIDEBAR_CSS = `
+.bt-row-role-tags{display:flex;gap:6px;min-width:0;overflow:hidden}
 .bt-confirm{width:260px;max-width:72vw;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px}
 .bt-confirm-text{margin:0;font-size:13px;line-height:19px;color:var(--bt-ink-2)}
 .bt-confirm-error{margin:0;font-size:12px;line-height:17px;color:var(--st-bad-strong,var(--bt-danger));overflow-wrap:anywhere}
@@ -38904,12 +39078,17 @@ var own2 = (map, id) => Object.hasOwn(map ?? {}, id) ? map[id] : void 0;
 var actionReason = (row2) => row2.record ? row2.inUse && t(UNINSTALL_REASON) : row2.listed?.installable === false && t(COMMUNITY_REASON);
 var checksum = (sha256) => (0, import_react88.createElement)("code", null, sha256.match(/.{1,16}/g).map((part, index) => (0, import_react88.createElement)("span", { key: index }, index ? (0, import_react88.createElement)("wbr") : null, part)));
 function shopRoles(roster) {
-  if (!rolesOn(roster?.prefs)) return [];
   const bots = roster?.bots ?? Object.values(roster?.byId ?? {});
   const attached = new Set(bots.flatMap(attachedRoleIds));
   const catalog = new Map((roster?.roleCatalog?.roles ?? []).map((role) => [role.id, role]));
-  const rows2 = [];
-  if (bots.some((bot) => bot.kind === BUILTIN_ROLES.genie.kind)) {
+  const rows2 = (roster?.roleProviders ?? []).map((provider) => ({
+    key: `role:registry:${provider.id}`,
+    id: provider.id,
+    name: roleName(roster, provider.id),
+    provider
+  }));
+  if (!rolesOn(roster?.prefs)) return rows2;
+  if (!roleProvider(roster, "genie") && bots.some((bot) => bot.kind === BUILTIN_ROLES.genie.kind)) {
     rows2.push({ key: BUILTIN_KEY, id: "genie", name: t("Genie"), builtIn: true });
   }
   for (const id of /* @__PURE__ */ new Set([...catalog.keys(), ...Object.keys(roster?.roles ?? {})])) {
@@ -38928,11 +39107,11 @@ function shopRoles(roster) {
       inUse: attached.has(id)
     });
   }
-  const rank = (row2) => row2.builtIn ? 0 : row2.listed?.installable ? 1 : row2.listed ? 2 : 3;
+  const rank = (row2) => row2.builtIn || row2.provider ? 0 : row2.listed?.installable ? 1 : row2.listed ? 2 : 3;
   return rows2.sort((a, b) => rank(a) - rank(b));
 }
 function roleAction(row2, roster, actions, operation, className) {
-  if (row2.builtIn) return null;
+  if (row2.builtIn || row2.provider) return null;
   const { id, record } = row2;
   const action = record ? actions.uninstallRole : actions.installRole;
   const reason = actionReason(row2);
@@ -38948,12 +39127,12 @@ function roleAction(row2, roster, actions, operation, className) {
   }, record ? t("Uninstall") : t("Install"));
 }
 function RoleTile({ row: row2, roster, actions, operation, open }) {
-  const { name, builtIn, record, listed, declarations: declarations2 } = row2;
+  const { name, builtIn, provider, record, listed, declarations: declarations2 } = row2;
   const tag = builtIn ? t("Built in") : listed ? t(listed.installable ? "Official" : "Community") : t("Installed");
   const reason = actionReason(row2);
   const status = [
     record && (record.status === "ok" ? t("Installed") : roleHealth(record.status)),
-    record ? record.version : listed?.version,
+    record ? record.version : listed?.version ?? provider?.version,
     declarations2?.description
   ].filter(Boolean).join(" · ");
   return (0, import_react88.createElement)(
@@ -38961,7 +39140,7 @@ function RoleTile({ row: row2, roster, actions, operation, open }) {
     null,
     (0, import_react88.createElement)(
       "div",
-      { className: "bt-app", "data-state": record || builtIn ? "ready" : "off" },
+      { className: "bt-app", "data-state": record || builtIn || provider ? "ready" : "off" },
       (0, import_react88.createElement)(
         "button",
         { type: "button", className: "bt-app-main", onClick: () => open(row2.key) },
@@ -38999,6 +39178,13 @@ function newerVersion(candidate, installed) {
   return false;
 }
 function RoleShopCard({ row: row2, roster, actions, operation }) {
+  if (row2.provider) return (0, import_react88.createElement)(
+    Card2,
+    null,
+    (0, import_react88.createElement)(Row, { label: t("Installed"), hint: t("Attach it from the Bot’s settings.") }),
+    (0, import_react88.createElement)(Row, { label: t("Declared tools"), hint: row2.provider.tools.join(", ") || t("None") }),
+    (0, import_react88.createElement)(Row, { label: t("Grants requested"), hint: row2.provider.capabilities.join(", ") || t("None") })
+  );
   if (row2.builtIn) return (0, import_react88.createElement)(
     Card2,
     null,
@@ -49352,10 +49538,10 @@ function personWrote(outline, hiddenTurns = []) {
   if (!Array.isArray(outline)) return false;
   return outline.some((entry) => !hiddenTurns.includes(entry.turn) && typeof entry.prompt === "string" && entry.prompt.trim() !== "" && !HEADER.test(entry.prompt));
 }
-function suggestionsFor(entries2, context) {
+function suggestionsFor(entries2, context, definitions) {
   const items = [];
   for (const entry of entries2) {
-    if (!roleOutletVisible("suggestions", entry.id, context.bot, context.roster)) continue;
+    if (!roleContributionVisible("suggestions", entry.id, context.bot, context.roster, definitions)) continue;
     try {
       if (entry.when && !entry.when(context)) continue;
       for (const item of entry.items(context) ?? []) if (item?.label && item?.text) items.push({ ...item, key: `${entry.id}:${item.id ?? item.label}` });
@@ -49380,12 +49566,13 @@ function SuggestionDock({ sessionId, input, session, useRoster, useSessions }) {
   const outline = (list) => list.projectionsBySession?.[part]?.values?.turnOutline ?? list.byId?.[part]?.projectionValues?.turnOutline;
   const wrote = useSessions ? useSessions((list) => personWrote(outline(list), roster?.exchangeTurns?.[part] ?? [])) : true;
   const entries2 = useEntries(chatSuggestions);
+  const definitions = useEntries(roleContributions);
   const [images, setImages] = (0, import_react110.useState)(false);
   (0, import_react110.useEffect)(() => {
     void imageAccess().then(setImages);
   }, [sessionId]);
   if (!bot || wrote || session?.running || (input?.draft ?? "").trim() !== "") return null;
-  const items = suggestionsFor(entries2, { bot, roster, images });
+  const items = suggestionsFor(entries2, { bot, roster, images }, definitions);
   if (items.length === 0) return null;
   return (0, import_react110.createElement)(
     "div",
@@ -50821,6 +51008,14 @@ function OpeningAwareHeader(props) {
   return (0, import_react114.createElement)(HeaderPill, { ...props, useSessions: useVisibleSessions, useTurnClock: useVisibleClock });
 }
 var currentFace = null;
+var roleToolCards = Object.freeze({
+  ...toolCards,
+  register: (names, render, options) => toolCards.register(names, typeof render === "function" ? (props) => {
+    const bot = ownRole(props.roster?.byId, props.sessionId);
+    return roleContributionVisible("toolCards", props.tool, bot, props.roster) ? render(props) : null;
+  } : render, options)
+});
+roleContributions.source.subscribe(() => toolCards.source.set((cards2) => [...cards2]));
 var omni = Object.freeze({
   // The host's POST /api/omni-ui, which their own host halves extend.
   call,
@@ -50832,7 +51027,7 @@ var omni = Object.freeze({
   dateLocale,
   // The Bot surface: what runs while it is up, and what draws in its places.
   onShell,
-  toolCards,
+  toolCards: roleToolCards,
   nav,
   badges,
   botChildren,
@@ -50844,6 +51039,7 @@ var omni = Object.freeze({
   chatSuggestions,
   registerComposerPack,
   setCanvasRenderer,
+  roles: clientRoles,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons: icons_exports, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
   // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's
