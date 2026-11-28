@@ -5,7 +5,7 @@ import { teamHomeOf } from './folders.js'
 import { ACTIVATION_COMPARE } from './state-format.js'
 import { LISTENER_UNKNOWN } from './supervisor/child.js'
 import { inDesktopApp } from './constants.js'
-import { currentOf, hasBootId, isId, publicVersion, REINSTALL_REFUSAL, reinstallRefusalReason, runOf, supervisorStateOf } from './supervisor/records.js'
+import { currentOf, hasBootId, isId, publicVersion, REINSTALL_REFUSAL, reinstallRefusalReason, RUNNING, runOf, supervisorStateOf } from './supervisor/records.js'
 import { PLUGINS } from './supervisor/release.js'
 import { comparesActivations, liveTeamLineage, teamSnapshot } from './supervisor/rollback.js'
 import { readJson, usableStore } from './supervisor/store.js'
@@ -72,31 +72,48 @@ export function stateWriteProof(rt, env = { ...process.env }) {
   const announced = env.AUTOMAGIK_SUPERVISOR_RUN
   let bootRun = announced
   let steady = false
-  return ({ compare = false } = {}) => {
+  let committed
+  let candidate = announced !== undefined && env[ACTIVATION_COMPARE] === `${supervisor?.bootId}:${announced}`
+  return ({ compare = false, legacyBootstrap = false } = {}) => {
     if (supervisor === null) return announced ? 'held' : 'steady'
+    const withoutLiveRun = () => legacyBootstrap && bootRun === undefined ? 'steady' : 'held'
     const profileDir = rt.ctx.get?.('profileContext')?.dir
     const records = readStore(profileDir)
-    if (!records.storeDir) return 'held'
+    if (!records.storeDir) return withoutLiveRun()
     const { bootId } = supervisor
     const bootIds = bootIdsOf(records, bootId)
     const announcement = supervisorStateOf(records.supervisorRecord, bootIds)
-    if (announcement?.bootId !== bootId) return 'held'
+    if (announcement?.bootId !== bootId) return withoutLiveRun()
+    // A 5b child can bind to the announcement before its run record is readable.
+    if (!steady && bootRun === undefined && announcement.runId !== null) bootRun = announcement.runId
     const { current, run, problem } = stateOf(records, bootId, bootIds)
-    if (problem) return 'held'
+    const inTrial = ['restarting', 'health'].includes(run?.phase)
+    if (inTrial && run.runId === bootRun) candidate = true
+    if (problem) return withoutLiveRun()
     if (announcement.runId === null && bootRun === undefined) {
       steady = true
       return 'steady'
     }
-    if (run === null) return 'held'
-    // Delivery 5b supplied a live record but no RUN in the child's environment.
-    if (!steady && bootRun === undefined) bootRun = run.runId
+    if (run === null) return withoutLiveRun()
+    const bound = run.runId === bootRun
     // An early refusal leaves the original child in place with its team unchanged.
-    if (steady && ['checking', 'downloading', 'verifying', 'staging', 'notUpdated'].includes(run.phase)) return 'steady'
-    if (run.runId !== bootRun || rt.statePath !== join(teamHomeOf(env), 'state.json')) return 'held'
-    if (run.phase === 'healthy' && run.reason === 'health-check-finished' && current?.live?.version === run.to
-      && current.live.sequence === records.runRecord.sequence) return 'steady'
-    if (run.phase === 'rolledBack' || run.phase === 'notUpdated') return 'returned'
-    if (!compare || !['restarting', 'health'].includes(run.phase)
+    if (steady && !bound && ['checking', 'downloading', 'verifying', 'staging', 'notUpdated'].includes(run.phase)
+      && (!committed || current?.live?.version === committed.version && current.live.sequence === committed.sequence)) return 'steady'
+    const sameHome = rt.statePath === join(teamHomeOf(env), 'state.json')
+    if (bound && sameHome && run.phase === 'healthy' && run.reason === 'health-check-finished'
+      && current?.live?.version === run.to && current.live.sequence === records.runRecord.sequence) {
+      committed = current.live
+      steady = true
+      return 'steady'
+    }
+    // Before the RUN flag existed, a live announcement can still fence an
+    // absent roster. A terminal verdict releases only ordinary bootstrap.
+    if (legacyBootstrap && bound) {
+      return RUNNING.has(run.phase) || run.phase === 'manualRecovery' ? 'held' : 'steady'
+    }
+    if (!bound || !sameHome) return 'held'
+    if (run.phase === 'rolledBack' || run.phase === 'notUpdated') return candidate ? 'held' : 'returned'
+    if (!compare || !inTrial
       || env[ACTIVATION_COMPARE] !== `${bootId}:${bootRun}` || announced !== bootRun) return 'held'
     try {
       const { journal } = records.runRecord

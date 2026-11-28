@@ -8,6 +8,7 @@ import { createRuntime } from '../index.js'
 import { AGENT_TOOLS } from '../src/host/agent-access.js'
 import { UPDATE_CUT } from '../src/host/constants.js'
 import { install as installResume, RESUME_DELAY_MS } from '../src/host/resume.js'
+import { createRoleSettings } from '../src/host/role-settings.js'
 import { createUpdateHold, GONE_WAIT_MS, install, PROFILE_WAIT_MS, STALL_MS, STOP_WAIT_MS, UNANSWERED_MS } from '../src/host/self-update-hold.js'
 import { stateWriteProof, storeDirOf, writeJsonAtomic } from '../src/host/self-update.js'
 import { ACTIVATION_COMPARE } from '../src/host/state-format.js'
@@ -16,6 +17,7 @@ import { fakeContext } from './fake-ctx.js'
 import { prepareRollback } from './fixtures/w1-format-predecessor.mjs'
 import { fixture, write } from './fixtures/supervisor.mjs'
 import { fileURLToPath } from 'node:url'
+import { pins, rosterBytes } from './fixtures/w1-format-profile.mjs'
 
 test('bound write proof follows replay snapshots and the matching durable healthy current', async t => {
   const plugin = fileURLToPath(new URL('../', import.meta.url))
@@ -38,6 +40,14 @@ test('bound write proof follows replay snapshots and the matching durable health
   assert.equal(stateWriteProof(team, { ...env, [ACTIVATION_COMPARE]: 'prior-boot:' + run.runId })({ compare: true }), 'held')
   const lagging = stateWriteProof(team, { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined })
   assert.equal(lagging({ compare: true }), 'held')
+  assert.equal(lagging({ legacyBootstrap: true }), 'held')
+  const unreadable = stateWriteProof(team, { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined })
+  fs.writeFileSync(join(store, 'state.json'), '{')
+  assert.equal(unreadable({ legacyBootstrap: true }), 'held')
+  write(join(store, 'supervisor.json'), { bootId: 'stale-boot', runId: run.runId, version: 1 })
+  assert.equal(unreadable({ legacyBootstrap: true }), 'held')
+  write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: run.runId, version: 1 })
+  runStatus('health', null)
   const snap = join(store, run.journal.keep, 'data', 'bots-state.json')
   fs.writeFileSync(snap, original.toString() + '\n')
   assert.equal(proof({ compare: true }), 'held')
@@ -45,12 +55,21 @@ test('bound write proof follows replay snapshots and the matching durable health
   assert.equal(proof({ compare: true }), 'held')
   runStatus('healthy', 'health-check-finished')
   assert.equal(lagging(), 'held')
+  assert.equal(lagging({ legacyBootstrap: true }), 'steady')
   write(join(store, 'current.json'), { version: 1, live: { version: run.to, sequence: run.sequence - 1 },
     kept: { version: run.from }, lastSequence: run.sequence - 1 })
   assert.equal(lagging(), 'held')
   write(join(store, 'current.json'), { version: 1, live: { version: run.to, sequence: run.sequence },
     kept: { version: run.from }, lastSequence: run.sequence })
   assert.equal(lagging(), 'steady')
+  const previousEnv = { ...env, [ACTIVATION_COMPARE]: undefined }
+  const laggingCandidate = stateWriteProof(team, previousEnv)
+  runStatus('health', null)
+  assert.equal(laggingCandidate(), 'held')
+  runStatus('rolledBack', 'health-failed')
+  assert.equal(proof(), 'held')
+  assert.equal(laggingCandidate(), 'held')
+  assert.equal(stateWriteProof(team, previousEnv)(), 'returned')
 })
 
 test('steady host resumes sidecar writes when an update is refused before stopping it', t => {
@@ -74,6 +93,54 @@ test('steady host resumes sidecar writes when an update is refused before stoppi
   assert.equal(proof(), 'steady')
   // A child started for the run cannot use this refusal as proof of a committed candidate.
   assert.equal(stateWriteProof(team, { ...supervisor, AUTOMAGIK_SUPERVISOR_RUN: runId })(), 'returned')
+})
+
+test('a committed host still writes role settings after a later run refuses without restarting', async t => {
+  const { profileDir, store, botsHome } = fixture(t)
+  const boot = 'committed-boot'
+  const first = 'committed-run'
+  const later = 'later-owner-run'
+  const env = {
+    AUTOMAGIK_BOTS_HOME: botsHome, AUTOMAGIK_SUPERVISOR_BOOT: boot,
+    AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8', AUTOMAGIK_SUPERVISOR_RUN: first,
+  }
+  for (const [name, value] of Object.entries(env)) {
+    const original = process.env[name]
+    process.env[name] = value
+    t.after(() => { if (original === undefined) delete process.env[name]; else process.env[name] = original })
+  }
+  const stamp = new Date().toISOString()
+  const phase = (runId, phase, reason, to) => {
+    write(join(store, 'supervisor.json'), { version: 1, bootId: boot, runId })
+    write(join(store, 'state.json'), { version: 1, bootId: boot, runId, phase, reason, from: '3.178.5',
+      to, sequence: 28, startedAt: stamp, updatedAt: stamp })
+  }
+  const current = sequence => write(join(store, 'current.json'), {
+    version: 1, live: { version: '3.178.8', sequence }, kept: null, lastSequence: sequence,
+  })
+  current(28)
+  phase(first, 'healthy', 'health-check-finished', '3.178.8')
+  fs.writeFileSync(join(botsHome, 'state.json'), rosterBytes(2, { roles: [pins.voice] }))
+  const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+  const rt = createRuntime(ctx, { home: botsHome, github: false })
+  t.after(async () => { rt.dispose(); await ctx.dispose() })
+  await rt.load()
+  const settings = createRoleSettings(botsHome)
+  const spec = [{ key: 'voice', kind: 'voice' }]
+  const set = voice => settings.write('a', pins.voice.id, spec, { voice }, () => {})
+  assert.deepEqual(await set('committed'), { voice: 'committed' })
+  phase(later, 'checking', null, '3.178.9')
+  assert.deepEqual(await set('checking'), { voice: 'checking' })
+  phase(later, 'notUpdated', 'listener-unknown', '3.178.9')
+  assert.deepEqual(await set('still serving'), { voice: 'still serving' })
+  current(29)
+  await assert.rejects(set('stale proof'), /after the update commits/)
+  current(28)
+  phase(later, 'health', null, '3.178.9')
+  await assert.rejects(set('wrong trial'), /after the update commits/)
+  phase(later, 'rolledBack', 'health-failed', '3.178.9')
+  await assert.rejects(set('wrong verdict'), /after the update commits/)
+  assert.deepEqual(await settings.read('a', pins.voice.id, spec), { voice: 'still serving' })
 })
 
 const bootId = 'd5b-fixture-boot'

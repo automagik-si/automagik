@@ -130,6 +130,47 @@ for (const format of [2, 3]) {
   })
 }
 
+test('the continuing lock holder keeps its legacy roster after the file is deleted', async t => {
+  const { rt, statePath, home } = runtime(t, rosterBytes(2).toString())
+  await rt.load()
+  assert.equal(rt.holdsLock(), true)
+  const before = structuredClone(rt.botOf('a'))
+  fs.unlinkSync(statePath)
+  await rt.refresh()
+  assert.equal(rt.holdsLock(), true)
+  assert.deepEqual(rt.botOf('a'), before)
+  assert.equal(fs.existsSync(statePath), false)
+  assert.equal(await rt.save({ required: true, durable: true }), true)
+  assert.deepEqual(decoded(statePath).bots.a, before)
+  assert.deepEqual(fs.readdirSync(home).filter(name => name.startsWith('state.json.replaced-')), [])
+})
+
+for (const discovery of ['refresh', 'save', 'takeover']) {
+  test('a missing protected roster stays fenced when discovered by ' + discovery, async t => {
+    const ids = [activationIds.registry]
+    const source = rosterBytes(4, { roles: [pins.registry], stateActivations: ids })
+    const { rt, home, statePath, dispose } = runtime(t, source.toString(), installProtected)
+    await rt.load()
+    let writer = rt
+    if (discovery === 'takeover') {
+      const reader = host(home, undefined, installProtected)
+      t.after(reader.dispose)
+      await reader.rt.load()
+      writer = reader.rt
+      await dispose()
+    }
+    fs.unlinkSync(statePath)
+    if (discovery === 'save') await assert.rejects(writer.save({ required: true }), { code: 'ELOCKLOST' })
+    else await writer.refresh()
+    await writer.save()
+    await assert.rejects(writer.save({ required: true }), /activation could not be confirmed/)
+    assert.deepEqual(writer.state.stateActivations, ids)
+    assert.equal(writer.teamHealth(), null)
+    assert.equal(writer.holdsLock(), false)
+    assert.deepEqual(fs.readdirSync(home), ['state.lock'])
+  })
+}
+
 test('malformed or unknown format-5 IDs refuse load, reader takeover, and outside replacement before decode', async t => {
   const source = rosterBytes(3).toString()
   const { rt, home, statePath, dispose } = runtime(t, source, installProtected)
@@ -157,6 +198,18 @@ test('malformed or unknown format-5 IDs refuse load, reader takeover, and outsid
   fs.writeFileSync(statePath, source)
   await reader.rt.refresh()
   assert.equal(reader.rt.botOf('a').id, 'a')
+})
+
+test('an unknown attachment source cannot borrow a committed registry activation', async t => {
+  const source = rosterBytes(4, {
+    roles: [{ ...pins.solver, source: 'package' }], stateActivations: [activationIds.registry],
+  })
+  const { rt, statePath } = runtime(t, source.toString(), installProtected)
+  await rt.load()
+  assert.equal(rt.botOf('a'), undefined)
+  assert.match(rt.readOnly(), /unrecognized saved Bot role attachments/)
+  await assert.rejects(rt.save({ required: true }), /unrecognized saved Bot role attachments/)
+  assert.deepEqual(fs.readFileSync(statePath), source)
 })
 
 test('stale queued permission copies cannot replay across an activation', async t => {

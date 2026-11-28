@@ -103,6 +103,12 @@ export function install(rt, { contract = updateContract } = {}) {
   let committedActivations = []
   let activationEpoch = 0
   let activationFence = false
+  const fenceActivation = () => {
+    if (activationFence) return
+    activationFence = true
+    rt.solverSettle?.cancel()
+    rt.dropAllGrants?.()
+  }
   let retryActivation
   let committedPins = new Map()
   const pinsIn = ({ bots } = {}) => new Map(Object.entries(bots ?? {}).map(([id, bot]) => [
@@ -127,9 +133,9 @@ export function install(rt, { contract = updateContract } = {}) {
   let teamPresentAtLoad = null
   // Preserve ENOENT as evidence until the supervisor decides the trial.
   const missingTeamHeld = () => teamPresentAtLoad === false && (rt.teamImportPending?.() === true
-    || (rt.stateWriteProof === undefined
-      ? !!process.env.AUTOMAGIK_SUPERVISOR_RUN && rt.updateHold?.awaitingBootVerdict !== false
-      : !sidecarAllowed()))
+    || (process.env.AUTOMAGIK_SUPERVISOR_RUN
+      ? rt.updateHold?.awaitingBootVerdict !== false
+      : rt.stateWriteProof?.({ legacyBootstrap: true }) === 'held'))
   let writing = Promise.resolve()
   let savedRecovery = recoveryFields(state)
   // Failed attempts stay with their owner. A published replacement can survive a takeover.
@@ -308,6 +314,7 @@ export function install(rt, { contract = updateContract } = {}) {
     } catch (error) {
       seen = stamp()
       if (error?.code === 'ENOENT') {
+        if (committedActivations.length) fenceActivation()
         stuck = undefined
         unconfirmedState = undefined
         return undefined
@@ -408,6 +415,7 @@ export function install(rt, { contract = updateContract } = {}) {
   // Fill `state` from the saved file and bring an older team up to date. Returns the
   // groups whose Session titles still need the new name.
   const adopt = (parsed) => {
+    if (activationFence) return { migrated: false, stale: [], repaired: false, retiredSeed: false }
     lockEpoch += 1
     // Until the end of this: a file that could not be read, or was set aside as corrupt,
     // leaves an empty team in memory that is not the saved one.
@@ -424,7 +432,7 @@ export function install(rt, { contract = updateContract } = {}) {
     const valid = parsed !== null && parsed !== undefined ? true : stuck === undefined && !aside
     const hadCapabilities = parsed !== null && parsed !== undefined && Object.hasOwn(parsed, 'capabilities')
     credentials.decode(parsed)
-    committedActivations = [...(parsed?.[STATE_ACTIVATIONS] ?? [])]
+    if (valid) committedActivations = [...(parsed?.[STATE_ACTIVATIONS] ?? [])]
     committedPins = pinsIn(parsed)
     for (const key of Object.keys(state)) delete state[key]
     Object.assign(state, JSON.parse(EMPTY), parsed ?? {})
@@ -791,6 +799,11 @@ export function install(rt, { contract = updateContract } = {}) {
   let recoveryPending = false
   const adoptAfterReclaim = ({ archive = true } = {}) => {
     const run = (adopting ?? writing).then(async () => {
+      if (activationFence) return false
+      if (committedActivations.length && !lstatSync(statePath, { throwIfNoEntry: false })) {
+        fenceActivation()
+        return false
+      }
       if (archive && stamp() !== seen) {
         let replacement
         try { replacement = JSON.parse(regularBytes(statePath)) } catch {}
@@ -881,6 +894,10 @@ export function install(rt, { contract = updateContract } = {}) {
     }
     const current = stamp()
     if (current !== seen && current !== publishing) {
+      // The current writer keeps its loaded legacy team when only the file was removed.
+      // Its next ordinary save can recreate it. Reclaim and protected snapshots use their own checks.
+      if (current === '' && teamRead && !committedActivations.length && rt.holdsLock()
+        && !lstatSync(statePath, { throwIfNoEntry: false })) return
       if (stuck === undefined && holder === undefined) return adoptAfterReclaim()
       const wasStuck = stuck !== undefined
       const { repaired, retiredSeed } = adopt(readFileState())
@@ -1139,7 +1156,9 @@ export function install(rt, { contract = updateContract } = {}) {
           const current = lockBroken ? '' : stamp()
           // An outside edit is adopted instead of overwritten; deletion can be saved again.
           const changed = owned && (strict || current !== '') && current !== seen
-          if (changed) void adoptAfterReclaim().catch(() => {})
+          if (changed && current === '' && committedActivations.length
+            && !lstatSync(statePath, { throwIfNoEntry: false })) fenceActivation()
+          else if (changed) void adoptAfterReclaim().catch(() => {})
           if (!owned || changed || lockEpoch !== epoch || (strict && stopped) || (flush && !sameGeneration(generation))) {
             const error = new Error(changed ? 'ds-bot: the Bot team file changed under this host\'s lock' : 'ds-bot lost the state lock to another dsh')
             error.code = 'ELOCKLOST'
@@ -1239,11 +1258,7 @@ export function install(rt, { contract = updateContract } = {}) {
         }
         return true
       } catch (error) {
-        if (strict && renamed && !confirmed) {
-          activationFence = true
-          rt.solverSettle?.cancel()
-          rt.dropAllGrants?.()
-        }
+        if (strict && renamed && !confirmed) fenceActivation()
         await unlink(temp).catch(() => {})
         throw error
       }
