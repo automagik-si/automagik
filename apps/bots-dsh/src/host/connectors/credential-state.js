@@ -4,6 +4,7 @@ import { credentialFields, credentialParts } from './credential-fields.js'
 import { CONNECTOR_KEY, publishConnectorKey, readConnectorKey } from './credential-key.js'
 
 export const ENCRYPTED_STATE_VERSION = 3
+export const encryptedStateFormat = version => version === ENCRYPTED_STATE_VERSION || version === 5
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isEnvelope = value => record(value) && Object.hasOwn(value, 'enc')
 const isLiteral = value => record(value) && Object.hasOwn(value, 'literal')
@@ -71,7 +72,7 @@ function copyConnectorFields(state) {
 export function checkImportedCredentials(bytes, key) {
   let parsed
   try { parsed = JSON.parse(bytes) } catch { return }
-  if (parsed?.version !== ENCRYPTED_STATE_VERSION) return
+  if (!encryptedStateFormat(parsed?.version)) return
   for (const field of credentialFields(parsed.connectors)) {
     if (isEnvelope(field.value) && decrypt(field, field.value, key) === undefined) {
       throw new Error('The imported Bot team needs a matching connector key.')
@@ -79,7 +80,7 @@ export function checkImportedCredentials(bytes, key) {
   }
 }
 
-export function connectorState(home, holdsLock) {
+export function connectorState(home, mayCreateKey) {
   const path = join(home, CONNECTOR_KEY)
   let committed = new Map()
   const unavailable = new WeakSet()
@@ -89,14 +90,14 @@ export function connectorState(home, holdsLock) {
     let key
     for (const field of credentialFields(parsed?.connectors)) {
       const { fields, name, value } = field
-      if (parsed.version === ENCRYPTED_STATE_VERSION && isEnvelope(value)) {
+      if (encryptedStateFormat(parsed.version) && isEnvelope(value)) {
         key ??= readConnectorKey(path)
         const clear = decrypt(field, value, key)
         committed.set(address(field), { value, envelope: true, hash: clear === undefined ? undefined : hash(clear) })
         if (clear === undefined) unavailable.add(value)
         else fields[name] = clear
       } else {
-        if (parsed.version === ENCRYPTED_STATE_VERSION && isLiteral(value)) fields[name] = value.literal
+        if (encryptedStateFormat(parsed.version) && isLiteral(value)) fields[name] = value.literal
         committed.set(address(field), { value: fields[name] })
       }
     }
@@ -123,7 +124,7 @@ export function connectorState(home, holdsLock) {
     return copy
   }
 
-  const encode = (state, { initializeKey = true } = {}) => {
+  const encode = (state, { initializeKey = true, protectedState = false } = {}) => {
     const copy = copyConnectorFields(state)
     const snapshot = new Map()
     let key
@@ -131,11 +132,16 @@ export function connectorState(home, holdsLock) {
     let refused = false
     let encrypted = false
     let pending = false
+    let keyDeferred = false
     const keyIds = new Set([...committed.values()].filter(entry => entry.envelope).map(entry => entry.value.kid))
     const loadKeyForWrite = () => {
       if (key !== undefined) return
       key = readConnectorKey(path)
-      if (key.missing && initializeKey && holdsLock() && keyIds.size === 0) {
+      if (key.missing && initializeKey && keyIds.size === 0) {
+        if (!mayCreateKey(protectedState)) {
+          keyDeferred = true
+          return
+        }
         try { publishConnectorKey(path) } catch (error) {
           if (error?.code !== 'EEXIST') return
         }
@@ -148,6 +154,7 @@ export function connectorState(home, holdsLock) {
       let entry = { value }
       if (unavailable.has(value)) {
         entry = { value, envelope: true }
+        if (protectedState) key ??= readConnectorKey(path)
       } else {
         const parts = credentialParts(kind, name, value)
         if (parts.some(part => part.forms !== undefined)) {
@@ -177,16 +184,21 @@ export function connectorState(home, holdsLock) {
         encrypted ||= entry.envelope === true
       }
     }
+    copy.version = protectedState ? (encrypted ? 5 : 4) : (encrypted ? ENCRYPTED_STATE_VERSION : 2)
     if (encrypted) {
-      copy.version = ENCRYPTED_STATE_VERSION
       for (const field of credentialFields(copy.connectors)) {
         if (!snapshot.get(address(field))?.envelope && (isEnvelope(field.value) || isLiteral(field.value))) {
           field.fields[field.name] = { literal: field.value }
         }
       }
     }
-    return { bytes: JSON.stringify(copy), encrypted, refused, pending,
-      keyIsCurrent: () => !usedKey || readConnectorKey(path).identity === key.identity,
+    return { bytes: JSON.stringify(copy), encrypted, refused, pending, keyDeferred,
+      format: copy.version,
+      keyIsCurrent: () => {
+        if (!usedKey && !(protectedState && key !== undefined)) return true
+        const current = readConnectorKey(path)
+        return current.identity === key.identity && current.missing === key.missing
+      },
       commit: () => { committed = snapshot } }
   }
 

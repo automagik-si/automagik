@@ -1,13 +1,21 @@
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { teamHomeOf } from './folders.js'
+import { ACTIVATION_COMPARE } from './state-format.js'
 import { LISTENER_UNKNOWN } from './supervisor/child.js'
 import { inDesktopApp } from './constants.js'
-import { currentOf, hasBootId, isId, publicVersion, REINSTALL_REFUSAL, reinstallRefusalReason, runOf, supervisorStateOf } from './supervisor/records.js'
+import { currentOf, hasBootId, isId, publicVersion, REINSTALL_REFUSAL, reinstallRefusalReason, RUNNING, runOf, supervisorStateOf } from './supervisor/records.js'
 import { PLUGINS } from './supervisor/release.js'
+import { comparesActivations, liveTeamLineage, teamSnapshot } from './supervisor/rollback.js'
 import { readJson, usableStore } from './supervisor/store.js'
+import { validJournal } from './supervisor/switch.js'
 
 export { REASON_CODES } from './supervisor/records.js'
 export { prepareStore, storeDirOf, usableStore, writeJsonAtomic } from './supervisor/store.js'
+
+const trialPhases = new Set(['restarting', 'health'])
+const servingPhases = new Set(['checking', 'downloading', 'verifying', 'staging', 'notUpdated'])
 
 export function readCheckRecord(profileDir) {
   const checkStore = () => usableStore(profileDir)
@@ -58,6 +66,96 @@ export function supervisorOf(env = process.env) {
   const version = env?.AUTOMAGIK_SUPERVISOR_VERSION
   if (!isId(bootId) || !publicVersion(version, [bootId])) return null
   return { bootId, version }
+}
+
+// Used before host hooks, including by import. Re-read the executing supervisor's
+// records at publication. The copied code on disk may belong to a later version.
+export function stateWriteProof(rt, env = { ...process.env }) {
+  const supervisor = supervisorOf(env)
+  const announced = env.AUTOMAGIK_SUPERVISOR_RUN
+  let bootRun = announced
+  let steady = false
+  let committed
+  let returnedCurrent
+  let candidate = announced !== undefined && env[ACTIVATION_COMPARE] === `${supervisor?.bootId}:${announced}`
+  return ({ compare = false, legacyBootstrap = false } = {}) => {
+    if (supervisor === null) return announced ? 'held' : 'steady'
+    const withoutLiveRun = () => legacyBootstrap && bootRun === undefined ? 'steady' : 'held'
+    const profileDir = rt.ctx.get?.('profileContext')?.dir
+    const records = readStore(profileDir)
+    if (!records.storeDir) return withoutLiveRun()
+    const { bootId } = supervisor
+    const bootIds = bootIdsOf(records, bootId)
+    const announcement = supervisorStateOf(records.supervisorRecord, bootIds)
+    // The run record may be saved before the announcement. A same-boot
+    // active record can hold bootstrap but cannot itself authorize a write.
+    if (announcement?.bootId !== bootId || announcement.runId !== records.runRecord?.runId) {
+      const pending = runOf(records.runRecord, bootIds)
+      if (pending?.bootId === bootId && (RUNNING.has(pending.phase) || pending.phase === 'manualRecovery')) {
+        if (!steady && bootRun === undefined) bootRun = pending.runId
+        if (pending.runId === bootRun) {
+          candidate ||= trialPhases.has(pending.phase)
+          return 'held'
+        }
+        if (!servingPhases.has(pending.phase)) {
+          returnedCurrent = undefined
+          return 'held'
+        }
+      }
+    }
+    if (announcement?.bootId !== bootId) return withoutLiveRun()
+    // A 5b child can bind to the announcement before its run record is readable.
+    if (!steady && bootRun === undefined && announcement.runId !== null) bootRun = announcement.runId
+    const { current, run, problem } = stateOf(records, bootId, bootIds)
+    const inTrial = trialPhases.has(run?.phase)
+    if (inTrial && run.runId === bootRun) candidate = true
+    if (problem) return withoutLiveRun()
+    if (announcement.runId === null && bootRun === undefined) {
+      steady = true
+      return 'steady'
+    }
+    if (run === null) return withoutLiveRun()
+    const bound = run.runId === bootRun
+    // An early refusal leaves the original child in place with its team unchanged.
+    if (steady && !bound && servingPhases.has(run.phase)
+      && (!committed || current?.live?.version === committed.version && current.live.sequence === committed.sequence)) return 'steady'
+    const sameHome = rt.statePath === join(teamHomeOf(env), 'state.json')
+    if (!bound && returnedCurrent !== undefined) {
+      if (!sameHome || !servingPhases.has(run.phase)
+        || current?.live?.version !== returnedCurrent?.version || current?.live?.sequence !== returnedCurrent?.sequence) {
+        returnedCurrent = undefined
+      } else return 'returned'
+    }
+    if (bound && sameHome && run.phase === 'healthy' && run.reason === 'health-check-finished'
+      && current?.live?.version === run.to && current.live.sequence === records.runRecord.sequence) {
+      committed = current.live
+      steady = true
+      return 'steady'
+    }
+    // Before the RUN flag existed, a live announcement can still fence an
+    // absent roster. A terminal verdict releases only ordinary bootstrap.
+    if (legacyBootstrap && bound) {
+      return RUNNING.has(run.phase) || run.phase === 'manualRecovery' ? 'held' : 'steady'
+    }
+    if (!bound || !sameHome) return 'held'
+    if (run.phase === 'rolledBack' || run.phase === 'notUpdated') {
+      if (candidate) return 'held'
+      returnedCurrent = current?.live ?? null
+      return 'returned'
+    }
+    if (!compare || !inTrial
+      || env[ACTIVATION_COMPARE] !== `${bootId}:${bootRun}` || announced !== bootRun) return 'held'
+    try {
+      const { journal } = records.runRecord
+      if (!validJournal(records.runRecord) || journal.undo || journal.pending !== null
+        || journal.done.length !== journal.steps.length) return 'held'
+      const config = { store: records.storeDir, env }
+      return comparesActivations(config, records.runRecord)
+        && liveTeamLineage(teamSnapshot(config, records.runRecord)) === 'descended' ? 'compare' : 'held'
+    } catch {
+      return 'held'
+    }
+  }
 }
 
 function runView(run) {

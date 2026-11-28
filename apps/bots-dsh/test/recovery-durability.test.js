@@ -201,7 +201,7 @@ test('a published Solver copy keeps its Session when directory sync fails', posi
       defaultBotModel: async () => undefined,
       resolveAgent: async id => ({ session: { id } }),
       applyPermission: async () => {},
-      withSolverCopy: (_, create) => create({ pin: { id: 'solver', source: 'package' }, check() {} }),
+      withSolverCopy: (_, create) => create({ pin: { id: 'solver', version: '1.0.0', attachedAt: new Date(0).toISOString(), grants: [] }, check() {} }),
     })
     installRoster(rt)
     installReview(rt)

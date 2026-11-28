@@ -1,7 +1,7 @@
 import { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, readFileSync, readdirSync, fchmodSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { HISTORY_TIMEOUT_MS, LATE_ANSWER, SOURCE_KIND } from './constants.js'
-import { historyBack, readNotes } from './resume.js'
+import { historyBack, readNotes, savedReportApplies } from './resume.js'
 
 export const io = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, readFileSync, readdirSync, fchmodSync, existsSync }
 
@@ -118,14 +118,18 @@ export function install(rt) {
   const firstSends = new Map()
 
   const loadedHolder = () => !stopping && ctx.fiber?.uid !== null && rt.holdsLock() && rt.teamLoaded()
-  const owned = () => loadedHolder() && !unreadable && readTerm !== undefined && rt.lockTerm() === readTerm
+  const owned = () => loadedHolder() && rt.teamCurrent?.() !== false && !unreadable
+    && readTerm !== undefined && rt.lockTerm() === readTerm
+  const canWrite = () => owned() && rt.sidecarWritable?.({ legacy: true }) !== false
   const guard = () => {
     const mine = epoch
     const term = readTerm
-    return () => owned() && epoch === mine && readTerm === term
+    return () => canWrite() && epoch === mine && readTerm === term
   }
   const known = report => report !== undefined && !report.foreign && !report.headless
   const open = report => known(report) && report.open && reports.get(report.id) === report
+    && savedReportApplies(rt, report.botId, report.intent.report?.taskSessionId,
+      report.kind === 'group-report' ? report.intent.roomId : undefined)
   const old = report => Date.now() - report.intent.at > WEEK_MS
   const unmarked = id => diskUnmarked.has(id) || rt.deliveryNote(id)?.marked === false
   const pending = id => firstSends.get(id) === rt.lockTerm()
@@ -178,6 +182,7 @@ export function install(rt) {
   }
 
   function append(record, { sync = true } = {}) {
+    if (!canWrite()) throw new Error('The wake log is held for the update.')
     const line = JSON.stringify(record)
     const bytes = Buffer.from(`${torn ? '\n' : ''}${line}\n`)
     try {
@@ -221,7 +226,7 @@ export function install(rt) {
   function rewrite() {
     clearImmediate(rewriteTimer)
     rewriteTimer = undefined
-    if (!owned() || (reports.size === 0 && size === 0)) return
+    if (!canWrite() || (reports.size === 0 && size === 0)) return
     const next = new Map()
     const lines = []
     const since = Date.now() - WEEK_MS
@@ -681,7 +686,7 @@ export function install(rt) {
     intent(fields) {
       if (unreadable || rt.loginTextMatches?.(fields.report.text)
         || rt.reportHasLoginCode?.({ ...fields.report, roomId: fields.roomId })) return 'off'
-      if (!owned()) return 'unowned'
+      if (!canWrite()) return 'unowned'
       try {
         append({ v: 1, ...fields, at: Date.now(), event: 'intent' })
         firstSends.set(fields.id, readTerm)

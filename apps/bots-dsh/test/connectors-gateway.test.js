@@ -2,7 +2,172 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
+import { mailSecretName } from '../src/host/connectors/mail/presets.js'
 import { createGateway } from '../src/host/connectors/gateway.js'
+import { createRuntime } from '../index.js'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fakeContext } from './fake-ctx.js'
+import { rosterBytes, scratch } from './fixtures/w1-format-profile.mjs'
+
+test('a direct connector mutation cannot create a key or publish a roster during a trial', async t => {
+  const home = scratch(t)
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const rt = createRuntime(ctx, { home, github: false })
+  await rt.load()
+  const before = readFileSync(rt.statePath)
+  rt.stateWriteProof = () => 'held'
+  const fetch = t.mock.method(globalThis, 'fetch', () => assert.fail('Held connector sign-in reached OAuth discovery'))
+  await assert.rejects(rt.connectorEndpoint('connector-add', {
+    name: 'Fixture', command: 'fixture-never-exec', env: { TOKEN: 'fixture-credential-value' },
+  }), /after the update commits/)
+  await assert.rejects(rt.connectorEndpoint('connector-connect', { id: 'notion' }), /after the update commits/)
+  assert.equal(fetch.mock.callCount(), 0)
+  assert.equal(existsSync(join(home, 'connector-key')), false)
+  assert.deepEqual(readFileSync(rt.statePath), before)
+  assert.equal(rt.state.connectors, undefined)
+})
+
+test('a hold refuses new mail accounts and removal, and lets an admitted login finish', async t => {
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const home = scratch(t)
+  writeFileSync(join(home, 'state.json'), rosterBytes(2))
+  let proof = 'steady'
+  const connect = t.mock.fn(async () => {
+    proof = 'held'
+    return { close: async () => {} }
+  })
+  const fetch = t.mock.fn(() => assert.fail('Held Google sign-in reached discovery'))
+  const rt = createRuntime(ctx, { home, github: false, mail: { connect, fetch } })
+  await rt.load()
+  rt.stateWriteProof = () => proof
+  const existing = 'existing@example.test'
+  const password = 'fixture-existing-password'
+  const add = address => rt.connectorEndpoint('mail-account-add', { address, provider: 'qq', password })
+  await add(existing)
+  const name = mailSecretName(existing, 'PASSWORD')
+  assert.equal(rt.secretValue(name), password)
+  const roster = readFileSync(rt.statePath)
+  const secretsFile = join(home, 'secrets.json')
+  const secrets = readFileSync(secretsFile)
+  assert.equal(Object.values(JSON.parse(roster).connectors.mail.accounts)[0].address, existing)
+  assert.equal(JSON.parse(secrets).secrets.find(row => row.name === name)?.value, password)
+
+  const refused = { code: 'bot/refused', message: 'Connectors can be changed after the update commits.' }
+  await assert.rejects(add('second@example.test'), refused)
+  await assert.rejects(rt.connectorEndpoint('mail-account-add', { google: true }), refused)
+  await assert.rejects(rt.connectorEndpoint('mail-account-remove', { address: existing }), refused)
+  assert.equal(connect.mock.callCount(), 1)
+  assert.equal(fetch.mock.callCount(), 0)
+  assert.deepEqual(readFileSync(rt.statePath), roster)
+  assert.deepEqual(readFileSync(secretsFile), secrets)
+  assert.equal(rt.secretValue(name), password)
+})
+
+async function refreshAcrossHold(t, failRosterSave = false) {
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const home = scratch(t)
+  writeFileSync(join(home, 'state.json'), rosterBytes(2))
+  const rt = createRuntime(ctx, { home, github: false })
+  await rt.load()
+  rt.state.connectors = { notion: {
+    oauth: { authorizationServerUrl: 'https://fixture.test' }, client: { via: 'manual', clientId: 'fake-client' },
+  } }
+  await rt.save({ required: true })
+  await rt.secretEndpoint('secret-set', { name: 'CONNECTOR_NOTION_REFRESH', value: 'fixture-old-refresh', scope: [] })
+  const beforeRoster = JSON.parse(readFileSync(rt.statePath))
+  const secretPath = join(home, 'secrets.json')
+  let proof = 'steady'
+  rt.stateWriteProof = () => proof
+  const posted = Promise.withResolvers()
+  const provider = Promise.withResolvers()
+  const fetch = t.mock.method(globalThis, 'fetch', async input => {
+    const url = String(input?.url ?? input)
+    if (url === 'https://fixture.test/.well-known/oauth-authorization-server') {
+      return Response.json({ issuer: 'https://fixture.test', authorization_endpoint: 'https://fixture.test/auth',
+        token_endpoint: 'https://fixture.test/token', response_types_supported: ['code'] })
+    }
+    assert.equal(url, 'https://fixture.test/token')
+    posted.resolve()
+    return provider.promise
+  })
+  const refresh = rt.connectorsInternals.refreshConnector('notion')
+  await Promise.race([posted.promise, refresh.then(() => assert.fail('The token request never started'))])
+  proof = 'held'
+  if (failRosterSave) {
+    const save = rt.save.bind(rt)
+    t.mock.method(rt, 'save', (...args) => {
+      if (rt.secretValue('CONNECTOR_NOTION_TOKEN') === 'fixture-new-access') throw new Error('fixture roster unavailable')
+      return save(...args)
+    })
+  }
+  provider.resolve(Response.json({ access_token: 'fixture-new-access', refresh_token: 'fixture-new-refresh', token_type: 'Bearer' }))
+  assert.equal(await refresh, !failRosterSave, rt.connectorsInternals.statuses.get('notion')?.error)
+  const secrets = JSON.parse(readFileSync(secretPath)).secrets
+  for (const [name, value] of [['CONNECTOR_NOTION_REFRESH', 'fixture-new-refresh'], ['CONNECTOR_NOTION_TOKEN', 'fixture-new-access']]) {
+    assert.equal(rt.secretValue(name), value)
+    assert.equal(secrets.find(row => row.name === name)?.value, value)
+  }
+  const after = JSON.parse(readFileSync(rt.statePath))
+  assert.deepEqual(after.connectors, beforeRoster.connectors)
+  assert.equal(after.version, beforeRoster.version)
+  assert.equal(after.stateActivations, undefined)
+  assert.equal(existsSync(join(home, 'connector-key')), false)
+  const requests = fetch.mock.callCount()
+  assert.equal(await rt.connectorsInternals.refreshConnector('notion'), false)
+  assert.equal(fetch.mock.callCount(), requests)
+}
+
+test('an admitted OAuth refresh retains the provider response across an update hold', t => refreshAcrossHold(t))
+test('a roster save failure after storing an OAuth response preserves the rotated refresh token', t => refreshAcrossHold(t, true))
+
+test('Gmail refresh retains rotated credentials during an update hold', async t => {
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const home = scratch(t)
+  const seed = JSON.parse(rosterBytes(2))
+  seed.bots.a.sessionId = 'reader-session'
+  writeFileSync(join(home, 'state.json'), JSON.stringify(seed))
+  const address = 'reader@example.test'
+  for (const key of ['AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID', 'AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET']) {
+    const previous = process.env[key]
+    process.env[key] = 'fixture'
+    t.after(() => {
+      if (previous === undefined) delete process.env[key]
+      else process.env[key] = previous
+    })
+  }
+  const fetch = async (input, options) => {
+    const url = new URL(input?.url ?? input)
+    if (url.hostname === 'accounts.google.com' && url.pathname === '/token') {
+      return Response.json({ access_token: 'new-access', refresh_token: 'new-refresh', token_type: 'Bearer' })
+    }
+    assert.equal(url.hostname, 'gmail.googleapis.com')
+    const token = new Headers(options.headers).get('authorization')
+    return token === 'Bearer new-access' ? Response.json({ messages: [] }) : new Response(null, { status: 401 })
+  }
+  const rt = createRuntime(ctx, { home, github: false, mail: { fetch, connect: async () => ({ close: async () => {} }) } })
+  await rt.load()
+  // Register the mail tools through the normal account route before exercising Gmail.
+  await rt.connectorEndpoint('mail-account-add', { address: 'test@qq.com', password: 'fixture' })
+  rt.state.connectors.mail.accounts.gmail = { id: 'gmail', address, auth: 'google' }
+  for (const suffix of ['TOKEN', 'REFRESH']) {
+    await rt.secretEndpoint('secret-set', { name: mailSecretName(address, suffix), value: 'fixture-old', scope: [] })
+  }
+  rt.stateWriteProof = () => 'held'
+  const search = rt.teamTools.find(tool => tool.name === 'mail_search')
+  const bot = Object.values(rt.state.bots)[0]
+  assert.equal(await search.execute({ account: address }, { agent: { id: bot.sessionId } }), 'No matching mail.')
+  const disk = JSON.parse(readFileSync(join(home, 'secrets.json'))).secrets
+  for (const [suffix, expected] of [['TOKEN', 'new-access'], ['REFRESH', 'new-refresh']]) {
+    const name = mailSecretName(address, suffix)
+    assert.equal(rt.secretValue(name), expected)
+    assert.equal(disk.find(row => row.name === name)?.value, expected)
+  }
+})
 
 for (const refreshing of [false, true]) {
   test(`an upstream stream error cannot crash the engine${refreshing ? ' during refresh' : ''}`, () => {
@@ -122,4 +287,35 @@ test('gateway preserves MCP POST headers and bodies and reports expired sessions
   assert.equal(refreshes, 0)
   assert.match(JSON.stringify(logs), /notion.*POST.*404/)
   assert.equal(JSON.stringify(logs).includes('private-'), false)
+})
+
+test('OAuth refresh defers provider rotation while writes are held, including during discovery', async t => {
+  const ctx = fakeContext()
+  const home = scratch(t)
+  writeFileSync(join(home, 'state.json'), rosterBytes(2))
+  const rt = createRuntime(ctx, { home, github: false })
+  t.after(() => ctx.dispose())
+  await rt.load()
+  await rt.loadSecrets()
+  await rt.secretEndpoint('secret-set', { name: 'CONNECTOR_NOTION_REFRESH', value: 'fixture-original', scope: [] })
+  rt.state.connectors = { notion: { oauth: { authorizationServerUrl: 'https://as.test' }, client: { via: 'manual', clientId: 'fixture' } } }
+  let held = true
+  rt.stateWriteProof = () => held ? 'held' : 'steady'
+  const requests = []
+  t.mock.method(globalThis, 'fetch', async url => {
+    const address = String(url?.url ?? url)
+    requests.push(address)
+    held = true
+    return Response.json(address.endsWith('/token')
+      ? { access_token: 'fixture-access', refresh_token: 'fixture-rotated', token_type: 'Bearer' }
+      : { issuer: 'https://as.test', authorization_endpoint: 'https://as.test/auth', token_endpoint: 'https://as.test/token',
+          response_types_supported: ['code'] })
+  })
+  assert.equal(await rt.connectorsInternals.refreshConnector('notion'), false)
+  assert.deepEqual(requests, [])
+  held = false
+  assert.equal(await rt.connectorsInternals.refreshConnector('notion'), false)
+  assert.ok(requests.some(address => address.includes('well-known')))
+  assert.equal(requests.includes('https://as.test/token'), false)
+  assert.equal(rt.secretValue('CONNECTOR_NOTION_REFRESH'), 'fixture-original')
 })

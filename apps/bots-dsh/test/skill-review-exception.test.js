@@ -341,6 +341,7 @@ test('exception 4 case-insensitive state is visible only after the staged librar
   putLegacy(src)
   fs.writeFileSync(join(src, 'STATE.JSON'), '{"version":1}', { mode: 0o600 })
   const realExists = fs.existsSync
+  const realOpen = fs.openSync
   const realRead = fs.readFileSync
   const realCopy = fs.cpSync
   const realStat = fs.statSync
@@ -350,6 +351,7 @@ test('exception 4 case-insensitive state is visible only after the staged librar
     ? join(path, '../STATE.JSON') : path
   const mocks = [
     t.mock.method(fs, 'existsSync', path => realExists(filesystemPath(path))),
+    t.mock.method(fs, 'openSync', (path, ...args) => realOpen(filesystemPath(path), ...args)),
     t.mock.method(fs, 'readFileSync', (path, ...args) => realRead(filesystemPath(path), ...args)),
     t.mock.method(fs, 'statSync', (path, ...args) => realStat(filesystemPath(path), ...args)),
     t.mock.method(fs, 'cpSync', (from, to, options) => {

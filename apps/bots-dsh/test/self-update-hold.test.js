@@ -8,10 +8,307 @@ import { createRuntime } from '../index.js'
 import { AGENT_TOOLS } from '../src/host/agent-access.js'
 import { UPDATE_CUT } from '../src/host/constants.js'
 import { install as installResume, RESUME_DELAY_MS } from '../src/host/resume.js'
+import { createRoleSettings } from '../src/host/role-settings.js'
 import { createUpdateHold, GONE_WAIT_MS, install, PROFILE_WAIT_MS, STALL_MS, STOP_WAIT_MS, UNANSWERED_MS } from '../src/host/self-update-hold.js'
-import { storeDirOf, writeJsonAtomic } from '../src/host/self-update.js'
+import { stateWriteProof, storeDirOf, writeJsonAtomic } from '../src/host/self-update.js'
+import { ACTIVATION_COMPARE } from '../src/host/state-format.js'
 import { requestOf } from '../src/host/supervisor/request.js'
 import { fakeContext } from './fake-ctx.js'
+import { prepareRollback } from './fixtures/w1-format-predecessor.mjs'
+import { fixture, write } from './fixtures/supervisor.mjs'
+import { fileURLToPath } from 'node:url'
+import { pins, rosterBytes } from './fixtures/w1-format-profile.mjs'
+
+test('bound write proof follows replay snapshots and the matching durable healthy current', async t => {
+  const plugin = fileURLToPath(new URL('../', import.meta.url))
+  const bench = await prepareRollback(t, plugin, 2, 4)
+  const { config, run, path, original } = bench
+  const { profileDir, store } = config
+  fs.writeFileSync(path, original)
+  const env = { ...config.env, AUTOMAGIK_SUPERVISOR_BOOT: run.bootId, AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8',
+    AUTOMAGIK_SUPERVISOR_RUN: run.runId, [ACTIVATION_COMPARE]: `${run.bootId}:${run.runId}` }
+  const team = { ctx: { get: () => ({ dir: profileDir }) }, statePath: path }
+  const runStatus = (phase, reason) => write(join(store, 'state.json'), {
+    ...run, phase, reason, rollback: undefined, journal: { ...run.journal, undo: undefined, undoReason: undefined },
+  })
+  write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: run.runId, version: 1 })
+  runStatus('health', null)
+  const proof = stateWriteProof(team, env)
+  assert.equal(proof(), 'held', 'comparison is never enough for a sidecar')
+  assert.equal(proof({ compare: true }), 'compare')
+  assert.equal(stateWriteProof({ ...team, statePath: path + '.other' }, env)({ compare: true }), 'held')
+  assert.equal(stateWriteProof(team, { ...env, [ACTIVATION_COMPARE]: 'prior-boot:' + run.runId })({ compare: true }), 'held')
+  const noRunEnv = { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined, [ACTIVATION_COMPARE]: undefined }
+  for (const [bootId, runId] of [['stale-boot', run.runId], [run.bootId, null], [run.bootId, 'previous-run']]) {
+    const stale = stateWriteProof(team, noRunEnv)
+    write(join(store, 'supervisor.json'), { bootId, runId, version: 1 })
+    assert.equal(stale({ legacyBootstrap: true }), 'held')
+    assert.equal(stale(), 'held')
+    assert.equal(stale({ compare: true }), 'held')
+    write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: run.runId, version: 1 })
+    runStatus('rolledBack', 'health-failed')
+    assert.equal(stale(), 'held')
+    assert.equal(stateWriteProof(team, noRunEnv)(), 'returned')
+    runStatus('health', null)
+  }
+  const lateAnnouncement = stateWriteProof(team, noRunEnv)
+  write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: null, version: 1 })
+  runStatus('checking', null)
+  assert.equal(lateAnnouncement({ legacyBootstrap: true }), 'held')
+  runStatus('health', null)
+  assert.equal(lateAnnouncement(), 'held')
+  write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: run.runId, version: 1 })
+  runStatus('rolledBack', 'health-failed')
+  assert.equal(lateAnnouncement(), 'held')
+  runStatus('health', null)
+  const lagging = stateWriteProof(team, { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined })
+  assert.equal(lagging({ compare: true }), 'held')
+  assert.equal(lagging({ legacyBootstrap: true }), 'held')
+  const unreadable = stateWriteProof(team, { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined })
+  fs.writeFileSync(join(store, 'state.json'), '{')
+  assert.equal(unreadable({ legacyBootstrap: true }), 'held')
+  write(join(store, 'supervisor.json'), { bootId: 'stale-boot', runId: run.runId, version: 1 })
+  assert.equal(unreadable({ legacyBootstrap: true }), 'held')
+  write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: run.runId, version: 1 })
+  runStatus('health', null)
+  const snap = join(store, run.journal.keep, 'data', 'bots-state.json')
+  fs.writeFileSync(snap, original.toString() + '\n')
+  assert.equal(proof({ compare: true }), 'held')
+  runStatus('manualRecovery', 'rollback-failed')
+  assert.equal(proof({ compare: true }), 'held')
+  runStatus('healthy', 'health-check-finished')
+  assert.equal(lagging(), 'held')
+  assert.equal(lagging({ legacyBootstrap: true }), 'steady')
+  write(join(store, 'current.json'), { version: 1, live: { version: run.to, sequence: run.sequence - 1 },
+    kept: { version: run.from }, lastSequence: run.sequence - 1 })
+  assert.equal(lagging(), 'held')
+  write(join(store, 'current.json'), { version: 1, live: { version: run.to, sequence: run.sequence },
+    kept: { version: run.from }, lastSequence: run.sequence })
+  assert.equal(lagging(), 'steady')
+  const previousEnv = { ...env, [ACTIVATION_COMPARE]: undefined }
+  const laggingCandidate = stateWriteProof(team, previousEnv)
+  runStatus('health', null)
+  assert.equal(laggingCandidate(), 'held')
+  runStatus('rolledBack', 'health-failed')
+  assert.equal(proof(), 'held')
+  assert.equal(laggingCandidate(), 'held')
+  assert.equal(stateWriteProof(team, previousEnv)(), 'returned')
+})
+
+test('steady host resumes sidecar writes when an update is refused before stopping it', t => {
+  const { env, profileDir, store, botsHome } = fixture(t)
+  const bootId = 'unchanged-host'
+  const runId = 'refused-run'
+  const team = { ctx: { get: () => ({ dir: profileDir }) }, statePath: join(botsHome, 'state.json') }
+  const supervisor = { ...env, AUTOMAGIK_SUPERVISOR_BOOT: bootId, AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8' }
+  const proof = stateWriteProof(team, supervisor)
+  const announce = id => write(join(store, 'supervisor.json'), { version: 1, bootId, runId: id })
+  const phase = (phase, reason) => write(join(store, 'state.json'), {
+    version: 1, bootId, runId, phase, reason, from: null, to: null, requestId: 'owner-request',
+    startedBy: 'owner-route', startedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+  })
+  announce(null)
+  assert.equal(proof(), 'steady')
+  phase('checking', null)
+  announce(runId)
+  assert.equal(proof(), 'steady')
+  phase('notUpdated', 'listener-unknown')
+  assert.equal(proof(), 'steady')
+  // A child started for the run cannot use this refusal as proof of a committed candidate.
+  assert.equal(stateWriteProof(team, { ...supervisor, AUTOMAGIK_SUPERVISOR_RUN: runId })(), 'returned')
+  phase('health', null)
+  announce(null)
+  assert.equal(proof(), 'held')
+})
+
+test('a committed host still writes role settings after a later run refuses without restarting', async t => {
+  const { profileDir, store, botsHome } = fixture(t)
+  const boot = 'committed-boot'
+  const first = 'committed-run'
+  const later = 'later-owner-run'
+  const env = {
+    AUTOMAGIK_BOTS_HOME: botsHome, AUTOMAGIK_SUPERVISOR_BOOT: boot,
+    AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8', AUTOMAGIK_SUPERVISOR_RUN: first,
+  }
+  for (const [name, value] of Object.entries(env)) {
+    const original = process.env[name]
+    process.env[name] = value
+    t.after(() => { if (original === undefined) delete process.env[name]; else process.env[name] = original })
+  }
+  const stamp = new Date().toISOString()
+  const phase = (runId, phase, reason, to) => {
+    write(join(store, 'supervisor.json'), { version: 1, bootId: boot, runId })
+    write(join(store, 'state.json'), { version: 1, bootId: boot, runId, phase, reason, from: '3.178.5',
+      to, sequence: 28, startedAt: stamp, updatedAt: stamp })
+  }
+  const current = sequence => write(join(store, 'current.json'), {
+    version: 1, live: { version: '3.178.8', sequence }, kept: null, lastSequence: sequence,
+  })
+  current(28)
+  phase(first, 'healthy', 'health-check-finished', '3.178.8')
+  fs.writeFileSync(join(botsHome, 'state.json'), rosterBytes(2, { roles: [pins.voice] }))
+  const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+  const rt = createRuntime(ctx, { home: botsHome, github: false })
+  t.after(async () => { rt.dispose(); await ctx.dispose() })
+  await rt.load()
+  const settings = createRoleSettings(botsHome)
+  const spec = [{ key: 'voice', kind: 'voice' }]
+  const set = voice => settings.write('a', pins.voice.id, spec, { voice }, () => {})
+  assert.deepEqual(await set('committed'), { voice: 'committed' })
+  phase(later, 'checking', null, '3.178.9')
+  assert.deepEqual(await set('checking'), { voice: 'checking' })
+  phase(later, 'notUpdated', 'listener-unknown', '3.178.9')
+  assert.deepEqual(await set('still serving'), { voice: 'still serving' })
+  current(29)
+  await assert.rejects(set('stale proof'), /after the update commits/)
+  current(28)
+  phase(later, 'health', null, '3.178.9')
+  await assert.rejects(set('wrong trial'), /after the update commits/)
+  phase(later, 'rolledBack', 'health-failed', '3.178.9')
+  await assert.rejects(set('wrong verdict'), /after the update commits/)
+  assert.deepEqual(await settings.read('a', pins.voice.id, spec), { voice: 'still serving' })
+})
+
+for (const candidate of [false, true]) {
+  test(`a ${candidate ? 'rolled-back candidate cannot change' : 'returned predecessor can change'} legacy sidecars`, async t => {
+    const { profileDir, store, botsHome } = fixture(t)
+    const bootId = 'return-boot'
+    const runId = 'return-run'
+    for (const [name, value] of Object.entries({ AUTOMAGIK_BOTS_HOME: botsHome, AUTOMAGIK_SUPERVISOR_BOOT: bootId,
+      AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8', AUTOMAGIK_SUPERVISOR_RUN: runId })) {
+      const original = process.env[name]
+      process.env[name] = value
+      t.after(() => { if (original === undefined) delete process.env[name]; else process.env[name] = original })
+    }
+    const phase = (phase, reason) => write(join(store, 'state.json'), { version: 1, bootId, runId, phase, reason,
+      from: '3.178.8', to: '3.178.9', startedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() })
+    const current = sequence => write(join(store, 'current.json'), { version: 1,
+      live: { version: '3.178.8', sequence }, kept: null, lastSequence: sequence })
+    current(27)
+    write(join(store, 'supervisor.json'), { version: 1, bootId, runId })
+    phase(candidate ? 'health' : 'rolledBack', candidate ? null : 'health-failed')
+    if (!candidate) {
+      rmSync(join(botsHome, 'state.json'))
+      const importHome = join(botsHome, '..', 'import-source')
+      mkdirSync(importHome)
+      const bytes = rosterBytes(2)
+      fs.writeFileSync(join(importHome, 'state.json'), bytes)
+      const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+      const importing = createRuntime(ctx, { home: botsHome, importHome, github: false })
+      try {
+        assert.equal(importing.stateWriteProof(), 'returned')
+        await importing.load()
+        await importing.committedUpdate()
+        assert.equal(importing.teamImportPending(), true)
+        assert.equal(existsSync(importing.statePath), false)
+        assert.deepEqual(readFileSync(join(importHome, 'state.json')), bytes)
+      } finally { importing.dispose(); await ctx.dispose() }
+
+      const freshCtx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+      const fresh = createRuntime(freshCtx, { home: botsHome, github: false })
+      try {
+        await fresh.load()
+        assert.equal(fresh.stateWriteProof(), 'returned')
+        await fresh.save()
+        assert.equal(fresh.teamHealth().present, false)
+        await fresh.connectorEndpoint('connector-connect', { id: 'notion', token: 'fixture-fresh-token' })
+        assert.equal(fresh.secretValue('CONNECTOR_NOTION_TOKEN'), 'fixture-fresh-token')
+      } finally { fresh.dispose(); await freshCtx.dispose() }
+    }
+    const source = JSON.parse(rosterBytes(2, { roles: [pins.voice] }))
+    source.connectors = { fixture: { custom: { name: 'Fake', command: 'fixture-never-exec', env: { TOKEN: 'fixture-only-credential' } } } }
+    source.roles = Object.fromEntries([pins.solver, pins.voice].map(({ id, version }) => [id, { id, version, sha256: '0'.repeat(64) }]))
+    write(join(botsHome, 'state.json'), source)
+    const packageDir = join(botsHome, 'roles', pins.solver.id, pins.solver.version)
+    mkdirSync(packageDir, { recursive: true })
+    fs.writeFileSync(join(packageDir, 'prompt.md'), 'Detached local fixture role')
+    const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+    let route
+    const register = ctx.connection.fetch.register
+    ctx.connection.fetch.register = options => {
+      if (options.path === '/api/omni-ui' && options.methods.includes('POST')) route = options
+      return register(options)
+    }
+    const rt = createRuntime(ctx, { home: botsHome, github: false })
+    t.after(async () => { rt.dispose(); await ctx.dispose() })
+    await rt.load()
+    if (candidate) {
+      assert.equal(rt.stateWriteProof(), 'held')
+      assert.equal(rt.holdsLock(), true)
+      const response = await route.fetch(new Request('http://127.0.0.1/api/omni-ui', {
+        method: 'POST', body: JSON.stringify({ endpoint: 'state', payload: { health: true } }),
+      }))
+      assert.deepEqual(await response.json(), { ok: true, value: { present: true, revision: source.revision, bots: 2 } })
+    }
+    phase('rolledBack', 'health-failed')
+    assert.equal(rt.stateWriteProof(), candidate ? 'held' : 'returned')
+    const key = join(botsHome, 'connector-key')
+    const settings = createRoleSettings(botsHome)
+    const spec = [{ key: 'voice', kind: 'voice' }]
+    const setVoice = () => settings.write('a', pins.voice.id, spec, { voice: 'returned voice' }, () => {})
+    const setConnector = () => rt.connectorEndpoint('connector-set', { id: 'fixture', readOnly: true })
+    const token = 'fixture-only-notion-token'
+    const connect = () => rt.connectorEndpoint('connector-connect', { id: 'notion', token })
+    const uninstall = () => rt.uninstallRole(pins.solver.id)
+    assert.equal(rt.holdsLock(), true)
+    assert.equal(rt.teamHealth().present, true)
+    assert.equal(fs.existsSync(key), false)
+    if (candidate) {
+      await assert.rejects(setVoice(), /after the update commits/)
+      await assert.rejects(setConnector(), /after the update commits/)
+      await assert.rejects(connect(), /after the update commits/)
+      await assert.rejects(uninstall(), /after the update commits/)
+      assert.equal(existsSync(packageDir), true)
+      assert.deepEqual(JSON.parse(readFileSync(rt.statePath)).roles, source.roles)
+      assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), undefined)
+      await rt.save({ required: true })
+      assert.equal(JSON.parse(fs.readFileSync(rt.statePath)).version, 2)
+      assert.equal(fs.existsSync(key), false)
+      assert.deepEqual(await settings.read('a', pins.voice.id, spec), { voice: '' })
+    } else {
+      assert.deepEqual(await setVoice(), { voice: 'returned voice' })
+      await setConnector()
+      await connect()
+      assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), token)
+      assert.match(fs.readFileSync(join(botsHome, 'secrets.json'), 'utf8'), /CONNECTOR_NOTION_TOKEN/)
+      const saved = JSON.parse(fs.readFileSync(rt.statePath))
+      assert.equal(saved.version, 3)
+      assert.equal(saved.connectors.fixture.readOnly, true)
+      assert.equal(saved.connectors.fixture.custom.env.TOKEN.enc, 'v1')
+      assert.equal(fs.existsSync(key), true)
+      assert.equal(rt.stateWriteProof({ compare: true }), 'returned')
+      await assert.rejects(rt.uninstallRole(pins.voice.id), /Detach this role from every Bot/)
+      const otherHome = stateWriteProof({ ...rt, statePath: rt.statePath + '.custom' })
+      assert.equal(otherHome(), 'held')
+      const changedCurrent = stateWriteProof(rt)
+      assert.equal(changedCurrent(), 'returned')
+      const later = 'second-owner-check'
+      const laterPhase = (phase, reason) => {
+        write(join(store, 'state.json'), { version: 1, bootId, runId: later, phase, reason,
+          from: '3.178.8', to: '3.178.9', startedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() })
+        write(join(store, 'supervisor.json'), { version: 1, bootId, runId: later })
+      }
+      laterPhase('checking', null)
+      assert.deepEqual(await setVoice(), { voice: 'returned voice' })
+      laterPhase('notUpdated', 'not-newer')
+      assert.equal(rt.stateWriteProof(), 'returned')
+      assert.deepEqual(await setVoice(), { voice: 'returned voice' })
+      assert.deepEqual(await uninstall(), { removed: true })
+      assert.equal(existsSync(packageDir), false)
+      assert.equal(JSON.parse(readFileSync(rt.statePath)).roles[pins.solver.id], undefined)
+      assert.deepEqual(JSON.parse(readFileSync(rt.statePath)).roles[pins.voice.id], source.roles[pins.voice.id])
+      assert.equal(otherHome(), 'held')
+      laterPhase('health', null)
+      await assert.rejects(setVoice(), /after the update commits/)
+      laterPhase('notUpdated', 'not-newer')
+      await assert.rejects(setVoice(), /after the update commits/)
+      current(28)
+      assert.equal(changedCurrent(), 'held')
+      current(27)
+      assert.equal(changedCurrent(), 'held')
+    }
+  })
+}
 
 const bootId = 'd5b-fixture-boot'
 const verdict = (phase, requestId = 'new-request') => ({ runId: 'live-run', phase, requestId, updatedAt: new Date(0).toISOString() })

@@ -2,12 +2,14 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { BOTS, fixture, FROM, read, RUN_ID, TO, write } from './supervisor.mjs'
 import { activationIds, CONTRACT_PATH, LEGACY_CONTRACT, pins, rosterBytes, scratch, sha256 } from './w1-format-profile.mjs'
 
+const BOTS = '@automagik/bots-dsh'
+const read = path => JSON.parse(fs.readFileSync(path))
+const write = (path, value) => fs.writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 const load = (plugin, file) => import(pathToFileURL(join(plugin, file)).href)
 
-async function withHost(plugin, home, work) {
+export async function withHost(plugin, home, work) {
   const [{ install: installStore }, { install: installRoster }, { installRoles }, roles] = await Promise.all([
     load(plugin, 'src/host/store.js'), load(plugin, 'src/host/roster.js'),
     load(plugin, 'src/host/roles.js'), load(plugin, 'src/shared/roles.js'),
@@ -32,6 +34,88 @@ export const legacyCells = Object.freeze([
   ...[2, 3, 4, 5].map(format => ({ format, shape: 'registry pin' })),
 ])
 
+export async function assertRefusedCell(t, plugin, { format, shape }, { host = withHost } = {}) {
+  const home = scratch(t)
+  const path = join(home, 'state.json')
+  const registry = shape === 'registry pin'
+  const roles = registry ? [pins.registry] : [pins.solver, pins.voice]
+  const stateActivations = format >= 4 ? [registry ? activationIds.registry : activationIds.stack] : undefined
+  const source = rosterBytes(format, { roles, stateActivations, catalogControl: registry })
+  const reason = format >= 4 ? 'saved by a newer Omni; update Omni'
+    : 'unrecognized saved Bot role attachments; restore a valid team backup'
+  const readOnly = `The Bot team file ${path} could not be read (${reason}). Omni does not change it; fix or move the file and reload.`
+  fs.writeFileSync(path, source, { mode: 0o600 })
+  const checkSource = () => assert.deepEqual(fs.readFileSync(path), source)
+  await host(plugin, home, async rt => {
+    checkSource()
+    assert.equal(rt.readOnly(), readOnly)
+    assert.equal(rt.teamLoaded(), false)
+    assert.equal(rt.teamHealth(), null)
+    assert.equal(rt.holdsLock(), false)
+    assert.deepEqual(Object.keys(rt.state.bots), [])
+    assert.equal(rt.botOf('a'), undefined)
+    assert.equal(rt.state.connectors, undefined)
+    assert.equal(rt.roleRuntime.grantOf('a', 'task-start'), undefined)
+    const refused = async (promise, reason = readOnly) => {
+      await assert.rejects(promise, error => error.message.endsWith(reason))
+      checkSource()
+    }
+    await refused(rt.attachRole('a', 'voice-mouth'), 'No such Bot')
+    await refused(rt.detachRole('a'), 'No such Bot')
+    await refused(rt.grantRole({ id: 'a', role: 'solver', capability: 'task-start', on: true }))
+    await refused(rt.save({ required: true, durable: true }))
+    await rt.save()
+    checkSource()
+  })
+  checkSource()
+  assert.deepEqual(fs.readdirSync(home), ['state.json'])
+}
+
+export async function assertCleanCell(t, plugin, format, { host = withHost, legacy = true } = {}) {
+  const home = scratch(t)
+  const path = join(home, 'state.json')
+  const source = rosterBytes(format)
+  const original = JSON.parse(source)
+  fs.writeFileSync(path, source, { mode: 0o600 })
+  await host(plugin, home, async (rt, { effectiveRoleIds }) => {
+    const loaded = fs.readFileSync(path)
+    const version = format === 3 ? 3 : 2
+    const revision = original.revision + Number(format < 2)
+    assert.equal(read(path).version, version)
+    assert.equal(read(path).revision, revision)
+    if (format >= 2) assert.deepEqual(loaded, source)
+    assert.equal(rt.readOnly(), undefined)
+    assert.equal(rt.teamLoaded(), true)
+    assert.deepEqual(rt.teamHealth(), { present: true, revision, bots: 2 })
+    assert.equal(rt.holdsLock(), true)
+    assert.deepEqual(rt.botOf('a').roles, [pins.solver])
+    assert.equal(Object.hasOwn(rt.botOf('b'), 'roles'), false)
+    assert.deepEqual(effectiveRoleIds(rt.botOf('b'), rt.state.prefs), ['genie'])
+    if (legacy) {
+      await assert.rejects(rt.attachRole('a', pins.voice.id), /Detach solver first/i)
+      assert.deepEqual(fs.readFileSync(path), loaded)
+    }
+    if (format === 3) assert.equal(rt.connectorCredentialsUnavailable(rt.state.connectors.service.custom), true)
+    assert.equal(await rt.save({ required: true, durable: true }), true)
+    const saved = read(path)
+    assert.equal(saved.version, version)
+    assert.equal(saved.revision, revision + 1)
+    assert.deepEqual(saved.bots.a.roles, [pins.solver])
+    assert.deepEqual(saved.connectors, original.connectors)
+    await rt.detachRole('b')
+    assert.deepEqual(read(path).bots.b.roles, [])
+    assert.deepEqual(effectiveRoleIds(rt.botOf('b'), rt.state.prefs), [])
+    await rt.detachRole('a')
+    const detached = read(path)
+    assert.deepEqual(detached.bots.a.roles, [])
+    assert.equal(detached.bots.a.reviewGuard, true)
+    assert.equal(detached.version, version)
+    assert.deepEqual(detached.connectors, original.connectors)
+  })
+  assert.deepEqual(fs.readdirSync(home), ['state.json'])
+}
+
+// The historical installed runner targets signed artifacts from before 5A-F.
 export async function assertLegacyCell(t, plugin, { format, shape }) {
   const home = scratch(t)
   const path = join(home, 'state.json')
@@ -99,27 +183,30 @@ export const rollbackCells = Object.freeze([[2, 2], [3, 3], [2, 3], [2, 4], [3, 
 
 // By default this prepares a disposable profile with synthetic package and lock inputs.
 // An installed runner can supply its own profile and real predecessor module tree.
-export async function prepareRollback(t, plugin, from, to, installed) {
+export async function prepareRollback(t, plugin, from, to, installed, { switchTimeBytes, trialRoles } = {}) {
   const [{ planSwitch, completeSwitch }, { PROFILE_INPUTS, stagePaths }, { teamSnapshot, updateContract }] = await Promise.all([
     load(plugin, 'src/host/supervisor/switch.js'), load(plugin, 'src/host/supervisor/stage.js'),
     load(plugin, 'src/host/supervisor/rollback.js'),
   ])
-  const f = installed ?? fixture(t)
+  const f = installed ?? (await import('./supervisor.mjs')).fixture(t)
   const { profileDir, store, env, profile } = f
   const path = join(f.botsHome, 'state.json')
-  const predecessor = installed?.version ?? FROM
-  const candidate = installed?.candidateVersion ?? TO
-  const staging = stagePaths(store, RUN_ID, profile)
+  const predecessor = installed?.version ?? '3.160.2'
+  const candidate = installed?.candidateVersion ?? '3.160.3'
+  const runId = 'test-run-001'
+  const staging = stagePaths(store, runId, profile)
   const oldContract = join(profileDir, 'node_modules', BOTS, CONTRACT_PATH)
   if (!installed) write(oldContract, LEGACY_CONTRACT)
   const captured = updateContract(profileDir)
   assert.deepEqual(captured, LEGACY_CONTRACT)
   const config = { ...f.config, profileDir, store, env, stateFormats: captured.stateFormats }
-  const original = rosterBytes(from)
+  const original = switchTimeBytes ?? rosterBytes(from)
+  const source = JSON.parse(original)
   const trial = rosterBytes(to, {
-    revision: 8, roles: to >= 4 ? [pins.solver, pins.registry] : [pins.solver, pins.voice],
+    revision: (source.revision ?? 7) + 1,
+    roles: trialRoles ?? (to >= 4 ? [pins.solver, pins.registry] : [pins.solver, pins.voice]),
     stateActivations: to >= 4 ? [activationIds.registry, activationIds.stack] : undefined,
-    connectors: JSON.parse(original).connectors,
+    connectors: source.connectors,
   })
   fs.writeFileSync(path, original)
   const candidatePackage = join(staging.profileDir, 'node_modules', BOTS)
@@ -136,7 +223,7 @@ export async function prepareRollback(t, plugin, from, to, installed) {
 
   const now = new Date().toISOString()
   const run = {
-    version: 1, phase: 'switching', reason: null, runId: RUN_ID, bootId: 'sup_fixture',
+    version: 1, phase: 'switching', reason: null, runId, bootId: 'sup_fixture',
     from: predecessor, to: candidate, sequence: 42, names: [BOTS], startedAt: now, updatedAt: now,
     fromVersions: { [BOTS]: predecessor },
   }

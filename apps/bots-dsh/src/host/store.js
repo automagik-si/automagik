@@ -1,33 +1,86 @@
 // Store: the saved team (state.json), its migrations, the lock that keeps a second dsh
 // host on the same data from writing it, and the indexes that map a Session to the Bot
 // or group chat it belongs to.
-import { createHash } from 'node:crypto'
-import { constants, copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { constants, copyFileSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs'
 import { mkdir, unlink, writeFile } from 'node:fs/promises'
 
 import { dirname, join } from 'node:path'
 import { piAiClaudeOf } from './claude-models.js'
 import { KEY_ERROR } from './connectors/credential-key.js'
-import { connectorState, ENCRYPTED_STATE_VERSION } from './connectors/credential-state.js'
+import { connectorState, encryptedStateFormat } from './connectors/credential-state.js'
 import { DRAFT_SWEEP_MAX, LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
-import { replaceFile, syncDirectory, syncFile } from './files.js'
+import { publishHostFile, replaceFile, syncDirectory, syncDirectorySync, syncFile } from './files.js'
 import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { refusal } from './refusal.js'
+import { activationIds, protectedStateFormat, STATE_ACTIVATIONS } from './state-format.js'
+import { regularBytes, syncFile as syncFileSync } from './supervisor/store.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
 import { markOf } from '../shared/permission-levels.js'
 import { effectiveMarkOf, nativeToolsOn, restrictedBot } from '../shared/native-tools.js'
 import { TASK_ROUTE_DEFAULT } from '../shared/route-policy.js'
 import { shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import { GUARD_OFF_NOTICE } from '../shared/guard-groups.js'
+import { packageAttachment } from '../shared/roles.js'
 import updateContract from './update-contract.json' with { type: 'json' }
 
 // The saved team's format. A file may carry an older version this build still reads and
 // migrates (the formats before the stamp count as LEGACY_VERSION); any other value means a
 // newer Omni wrote it, and this one must not touch it.
-const COMPATIBLE_VERSIONS = updateContract.stateFormats
 const STATE_VERSION = 2
 const LEGACY_VERSION = 0
+const activationDeferred = 'The Bot team change can be retried after the update commits.'
+const changedTeam = 'The Bot team changed. Try again.'
+
+function attachmentProblem(team, active) {
+  for (const bot of Object.values(team.bots ?? {})) {
+    if (!Array.isArray(bot?.roles)) continue
+    const pins = bot.roles
+    // ID-only legacy recovery entries are not package pins. They continue to
+    // follow the old reader, including the built-in Genie carrier.
+    const stack = pins.length > 1 && pins.some(pin => packageAttachment({ roles: [pin] }))
+    if (stack && (!active.includes('w1-role-stack-v1') || new Set(pins.map(pin => pin?.id)).size !== pins.length)) return true
+    if (pins.some(pin => Object.hasOwn(pin ?? {}, 'source')
+      && (pin.source !== 'registry' || !active.includes('w1-registry-pin-v1')))) return true
+  }
+  return false
+}
+
+export function stateFormatProblem(team, contract = updateContract) {
+  const raw = team.version
+  const version = raw === undefined ? LEGACY_VERSION : raw
+  if (!Number.isInteger(version) || !contract.stateFormats.includes(version)) {
+    return Number.isInteger(version) && version > Math.max(...contract.stateFormats)
+      ? 'saved by a newer Omni; update Omni'
+      : `saved by an Omni this version cannot read (format ${JSON.stringify(raw)?.slice(0, 24)})`
+  }
+  const active = protectedStateFormat(version) ? activationIds(team[STATE_ACTIVATIONS], { required: true }) : []
+  const allowed = activationIds(contract.activations)
+  if (!active || (protectedStateFormat(version) && !active.every(id => allowed?.includes(id)))
+    || (!protectedStateFormat(version) && Object.hasOwn(team, STATE_ACTIVATIONS))) {
+    return 'unrecognized saved state activations; update Omni or restore a valid team backup'
+  }
+  if (attachmentProblem(team, active)) return 'unrecognized saved Bot role attachments; restore a valid team backup'
+}
+
+function savePreimage(path, bytes, backup) {
+  const digest = createHash('sha256').update(bytes).digest('hex')
+  const base = `${path}.pre-${backup ?? `roles-${digest}`}`
+  const verify = target => {
+    const stat = lstatSync(target, { throwIfNoEntry: false })
+    if (!stat) return false
+    if (!stat.isFile() || stat.nlink !== 1 || (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600)
+      || (process.getuid && stat.uid !== process.getuid())) throw new Error('Unsafe Bot team activation backup')
+    return regularBytes(target).equals(bytes)
+  }
+  let target = base
+  if (lstatSync(base, { throwIfNoEntry: false }) && !verify(base) && backup !== undefined) target += `-${digest}`
+  if (!lstatSync(target, { throwIfNoEntry: false })) publishHostFile(target, bytes)
+  if (!verify(target)) throw new Error('Bot team activation backup differs from the source')
+  syncFileSync(target)
+  syncDirectorySync(dirname(target))
+}
 
 // A table read that sees only the keys the table holds itself. Ids that come from
 // outside (a request body, a tool argument, a name a model gives) go through this, so
@@ -43,9 +96,37 @@ const recoveryFields = ({ bots, works }) => JSON.stringify({
   open: Object.keys(works ?? {}).sort().map(id => [id, works[id]?.at, works[id]?.open]),
 })
 
-export function install(rt) {
+export function install(rt, { contract = updateContract } = {}) {
   const { ctx, home, statePath } = rt
-  const credentials = connectorState(home, () => rt.ownsLockForPendingWrite())
+  const sidecarAllowed = (predecessor = false, proof = rt.stateWriteProof?.()) => proof === undefined || proof === 'steady'
+    || (predecessor && proof === 'returned' && teamRead
+      && (teamPresentAtLoad === true || (sameGeneration(bootstrapGeneration) && unconfirmedState === undefined))
+      && committedActivations.length === 0 && teamCurrent() && rt.holdsLock())
+  const credentials = connectorState(home, protectedState => sidecarAllowed(!protectedState) && rt.ownsLockForPendingWrite())
+  let committedActivations = []
+  let activationEpoch = 0
+  let activationFence = false
+  const fenceActivation = () => {
+    if (activationFence) return
+    activationFence = true
+    rt.solverSettle?.cancel()
+    rt.dropAllGrants?.()
+  }
+  let retryActivation
+  let committedPins = new Map()
+  const pinsIn = ({ bots } = {}) => new Map(Object.entries(bots ?? {}).map(([id, bot]) => [
+    id, JSON.stringify(bot?.roles ?? []),
+  ]))
+  rt.sidecarWritable = ({ legacy = false, predecessor = false } = {}) => {
+    const proof = rt.stateWriteProof?.()
+    return sidecarAllowed(predecessor, proof)
+      || (legacy && (proof === 'returned' || committedActivations.length === 0 && teamRead))
+  }
+  rt.hasCommittedRole = (botId, roleId) => {
+    const pins = own(state.bots, botId)?.roles
+    return teamRead && teamCurrent() && rt.holdsLock() && Array.isArray(pins)
+      && pins.some(pin => pin?.id === roleId) && committedPins.get(botId) === JSON.stringify(pins)
+  }
 
   /** @type {{version:2, workspaceId?:string, mainBotIds:string[], bots:Record<string,any>, privateArchives:any[], rooms:Record<string,any>, agents:Record<string,any>, sections:any[], capabilities:{items:Record<string,any>}, exchanges:any[], exchangeTurns:Record<string,number[]>, revision:number}} */
   const state = { version: STATE_VERSION, mainBotIds: [], bots: {}, privateArchives: [], rooms: {}, agents: {}, sections: [], capabilities: { items: {} }, exchanges: [], exchangeTurns: {}, works: {}, requests: {}, questions: {}, views: {}, closedCards: {}, prefs: {}, switching: {}, revision: 0 }
@@ -53,9 +134,13 @@ export function install(rt) {
   // Whether `state` is the team as its file has it (teamLoaded).
   let teamRead = false
   let teamPresentAtLoad = null
+  // Health reports presence at load. A first publication proves ownership only for its own generation.
+  let bootstrapGeneration
   // Preserve ENOENT as evidence until the supervisor decides the trial.
-  const missingTeamHeld = () => teamPresentAtLoad === false && !!process.env.AUTOMAGIK_SUPERVISOR_RUN
-    && rt.updateHold?.awaitingBootVerdict !== false
+  const missingTeamHeld = () => teamPresentAtLoad === false && (rt.teamImportPending?.() === true
+    || (process.env.AUTOMAGIK_SUPERVISOR_RUN
+      ? rt.updateHold?.awaitingBootVerdict !== false
+      : rt.stateWriteProof?.({ legacyBootstrap: true }) === 'held'))
   let writing = Promise.resolve()
   let savedRecovery = recoveryFields(state)
   // Failed attempts stay with their owner. A published replacement can survive a takeover.
@@ -171,6 +256,7 @@ export function install(rt) {
     }
   }
   const readOnly = () => {
+    if (activationFence) return 'The Bot team activation could not be confirmed. Recover the saved team before writing again.'
     if (stuck !== undefined) return `The Bot team file ${statePath} could not be read (${stuck}). Omni does not change it; fix or move the file and reload.`
     if (holder === undefined) return missingTeamHeld()
       ? 'The Bot team is read-only while the update is being checked.' : undefined
@@ -227,11 +313,13 @@ export function install(rt) {
   const readFileState = () => {
     aside = false
     let contents
+    const before = stamp()
     try {
       contents = readFileSync(statePath)
     } catch (error) {
       seen = stamp()
       if (error?.code === 'ENOENT') {
+        if (committedActivations.length) fenceActivation()
         stuck = undefined
         unconfirmedState = undefined
         return undefined
@@ -241,6 +329,11 @@ export function install(rt) {
       return undefined
     }
     seen = stamp()
+    if (before !== seen) {
+      stuck = changedTeam
+      seen = before
+      return undefined
+    }
     const bytes = contents.toString('utf8')
     if (unconfirmedState !== bytes) unconfirmedState = undefined
     let parsed
@@ -264,16 +357,8 @@ export function install(rt) {
     // The file's own version decides: only a missing stamp is the format before this field,
     // and only an exact integer in the list is compatible. Any other value or type is refused
     // untouched — never migrated and never rewritten.
-    const raw = parsed?.version
-    const version = raw === undefined ? LEGACY_VERSION : (Number.isInteger(raw) ? raw : undefined)
-    if (version !== undefined && COMPATIBLE_VERSIONS.includes(version)) {
-      stuck = undefined
-      return parsed
-    }
-    stuck = version !== undefined && version > Math.max(...COMPATIBLE_VERSIONS)
-      ? 'saved by a newer Omni; update Omni'
-      : `saved by an Omni this version cannot read (format ${JSON.stringify(raw)?.slice(0, 24)})`
-    return undefined
+    stuck = stateFormatProblem(parsed, contract)
+    return stuck === undefined ? parsed : undefined
   }
 
   const ownPart = bot => typeof bot.sessionId === 'string' && bot.sessionId !== '' ? bot.sessionId : bot.id
@@ -335,6 +420,7 @@ export function install(rt) {
   // Fill `state` from the saved file and bring an older team up to date. Returns the
   // groups whose Session titles still need the new name.
   const adopt = (parsed) => {
+    if (activationFence) return { migrated: false, stale: [], repaired: false, retiredSeed: false }
     lockEpoch += 1
     // Until the end of this: a file that could not be read, or was set aside as corrupt,
     // leaves an empty team in memory that is not the saved one.
@@ -351,18 +437,20 @@ export function install(rt) {
     const valid = parsed !== null && parsed !== undefined ? true : stuck === undefined && !aside
     const hadCapabilities = parsed !== null && parsed !== undefined && Object.hasOwn(parsed, 'capabilities')
     credentials.decode(parsed)
+    if (valid) committedActivations = [...(parsed?.[STATE_ACTIVATIONS] ?? [])]
+    committedPins = pinsIn(parsed)
     for (const key of Object.keys(state)) delete state[key]
     Object.assign(state, JSON.parse(EMPTY), parsed ?? {})
     savedRecovery = recoveryFields(state)
     pendingDurability = undefined
     // The serializer stamps the format of the saved fields.
-    state.version = STATE_VERSION
+    state.version = protectedStateFormat(parsed?.version) ? parsed.version : STATE_VERSION
     state.prefs ??= {}
     // Teams saved before the DSH Agent existed carry no `agents`; corrupt values reset.
     if (state.agents === null || typeof state.agents !== 'object' || Array.isArray(state.agents)) state.agents = {}
     // `computer` is the computer-use switch; absent or corrupt means off.
     if (state.computer === null || typeof state.computer !== 'object' || Array.isArray(state.computer)) state.computer = {}
-    let migrated = !hadCapabilities || (parsed?.version !== STATE_VERSION && parsed?.version !== ENCRYPTED_STATE_VERSION)
+    let migrated = !hadCapabilities || (parsed?.version !== STATE_VERSION && parsed?.version !== 4 && !encryptedStateFormat(parsed?.version))
     if (state.autoStamp !== state.revision && rt.dropAutoMarks()) migrated = true
     if (holder !== undefined) rt.dropAutoMarks()
     // The single DSH Agent of older teams splits into a DSH bot and the tasks record (agents.js).
@@ -679,8 +767,17 @@ export function install(rt) {
     }
   }
 
+  const importIfSafe = () => {
+    if (!rt.holdsLock() || stopped) return false
+    try { return rt.importTeam?.(rt.holdsLock) === true } catch (error) {
+      warn('ds-bot: importing the saved Bot team failed: %s', error)
+      return false
+    }
+  }
+
   const load = () => loaded ??= (async () => {
     claimLock()
+    importIfSafe()
     if (holder !== undefined) warn('ds-bot: %s', readOnly())
     const parsed = readFileState()
     teamPresentAtLoad = parsed !== undefined ? true : stuck === undefined && !aside ? false : null
@@ -705,20 +802,28 @@ export function install(rt) {
   // refresh slips between finding the change and the adopt.
   let adopting
   let recoveryPending = false
-  const mayInitializeRecoveryKey = () => {
-    try { return JSON.parse(readFileSync(statePath))?.version !== ENCRYPTED_STATE_VERSION } catch { return false }
-  }
-  const adoptAfterReclaim = () => {
+  const adoptAfterReclaim = ({ archive = true } = {}) => {
     const run = (adopting ?? writing).then(async () => {
-      if (stamp() !== seen) {
+      if (activationFence) return false
+      if (committedActivations.length && !lstatSync(statePath, { throwIfNoEntry: false })) {
+        fenceActivation()
+        return false
+      }
+      if (archive && stamp() !== seen) {
+        let replacement
+        try { replacement = JSON.parse(regularBytes(statePath)) } catch {}
+        const refused = replacement && typeof replacement === 'object' && !Array.isArray(replacement)
+          && stateFormatProblem(replacement, contract)
         const aside = `${statePath}.replaced-${Date.now()}`
-        const snapshot = credentials.encode(state, { initializeKey: mayInitializeRecoveryKey() })
+        const snapshot = credentials.encode({ ...state, ...(committedActivations.length ? { [STATE_ACTIVATIONS]: committedActivations } : {}) },
+          { initializeKey: !refused && replacement !== undefined && !encryptedStateFormat(replacement?.version),
+            protectedState: committedActivations.length > 0 })
         try {
           if (snapshot.pending || snapshot.refused || !snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
           await writeFile(aside, snapshot.bytes, { mode: 0o600, flag: 'wx' })
           warn('ds-bot: %s changed while no host held the team; it is adopted and this host\'s state is kept as %s', statePath, aside)
         } catch (error) {
-          if (snapshot.encrypted || snapshot.pending || snapshot.refused) {
+          if (!refused && (snapshot.encrypted || snapshot.pending || snapshot.refused)) {
             recoveryPending = true
             warn('ds-bot: keeping the current Bot team open until its recovery copy can be saved: %s', error)
             throw error
@@ -755,10 +860,12 @@ export function install(rt) {
   // A reading host follows the file and takes over once the other host has gone.
   const refresh = async () => {
     await load()
+    if (activationFence) return
     const hadHolder = holder !== undefined
     if (hadHolder) {
       claimLock()
       if (holder === undefined) {
+        importIfSafe()
         warn('omni-ui: the other dsh has closed; this one now saves the Bot team')
         warnedReadOnly = false
         const { repaired, retiredSeed } = adopt(readFileState())
@@ -786,7 +893,17 @@ export function install(rt) {
       lockGained()
       return
     }
-    if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) {
+    if (teamPresentAtLoad === false && importIfSafe()) {
+      teamPresentAtLoad = true
+      return adoptAfterReclaim({ archive: false })
+    }
+    const current = stamp()
+    if (current !== seen && current !== publishing) {
+      // The current writer keeps its loaded legacy team when only the file was removed.
+      // Its next ordinary save can recreate it. Reclaim and protected snapshots use their own checks.
+      if (current === '' && teamRead && !committedActivations.length && rt.holdsLock()
+        && !lstatSync(statePath, { throwIfNoEntry: false })) return
+      if (stuck === undefined && holder === undefined) return adoptAfterReclaim()
       const wasStuck = stuck !== undefined
       const { repaired, retiredSeed } = adopt(readFileState())
       if (retiredSeed) await save({ required: true })
@@ -809,7 +926,7 @@ export function install(rt) {
     return false
   }
   const writable = () => {
-    if (stuck !== undefined) return warnReadOnly()
+    if (stuck !== undefined || activationFence) return warnReadOnly()
     if (lockBroken) return true
     if (holder === undefined && lock.owns()) return true
     rt.dropAutoMarks()
@@ -829,10 +946,10 @@ export function install(rt) {
     return warnReadOnly()
   }
 
-  rt.canWriteTeam = () => stuck === undefined && (lockBroken || (holder === undefined && lock.owns()))
+  rt.canWriteTeam = () => !activationFence && stuck === undefined && (lockBroken || (holder === undefined && lock.owns()))
   rt.lockBeating = () => lock.beating?.() !== false
   rt.holdsLock = () => {
-    if (stopped || lockBroken || stuck !== undefined || holder !== undefined) return false
+    if (stopped || lockBroken || activationFence || stuck !== undefined || holder !== undefined) return false
     if (!lock.owns()) {
       onLockLost()
       return false
@@ -842,7 +959,7 @@ export function install(rt) {
   }
   // A write that was already on its way when the plugin stopped may still land: the lock is
   // released only after the writes registered here end (holdLockUntil), so it is still ours.
-  rt.ownsLockForPendingWrite = () => !lockBroken && stuck === undefined && holder === undefined && lock.owns()
+  rt.ownsLockForPendingWrite = () => !lockBroken && !activationFence && stuck === undefined && holder === undefined && lock.owns()
   rt.holdLockUntil = (pending) => { lockWaits.add(pending) }
   // RFC 0039 delivery 3: the team an ending operation began in. An adopt replaces the team in memory (`epoch`);
   // a lost and re-claimed lock ends this host's term (`term`, claimLock). Only a host that holds the team now,
@@ -864,6 +981,7 @@ export function install(rt) {
   }
   rt.saveCopy = (change, { beforeCommit, afterPublish, afterWrite, durable = false } = {}) => {
     const admitted = rt.teamGeneration()
+    const copyActivationEpoch = activationEpoch
     if (missingTeamHeld()) return Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`))
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
     refreshShellHolds(state.bots)
@@ -873,7 +991,6 @@ export function install(rt) {
       let revision
       const applyCopy = callback => {
         state.revision = state.autoStamp = revision
-        state.version = STATE_VERSION
         state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
         callback()
         refreshShellHolds(state.bots)
@@ -884,13 +1001,13 @@ export function install(rt) {
         refreshShellHolds(copy.bots, { log: false })
         revision = state.revision + 1
         copy.revision = copy.autoStamp = revision
-        copy.version = STATE_VERSION
         copy.exchanges = copy.exchanges.slice(-MAX_EXCHANGES)
         return copy
       }, {
         required: true,
         durable,
         admitted,
+        copyActivationEpoch,
         epoch: lockEpoch,
         beforeCommit,
         afterPublish: afterPublish && (current => {
@@ -902,7 +1019,6 @@ export function install(rt) {
     }
     state.revision += 1
     state.autoStamp = state.revision
-    state.version = STATE_VERSION
     state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
     const copy = credentials.clone(state)
     change(copy)
@@ -916,7 +1032,7 @@ export function install(rt) {
       else if (useLiveConnectors) delete copy.connectors
       if (copy.revision < state.revision) copy.revision = copy.autoStamp = state.revision + 1
       return copy
-    }, { required: true, durable, admitted, epoch: lockEpoch, afterWrite: () => {
+    }, { required: true, durable, admitted, copyActivationEpoch, epoch: lockEpoch, afterWrite: () => {
       if (copy.revision > state.revision) state.revision = state.autoStamp = copy.revision
     } })
   }
@@ -934,7 +1050,6 @@ export function install(rt) {
       rt.sweepAuto?.()
       state.revision += 1
       state.autoStamp = state.revision
-      state.version = STATE_VERSION
       state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
       if (enableNativeTools === undefined) return state
       // ON belongs to this write's encoding until the owner route receives its
@@ -950,14 +1065,78 @@ export function install(rt) {
   }
 
   let warnedCredentialSave = false
-  const writeSnapshot = (snapshotOf, { required = false, durable = false, admitted, epoch: copyEpoch, beforeCommit, afterPublish, afterWrite } = {}) => {
+  const allowedActivations = activationIds(contract.activations)
+  const activationAllowed = () => {
+    const proof = rt.stateWriteProof?.({ compare: true })
+    return proof === undefined || proof === 'steady' || proof === 'compare'
+  }
+  const activationError = () => refusal(activationDeferred, { code: 'bot/state-activation-deferred' })
+  const setActivations = (data, requested) => {
+    const proposed = Object.hasOwn(data, STATE_ACTIVATIONS) ? activationIds(data[STATE_ACTIVATIONS]) : []
+    const authorized = [...new Set([...committedActivations, ...requested])].sort()
+    if (!proposed || proposed.some(id => !authorized.includes(id))) throw refusal('Uncommitted Bot team state activation.')
+    const copy = { ...data, version: authorized.length ? 4 : STATE_VERSION }
+    if (authorized.length) copy[STATE_ACTIVATIONS] = authorized
+    else delete copy[STATE_ACTIVATIONS]
+    const problem = stateFormatProblem(copy, contract)
+    if (problem) throw refusal(problem)
+    return copy
+  }
+
+  // The caller describes the change against the latest locked copy. Callers
+  // publish their live view from afterWrite, once the new format is durable.
+  rt.commitStateActivation = async (ids, change, { backup, beforeCommit, afterWrite, retry = false } = {}) => {
+    const requested = activationIds(ids, { required: true })
+    if (!requested?.every(id => allowedActivations?.includes(id))
+      || ![4, 5].every(version => contract.stateFormats.includes(version))) throw refusal('Unsupported Bot team state activation.')
+    if (typeof afterWrite !== 'function') throw new TypeError('A state activation requires a live-state commit.')
+    if (backup !== undefined && (typeof backup !== 'string' || !/^(?:solver|positions)-[a-zA-Z0-9.-]{1,64}$/.test(backup))) {
+      throw refusal('Invalid Bot team activation backup name.')
+    }
+    await load()
+    await refresh()
+    if (!rt.holdsLock()) throw refusal(readOnly() ?? changedTeam)
+    const key = requested.join(',')
+    try {
+      return await writeSnapshot(() => {
+        const copy = credentials.clone(state)
+        change(copy)
+        copy.revision = copy.autoStamp = state.revision + 1
+        return copy
+      }, { required: true, durable: true, admitted: rt.teamGeneration(), requested, backup, beforeCommit, afterWrite })
+    } catch (error) {
+      if (!retry || error?.code !== 'bot/state-activation-deferred') throw error
+      retryActivation ??= new Map()
+      retryActivation.set(key, () => rt.commitStateActivation(requested, change, { backup, beforeCommit, afterWrite }))
+      return false
+    }
+  }
+
+  rt.retryStateActivations = async () => {
+    if (!sidecarAllowed() || !retryActivation) return
+    const pending = retryActivation
+    retryActivation = undefined
+    for (const retry of pending.values()) {
+      try { await retry() } catch (error) { warn('ds-bot: retrying the saved state activation failed: %s', error) }
+    }
+  }
+  rt.committedUpdate = async () => {
+    if (!sidecarAllowed() || stopped) return
+    await refresh()
+    await rt.retryStateActivations()
+  }
+
+  const writeSnapshot = (snapshotOf, {
+    required = false, durable = false, admitted, epoch: copyEpoch, copyActivationEpoch,
+    beforeCommit, afterPublish, afterWrite, requested = [], backup,
+  } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
       if (missingTeamHeld()) {
         if (required) throw new Error(`This host cannot save the Bot team: ${readOnly()}`)
         return
       }
-      if (stuck !== undefined || holder !== undefined) {
+      if (stuck !== undefined || activationFence || holder !== undefined) {
         if (required) throw new Error(`This host cannot save the Bot team: ${readOnly()}`)
         warnReadOnly()
         return
@@ -965,18 +1144,28 @@ export function install(rt) {
       const epoch = copyEpoch ?? lockEpoch
       // Ordinary saves use the adopted state, not a snapshot of the replaced team.
       const generation = admitted ?? rt.teamGeneration()
-      const temp = `${statePath}.${process.pid}.tmp`
-      let flush = durable
+      const activating = requested.some(id => !committedActivations.includes(id))
+      const strict = requested.length > 0 || committedActivations.length > 0
+      const bootstrap = !strict && teamPresentAtLoad === false && teamRead && seen === '' && !lockBroken
+      const temp = strict ? `${statePath}.${randomUUID()}.tmp` : `${statePath}.${process.pid}.tmp`
+      let flush = durable || bootstrap
+      let renamed = false
+      let confirmed = false
       try {
+        if (copyActivationEpoch !== undefined && copyActivationEpoch !== activationEpoch) throw refusal(changedTeam)
+        if (strict && (lockBroken || !teamRead)) throw refusal(changedTeam)
+        if (activating && !activationAllowed()) throw activationError()
         if (durable && sameGeneration(generation)) pendingDurability = generation
         await mkdir(home, { recursive: true })
         const ensureLock = () => {
-          const owned = lockBroken || lock.owns()
+          const owned = lockBroken ? !strict : lock.owns()
           const current = lockBroken ? '' : stamp()
           // An outside edit is adopted instead of overwritten; deletion can be saved again.
-          const changed = owned && current !== '' && current !== seen
-          if (changed) void adoptAfterReclaim().catch(() => {})
-          if (!owned || changed || lockEpoch !== epoch || (flush && !sameGeneration(generation))) {
+          const changed = owned && (strict || current !== '') && current !== seen
+          if (changed && current === '' && committedActivations.length
+            && !lstatSync(statePath, { throwIfNoEntry: false })) fenceActivation()
+          else if (changed) void adoptAfterReclaim().catch(() => {})
+          if (!owned || changed || lockEpoch !== epoch || (strict && stopped) || (flush && !sameGeneration(generation))) {
             const error = new Error(changed ? 'ds-bot: the Bot team file changed under this host\'s lock' : 'ds-bot lost the state lock to another dsh')
             error.code = 'ELOCKLOST'
             rt.dropAllGrants?.()
@@ -984,32 +1173,48 @@ export function install(rt) {
           }
         }
         ensureLock()
-        const data = snapshotOf()
+        const data = setActivations(snapshotOf(), requested)
         const recovery = recoveryFields(data)
-        flush ||= recovery !== savedRecovery || unconfirmedState !== undefined || sameGeneration(pendingDurability)
+        flush ||= strict || recovery !== savedRecovery || unconfirmedState !== undefined || sameGeneration(pendingDurability)
         if (flush) {
           ensureLock()
           pendingDurability = generation
         }
-        const snapshot = credentials.encode(data)
-        if (snapshot.refused) throw refusal(KEY_ERROR)
+        if (activating) {
+          const preimage = regularBytes(statePath, { optional: true })
+          ensureLock()
+          if (preimage) {
+            const revision = JSON.parse(preimage).revision ?? 0
+            if (!Number.isSafeInteger(data.revision) || data.revision <= revision) throw refusal(changedTeam)
+            savePreimage(statePath, preimage, backup)
+            ensureLock()
+          }
+          else if (seen !== '' || teamPresentAtLoad !== false || lstatSync(statePath, { throwIfNoEntry: false })) throw refusal(changedTeam)
+        }
+        const snapshot = credentials.encode(data, { protectedState: strict })
+        const savedPins = pinsIn(data)
+        if (activating && snapshot.keyDeferred && !sidecarAllowed()) throw activationError()
+        if (snapshot.refused || (strict && snapshot.pending)) throw refusal(KEY_ERROR)
+        if (!contract.stateFormats.includes(snapshot.format)) throw refusal('Unsupported Bot team state format.')
         if (snapshot.pending && !warnedCredentialSave) {
           warnedCredentialSave = true
           warn('ds-bot: %s', KEY_ERROR)
         }
-        await writeFile(temp, snapshot.bytes, 'utf8')
+        await writeFile(temp, snapshot.bytes, strict ? { encoding: 'utf8', flag: 'wx', mode: 0o600 } : 'utf8')
         if (flush) await syncFile(temp)
         const ensureKey = () => {
           if (!snapshot.keyIsCurrent()) throw refusal(KEY_ERROR)
         }
         const ensureCommit = () => {
-          ensureLock()
-          const checked = beforeCommit?.()
-          if (typeof checked?.then === 'function') return checked.then(() => {
+          const checkPublication = () => {
             ensureLock()
             ensureKey()
-          })
-          ensureKey()
+            if (activating && !activationAllowed()) throw activationError()
+          }
+          ensureLock()
+          const checked = beforeCommit?.()
+          if (typeof checked?.then === 'function') return checked.then(checkPublication)
+          checkPublication()
         }
         const checked = ensureCommit()
         if (checked !== undefined) await checked
@@ -1018,10 +1223,12 @@ export function install(rt) {
         const nextStamp = fileStamp(temp)
         publishing = nextStamp
         try {
-          await replaceFile(temp, statePath, ensureCommit)
+          await replaceFile(temp, statePath, ensureCommit, strict ? { rename: renameSync } : undefined)
+          renamed = true
           // Keep our published stamp even if directory sync later fails or
           // another file has already replaced the one we published.
           seen = nextStamp
+          if (bootstrap) bootstrapGeneration = generation
         } finally {
           publishing = undefined
         }
@@ -1030,14 +1237,26 @@ export function install(rt) {
           pendingDurability = undefined
           unconfirmedState = snapshot.bytes
         }
-        afterPublish?.(lockEpoch === epoch)
+        if (!strict) afterPublish?.(lockEpoch === epoch)
         if (flush) {
           await syncDirectory(dirname(statePath))
           unconfirmedState = undefined
           ensureLock()
         }
+        if (strict) {
+          ensureKey()
+          if (activating && !activationAllowed()) throw activationError()
+          committedActivations = [...data[STATE_ACTIVATIONS]]
+          state.version = snapshot.format
+          state[STATE_ACTIVATIONS] = [...committedActivations]
+          if (activating) activationEpoch++
+          if (requested.length) state.revision = state.autoStamp = data.revision
+          confirmed = true
+          afterPublish?.(true)
+        }
         snapshot.commit()
-        afterWrite?.()
+        committedPins = savedPins
+        afterWrite?.(data)
         // The file now holds this team, a fresh one after a corrupt file included.
         if (stuck === undefined) teamRead = true
         rt.capabilitiesStateSaved?.()
@@ -1046,6 +1265,7 @@ export function install(rt) {
         }
         return true
       } catch (error) {
+        if (strict && renamed && !confirmed) fenceActivation()
         await unlink(temp).catch(() => {})
         throw error
       }
@@ -1270,7 +1490,7 @@ export function install(rt) {
   // read or was set aside as corrupt. It reads memory only.
   const teamLoaded = () => teamRead
   const teamCurrent = () => {
-    if (adopting !== undefined) return false
+    if (activationFence || adopting !== undefined) return false
     const current = stamp()
     return current === seen || current === publishing
   }
@@ -1292,11 +1512,11 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
-    state, load, save, refresh, readOnly, teamLoaded,
+    state, load, save, refresh: async () => { await refresh(); await rt.retryStateActivations() }, readOnly, teamLoaded,
     connectorCredentialsUnavailable: credentials.hasUnavailable,
     retryConnectorCredentials: () => credentials.retry(state.connectors),
     // The first read distinguishes an absent roster from a saved empty team.
-    teamHealth: () => teamPresentAtLoad !== null && teamRead && stuck === undefined && !aside
+    teamHealth: () => !activationFence && teamPresentAtLoad !== null && teamRead && stuck === undefined && !aside
       ? { present: teamPresentAtLoad, revision: state.revision, bots: Object.keys(state.bots).length } : null,
     teamCurrent, own, onSaved, onLockGained, onAdopted, lockTerm: () => lockTerm, closeCard, assertShellChoice, refreshShellChoice,
     botOf, roomOf, isMain, chatOf, sessionOfRoom, selfOf, isBotSession,
