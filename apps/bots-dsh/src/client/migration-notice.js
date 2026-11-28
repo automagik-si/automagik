@@ -66,6 +66,14 @@ function ChiefRecovery({ recovery, choices, readOnly, setChief }) {
     error ? h('p', { role: 'alert' }, error) : null)
 }
 
+export function migrationFace({ actions, roster, gated, mountedViewer, after }) {
+  return {
+    actions, hooks: { roster }, readRoster: roster.getSnapshot,
+    isOwner: () => !gated || ['owner', 'admin'].includes(mountedViewer()?.role),
+    after,
+  }
+}
+
 export function MigrationNotices({ useRoster, readRoster, isOwner, after, actions }) {
   const roster = useRoster(value => value)
   const { notices, recovery, choices, readOnly } = migrationView(roster, isOwner())

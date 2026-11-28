@@ -50718,6 +50718,15 @@ function ChiefRecovery({ recovery, choices, readOnly, setChief }) {
     error ? (0, import_react113.createElement)("p", { role: "alert" }, error) : null
   );
 }
+function migrationFace({ actions, roster, gated, mountedViewer: mountedViewer2, after }) {
+  return {
+    actions,
+    hooks: { roster },
+    readRoster: roster.getSnapshot,
+    isOwner: () => !gated || ["owner", "admin"].includes(mountedViewer2()?.role),
+    after
+  };
+}
 function MigrationNotices({ useRoster, readRoster: readRoster2, isOwner, after, actions }) {
   const roster = useRoster((value) => value);
   const { notices, recovery, choices, readOnly } = migrationView(roster, isOwner());
@@ -51744,13 +51753,6 @@ function applyOwner(ctx, { gated = false } = {}) {
     });
   }
   const face = () => ({ actions, hooks: { roster, ui: ui2, activity, work, memoryNews, registry: registry2, turnClock, live, computer, cards: cards2, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } });
-  const migrationFace = () => ({
-    actions,
-    hooks: { roster },
-    readRoster: roster.getSnapshot,
-    isOwner: () => !gated || mountedViewer()?.role === "owner",
-    after
-  });
   const openingFace = () => ({ ...face(), openingSessions: ctx.sessions });
   const ownerViewer = gated ? requestViewer("whoami") : void 0;
   const updateQueue = async (sessionId, itemId, action) => {
@@ -52068,7 +52070,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => shadow("shell.overlay", { id: "bot-computer", order: 40, inject: face }, ComputerIndicator),
     () => shadow("shell.overlay", { id: "bot", order: 50, inject: face }, Overlays),
     () => shadow("shell.overlay", { id: "bot-signin", order: 55, inject: face }, DeepSeekSignIn),
-    () => shadow("shell.overlay", { id: "bot-migration", order: 58, inject: migrationFace }, MigrationNotices),
+    () => shadow("shell.overlay", { id: "bot-migration", order: 58, inject: () => migrationFace({ actions, roster, gated, mountedViewer, after }) }, MigrationNotices),
     () => shadow("shell.overlay", { id: "bot-toast", order: 60, inject: face }, ErrorToast)
   ];
   const installUserTimes = () => {
