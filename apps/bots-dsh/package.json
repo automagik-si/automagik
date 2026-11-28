@@ -29,6 +29,7 @@
     "./read-scope-search": "./src/host/read-scope-search.js",
     "./sandbox-local": "./src/host/sandbox-local.js",
     "./web-search": "./web-search.js",
+    "./decisions": "./decisions.js",
     "./member-wall/fs": "./src/host/member-wall/fs.js",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
@@ -36,6 +37,7 @@
   "files": [
     "index.js",
     "src/host/",
+    "src/decisions/",
     "src/shared/",
     "src/office/",
     "roles/solver/",
@@ -46,6 +48,7 @@
     "office.js",
     "locale/",
     "web-search.js",
+    "decisions.js",
     "cordis.patch.yml",
     "README.md",
     "LICENSE",

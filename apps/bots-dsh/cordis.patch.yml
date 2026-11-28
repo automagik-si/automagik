@@ -1,7 +1,7 @@
 # Mounts Omni's host plugin; the browser half is discovered through the package's
 # dsh.client manifest and ./client export.
 #
-# Installed into someone's own DSH, this patch adds Omni and changes nothing of theirs:
+# Installed into someone's own DSH, this patch adds Omni and Decisions:
 # the team keeps its files in $AUTOMAGIK_HOME/bots (~/.automagik/bots), its Omni key in its own link file
 # there, and it overrides no other entry's config. The keyless web search
 # (@automagik/bots-dsh/web-search) is not inserted here, because it takes over DSH's
@@ -13,3 +13,5 @@
         # Omni is not on a registry release channel yet; nothing checks for or installs
         # updates, of Omni or of DSH.
         updateCheck: false
+    - id: decisions
+      name: '@automagik/bots-dsh/decisions'
