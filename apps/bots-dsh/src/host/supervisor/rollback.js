@@ -240,13 +240,19 @@ export async function restoreData(config, run, save, {
       || (trialHash !== null && !HASH.test(trialHash)) || !HASH.test(snapshotHash)
       || (why !== undefined && why !== 'team-lost')) throw new Error('Invalid data restore journal')
     if (snapshotHash !== team.snapshotHash) throw new RollbackBlocked('snapshot-changed')
+    const trialCopy = dir => join(dir, 'trial-' + team.snapshot)
+    const displaced = trialHash !== null && trialHash !== snapshotHash
+    const verifyDisplaced = () => {
+      const copy = trialCopy(join(config.store, 'rollback-data', run.runId))
+      if (displaced && !sameHash(checkedLive(copy), trialHash)) throw new RollbackBlocked('snapshot-changed')
+    }
     if (prior?.restored === true) {
+      verifyDisplaced()
       // A previously admitted child can have saved a compatible descendant before the supervisor stopped.
       if (liveHash !== snapshotHash && !(run.rollback.starts > 0 && canKeep)) throw new RollbackBlocked('superseded')
       return proof
     }
     let trialKept = false
-    const trialCopy = dir => join(dir, 'trial-' + team.snapshot)
     if (!sameHash(trial, snapshotHash)) {
       if (liveHash !== trialHash) throw new RollbackBlocked('superseded')
       if (trial !== undefined) {
@@ -261,8 +267,9 @@ export async function restoreData(config, run, save, {
       if (!sameHash(checkedLive(path), liveHash)) throw new RollbackBlocked('superseded')
       requireOwnership()
       writeBytesAtomic(path, snapshot, { durable: true })
-    } else if (trialHash !== null && trialHash !== snapshotHash) {
-      trialKept = sameHash(regularBytes(trialCopy(join(config.store, 'rollback-data', run.runId)), { optional: true }), trialHash)
+    } else if (displaced) {
+      verifyDisplaced()
+      trialKept = true
     }
     requireOwnership()
     dataOutcome(run, save, { restored: true, trialKept, ...(why ? { why } : {}) }, { ...run.journal, restored: true })

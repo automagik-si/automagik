@@ -524,6 +524,25 @@ for (const modified of ['none', 'trial', 'snapshot', 'previous-after-completion'
   })
 }
 
+for (const completed of [false, true]) {
+  test('restore replay requires the displaced trial archive, recorded outcome: ' + completed, async t => {
+    const f = prepare(t)
+    const run = read(f.state)
+    await restoreData(f.config, run, saveTo(run))
+    assert.equal(run.rollback.data.trialKept, true)
+    if (!completed) {
+      delete run.rollback.data
+      delete run.journal.restored
+    }
+    const archive = join(f.backup, 'trial-bots-state.json')
+    fs.rmSync(archive)
+    await assert.rejects(restoreData(f.config, run, saveTo(run)), /snapshot-changed/)
+    write(archive, { version: 2, note: 'unexpected bytes' })
+    await assert.rejects(restoreData(f.config, run, saveTo(run)), /snapshot-changed/)
+    assert.deepEqual(read(f.path), originalTeam)
+  })
+}
+
 test('rollback replay preserves the verified archive when the kept snapshot changes after restore intent', async t => {
   const f = prepare(t)
   const before = await rollback(f, { cutAt: run => !!run.journal.restore })
