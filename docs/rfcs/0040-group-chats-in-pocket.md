@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q7 answered with this RFC's recommendations, see Decided; amends RFC 0015, which records the amendment; deliveries 1-3 under way, none merged) |
+| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q7 answered with this RFC's recommendations, see Decided; amends RFC 0015, which records the amendment; deliveries 1-3 under way, none merged) · Amendment proposed by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-20 |
@@ -586,3 +586,17 @@ None. See Decided for questions 1 to 7.
   [RFC 0039 — Scoped approval grants](0039-person-scoped-approval-grants.md).
 - [RFC 0011 — Monorepo parts and releases](0011-monorepo-parts-and-releases.md).
 - [Pocket privacy](../../apps/pocket/docs/privacy.md).
+
+## Proposed amendment: the chief and a team's leader (RFC 0050)
+
+[RFC 0050](0050-teams-positions-roles.md) proposes these changes to the group model while keeping the phone projection and its
+paired-phone eligibility rules.
+
+- “A Main Bot posts into any group without being a member” becomes: the chief of staff can
+  post into any group, and in W4 a team leader can post into groups whose `room.teamId`
+  names that team, including as a nonmember.
+- “a member's or Main Bot's message” projects the same assistant row for a member, chief,
+  or authorized leader even when the sender is outside the group's membership.
+- “the admin or a Main Bot” in the threat model becomes the responsible member
+  (`room.admin`), the chief or, for a team-owned group, its leader. The phone acquires no
+  new Bot or group administration authority.
