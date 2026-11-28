@@ -406,9 +406,11 @@ export function installRoles(rt, deps = {}) {
   }
   rt.hasRole = (id, role) => {
     const bot = rt.own(state.bots, id)
+    if (attachedRoles(bot).some(pin => pin.id === role && (registryAttachment(pin) || isPackageRoleId(pin.id)))) {
+      return runtime.heldOf(id, role) !== undefined
+    }
+    if (role === 'genie' && rt.roleRegistry?.of(role)) return effectiveRoleIds(bot).includes(role)
     return hasRole(bot, role, state.prefs)
-      && (bot?.roles?.some(pin => pin?.id === role && registryAttachment(pin))
-        ? runtime.heldOf(id, role) !== undefined : true)
   }
   rt.detachRole = (id, role) => editRole(id, false, role)
   const roleWrite = work => serialize(async () => {
@@ -416,16 +418,22 @@ export function installRoles(rt, deps = {}) {
     packages.requireWriter()
     return work()
   })
+  const rolePin = (id, role) => {
+    const roleId = typeof role === 'string' ? role : role?.id
+    const pin = attachedRoles(rt.own(state.bots, id)).find(entry => entry.id === roleId)
+    if (!rolesOn(state.prefs) && !registryAttachment(pin)) throw rolesOff()
+    return typeof role === 'string' ? pin : role
+  }
   rt.grantRole = ({ id, role, capability, on }) => roleWrite(async () => {
     if (typeof id !== 'string' || typeof on !== 'boolean') throw refusal('Invalid role grant.')
-    if (!rolesOn(state.prefs) && role?.source !== 'registry') throw rolesOff()
+    const pin = rolePin(id, role)
     await runtime.ready(id)
-    const held = runtime.requireAttachment(id, role)
+    const held = runtime.requireAttachment(id, pin)
     if (!runtime.capabilitiesOf(held).includes(capability)) throw refusal('This role does not declare that capability.')
     const before = held.bot.roles.find(pin => sameRolePin(pin, held.pin))
     const check = () => {
       packages.requireWriter()
-      if (runtime.requireAttachment(id, role) !== held || !held.bot.roles.includes(before)) {
+      if (runtime.requireAttachment(id, pin) !== held || !held.bot.roles.includes(before)) {
         throw refusal("This Bot's role changed. Try again.")
       }
     }
@@ -438,13 +446,13 @@ export function installRoles(rt, deps = {}) {
   })
   const roleSettings = (id, role, values, write) => roleWrite(async () => {
     if (typeof id !== 'string') throw refusal('No such Bot')
-    if (!rolesOn(state.prefs) && role?.source !== 'registry') throw rolesOff()
+    const pin = rolePin(id, role)
     await runtime.ready(id)
-    const held = runtime.requireAttachment(id, role)
+    const held = runtime.requireAttachment(id, pin)
     const declarations = held.manifest.settings
     const check = () => {
       packages.requireWriter()
-      if (runtime.requireAttachment(id, role) !== held) throw refusal("This Bot's role changed. Try again.")
+      if (runtime.requireAttachment(id, pin) !== held) throw refusal("This Bot's role changed. Try again.")
     }
     check()
     if (write) return runtime.settings.write(id, held.pin.id, declarations, values, check)

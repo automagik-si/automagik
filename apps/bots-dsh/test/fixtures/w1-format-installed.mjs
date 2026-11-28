@@ -8,6 +8,8 @@ import fs from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fakeContext } from '../fake-ctx.js'
+import { activationIds } from './w1-format-profile.mjs'
 import { verifyLane } from '../../src/host/lane-verify.js'
 import { ROLE_KEYS } from '../../src/host/supervisor/release.js'
 import { VENDOR } from '../../src/host/supervisor/stage.js'
@@ -119,7 +121,9 @@ function profileFor(t, artifact) {
     dsh: { profile: { bundles: [base, web, BOTS] } },
   })
   fs.writeFileSync(join(profileDir, 'pnpm-lock.yaml'), `lockfileVersion: '9.0'\n# Fixture pin: ${pin}\n`)
-  assert.deepEqual(readFormatContract(plugin).contract, LEGACY_CONTRACT)
+  const contract = readFormatContract(plugin)
+  if (artifact.candidate) assert.equal(contract.legacy, false)
+  else assert.deepEqual(contract.contract, LEGACY_CONTRACT)
   const store = prepareStore(profileDir)
   const dshVersion = read(join(dsh, manifest)).version
   const expectedDsh = read(join(checkout, 'dev/harness', manifest)).dependencies['@deepseek-ai/dsh']
@@ -148,13 +152,49 @@ function installedSupervisor(f, artifact) {
   return { entry: join(copy, main), sha256: hashes[main], closureSha256: sha256(JSON.stringify(hashes)) }
 }
 
-async function replayInstalled(t, artifact, from, to, { guarded = false, held = false } = {}) {
+async function writeCandidateTrial(t, candidate, f, rollback, from, to) {
+  const trial = profileFor(t, candidate)
+  const path = join(trial.botsHome, 'state.json')
+  const original = JSON.parse(rollback.original)
+  const source = rosterBytes(from, { roles: [], revision: original.revision, connectors: original.connectors })
+  fs.writeFileSync(path, source)
+  const { createRuntime } = await import(pathToFileURL(join(trial.plugin, 'index.js')).href)
+  const ctx = fakeContext()
+  const rt = createRuntime(ctx, { home: trial.botsHome, diagnosticsFile: false, github: false, updateCheck: false })
+  try {
+    await rt.load()
+    // Use two registry attachments so neither collision proof is stubbed.
+    for (const id of ['operator', 'guide']) {
+      rt.hooks.role({ id, name: id, tools: [], capabilities: [] })
+      await rt.attachRole('a', id)
+    }
+    const saved = fs.readFileSync(path)
+    const state = JSON.parse(saved)
+    assert.equal(state.version, to)
+    assert.deepEqual(state.stateActivations, [activationIds.registry, activationIds.stack])
+    assert.deepEqual(state.bots.a.roles.map(pin => pin.id), ['operator', 'guide'])
+    assert.deepEqual(state.connectors, original.connectors)
+    assert.deepEqual(fs.readFileSync(path + '.pre-roles-' + sha256(source)), source)
+    assert.deepEqual(trial.dependencyPins, f.dependencyPins)
+    assert.deepEqual(trial.runtimePins, f.runtimePins)
+    rollback.trial = saved
+    fs.writeFileSync(rollback.path, saved)
+    t.diagnostic(JSON.stringify({ candidate: candidate.provenance, writer: 'packed host runtime in disposable context',
+      dependencies: trial.dependencyPins, dsh: trial.dshVersion, trial: sha256(saved) }))
+  } finally {
+    rt.dispose()
+    await ctx.dispose()
+  }
+}
+
+async function replayInstalled(t, artifact, from, to, { guarded = false, held = false, candidate } = {}) {
   const f = profileFor(t, artifact)
   const supervisor = installedSupervisor(f, artifact)
   const rollback = await prepareRollback(t, f.plugin, from, to, f, guarded ? {
     switchTimeBytes: rosterBytes(from, { roles: held ? [pins.solver, pins.voice] : [pins.solver], revision: 42 }),
     trialRoles: to >= 4 ? [pins.solver, pins.registry] : [pins.solver],
   } : undefined)
+  if (candidate && to >= 4) await writeCandidateTrial(t, candidate, f, rollback, from, to)
   const state = join(f.store, 'state.json')
   writeJsonAtomic(state, rollback.run, { profileDir: f.profileDir, durable: true })
   const { runSupervisor } = await import(pathToFileURL(supervisor.entry).href)
@@ -200,11 +240,20 @@ async function replayInstalled(t, artifact, from, to, { guarded = false, held = 
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [tarball, lane, supervisor, commit, hash, ...extra] = process.argv.slice(2)
-  assert.ok(tarball && lane && supervisor && commit && hash && !extra.length,
-    'Usage: w1-format-installed.mjs <bots.tgz> <lane.json> <supervisor/main.js> <commit> <sha256>')
+  const [tarball, lane, supervisor, commit, hash, candidatePath, candidateCommit, ...extra] = process.argv.slice(2)
+  assert.ok(tarball && lane && supervisor && commit && hash && !extra.length
+    && Boolean(candidatePath) === Boolean(candidateCommit),
+    'Usage: w1-format-installed.mjs <bots.tgz> <lane.json> <supervisor/main.js> <commit> <sha256> [candidate.tgz candidate-commit]')
   const artifact = verifyArtifact({ tarball: resolve(tarball), lane: resolve(lane), supervisor: resolve(supervisor), commit, hash })
   const guarded = artifact.provenance.classification === 'guarded-f'
+  let candidate
+  if (candidatePath) {
+    assert.ok(guarded)
+    assert.match(candidateCommit, /^[a-f0-9]{40}$/)
+    const bytes = fs.readFileSync(candidatePath)
+    candidate = { candidate: true, bytes, provenance: { version: artifact.provenance.version,
+      commit: candidateCommit, tarballSha256: sha256(bytes) } }
+  }
   test('verified installed predecessor store and role writer', async t => {
     const f = profileFor(t, artifact)
     t.diagnostic(JSON.stringify({ ...artifact.provenance, node: process.version, dsh: f.dshVersion, lifecycle: 'direct module calls' }))
@@ -218,8 +267,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   })
   for (const [from, to] of rollbackCells) {
     test('installed predecessor rollback with roster ' + from + ' → ' + to, { timeout: 45_000 },
-      t => replayInstalled(t, artifact, from, to, { guarded }))
+      t => replayInstalled(t, artifact, from, to, { guarded, candidate }))
     if (guarded && to >= 4) test('guarded F restores held roster ' + from + ' → ' + to, { timeout: 45_000 },
-      t => replayInstalled(t, artifact, from, to, { guarded, held: true }))
+      t => replayInstalled(t, artifact, from, to, { guarded, held: true, candidate }))
   }
 }

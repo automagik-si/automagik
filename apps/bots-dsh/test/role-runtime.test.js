@@ -1443,6 +1443,15 @@ test('stock Voice stacks with a registry role, retains settings and blocks unins
   assert.equal(live.roleRuntime[FIRST].pin.id, ID)
   assert.deepEqual(live.roleRuntimeByRole[FIRST][ID].tools, ['speak'])
   assert.ok(live.roleRuntimeByRole[FIRST][ID].settings.length)
+  await h.ok('set-prefs', { roles: false })
+  assert.deepEqual(await h.ok('role-grant', { id: FIRST, role: operator.id, capability: 'task-start', on: false }), [])
+  assert.deepEqual(await h.ok('role-settings', { id: FIRST, role: operator.id }), {})
+  for (const endpoint of ['role-grant', 'role-settings', 'role-settings-set']) {
+    const result = await h.call(endpoint, { id: FIRST, role: ID, capability: 'audio-out', on: false, values: {} })
+    assert.equal(result.ok, false)
+    assert.match(result.error.message, /Roles are turned off/)
+  }
+  await h.ok('set-prefs', { roles: true })
   await assert.rejects(rt.uninstallRole(ID), /Detach this role/)
   await rt.detachRole(FIRST)
   assert.deepEqual(rt.botOf(FIRST).roles.map(pin => pin.id), [operator.id])

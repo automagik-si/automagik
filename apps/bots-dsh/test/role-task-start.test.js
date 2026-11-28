@@ -745,3 +745,20 @@ test('D3 final: refused allocation cleanup survives same-team writer adoption', 
   assert.deepEqual(h.dispatched, [kept])
   assert.deepEqual(await scopedIds(), baseline)
 })
+
+test('dispatch refuses a provider identity change with identical role IDs and grants', async t => {
+  const h = await fixture(t)
+  const definition = { id: 'operator', name: 'Operator', capabilities: ['task-start'], tools: [] }
+  const dispose = h.rt.hooks.role(definition)
+  await h.rt.attachRole('solver', definition.id)
+  await h.rt.grantRole({ id: 'solver', role: definition.id, capability: 'task-start', on: true })
+  h.rt.modelAccess = async () => {
+    dispose()
+    h.rt.hooks.role(definition)
+    assert.equal(h.rt.roleRuntime.grantOf('solver', 'task-start'), 'granted')
+    return { ready: true }
+  }
+  assert.match(await h.execute('solver'), changed)
+  assert.deepEqual(h.created, [])
+  assert.deepEqual(h.dispatched, [])
+})

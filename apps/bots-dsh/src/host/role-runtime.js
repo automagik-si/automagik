@@ -1,5 +1,5 @@
 import { defineTool, parameterSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
-import { attachedRoles, packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
+import { attachedRoles, isPackageRoleId, packageAttachment, rolesOn, sameRolePin } from '../shared/roles.js'
 import { SOLVER_ROLE_ID, solverLimitsPart, solverReviewPart } from '../shared/solver-method.js'
 import { solverTracked } from './solver-progress.js'
 import { routeOf } from '../shared/routes.js'
@@ -47,12 +47,14 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   const ownBot = id => rt.own?.(state.bots, id)
   const enabled = () => !disposed && rt.readOnly?.() === undefined && rt.holdsLock?.() === true
   const keyOf = (id, pin) => JSON.stringify([id, pin.id])
+  const identityOf = ({ id, version, attachedAt, source }) => ({ id, version, attachedAt, ...(source ? { source } : {}) })
   const pinOf = held => attachedRoles(held.bot).find(pin => sameRolePin(pin, held.pin))
   const current = (id, held) => enabled() && id === held.bot.id
     && attachments.get(keyOf(id, held.pin)) === held && ownBot(id) === held.bot && pinOf(held)
     && (held.pin.source === 'registry'
       ? rt.hasCommittedRole?.(id, held.pin.id) === true && rt.roleRegistry?.of(held.pin.id) === held.record
-      : rolesOn(state.prefs) && packages.recordOf(held.pin.id) === held.record && !packages.damaged(held.record))
+      : rolesOn(state.prefs) && (attachedRoles(held.bot).length < 2 || rt.hasCommittedRole?.(id, held.pin.id) === true)
+        && packages.recordOf(held.pin.id) === held.record && !packages.damaged(held.record))
   const heldsOf = id => attachedRoles(ownBot(id)).flatMap(pin => {
     const held = attachments.get(keyOf(id, pin))
     return held?.manifest && current(id, held) ? [held] : []
@@ -202,7 +204,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
           attachments.set(key, { pin, record, bot, manifest, runtime })
           continue
         }
-        if (!rolesOn(state.prefs)) continue
+        if (!rolesOn(state.prefs) || !isPackageRoleId(pin.id)) continue
         const record = packages.recordOf(pin.id)
         if (!record || record.version !== pin.version || packages.damaged(record)) continue
         if (rt.botRunnerRequired !== undefined && !warnedRunner) {
@@ -350,6 +352,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     let text = held?.runtime.prompt
     if (typeof text === 'function') {
       try { text = text(bot.id, sessionId) } catch { text = undefined }
+      if (!current(bot.id, held)) text = undefined
     }
     const role = typeof text === 'string' && text.trim()
       && (owner(sessionId) !== undefined || promptOnly(held.manifest))
@@ -364,9 +367,14 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     if (!lead) return partOf(sessionId, undefined, bot)
     return holders.map(held => partOf(sessionId, held, bot, held === lead)).filter(Boolean).join('\n') || undefined
   }
+  const registryHolders = id => heldsOf(id).filter(held => held.pin.source === 'registry')
   function partFor(sessionId, id) {
     const turn = turnPrompts.get(sessionId)
-    return turn?.id === id ? turn.part : partsOf(sessionId, id, ownBot(id))
+    if (turn?.id === id) {
+      const current = registryHolders(id)
+      if (current.length === turn.registry.length && current.every((held, index) => held === turn.registry[index])) return turn.part
+    }
+    return partsOf(sessionId, id, ownBot(id))
   }
   function prompt(sessionId, agent) {
     const id = promptOwner(sessionId)
@@ -407,7 +415,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
         const provider = liveProvider(sessionId, session)
         if (!held?.runtime.prompt?.trim() || (provider ? providerWarning(provider) : savedWarning(bot))) instructions = bot.instructions
       }
-      turnPrompts.set(sessionId, { id, bot, part, instructions })
+      turnPrompts.set(sessionId, { id, bot, part, instructions, registry: registryHolders(id) })
     }
   }
 
@@ -427,8 +435,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       const acp = warning === acpWarning || (held.pin.id !== SOLVER_ROLE_ID
         && providerWarning(providerOf(held.bot.appliedModel ?? held.bot.model)) === acpWarning)
       return [[id, held.pin.id, {
-        pin: { id: held.pin.id, version: held.pin.version, attachedAt: held.pin.attachedAt,
-          ...(held.pin.source ? { source: held.pin.source } : {}) }, settings: held.manifest.settings,
+        pin: identityOf(held.pin), settings: held.manifest.settings,
         capabilities: capabilitiesOf(held),
         tools: held.pin.source === 'registry' ? held.record.tools : held.runtime?.tools.map(tool => tool.definition.name) ?? [], acp,
         ...(warning && warning !== acpWarning ? { promptWarning: warning } : {}),
@@ -439,10 +446,8 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     return Object.fromEntries(Object.entries(state.bots ?? {}).flatMap(([id, bot]) => {
       const pins = attachedRoles(bot)
       if (!pins.length) return []
-      return [[id, Object.fromEntries(pins.map(pin => {
-        const { grants, ...identity } = pin
-        return [pin.id, keyed.get(keyOf(id, pin)) ?? { pin: identity, status: 'missing' }]
-      }))]]
+      return [[id, Object.fromEntries(pins.map(pin =>
+        [pin.id, keyed.get(keyOf(id, pin)) ?? { pin: identityOf(pin), status: 'missing' }]))]]
     }))
   }
 
@@ -479,7 +484,10 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     reset(record) {
       if (record) pins.delete(record)
     },
-    ready: id => Promise.all([...attachments.values()].filter(held => id === undefined || held.bot.id === id).map(held => held.ready)),
+    ready(id) {
+      const pending = [...attachments.values()].filter(held => held.ready && (id === undefined || held.bot.id === id))
+      return id === undefined || pending.length ? Promise.all(pending.map(held => held.ready)) : undefined
+    },
     dispose() {
       disposed = true
       turnPrompts.clear()

@@ -600,6 +600,13 @@ test('the real npm plugin tarball has no roles source paths', () => {
     expect(tarballs).toHaveLength(1);
     const paths = ok(run(root, 'tar', '-tzf', tarballs[0])).trim().split('\n');
     expect(paths).toContain('package/src/host/role-package.js');
+    const host = 'package/src/host/';
+    const inventory = JSON.parse(ok(run(root, 'tar', '-xzOf', tarballs[0], host + 'supervisor/files.json'))) as string[];
+    expect(inventory).toContain('state-format.js');
+    for (const file of [...inventory, 'update-contract.json']) {
+      expect(paths).toContain(host + file);
+      expect(ok(run(root, 'tar', '-xzOf', tarballs[0], host + file))).toBe(readFileSync(join(ROOT, PLUGIN, 'src/host', file), 'utf8'));
+    }
     expect(paths.filter(path => path.startsWith('package/roles/')).sort()).toEqual([
       'package/roles/solver/prompt.md',
       'package/roles/solver/role.json',

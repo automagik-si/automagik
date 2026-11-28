@@ -122,14 +122,14 @@ export function install(rt) {
     all: () => [...roles.values()].sort((a, b) => a.order - b.order),
     toolsWithheldFrom(bot) {
       const withheld = new Set(genieDetached(bot, rt.state.prefs) ? BUILTIN_ROLES.genie.tools : [])
+      const held = bot ? rt.roleRuntime?.heldsOf(bot.id) ?? [] : []
       for (const [tool, owners] of toolOwners) {
-        const held = bot ? rt.roleRuntime?.heldsOf(bot.id) ?? [] : []
         const registry = held.some(entry => entry.pin.source === 'registry' && owners.has(entry.pin.id)
           && entry.record.tools.includes(tool))
         const catalog = held.some(entry => entry.pin.source === undefined
           && entry.runtime?.tools.some(candidate => candidate.definition.name === tool))
         const genie = owners.has('genie') && BUILTIN_ROLES.genie.tools.includes(tool)
-          && bot?.kind === 'genie' && !genieDetached(bot, rt.state.prefs)
+          && bot?.kind === 'genie' && !genieDetached(bot, roles.has('genie') ? undefined : rt.state.prefs)
         if (registry || catalog || genie) withheld.delete(tool)
         else withheld.add(tool)
       }
