@@ -4,7 +4,7 @@
 // change. Only the calls automagik-herdr makes: ls [--all] [--label k=v], get, read, label, run (its
 // launch argv kept as `argv`, `sh -c <command>` for a template, as hc's own get shows), server
 // status (state.core), kill (the terminal finishes, and its live die_with_parent children with
-// it, as hc ends them), templates (state.templates:
+// it, as hc ends them), rm (only a finished terminal), templates (state.templates:
 // [{ name, command }]), machine ls and exec --on (state.machines: [{ name, state, uname, home,
 // path?, temporary? }]: a linked machine is a scratch home folder; its `uname -sm` is `uname`,
 // anything else runs here with HOME=home and `path` (a folder of fakes) first on PATH, in
@@ -122,7 +122,7 @@ if (lockProbe && words[1] === lockProbe.terminal && ["get", "kill"].includes(wor
 }
 
 // A linked machine's terminal ("vm/t8") on a machine that isn't connected: unavailable, as hc says.
-if (["get", "label", "kill", "read", "send", "keys", "interrupt"].includes(words[0]) && words[1]?.includes("/")) {
+if (["get", "label", "kill", "rm", "read", "send", "keys", "interrupt"].includes(words[0]) && words[1]?.includes("/")) {
   const prefix = words[1].split("/")[0];
   const m = machineAt(prefix);
   const peer = twoCore && words[0] === "send" && (state.peers ?? []).find((p) => [p.id, p.name].includes(prefix));
@@ -508,31 +508,60 @@ switch (words[0]) {
     out({ address: t.address });
     break;
   }
-  case "kill": {
+  case "kill":
+  case "rm": {
+    const remove = words[0] === "rm";
     const [machine, terminal] = words[1]?.split("/") ?? [];
     const m = machineAt(machine);
+    const finish = (pane, at) => {
+      if (pane.state === "live") Object.assign(pane, { state: "finished", finished_ms: at, reason: "killed" });
+    };
+    const removePane = (pane, record) => {
+      if (state.failRm === words[1]) fail(`rm refused on ${words[1]}\nsecond diagnostic`);
+      if (pane.state !== "finished") fail(`terminal ${words[1]} is still running`);
+      record.terminals = record.terminals.filter((p) => p !== pane);
+      out({ address: words[1] });
+    };
     if (terminal && m?.remoteState) {
       const remote = readState(m.remoteState);
       const pane = remote.terminals.find((p) => p.address === terminal);
       if (!pane) fail(JSON.stringify({ error: { kind: "not_found", message: `no terminal ${words[1]}` } }), 3);
+      if (remove) {
+        removePane(pane, remote);
+        saveState(m.remoteState, remote);
+        break;
+      }
       if ([words[1], nameAddress(words[1])].includes(state.failKill)) peerLoss();
-      pane.state = "finished";
+      finish(pane, Date.now());
       saveState(m.remoteState, remote);
       if (state.loseCleanupReply) {
         if (state.loseCleanupGet) (state.failGet ??= []).push(words[1]);
         save();
         peerLoss();
       }
-      out({ address: words[1], state: pane.state });
+      out(remotePane(m, pane));
       break;
     }
     const t = find(nameAddress(words[1]));
-    if (!t) fail(`no terminal ${words[1]}`);
+    if (!t) fail(`no terminal ${words[1]}`, 3);
+    if (remove) {
+      removePane(t, state);
+      save();
+      break;
+    }
     if ([words[1], nameAddress(words[1])].includes(state.failKill)) fail(`kill refused on ${words[1]}`);
-    t.state = "finished";
-    t.finished_ms = Date.now();
+    const at = Date.now();
+    const wasLive = t.state === "live";
+    finish(t, at);
     // state.surviveParent: children that outlive their parent's end anyway (a kill that didn't take).
-    for (const c of state.terminals) if (c.parent === t.address && c.state === "live" && c.die_with_parent && !(state.surviveParent ?? []).includes(c.address)) c.state = "finished";
+    const finishChildren = (parent) => {
+      for (const c of state.terminals) {
+        if (c.parent !== parent || c.state !== "live" || !c.die_with_parent || (state.surviveParent ?? []).includes(c.address)) continue;
+        finish(c, at);
+        finishChildren(c.address);
+      }
+    };
+    if (wasLive) finishChildren(t.address);
     // A file changes exactly when the selected pane is ended.
     if (state.onKillWrite?.terminal === t.address) {
       writeFileSync(state.onKillWrite.path, state.onKillWrite.text);
@@ -546,10 +575,13 @@ switch (words[0]) {
       delete state.afterKill;
     }
     save();
-    out({ address: t.address, state: t.state });
-    // Killing the caller's own terminal ends the caller (this fake runs exec'd by the wrapper,
-    // so its parent is the program that called hc).
-    if (process.env.HC_TERMINAL_ID && [t.address, t.name].includes(process.env.HC_TERMINAL_ID)) process.kill(process.ppid, "SIGKILL");
+    // Older hc can return fewer fields than the record available from get.
+    out(state.killReply?.[words[1]] ?? t);
+    // A caller in the old terminal dies with it. A detached retirement process is outside it.
+    if (process.env.HC_TERMINAL_ID && [t.address, t.name].includes(process.env.HC_TERMINAL_ID)) {
+      const sid = spawnSync("ps", ["-o", "pgid=", "-p", String(process.ppid)], { encoding: "utf8" }).stdout?.trim();
+      if (sid !== String(process.ppid)) process.kill(process.ppid, "SIGKILL");
+    }
     break;
   }
   case "server": {

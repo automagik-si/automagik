@@ -194,10 +194,10 @@ for (const ledger of ["absent", "stale"]) {
     const before = fileOrNull(attachPath(fallback));
     writeFileSync(s.logPath, "");
     const r = restartFrom(s, terminal, ["restart", "Genie", "--json"]);
-    // The fake hc ends the CLI as the real kill of its own pane would: what it printed first stands.
+    assert.equal(r.status, 0, r.stderr);
     assert.ok(r.stdout.trim(), r.stderr);
     assert.equal(JSON.parse(r.stdout).replaced, terminal, r.stderr);
-    assert.deepEqual(calls(s).at(-1), ["kill", terminal], "the kill of its own pane is the last hc call");
+    assert.deepEqual(calls(s).at(-1), ["rm", terminal, "--json"], "the old pane is removed last");
     const launches = runs(s);
     assert.equal(launches.length, 1, "one replacement, never a twin");
     assert.equal(envWord(launches[0], "HERDR_APP_HOME"), `HERDR_APP_HOME=${s.app}`, "the carried app home");
@@ -632,7 +632,7 @@ test("#1195 a live labelled pane no ledger proves is adopted and replaced, never
   const before = fileOrNull(attachPath(fallback));
   writeFileSync(s.logPath, "");
   const r = restartFrom(s, terminal, ["restart", "Genie", "--tree", "--json"]);
-  // The fake hc ends the CLI as the real kill of its own pane would: what it printed first stands.
+  assert.equal(r.status, 0, r.stderr);
   assert.ok(r.stdout.trim(), r.stderr);
   assert.equal(JSON.parse(r.stdout).replaced, terminal, "the labelled live pane is replaced, never twinned");
   const launches = runs(s);
@@ -640,7 +640,7 @@ test("#1195 a live labelled pane no ledger proves is adopted and replaced, never
   assert.equal(envWord(launches[0], "HERDR_APP_HOME"), `HERDR_APP_HOME=${s.app}`, "adopted into its launch home");
   assert.equal(envWord(launches[0], "CLAUDE_CONFIG_DIR"), `CLAUDE_CONFIG_DIR=${loginB}`, "its login, never the default home's");
   assert.ok(!afterDash(launches[0]).includes(`CLAUDE_CONFIG_DIR=${loginA}`), "never the default home's login");
-  assert.deepEqual(calls(s).at(-1), ["kill", terminal], "the adopted pane ends last");
+  assert.deepEqual(calls(s).at(-1), ["rm", terminal, "--json"], "the adopted pane is removed last");
   assert.equal(liveFor(s, ID.main).length, 1, "exactly one live seat");
   assert.deepEqual(fileOrNull(attachPath(fallback)), before, "the default ledger stays exactly as it was");
   const rows = readRows(readFileSync(attachPath(s.app), "utf8")).rows;

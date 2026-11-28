@@ -691,7 +691,7 @@ export function agentHomeTests(cli) {
       assert.equal(r.code, 1, r.err);
       assert.match(r.err, message);
       const pane = s.hcState().terminals.find((x) => x.address === "t100");
-      assert.equal(pane.state, ended ? "finished" : "live");
+      assert.equal(pane?.state, ended ? undefined : "live");
       assert.equal(s.calls().some((c) => c[0] === "kill"), kill, "only a positively identified instance is ended");
       const [intent, ...rest] = s.ledger();
       assert.equal(intent.event, "intent", "its reservation stays");
