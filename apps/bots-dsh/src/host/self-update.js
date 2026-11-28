@@ -1,10 +1,15 @@
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { teamHomeOf } from './folders.js'
+import { ACTIVATION_COMPARE } from './state-format.js'
 import { LISTENER_UNKNOWN } from './supervisor/child.js'
 import { inDesktopApp } from './constants.js'
 import { currentOf, hasBootId, isId, publicVersion, REINSTALL_REFUSAL, reinstallRefusalReason, runOf, supervisorStateOf } from './supervisor/records.js'
 import { PLUGINS } from './supervisor/release.js'
+import { comparesActivations, liveTeamLineage, teamSnapshot } from './supervisor/rollback.js'
 import { readJson, usableStore } from './supervisor/store.js'
+import { validJournal } from './supervisor/switch.js'
 
 export { REASON_CODES } from './supervisor/records.js'
 export { prepareStore, storeDirOf, usableStore, writeJsonAtomic } from './supervisor/store.js'
@@ -58,6 +63,51 @@ export function supervisorOf(env = process.env) {
   const version = env?.AUTOMAGIK_SUPERVISOR_VERSION
   if (!isId(bootId) || !publicVersion(version, [bootId])) return null
   return { bootId, version }
+}
+
+// Used before host hooks, including by import. Re-read the executing supervisor's
+// records at publication. The copied code on disk may belong to a later version.
+export function stateWriteProof(rt, env = { ...process.env }) {
+  const supervisor = supervisorOf(env)
+  const announced = env.AUTOMAGIK_SUPERVISOR_RUN
+  let bootRun = announced
+  let steady = false
+  return ({ compare = false } = {}) => {
+    if (supervisor === null) return announced ? 'held' : 'steady'
+    const profileDir = rt.ctx.get?.('profileContext')?.dir
+    const records = readStore(profileDir)
+    if (!records.storeDir) return 'held'
+    const { bootId } = supervisor
+    const bootIds = bootIdsOf(records, bootId)
+    const announcement = supervisorStateOf(records.supervisorRecord, bootIds)
+    if (announcement?.bootId !== bootId) return 'held'
+    const { current, run, problem } = stateOf(records, bootId, bootIds)
+    if (problem) return 'held'
+    if (announcement.runId === null && bootRun === undefined) {
+      steady = true
+      return 'steady'
+    }
+    if (run === null) return 'held'
+    // Delivery 5b supplied a live record but no RUN in the child's environment.
+    if (!steady && bootRun === undefined) bootRun = run.runId
+    if (steady && ['checking', 'downloading', 'verifying', 'staging'].includes(run.phase)) return 'steady'
+    if (run.runId !== bootRun || rt.statePath !== join(teamHomeOf(env), 'state.json')) return 'held'
+    if (run.phase === 'healthy' && run.reason === 'health-check-finished' && current?.live?.version === run.to
+      && current.live.sequence === records.runRecord.sequence) return 'steady'
+    if (run.phase === 'rolledBack' || run.phase === 'notUpdated') return 'returned'
+    if (!compare || !['restarting', 'health'].includes(run.phase)
+      || env[ACTIVATION_COMPARE] !== `${bootId}:${bootRun}` || announced !== bootRun) return 'held'
+    try {
+      const { journal } = records.runRecord
+      if (!validJournal(records.runRecord) || journal.undo || journal.pending !== null
+        || journal.done.length !== journal.steps.length) return 'held'
+      const config = { store: records.storeDir, env }
+      return comparesActivations(config, records.runRecord)
+        && liveTeamLineage(teamSnapshot(config, records.runRecord)) === 'descended' ? 'compare' : 'held'
+    } catch {
+      return 'held'
+    }
+  }
 }
 
 function runView(run) {

@@ -260,6 +260,9 @@ export function createRolePackages(rt, catalog, {
       throw refusal('Detach this role from every Bot before uninstalling it.')
     }
   }
+  const requireSidecarWrite = () => {
+    if (rt.sidecarWritable?.() === false) throw refusal('Role packages can be removed after the update commits.')
+  }
   const attachable = (id, record, entry) => isPackageRoleId(id) && (verified.has(record)
     || (record.source !== 'bundled' && entry?.display.installable === true && entry.display.version === record.version
       && entry.sha256 === record.sha256.toLowerCase()))
@@ -624,6 +627,7 @@ export function createRolePackages(rt, catalog, {
 
   async function uninstall(id) {
     requireWriter()
+    requireSidecarWrite()
     if (typeof id !== 'string' || !ownRecord(state.roles, id)) throw refusal('This role is not installed.')
     requireDetached(id)
     statuses.delete(id)
@@ -637,6 +641,7 @@ export function createRolePackages(rt, catalog, {
     }
     const admit = () => {
       requireWriter()
+      requireSidecarWrite()
       expectRecord(id, true, record)
       requireDetached(id)
     }
@@ -664,13 +669,18 @@ export function createRolePackages(rt, catalog, {
       if (original[3] && !await inspect(fs, paths.verDir)) throw refusal('The package folder contains unsafe entries.')
       const before = await directories(fs, paths)
       requireWriter()
+      requireSidecarWrite()
       expectRecord(id, false, undefined)
       requireDetached(id)
       if (!original.every((stat, index) => sameFile(stat, before[index]))) throw refusal('The package folder changed.')
       if (original[3]) await fs.rm(paths.verDir, { recursive: true })
       for (const path of evidencePaths(paths)) {
         const stat = await lstat(fs, path)
-        if (stat) await fs.unlink(path)
+        if (stat) {
+          requireWriter()
+          requireSidecarWrite()
+          await fs.unlink(path)
+        }
       }
       await prune(fs, paths.pkgDir)
       return { removed: true }

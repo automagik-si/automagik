@@ -38,7 +38,7 @@ const VERDICTS = new Set(['healthy', 'rolledBack', 'notUpdated'])
  * - requestPresent(requestId): whether request.json still holds our request.
  * - onResume(): picks up, in this run, the work this process stopped (an update that did not happen).
  */
-export function createUpdateHold({ readStatus, expectedRun, requestPresent = () => false, onResume = () => {}, bootPlan = () => {}, warn = () => {}, now = Date.now, schedule = (fn, ms) => setTimeout(fn, ms) }) {
+export function createUpdateHold({ readStatus, expectedRun, requestPresent = () => false, onResume = () => {}, onHealthy, bootPlan = () => {}, warn = () => {}, now = Date.now, schedule = (fn, ms) => setTimeout(fn, ms) }) {
   let state = 'unknown'
   let ours = null
   let firstAt
@@ -77,7 +77,9 @@ export function createUpdateHold({ readStatus, expectedRun, requestPresent = () 
       waiters.clear()
     }
     // The boot pass can now reserve its recovery destinations before admitting held steps.
-    const plan = disposed ? undefined : bootHeld ? bootPlan()
+    const plan = disposed ? undefined : bootHeld ? (reason === 'healthy' && onHealthy
+      ? Promise.resolve().then(onHealthy).catch(error => warn('ds-bot: committing the update failed: %s', error)).then(bootPlan)
+      : bootPlan())
       : request?.ownsTeam() ? onResume(reason, request.ownsTeam) : undefined
     if (plan === undefined) releaseWaiters()
     else void Promise.resolve(plan).then(releaseWaiters, error => {
@@ -248,6 +250,7 @@ export function install(rt) {
     },
     requestPresent,
     onResume: (_reason, ownsTeam) => rt.resumeUpdateStopped?.(ownsTeam),
+    onHealthy: () => rt.committedUpdate?.(),
     bootPlan: () => rt.resumeDestinationsPlanned,
     warn: (...args) => rt.warn?.(...args),
   })

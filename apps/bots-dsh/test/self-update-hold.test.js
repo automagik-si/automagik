@@ -9,9 +9,49 @@ import { AGENT_TOOLS } from '../src/host/agent-access.js'
 import { UPDATE_CUT } from '../src/host/constants.js'
 import { install as installResume, RESUME_DELAY_MS } from '../src/host/resume.js'
 import { createUpdateHold, GONE_WAIT_MS, install, PROFILE_WAIT_MS, STALL_MS, STOP_WAIT_MS, UNANSWERED_MS } from '../src/host/self-update-hold.js'
-import { storeDirOf, writeJsonAtomic } from '../src/host/self-update.js'
+import { stateWriteProof, storeDirOf, writeJsonAtomic } from '../src/host/self-update.js'
+import { ACTIVATION_COMPARE } from '../src/host/state-format.js'
 import { requestOf } from '../src/host/supervisor/request.js'
 import { fakeContext } from './fake-ctx.js'
+import { prepareRollback } from './fixtures/w1-format-predecessor.mjs'
+import { write } from './fixtures/supervisor.mjs'
+import { fileURLToPath } from 'node:url'
+
+test('bound write proof follows replay snapshots and the matching durable healthy current', async t => {
+  const plugin = fileURLToPath(new URL('../', import.meta.url))
+  const bench = await prepareRollback(t, plugin, 2, 4)
+  const { config, run, path, original } = bench
+  const { profileDir, store } = config
+  fs.writeFileSync(path, original)
+  const env = { ...config.env, AUTOMAGIK_SUPERVISOR_BOOT: run.bootId, AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8',
+    AUTOMAGIK_SUPERVISOR_RUN: run.runId, [ACTIVATION_COMPARE]: `${run.bootId}:${run.runId}` }
+  const team = { ctx: { get: () => ({ dir: profileDir }) }, statePath: path }
+  const runStatus = (phase, reason) => write(join(store, 'state.json'), {
+    ...run, phase, reason, rollback: undefined, journal: { ...run.journal, undo: undefined, undoReason: undefined },
+  })
+  write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: run.runId, version: 1 })
+  runStatus('health', null)
+  const proof = stateWriteProof(team, env)
+  assert.equal(proof(), 'held', 'comparison is never enough for a sidecar')
+  assert.equal(proof({ compare: true }), 'compare')
+  assert.equal(stateWriteProof({ ...team, statePath: path + '.other' }, env)({ compare: true }), 'held')
+  assert.equal(stateWriteProof(team, { ...env, [ACTIVATION_COMPARE]: 'prior-boot:' + run.runId })({ compare: true }), 'held')
+  const lagging = stateWriteProof(team, { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined })
+  assert.equal(lagging({ compare: true }), 'held')
+  const snap = join(store, run.journal.keep, 'data', 'bots-state.json')
+  fs.writeFileSync(snap, original.toString() + '\n')
+  assert.equal(proof({ compare: true }), 'held')
+  runStatus('manualRecovery', 'rollback-failed')
+  assert.equal(proof({ compare: true }), 'held')
+  runStatus('healthy', 'health-check-finished')
+  assert.equal(lagging(), 'held')
+  write(join(store, 'current.json'), { version: 1, live: { version: run.to, sequence: run.sequence - 1 },
+    kept: { version: run.from }, lastSequence: run.sequence - 1 })
+  assert.equal(lagging(), 'held')
+  write(join(store, 'current.json'), { version: 1, live: { version: run.to, sequence: run.sequence },
+    kept: { version: run.from }, lastSequence: run.sequence })
+  assert.equal(lagging(), 'steady')
+})
 
 const bootId = 'd5b-fixture-boot'
 const verdict = (phase, requestId = 'new-request') => ({ runId: 'live-run', phase, requestId, updatedAt: new Date(0).toISOString() })

@@ -237,22 +237,30 @@ export function install(rt) {
 
   // --- secrets ----------------------------------------------------------
 
+  const requireConnectorWrite = () => {
+    if (rt.sidecarWritable?.() === false) throw refusal('Connectors can be changed after the update commits.')
+  }
   const keptSecret = async (name) => { await rt.loadSecrets(); return rt.secretValue(name) !== undefined }
   const writeSecret = async (name, value, purpose) => {
     const kept = await keptSecret(name)
+    requireConnectorWrite()
     await rt.secretEndpoint('secret-set', { name, value, purpose, ...(kept ? {} : { scope: [] }) })
   }
   const dropSecrets = async (id) => {
     await rt.loadSecrets()
     for (const name of [tokenSecretOf(id), refreshSecretOf(id), clientSecretOf(id), keySecretOf(id)]) {
+      requireConnectorWrite()
       if (id !== 'github' || name === GITHUB_SECRET || name !== tokenSecretOf(id)) {
         if (rt.secretStored(name)) await rt.secretEndpoint('secret-delete', { name }).catch(() => {})
       }
     }
   }
   const saveState = async (id, patch) => {
-    state.connectors = { ...(state.connectors ?? {}), [id]: { ...state.connectors?.[id], ...patch } }
-    await rt.save()
+    requireConnectorWrite()
+    const change = team => {
+      team.connectors = { ...(team.connectors ?? {}), [id]: { ...team.connectors?.[id], ...patch } }
+    }
+    await rt.saveCopy(change, { beforeCommit: requireConnectorWrite, afterWrite: () => change(state) })
   }
 
   // --- OAuth sign-in ----------------------------------------------------
@@ -703,12 +711,13 @@ export function install(rt) {
       return connectorsView()
     },
     async 'connector-disconnect'(body) {
+      requireConnectorWrite()
       const entry = known(body.id)
       await endPending(entry.id)
       await dropSecrets(entry.id)
       if (entry.custom !== undefined) {
         const remove = team => { delete team.connectors?.[entry.id] }
-        await rt.saveCopy(remove, { afterWrite: () => remove(state) })
+        await rt.saveCopy(remove, { beforeCommit: requireConnectorWrite, afterWrite: () => remove(state) })
       } else if (state.connectors?.[entry.id] !== undefined) {
         delete state.connectors[entry.id]
         await rt.save()
@@ -767,6 +776,7 @@ export function install(rt) {
       return connectorsView()
     },
     async 'connector-add'(body) {
+      requireConnectorWrite()
       const name = String(body.name ?? '').trim()
       if (name === '') throw refusal('Name the connector')
       const url = typeof body.url === 'string' ? body.url.trim() : undefined
@@ -781,7 +791,7 @@ export function install(rt) {
       await rt.saveCopy(team => {
         id = customId(name, new Set(Object.keys(team.connectors ?? {})))
         team.connectors = { ...team.connectors, [id]: row }
-      }, { afterWrite: () => {
+      }, { beforeCommit: requireConnectorWrite, afterWrite: () => {
         CONNECTOR_IDS.add(id)
         state.connectors = { ...state.connectors, [id]: row }
       } })
@@ -798,6 +808,7 @@ export function install(rt) {
       return importScan()
     },
     async 'connector-import'(body) {
+      requireConnectorWrite()
       const picked = await importPick(body.items)
       for (const { url } of picked) if (url !== undefined) checkAddress(url)
       const created = []

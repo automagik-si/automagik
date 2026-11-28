@@ -3,6 +3,27 @@ import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { createGateway } from '../src/host/connectors/gateway.js'
+import { createRuntime } from '../index.js'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fakeContext } from './fake-ctx.js'
+import { scratch } from './fixtures/w1-format-profile.mjs'
+
+test('a direct connector mutation cannot create a key or publish a roster during a trial', async t => {
+  const home = scratch(t)
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const rt = createRuntime(ctx, { home, github: false })
+  await rt.load()
+  const before = readFileSync(rt.statePath)
+  rt.stateWriteProof = () => 'held'
+  await assert.rejects(rt.connectorEndpoint('connector-add', {
+    name: 'Fixture', command: 'fixture-never-exec', env: { TOKEN: 'fixture-credential-value' },
+  }), /after the update commits/)
+  assert.equal(existsSync(join(home, 'connector-key')), false)
+  assert.deepEqual(readFileSync(rt.statePath), before)
+  assert.equal(rt.state.connectors, undefined)
+})
 
 for (const refreshing of [false, true]) {
   test(`an upstream stream error cannot crash the engine${refreshing ? ' during refresh' : ''}`, () => {

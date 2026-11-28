@@ -202,6 +202,16 @@ export const readNotes = (file, { strict = false, onRead } = {}) => {
   }
 }
 
+// An update may restore the roster and leave its notes behind. Task reports
+// need their producer in the adopted roster before they can act on it.
+export function savedReportApplies(rt, botId, taskSessionId, roomId) {
+  if (rt.stateWriteProof?.() !== 'returned') return true
+  if (!rt.botOf(botId)) return false
+  if (roomId !== undefined) return rt.roomOf(roomId) !== undefined
+  const task = rt.own(rt.state.tasks, taskSessionId)
+  return typeof taskSessionId === 'string' && task?.from === botId
+}
+
 // Read a stable log cut without opening an Agent or waking its Session.
 export async function* historyBack(controller, sessionId, signal) {
   const read = typeof controller?.events === 'function' ? controller.events : controller?.page
@@ -353,7 +363,8 @@ export function install(rt) {
   const notesFenced = () => needsAdoption || rt.readOnly() !== undefined || (noteTerm !== undefined && noteTerm !== rt.lockTerm())
   const persist = (durable = rt.updateHoldView?.() === true) => {
     // Only the host that saves the team runs its work again.
-    if (stopped || notesFenced()) return Promise.resolve(false)
+    const sidecarAllowed = () => rt.sidecarWritable?.({ legacy: true }) !== false
+    if (stopped || notesFenced() || !sidecarAllowed()) return Promise.resolve(false)
     const term = rt.lockTerm()
     noteTerm ??= term
     const notedTurns = passTook ? { ...pendingTurns, ...turns } : { ...turns, ...interrupted.turns }
@@ -374,7 +385,7 @@ export function install(rt) {
       const requested = flushLatest
       flushLatest = false
       // Noted before the stop: it still lands, since the store keeps the lock until this write ends.
-      const current = () => !notesFenced() && rt.lockTerm() === term
+      const current = () => !notesFenced() && sidecarAllowed() && rt.lockTerm() === term
         && (term === 0 || (rt.ownsLockForPendingWrite?.() ?? rt.holdsLock()))
       if (!current()) return false
       flushPending ||= requested
@@ -1641,6 +1652,7 @@ export function install(rt) {
     const seen = new Set()
     for (const item of notes) {
       const { args, oldId } = item
+      if (args.role === 'task-done' && !savedReportApplies(rt, args.toId, args.taskSessionId)) continue
       // The reply may have reached disk just before its work closed. Settle that
       // work before considering the old reviewer's turn or waking the reply.
       if (ownsTeam() && args.durableResult === true && args.role === 'reply' && typeof args.reviewReceipt === 'string'

@@ -15,7 +15,8 @@ import * as store from './src/host/store.js'
 import { CONNECTOR_KEY, CONNECTOR_KEY_ORIGINS, connectorKeyOriginName, keyFileName, publishConnectorKey, readConnectorKey, readConnectorKeyOrigins } from './src/host/connectors/credential-key.js'
 import { checkImportedCredentials } from './src/host/connectors/credential-state.js'
 import { hasOnlyHostPublicationLinks, isHostPublicationTemp, publishHostFile, syncDirectorySync } from './src/host/files.js'
-import { writeBytesAtomic } from './src/host/supervisor/store.js'
+import { regularBytes, writeBytesAtomic } from './src/host/supervisor/store.js'
+import { homeLock } from './src/host/home-lock.js'
 import * as addressPolicy from './src/host/address-policy.js'
 import * as models from './src/host/models.js'
 import * as modelState from './src/host/model-state.js'
@@ -87,6 +88,7 @@ import * as update from './src/host/update.js'
 import * as selfUpdate from './src/host/self-update.js'
 import * as selfUpdateCheck from './src/host/self-update-check.js'
 import * as selfUpdateHold from './src/host/self-update-hold.js'
+import { bindRoleSettings } from './src/host/role-settings.js'
 import * as dshUpdate from './src/host/dsh-update.js'
 import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
@@ -228,18 +230,26 @@ function prepareSkillImport(home, from, hasSkills) {
 
 // A team kept elsewhere before (config.importHome, e.g. ~/.dsh/bot) is copied in once,
 // when the home has no team yet. Only on request: the source is left as it was.
-function importTeam(home, from, warn) {
+function importTeam(home, from, warn, ownsLock) {
   if (!from) return false
   const sourceState = join(from, 'state.json')
   const destinationState = join(home, 'state.json')
-  if (existsSync(destinationState) || !existsSync(sourceState)) return false
+  if (fs.lstatSync(destinationState, { throwIfNoEntry: false }) || !existsSync(sourceState)) return false
   const skillSources = fs.readdirSync(from, { withFileTypes: true }).filter(entry => skillAlias(entry.name) === skillLibraryName)
   if (skillSources.some(entry => entry.name !== skillLibraryName || !entry.isDirectory())) throw skillImportFailure()
-  const stateBytes = fs.readFileSync(sourceState)
+  const stateBytes = regularBytes(sourceState)
+  const document = JSON.parse(stateBytes)
+  if (document === null || typeof document !== 'object' || Array.isArray(document)) throw new Error('Invalid imported Bot team.')
+  const problem = store.stateFormatProblem(document)
+  if (problem) throw new Error(`The imported Bot team cannot be read: ${problem}.`)
   const sourceKey = readConnectorKey(join(from, CONNECTOR_KEY))
   checkImportedCredentials(stateBytes, sourceKey)
   const copySkills = prepareSkillImport(home, from, skillSources.length !== 0)
-  const stageState = !sourceKey.missing || copySkills !== undefined
+  const checkSource = () => {
+    const key = readConnectorKey(join(from, CONNECTOR_KEY))
+    if (!ownsLock() || fs.lstatSync(destinationState, { throwIfNoEntry: false }) || !regularBytes(sourceState).equals(stateBytes)
+      || key.identity !== sourceKey.identity || key.missing !== sourceKey.missing) throw new Error('The Bot team changed during import.')
+  }
   const copyHome = () => cpSync(from, home, { recursive: true, force: false, filter: source => {
     const [first, second] = relative(from, source).split(sep)
     if (skillAlias(first) === 'skills') {
@@ -257,14 +267,16 @@ function importTeam(home, from, warn) {
       ![skillLibrary.SKILL_REVIEW_KEY, skillLibrary.SKILL_IMPORT_MARK, 'state.json'].some(name => isHostPublicationTemp(alias, name)) &&
       !/^\.write-[a-f0-9-]{36}\.tmp$/.test(alias) &&
       // The destination may treat a distinct source entry as the state file.
-      !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && (!stageState || alias !== 'state.json')
+      !keyFileName(name) && name !== CONNECTOR_KEY_ORIGINS && alias !== 'state.json'
   } })
 
-  const publishState = () => {
+  const publishState = (checkKey = () => {}) => {
     copySkills?.()
+    checkSource()
+    checkKey()
     try {
-      if (copySkills) publishHostFile(destinationState, stateBytes)
-      else writeBytesAtomic(destinationState, stateBytes, { exclusive: true })
+      if (copySkills || !sourceKey.missing || document.version >= 4) publishHostFile(destinationState, stateBytes)
+      else writeBytesAtomic(destinationState, stateBytes, { durable: process.platform !== 'win32' })
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error
       return false
@@ -272,8 +284,9 @@ function importTeam(home, from, warn) {
     return true
   }
   if (sourceKey.missing) {
+    checkSource()
     copyHome()
-    return copySkills ? publishState() : true
+    return publishState()
   }
   if (sourceKey.bytes === undefined) throw new Error('The imported Bot team needs a readable connector key.')
 
@@ -284,6 +297,7 @@ function importTeam(home, from, warn) {
     return destination
   }
   const destination = checkDestination()
+  checkSource()
   // Remember the other homes that hold this key before publishing the copy.
   const origins = new Set([from, fs.realpathSync(from), ...readConnectorKeyOrigins(from)])
   const originDir = join(home, CONNECTOR_KEY_ORIGINS)
@@ -292,21 +306,21 @@ function importTeam(home, from, warn) {
     writeBytesAtomic(join(originDir, connectorKeyOriginName(origin)), origin, { durable: process.platform !== 'win32' })
   }
   if (destination.missing) {
+    checkSource()
     try { publishConnectorKey(destinationPath, sourceKey.bytes) } catch (error) {
       if (error?.code !== 'EEXIST') throw error
       checkDestination()
     }
   }
   copyHome()
-  if (checkDestination().missing) throw new Error('The imported Bot team needs a matching connector key.')
-  return publishState()
+  return publishState(() => {
+    if (checkDestination().missing) throw new Error('The imported Bot team needs a matching connector key.')
+  })
 }
 
 export function createRuntime(ctx, config = {}) {
   const dshHome = folders.dshHomeOf(process.env.DSH_HOME)
   const home = folders.expandPath(config.home ?? folders.teamHomeOf(process.env))
-  const imported = importTeam(home, config.importHome && resolve(folders.expandPath(config.importHome)),
-    message => ctx.logger.warn(message))
   const rt = {
     ctx,
     config,
@@ -325,12 +339,31 @@ export function createRuntime(ctx, config = {}) {
       mainRole: config.mainRole ?? 'Orchestrator',
     },
   }
+  rt.stateWriteProof = selfUpdate.stateWriteProof(rt)
+  const from = config.importHome && folders.expandPath(config.importHome)
+  let pendingImport = Boolean(from && !existsSync(rt.statePath) && existsSync(join(from, 'state.json')))
+  rt.teamImportPending = () => pendingImport
+  rt.importTeam = owns => {
+    if (!pendingImport || rt.stateWriteProof() !== 'steady') return false
+    const imported = importTeam(home, from, message => ctx.logger.warn(message), owns)
+    pendingImport = false
+    if (imported) ctx.logger.warn('omni-ui: copied the team from %s into %s', config.importHome, home)
+    return imported
+  }
+  if (pendingImport && rt.stateWriteProof() === 'steady') {
+    fs.mkdirSync(home, { recursive: true })
+    const lock = homeLock(join(home, 'state.lock'))
+    try {
+      if (lock.claim() === undefined) rt.importTeam(lock.owns)
+    } finally { lock.release() }
+  }
   const disposers = []
   for (const module of MODULES) {
     const dispose = module.install(rt)
     if (typeof dispose === 'function') disposers.push(dispose)
   }
   let disposed = false
+  disposers.push(bindRoleSettings(rt))
   rt.dispose = () => {
     if (disposed) return
     disposed = true
@@ -351,6 +384,5 @@ export function createRuntime(ctx, config = {}) {
   // Reloading the plugin while DSH is live must retain turns and child agents already running.
   void rt.adoptLiveWork?.().catch(error => rt.warn?.('omni-ui: adopting the work still running failed: %s', error))
   void rt.resumeFallbackWayBacks?.().catch(error => rt.warn?.('ds-bot: resuming model fallback failed: %s', error))
-  if (imported) rt.warn?.('omni-ui: copied the team from %s into %s', config.importHome, home)
   return rt
 }

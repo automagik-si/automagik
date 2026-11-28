@@ -11,6 +11,7 @@ import { KEY_ERROR } from '../src/host/connectors/credential-key.js'
 import { install as installSkills } from '../src/host/skill-library.js'
 import { install } from '../src/host/store.js'
 import { stubSkillReviewer } from './fixtures/skill-review-model.js'
+import { activationIds, pins, rosterBytes, sha256 } from './fixtures/w1-format-profile.mjs'
 
 function patch(method, replace) {
   const original = fsp[method]
@@ -61,9 +62,9 @@ function host(home, saved, store = install) {
   return { rt, home, statePath, warnings, dispose }
 }
 
-function runtime(t, saved) {
+function runtime(t, saved, store) {
   const home = fs.mkdtempSync(join(tmpdir(), 'ds-bot-store-'))
-  const instance = host(home, saved)
+  const instance = host(home, saved, store)
   t.after(async () => {
     await instance.dispose()
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 })
@@ -85,6 +86,186 @@ const protectedTeam = {
   version: 2, connectors: { service: { custom: { command: 'mcp', env: { TOKEN: 'fixture-store-token9' } } } },
 }
 const savedToken = bytes => JSON.parse(bytes).connectors.service.custom.env.TOKEN
+const protectedContract = { stateFormats: [0, 1, 2, 3, 4, 5], activations: Object.values(activationIds) }
+const installProtected = rt => install(rt, { contract: protectedContract })
+const decoded = path => JSON.parse(fs.readFileSync(path))
+const addRegistry = copy => { copy.bots.a.roles = [pins.registry] }
+const addStack = copy => { copy.bots.a.roles = [pins.registry, pins.voice] }
+
+for (const format of [2, 3]) {
+  test('durable activation backs up the exact format ' + format + ' source and keeps IDs across ordinary saves', async t => {
+    const { rt, home, statePath } = runtime(t, rosterBytes(format).toString(), installProtected)
+    await rt.load()
+    const source = fs.readFileSync(statePath)
+    const backup = `${statePath}.pre-roles-${sha256(source)}`
+    fs.writeFileSync(backup, 'torn', { mode: 0o600 })
+    await assert.rejects(rt.commitStateActivation([activationIds.registry], addRegistry, { afterWrite: assert.fail }), /backup differs/)
+    assert.deepEqual(fs.readFileSync(statePath), source)
+    assert.deepEqual(rt.botOf('a').roles, [pins.solver])
+    fs.writeFileSync(backup, source, { mode: 0o600 })
+    await rt.commitStateActivation([activationIds.registry], addRegistry, { afterWrite: data => {
+      assert.deepEqual(fs.readFileSync(backup), source)
+      assert.equal(decoded(statePath).version, format + 2)
+      assert.deepEqual(rt.botOf('a').roles, [pins.solver])
+      rt.botOf('a').roles = data.bots.a.roles
+    } })
+    const first = fs.readFileSync(statePath)
+    await rt.commitStateActivation([activationIds.stack], addStack, { afterWrite: data => {
+      rt.botOf('a').roles = data.bots.a.roles
+    } })
+    assert.deepEqual(fs.readFileSync(`${statePath}.pre-roles-${sha256(first)}`), first)
+    await rt.saveCopy(copy => { copy.version = 2; delete copy.stateActivations; copy.bots.a.roles = [] }, {
+      afterWrite: () => { rt.botOf('a').roles = [] },
+    })
+    delete rt.state.stateActivations
+    await rt.save()
+    const saved = decoded(statePath)
+    assert.equal(saved.version, format + 2)
+    assert.deepEqual(saved.stateActivations, Object.values(activationIds).sort())
+    assert.deepEqual(saved.bots.a.roles, [])
+    if (format === 3) {
+      assert.deepEqual(savedToken(fs.readFileSync(statePath)), savedToken(source))
+      assert.equal(fs.existsSync(join(home, 'connector-key')), false)
+    }
+  })
+}
+
+test('malformed or unknown format-5 IDs refuse load, reader takeover, and outside replacement before decode', async t => {
+  const source = rosterBytes(3).toString()
+  const { rt, home, statePath, dispose } = runtime(t, source, installProtected)
+  await rt.load()
+  const reader = host(home, undefined, installProtected)
+  t.after(reader.dispose)
+  await reader.rt.load()
+  for (const ids of [['unknown'], [], [activationIds.registry, activationIds.registry], ['bad.ID']]) {
+    const invalid = rosterBytes(5, { stateActivations: ids })
+    fs.writeFileSync(statePath, invalid)
+    await reader.rt.refresh()
+    assert.equal(reader.rt.teamHealth(), null)
+    assert.equal(reader.rt.botOf('a'), undefined)
+    assert.equal(reader.rt.state.connectors, undefined)
+    await assert.rejects(reader.rt.save({ required: true }), /unrecognized saved state activations/)
+    await reader.rt.save()
+    assert.deepEqual(fs.readFileSync(statePath), invalid)
+  }
+  await rt.refresh()
+  assert.equal(rt.botOf('a'), undefined)
+  await dispose()
+  await reader.rt.refresh()
+  assert.equal(reader.rt.teamHealth(), null)
+  assert.equal(fs.existsSync(join(home, 'connector-key')), false)
+  fs.writeFileSync(statePath, source)
+  await reader.rt.refresh()
+  assert.equal(reader.rt.botOf('a').id, 'a')
+})
+
+test('stale queued permission copies cannot replay across an activation', async t => {
+  const { rt, statePath } = runtime(t, rosterBytes(2).toString(), installProtected)
+  await rt.load()
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const first = rt.commitStateActivation([activationIds.registry], addRegistry, {
+    beforeCommit: () => { entered.resolve(); return release.promise },
+    afterWrite: data => { rt.botOf('a').roles = data.bots.a.roles },
+  })
+  await entered.promise
+  const stale = rt.saveCopy(copy => { copy.prefs.permission = 'old copy' })
+  const refused = assert.rejects(stale, /team changed/i)
+  release.resolve()
+  await first
+  await refused
+  assert.deepEqual(decoded(statePath).bots.a.roles, [pins.registry])
+  assert.equal(decoded(statePath).prefs.permission, undefined)
+})
+
+test('a deferred migration recomputes once against the team the matching healthy verdict leaves', async t => {
+  const { rt, statePath } = runtime(t, rosterBytes(2).toString(), installProtected)
+  let proof = 'held'
+  rt.stateWriteProof = () => proof
+  await rt.load()
+  const propose = t.mock.fn(copy => { copy.prefs.appliedTo = copy.bots.a.name })
+  const afterWrite = t.mock.fn(data => { rt.state.prefs = data.prefs })
+  const source = fs.readFileSync(statePath)
+  assert.equal(await rt.commitStateActivation([activationIds.registry], propose, { retry: true, afterWrite }), false)
+  assert.equal(propose.mock.callCount(), 0)
+  assert.ok(rt.teamHealth())
+  proof = 'returned'
+  await rt.committedUpdate()
+  assert.deepEqual(fs.readFileSync(statePath), source)
+  const replacement = JSON.parse(source)
+  replacement.bots.a.name = 'Restored Fixture'
+  fs.writeFileSync(statePath, JSON.stringify(replacement))
+  proof = 'steady'
+  await rt.committedUpdate()
+  await rt.committedUpdate()
+  assert.equal(afterWrite.mock.callCount(), 1)
+  assert.equal(propose.mock.callCount(), 1)
+  assert.equal(decoded(statePath).prefs.appliedTo, 'Restored Fixture')
+})
+
+test('a general save cannot initialize a key even with activation comparison', async t => {
+  const { rt, home, statePath } = runtime(t, { version: 2 })
+  await rt.load()
+  let safe = false
+  rt.stateWriteProof = ({ compare } = {}) => safe ? 'steady' : compare ? 'compare' : 'held'
+  const path = join(home, 'connector-key')
+  rt.state.connectors = protectedTeam.connectors
+  await assert.rejects(rt.save({ required: true }), { message: KEY_ERROR })
+  assert.equal(fs.existsSync(path), false)
+  assert.equal(decoded(statePath).connectors, undefined)
+  safe = true
+  await rt.save({ required: true })
+  assert.equal(decoded(statePath).version, 3)
+  assert.equal(savedToken(fs.readFileSync(statePath)).enc, 'v1')
+})
+
+test('lock loss after backup refuses publication and a fresh writer can retry', async t => {
+  const { rt, home, statePath } = runtime(t, rosterBytes(2).toString(), installProtected)
+  await rt.load()
+  const source = fs.readFileSync(statePath)
+  let published = false
+  await assert.rejects(rt.commitStateActivation([activationIds.registry], addRegistry, {
+    beforeCommit: () => {
+      assert.deepEqual(fs.readFileSync(`${statePath}.pre-roles-${sha256(source)}`), source)
+      fs.unlinkSync(join(home, 'state.lock'))
+    },
+    afterWrite: () => { published = true },
+  }), { code: 'ELOCKLOST' })
+  assert.equal(published, false)
+  assert.deepEqual(fs.readFileSync(statePath), source)
+  await rt.refresh()
+  assert.equal(await rt.commitStateActivation([activationIds.registry], addRegistry, {
+    afterWrite: data => { rt.botOf('a').roles = data.bots.a.roles },
+  }), true)
+})
+
+for (const where of ['file', 'directory']) {
+  test('activation sync failure at the ' + where + ' cannot publish authority', async t => {
+    const { rt, home, statePath } = runtime(t, rosterBytes(2).toString(), installProtected)
+    await rt.load()
+    const source = fs.readFileSync(statePath)
+    const restore = patch('open', original => async (path, ...args) => {
+      const handle = await original(path, ...args)
+      const hits = where === 'directory' ? path === home : String(path).startsWith(statePath + '.')
+      if (hits) handle.sync = async () => { throw new Error('injected sync failure') }
+      return handle
+    })
+    const afterWrite = t.mock.fn()
+    try {
+      await assert.rejects(rt.commitStateActivation([activationIds.registry], addRegistry, { afterWrite }), /injected sync failure/)
+    } finally { restore() }
+    assert.equal(afterWrite.mock.callCount(), 0)
+    assert.deepEqual(rt.botOf('a').roles, [pins.solver])
+    if (where === 'file') {
+      assert.deepEqual(fs.readFileSync(statePath), source)
+    } else {
+      assert.equal(decoded(statePath).version, 4)
+      assert.equal(rt.teamHealth(), null)
+      assert.equal(rt.holdsLock(), false)
+      await assert.rejects(rt.save({ required: true }), /could not be confirmed/)
+    }
+  })
+}
 
 test('encrypted teams are admitted only by readers that support their format', async (t) => {
   const { rt, home, statePath, dispose } = runtime(t, protectedTeam)

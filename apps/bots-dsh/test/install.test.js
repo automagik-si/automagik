@@ -1,13 +1,105 @@
 import assert from 'node:assert/strict'
-import { globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createRuntimeResolution } from '@deepseek-ai/dsh-app-boot'
 import { build } from 'esbuild'
-import { apply } from '../index.js'
+import { apply, createRuntime } from '../index.js'
+import { prepareStore, writeJsonAtomic } from '../src/host/self-update.js'
+import { createRoleSettings } from '../src/host/role-settings.js'
 import { fakeContext } from './fake-ctx.js'
+import { activationIds, pins, rosterBytes, scratch } from './fixtures/w1-format-profile.mjs'
+
+test('early import waits for a live no-RUN trial to commit, even after a healthy phase appears', async t => {
+  const root = scratch(t)
+  const home = join(root, 'dest')
+  const from = join(root, 'source')
+  const profileDir = join(root, 'dsh', 'profiles', 'web')
+  mkdirSync(profileDir, { recursive: true })
+  mkdirSync(from)
+  const source = rosterBytes(2)
+  writeFileSync(join(from, 'state.json'), source)
+  const store = prepareStore(profileDir)
+  const bootId = 'fixture-import-boot'
+  const runId = 'fixture-import-run'
+  const stamp = new Date().toISOString()
+  const env = {
+    AUTOMAGIK_BOTS_HOME: home, AUTOMAGIK_SUPERVISOR_BOOT: bootId, AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8',
+    AUTOMAGIK_SUPERVISOR_RUN: undefined,
+  }
+  for (const [key, value] of Object.entries(env)) {
+    const before = process.env[key]
+    t.after(() => { if (before === undefined) delete process.env[key]; else process.env[key] = before })
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  const write = (name, data) => writeJsonAtomic(join(store, name), { version: 1, ...data }, { profileDir })
+  const run = { bootId, runId, from: '3.178.5', to: '3.178.8', sequence: 23, startedAt: stamp, updatedAt: stamp }
+  write('supervisor.json', { bootId, runId })
+  write('state.json', { ...run, phase: 'health', reason: null })
+  const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+  t.after(() => ctx.dispose())
+  const rt = createRuntime(ctx, { home, importHome: from })
+  await rt.load()
+  assert.equal(rt.updateHold.closed, true)
+  assert.equal(rt.teamHealth().present, false)
+  assert.equal(existsSync(rt.statePath), false)
+  assert.equal(existsSync(join(home, 'connector-key')), false)
+  write('state.json', { ...run, phase: 'healthy', reason: 'health-check-finished' })
+  await rt.committedUpdate()
+  assert.equal(existsSync(rt.statePath), false)
+  write('current.json', { live: { version: run.to, sequence: run.sequence },
+    kept: { version: run.from }, lastSequence: run.sequence })
+  await rt.committedUpdate()
+  assert.deepEqual(readFileSync(rt.statePath), source)
+  assert.equal(rt.botOf('a').id, 'a')
+  writeFileSync(join(from, 'state.json'), rosterBytes(2, { roles: [] }))
+  await rt.committedUpdate()
+  assert.deepEqual(readFileSync(rt.statePath), source)
+})
+
+test('import refuses an incompatible roster before any destination roster or key is published', t => {
+  const root = scratch(t)
+  const source = join(root, 'source')
+  mkdirSync(source)
+  writeFileSync(join(source, 'connector-key'), Buffer.alloc(32, 7), { mode: 0o600 })
+  for (const [tag, bytes] of [
+    ['protected', rosterBytes(4, { stateActivations: [activationIds.registry] })],
+    ['preactivation', rosterBytes(2, { roles: [pins.registry] })],
+  ]) {
+    const path = join(source, 'state.json')
+    const home = join(root, tag)
+    writeFileSync(path, bytes)
+    assert.throws(() => createRuntime(fakeContext(), { home, importHome: source }), /imported Bot team cannot be read/)
+    assert.deepEqual(readFileSync(path), bytes)
+    assert.equal(existsSync(join(home, 'state.json')), false)
+    assert.equal(existsSync(join(home, 'connector-key')), false)
+    assert.equal(existsSync(join(home, 'state.lock')), false)
+  }
+})
+
+test('the direct role settings writer waits for commit and old settings cannot attach themselves', async t => {
+  const home = scratch(t)
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  writeFileSync(join(home, 'state.json'), rosterBytes(2, { roles: [pins.voice] }))
+  const rt = createRuntime(ctx, { home })
+  await rt.load()
+  let phase = 'held'
+  rt.stateWriteProof = () => phase
+  const settings = createRoleSettings(home)
+  const spec = [{ key: 'voice', kind: 'voice' }]
+  const set = () => settings.write('a', pins.voice.id, spec, { voice: 'fixture voice' }, () => {})
+  await assert.rejects(set(), /after the update commits/)
+  assert.equal(existsSync(join(home, 'roles', 'data')), false)
+  phase = 'steady'
+  assert.deepEqual(await set(), { voice: 'fixture voice' })
+  await rt.detachRole('a')
+  assert.equal(existsSync(join(home, 'roles', 'data', 'a', pins.voice.id, 'settings.json')), true)
+  await assert.rejects(settings.read('a', pins.voice.id, spec), /role changed/)
+})
 
 test('a linked checkout declares the DSH patch parser as an optional peer', (t) => {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-profile-resolution-'))
