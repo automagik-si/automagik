@@ -721,22 +721,19 @@ jobs:
     # module.registerHooks (22.15+).
     # Only when herdr/ changed, or the workflows and lane tooling that test and pack it: the
     # `changes` job's herdr output decides it before this job takes a runner.
-    name: herdr pack (Node ${{ matrix.node }})
+    name: herdr pack (Node ${{ matrix.node }}, shard ${{ matrix.shard }}/2)
     needs: [changes, nodes]
     if: ${{ !cancelled() && needs.changes.outputs.herdr != 'false' }}
     runs-on: ubuntu-24.04
-    # Measured: 10m58 on Node 22, 12m32 on Node 24, whose leg also runs the herdr-app
-    # system-libraries apt-get (2m33 in the slow run). At 15 that leg was cancelled at its cap
-    # twice in one day on unrelated changes (#1603, #1681), recording no result; 20 kept the
-    # suite, the install and a slow runner's variance under the cap until the Node 24 leg grew
-    # to 15-19 min on dev (2026-11-20) and was cancelled at 20 with 3683 of ~3774 tests done.
-    # 30 keeps that headroom. Do not trim it back.
+    # Unsharded legs reached 30 minutes (run 46153520338). Splitting out cli and worker gives
+    # each Node version two runners, with the 30-minute limit covering runner and apt variance.
     timeout-minutes: 30
     strategy:
       fail-fast: false
       # One list for CI and the release (#1645): .github/node-versions.json.
       matrix:
         node: ${{ fromJSON(needs.nodes.outputs.matrix) }}
+        shard: [1, 2]
     defaults:
       run:
         working-directory: herdr
@@ -754,7 +751,7 @@ jobs:
       # of fetching them again; the key carries the hosted image (ImageOS/ImageVersion) and a
       # suffix to bump when this step changes. A miss still installs, bounded below.
       - name: Prepare the apt archive cache
-        if: matrix.node == '24'
+        if: matrix.node == '24' && matrix.shard == 1
         id: image
         run: |
           set -euo pipefail
@@ -767,7 +764,7 @@ jobs:
           sudo chmod -R u+rwX /var/cache/apt/archives
 
       - name: Restore the herdr-app package cache
-        if: matrix.node == '24'
+        if: matrix.node == '24' && matrix.shard == 1
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: /var/cache/apt/archives
@@ -777,7 +774,7 @@ jobs:
       # regional mirror that is down (run 44534018166). Rewrite the host to the canonical
       # archive before `apt-get update` so a dead mirror cannot red this job.
       - name: Point apt at the canonical Ubuntu archive
-        if: matrix.node == '24'
+        if: matrix.node == '24' && matrix.shard == 1
         run: bash "$GITHUB_WORKSPACE/.github/scripts/apt-canonical-sources.sh"
 
       # The app's own mod loader, not a stand-in: every PACK_MODS mod of the pack built from this
@@ -786,7 +783,7 @@ jobs:
       # One matrix leg is enough: the loader does not depend on the job's Node. libxkbcommon-x11-0
       # is the app's one missing library (libxcb-xkb1 comes with it); check needs no X server.
       - name: herdr-app system libraries
-        if: matrix.node == '24'
+        if: matrix.node == '24' && matrix.shard == 1
         run: |
           set -euo pipefail
           sudo chown -R _apt:root /var/cache/apt/archives
@@ -797,7 +794,7 @@ jobs:
           # run, so both are generous for a slow but working mirror, while a stalled one is
           # killed at the bound. Each bound sends TERM, then KILL 15s later, so the worst path
           # here (cache try, update, install) is 240+120+240 plus three 15s graces = 10m45s,
-          # under the job's 20-minute cap. PR #1690's run 44521928357 failed this step with
+          # within the job's limit. PR #1690's run 44521928357 failed this step with
           # `Unable to connect to azure.archive.ubuntu.com:http` and no phase visible, because
           # every apt call was `-qq`.
           readonly APT_INSTALL_LIMIT=240
@@ -891,7 +888,7 @@ jobs:
       # standalone check.
       - name: Every pack mod loads in herdr-app
         id: app
-        if: matrix.node == '24'
+        if: matrix.node == '24' && matrix.shard == 1
         working-directory: .
         run: node .github/scripts/herdr-app-check.mjs --keep-app
 
@@ -900,13 +897,38 @@ jobs:
       - name: Tests
         id: tests
         env:
+          SHARD: ${{ matrix.shard }}
           # test/standalone-check.test.mjs runs `herdr-app check` on every am-* mod for real only with
-          # AUTOMAGIK_HERDR_APP_CHECK=1 and HERDR_APP_BIN naming the app: the Node 24 leg, from the pinned
-          # build the step above verified and kept. A feed that could not be reached (outcome
-          # unverified, already a ::warning::) skips it; a missing handoff fails it. Other legs skip.
-          AUTOMAGIK_HERDR_APP_CHECK: ${{ matrix.node == '24' && steps.app.outputs.outcome != 'unverified' && '1' || '' }}
+          # AUTOMAGIK_HERDR_APP_CHECK=1 and HERDR_APP_BIN naming the app. It lives in shard 1, which
+          # runs the pinned build on the app-check leg. An unverified feed skips the real check.
+          AUTOMAGIK_HERDR_APP_CHECK: >-
+            ${{ matrix.node == '24' && matrix.shard == 1 &&
+                steps.app.outputs.outcome != 'unverified' && '1' || '' }}
           HERDR_APP_BIN: ${{ steps.app.outputs.bin }}
-        run: node --test 'test/*.test.mjs'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          all=(test/*.test.mjs)
+          slow=(test/cli.test.mjs test/worker.test.mjs)
+          rest=()
+          for file in "${all[@]}"; do
+            case "$file" in
+              "${slow[0]}"|"${slow[1]}") ;;
+              *) rest+=("$file") ;;
+            esac
+          done
+          # Sort without deduplicating so missing and duplicate files both fail the Tests step.
+          if (( ${#rest[@]} == 0 )) ||
+              ! diff -u <(printf '%s\n' "${all[@]}" | sort) \
+                        <(printf '%s\n' "${rest[@]}" "${slow[@]}" | sort); then
+            echo '::error::The Herdr test shards must cover every test/*.test.mjs file once'
+            exit 1
+          fi
+          case "$SHARD" in
+            1) exec node --test "${rest[@]}" ;;
+            2) exec node --test "${slow[@]}" ;;
+            *) echo "::error::Unknown Herdr test shard: $SHARD"; exit 1 ;;
+          esac
 
       - name: Syntax
         id: syntax

@@ -327,9 +327,12 @@ describe('a gated job', () => {
     }
   });
 
-  test('keeps its name, so the check people look at does not move', () => {
+  test('keeps recognizable names, including distinct Herdr shards', () => {
     for (const id of Object.keys(GATED)) expect(ci.jobs[id].name).toBeDefined();
-    expect(ci.jobs.herdr.name).toBe('herdr pack (Node ${{ matrix.node }})');
+    expect(ci.jobs.herdr.name).toBe(
+      'herdr pack (Node ${{ matrix.node }}, shard ${{ matrix.shard }}/2)',
+    );
+    expect(ci.jobs.herdr.strategy.matrix.shard).toEqual([1, 2]);
     expect(ci.jobs['pocket-link'].name).toBe('Pocket Link bridge (${{ matrix.os }})');
     expect(ci.jobs.usagemeter.name).toBe('usagemeter (${{ matrix.os }})');
     expect(ci.jobs.meter.name).toBe('Meter status line');
