@@ -146,6 +146,25 @@ test('effective Settings updates go through the real volatile Loader entry and r
   await snapshots.return()
 })
 
+test('a purpose with inconsistent stored thresholds remains readable and repairable', async t => {
+  const { id, defaults } = PURPOSES[0]
+  const stored = { ...defaults, tau: 0.5, tau0: 0.9, k: 3 }
+  const { decisions, writes } = await mount(t, { purposes: { [id]: stored } })
+  const feed = decisions.follow(new AbortController().signal)
+  const view = snapshot => snapshot.purposes.find(purpose => purpose.id === id).settings
+  assert.deepEqual(decisions.settings(id), defaults)
+  assert.deepEqual(view(decisions.snapshot()), defaults)
+  assert.deepEqual(view((await feed.next()).value), defaults)
+  assert.equal(writes.length, 0)
+  await decisions.configure({ model })
+  assert.deepEqual(writes[0].patch, { model })
+  await assert.rejects(decisions.configure({ purposes: { [id]: { tau0: 0.6 } } }), TypeError)
+  assert.equal(writes.length, 1)
+  await decisions.configure({ purposes: { [id]: { tau0: 0.2 } } })
+  assert.deepEqual(view((await feed.next()).value), { ...stored, tau0: 0.2 })
+  await feed.return()
+})
+
 test('bounds and normalizes outgoing state, questions and answered metadata', async t => {
   const { decisions, rows } = await mount(t, { providerId: 'fake', model })
   const chosen = fakeProvider({ info: { limits: { maxQuestions: 2, maxOptions: 2, maxLevels: 2 } }, evaluate(call) {

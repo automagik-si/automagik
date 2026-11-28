@@ -252,7 +252,14 @@ export default class Decisions extends Service {
   settings(purpose) {
     const spec = this.purposes.get(purpose)
     if (!spec) throw new TypeError('Unknown decision purpose')
-    return validatePurposeSettings(spec.defaults, valueOf(this.config.purposes.get(), purpose) ?? {})
+    const stored = valueOf(this.config.purposes.get(), purpose) ?? {}
+    try {
+      return validatePurposeSettings(spec.defaults, stored)
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error
+      // An externally edited profile can pass the field schema but violate tau0 <= tau.
+      return { ...spec.defaults }
+    }
   }
 
   snapshot() {
@@ -336,11 +343,17 @@ export default class Decisions extends Service {
       throw new TypeError('Unknown decision purpose')
     }
     if (Object.values(purposePatch).some(value => !object(value))) throw new TypeError('Invalid decision purpose settings')
-    const resolved = new Map([...this.purposes].map(([id]) =>
-      [id, validatePurposeSettings(this.settings(id), valueOf(purposePatch, id) ?? {}, reg?.info)]))
-    if (Object.hasOwn(patch, 'purposes')) {
-      fields.purposes = Object.fromEntries(Object.keys(purposePatch).map(id => [id, resolved.get(id)]))
+    const stored = this.config.purposes.get()
+    const updates = []
+    for (const [id, spec] of this.purposes) {
+      if (Object.hasOwn(purposePatch, id)) {
+        const effective = { ...valueOf(stored, id), ...purposePatch[id] }
+        updates.push([id, validatePurposeSettings(spec.defaults, effective, reg?.info)])
+      } else {
+        validatePurposeSettings(spec.defaults, this.settings(id), reg?.info)
+      }
     }
+    if (Object.hasOwn(patch, 'purposes')) fields.purposes = Object.fromEntries(updates)
     const settings = this.owner.get('settings')
     if (!settings || !this.entryId) throw new Error('Decisions configuration requires a settings service and profile entry')
     await settings.update(this.entryId, fields)
