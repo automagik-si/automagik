@@ -34,6 +34,7 @@ const guardedF = {
 }
 const historical = new Map([
   ['3.178.5', 'bf4337a2426da90f29be9ce6361477213641a284'],
+  ['3.178.8', 'd0fe59de8bd5b29ef712675ae7cdaaaf7308dd8e'],
 ])
 
 function verifyArtifact({ tarball, lane, supervisor, commit, hash }) {

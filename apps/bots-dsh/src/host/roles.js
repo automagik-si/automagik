@@ -14,7 +14,7 @@ const REGISTRY_ACTIVATION = 'w1-registry-pin-v1'
 const STACK_ACTIVATION = 'w1-role-stack-v1'
 const activationFor = pins => [
   ...(pins.some(registryAttachment) ? [REGISTRY_ACTIVATION] : []),
-  ...(pins.length > 1 ? [STACK_ACTIVATION] : []),
+  ...(pins.length > 1 && (pins.some(registryAttachment) || packageAttachment({ roles: pins })) ? [STACK_ACTIVATION] : []),
 ]
 
 let roleQueue = Promise.resolve()
@@ -294,7 +294,8 @@ export function installRoles(rt, deps = {}) {
           }
           await packages.requireAttachable(roleId, record)
         }
-        if (effective.includes('genie') && !rt.roleRegistry?.of('genie') && !raw.length && roleId !== 'genie') {
+        if (effective.includes('genie') && !hasSlot && roleId !== 'genie') {
+          if (rt.roleRegistry?.of('genie')) throw refusal('Attach Genie first to keep it, or detach it before choosing another role.')
           throw refusal(CHOOSE_NONE_FIRST)
         }
         if (transition) solverRecord = record

@@ -302,7 +302,8 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
   const savedWarning = bot => [bot.appliedModel, bot.model].map(providerOf).map(providerWarning).find(Boolean)
   const sessionsOf = bot => [rt.chatOf?.(bot.id), ...(rt.groupSessionsOf?.(bot.id) ?? [])].filter(Boolean)
-  const isWaitingSolver = held => held.pin.id === SOLVER_ROLE_ID && held.bot.waitingRole?.id === SOLVER_ROLE_ID
+  const isCatalogSolver = held => held?.pin.id === SOLVER_ROLE_ID && held.pin.source !== 'registry'
+  const isWaitingSolver = held => isCatalogSolver(held) && held.bot.waitingRole?.id === SOLVER_ROLE_ID
   function liveProvider(sessionId, session) {
     try {
       const agent = ctx.get?.('agents')?.get?.(sessionId)
@@ -357,13 +358,13 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     const role = typeof text === 'string' && text.trim()
       && (owner(sessionId) !== undefined || promptOnly(held.manifest))
     if (!role) return limits ? `<role-prompt id="solver">\n${limits}\n</role-prompt>` : undefined
-    const solver = held.pin.id === SOLVER_ROLE_ID
+    const solver = isCatalogSolver(held)
     const pieces = [text.trimEnd(), ...(solver ? [solverReviewPart(held.bot, ownBot)] : []), ...(limits ? [limits] : [])]
     return `<role-prompt id="${held.pin.id}">\n${pieces.join('\n')}\n</role-prompt>`
   }
   function partsOf(sessionId, id, bot) {
     const holders = heldsOf(id).filter(held => held.runtime)
-    const lead = holders.find(held => held.pin.id === SOLVER_ROLE_ID) ?? holders[0]
+    const lead = holders.find(isCatalogSolver) ?? holders[0]
     if (!lead) return partOf(sessionId, undefined, bot)
     return holders.map(held => partOf(sessionId, held, bot, held === lead)).filter(Boolean).join('\n') || undefined
   }
@@ -413,7 +414,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
       let instructions
       if (bot.waitingRole?.id === SOLVER_ROLE_ID) {
         const provider = liveProvider(sessionId, session)
-        if (!held?.runtime.prompt?.trim() || (provider ? providerWarning(provider) : savedWarning(bot))) instructions = bot.instructions
+        if (!isCatalogSolver(held) || !held.runtime?.prompt?.trim() || (provider ? providerWarning(provider) : savedWarning(bot))) instructions = bot.instructions
       }
       turnPrompts.set(sessionId, { id, bot, part, instructions, registry: registryHolders(id) })
     }
@@ -430,9 +431,9 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     const entries = [...attachments].flatMap(([, held]) => {
       const id = held.bot.id
       if ((!byRole && heldOf(id) !== held) || !current(id, held) || !held.manifest
-        || (held.pin.id === SOLVER_ROLE_ID && !held.runtime?.prompt?.trim())) return []
+        || (isCatalogSolver(held) && !held.runtime?.prompt?.trim())) return []
       const warning = isWaitingSolver(held) ? deliveryWarning(held.bot, routes) : undefined
-      const acp = warning === acpWarning || (held.pin.id !== SOLVER_ROLE_ID
+      const acp = warning === acpWarning || (!isCatalogSolver(held)
         && providerWarning(providerOf(held.bot.appliedModel ?? held.bot.model)) === acpWarning)
       return [[id, held.pin.id, {
         pin: identityOf(held.pin), settings: held.manifest.settings,
@@ -466,7 +467,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     },
     serving(id, record, pin, routes) {
       const held = active(id, SOLVER_ROLE_ID)
-      return held?.record === record && sameRolePin(held?.pin, pin) && Boolean(held.runtime.prompt?.trim())
+      return isCatalogSolver(held) && held.record === record && sameRolePin(held.pin, pin) && Boolean(held.runtime.prompt?.trim())
         && !deliveryWarning(held.bot, routes)
     },
     async prepare(details, sha256) {

@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
-import { activationIds, rosterBytes, scratch } from './fixtures/w1-format-profile.mjs'
+import { assertRefusedCell, legacyCells } from './fixtures/w1-format-predecessor.mjs'
+import { activationIds, pins, rosterBytes, scratch } from './fixtures/w1-format-profile.mjs'
 
 const role = { id: 'operator', name: 'Operator', tools: ['operate'], capabilities: ['task-start'], prompt: 'Operate.' }
 
@@ -112,3 +114,69 @@ test('format 5 retains a usable encrypted credential and an unmatched envelope',
     }
   })
 })
+
+test('detaching legacy ID-only roles while activation is deferred keeps format 2', async t => {
+  const f = fixture(t, 2, { roles: [{ id: 'genie' }, { id: 'voice-mouth' }] })
+  const { rt } = await f.open()
+  rt.stateWriteProof = () => 'pending'
+  await rt.detachRole('a')
+  const saved = f.saved()
+  assert.deepEqual(saved.bots.a.roles, [])
+  assert.equal(saved.version, 2)
+  assert.equal(saved.stateActivations, undefined)
+  assert.equal(existsSync(f.backup), false)
+})
+
+test('a registry attachment cannot silently detach a kind-carried Genie', async t => {
+  const f = fixture(t)
+  const { rt } = await f.open()
+  rt.hooks.role(role)
+  rt.hooks.role({ id: 'genie', name: 'Genie', tools: ['grant_wish'] })
+  assert.equal(rt.hasRole('b', 'genie'), true)
+  await assert.rejects(rt.attachRole('b', role.id), /Choose None|Attach Genie/)
+  assert.equal(rt.hasRole('b', 'genie'), true)
+  assert.deepEqual(readFileSync(f.path), f.source)
+  await rt.attachRole('b', 'genie')
+  await rt.attachRole('b', role.id)
+  assert.deepEqual(f.saved().bots.b.roles.map(pin => pin.id), ['genie', 'operator'])
+  assert.equal(rt.hasRole('b', 'genie'), true)
+})
+
+test('a registry Solver with a function prompt keeps its own view and prompt', async t => {
+  const f = fixture(t)
+  const { rt } = await f.open()
+  rt.hooks.role({ id: 'solver', name: 'Registry Solver', prompt: () => 'Registry method.' })
+  await rt.attachRole('a', 'solver')
+  const held = rt.roleRuntime.heldOf('a', 'solver')
+  assert.equal(rt.roleRuntime.viewByRole().a.solver.pin.source, 'registry')
+  assert.equal(rt.roleRuntime.serving('a', held.record, held.pin), false)
+  const session = rt.chatOf('a')
+  rt.roleRuntime.event(session, { type: 'turn/start', data: { turn: 1 } })
+  assert.match(rt.roleRuntime.prompt(session), /Registry method/)
+})
+
+for (const cell of legacyCells.filter(cell => cell.format < 4)) {
+  test('activated host refuses unmarked ' + cell.shape + ' in format ' + cell.format, t =>
+    assertRefusedCell(t, fileURLToPath(new URL('../', import.meta.url)), cell))
+}
+
+for (const [name, format, roles, stateActivations] of [
+  ['unknown marker', 4, [], ['future-role-v1']],
+  ['missing markers', 4, [], undefined],
+  ['empty markers', 5, [], []],
+  ['duplicate marker', 4, [], [activationIds.stack, activationIds.stack]],
+  ['missing stack marker', 4, [pins.voice, pins.solver], [activationIds.registry]],
+  ['duplicate role id', 4, [pins.voice, pins.voice], [activationIds.stack]],
+  ['marker on legacy format', 2, [], [activationIds.stack]],
+  ['missing registry marker', 4, [pins.registry], [activationIds.stack]],
+]) {
+  test('reader preserves bytes and refuses authority for ' + name, async t => {
+    const f = fixture(t, format, { roles, stateActivations })
+    const { rt } = await f.open()
+    assert.match(rt.readOnly(), /unrecognized saved/)
+    assert.equal(rt.holdsLock(), false)
+    assert.equal(rt.botOf('a'), undefined)
+    await assert.rejects(rt.save({ required: true }))
+    assert.deepEqual(readFileSync(f.path), f.source)
+  })
+}
