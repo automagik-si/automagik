@@ -1,5 +1,6 @@
 // Team tools: the roster, bot-to-bot messages, group chat settings and posts, and the
 // question and view cards. Group rounds and reading chats are in groups.js.
+import { SCHEDULE_TARGET_REFUSAL } from '../shared/tool-policy-copy.js'
 import { SKILL_TOOL, skillTool } from './skill-library-call.js'
 import { randomUUID } from 'node:crypto'
 import { createEditInput } from './image-input.js'
@@ -94,7 +95,7 @@ const GOAL_REFUSAL = 'A group Session does not run /goal: set the group\'s goal 
 // DSH 0.2.2's schedule tools can deliver to a new Session, which is outside the team and
 // has no Bot; a Bot's tasks deliver to its own chat, which Omni moves on with each part.
 const SCHEDULE_TARGET_TOOLS = ['schedule_create', 'schedule_edit']
-const SCHEDULE_TARGET_REFUSAL = 'A Bot’s scheduled tasks run in its own chat. Use target "this_session".'
+
 const MODE_PARAM = {
   type: 'string',
   enum: ROOM_MODES,
@@ -1513,6 +1514,7 @@ export function install(rt) {
   // goal is the group's own. The restricts are kept with the Session's scope, so they
   // lift with it. A native DSH Bot keeps DSH's own question and goal tools.
   const nativeDshSession = id => rt.botOf(rt.selfOf(id))?.kind === 'dsh'
+  rt.nativeDshScheduleSession = nativeDshSession
   const hideBotUnusedTools = (agent) => {
     shareBotTools(agent)
     const id = agent?.session?.id

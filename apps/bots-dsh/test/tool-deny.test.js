@@ -246,6 +246,8 @@ test('a restricted Bot loses schedule create and edit, and the guard refuses bot
   const bot = await rt.createBot({
     name: 'Analista', denyTools: ['bash'], pickModel: true, instructions: 'Read only.',
   })
+  bot.kind = 'dsh'
+  await rt.applyToolDeny(bot)
   await flush()
   // The profile serves the schedule tools, so the restriction hides them too.
   const applied = restricted.filter(entry => entry.sessionId === bot.id).at(-1)
@@ -270,6 +272,8 @@ test('a restricted Bot loses schedule create and edit when not restrictable', as
   const bot = await rt.createBot({
     name: 'Analista', denyTools: ['bash'], pickModel: true, instructions: 'Read only.',
   })
+  bot.kind = 'dsh'
+  await rt.applyToolDeny(bot)
   await flush()
   const hidden = restricted.filter(entry => entry.sessionId === bot.id
     && entry.deny.some(name => schedule.includes(name)))
@@ -285,16 +289,15 @@ test('a restricted Bot loses schedule create and edit when not restrictable', as
   }
 })
 
-test('a Bot without a deny list keeps schedule create and edit', async (t) => {
+test('a Bot without a deny list keeps schedule tools and uses the existing Session target', async (t) => {
   const schedule = ['schedule_create', 'schedule_edit']
   const { ctx } = team(t, { served: [...SERVED, ...schedule] })
   const rt = ctx.provided.get('omniTeam')
   const bot = await rt.createBot({ name: 'Plain', pickModel: true, instructions: 'Free.' })
   await flush()
-  const guard = (ctx.listeners.get('tools/execute') ?? [])[0]
-  for (const name of schedule) {
-    assert.equal(await guard({ name, agent: { id: bot.id } }, async () => 'ran'), 'ran')
-  }
+  const guard = ctx.listeners.get('tools/execute')[0]
+  const exec = { name: 'schedule_create', agent: { id: bot.id }, arguments: { target: 'this_session' } }
+  assert.equal(await guard(exec, async () => 'ran'), 'ran')
 })
 
 test('only the user can change a Bot\'s deny list; the Bot cannot lift its own', async (t) => {
@@ -428,4 +431,21 @@ test('a subagent child of a restricted Bot is restricted and refused by the guar
     /does not have the bash tool/,
   )
   assert.equal(await guard({ name: 'omni_messages', agent: { id: grandchildId } }, async () => 'ran'), 'ran')
+})
+
+test('committed lineage replaces the implicit schedule mask and keeps explicit tool denials', async t => {
+  const { ctx, restricted } = team(t, { served: [...SERVED, 'schedule_create', 'schedule_edit'] })
+  const rt = ctx.provided.get('omniTeam')
+  const bot = await rt.createBot({
+    name: 'Planner', denyTools: ['bash', 'schedule_edit'], pickModel: true, instructions: 'Plan.',
+  })
+  await rt.applyToolDeny(bot)
+  const applied = restricted.filter(entry => entry.sessionId === bot.id).at(-1)
+  assert.deepEqual(applied.deny, ['bash', 'schedule_edit'])
+
+  const guard = ctx.listeners.get('tools/execute')[0]
+  const exec = (name, target) => ({ name, agent: { id: bot.id }, arguments: { target } })
+  assert.equal(await guard(exec('schedule_create', 'this_session'), async () => 'ran'), 'ran')
+  await assert.rejects(guard(exec('schedule_create', 'new_once'), async () => 'ran'), /verified Sessions/)
+  await assert.rejects(guard(exec('schedule_edit', 'this_session'), async () => 'ran'), /does not have the schedule_edit tool/)
 })

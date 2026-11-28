@@ -7,6 +7,7 @@
 // the service is optional and every endpoint reports whether it is there.
 
 import { createHash, randomUUID } from 'node:crypto'
+import { POLICY_UNAVAILABLE_TEXT, SCHEDULE_TARGET_REFUSAL } from '../shared/tool-policy-copy.js'
 import { SIGN_IN_TEXT_MAX } from '../shared/cli-login.js'
 import { CODE_REFUSED } from './cli-login.js'
 import { hasWriteApi } from './pocket-chat.js'
@@ -262,6 +263,7 @@ export function install(rt) {
   // than let it run with no Bot to bind it; the next successful sweep clears it. `swept`
   // holds deliveries closed through the boot window, before the first check has run.
   const stuck = new Set()
+  const deferred = new Set()
   // The boot check runs after the team loads; before that an empty team would read as "no
   // restricted Bot" and open the guard too early, so only a load-backed sweep opens it.
   let teamLoaded = false
@@ -285,6 +287,65 @@ export function install(rt) {
   if (typeof ctx.inject === 'function') ctx.inject(['schedule'], attach)
   else if (ctx.get?.('schedule') !== undefined) attach({ schedule: ctx.get('schedule'), effect: (execute, label) => ctx.effect(execute, label) })
 
+  const allowsManagedTarget = (owner, kind, destination) =>
+    owner.verified && kind === 'session' && destination?.verified === true
+    && destination.bot?.id === owner.bot.id
+
+  rt.assertScheduleToolTarget = async (exec, policy) => {
+    if (exec.name !== 'schedule_create' && exec.name !== 'schedule_edit') return
+    const id = exec.agent?.session?.id ?? exec.agent?.id
+    if (rt.nativeDshScheduleSession?.(id)) return
+    if (!policy?.bot && !rt.isBotSession?.(id)) return
+    if (policy?.state === 'unavailable' || !policy?.bot || rt.teamAvailable?.() === false) {
+      throw refusal(POLICY_UNAVAILABLE_TEXT)
+    }
+    const args = exec.arguments
+    if (restricted(policy.bot) && args?.action !== 'delete'
+      && rt.botOf(id)?.id !== policy.bot.id && (rt.selfOf?.(id) ?? rt.state?.tasks?.[id]?.from) !== policy.bot.id) {
+      throw refusal('Use a Bot Session with a saved team binding to arm a task.')
+    }
+    const owner = { bot: policy.bot, verified: true }
+    if (exec.name === 'schedule_create') {
+      const kind = args?.target === 'this_session' ? 'session' : args?.target
+      if (!allowsManagedTarget(owner, kind, args?.target === 'this_session' ? owner : undefined)) {
+        throw refusal(SCHEDULE_TARGET_REFUSAL)
+      }
+      return
+    }
+    if (typeof args?.id !== 'string' || typeof service?.catalog !== 'function') throw refusal(SCHEDULE_TARGET_REFUSAL)
+    const row = (await service.catalog()).find(entry => entry.id === args.id)
+    const current = await verifiedScheduleLineage(id, exec.agent)
+    if (row === undefined || current?.state === 'unavailable' || current?.bot?.id !== policy.bot.id
+      || rt.teamAvailable?.() === false) throw refusal(SCHEDULE_TARGET_REFUSAL)
+    let matched = false
+    for (const session of row.involvedSessionIds ?? []) {
+      if (row.target?.kind === 'new_once' && session === row.target.sessionId) continue
+      const involved = await verifiedScheduleLineage(session)
+      if (involved.state === 'unavailable' || involved.bot?.id !== policy.bot.id) throw refusal(SCHEDULE_TARGET_REFUSAL)
+      matched = true
+    }
+    if (!matched) throw refusal(SCHEDULE_TARGET_REFUSAL)
+    if (args.action !== 'delete') {
+      const kind = args.target === 'this_session' ? 'session' : args.target ?? row.target?.kind
+      const destination = args.target === 'this_session' ? current
+        : args.target === undefined && kind === 'session' ? await verifiedScheduleLineage(row.target.sessionId) : undefined
+      if (!allowsManagedTarget(owner, kind, {
+        bot: destination?.bot, verified: destination !== undefined && destination.state !== 'unavailable',
+      })) throw refusal(SCHEDULE_TARGET_REFUSAL)
+    }
+    if (rt.teamAvailable?.() === false) throw refusal(POLICY_UNAVAILABLE_TEXT)
+    // The DSH tool schema only accepts string revisions, even though the
+    // scheduler service used by the owner can compare a legacy null revision.
+    const observed = row.updatedAt
+    if (typeof observed !== 'string') {
+      throw refusal('This task was saved without a change stamp, so a Bot cannot edit it. Pause, rename or remove it from the task list, or create a new one with target "this_session".')
+    }
+    if (args.expectedUpdatedAt !== undefined && args.expectedUpdatedAt !== observed) {
+      throw refusal('The scheduled task changed. Read it and try again.', { code: 'schedule_conflict' })
+    }
+    if (args.expectedUpdatedAt === undefined) exec.arguments = { ...args, expectedUpdatedAt: observed }
+  }
+
   // The Bot (and group chat) a task's Session speaks for, the group chat for a group's
   // own Session, or nothing for a Session outside the team.
   const ownerOf = (sessionId) => {
@@ -301,9 +362,9 @@ export function install(rt) {
   // The live registry only holds Sessions that are loaded, so a subagent child that ended,
   // or a team loaded after a restart before the child reopened, would be missed. A strict
   // read throws when the persisted copy cannot be read, instead of answering "no header".
-  const headerOf = async (sessionId, { strict = false } = {}) => {
+  const headerOf = async (sessionId, { strict = false, durableOnly = false } = {}) => {
     const live = ctx.sessions?.get?.(sessionId)?.header
-    if (live !== undefined) return live
+    if (live !== undefined && !durableOnly) return live
     // The optional store needs an explicit lookup; test contexts may only expose a property.
     let persistence
     try { persistence = ctx.get?.('sessionPersistence') } catch {}
@@ -315,6 +376,17 @@ export function install(rt) {
       if (strict) throw error
       return undefined
     }
+  }
+  const verifiedScheduleLineage = async (sessionId, agent) => {
+    const headers = new Map()
+    let id = sessionId
+    while (typeof id === 'string' && !headers.has(id) && headers.size < 32) {
+      const stored = await headerOf(id, { strict: true, durableOnly: true })
+      headers.set(id, stored)
+      const header = stored ?? ctx.sessions?.get?.(id)?.header ?? (id === sessionId ? agent?.session?.header : undefined)
+      id = header?.origin === 'subagent' ? header.parentSession : undefined
+    }
+    return rt.sessionPolicyOf?.(sessionId, agent, headers) ?? { state: 'unavailable' }
   }
   // The Bot an involved Session speaks for: its own chat, a group Session, an earlier part,
   // a task run, or a subagent child (through its parent lineage). DSH records every Session
@@ -342,11 +414,31 @@ export function install(rt) {
     }
     return { ids }
   }
-  const botOfTaskSession = async sessionId => (await lineageOf(sessionId)).bot
+  const bindingOfTaskSession = async sessionId => {
+    if (rt.multiuserHold?.()) {
+      return { bot: (await lineageOf(sessionId)).bot, verified: true }
+    }
+    try {
+      const policy = await verifiedScheduleLineage(sessionId)
+      if (policy.state !== 'unavailable') return { bot: policy.bot, verified: true }
+    } catch {}
+    // A conflicting or unreadable header must not erase a known Bot's claim.
+    // The old walk is a hint for holding delivery, never for authorizing it.
+    try { return { bot: (await lineageOf(sessionId, { recorded: true })).bot, verified: false } }
+    catch { return { bot: undefined, verified: false, failed: true } }
+  }
+  const botOfTaskSession = async sessionId => (await bindingOfTaskSession(sessionId)).bot
   // A fresh-Session target opens a Session with no Bot lineage, so it could bypass
   // the rollback hold, a Bot's deny list, or its shell restriction.
   const restricted = bot => bot != null && (rt.multiuserHold?.() || bot.shell === false
     || (Array.isArray(bot.denyTools) && bot.denyTools.length > 0))
+  const managed = bot => bot != null && bot.kind !== 'dsh'
+  const lineageRestricted = bot => managed(bot) || restricted(bot)
+  const targetUnsafe = (owner, target, destination) => managed(owner.bot)
+    ? !allowsManagedTarget(owner, target.kind, destination)
+    : restricted(owner.bot) && (NEW_TARGETS.has(target.kind)
+      || (target.kind === 'session' && destination?.bot === undefined))
+
   // Every Session a Bot speaks from now, plus the ones a caller already has.
   const sessionsOf = (bot, extra = []) => {
     const ids = new Set(extra)
@@ -389,7 +481,7 @@ export function install(rt) {
     retryTimer = setInterval(() => {
       void revokeNewSchedules()
         .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))
-      if (stuck.size === 0) stopRetry()
+      if (stuck.size === 0 && deferred.size === 0) stopRetry()
     }, PAUSE_RETRY_MS)
     retryTimer.unref?.()
   }
@@ -415,6 +507,15 @@ export function install(rt) {
     // cannot vouch for what it did not read: the guard stays closed for unlineaged
     // deliveries until this host owns the team and a later sweep runs.
     if (typeof rt.readOnly === 'function' && rt.readOnly() !== undefined) return []
+    const generation = rt.teamGeneration?.()
+    const mayWriteNewScope = () => {
+      if (rt.teamAvailable?.() === false) return false
+      const live = rt.teamGeneration?.()
+      if (live?.epoch !== generation?.epoch || live?.term !== generation?.term) return false
+      const proof = rt.stateWriteProof?.()
+      if (proof === undefined || proof === 'steady') return rt.sidecarWritable?.() !== false
+      return proof === 'returned' && rt.sidecarWritable?.({ predecessor: true }) === true
+    }
     // Only a sweep that started with the team loaded may open the guard: an attach-time
     // sweep can finish after the boot chain and would otherwise vouch for pre-load state.
     const loadedThen = teamLoaded
@@ -425,46 +526,45 @@ export function install(rt) {
     const cache = new Map()
     const botFor = async (sessionId) => {
       if (cache.has(sessionId)) return cache.get(sessionId)
-      const resolved = await botOfTaskSession(sessionId)
+      const resolved = await bindingOfTaskSession(sessionId)
       cache.set(sessionId, resolved)
       return resolved
     }
-    // Is this task's delivery one no team lineage can bind, and is it this Bot's?
-    const freshEntry = async (entry) => {
+    const belongsToBot = async (entry, scopedOnly = scoped) => {
       const target = entry.target ?? {}
-      const unbound = target.kind === 'session'
-        && await botFor(target.sessionId) === undefined
-        && !(sessions !== undefined && sessions.has(target.sessionId))
-      return NEW_TARGETS.has(target.kind) || unbound
-    }
-    const belongsToBot = async (entry) => {
-      if (!(await freshEntry(entry))) return false
-      const involved = Array.isArray(entry.involvedSessionIds) ? entry.involvedSessionIds : []
-      if (sessions === undefined) {
-        for (const sessionId of involved) {
-          if (restricted(await botFor(sessionId))) return true
-        }
-        return false
+      const destination = target.kind === 'session' ? await botFor(target.sessionId) : undefined
+      let newScope = false
+      for (const id of entry.involvedSessionIds ?? []) {
+        const resolved = await botFor(id)
+        const owner = sessions?.has(id) && resolved.bot === undefined ? { ...resolved, bot } : resolved
+        if (scopedOnly && owner.bot?.id !== bot?.id) continue
+        const unbound = NEW_TARGETS.has(target.kind) || (target.kind === 'session' && destination?.bot === undefined)
+        if (unbound && (restricted(owner.bot) || (scopedOnly && any && owner.bot !== undefined))) return 'old'
+        if (targetUnsafe(owner, target, destination)) newScope = true
       }
-      // A scoped caller vouches for the ids it hands over, so they resolve before maps go.
-      const matched = involved.some(sessionId => sessions.has(sessionId))
-      if (matched && (any || restricted(bot))) return true
-      if (bot === undefined) return false
-      // A subagent child is in no team map; its durable header still names the Bot.
-      for (const sessionId of involved) {
-        const owner = await botFor(sessionId)
-        if (owner?.id === bot.id && (any || restricted(bot))) return true
-      }
-      return false
+      return newScope ? 'new' : undefined
     }
-    const wasClosed = !swept || stuck.size > 0
+    const wasClosed = !swept || stuck.size > 0 || deferred.size > 0
     const paused = []
     const attempted = new Set()
-    const pauseEntry = async (entry) => {
+    const pauseEntry = async (entry, scope) => {
       attempted.add(entry.id)
+      if (scope === 'new' && !mayWriteNewScope()) { deferred.add(entry.id); return }
       try {
-        await service.edit({ id: entry.id, action: 'update', patch: { active: false } })
+        const request = { id: entry.id, action: 'update', patch: { active: false } }
+        let signal
+        if (scope === 'new') {
+          request.expectedUpdatedAt = entry.updatedAt ?? null
+          signal = new AbortController().signal
+          signal.throwIfAborted = () => {
+            if (!mayWriteNewScope()) throw refusal(POLICY_UNAVAILABLE_TEXT)
+          }
+          signal.throwIfAborted()
+        }
+        const result = await service.edit(request, undefined, signal)
+        if (result?.code === 'schedule_conflict') throw new Error('The scheduled task changed during its policy check.')
         stuck.delete(entry.id)
+        deferred.delete(entry.id)
         paused.push(entry.id)
         rt.warn('ds-bot: paused the scheduled task %s: '
           + 'its fresh Session would run with no Bot lineage', entry.title ?? entry.id)
@@ -480,27 +580,20 @@ export function install(rt) {
       if (entry.status === 'active') active.set(entry.id, entry)
     }
     for (const entry of active.values()) {
-      if (await belongsToBot(entry)) await pauseEntry(entry)
+      const scope = await belongsToBot(entry)
+      if (scope) await pauseEntry(entry, scope)
     }
-    // A stuck task this sweep did not match: a Bot that is now unrestricted or gone has no
-    // restriction left to bypass, so the task is released; while a restricted Bot remains
-    // involved, the pause is tried again here.
-    for (const id of stuck) {
-      const entry = active.get(id)
-      if (entry === undefined) { stuck.delete(id); continue }
+    // A stuck row that is gone or now safe no longer holds delivery.
+    for (const id of new Set([...stuck, ...deferred])) {
       if (attempted.has(id)) continue
-      if (!(await freshEntry(entry))) { stuck.delete(id); continue }
-      const involved = Array.isArray(entry.involvedSessionIds) ? entry.involvedSessionIds : []
-      let stillRestricted = false
-      for (const sessionId of involved) {
-        if (restricted(await botFor(sessionId))) { stillRestricted = true; break }
-      }
-      if (!stillRestricted) stuck.delete(id)
-      else await pauseEntry(entry)
+      const entry = active.get(id)
+      const scope = entry && await belongsToBot(entry, false)
+      if (scope) await pauseEntry(entry, scope)
+      else { stuck.delete(id); deferred.delete(id) }
     }
-    if (stuck.size > 0) scheduleRetry()
+    if (stuck.size > 0 || deferred.size > 0) scheduleRetry()
     swept = swept || loadedThen
-    if (wasClosed && swept && stuck.size === 0) requestDrive()
+    if (wasClosed && swept && stuck.size === 0 && deferred.size === 0) requestDrive()
     return paused
   }
   // A restart keeps both the deny list and the armed task: check once the team is loaded.
@@ -516,7 +609,7 @@ export function install(rt) {
   })
   // Whether one delivery still belongs to a task a restricted Bot is involved in. Reads the
   // catalog only: management writes are serialized behind a delivery, reads are not.
-  const unsafeDelivery = async (sessionId, holding) => {
+  const unsafeDelivery = async (sessionId, holding, unavailable) => {
     if (holding && await botOfTaskSession(sessionId) !== undefined) return true
     let entries
     try {
@@ -525,17 +618,22 @@ export function install(rt) {
       return true
     }
     const seen = new Map()
-    const restrictedInvolved = async (ids) => {
+    const restrictedInvolved = async (ids, target, destination) => {
       for (const id of ids) {
-        if (!seen.has(id)) seen.set(id, await botOfTaskSession(id))
-        if (restricted(seen.get(id))) return true
+        if (!seen.has(id)) seen.set(id, await bindingOfTaskSession(id))
+        const owner = seen.get(id)
+        if (owner.failed) return true
+        if (owner.bot?.kind !== 'dsh' && rt.omniPolicyUnavailable?.(owner.bot?.id)) return true
+        if (unavailable && managed(owner.bot)) return true
+        if (target === undefined ? lineageRestricted(owner.bot) : targetUnsafe(owner, target, destination)) return true
       }
       return false
     }
     let freshUnsafe = false
     let exact = false
     for (const entry of entries) {
-      if (!holding && entry.status !== 'active') continue
+      if (!holding && entry.status !== 'active' && entry.status !== 'paused'
+        && entry.lastDelivery?.targetSessionId !== sessionId) continue
       const target = entry.target ?? {}
       const involved = Array.isArray(entry.involvedSessionIds) ? entry.involvedSessionIds : []
       if (holding && entry.lastDelivery?.targetSessionId === sessionId && await restrictedInvolved(involved)) return true
@@ -558,8 +656,8 @@ export function install(rt) {
       exact = true
       // A session target that resolves to a Bot is bound; one that does not is unsafe only
       // when a restricted Bot is involved (a fresh target that already delivered once).
-      if (await botOfTaskSession(sessionId) !== undefined) continue
-      if (await restrictedInvolved(involved)) return true
+      const destination = await bindingOfTaskSession(sessionId)
+      if (await restrictedInvolved(involved, target, destination)) return true
     }
     // An exact task for this Session decides it; only an anonymous `new` delivery falls
     // back to "some unsafe fresh task exists".
@@ -756,12 +854,11 @@ export function install(rt) {
       nativeOwners.delete(sessionId)
     }
     const holding = rt.multiuserHold?.() === true
-    if (holding || !swept || stuck.size > 0) {
-      if (!holding && await botOfTaskSession(sessionId) !== undefined) {
-        await checkScheduledReadScope(sessionId)
-        return next()
-      }
-      const unsafe = (holding || teamLoaded) && await unsafeDelivery(sessionId, holding)
+    const owner = rt.botOf(rt.selfOf?.(sessionId) ?? sessionId)
+    if (owner?.kind !== 'dsh' && rt.omniPolicyUnavailable?.(owner?.id)) throw refusal(POLICY_UNAVAILABLE_TEXT)
+    {
+      const unavailable = rt.teamAvailable?.() === false
+      const unsafe = (holding || teamLoaded) && await unsafeDelivery(sessionId, holding, unavailable)
       if (!teamLoaded || unsafe) {
         void revokeNewSchedules()
           .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))

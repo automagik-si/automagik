@@ -24,13 +24,14 @@
 // `schedule_create` and `schedule_edit`: their `new` and `new_once` targets open a Session
 // that is neither a subagent child nor a task record, so no lineage would bind the
 // restriction to it (#584).
+import { POLICY_UNAVAILABLE_TEXT } from '../shared/tool-policy-copy.js'
 import { isComputerTool } from './computer/catalog.js'
 import { changesWorkingFolder } from './folders.js'
 import { refusal } from './refusal.js'
 import { teamToolOf } from './approvals.js'
 import { solverTracked } from './solver-progress.js'
 import { WHY_EN } from './stops.js'
-import { actualSolver, POLICY_UNAVAILABLE_TEXT, solverCallId } from './review-guard.js'
+import { actualSolver, solverCallId } from './review-guard.js'
 import { solverReadPolicy } from './solver-confine.js'
 
 /** The most names one Bot may deny. */
@@ -231,12 +232,13 @@ export function install(rt) {
 
   const same = (left, right) => left.length === right.length && left.every((name, index) => name === right[index])
 
-  // The names this Bot's sessions must not get now: the user's list, the schedule tools a
-  // restricted Bot loses, and every shell tool and launcher when the Bot has no shell.
+  // Resolve explicit denials and the tools blocked by the Bot’s capabilities.
   // Shell tools are found from the Session's own surface, so a renamed copy is named too.
   const deniedNames = (bot, agent) => {
     const names = new Set(Array.isArray(bot?.denyTools) ? bot.denyTools : [])
-    if (isRestricted(bot)) for (const name of SCHEDULE_TOOLS) names.add(name)
+    if (isRestricted(bot) && (bot?.kind === 'dsh' || rt.multiuserHold?.())) {
+      for (const name of SCHEDULE_TOOLS) names.add(name)
+    }
     if (noShell(bot)) {
       for (const name of SHELL_LAUNCHERS) names.add(name)
       for (const name of shellNamesOf(agent, bot)) names.add(name)
@@ -357,15 +359,15 @@ export function install(rt) {
 
   // ACP supplies only the Session ID. Both entry points must see the registered
   // lineage as well as any stored header or explicitly supplied live Session.
-  const provenanceOf = (id, agent) => {
+  const provenanceOf = (id, agent, durable) => {
     const registered = ctx.get?.('agents')?.get?.(id)
     const stored = ctx.sessions?.get?.(id)
     if (registered !== undefined && (registered?.id !== id || registered.session?.id !== id)) return null
     if ((agent?.id !== undefined && agent.id !== id) || (agent?.session?.id !== undefined && agent.session.id !== id)
       || (stored?.id !== undefined && stored.id !== id)) return null
     const registeredHeader = registered?.session?.header
-    const storedHeader = stored?.header
-    const headers = [registeredHeader, storedHeader, agent?.session?.header].filter(header => header !== undefined)
+    const storedHeader = stored?.header ?? durable?.get(id)
+    const headers = [registeredHeader, storedHeader, agent?.session?.header, durable?.get(id)].filter(header => header !== undefined)
     const [first] = headers
     if (headers.some(header => !header || typeof header !== 'object' || Array.isArray(header)
       || header.id !== id || header.origin !== first.origin || header.parentSession !== first.parentSession
@@ -378,7 +380,7 @@ export function install(rt) {
     return first
   }
 
-  const solverPolicyOf = (sessionId, agent) => {
+  const resolveSessionPolicy = (sessionId, agent, solverOnly, durable) => {
     const unavailable = { state: 'unavailable' }
     try {
       if (rt.teamLoaded?.() === false) return unavailable
@@ -387,7 +389,7 @@ export function install(rt) {
       for (let depth = 0; depth < 32; depth += 1) {
         if (typeof current !== 'string' || current === '' || seen.has(current)) return unavailable
         seen.add(current)
-        const header = provenanceOf(current, depth === 0 ? agent : undefined)
+        const header = provenanceOf(current, depth === 0 ? agent : undefined, durable)
         if (header === null) return unavailable
         const child = header?.origin === 'subagent'
         if (child) {
@@ -395,15 +397,26 @@ export function install(rt) {
             || (header.delegationDepth !== undefined && (!Number.isSafeInteger(header.delegationDepth) || header.delegationDepth < 1))) return unavailable
         } else if (header && (header.origin !== undefined
           || (header.delegationDepth !== undefined && header.delegationDepth !== 0))) return unavailable
-        const scheduled = rt.scheduledNativeOwner?.(current) !== undefined
+        const scheduledOwner = rt.scheduledNativeOwner?.(current)
+        const scheduled = scheduledOwner !== undefined
         const past = rt.pastOwners?.get(current)
         const excluded = rt.groupOwners?.has(current) || rt.roomOwners?.has(current) || past?.roomId !== undefined
           || rt.taskOwners?.has(current) || !!rt.state?.tasks?.[current]
         const direct = rt.botOf(current)
-        const owner = rt.selfOf(current) ?? rt.state?.tasks?.[current]?.from
+        const self = rt.selfOf(current)
+        const taskOwner = rt.state?.tasks?.[current]?.from
+        const owner = self ?? taskOwner
         const bot = direct ?? (owner === undefined ? undefined : rt.botOf(owner))
+        if (!solverOnly) {
+          const claims = [direct?.id, self, taskOwner, scheduledOwner, past?.botId]
+          if (new Set(claims.filter(id => id !== undefined)).size > 1) return unavailable
+        }
         if (child && (scheduled || excluded || bot !== undefined)) return unavailable
-        if (scheduled || excluded) return { state: 'none', bot, own: false }
+        if (scheduled || excluded) {
+          if (solverOnly) return { state: 'none', bot, own: false }
+          const managed = bot ?? (scheduledOwner === undefined ? undefined : rt.botOf(scheduledOwner))
+          return managed === undefined ? unavailable : { state: 'none', bot: managed, own: false }
+        }
         if (owner !== undefined && bot === undefined) return unavailable
         if (bot) {
           const own = direct === bot || rt.chatOwners?.get(current) === bot.id || past?.botId === bot.id
@@ -419,6 +432,9 @@ export function install(rt) {
     } catch {}
     return unavailable
   }
+
+  const solverPolicyOf = (sessionId, agent) => resolveSessionPolicy(sessionId, agent, true)
+  const sessionPolicyOf = (sessionId, agent, durable) => resolveSessionPolicy(sessionId, agent, false, durable)
 
   const ownChatLineage = (sessionId, agent, bot) => {
     const policy = solverPolicyOf(sessionId, agent)
@@ -583,9 +599,11 @@ export function install(rt) {
     if (name === '' || exec?.agent === undefined) return next()
     const sessionId = exec.agent.session?.id ?? exec.agent.id
     const policy = solverPolicyOf(sessionId, exec.agent)
-    if (policy.state === 'unavailable') throw refusal(POLICY_UNAVAILABLE_TEXT)
-    const bot = policy.bot
+    const livePolicy = SCHEDULE_TOOLS.includes(name) ? sessionPolicyOf(sessionId, exec.agent) : policy
+    if (policy.state === 'unavailable' || livePolicy.state === 'unavailable') throw refusal(POLICY_UNAVAILABLE_TEXT)
+    const bot = livePolicy.bot
     if (bot === undefined) return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
+    if (rt.omniPolicyUnavailable?.(bot.id)) throw refusal(POLICY_UNAVAILABLE_TEXT)
     const launch = taskLaunchOf(exec, bot)
     if (launch !== undefined) {
       rt.noteStop?.(launch.sessionId, { why: launch.held.why, tool: name, callId: exec.callId, text: launch.held.text }, exec.agent)
@@ -596,6 +614,9 @@ export function install(rt) {
     // renamed or aliased shell tool never needs this plugin to know its name first.
     const shell = noShell(bot) && shellCall(name, exec.arguments, definitionOf(exec))
     if (!denied.includes(name) && !shell) {
+      if (SCHEDULE_TOOLS.includes(name)) {
+        await rt.assertScheduleToolTarget?.(exec, livePolicy)
+      }
       // A Solver's work call in its own chat dates its review mark (review-mark.js). A Bot with the
       // person's review guard on has its work refused there until its reviewer answers the plan
       // (review-guard.js). Only a Solver or a guarded Bot walks the lineage: every other Bot's call
@@ -702,7 +723,10 @@ export function install(rt) {
     if (held !== undefined) return { held, sessionId: exec.agent?.id ?? exec.agent?.session?.id }
   }
 
+  rt.teamAvailable = () => rt.teamLoaded?.() === true && rt.holdsLock?.() === true
+    && rt.readOnly?.() === undefined && rt.teamCurrent?.() !== false
+
   // Retries stop on a Session that leaves the team, so a lift is not attempted on a gone agent.
   Object.assign(rt, { botOfSession, ownChatLineage, applyToolDeny, applyToolDenyToAgent: apply, cleanDenyTools, unknownDenyTools, assertDenyTools })
-  Object.assign(rt, { reviewGuardOfExec: heldOfExec, solverPolicyOf })
+  Object.assign(rt, { reviewGuardOfExec: heldOfExec, sessionPolicyOf, solverPolicyOf })
 }

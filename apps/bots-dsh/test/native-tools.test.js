@@ -239,3 +239,16 @@ test('an Antigravity Bot at Read only, or with denied tools, is refused with the
   assert.equal(denied.nativeToolsBlock(denied.botOf('a')), 'restricted')
   await assert.rejects(() => denied.setNativeTools('a', { nativeTools: true }), error => error.message === 'Not available while this Bot has shell access off or denied tools.')
 })
+
+test('committed native-tools admission holds while the team is unavailable', () => {
+  const rt = runtime(RETIRED)
+  rt.teamAvailable = () => false
+  assert.equal(rt.nativeToolsFor('direct-a'), false)
+  assert.equal(rt.nativeToolsEligible('task-a'), false)
+  assert.equal(rt.nativeToolsBlock(rt.botOf('a')), 'level-unknown')
+  rt.teamAvailable = () => true
+  assert.equal(rt.nativeToolsFor('direct-a'), true)
+  rt.botOf('a').denyTools = ['read']
+  assert.equal(rt.nativeToolsFor('direct-a'), false)
+  assert.equal(rt.nativeToolsBlock(rt.botOf('a')), 'restricted')
+})

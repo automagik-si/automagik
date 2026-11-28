@@ -17,7 +17,8 @@ import { nativeCheckDirectory, normalizeCheckCommand } from './solver-check-comm
 import { isSolverBot, isWrittenSolverMethod } from '../shared/solver-method.js'
 import { solverReadPolicy } from './solver-confine.js'
 
-export const POLICY_UNAVAILABLE_TEXT = "The Bot team could not confirm this Session's rules, so nothing was sent. Send your message again."
+import { POLICY_UNAVAILABLE_TEXT } from '../shared/tool-policy-copy.js'
+export { POLICY_UNAVAILABLE_TEXT } from '../shared/tool-policy-copy.js'
 export const PLAN_GATE_RECLOSED_TEXT = "Work now waits for the reviewer's verdict on a new plan, so this answer stopped. Send your message again."
 export const actualSolver = bot => !!bot && (isSolverBot(bot) || isWrittenSolverMethod(bot.instructions))
 
