@@ -1098,7 +1098,7 @@ export function install(rt) {
         opener, openerRank, ...bound, parent, ...rt.taskAskerState(bot), kind: bot.kind, name: bot.name,
         routes: taskRoutes(bot, rt.taskRoutePolicy).join(','),
         catalogEpoch: rt.modelsEpoch(),
-        taskGrant: roles?.grantOf(botId, 'task-start'), routeGrant: roles?.grantOf(botId, 'route-policy'),
+        taskGrant: roles?.legacyTaskGrant(botId, 'task-start'), routeGrant: roles?.legacyTaskGrant(botId, 'route-policy'),
         verdict: bot.reviewTrack?.planVerdictAt,
       }
     }
@@ -1472,8 +1472,8 @@ export function install(rt) {
           if (self !== undefined && rt.isBotSession(callerSession)) await rt.roleRuntime?.ready(self)
           assertTaskGuard(rt.botOfSession?.(callerSession, exec.agent)?.id, self)
           const current = self !== undefined && rt.isBotSession(callerSession) && rt.selfOf(callerSession) === self
-          const taskGrant = current ? rt.roleRuntime?.grantOf(self, 'task-start') : undefined
-          if (named && (taskGrant !== 'granted' || rt.roleRuntime?.grantOf(self, 'route-policy') !== 'granted')) throw modelRefusal(MODEL_GRANT)
+          const taskGrant = current ? rt.roleRuntime?.legacyTaskGrant(self, 'task-start') : undefined
+          if (named && (taskGrant !== 'granted' || rt.roleRuntime?.legacyTaskGrant(self, 'route-policy') !== 'granted')) throw modelRefusal(MODEL_GRANT)
           if (taskGrant === 'declared') throw refusal(TASK_GRANT)
           if (taskGrant !== 'granted') return OLD_TASK_GATE
         }

@@ -74,6 +74,12 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
     if (candidates.length) return 'declared'
   }
 
+  // Until the task-admission migration, start_task uses the legacy catalog projection.
+  const legacyTaskGrant = (id, capability) => {
+    const held = heldOf(id)
+    if (held && capabilitiesOf(held).includes(capability)) return granted(held, capability) ? 'granted' : 'declared'
+  }
+
   async function moduleFor(details, sha256) {
     const { manifest, entryBytes } = details
     if (promptOnly(manifest)) return undefined
@@ -453,7 +459,7 @@ export function createRoleRuntime(rt, packages, { fs } = {}) {
   }
 
   return {
-    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings, capabilitiesOf, heldOf, heldsOf, grantOf,
+    voice, event, reconcile, tools, prompt, acpPrompt, instructionsFor, requireAttachment, settings, capabilitiesOf, heldOf, heldsOf, grantOf, legacyTaskGrant,
     readDeliveryRoutes, view, viewByRole: () => view(undefined, true),
     copyWarning: bot => savedWarning(bot) ?? providerWarning(liveProvider(bot.sessionId ?? bot.id)),
     async publicView() {

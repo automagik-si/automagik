@@ -240,6 +240,7 @@ async function replayInstalled(t, artifact, from, to, { guarded = false, held = 
     await Promise.race([done.promise, running])
     assert.equal(verdict?.phase, held ? 'manualRecovery' : 'rolledBack')
     assert.equal(verdict.reason, 'health-failed')
+    if (held) assert.equal(verdict.rollback.previousFailed, 'plugins')
     assert.equal(verdict.rollback.starts, 1)
     assert.equal(launches, 1)
     assert.equal(read(state).phase, verdict.phase)

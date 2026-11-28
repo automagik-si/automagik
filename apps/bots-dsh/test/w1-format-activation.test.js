@@ -180,3 +180,15 @@ for (const [name, format, roles, stateActivations] of [
     assert.deepEqual(readFileSync(f.path), f.source)
   })
 }
+
+test('stacking on a missing registered role explains how to recover without rewriting the roster', async t => {
+  const f = fixture(t)
+  const { rt } = await f.open()
+  const dispose = rt.hooks.role(role)
+  await rt.attachRole('a', role.id)
+  dispose()
+  rt.hooks.role({ id: 'other', name: 'Other' })
+  const before = readFileSync(f.path)
+  await assert.rejects(rt.attachRole('a', 'other'), /Detach operator first/)
+  assert.deepEqual(readFileSync(f.path), before)
+})

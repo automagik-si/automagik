@@ -27,6 +27,7 @@
 // register through `windowEndpoint`, which is not on `rt`: only those get the route's proof of
 // the desktop window (desktop-window.js). An endpoint added through `rt.hooks` never does.
 import { isPromise } from 'node:util/types'
+import { TEAM_TOOLS } from './constants.js'
 import { OMNI_KIND } from './roster.js'
 import { BUILTIN_ROLES, genieDetached, isRoleId, isRoleVersion } from '../shared/roles.js'
 
@@ -144,6 +145,9 @@ export function install(rt) {
       if (!isRoleId(id) || typeof name !== 'string' || !name.trim() || !isRoleVersion(version)
         || !strings(tools) || !strings(capabilities) || (prompt !== undefined && !['string', 'function'].includes(typeof prompt))
         || !['boolean', 'function'].includes(typeof attachable) || !Number.isFinite(order) || roles.has(id)) throw new Error('Invalid or duplicate Bot role provider')
+      const reserved = tools.find(tool => TEAM_TOOLS.includes(tool)
+        || Object.values(BUILTIN_ROLES).some(owner => owner.id !== id && owner.tools.includes(tool)))
+      if (reserved) throw new Error(`Bot role tool ${reserved} is reserved.`)
       const role = Object.freeze({ id, name, version, tools: Object.freeze([...tools]),
         capabilities: Object.freeze([...capabilities]), prompt, attachable, order })
       roles.set(id, role)

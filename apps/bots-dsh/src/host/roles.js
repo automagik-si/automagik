@@ -325,7 +325,8 @@ export function installRoles(rt, deps = {}) {
           for (const [i, pin] of raw.entries()) {
             const proof = existingProofs[i]
             const live = registryAttachment(pin) ? rt.roleRegistry?.of(pin.id) : packages.recordOf(pin.id)
-            if (!proof || live !== (proof.installed ?? proof) || live.version !== pin.version) throw changedRole()
+            if (!proof || (proof.installed ?? proof).version !== pin.version) detachFirst(pin.id)
+            if (live !== (proof.installed ?? proof)) throw changedRole()
             const clash = proof.tools.map(tool => typeof tool === 'string' ? tool : tool.name).find(name => names.has(name))
             if (clash) throw refusal(`Tool ${clash} is already supplied by ${pin.id}.`)
           }
