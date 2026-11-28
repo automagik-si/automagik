@@ -1,6 +1,6 @@
 {
   "name": "@automagik/multiuser-dsh",
-  "version": "3.178.13",
+  "version": "3.178.14",
   "description": "Admit and attribute Automagik workspace callers in DeepSeek Harness.",
   "license": "Apache-2.0",
   "type": "module",
