@@ -756,8 +756,9 @@ export const WORKER_SKILLS_SKIP = Object.freeze(["hermes"]);
  * A writer's work is preserved once committed; a reviewer's own scratch files are discarded.
  * The finish instructions are part of the same task argument.
  */
-export const WORKER_DONE_LINE = "Before you report done: commit or discard every change you made "
-  + "and leave the worktree clean (`git status --porcelain` prints nothing).\n"
+const WORKER_CLEAN_LINE = "Before you report done: commit or discard every change you made "
+  + "and leave the worktree clean (`git status --porcelain` prints nothing).";
+export const WORKER_DONE_LINE = WORKER_CLEAN_LINE + "\n"
   + "Write your final report to a .md file in the system temp folder, then run "
   + "`am worker done --report <file>`.\n"
   + "If you cannot finish, write what is blocking you and run "
@@ -767,10 +768,10 @@ export const WORKER_DONE_LINE = "Before you report done: commit or discard every
  * A worker's task text: the task as given, its optional Automatic catalog, then the needs-owner rule (#2057; not for an agent in
  * WORKER_OWNER_QUESTION_SKIP, #1747), then the worktree-clean instruction last (#1278 cause 5).
  */
-export function workerTaskText(task, agentKey = null, catalog = "") {
+export function workerTaskText(task, agentKey = null, catalog = "", { sandbox = false } = {}) {
   const skills = catalog && !WORKER_SKILLS_SKIP.includes(agentKey) ? `\n\n${catalog}` : "";
   const owner = WORKER_OWNER_QUESTION_SKIP.includes(agentKey) ? "" : `\n\n${WORKER_OWNER_QUESTION_LINE}`;
-  return `${task}${skills}${owner}\n\n${WORKER_DONE_LINE}`;
+  return `${task}${skills}${owner}\n\n${sandbox ? WORKER_CLEAN_LINE : WORKER_DONE_LINE}`;
 }
 
 /**

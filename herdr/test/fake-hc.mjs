@@ -640,7 +640,10 @@ switch (words[0]) {
       if (args[i] === "--on") on = args[++i]; else if (args[i] === "--cwd") cwd = args[++i]; else if (args[i] === "--timeout") i += 1;
     }
     const argv = args.slice(i + 1);
-    const m = machineAt(on);
+    const m = on ? machineAt(on) : state.localExec && {
+      state: "connected", home: process.env.HOME,
+      execPath: process.env.PATH, env: { NODE_OPTIONS: "" },
+    };
     if (!m) fail(JSON.stringify({ error: { kind: "not_found", message: `no machine "${on}"` } }), 3);
     if (m.state !== "connected") fail(`hc: ${on} is not connected`);
     const b64 = (s) => Buffer.from(s ?? "").toString("base64");
