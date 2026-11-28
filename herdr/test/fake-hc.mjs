@@ -640,7 +640,8 @@ switch (words[0]) {
       if (args[i] === "--on") on = args[++i]; else if (args[i] === "--cwd") cwd = args[++i]; else if (args[i] === "--timeout") i += 1;
     }
     const argv = args.slice(i + 1);
-    const m = machineAt(on);
+    // A local core exec receives its fixture login environment independently of its caller.
+    const m = on ? machineAt(on) : state.localExec && { state: "connected", ...state.localExec };
     if (!m) fail(JSON.stringify({ error: { kind: "not_found", message: `no machine "${on}"` } }), 3);
     if (m.state !== "connected") fail(`hc: ${on} is not connected`);
     const b64 = (s) => Buffer.from(s ?? "").toString("base64");
@@ -676,7 +677,8 @@ switch (words[0]) {
     // In an isolated remote fixture, the scratch PATH stands in for the remote OS bin folders.
     if (m.execPath && program?.includes("agent=$1 path=")) mapped[2] = mapped[2].replace(" /usr/bin /bin;", ";");
     const r = spawnSync(mapped[0], mapped.slice(1), { cwd: toDisk(cwd) ?? m.home, encoding: "utf8",
-      env: { ...process.env, HOME: m.home, PATH: m.execPath ?? `${m.path ? `${m.path}:` : ""}/usr/bin:/bin:/usr/sbin:/sbin`,
+      env: { ...(on ? process.env : {}), HOME: m.home,
+        PATH: m.execPath ?? `${m.path ? `${m.path}:` : ""}/usr/bin:/bin:/usr/sbin:/sbin`,
         SHELL: new URL("./fake-login-shell", import.meta.url).pathname, FAKE_LOGIN_PATH: m.login?.path ?? "",
         FAKE_LOGIN_NOISE: m.login?.noise ?? "", FAKE_LOGIN_EXIT: m.login?.exit ?? "", ...(m.env ?? {}) } });
     // state.loseExecAnswer: a program (by name) ran there, then the link dropped: unavailable, as hc says.

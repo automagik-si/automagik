@@ -551,7 +551,12 @@ export function agentHomeTests(cli) {
       + "\"$HC_TERMINAL_ID\" automagik-herdr.needs-owner=` as soon as you work again or the question is "
       + "withdrawn. A question your lead bot can answer: ask it in your reply, without the label. If "
       + "HC_TERMINAL_ID is unset or hc refuses, just ask in your reply.";
-    const task = `x\n\n${owner}\n\nBefore you report done: commit or discard every change you made and leave the worktree clean (\`git status --porcelain\` prints nothing).`;
+    const task = `x\n\n${owner}\n\nBefore you report done: commit or discard every change you made `
+      + "and leave the worktree clean (`git status --porcelain` prints nothing).\n"
+      + "Write your final report to a .md file in the system temp folder, then run "
+      + "`am worker done --report <file>`.\n"
+      + "If you cannot finish, write what is blocking you and run "
+      + "`am worker done --report <file> --state blocked`.";
     const worktree = (name) => join(s.project, ".claude/worktrees", name);
     const prefix = (name, branch) => ["run", "--bg", "--json", "--name", name, "--cwd", worktree(name),
       "--label", `worker.of=${BOT}`, "--label", `branch=${branch}`, "--label", "worker.role=dev"];

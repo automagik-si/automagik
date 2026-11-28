@@ -21,7 +21,7 @@ export function inTestRoots(path, env = process.env) {
 
 // A stale name may be missing. Resolve its existing ancestors, including symlinked
 // directories, before deciding where that name is allowed to land.
-function realPathPrefix(path) {
+export function realPathPrefix(path) {
   try { return realpathSync.native(path); } catch (error) {
     if (error?.code !== "ENOENT" || dirname(path) === path || basename(path) === "..") return null;
   }
@@ -82,9 +82,10 @@ function configValue(token) {
 }
 
 /** Read at most maxBytes plus one byte to detect overflow, including for size-zero proc files. */
-export function readBoundedFile(path, maxBytes) {
+export function readBoundedFile(path, maxBytes, { noFollow = false } = {}) {
   const invalid = (message) => Object.assign(new Error(message), { code: "INVALID_BOUNDED_FILE" });
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  const flags = constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0);
+  const fd = openSync(path, flags);
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) throw invalid("Expected a regular file.");

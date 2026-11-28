@@ -151,6 +151,12 @@ export const ALLOWLIST = [
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(lock, aside)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(aside)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(lock)", 1, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(source)", 1,
+    "a copied, untracked worker report in its worktree, outside Herdr's mods/ and layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(old)", 1,
+    "an expired Markdown file in the worker's reports directory, outside mods/ and layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(temp)", 1,
+    "the temporary project marker in am's checked projects directory, outside mods/ and layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(path)", 5, "the CLI's own files: .herdr/bots.json, its lock and temp files, and the failed refresh's own Antigravity cache temp file under <app home>/automagik-herdr/ (#809); and RFC 0043 delivery 2's own private preview and request files under <app home>/automagik-herdr/accounts-previews and <app home>/data/am-quota/plan-requests, expired, stale or committed"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(owner)", 1, "an owner file in an Accounts lock removed only after the recorded process is proved gone"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "rmdirSync(path)", 1, "an empty Accounts lock directory, beside the plan or the Claude login record"],
@@ -171,9 +177,16 @@ export const ALLOWLIST = [
   ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", path])", 2, "a file the panel just wrote and could not restrict to 0600, removed: its set-login writer record (<app home>/data/am-quota/writer.json) or a private request file under <app home>/data/am-quota/plan-requests; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
   ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", `${appDir()}/${REQUESTS_DIR}/${id}.json`])", 1, "the panel's private request file under <app home>/data/am-quota/plan-requests, removed after the CLI answered; RFC 0043 delivery 2's own records under the app home: never under mods/ or layouts/"],
   ["herdr/mods/am-quota/main.js", "exec(\"rm\", [\"-f\", \"--\", files.out, files.code, `${files.code}.tmp`])", 1, "a private CLI run's own output and exit-code files under <app home>/data/am-quota/runs (RFC 0043's fleet read), removed after the panel read them: never under mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(tmp)", 9, "the queued-restarts.json, handoff-failures.json, attention.json and linked-updates.json temp files in <app home>/automagik-herdr, the accounts fleet record's temp file in <app home>/data/am-quota (RFC 0043), and the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; and the accounts plan's temp files beside <app home>/accounts-plan.json (RFC 0043 delivery 2)"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(tmp)", 10,
+    "temporary siblings of queued restarts, handoff failures, attention and linked updates under "
+    + "<app home>/automagik-herdr, accounts records under <app home>/data/am-quota or beside "
+    + "<app home>/accounts-plan.json, project .herdr/bots.json and its lock, and private holder "
+    + "state or worker reports under am's checked reports directory, outside mods/ and layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, file)", 7, "queued-restarts.json (one writer, saveRestartQueue, #1557), handoff-failures.json (#1556) and linked-updates.json (the linked machines' update and install observations, #954 and #206) and their sibling temp files under <app home>/automagik-herdr, and the accounts fleet record fleet.json under <app home>/data/am-quota (RFC 0043), never mods/ or layouts/"],
-  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, path)", 3, "the CLI's own files: .herdr/bots.json in a project, its lock and temp files beside them; a bot's launch briefing file under <app home>/automagik-herdr/; and the holder pool's holders.json and start reservations there (#1432), never mods/ or layouts/"],
+  ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, path)", 3,
+    "temporary siblings of project .herdr/bots.json and its lock, the CLI's launch briefings "
+    + "and holder state under <app home>/automagik-herdr, and worker reports under am's checked "
+    + "reports directory, outside mods/ and layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(fresh, path)", 1, "the Bot login reader's sequence memory under <app home>/automagik-herdr/, a bare-number file, in the source and its am copy: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "unlinkSync(fresh)", 1, "the Bot login reader's own sequence-memory temp file under <app home>/automagik-herdr/, removed only when its rename failed, in the source and its am copy: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(from, to)", 1, "the refresh's own Antigravity model cache temp file under <app home>/automagik-herdr/ renamed onto its cache: never under mods/ or layouts/"],

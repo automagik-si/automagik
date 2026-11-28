@@ -535,9 +535,11 @@ test("hc kill (#955): a main bot's seat ends a pane; the roster's kind decides, 
     }
     // A worker, the main bot's own included, never kills.
     writeFileSync(s.logPath, "");
-    const worker = guardRun(s, ["kill", "t110"], { HC_TERMINAL_ID: "t105" });
-    assertRefused(worker);
-    assert.match(worker.stderr, /hc kill is for a project's main bot only, never a worker/);
+    for (const target of ["t105", "t110"]) {
+      const worker = guardRun(s, ["kill", target], { HC_TERMINAL_ID: "t105" });
+      assertRefused(worker);
+      assert.match(worker.stderr, /never a worker; finish your pane with am worker done/);
+    }
     assert.deepEqual(killsSeen(s), []);
   }
 });

@@ -660,6 +660,7 @@ am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
        [--task ID [--lead BOT]] [--agent-home DIR]
 am worker kill <pane>   # end a worker you started with am worker. Plain hc run cleanup belongs to the project's main bot.
+am worker done --report <file> [--state done|blocked]  # finish your own worker pane
 am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
 am machines [update [--machine M | --linked | --local] | --auto on|off|status [--machine M]]
@@ -2269,6 +2270,22 @@ it sits unchanged at the bottom of an agy pane; and the path after "Read:". Its 
 rows can contain ordinary text, but must not be a heading, rule, "Read:" or "Reason:" row.
 
 ### Ending a worker
+
+From your worker pane, put the final report in a readable `.md` file up to 64 KiB. Use the
+system temp folder or the worker's worktree. Run `am worker done --report <file>` from a clean
+worktree. Add `--state blocked` to report a blocker from a worktree with uncommitted changes.
+am replaces the worker's report under `${AM_HOME:-~/.automagik}/projects/<project>/reports/`.
+A private `project.json` records the full project key. A basename collision adds a 12-digit
+hash suffix to the project folder. The local core's helper checks that the caller is running
+under the worker pane and that the core's launch and attach ledgers identify it as a worker.
+It removes Markdown reports older than 30 days when saving a new report. The lead receives
+one notice starting with `[am] worker …`. Read the named report and check the worker in am
+before acting on the notice. The worker sees the hand-over receipt before the helper ends its
+pane. The existing sweep handles worktree cleanup. Workers behind the per-pane hc proxy or
+on a linked machine leave their report for their bot, who can use `am worker kill`.
+The outside step's Git calls ignore the repository's hooks, file monitor, pager and external diff,
+but a clean or smudge filter named in the repository's Git config can still run because Git has no
+switch to disable filters.
 
 `hc kill` is for the seat of a project's main bot only (`kind: "main"` in `bots.json`). Every
 other bot, a member that leads a squad included, ends a worker it started with:
