@@ -84,6 +84,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0049](0049-skills-for-bots.md) | Skills for Bots | Accepted (2026-11-24: the owner's decisions and the lead's rulings in #2074; no delivery merged) | none (ships outside the five milestones) |
 | [0050](0050-teams-positions-roles.md) | Teams, positions and roles | Accepted (2026-11-28, by the owner's delegate, effective on merge) | none (ships outside the five milestones) |
 | [0051](0051-threads-and-the-orchestrator.md) | Threads and the Orchestrator | Accepted (2026-11-28, effective on merge under the owner's delegated authority, see Answers) | none (ships outside the five milestones) |
+| [0052](0052-calls-and-voice-engines.md) | Calls and voice engines (Voice role and call engine) | Accepted | none |
 
 Milestones, in the owner's order:
 
