@@ -12841,18 +12841,26 @@ async function workerDoneCore() {
   return core;
 }
 
-/** Match the local caller to a single worker launch and rule out an attached bot seat. */
-async function workerDonePane(core, expected) {
-  const terminal = process.env.HC_TERMINAL_ID;
-  if (!isHcTerminalId(terminal) || !core) throw workerDoneRefusal();
+async function workerDoneLivePane(terminal, expected) {
   const pane = await retirementGet(terminal).catch(() => null);
-  const created = expected ?? pane?.created_ms;
-  if (!sameLivePane(pane, terminal, created) || pane.labels?.[BOT_LABEL]
+  if (!sameLivePane(pane, terminal, expected ?? pane?.created_ms) || pane.labels?.[BOT_LABEL]
       || !pane.labels?.[WORKER_OF_LABEL]) throw workerDoneRefusal();
+  return pane;
+}
+
+/** The caller has already been proven. Bind that launch to the core's own ledgers. */
+async function workerDonePane(core, terminal, created) {
+  const pane = await workerDoneLivePane(terminal, created);
   const identity = { core, terminal, created_ms: created };
   const row = workerStartForLaunch(workerLedgerRows(), launchKey(identity));
-  const bindings = foldAttach(readAttachFile() ?? []);
-  if (!row || !isAbsolute(row.project ?? "") || !isAbsolute(row.worktree ?? "") || !row.branch
+  if (!row) throw workerDoneUnavailable("No worker launch was found in the core's Herdr app home.");
+  let attachments;
+  try { attachments = readAttachFile(); } catch {}
+  if (!attachments) {
+    throw workerDoneUnavailable("The core's Herdr app home has no readable attach ledger.");
+  }
+  const bindings = foldAttach(attachments);
+  if (!isAbsolute(row.project ?? "") || !isAbsolute(row.worktree ?? "") || !row.branch
       || row.botId !== pane.labels[WORKER_OF_LABEL] || row.worktree !== pane.cwd
       || bindings.byKey.has(attachKey(identity))) throw workerDoneRefusal();
   return { pane, row, bindings };
@@ -12864,16 +12872,24 @@ function readWorkerProjectMarker(marker) {
   if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0) {
     throw new Error(`Couldn't verify private project marker ${marker}.`);
   }
-  const key = JSON.parse(readBoundedFile(marker, 64 * 1024, { noFollow: true })).key;
+  let key;
+  try { key = JSON.parse(readBoundedFile(marker, 64 * 1024, { noFollow: true }))?.key; } catch {}
   if (typeof key !== "string" || !isAbsolute(key)) {
     throw new Error(`Invalid project marker ${marker}.`);
   }
   return key;
 }
 
+function ensureWorkerReportDir(dir) {
+  try { ensurePrivateStateDir(dir); } catch (error) {
+    if (!error.code) throw error;
+    throw new Error(`Couldn't create report folder ${dir}.`);
+  }
+}
+
 function workerReportProject(dir, project, name, source) {
   if (insideHerdrFiles(dir)) throw new Error("Reports belong outside Herdr's managed folders.");
-  ensurePrivateStateDir(dir);
+  ensureWorkerReportDir(dir);
   const marker = join(dir, "project.json");
   const key = readWorkerProjectMarker(marker);
   if (key !== null && key !== project) return false;
@@ -12903,7 +12919,7 @@ function workerReportsDir(project, name, source) {
   }
   if (canonical !== state) throw new Error("AM_HOME contains a symlink.");
   const projects = join(state, "projects");
-  ensurePrivateStateDir(projects);
+  ensureWorkerReportDir(projects);
   let projectHome = join(projects, slug);
   if (!workerReportProject(projectHome, project, name, source)) {
     const digest = createHash("sha256").update(project).digest("hex").slice(0, 12);
@@ -12914,7 +12930,7 @@ function workerReportsDir(project, name, source) {
   }
   const reports = join(projectHome, "reports");
   if (insideHerdrFiles(reports)) throw new Error("Reports belong outside Herdr's managed folders.");
-  ensurePrivateStateDir(reports);
+  ensureWorkerReportDir(reports);
   return reports;
 }
 
@@ -12994,15 +13010,19 @@ function expireWorkerReports(dir, path) {
 const cutNotice = (text, length) => text.slice(0, length).replace(/[\uD800-\uDBFF]$/u, "");
 
 function workerWakeLine({ worker, state, branch, pr, report, summary }) {
-  const path = workerReportText(report);
   const start = `[am] worker ${workerReportText(worker)} ${state} · branch `;
-  const rest = `${pr ? ` · PR #${pr}` : ""} · report ${path} · `;
-  // Keep the entire report path. If even the fixed fields cannot fit, use the receipt only.
-  const room = 240 - start.length - rest.length;
-  if (room < 0) return null;
+  const reportField = `${pr ? ` · PR #${pr}` : ""} · report `;
+  let path = workerReportText(report);
+  let room = 240 - start.length - reportField.length - path.length;
+  if (room < 0) {
+    path = workerReportText(basename(report));
+    summary = undefined;
+    room = 240 - start.length - reportField.length - path.length;
+  }
   let branchText = workerReportText(branch);
   if (branchText.length > room) branchText = room ? cutNotice(branchText, room - 1) + "…" : "";
-  return `${start}${branchText}${rest}${cutNotice(summary, room - branchText.length)}`;
+  const sample = summary && cutNotice(summary, Math.max(0, room - branchText.length - 3));
+  return `${start}${branchText}${reportField}${path}${sample ? ` · ${sample}` : ""}`;
 }
 
 async function workerReportPr(branch, worktree) {
@@ -13044,10 +13064,9 @@ async function* workerReportFrames(socket) {
 
 const workerReportSend = (socket, frame) => socket.write(JSON.stringify(frame) + "\n");
 
-async function finishWorkerReport(core, created, request, accept, say) {
-  if (await workerDoneCore() !== core) throw workerDoneRefusal();
-  const first = await workerDonePane(core, created);
-  const { address, name } = first.pane;
+async function finishWorkerReport(core, address, created, request, accept, say) {
+  if (await freshCoreId() !== core) throw workerDoneRefusal();
+  const { pane: { name } } = await workerDonePane(core, address, created);
   const lockDir = join(appHome(), "automagik-herdr", "locks");
   ensurePrivateStateDir(lockDir);
   const lock = join(lockDir, `worker-done-${address}-${created}.lock`);
@@ -13055,7 +13074,7 @@ async function finishWorkerReport(core, created, request, accept, say) {
   const stop = keepFresh(lock, token);
   let saved;
   try {
-    const context = await workerDonePane(core, created);
+    const context = await workerDonePane(core, address, created);
     const { row } = context;
     const { state, source, identity } = request;
     const worktree = realDir(row.worktree);
@@ -13079,14 +13098,15 @@ async function finishWorkerReport(core, created, request, accept, say) {
     const pr = await workerReportPr(row.branch, worktree);
     const lead = await workerReportLead(context, core);
     if (await freshCoreId() !== core) throw workerDoneRefusal();
-    await workerDonePane(core, created);
+    await workerDonePane(core, address, created);
     if (readText(lock) !== token) throw workerDoneRefusal();
     const dir = workerReportsDir(row.project, name, source);
     const path = join(dir, `${name}.md`);
-    const firstLine = contents.toString("utf8").split(/\r\n?|\n|\u2028|\u2029/u, 1)[0];
-    const summary = cutNotice(workerReportText(firstLine), 240);
+    const firstLine = contents.toString("utf8").split(/\r\n?|\n|\u2028|\u2029/u)
+      .map((line) => workerReportText(line).trim()).find(Boolean);
+    const summary = firstLine && cutNotice(firstLine, 240);
     const data = { worker: name, state, branch: row.branch,
-      ...(pr ? { pr } : {}), report: path, summary };
+      ...(pr ? { pr } : {}), report: path, ...(summary ? { summary } : {}) };
     const line = workerWakeLine(data);
     const key = launchKey(row);
     const digest = createHash("sha256").update(contents).digest("hex");
@@ -13114,10 +13134,10 @@ async function finishWorkerReport(core, created, request, accept, say) {
       ? `The lead's notice was already attempted. Report saved at ${path}.`
       : `The lead was not told. Report saved at ${path}.`;
     if (await freshCoreId() !== core) throw workerDoneRefusal();
-    await workerDonePane(core, created);
+    await workerDonePane(core, address, created);
     if (!await accept(data, notice)) return;
     if (readText(lock) !== token || await freshCoreId() !== core) throw workerDoneRefusal();
-    const { pane } = await workerDonePane(core, created);
+    const { pane } = await workerDonePane(core, address, created);
     const killed = await hcKill(address, { before: pane, kind: "worker", core, children, say });
     if (killed.code !== 0) {
       throw new Error(`Couldn't end ${address}. Ask its bot to run am worker kill ${address}.`);
@@ -13132,8 +13152,54 @@ async function finishWorkerReport(core, created, request, accept, say) {
   } finally { stop(); dropLock(lock, token); }
 }
 
+async function workerCallerProven(terminalPid, token) {
+  // Both Linux and macOS ps support these columns. Use the host's ps with untruncated argv.
+  const columns = ["-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "command="];
+  const result = await runProgram("/bin/ps", ["-axww", ...columns], { timeout: 5000 });
+  if (result.code !== 0) return false;
+  const parents = new Map();
+  const candidates = [];
+  for (const line of result.stdout.split("\n")) {
+    const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+    if (!row || /^[ZX]/.test(row[3])) continue;
+    const pid = Number(row[1]);
+    parents.set(pid, Number(row[2]));
+    if (row[4].trimEnd().split(/\s+/).at(-1) === token) candidates.push(pid);
+  }
+  if (!parents.has(terminalPid)) return false;
+  return candidates.some((pid) => {
+    const seen = new Set([pid]);
+    let parent = parents.get(pid);
+    while (parent && !seen.has(parent)) {
+      if (parent === terminalPid) return true;
+      seen.add(parent);
+      parent = parents.get(parent);
+    }
+    return false;
+  });
+}
+
+async function proveWorkerCaller(core, terminal, created, token) {
+  if (!isHcTerminalId(terminal) || !Number.isSafeInteger(created)
+      || typeof token !== "string" || !/^[a-f0-9-]{36}$/.test(token)) throw workerDoneRefusal();
+  const route = await localCoreStatus();
+  if (!route.socket || route.status?.core?.id !== core) throw workerDoneRefusal();
+  discoveredCoreSocket = pinnedCoreSocket = route.socket;
+  const pane = await workerDoneLivePane(terminal, created);
+  if (!Number.isSafeInteger(pane.pid) || pane.pid <= 0
+      || !await workerCallerProven(pane.pid, token)) throw workerDoneRefusal();
+}
+
 /** Spawned by the core, detached from both its exec request and the worker's terminal. */
-export async function retireSelfWorker(core, created) {
+export async function retireSelfWorker(core, terminal, created, callerToken) {
+  try {
+    await proveWorkerCaller(core, terminal, created, callerToken);
+    await workerDonePane(core, terminal, created);
+  } catch (error) {
+    process.send(workerReportError(error));
+    process.disconnect();
+    return;
+  }
   const token = randomUUID();
   const proof = randomUUID();
   const host = "127.0.0.1";
@@ -13149,7 +13215,7 @@ export async function retireSelfWorker(core, created) {
         const { value: request } = await frames.next();
         if (!request) return;
         const warnings = [];
-        await finishWorkerReport(core, created, request, async (data, notice) => {
+        await finishWorkerReport(core, terminal, created, request, async (data, notice) => {
           workerReportSend(socket, { data, notice });
           return (await frames.next()).value?.retire === true;
         }, (line) => warnings.push(line));
@@ -13171,11 +13237,11 @@ export async function retireSelfWorker(core, created) {
 }
 
 /** A local core exec is the sandbox crossing. Detached spawn on its own only changes sessions. */
-export async function startWorkerRetirement(core, created) {
+export async function startWorkerRetirement(core, terminal, created, callerToken) {
   const code = `import { retireSelfWorker } from ${JSON.stringify(import.meta.url)};
     await retireSelfWorker(...JSON.parse(process.argv[1]));`;
   const child = spawn(process.execPath, ["--input-type=module", "-e", code,
-    JSON.stringify([core, created])], {
+    JSON.stringify([core, terminal, created, callerToken])], {
     detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
   await new Promise((done, reject) => {
@@ -13189,20 +13255,15 @@ export async function startWorkerRetirement(core, created) {
   child.unref();
 }
 
-async function workerRetirementSocket(core, pane) {
+async function workerRetirementSocket(core, pane, callerToken) {
   const code = `import { startWorkerRetirement } from ${JSON.stringify(import.meta.url)};
     await startWorkerRetirement(...JSON.parse(process.argv[1]));`;
-  const socket = discoveredCoreSocket;
-  const path = launchPath(realHcPath(), pane.cwd).path;
-  const env = [`PATH=${path}`, `HERDR_APP_HOME=${resolvePath(appHome())}`,
-    `AM_HOME=${resolvePath(process.env.AM_HOME || join(home(), ".automagik"))}`,
-    `HC_TERMINAL_ID=${pane.address}`, `HC_TERMINAL_SOCKET=${socket}`,
-    `HC_SOCKET=${socket}`, `AUTOMAGIK_HERDR_CORE_SOCKET=${socket}`];
-  const result = await hcReal(["exec", "--json", "--timeout", "15", "--", "/usr/bin/env",
-    ...env, process.execPath, "--input-type=module", "-e", code,
-    JSON.stringify([core, pane.created_ms])], { timeout: 20_000 });
+  const result = await hcReal(["exec", "--json", "--timeout", "15", "--",
+    "node", "--input-type=module", "-e", code,
+    JSON.stringify([core, pane.address, pane.created_ms, callerToken])], { timeout: 20_000 });
   const launch = decodeExec(result, 15);
   const ready = launch.code === 0 && terminalReply(launch);
+  if (ready?.error) throw new CliError(ready.error, ready.code);
   if (ready?.host !== "127.0.0.1" || !Number.isInteger(ready.port)
       || typeof ready.token !== "string" || typeof ready.proof !== "string") {
     throw workerDoneUnavailable("The local core could not start the outside report helper.");
@@ -13220,20 +13281,30 @@ async function cmdWorkerDone(opts, rest) {
     throw new CliError("Use am worker done --report <file> [--state done|blocked].", 2);
   }
   const core = await workerDoneCore();
-  const { pane, row } = await workerDonePane(core);
-  const worktree = realDir(row.worktree);
+  const pane = await workerDoneLivePane(process.env.HC_TERMINAL_ID);
+  const worktree = realDir(pane.cwd);
   if (!worktree) throw workerDoneRefusal();
   const input = readWorkerReport(opts.report, worktree);
-  await checkWorkerReportStatus(worktree, state);
-  const { socket, token, proof } = await workerRetirementSocket(core, pane);
-  socket.setTimeout(WORKER_REPORT_TIMEOUT, () => socket.destroy());
+  const callerToken = randomUUID();
+  // EOF also ends the proof when the CLI is killed with its pane.
+  const witness = spawn(process.execPath, ["-e", "process.stdin.resume()", callerToken],
+    { stdio: ["pipe", "ignore", "ignore"] });
+  let socket;
   let accepted = false;
   try {
+    await new Promise((done, reject) => {
+      witness.once("spawn", done);
+      witness.once("error", reject);
+    });
+    const connection = await workerRetirementSocket(core, pane, callerToken);
+    ({ socket } = connection);
+    socket.setTimeout(WORKER_REPORT_TIMEOUT, () => socket.destroy());
     const frames = workerReportFrames(socket);
-    workerReportSend(socket, { token });
-    if ((await frames.next()).value?.proof !== proof) {
+    workerReportSend(socket, { token: connection.token });
+    if ((await frames.next()).value?.proof !== connection.proof) {
       throw new Error("Could not verify the outside report helper.");
     }
+    await checkWorkerReportStatus(worktree, state);
     workerReportSend(socket, { state, ...input });
     const { value: response } = await frames.next();
     if (response?.error) throw new CliError(response.error, response.code);
@@ -13255,7 +13326,11 @@ async function cmdWorkerDone(opts, rest) {
     if (error instanceof CliError) throw error;
     if (!accepted) throw workerDoneUnavailable(workerReportError(error).error);
     throw new CliError(workerReportError(error).error);
-  } finally { socket.destroy(); }
+  } finally {
+    socket?.destroy();
+    witness.stdin.destroy();
+    witness.kill();
+  }
 }
 
 /** How long a worker that takes its task as a message may take to say it is ready, in seconds (hc wait's check-in). */
@@ -13803,7 +13878,9 @@ async function cmdWorker(opts, rest) {
   const sandbox = !plan.template && plan.agent === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: project.key, bot }), process.platform,
     (warning) => warnings.push(warning));
-  const taskText = catalog => workerTaskText(task, hermes ? "hermes" : runs, catalog, { sandbox });
+  const linked = Boolean(project.machine) || !local(me.address);
+  const taskText = catalog => workerTaskText(task, hermes ? "hermes" : runs, catalog,
+    { sandbox, linked });
   const prompt = taskText("");
   const agentKnown = plan.template ? t?.runs !== undefined : Boolean(plan.agent ?? agentKeyOfArgv(plan.argv ?? [], agents));
   const skillSelection = !hermes && agentKnown && isHcTerminalId(me.address) ? bindWorkerSkillTeam(bot.id, { home: home() }) : {};

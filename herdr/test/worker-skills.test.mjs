@@ -79,6 +79,12 @@ test("#2085 U2: worker task text keeps both fixed lines and excludes Hermes", ()
   assert.equal(workerTaskText("do it", "hermes", catalog), `do it\n\n${WORKER_DONE_LINE}`);
 });
 
+test("a linked worker's task omits the report command and keeps the clean-worktree line", () => {
+  const text = workerTaskText("do it", "claude", "", { linked: true });
+  const cleanLine = WORKER_DONE_LINE.split("\n")[0];
+  assert.equal(text, `do it\n\n${WORKER_OWNER_QUESTION_LINE}\n\n${cleanLine}`);
+});
+
 test("#2085 U3: refused publications never return a partial catalog", async t => {
   const cases = {
     "symlinked file": p => { fs.renameSync(p.snapshot, p.snapshot + ".original"); fs.symlinkSync(p.snapshot + ".original", p.snapshot); },

@@ -768,10 +768,12 @@ export const WORKER_DONE_LINE = WORKER_CLEAN_LINE + "\n"
  * A worker's task text: the task as given, its optional Automatic catalog, then the needs-owner rule (#2057; not for an agent in
  * WORKER_OWNER_QUESTION_SKIP, #1747), then the worktree-clean instruction last (#1278 cause 5).
  */
-export function workerTaskText(task, agentKey = null, catalog = "", { sandbox = false } = {}) {
+export function workerTaskText(task, agentKey = null, catalog = "", {
+  sandbox = false, linked = false,
+} = {}) {
   const skills = catalog && !WORKER_SKILLS_SKIP.includes(agentKey) ? `\n\n${catalog}` : "";
   const owner = WORKER_OWNER_QUESTION_SKIP.includes(agentKey) ? "" : `\n\n${WORKER_OWNER_QUESTION_LINE}`;
-  return `${task}${skills}${owner}\n\n${sandbox ? WORKER_CLEAN_LINE : WORKER_DONE_LINE}`;
+  return `${task}${skills}${owner}\n\n${sandbox || linked ? WORKER_CLEAN_LINE : WORKER_DONE_LINE}`;
 }
 
 /**
