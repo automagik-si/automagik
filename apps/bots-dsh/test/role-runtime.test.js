@@ -1459,6 +1459,28 @@ test('stock Voice stacks with a registry role, retains settings and blocks unins
   assert.deepEqual(await rt.uninstallRole(ID), { removed: true })
 })
 
+for (const [first, granted] of [['operator', ID], ['operator', 'operator'], [ID, ID]]) {
+  test(`Settings controls the Voice grant with ${first} first and speech granted to ${granted}`, async t => {
+    const f = await fixture(t)
+    const h = await f.start()
+    h.rt.hooks.role({ id: 'operator', name: 'Operator', capabilities: ['audio-out'] })
+    await h.ok('role-install', { id: ID })
+    for (const role of first === ID ? [ID, 'operator'] : ['operator', ID]) {
+      await h.ok('role-attach', { id: FIRST, role })
+    }
+    await h.ok('role-grant', { id: FIRST, role: granted, capability: 'audio-out', on: true })
+    const card = await mountRoleSettings(t, h, FIRST)
+    const checked = () => card.document.querySelector('[role="switch"][aria-label="Allow speech"]').getAttribute('aria-checked')
+    const hasSpeech = role => h.rt.botOf(FIRST).roles.find(pin => pin.id === role).grants.includes('audio-out')
+    assert.equal(checked(), String(granted === ID))
+    await card.click('Allow speech')
+    await until(() => hasSpeech(ID) === (granted !== ID))
+    await card.refresh()
+    assert.equal(checked(), String(granted !== ID))
+    assert.equal(hasSpeech('operator'), granted === 'operator')
+  })
+}
+
 test('Voice tool collisions refuse both orders without modifying the roster', async t => {
   const f = await fixture(t)
   const h = await f.start()
