@@ -1359,6 +1359,7 @@ November 22 and November 23 native-tools amendments. Those amendments record the
   bypass the policy. The existing restrictions for identity-less Sessions and the limitations
   on kept models continue to apply.
 - **Upgrade.** “A Main Bot with Omni configured” describes the old one-shot lock repair.
-  Preserve its compatibility input while the legacy mirror is in use. On the migrated path
-  the host enforces the Bot's switches before Omni removes plugin-side stripping. Holding the
-  Omni role or the chief position alone does not lock native tools.
+  Preserve its compatibility input while the legacy mirror is in use. For migrated Bots,
+  enforce effective restrictions while the old linked Omni provider is installed and until
+  the host certifies the committed replacement policy. Holding Omni or the chief position alone does not lock native tools on the
+  certified path. Standalone native DSH Sessions retain their existing policy.

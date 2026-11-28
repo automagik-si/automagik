@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-23, #2056). Proposed status on acceptance of [RFC 0050](0050-teams-positions-roles.md): Withdrawn (2026-11-27 proposal. Solver Bots migrate to Orchestrator.) |
+| Status | Superseded (2026-11-28, effective when [RFC 0050](0050-teams-positions-roles.md) merges. Solver Bots migrate to Orchestrator.) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none for this RFC (docs only). D1 and D1.5 use the plugin lane (3.N.P). D2 first ships in a full release (3.N.0). |
 | Created | 2026-11-23 |
 
-## Proposed withdrawal (RFC 0050)
+## Withdrawn when RFC 0050 merges
 
 Previously Accepted (2026-11-23: the owner's decisions in #2056, and, by the owner's delegate, the D1 design choices recorded here: best-effort rollback, the native tick's parity with Details, and the read-only view field; no delivery merged). The design below records
 the original Solver decisions and deliveries.
@@ -15,8 +15,8 @@ the original Solver decisions and deliveries.
 The earlier “New Solver” action, “The `solver` role”, and “The review guard adds no trust”
 sections describe the behavior before retirement. [RFC 0050](0050-teams-positions-roles.md) proposes removing the dialog,
 review guard, review mark, `solver_progress` and package. Keep the existing protection
-for legacy Solver records until a migration with a verified backup can replace their Solver
-attachments with the Orchestrator, carrying applicable grants and preserving other roles.
+for legacy Solver records until the durable activation commits the replacement with the
+Orchestrator. Preserve other roles and their order and apply the grant rules in RFC 0050.
 The session-lineage check and ACP identity compatibility survive the retirement.
 
 ## Summary

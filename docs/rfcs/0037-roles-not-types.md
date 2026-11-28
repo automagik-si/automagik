@@ -351,7 +351,7 @@ process, and this RFC does not claim they do. That is why community roles wait f
 1. **`state.json`: `bots[].role` is untouched.** It is the person's short free-text label, as
    today, and no read or write of the product treats it as an attachment. The new field is
    `bot.roles`; the two are never converted into each other.
-2. **`state.json`: `bots[].roles`.** A list of attachments, limited to one through P6:
+2. **`state.json`: `bots[].roles`.** A list of attachments, at most one through P6:
    `{ id, version, attachedAt, grants }`. Absent means none. It is additive; an older plugin
    ignores it and its own save keeps it. Detaching removes the entry; uninstalling the package
    does not touch the Bot's own fields.
@@ -596,7 +596,7 @@ none needed a fallback. The questions above stay as they were asked.
 
 ## Proposed amendment: positions and the shared role registry (RFC 0050)
 
-These replacements apply when [RFC 0050](0050-teams-positions-roles.md) is accepted and its corresponding deliveries land.
+These replacements take effect as the corresponding [RFC 0050](0050-teams-positions-roles.md) deliveries land.
 The original P1–P6 plan and its approved answers above record the earlier design.
 
 | Earlier wording and location | Proposed replacement |
@@ -606,11 +606,11 @@ The original P1–P6 plan and its approved answers above record the earlier desi
 | Rule 3, “One role per Bot through P6”, and Q1, “Recommend one through P6” | Roles stack. Compose one prompt part per attachment in attachment order, union tools, and keep grants, settings and UI per attachment. Refuse an attach when a tool name clashes and preserve the existing attachments. |
 | Q2, “It stays a team-level power” | The chief of staff holds the instance position and team leaders hold scoped positions. Orchestrator is a separate role. |
 | “What a role is not”, “a DSH plugin”, and Q6, “official Automagik roles only” | An official role may be provided by bots-dsh, by a reviewed official-lane DSH plugin, or by the signed catalog. All use the same registry. Host extension and role attachment are distinct operations. Community execution still waits for P5. |
-| Contract 2, “A list of attachments”, formerly limited to one role | Read the existing list in order, without a count limit. Keep the existing pin fields and accept provider source metadata. Detach and grant operations are per attachment. |
+| Contract 2, “A list of attachments”, formerly limited to one role | Read the existing list in order and append new attachments. Keep the existing pin fields and accept provider source metadata. Detach and grant operations are per attachment. Add `roleRuntimeByRole[botId][roleId]` and retain the package-first `roleRuntime[botId]` with its legacy-kind fallback through `positions: 2`. |
 | Contract 4, “The package manifest described above” | Package manifests retain their ID, version and capability checks. There is no `conflicts` field. The registry enforces the tool-name clash rule at attach. |
 | Contract 6, “a role whose package ships inside the Bot team plugin” | Catalog installation stays verified. First-party and plugin definitions attach from the registry without installing a bundled package. The Solver exception remains available to support upgrades until Solver is migrated, then its carrier is removed. |
-| Contract 8, “`audio-out`, `task-start`, `route-policy`, `history-read`” and “enforces `task-start` and `route-policy` at `start_task`” | Add `call-engine` to the closed capability list for Voice in W3. A current attachment must declare a granted capability. W1 enforces task and route grants at `start_task`. W2 enforces them at `delegate`. |
+| Contract 8, “`audio-out`, `task-start`, `route-policy`, `history-read`” and “enforces `task-start` and `route-policy` at `start_task`” | Add `call-engine` to the closed capability list for Voice in W3. A current attachment must declare a granted capability. After W1’s task cutover, `start_task` requires its grant and a named model also requires `route-policy`. W2 enforces them at `delegate`. |
 | “What changes for Bots”, “Main Bot” and “a team-level power” | The chief holds the crown and instance powers. Team leaders hold team powers in W4. A position and a role can change independently. |
 | Contract 9, “Kind stays a stored field”, and Q10, “Whether either follows Genie into roles is a separate RFC after P6” | Omni and Genie kinds migrate to registry roles. Keep their stored kinds for compatibility, then remove those kinds at `positions: 2`. Unfold keeps its kind, and Herdr's seat kind keeps its meaning. |
-| P4, “The first product, on the voice chat the app already has” | Keep working Voice / Mouth pins, settings, grants and `speak` through W1. W3 delivers the registry Voice role, `speak` and the `call-engine` capability alongside the existing audio-output contract, with a compatible upgrade of existing pins. |
-| P6, “an official role package built from the Genie project's release” and “restore `kind` from the record” | The official Genie plugin release supplies the role through the registry. Before a write, copy the original state to `state.json.pre-positions-<pluginVersion>`. Preserve wishes, look and Session. Use `positionsFrom` for position and kind rollback or restore the backup for a full state rollback. Remove the old Genie exclusivity with the compatibility cleanup. |
+| P4, “The first product, on the voice chat the app already has” | Keep working Voice / Mouth pins, settings, grants and `speak` through W1. W3 delivers the registry Voice role, `speak` and a separate `call-engine` grant. Existing catalog pins upgrade with owner consent. A disabled catalog pin stays inert until enabled and consented. |
+| P6, “an official role package built from the Genie project's release” and “restore `kind` from the record” | The official Genie plugin release supplies the role through the registry. Before a write, copy the original state to `state.json.pre-positions-<pluginVersion>`. Preserve wishes, look and Session. Use `positionsFrom` to diagnose the original positions and kinds. Stop writers and restore the compatible snapshot with its matching profile data before using an older host. Old Genie exclusivity applies only to the legacy carrier. An explicit detach survives the provider transition. |

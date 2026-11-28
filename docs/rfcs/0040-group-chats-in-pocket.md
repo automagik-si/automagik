@@ -598,5 +598,6 @@ paired-phone eligibility rules.
 - “a member's or Main Bot's message” projects the same assistant row for a member, chief,
   or authorized leader even when the sender is outside the group's membership.
 - “the admin or a Main Bot” in the threat model becomes the responsible member
-  (`room.admin`), the chief or, for a team-owned group, its leader. The phone acquires no
-  new Bot or group administration authority.
+  (`room.admin`), the chief or, for a team-owned group, its leader. A responsible member can
+  delete the group after explicit confirmation through an admitted management surface.
+  The phone acquires no new Bot or group administration authority.
