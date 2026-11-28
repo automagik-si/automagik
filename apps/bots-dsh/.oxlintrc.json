@@ -10,7 +10,7 @@
     "rules": {
       "no-restricted-imports": ["error", {
         "patterns": [{
-          "group": ["../host/*", "./host/*", "../../**/host/*"],
+          "group": ["../host/**", "./host/**", "../../**/host/**"],
           "message": "Decisions must stay independent of the Bot host."
         }]
       }]
