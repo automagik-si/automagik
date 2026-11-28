@@ -85,7 +85,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0050](0050-teams-positions-roles.md) | Teams, positions and roles | Accepted (2026-11-28, by the owner's delegate, effective on merge) | none (ships outside the five milestones) |
 | [0051](0051-threads-and-the-orchestrator.md) | Threads and the Orchestrator | Accepted (2026-11-28, effective on merge under the owner's delegated authority, see Answers) | none (ships outside the five milestones) |
 | [0052](0052-calls-and-voice-engines.md) | Calls and voice engines (Voice role and call engine) | Accepted | none |
-| [0053](0053-decisions.md) | Decisions | Accepted (2026-11-28, under the owner's delegated authority, effective on merge) | none |
+| [0053](0053-decisions.md) | Decisions | In delivery (accepted 2026-11-28 by the owner's delegate, #2177; delivery 1 merged in #2187; amended 2026-11-28 in #2188 for admission results and judgment reads, effective on merge) | none |
 
 Milestones, in the owner's order:
 
