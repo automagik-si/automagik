@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892, 5b, #1911, 5c, #1923, 5d, #1940, and 5e-1, #1960; the owner's delegate chose 5e-1 first and 5e-2' for owner authorship after it; member and guest prompting waits on DSH; amended 2026-11-21: the gated owner's proof for the Code side, as RFC 0030's Q18 answer approved by the owner's delegate on 2026-11-20, narrowed by the owner's delegate on 2026-11-21: the Code side in a gated browser needs member admission on and delivery 3's readiness, and Cloud mode stays off; delivery 7 open) · Amendment proposed by [RFC 0050](0050-teams-positions-roles.md) |
+| Status | In delivery (approved by the owner's delegate on 2026-11-20, with the amendment below: the gate reroutes `/api`; Q1 answered as amended, Q2-Q8 with this RFC's recommendations; delivery 5 specified by the amendment of the same day, approved by the owner's delegate on 2026-11-20 with its Q1-Q4 recommendations; merged: delivery 1, #1892, 5b, #1911, 5c, #1923, 5d, #1940, and 5e-1, #1960; the owner's delegate chose 5e-1 first and 5e-2' for owner authorship after it; member and guest prompting waits on DSH; amended 2026-11-21: the gated owner's proof for the Code side, as RFC 0030's Q18 answer approved by the owner's delegate on 2026-11-20, narrowed by the owner's delegate on 2026-11-21: the Code side in a gated browser needs member admission on and delivery 3's readiness, and Cloud mode stays off; delivery 7 open) · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P); the gate and the server image |
 | Created | 2026-11-20 |
@@ -1570,9 +1570,9 @@ recommendations.
 - [The 0024 evidence record](../cloud/0024-delivery-0-evidence.md): what the gate and DSH do
   today.
 
-## Proposed amendment: the chief and team member principals (RFC 0050)
+## Amendment: the chief and team member principals (2026-11-28, #2176)
 
-[RFC 0050](0050-teams-positions-roles.md) proposes these substitutions in the delivery 5 role table, caller policy, `people`
+[RFC 0050](0050-teams-positions-roles.md) specifies these substitutions in the delivery 5 role table, caller policy, `people`
 contract and 5c checks.
 
 - “never a main Bot”, “A main Bot visible through its allowlist” and “`workspace` is refused

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (accepted 2026-11-19 by the owner's delegate, see Decided D1-D6; amends RFC 0015). Delivery 1 merged in #1780, #1789 and #1802. Delivery 2 merged in #1793, #1801 and #1832. · Amendment proposed by [RFC 0050](0050-teams-positions-roles.md) |
+| Status | In delivery (accepted 2026-11-19 by the owner's delegate, see Decided D1-D6; amends RFC 0015). Delivery 1 merged in #1780, #1789 and #1802. Delivery 2 merged in #1793, #1801 and #1832. · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-19 |
@@ -628,7 +628,7 @@ None. See Decided for D1 to D6.
 - [RFC 0011 — Monorepo parts and releases](0011-monorepo-parts-and-releases.md).
 - [Pocket privacy](../../apps/pocket/docs/privacy.md).
 
-## Proposed amendment: global Bot eligibility (RFC 0050)
+## Amendment: global Bot eligibility (2026-11-28, #2176)
 
 D5 says “Global Bots, the Main Bot included, are not eligible for management”.
 Under [RFC 0050](0050-teams-positions-roles.md), global Bots remain ineligible for Pocket management, including the chief of staff.

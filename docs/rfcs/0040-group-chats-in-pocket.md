@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q7 answered with this RFC's recommendations, see Decided; amends RFC 0015, which records the amendment; deliveries 1-3 under way, none merged) · Amendment proposed by [RFC 0050](0050-teams-positions-roles.md) |
+| Status | Accepted, in delivery (2026-11-20, approved by the owner's delegate: Q1-Q7 answered with this RFC's recommendations, see Decided; amends RFC 0015, which records the amendment; deliveries 1-3 under way, none merged) · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-20 |
@@ -587,9 +587,9 @@ None. See Decided for questions 1 to 7.
 - [RFC 0011 — Monorepo parts and releases](0011-monorepo-parts-and-releases.md).
 - [Pocket privacy](../../apps/pocket/docs/privacy.md).
 
-## Proposed amendment: the chief and a team's leader (RFC 0050)
+## Amendment: the chief and a team's leader (2026-11-28, #2176)
 
-[RFC 0050](0050-teams-positions-roles.md) proposes these changes to the group model while keeping the phone projection and its
+[RFC 0050](0050-teams-positions-roles.md) specifies these changes to the group model while keeping the phone projection and its
 paired-phone eligibility rules.
 
 - “A Main Bot posts into any group without being a member” becomes: the chief of staff can

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22); RFC 0030's 2026-11-23 amendment (#2061) carries a Bot's own chat across a harness change with a handoff and read_own_chat, and adds the one-tool dsh-history bridge for agents without the bridge; amended 2026-11-26 (#2061 D2d: history shares the existing dsh bridge)) · Amendment proposed by [RFC 0050](0050-teams-positions-roles.md) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); [RFC 0030 Q7a](0030-code-mode-in-the-app.md#handoff-note) supersedes the explicit history-carrying route change for a Bot's own chat; amended 2026-11-22 (#1564: per-Bot native tools switch, decided by the owner's delegate, 2026-11-22); RFC 0030's 2026-11-23 amendment (#2061) carries a Bot's own chat across a harness change with a handoff and read_own_chat, and adds the one-tool dsh-history bridge for agents without the bridge; amended 2026-11-26 (#2061 D2d: history shares the existing dsh bridge)) · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -1347,9 +1347,9 @@ this amendment" lines.
 - **Rollback.** Revert the change: agy launches with its own tools in every Session again, as
   before; the marker and an ON saved for Antigravity are ignored, and Details shows no row.
 
-## Proposed amendment: per-Bot switches and native tools (RFC 0050)
+## Amendment: per-Bot switches and native tools (2026-11-28, #2176)
 
-[RFC 0050](0050-teams-positions-roles.md) proposes the following replacements for the eligibility and upgrade rules in the
+[RFC 0050](0050-teams-positions-roles.md) specifies the following replacements for the eligibility and upgrade rules in the
 November 22 and November 23 native-tools amendments. Those amendments record the earlier path.
 
 - **Eligibility.** The earlier list includes “the Main Bot when it operates Omni” and says

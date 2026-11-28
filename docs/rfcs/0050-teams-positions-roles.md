@@ -157,7 +157,7 @@ target. The host resolves the effective target on both `schedule_create` and `sc
 omitted target or a partial edit to an existing schedule. The available target is `this_session` in verified
 lineage, including a group, task, automation or verified subagent Session. Refuse `new` and `new_once`. A Bot
 with a switch off or custom denials keeps the schedule tools, subject to the owner’s explicit tool denials and
-existing caller limits. Standalone native DSH Sessions retain the existing exception and tool policy. A fresh
+existing caller limits. Sessions of a native DSH Bot (`kind: "dsh"`) retain the existing exception and tool policy. A fresh
 Session cannot be assumed to inherit the Bot's complete sandbox. Use this policy for admission and delivery,
 including load, reassignment and restart, before revoking or pausing any Bot's armed entries with an unsafe
 target. Keep their records and the unsafe-delivery hold. Unknown, conflicting or cross-Bot lineage fails
@@ -167,7 +167,7 @@ closed. A refusal should say which target remains available.
 
 ### Positions, compatibility reads and writes
 
-Team state keeps its schema version. `chiefId: string | null` names the position and `positions` is absent or
+The positions fields extend the team record. `chiefId: string | null` names the position and `positions` is absent or
 0 before conversion, 1 during compatibility and 2 after separate cleanup. `positionsFrom` records the original
 live Main ordering, kinds by Bot ID, migration timestamp and the exact source backup digest. Write it once as
 immutable diagnostic evidence. Recovery uses the backup bytes. Keep the chief and the chief-first `mainBotIds`
@@ -259,8 +259,11 @@ seat `kind: "main"` retain their meanings.
 - **Task authority.** Keep legacy unnamed task admission until Group 6B can persist proven effective authority
   and cut over. Preserve existing valid named-model grants and existing withheld decisions. A former Main or
   unlinked Omni Bot gets only `task-start` from legacy status, and only if an unnamed call would have cleared
-  the old effective gate. An attached role withholding the grant, a shell or caller restriction, or the linked
-  provider's refusal excludes that inference. Carry `route-policy` only from a role entry that already grants
+  the old effective gate. The released host bypasses the role grant check on an unnamed legacy start.
+  An ungranted role on a Main can therefore coexist with effective unnamed admission. Preserve that
+  role's withheld decision on conversion. In the release where access changes, notify the owner of
+  every Bot whose released unnamed admission is withheld, identify `task-start` and link its grant
+  control. Existing shell or caller restrictions and the linked provider's refusal still apply. Carry `route-policy` only from a role entry that already grants
   it. Keep the old linked provider's refusal until its certified replacement. Removing the refusal does not
   synthesize or revive a grant. Reconcile Bots created between `positions: 1` and cutover, and revalidate
   current attachments, provenance, permissions and model choices before dispatch. Later reloads cannot
@@ -292,7 +295,10 @@ seat `kind: "main"` retain their meanings.
   old record. Disable automatic dispatch from the retired path. Resume recovery only through a later explicit
   owner write after verifying the current permissions, originating Session and existing delivery record.
   Preserve a held result when those checks cannot prove a safe destination.
-- **Downgrade.** The old host can recognize one package entry. A stacked Bot may show its package roles as
+- **Downgrade.** Before enabling the first incompatible write, prove that the old writer refuses it and
+  automatic supervisor rollback restores a matching pre-update snapshot. Exercise plain and encrypted
+  profiles. An older supported writer may continue using a home only while its format and authority remain
+  compatible. Group 3A adds no incompatible state. The old host can recognize one package entry. A stacked Bot may show its package roles as
   missing on that reader and must never be written by it. Before rollout keep the complete isolated pre-W1
   snapshot. Stop both writers, preserve the migrated home and restore a separate copy of the compatible
   snapshot with its matching key store, profile data and add-ons before starting the older host. Restore

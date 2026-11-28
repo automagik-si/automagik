@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | Accepted (2026-11-10, by the owner; council review 2026-11-09: proceed with conditions, folded in; owner's answers: identity and billing, 2026-11-09; isolation, identity stand-up, hosting, the goal and Q18, 2026-11-10; Chat: Decided 19-25, 2026-11-09; amends RFC 0008; amended 2026-11-09 by [RFC 0025][25]; (f)'s machine-link rule: amendment proposed by [RFC 0022][22]'s (l), Q17, 2026-11-10; Invitations by project accepted by the owner, 2026-11-12, Decided 27; instance id, account evidence and reservations (#1426): amendment approved by the owner's delegate on 2026-11-20, questions 1-5 answered with its recommendations) |
-| Goal | First goal (owner, 2026-11-10): by 23 Nov, the owner signs in and opens one hosted workspace in test mode, with no real charges: RFC 0024 deliveries 0-4 and RFC 0025 phase A. · Amendment proposed by [RFC 0050](0050-teams-positions-roles.md) |
+| Goal | First goal (owner, 2026-11-10): by 23 Nov, the owner signs in and opens one hosted workspace in test mode, with no real charges: RFC 0024 deliveries 0-4 and RFC 0025 phase A. · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none here (docs); desktop (3.N) for secure storage, sign-in and the rail; the server image and plugin (3.N.P) for the self-hosted gate and the web rail; the Cloud service in its own private repository in the owner's organisation (its contracts stay public here) |
 | Created | 2026-11-09 |
@@ -1495,7 +1495,7 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
 [22]: 0022-desktop-chat-view.md
 [25]: 0025-cloud-economics.md
 
-## Proposed amendment: chief visibility and people on teams (RFC 0050)
+## Amendment: chief visibility and people on teams (2026-11-28, #2176)
 
 Decided, design section (f) and its delivery checks say “never "anyone" for the main bot”,
 use the default “for the main bot unless an owner widens it to an allowlist”, and check that

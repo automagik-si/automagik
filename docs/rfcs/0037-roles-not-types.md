@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-19, approved by the owner's delegate: one Bot, roles make the difference; the P1-P6 order as written; Q1-Q10 answered with this RFC's own recommendations, see Answers; no delivery merged) · Amendment proposed by [RFC 0050](0050-teams-positions-roles.md) |
+| Status | Accepted (2026-11-19, approved by the owner's delegate: one Bot, roles make the difference; the P1-P6 order as written; Q1-Q10 answered with this RFC's own recommendations, see Answers; no delivery merged) · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-19 |
@@ -594,12 +594,12 @@ none needed a fallback. The questions above stay as they were asked.
 - [RFC 0020](0020-unfold-plugins-leave.md): why `unfold` remains a kind and is not part of this
   plan.
 
-## Proposed amendment: positions and the shared role registry (RFC 0050)
+## Amendment: positions and the shared role registry (2026-11-28, #2176)
 
 These replacements take effect as the corresponding [RFC 0050](0050-teams-positions-roles.md) deliveries land.
 The original P1–P6 plan and its approved answers above record the earlier design.
 
-| Earlier wording and location | Proposed replacement |
+| Earlier wording and location | Replacement |
 |---|---|
 | Rule 1, “The Main Bot stays a team-level power” | Assign the chief of staff for the instance and a leader for a team. Every Bot still uses the same record and runtime. |
 | Rule 2, “Sessions or Main Bot powers” | A role adds only its own abilities. It cannot change a position or remove a base tool. The owner controls Terminal, Files and Computer use per Bot. |
