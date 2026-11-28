@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -40,7 +40,7 @@ function fixture(t, start = today) {
     get ledger() { return ledger },
     reopen() { ledger.close(); ledger = createLedger(home, { now }) },
     setTime(value) { at = value },
-    files, bytes,
+    dir, files, bytes,
     records: () => bytes().trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
   }
 }
@@ -293,4 +293,16 @@ test('cohorts never pool and evaluation windows narrow the exact 90-day retentio
   f.setTime(today + 4 * day)
   f.reopen()
   assert.deepEqual(f.files(), ['2026-11.jsonl'])
+})
+
+test('a partial tail survives restart without consuming the next decision', t => {
+  const f = fixture(t)
+  f.ledger.appendDecision(request(), outcome('before', { a: 0.6 }))
+  appendFileSync(join(f.dir, f.files()[0]), '{"v":1,')
+  const before = f.bytes()
+  f.reopen()
+  f.ledger.appendDecision(request(), outcome('after', { a: 0.6 }))
+  assert.ok(f.bytes().startsWith(before + '\n'))
+  assert.equal(f.ledger.evaluation(purpose).total, 2)
+  assert.equal(f.ledger.label('after', judge('a', true)), true)
 })

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { canonicalDigest, capState } from './egress.js'
 import { PURPOSES } from './purposes.js'
@@ -164,7 +164,16 @@ export function createLedger(home, { now = Date.now, purposes, dir = join(home, 
 
   function append(at, fields) {
     prune(at)
-    appendFileSync(join(dir, `${monthOf(at)}.jsonl`), JSON.stringify({ v: 1, at, ...fields }) + '\n', { mode: 0o600 })
+    const fd = openSync(join(dir, `${monthOf(at)}.jsonl`), 'a+', 0o600)
+    try {
+      const { size } = fstatSync(fd)
+      const tail = Buffer.alloc(1)
+      // An interrupted append must not swallow the next complete JSON record.
+      const separate = size > 0 && readSync(fd, tail, 0, 1, size - 1) === 1 && tail[0] !== 10
+      appendFileSync(fd, (separate ? '\n' : '') + JSON.stringify({ v: 1, at, ...fields }) + '\n')
+    } finally {
+      closeSync(fd)
+    }
   }
 
   function read(at, sinceMs) {

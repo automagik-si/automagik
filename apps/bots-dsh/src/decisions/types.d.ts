@@ -126,6 +126,9 @@ export interface Decisions {
   evaluation(purpose: DecisionPurpose, options?: { sinceMs?: number }): Promise<DecisionEvaluation>
 }
 
+/** Explicit context type for consumers of the Cordis 4.1 emitted declarations. */
+export type DecisionsContext = import('@deepseek-ai/cordis').Context & { decisions: Decisions }
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     decisions: Decisions
