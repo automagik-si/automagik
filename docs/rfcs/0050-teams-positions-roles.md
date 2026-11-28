@@ -209,8 +209,8 @@ seat `kind: "main"` retain their meanings.
 ### Durable migration and recovery
 
 - **Backup before writes.** Take an exclusive, private-mode copy of the original encoded `state.json` bytes
-  under the store write lock before the first stacked write, position migration or staged Solver write. Take a
-  matching copy again for a later migration write if its source changed. Use
+  under the store write lock before the first write requiring format 4 or 5, position migration or staged
+  Solver write. Take a matching copy again for a later migration write if its source changed. Use
   `state.json.pre-positions-<pluginVersion>` or `state.json.pre-solver-<pluginVersion>` for the corresponding
   migration. Reuse an existing backup only when its bytes match. Preserve a differing file and create a
   digest-qualified copy of the current source. Sync the backup file and parent directory, recheck the lock and
@@ -295,16 +295,112 @@ seat `kind: "main"` retain their meanings.
   old record. Disable automatic dispatch from the retired path. Resume recovery only through a later explicit
   owner write after verifying the current permissions, originating Session and existing delivery record.
   Preserve a held result when those checks cannot prove a safe destination.
-- **Downgrade.** Before enabling the first incompatible write, prove that the old writer refuses it and
-  automatic supervisor rollback restores a matching pre-update snapshot. Exercise plain and encrypted
-  profiles. An older supported writer may continue using a home only while its format and authority remain
-  compatible. Group 3A adds no incompatible state. The old host can recognize one package entry. A stacked Bot may show its package roles as
-  missing on that reader and must never be written by it. Before rollout keep the complete isolated pre-W1
-  snapshot. Stop both writers, preserve the migrated home and restore a separate copy of the compatible
-  snapshot with its matching key store, profile data and add-ons before starting the older host. Restore
-  matching migration backups under the state lock for record recovery. `positionsFrom` cannot undo the extra
-  Omni denies, switch mirrors, grants, retired Solver fields or later edits. Keep Sessions, memory and wishes
-  with the matching profile. Newer writes remain in the preserved migrated home.
+
+### State formats and rollback
+
+Group 3A adds no incompatible state. Starting in Group 5A, durably stamp the first save of any record an
+older writer cannot safely use and update with format **4** for plain state or **5** for encrypted state.
+An unchanged single legacy Solver or Voice package pin can keep the old representation and format 2 or 3.
+One registry pin is enough to require 4 or 5, even if its provider is missing. So is a stack of package or
+registry pins. Preserve the existing pin fields and order, grants, caller checks and legacy client routes
+and views on the new host. Formats 4 and 5 govern which hosts can use the saved state. Role and position
+authority still require the existing caller, provider and migration checks.
+
+Use 4 or 5 for the first save of `solverMigrationV1` in Group 13A and committed positions in Group 2, even on
+a roster with no new attachment. A legacy writer can leave the staged source identity stale by detaching
+Solver, or change `mainBotIds` without updating `chiefId`. Keep the live Solver guards during staging and
+the chief-first mirror during positions compatibility. Group 13A adds its own stable activation ID in
+the first durable write of the Solver stage. Group 2 adds a distinct ID in the first durable write of
+positions. Each later incompatible change, including Solver retirement or a caller authority cutover,
+adds its own stable ID in the write that first activates it, even on a roster already using 4/5. Once saved as 4 or
+5, every subsequent save stays in that pair, including after the last incompatible pin is detached. Keep
+the durable activation markers on subsequent saves. Preserve the existing credential envelope and key
+checks. A retained encrypted envelope with an unavailable key still uses 5.
+
+Group 5A must name a single top-level plaintext list in `state.json` for stable activation IDs. The list
+sits outside the credential envelope so the host and supervisor can read it without a key. Group 5A records
+the applicable IDs when it first saves a registry pin or a stack. A missing or malformed list makes a
+format 4/5 file unrecognized. Select the format and record the activation under the same lock and source
+generation as the change. Check on load, reload, takeover, external replacement and reclaim before the host
+makes an existing incompatible record writable or exposes its migrated authority. An older writer that cannot
+use the format or activation leaves the bytes intact and exposes a diagnostic. A failed Group 5A backup or
+stamp refuses the attach and preserves the prior format and bytes. Later deliveries apply their stated hold
+or legacy behavior on failure.
+
+**Rollback to an intermediate release.** The released supervisor captures the previous reader's accepted
+formats at switch time. With intact revision lineage it keeps a trial file if its numeric format is listed.
+This restores an incompatible 4/5 trial for a predecessor that reads only 0–3, but once both releases
+accept 4/5 the number alone cannot distinguish the authority each release understands.
+
+Every release listing 4 or 5 in its update contract's `stateFormats` must refuse unrecognized activations
+before making the roster available or writable. Group 5A may list these formats only when it also ships
+this host refusal and the supervisor comparison below. Declare supported IDs in an additive `activations`
+list alongside `version: 1`, `holdRun: true` and `stateFormats`. Preserve those required fields so the
+installed supervisor accepts the contract through `updateContract()`. It gives back an update as
+`profile-invalid` when that check fails. Admit an ID to the published contract only after the installed
+artifact evidence below passes for that activation.
+
+At switch time capture the installed predecessor's contract in the snapshot index. On rollback, prove
+compatibility or restore the switch-time roster under the existing lock, byte identity and lineage safeguards.
+
+- For a trial in format 0–3, require intact trial lineage and membership of its format in the captured formats.
+- For 4/5, require a parsed trial with intact lineage and a well-formed activation list. The index must
+  contain well-formed predecessor format and activation lists. The trial format must be listed and every
+  trial activation must belong to the captured activation list.
+- The three outcomes are a trial kept with that proof, a restored snapshot, or blocked recovery with the
+  team unavailable. For an unproven trial, `unknown`, `team-in-use`, `snapshot-changed` and `superseded`
+  report blocked recovery. Leaving bytes in place grants no permission to open the team.
+
+The running supervisor advertises its activation-comparison capability to the trial child. The host may
+write a first new activation during a trial only when that supervisor announces support. Otherwise defer
+the write until the trial commits. This handshake uses the running copy because the update store can
+retain an older supervisor even when the installed plugin supports the comparison.
+
+**Automatic restore boundary.** The supervisor snapshots the resolved Bot home `state.json` at switch
+time. It archives its exact bytes as `rollback-data/<runId>/bots-state.json` with the `data.json` index.
+On restoration, the live file must match the snapshot byte-for-byte, and the displaced trial bytes must
+match `trial-bots-state.json` in the same directory. Compare SHA-256 digests and verify that the restored
+host opens the pre-switch roster. A snapshot taken after a stack was committed restores that stack, even
+if a separate migration backup contains its earlier single-pin state.
+
+The data snapshot excludes role settings in `roles/data`, `inflight.json`, connector keys, migration
+backup files, Sessions, memory and wishes. Profile modules, lockfile, dependencies and managed archives
+are restored separately by the switch journal. An encrypted restore can recover the envelope bytes while
+the credentials remain unavailable if the matching key is missing. Keep a complete isolated pre-W1
+snapshot for a manual downgrade across these boundaries. Stop both writers, preserve the migrated home
+and restore a separate copy of the compatible snapshot with matching keys, profile data, add-ons, Sessions,
+memory and wishes before starting the older host. Use matching migration backups under the state lock for
+record recovery. `positionsFrom` cannot undo added Omni denies, switch mirrors, grants, retired Solver
+fields or later edits.
+
+Until the trial commits, keep `roles/data`, `inflight.json` and connector keys readable by the
+predecessor. An activation that must incompatibly rewrite or delete one of them waits until commit,
+unless the running supervisor announces that it snapshots and restores that specific file for this trial.
+
+**Release evidence.** Synthetic v3.178.5 probes preserved intact-lineage trial files in accepted formats
+2 and 3. The old detach cleared a stack, the old Main write left a positions-only record with a mismatched
+mirror, and the old detach left a staged Solver record pointing at a removed pin. For incompatible trial
+formats 4 and 5, the probe observed store refusal, byte-exact supervisor restoration of the pre-switch
+file and archival of the trial. The format 5 fixture used the existing authenticated envelope layout. The
+18-test probe injected trial inputs and substituted child lifecycle and health callbacks.
+
+Before enabling Group 5A writes and each later incompatible activation, run the actual writer and
+supervisor with the preceding installed artifact and supported skipped-version sources. Cover plain and
+encrypted homes, an unchanged legacy single pin, one registry pin and a stack, detach followed by reload and
+save, and positions-only and staged Solver inputs when those deliveries land. For each of those last two
+cases, start with a 4/5 predecessor that recognizes all prior IDs and lacks only the new one. Verify the
+first write includes the distinct new ID and that a failed trial restores the switch-time roster.
+Check required-save refusal
+and that optional saves leave bytes intact on an incompatible old host. Exercise successful and failed
+trials from a 2/3 snapshot and, once the predecessor writes 4/5, from a 4/5 snapshot. Record file digests,
+the rollback verdict, reopening and caller authority, and the effects of a matching or unavailable
+connector key. Exercise a lagging supervisor with no activation comparison and verify that the child
+defers the first new activation until commit. With activation comparison present but no announced snapshot
+support for a particular sidecar, prove its incompatible write waits until commit. After restore, leave trial-era `roles/data` and `inflight.json`
+in place and verify that the restored host grants nothing and dispatches nothing for any Bot, pin or run
+absent from the restored roster. Include lock loss and retry so a failed activation cannot publish authority or re-stamp a
+protected file into 2/3. The candidate and installed-artifact results are required before the affected
+delivery ships.
 
 ## Authority and release order
 
@@ -332,7 +428,7 @@ until their separately authorized removal.
 | Groups in order | Lane and acceptance |
 |---|---|
 | **1** | Docs only. This RFC is Accepted when it merges. Implementation starts after that merge. Verify the no-shipping classification for this PR's diff. |
-| **3A → 5A → 5B → 6** | Plugin. Land the additive rules hook, host registry with both views, client registry and then Orchestrator provider. Check old/new client and host combinations, per-pin grants and settings, clashes, stock Voice with its actual `speak` and `audio-out`, and old Solver and task admission. |
+| **3A → 5A → 5B → 6** | Plugin. Land the additive rules hook, host registry with both views, client registry and then Orchestrator provider. Review and accept the state-format amendment before Group 5A. Ship its 4/5 writer and prove the rollback contract with Group 5A. Check old/new client and host combinations, per-pin grants and settings, clashes, stock Voice with its actual `speak` and `audio-out`, and old Solver and task admission. |
 | **12A → 13A → 2 → 3** | Plugin. First enforce the switches, universal lineage scheduling and native policy under the old guards. Stage Solver conversion with exact backups, then commit positions with the saved-link bridge. Move all chief callers together. Check failed writes, sync, lock loss, stale reads, mixed-role and repeat upgrades, old-Omni tool restrictions, and that former Mains lose chief powers. |
 | **4 → 7 → 12B → 8A** | Plugin. Move the UI and onboarding to the chief, expose the effective switches and retire new Solver creation and attachment. Test both legacy and new commands, the crown and landing, the old plugin's enabling refusals, localized labels and the still-active Solver guard and settings. |
 | **10A → 8B → 9A → 9B → 10B → 11A → 11B → 13B → 6B** | Plugin. Commit canonical Solver migration before disabling execution guards. Retire remaining Solver UI, then make Solver characters ordinary while preserving existing looks. Remove obsolete notices and guard modules after callers migrate. Preserve model identity and saved results before deleting review-mark and progress code. Remove old writers and then switch task entry points to committed grants. Co-land each change with all former imports, fixtures, locale keys, bundles and surviving safety tests it affects. Reopen saved results and mixed-role profiles without duplicate delivery or new authority. |
@@ -371,9 +467,9 @@ The owner's delegate agreed to the following answers, effective with this RFC.
    stacking all four real roles. The legacy `set-main` alias stays available. Group 18 remains separately
    authorized work.
 
-The delegate also agreed to the compatibility, grant and recovery conditions above. Before implementation,
-record the exact review head and CI outcomes on the RFC PR. Approval of these decisions does not establish
-that an implementation, published artifact or provider pairing passed its gate.
+The delegate also agreed to the original RFC's compatibility, grant and recovery conditions. Before
+implementation, record the exact review head and CI outcomes on the RFC PR. Approval of these decisions
+does not establish that an implementation, published artifact or provider pairing passed its gate.
 
 ## Related RFCs
 
