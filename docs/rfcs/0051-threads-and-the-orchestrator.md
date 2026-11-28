@@ -213,7 +213,9 @@ create, edit and delivery, and every report.
 When a membership or deletion write invalidates admission, take these steps in
 order for each affected delegation:
 
-1. Apply `capTasks` in the same save, before unlinking provenance.
+1. Apply `capTasks` and durably close the round for reporting in the membership
+   save, before unlinking provenance. On load, finish an interrupted revocation
+   before dispatch or replay.
 2. Call `revokeNewSchedules` for the Session IDs whose admission was revoked.
 3. Stop the active turn through the cancellation path used by `rt.stopThread`.
 4. Record `stopped` with reason `thread/not-member`.
@@ -229,8 +231,8 @@ A message to a delegation that lacks admission is refused with
 `thread/not-member` for an otherwise authorized caller. It is never queued.
 Re-adding a member leaves old turns, schedules and undelivered work stopped.
 An explicit reopen starts a new round under fresh admission and the saved cap.
-Any result from the revoked round stays in the thread history. It never reaches either
-Bot's own chat or a private forward. An opener still entitled to receive a
+A revoked round keeps its result in the thread history. Its report intent or
+exchange can deliver only the notice, including after a restart or re-add. An opener still entitled to receive a
 notice at the original destination gets one deduplicated notice with the thread
 name and reason only.
 
@@ -329,8 +331,9 @@ per round. Session-backed reports use the durable `thread-report` wake intent ke
 by `thread:<id>:<round>`. A migrated task's round one keeps its legacy
 `task-report` kind and `task:<id>` key, including when the old intent is already
 pending or has completed. It never writes `thread:<id>:1`. Bot DMs have no Session
-wake key and use exchange deduplication. Replay checks current report admission and
-deduplicates any outstanding delivery.
+wake key and use exchange deduplication. Replay refuses a result from a round closed
+for revocation or stopped with `thread/not-member`, regardless of current admission.
+For other rounds, replay checks current report admission and deduplicates delivery.
 
 ## Left menu and right pane
 
@@ -454,7 +457,9 @@ reason into a held Session.
    revocation, stop and saved reason in order. Simulate a failed cancel and
    confirm that tool calls, schedule changes and deliveries, and reports are
    still refused. Verify the hold across restart, no automatic resume on re-add,
-   and an explicit reopen under the saved cap. Test the original destination's
+   and an explicit reopen under the saved cap. Remove a participant, restart before
+   `stopped` is recorded, and re-add them. Verify that the old turn, scheduled
+   delivery and result report all stay stopped. Test the original destination's
    content-free notice and the carried read scope of the person and chief.
    Exercise a missing binding and failed save or apply before the first brief.
    Prove the member's prompt, switches, schedule restrictions and skill pins
