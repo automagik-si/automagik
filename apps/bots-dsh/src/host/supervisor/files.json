@@ -3,6 +3,7 @@
   "home-lock.js",
   "lane-verify.js",
   "role-keys.json",
+  "state-format.js",
   "supervisor/capabilities.json",
   "supervisor/child.js",
   "supervisor/copy.js",

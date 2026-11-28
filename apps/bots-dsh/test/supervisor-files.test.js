@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { test } from 'node:test'
+import { activationIds } from '../src/host/state-format.js'
 import { SUPERVISOR_FILES } from '../src/host/supervisor/copy.js'
 import { IMAGE_HOST, runSupervisor } from '../src/host/supervisor/main.js'
 import { HOST, MAIN } from './fixtures/supervisor.mjs'
@@ -39,4 +40,16 @@ test('the supervisor entrypoint in the inventory exposes the image host capabili
   assert.ok(SUPERVISOR_FILES.includes('supervisor/main.js'))
   assert.equal(IMAGE_HOST, 1)
   assert.equal(typeof runSupervisor, 'function')
+})
+
+test('the shared activation parser bounds and canonically orders the copied wire lists', () => {
+  const ids = Array.from({ length: 256 }, (_, i) => 'wire-' + i).reverse()
+  assert.deepEqual(activationIds(ids, { required: true }), ids.toSorted())
+  assert.deepEqual(activationIds([]), [])
+  assert.deepEqual(activationIds(['a'.repeat(64)]), ['a'.repeat(64)])
+  assert.equal(activationIds([], { required: true }), null)
+  for (const invalid of [null, 'wire-id', {}, [...ids, 'extra'], [1], [''], ['a'.repeat(65)],
+    ['invalid-é'], ['Uppercase'], ['bad--id'], ['trailing-'], ['a\n'], ['a', 'a']]) {
+    assert.equal(activationIds(invalid), null)
+  }
 })

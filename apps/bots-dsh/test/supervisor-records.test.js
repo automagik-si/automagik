@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { currentOf } from '../src/host/supervisor/records.js'
+import { currentOf, runOf } from '../src/host/supervisor/records.js'
 import { PLUGINS } from '../src/host/supervisor/release.js'
+import { runOf as runOf5b } from './fixtures/supervisor-5b/supervisor/records.js'
+import { runOf as runOf6 } from './fixtures/supervisor-6/supervisor/records.js'
 
 const pin = `file:vendor/automagik-update/${'a'.repeat(64)}.tgz`
 const [acp, bots] = PLUGINS
@@ -27,4 +29,22 @@ test('an invalid pin or base invalidates the whole current record', () => {
     { entries, base: { [bots]: '' } }, { entries, base: { [bots]: 'x'.repeat(513) } },
     { entries, base: { [bots]: 1 } },
   ]) assert.equal(currentOf({ ...record, ...shape }, []), null, JSON.stringify(shape))
+})
+
+test('frozen v1 readers accept rollback keep, restore and blocked records', () => {
+  const now = '2026-11-28T09:00:00.000Z'
+  for (const [phase, data] of [
+    ['rolledBack', { restored: false, why: 'same-format', trialKept: false }],
+    ['rolledBack', { restored: true, trialKept: true }],
+    ...['unknown', 'team-in-use', 'snapshot-changed', 'superseded'].map(why =>
+      ['manualRecovery', { restored: false, why, trialKept: false }]),
+  ]) {
+    const saved = { version: 1, runId: 'fixture-run', bootId: 'sup_fixture', phase,
+      from: record.kept.version, to: record.live.version, reason: phase === 'manualRecovery' ? 'rollback-failed' : 'health-failed',
+      startedAt: now, updatedAt: now, rollback: { failed: 'page', step: 'data', trialFrom: now, data } }
+    const current = runOf(saved, [saved.bootId])
+    assert.equal(current.phase, phase)
+    assert.equal(runOf5b(saved, [saved.bootId]).phase, phase)
+    assert.deepEqual(runOf6(saved, [saved.bootId]), current)
+  }
 })

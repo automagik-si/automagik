@@ -6,6 +6,7 @@ import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { compareVersions } from '../lane-verify.js'
+import { ACTIVATION_COMPARE } from '../state-format.js'
 import { LISTENER_UNKNOWN, startChild } from './child.js'
 import { checkHealth, healthListener, listenerOf, verifyListener } from './health.js'
 import { copyVersion, installCopy, refreshCopy, reinstallCopies, runningCopy, SELF_CHECK_OK, supervisorVersion } from './copy.js'
@@ -13,7 +14,7 @@ import { checkRelinkConfig, installRegistry } from './pnpm.js'
 import { currentOf, isId, isVersion, REINSTALL_REFUSAL, reinstallRefusalReason, RUNNING, runOf, TERMINAL } from './records.js'
 import { inspectRelease, releaseSource } from './release.js'
 import { takeRequest } from './request.js'
-import { baseline, finishRolledBack, liveTeamLineage, rollbackLocation, runRollback, teamSnapshot, unpinnedPlugins, updateContract } from './rollback.js'
+import { baseline, captureContract, comparesActivations, finishRolledBack, liveTeamLineage, rollbackLocation, runRollback, teamSnapshot, unpinnedPlugins, updateContract } from './rollback.js'
 import { assertRelinked, discardArchives, downloadPath, laneEntries, relink, stageInstall, stagePaths, takeProfileLock } from './stage.js'
 import { identity, prepareStore, readJson, regularBytes, syncDirectory, takeLifetimeLock, UPDATE_RECORD_LIMIT, usableStore, writeJsonAtomic } from './store.js'
 import { candidateMatches, completeSwitch, didSwitch, planSwitch, sweepReinstallTrash, trashReinstall, UndoPreflightError, undoSwitch, validJournal, validTerminalJournal } from './switch.js'
@@ -70,6 +71,7 @@ export async function runSupervisor({
   bootEnv[LISTENER_UNKNOWN] = listener ? '0' : '1'
   delete bootEnv.AUTOMAGIK_SUPERVISOR_RUN
   delete bootEnv.AUTOMAGIK_SUPERVISOR_REINSTALL
+  delete bootEnv[ACTIVATION_COMPARE]
   let checkedListener, listenerCheck
   const seen = new Set()
   let child, run, active, exitCode, recoveredAt
@@ -150,7 +152,7 @@ export async function runSupervisor({
     exitCode ??= code
     controller.abort()
   }
-  function start(forRun = false) {
+  function start(forRun = false, { compare = false, beforeSpawn } = {}) {
     signal.throwIfAborted()
     try { onChildStart?.() } catch { warn('could not notify the host before starting DSH') }
     signal.throwIfAborted()
@@ -158,7 +160,9 @@ export async function runSupervisor({
     listenerCheck = undefined
     announceListener('unknown')
     const env = forRun ? { ...bootEnv, AUTOMAGIK_SUPERVISOR_RUN: run.runId } : bootEnv
+    if (compare) env[ACTIVATION_COMPARE] = `${bootId}:${run.runId}`
     const startedAt = Date.now()
+    beforeSpawn?.()
     const started = startChild(command, env, ended => {
       if (!ended.expectedExit && !trial) shutdown(ended.result.code)
     }, {
@@ -291,7 +295,8 @@ export async function runSupervisor({
       })
     }
     await runRollback({
-      config, staging, run, save, signal, stop, start: () => start(true), health, manualRecovery, retry: () => shutdown(1),
+      config, staging, run, save, signal, stop, start: beforeSpawn => start(true, { beforeSpawn }),
+      health, manualRecovery, retry: () => shutdown(1),
       restoreCurrent: () => {
         if (!Object.hasOwn(run, 'priorCurrent')) throw new Error('The prior version record was not saved')
         if (run.priorCurrent === null) {
@@ -384,7 +389,7 @@ export async function runSupervisor({
       } else {
         save({ phase: 'restarting', reason: null, trialStartedAt: run.trialStartedAt ?? stamp() })
         trial = true
-        candidate = start(true)
+        candidate = start(true, { compare: comparesActivations(config, run) })
         phase('health')
       }
     } finally {
@@ -514,12 +519,11 @@ export async function runSupervisor({
       if (expectedReinstall && (bootEnv.AUTOMAGIK_SUPERVISOR_REINSTALL !== bootId || !reinstallCopies(store))) {
         return refuseReinstall(staging, 'reinstall-unsupported')
       }
-      const contract = updateContract(profileDir)
-      if (!contract) {
+      const predecessor = captureContract(profileDir)
+      if (!predecessor) {
         if (expectedReinstall) return refuseReinstall(staging, 'previous-unsupported')
         return await giveBack(staging, 'profile-invalid', false, { legacy: true })
       }
-      config.stateFormats = contract.stateFormats
       const current = readCurrent()
       if (current === null) {
         if (expectedReinstall) return refuseReinstall(staging, 'store-invalid')
@@ -553,7 +557,8 @@ export async function runSupervisor({
       beginLiveChanges()
       await stop()
       signal.throwIfAborted()
-      const journal = planSwitch(config, staging, run)
+      const captured = captureContract(profileDir)
+      const journal = captured?.hash === predecessor.hash ? planSwitch(config, staging, run, captured.contract) : null
       if (!journal) {
         discardArchives(profileDir, staging)
         release()

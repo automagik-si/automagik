@@ -289,6 +289,9 @@ if (action === 'web' && mode !== 'exit' && process.env.REINSTALL_HOLD_FIXTURE) {
       assert.equal(result.reinstall, true)
       assert.equal(result.journal.keep, 'reinstall/' + result.runId)
       assert.equal(result.journal.relinked, true)
+      const boots = eventsOf(f).filter(event => event.event === 'boot')
+      assert.deepEqual(boots.map(event => event.activationCompare),
+        fault ? [undefined, `${boot.boot}:${result.runId}`, undefined] : [undefined, `${boot.boot}:${result.runId}`])
       assert.equal(activeBytes(f), fault ? 'broken' : 'repaired')
       assert.equal(has(join(f.store, 'versions')), false)
       if (fault) {
@@ -551,6 +554,12 @@ if (action === 'web' && mode !== 'exit' && process.env.REINSTALL_HOLD_FIXTURE) {
     assert.equal(result.phase, 'rolledBack')
     assert.equal(has(f.currentPath), false)
     assert.equal(activeBytes(f), 'broken')
+    const [steady, originalTrial, replayTrial, previous] = eventsOf(f).filter(event => event.event === 'boot')
+    assert.equal(steady.activationCompare, undefined)
+    assert.equal(originalTrial.activationCompare, `${interrupted.bootId}:${result.runId}`)
+    assert.notEqual(result.bootId, interrupted.bootId)
+    assert.equal(replayTrial.activationCompare, `${result.bootId}:${result.runId}`)
+    assert.equal(previous.activationCompare, undefined)
     await clean(f, result)
   })
 

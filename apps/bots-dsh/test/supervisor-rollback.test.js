@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { connectorState } from '../src/host/connectors/credential-state.js'
+import { homeLock } from '../src/host/home-lock.js'
 import { runSupervisor } from '../src/host/supervisor/main.js'
 import { finishRolledBack, restoreData, runRollback, teamSnapshot } from '../src/host/supervisor/rollback.js'
 import { PROFILE_INPUTS, VENDOR } from '../src/host/supervisor/stage.js'
@@ -15,6 +16,7 @@ import { completeSwitch, planSwitch, validTerminalJournal } from '../src/host/su
 import { BOTS, eventsOf, fixture, FROM, HOST, lane, read, RUN_ID, TO, write } from './fixtures/supervisor.mjs'
 
 const now = new Date().toISOString()
+const saveTo = run => changes => Object.assign(run, changes)
 const originalTeam = { version: 1, revision: 7, note: 'original roster' }
 const trialTeam = { version: 3, revision: 8, note: 'edited during trial' }
 const priorCurrent = { version: 1, live: { version: FROM, sequence: 41 }, kept: null, lastSequence: 41 }
@@ -65,7 +67,10 @@ function prepare(t, options = {}) {
   const kept = join(f.store, 'versions', FROM)
   const backup = join(f.store, 'rollback-data', RUN_ID)
   const originalLock = fs.readFileSync(join(profileDir, 'pnpm-lock.yaml'))
-  write(path, options.originalTeam ?? originalTeam)
+  if (options.absent) fs.unlinkSync(path)
+  else write(path, options.originalTeam ?? originalTeam)
+  if (options.contract) write(join(profileDir, 'node_modules', BOTS, 'src/host/update-contract.json'),
+    { version: 1, holdRun: true, ...options.contract })
   fs.mkdirSync(join(staging.profileDir, 'node_modules', BOTS), { recursive: true })
   fs.mkdirSync(staging.source)
   for (const file of PROFILE_INPUTS) fs.copyFileSync(join(profileDir, file), join(staging.source, file))
@@ -81,17 +86,17 @@ function prepare(t, options = {}) {
   fs.writeFileSync(candidateArchive, 'new archive')
   write(join(staging.root, 'created-archives.json'), [archive])
 
-  f.config.stateFormats = options.legacy ? undefined : [0, 1, 2]
+  f.config.stateFormats = options.reads ?? [0, 1, 2]
   const run = {
     version: 1, phase: 'switching', reason: null, runId: RUN_ID, bootId: 'sup_fixture',
     from: FROM, to: TO, sequence: 42, names: [BOTS], startedAt: now, updatedAt: now,
     ...(!options.legacy ? { fromVersions: { [BOTS]: FROM }, priorCurrent } : {}),
   }
-  run.journal = planSwitch(f.config, staging, run)
+  run.journal = planSwitch(f.config, staging, run, options.contract)
   completeSwitch(f.config, staging, run, () => {})
   if (options.contractMissing) fs.unlinkSync(join(kept, 'node_modules', BOTS, 'src/host/update-contract.json'))
   if (options.teamMissing) fs.unlinkSync(path)
-  else write(path, options.legacy ? { version: 2, revision: 8, note: 'readable team' } : trialTeam)
+  else if (!options.absent) write(path, options.legacy ? { version: 2, revision: 8, note: 'readable team' } : trialTeam)
   if (options.committed) write(current, nextCurrent)
   else write(current, priorCurrent)
   Object.assign(run, {
@@ -141,7 +146,8 @@ async function rollback(f, { cutAt, frozenCheck, ...hooks } = {}) {
       config: f.config, staging: f.staging, run, save, signal: signal.signal,
       stop: async () => {},
       restoreCurrent: () => persist(f, f.current, run.priorCurrent),
-      start: () => {
+      start: verifyHandoff => {
+        verifyHandoff()
         assert.equal(run.phase, 'rollingBack')
         assert.equal(run.rollback.step, 'restart')
         assertPrevious(f, hooks.team)
@@ -174,7 +180,7 @@ async function rollback(f, { cutAt, frozenCheck, ...hooks } = {}) {
   return { run: outcome, checkpoints }
 }
 
-async function recoverThroughDriver(f) {
+async function recoverThroughDriver(f, expected = 'rolledBack') {
   const { home, profile, command } = f
   command[command.indexOf('--port') + 1] = '3080'
   const options = { ...lane(f), home, profile, command, version: FROM, tarballs: [] }
@@ -191,20 +197,26 @@ async function recoverThroughDriver(f) {
     fs.closeSync(stderr)
   }
   let exited = false
+  let observed = false
   const exit = new Promise((resolve, reject) => {
     child.once('error', reject)
     child.once('close', code => { exited = true; resolve(code) })
   })
   try {
-    for (let n = 0; n < 200 && !exited; n++) {
+    for (let n = 0; n < 200; n++) {
       const state = read(f.state)
-      if (state.phase === 'rolledBack' && eventsOf(f).some(event => event.event === 'boot')) return state
+      if (state.phase === expected && (expected !== 'rolledBack' || eventsOf(f).some(event => event.event === 'boot'))) {
+        observed = true
+        return state
+      }
+      if (exited) break
       await wait(25)
     }
     assert.fail('recovered supervisor did not serve FROM: ' + fs.readFileSync(stderrPath, 'utf8'))
   } finally {
-    if (!exited) child.kill('SIGTERM')
-    assert.equal(await exit, 0, fs.readFileSync(stderrPath, 'utf8'))
+    if (!exited && (!observed || expected === 'rolledBack')) child.kill('SIGTERM')
+    const code = await exit
+    if (observed) assert.equal(code, expected === 'rolledBack' ? 0 : 1, fs.readFileSync(stderrPath, 'utf8'))
   }
 }
 
@@ -265,16 +277,15 @@ for (const [caseName, trial, data] of [
   ['newer', trialTeam, { restored: true, trialKept: true }],
   ['same', { version: 2, revision: 7 }, { restored: false, why: 'same-format', trialKept: false }],
   ['older', { version: 0, revision: 8 }, { restored: false, why: 'same-format', trialKept: false }],
-  ['unparsable', '{', { restored: false, why: 'unknown', trialKept: false }],
   ['missing', undefined, { restored: true, why: 'team-lost', trialKept: false }],
 ]) {
-  test('team restore handles ' + caseName + ' trial data', t => {
+  test('team restore handles ' + caseName + ' trial data', async t => {
     const f = prepare(t)
     if (trial === undefined) fs.unlinkSync(f.path)
     else if (typeof trial === 'string') fs.writeFileSync(f.path, trial)
     else write(f.path, trial)
     const run = read(f.state)
-    restoreData(f.config, run, changes => Object.assign(run, changes))
+    await restoreData(f.config, run, saveTo(run))
     assert.deepEqual(run.rollback.data, data)
     if (data.restored) assert.deepEqual(read(f.path), originalTeam)
     else if (typeof trial === 'string') assert.equal(fs.readFileSync(f.path, 'utf8'), trial)
@@ -282,16 +293,183 @@ for (const [caseName, trial, data] of [
   })
 }
 
-test('restore takes the writer lock and preserves a live peer\'s team', t => {
+for (const [scenario, end, why] of [
+  ['release', 1000], ['stale', 60_000], ['persistent', 65_000, 'team-in-use'],
+  ['abort', 500], ['index changes', 1000, 'snapshot-changed'], ['claim loses ownership', 0, 'team-in-use'],
+]) {
+  test('rollback lock retries handle ' + scenario, async t => {
+    const f = prepare(t)
+    const run = read(f.state)
+    const lockPath = join(f.botsHome, 'state.lock')
+    const epoch = 1_800_000_000_000
+    const peer = { token: 'other', host: hostname(), pid: process.ppid }
+    write(lockPath, peer)
+    fs.utimesSync(lockPath, new Date(epoch), new Date(epoch))
+    let elapsed = 0, created = 0
+    const attempts = []
+    const abort = new AbortController()
+    const createLock = path => {
+      assert.equal(path, lockPath)
+      created++
+      const lock = homeLock(path, { now: () => epoch + elapsed, isAlive: () => true })
+      return { ...lock, claim() {
+        attempts.push(elapsed)
+        if (scenario === 'claim loses ownership') return undefined
+        return lock.claim()
+      } }
+    }
+    const wait = async (ms, signal) => {
+      assert.equal(signal, abort.signal)
+      assert.equal(run.rollback.data, undefined)
+      assert.equal(run.journal.restore, undefined)
+      assert.equal(fs.existsSync(f.backup), false)
+      assert.deepEqual(read(f.path), trialTeam)
+      elapsed += ms
+      if (scenario === 'persistent') fs.utimesSync(lockPath, new Date(epoch + elapsed), new Date(epoch + elapsed))
+      if (elapsed !== end) return
+      if (scenario === 'abort') abort.abort(cutError)
+      if (scenario === 'release' || scenario === 'index changes') fs.unlinkSync(lockPath)
+      if (scenario === 'index changes') {
+        const index = join(f.kept, 'data.json')
+        fs.appendFileSync(index, ' ')
+      }
+    }
+    const options = { now: () => elapsed, wait, createLock, signal: abort.signal }
+    const attempt = restoreData(f.config, run, saveTo(run), options)
+    if (why || abort.signal.aborted || scenario === 'abort') {
+      await assert.rejects(attempt, why ? new RegExp(why) : cutError)
+      assert.deepEqual(read(f.path), trialTeam)
+      assert.equal(run.rollback.data, undefined)
+    } else {
+      await attempt
+      assert.deepEqual(read(f.path), originalTeam)
+    }
+    const lastAttempt = scenario === 'abort' ? end - 250 : end
+    assert.deepEqual(attempts, Array.from({ length: lastAttempt / 250 + 1 }, (_, i) => i * 250))
+    assert.equal(created, 1)
+    if (scenario === 'abort') {
+      fs.unlinkSync(lockPath)
+      await restoreData(f.config, run, saveTo(run))
+      assert.deepEqual(read(f.path), originalTeam)
+    }
+  })
+}
+
+test('loss after restore intent stops without retrying or writing the live team', async t => {
   const f = prepare(t)
-  write(join(f.botsHome, 'state.lock'), { token: 'other', host: hostname(), pid: process.ppid })
   const run = read(f.state)
-  restoreData(f.config, run, changes => Object.assign(run, changes))
-  assert.deepEqual(run.rollback.data, { restored: false, why: 'team-in-use', trialKept: false })
+  const lockPath = join(f.botsHome, 'state.lock')
+  const other = { host: hostname(), pid: process.ppid, token: 'other' }
+  await assert.rejects(restoreData(f.config, run, changes => {
+    Object.assign(run, changes)
+    if (changes.journal.restore) write(lockPath, other)
+  }, { wait: () => assert.fail('the acquired lock must not be retried') }), /team-in-use/)
+  assert.deepEqual(read(lockPath), other)
   assert.deepEqual(read(f.path), trialTeam)
+  assert.equal(run.rollback.data, undefined)
 })
 
-test('rollback restores a supported roster and retains the encrypted trial', t => {
+const protectedContract = { stateFormats: [0, 1, 2, 3, 4, 5], activations: ['base-role', 'stack-role'] }
+for (const [name, from, to, active, result] of [
+  ['format 4 subset', 4, 4, ['base-role'], 'keep'],
+  ['format 5 subset', 5, 5, ['stack-role', 'base-role'], 'keep'],
+  ['compatible cross-format', 4, 5, ['stack-role', 'base-role'], 'keep'],
+  ['foreign activation at the same format', 4, 4, ['base-role', 'new-role'], 'restore'],
+  ['missing trial list', 2, 4, undefined, 'restore'],
+  ['empty trial list', 2, 4, [], 'restore'],
+  ['invalid trial ID', 2, 4, ['BOGUS'], 'restore'],
+  ['duplicate trial ID', 2, 5, ['base-role', 'base-role'], 'restore'],
+  ['contradictory legacy marker', 2, 2, ['base-role'], 'restore'],
+]) {
+  test('rollback compares ' + name, async t => {
+    const original = { ...originalTeam, version: from, ...(from >= 4 ? { stateActivations: ['base-role'] } : {}) }
+    const f = prepare(t, { originalTeam: original, contract: protectedContract })
+    const trial = { ...trialTeam, version: to, stateActivations: active }
+    write(f.path, trial)
+    const { run } = await rollback(f, { team: result === 'keep' ? JSON.parse(JSON.stringify(trial)) : original })
+    assert.equal(run.phase, 'rolledBack')
+    assert.deepEqual(run.rollback.data, result === 'keep' ? { restored: false, why: 'same-format', trialKept: false }
+      : { restored: true, trialKept: true })
+    assert.deepEqual(read(join(f.backup, 'bots-state.json')), original)
+    const retained = join(f.backup, 'trial-bots-state.json')
+    if (result === 'restore') assert.deepEqual(read(retained), JSON.parse(JSON.stringify(trial)))
+    else assert.equal(fs.existsSync(retained), false)
+  })
+}
+
+for (const [field, value, result] of [
+  ['activations', undefined, 'restore'], ['activations', 'base-role', 'restore'], ['activations', ['base-role', 'base-role'], 'restore'],
+  ['activations', [], 'restore'], ['reads', undefined, 'blocked'], ['reads', [2, '4'], 'blocked'], ['sha256', undefined, 'restore'],
+]) {
+  test('rollback needs valid captured ' + field + ' for protected trial, fixture ' + JSON.stringify(value), async t => {
+    const f = prepare(t, { contract: protectedContract })
+    const path = join(f.kept, 'data.json')
+    const index = read(path)
+    index.files[0][field] = value
+    write(path, index)
+    const trial = { version: 4, revision: 8, stateActivations: ['base-role'] }
+    write(f.path, trial)
+    const { run } = await rollback(f, result === 'blocked' ? { start: () => assert.fail('missing proof') } : {})
+    assert.equal(run.phase, result === 'blocked' ? 'manualRecovery' : 'rolledBack')
+    if (result === 'blocked') {
+      assert.deepEqual(run.rollback.data, { restored: false, why: 'unknown', trialKept: false })
+      assert.deepEqual(read(f.path), trial)
+    } else {
+      assert.deepEqual(read(f.path), originalTeam)
+      assert.deepEqual(read(join(f.backup, 'trial-bots-state.json')), trial)
+    }
+  })
+}
+
+test('a historical index without a digest still allows a compatible legacy trial', async t => {
+  const f = prepare(t)
+  const path = join(f.kept, 'data.json')
+  const index = read(path)
+  delete index.files[0].sha256
+  write(path, index)
+  const team = { ...trialTeam, version: 2 }
+  write(f.path, team)
+  const { run } = await rollback(f, { team })
+  assert.equal(run.phase, 'rolledBack')
+  assert.deepEqual(run.rollback.data, { restored: false, why: 'same-format', trialKept: false })
+})
+
+for (const why of ['unknown', 'team-in-use', 'snapshot-changed', 'superseded']) {
+  test('a recorded ' + why + ' skip replays directly into manual recovery', async t => {
+    const f = prepare(t)
+    const { run } = f
+    const data = { restored: false, why, trialKept: false }
+    run.rollback.data = data
+    persist(f, f.state, run)
+    const outcome = await rollback(f, { start: () => assert.fail('a blocked predecessor cannot start') })
+    assert.deepEqual(outcome.checkpoints, ['save:manualRecovery:stop'])
+    assert.equal(outcome.run.phase, 'manualRecovery')
+    assert.deepEqual(outcome.run.rollback.data, data)
+    assert.deepEqual(read(f.path), trialTeam)
+  })
+}
+
+for (const kind of ['kept', 'restored', 'absent']) {
+  test('replacement at the spawn boundary blocks a previously proven ' + kind + ' team', async t => {
+    const f = prepare(t, { absent: kind === 'absent' })
+    if (kind === 'kept') write(f.path, { ...trialTeam, version: 2 })
+    const replacement = { version: 2, revision: 30, bots: {}, note: 'replacement' }
+    let handoffs = 0
+    const code = await runSupervisor({ ...lane(f), home: f.home, profile: f.profile, command: f.command,
+      version: FROM, env: f.env, onChildStart() { handoffs++; write(f.path, replacement) },
+      fetch: () => assert.fail('rollback is offline'), healthTimeout: 300,
+    })
+    assert.equal(code, 1)
+    assert.equal(handoffs, 1)
+    assert.equal(eventsOf(f).length, 0)
+    const saved = read(f.state)
+    assert.equal(saved.phase, 'manualRecovery')
+    assert.deepEqual(saved.rollback.data, { restored: false, why: 'superseded', trialKept: false })
+    assert.deepEqual(read(f.path), replacement)
+  })
+}
+
+test('rollback restores a supported roster and retains the encrypted trial', async t => {
   const f = prepare(t)
   const credentials = connectorState(f.botsHome, () => true)
   const clear = 'fixture-rollback-token9'
@@ -302,7 +480,7 @@ test('rollback restores a supported roster and retains the encrypted trial', t =
   const bytes = fs.readFileSync(key)
   fs.writeFileSync(f.path, trial)
   const run = read(f.state)
-  restoreData(f.config, run, changes => Object.assign(run, changes))
+  await restoreData(f.config, run, saveTo(run))
   assert.deepEqual(run.rollback.data, { restored: true, trialKept: true })
   assert.deepEqual(read(f.path), originalTeam)
   const retained = join(f.backup, 'trial-bots-state.json')
@@ -316,10 +494,10 @@ test('rollback restores a supported roster and retains the encrypted trial', t =
 })
 
 for (const modified of ['none', 'trial', 'snapshot', 'previous-after-completion']) {
-  test('replays restore intent safely with ' + modified + ' changes', t => {
+  test('replays restore intent safely with ' + modified + ' changes', async t => {
     const f = prepare(t)
     const run = read(f.state)
-    assert.throws(() => restoreData(f.config, run, changes => {
+    await assert.rejects(restoreData(f.config, run, changes => {
       Object.assign(run, changes)
       throw cutError
     }), error => error === cutError)
@@ -329,16 +507,20 @@ for (const modified of ['none', 'trial', 'snapshot', 'previous-after-completion'
     if (modified === 'trial') write(f.path, update)
     if (modified === 'snapshot') write(teamSnapshot(f.config, run).saved, update)
     const save = changes => Object.assign(run, changes)
-    restoreData(f.config, run, save)
+    if (modified === 'trial' || modified === 'snapshot') {
+      await assert.rejects(restoreData(f.config, run, save), modified === 'trial' ? /superseded/ : /snapshot-changed/)
+      assert.equal(run.rollback.data, undefined)
+    } else await restoreData(f.config, run, save)
     if (modified === 'previous-after-completion') {
       write(f.path, update)
-      restoreData(f.config, run, save)
+      await assert.rejects(restoreData(f.config, run, save), /superseded/)
       assert.deepEqual(read(f.path), update)
     } else {
       assert.deepEqual(read(f.path), modified === 'trial' ? update : modified === 'snapshot' ? trialTeam : originalTeam)
     }
-    assert.deepEqual(run.rollback.data, modified === 'trial' ? { restored: false, why: 'superseded', trialKept: false }
-      : modified === 'snapshot' ? { restored: false, why: 'snapshot-changed', trialKept: false } : { restored: true, trialKept: true })
+    if (modified === 'none' || modified === 'previous-after-completion') {
+      assert.deepEqual(run.rollback.data, { restored: true, trialKept: true })
+    }
   })
 }
 
@@ -352,7 +534,8 @@ test('rollback replay preserves the verified archive when the kept snapshot chan
   assert.deepEqual(JSON.parse(original), originalTeam)
   write(teamSnapshot(f.config, before.run).saved, { ...originalTeam, note: 'changed kept snapshot' })
 
-  const terminal = await recoverThroughDriver(f)
+  const terminal = await recoverThroughDriver(f, 'manualRecovery')
+  assert.equal(eventsOf(f).length, 0)
   assert.deepEqual(terminal.rollback.data, { restored: false, why: 'snapshot-changed', trialKept: false })
   assert.deepEqual(fs.readFileSync(archived), original)
   assert.deepEqual(read(f.path), trialTeam)
@@ -436,19 +619,19 @@ test('an asynchronous previous-child spawn error is observed once and stops reco
   assert.equal(read(f.state).rollback.starts, 1)
 })
 
-test('a missing team home can be recreated from the saved roster', t => {
+test('a missing team home can be recreated from the saved roster', async t => {
   const f = prepare(t)
   fs.rmSync(f.botsHome, { recursive: true })
   const run = read(f.state)
-  restoreData(f.config, run, changes => Object.assign(run, changes))
+  await restoreData(f.config, run, saveTo(run))
   assert.deepEqual(run.rollback.data, { restored: true, why: 'team-lost', trialKept: false })
   assert.deepEqual(read(f.path), originalTeam)
 })
 
-test('a cut after writing the live team but before the restore save recognizes the restored bytes', t => {
+test('a cut after writing the live team but before the restore save recognizes the restored bytes', async t => {
   const f = prepare(t)
   const run = read(f.state)
-  assert.throws(() => restoreData(f.config, run, changes => {
+  await assert.rejects(restoreData(f.config, run, changes => {
     if (changes.journal.restored) throw cutError
     Object.assign(run, changes)
   }), error => error === cutError)
@@ -457,46 +640,51 @@ test('a cut after writing the live team but before the restore save recognizes t
   assert.ok(run.journal.restore)
   const trialCopy = join(f.backup, 'trial-bots-state.json')
   assert.deepEqual(read(trialCopy), trialTeam)
-  restoreData(f.config, run, changes => Object.assign(run, changes))
+  await restoreData(f.config, run, saveTo(run))
   assert.deepEqual(read(f.path), originalTeam)
   assert.deepEqual(read(trialCopy), trialTeam)
   assert.equal(run.journal.restored, true)
 })
 
 
-test('an unreadable trial team is retained when health already observed team loss', t => {
+test('an unreadable trial team is retained when health already observed team loss', async t => {
   const original = { version: 2, revision: 7, bots: { ada: {} } }
   const f = prepare(t, { originalTeam: original })
   fs.writeFileSync(f.path, '{')
   const run = read(f.state)
   run.rollback.teamMissing = true
-  restoreData(f.config, run, changes => Object.assign(run, changes))
+  await restoreData(f.config, run, saveTo(run))
   assert.deepEqual(run.rollback.data, { restored: true, trialKept: true, why: 'team-lost' })
   assert.deepEqual(read(f.path), original)
   assert.equal(fs.readFileSync(join(f.backup, 'trial-bots-state.json'), 'utf8'), '{')
 })
 
 
-test('observed team loss restores the snapshot even if an equal-revision team appears', t => {
+test('observed team loss restores the snapshot even if an equal-revision team appears', async t => {
   const f = prepare(t, { originalTeam: { ...originalTeam, revision: 1 } })
   const replacement = { version: 1, revision: 1, bots: {} }
   write(f.path, replacement)
   const run = read(f.state)
   run.rollback.teamMissing = true
-  restoreData(f.config, run, changes => Object.assign(run, changes))
+  await restoreData(f.config, run, saveTo(run))
   assert.deepEqual(run.rollback.data, { restored: true, trialKept: true, why: 'team-lost' })
   assert.deepEqual(read(f.path), { ...originalTeam, revision: 1 })
   assert.deepEqual(read(join(f.backup, 'trial-bots-state.json')), replacement)
 })
 
-test('a descended empty roster and malformed bytes without loss evidence stay in place', t => {
+test('a descended empty roster and malformed bytes without loss evidence stay in place', async t => {
   const original = { version: 2, revision: 7, bots: { ada: {} } }
   for (const [bytes, why] of [[JSON.stringify({ version: 2, revision: 8, bots: {} }), 'same-format'], ['{', 'unknown']]) {
     const f = prepare(t, { originalTeam: original })
     fs.writeFileSync(f.path, bytes)
     const run = read(f.state)
-    restoreData(f.config, run, changes => Object.assign(run, changes))
-    assert.deepEqual(run.rollback.data, { restored: false, why, trialKept: false })
+    if (why === 'unknown') {
+      await assert.rejects(restoreData(f.config, run, saveTo(run)), /unknown/)
+      assert.equal(run.rollback.data, undefined)
+    } else {
+      await restoreData(f.config, run, saveTo(run))
+      assert.deepEqual(run.rollback.data, { restored: false, why, trialKept: false })
+    }
     assert.equal(fs.readFileSync(f.path, 'utf8'), bytes)
   }
 })
