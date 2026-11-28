@@ -4,6 +4,7 @@
 // am-automations-herdr.mjs); the in-app check in the mod's RECIPE still applies.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { registerHooks } from "node:module";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
@@ -19,6 +20,11 @@ registerHooks({
 const { state } = await import(stubs.herdr);
 const { nodes, index, textOf, all } = await import(stubs["gpui-kit"]);
 const { default: Automations, SCHEDULER, repairCommand } = await import("../mods/am-automations/main.js");
+const { FIND_SCHEDULER, schedulerAsset } = await import("../mods/am-automations/scheduler.js");
+const PATH_SCHEDULER = "/fake/bin/herdr-automations";
+const found = (stdout) => ({ code: 0, stdout, stderr: "" });
+const absent = { code: 127, stdout: "", stderr: "no such file" };
+const locating = (command, args) => command === "sh" && args[1] === FIND_SCHEDULER;
 
 function makeCx() {
   const cx = { pending: [], ticks: [], clipboard: [],
@@ -29,10 +35,10 @@ function makeCx() {
   return cx;
 }
 
-/** An exec where only `uname -m` answers, unless `scheduler` names a binary that does too. */
 function answer({ machine = "arm64", scheduler = null } = {}) {
   state.exec = async (command, args) => {
-    if (command === "uname") return { code: 0, stdout: `${machine}\n`, stderr: "" };
+    if (command === "uname") return found(args[0] === "-m" ? machine : "Darwin");
+    if (locating(command, args)) return scheduler ? found(scheduler) : absent;
     if (command !== scheduler) return { code: 127, stdout: "", stderr: `cannot run ${command}: no such file` };
     if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ automations: [], invalid: [], scheduler: { pid: 1 }, paused: false }), stderr: "" };
     if (args[0] === "history") return { code: 0, stdout: "[]", stderr: "" };
@@ -52,12 +58,12 @@ async function panel() {
 test("the repair command: our pinned release for this Mac's arch, hash-checked, into ~/.local/bin", () => {
   const release = "/automagik-si/automagik/releases/download/herdr-automations-v0.12.1-am.4";
   const arm = repairCommand("arm64");
-  assert.ok(arm.includes(`${release}/herdr-automations_darwin_arm64 `));
-  assert.ok(arm.includes(`echo "${SCHEDULER.sha256.arm64}  herdr-automations" | shasum -a 256 -c`));
-  assert.match(arm, /shasum -a 256 -c && chmod 755 herdr-automations && mv herdr-automations ~\/\.local\/bin\/; s=\$\?; /, "moved in only once the hash matches");
-  // Its scratch folder goes whether it worked or not, and the subshell keeps the install's status.
-  assert.ok(arm.startsWith('(d=; mkdir -p ~/.local/bin && d="$(mktemp -d)" && cd "$d" && curl '));
-  assert.ok(arm.endsWith('; s=$?; cd /; [ -z "$d" ] || rm -rf "$d"; exit "$s")'));
+  assert.ok(arm.includes(`${release}/herdr-automations_darwin_arm64 || exit`));
+  assert.ok(arm.includes(`${SCHEDULER.sha256.arm64} | shasum -a 256 -c || exit`));
+  assert.match(arm, /shasum -a 256 -c \|\| exit\nchmod 755/);
+  assert.ok(arm.endsWith('mv -fh herdr-automations "$bin")'));
+  assert.ok(arm.includes('bin="$HOME/.local/bin/herdr-automations"'));
+  assert.ok(arm.includes('mktemp -d "$dir/.herdr-automations.XXXXXX"'));
   const intel = repairCommand("x86_64");
   assert.match(intel, /herdr-automations-v[^/]+\/herdr-automations_darwin_amd64 /);
   assert.ok(intel.includes(SCHEDULER.sha256.amd64));
@@ -65,7 +71,7 @@ test("the repair command: our pinned release for this Mac's arch, hash-checked, 
   // A Linux Herdr gets the Linux build, checked with sha256sum (no shasum there).
   const linux = repairCommand("x86_64", "Linux"), linuxArm = repairCommand("aarch64", "Linux");
   assert.ok(linux.includes(`${release}/herdr-automations_linux_amd64 `));
-  assert.ok(linux.includes(`echo "${SCHEDULER.linux.amd64}  herdr-automations" | sha256sum -c && chmod 755`));
+  assert.ok(linux.includes(`${SCHEDULER.linux.amd64} | sha256sum -c || exit`));
   assert.match(linuxArm, /herdr-automations_linux_arm64 /);
   assert.ok(linuxArm.includes(SCHEDULER.linux.arm64));
   assert.equal(repairCommand("arm64", "Darwin"), arm, "a Mac is the default");
@@ -123,8 +129,8 @@ test("no scheduler: one line says what is missing, the command is shown, Copy co
   n.get("copy-repair").click({}, cx);
   assert.deepEqual(cx.clipboard, [repairCommand("x86_64")]);
   assert.equal(textOf(draw().get("copy-repair")), "Copied");
-  const ran = state.calls.map(([c]) => c);
-  assert.ok(ran.every((c) => c === "herdr-automations" || c === "uname" || c.endsWith("/.local/bin/herdr-automations")), ran.join(" "));
+  const scripts = state.calls.filter(([c]) => c === "sh").map(([, , script]) => script);
+  assert.deepEqual(scripts, [FIND_SCHEDULER]);
   assert.ok(!state.calls.some((c) => c.includes("service")), "no service install");
 });
 
@@ -152,7 +158,10 @@ test("Install runs the shown command once; the panel then finds the scheduler an
   const shell = [];
   state.exec = async (command, args) => {
     if (command === "uname") return { code: 0, stdout: args[0] === "-s" ? "Linux\n" : "x86_64\n", stderr: "" };
-    if (command === "sh") { shell.push(args); installed = true; return { code: 0, stdout: "herdr-automations: OK\n", stderr: "" }; }
+    if (locating(command, args)) return installed ? found(local) : absent;
+    if (command === "sh") {
+      shell.push(args); installed = true; return found("herdr-automations: OK\n");
+    }
     if (command !== local || !installed) return { code: 127, stdout: "", stderr: `cannot run ${command}: no such file` };
     if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ automations: [], invalid: [], scheduler: 0, backend: "hc", paused: false }), stderr: "" };
     if (args[0] === "history") return { code: 0, stdout: "[]", stderr: "" };
@@ -177,8 +186,9 @@ test("Install runs the shown command once; the panel then finds the scheduler an
 });
 
 test("a failed Install keeps the repair block and says why", async () => {
-  state.exec = async (command) => {
-    if (command === "uname") return { code: 0, stdout: "arm64\n", stderr: "" };
+  state.exec = async (command, args) => {
+    if (command === "uname") return found(args[0] === "-m" ? "arm64" : "Darwin");
+    if (locating(command, args)) return absent;
     if (command === "sh") return { code: 1, stdout: "", stderr: "curl: (22) The requested URL returned error: 404\nherdr-automations: FAILED\n" };
     return { code: 127, stdout: "", stderr: "no such file" };
   };
@@ -197,7 +207,8 @@ test("a failed Install keeps the repair block and says why", async () => {
 test("backend herdr, or none named: the panel says runs open in the TUI and names the file; hc and auto say nothing", async () => {
   const serve = (backend) => {
     state.exec = async (command, args) => {
-      if (command !== "herdr-automations") return { code: 127, stdout: "", stderr: "no such file" };
+      if (locating(command, args)) return found(PATH_SCHEDULER);
+      if (command !== PATH_SCHEDULER) return absent;
       if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ automations: [], invalid: [], scheduler: 7, backend, paused: false }), stderr: "" };
       if (args[0] === "history") return { code: 0, stdout: "[]", stderr: "" };
       return { code: 0, stdout: "0.12.1-am.4\n", stderr: "" };
@@ -219,20 +230,213 @@ test("backend herdr, or none named: the panel says runs open in the TUI and name
   }
 });
 
-test("on PATH: no repair line, and uname is never asked", async () => {
-  answer({ scheduler: "herdr-automations" });
-  const { view, draw } = await panel();
-  assert.equal(view.bin, "herdr-automations");
+test("on PATH: the panel uses the resolved executable and checks the platform once", async () => {
+  answer({ scheduler: PATH_SCHEDULER });
+  const { view, cx, draw } = await panel();
+  assert.equal(view.bin, PATH_SCHEDULER);
   assert.ok(!draw().has("scheduler-missing"));
-  assert.ok(!state.calls.some(([c]) => c === "uname"));
+  await cx.ticks[0](cx);
+  assert.deepEqual(state.calls.filter(([c]) => c === "uname"), [["uname", "-m"], ["uname", "-s"]]);
+});
+
+function offerFixture({ os = "Linux", machine = "x86_64", version = "dev", current = false,
+  bin = PATH_SCHEDULER, versionProbe, installFails = false, serviceFails = false } = {}) {
+  const asset = schedulerAsset(machine, os);
+  const different = "a".repeat(64);
+  let stamp = "123 mtime inode", sum = current ? asset.sha256 : different;
+  let live = false;
+  const history = [{ status: "running", run_id: "in-flight", automation: "nightly" }];
+  state.exec = async (command, args, options) => {
+    if (locating(command, args)) return bin ? found(bin) : absent;
+    if (command === "uname") return found(args[0] === "-m" ? machine : os);
+    if (command === "stat") return found(stamp);
+    if (command === asset?.hash[0]) return found(`${sum}  ${bin}\n`);
+    if (command === "sh") {
+      if (installFails) return { ...absent, stderr: "curl failed" };
+      stamp = "456 new-mtime new-inode";
+      sum = asset.sha256;
+      return found("");
+    }
+    if (command === "test" || command === "/usr/sbin/lsof") return live ? found("42") : absent;
+    if (command !== bin) return absent;
+    if (args[0] === "version") return versionProbe ? versionProbe(options) : found(version);
+    if (args[0] === "ls") return found(JSON.stringify({
+      automations: [], invalid: [], scheduler: 42, backend: "hc",
+    }));
+    if (args[0] === "history") return found(JSON.stringify(history));
+    if (args.join(" ") === "service status") {
+      return found("service installed: true\nscheduler running: true (pid 42)\n");
+    }
+    if (args.join(" ") === "service install") return serviceFails ? absent : found("Installed");
+    return absent;
+  };
+  return {
+    stamp: () => stamp,
+    change: (next, hash = different) => { stamp = next; sum = hash; },
+    switchDaemon: () => { live = true; },
+    hashes: () => state.calls.filter(([cmd]) => cmd === asset?.hash[0]).length,
+  };
+}
+
+test("the pinned hash hides Update and the stamp caches hashes across refreshes", async () => {
+  const f = offerFixture({ current: true });
+  const { cx, draw } = await panel();
+  assert.ok(!draw().has("scheduler-update"));
+  for (let i = 0; i < 4; i++) draw();
+  await Promise.all([cx.ticks[0](cx), cx.ticks[0](cx)]);
+  assert.equal(f.hashes(), 1, "the same file is hashed only once");
+  f.change("123 changed-mtime inode");
+  await cx.ticks[0](cx);
+  assert.ok(draw().has("scheduler-update"), "a changed mtime triggers another hash");
+  f.change("124 changed-mtime inode", SCHEDULER.linux.amd64);
+  await cx.ticks[0](cx);
+  assert.ok(!draw().has("scheduler-update"), "a changed size triggers another hash");
+  assert.equal(f.hashes(), 3);
+});
+
+for (const [version, words] of [
+  ["0.12.1-am.3", /older scheduler build \(0\.12\.1-am\.3\)/],
+  ["dev", /different scheduler build \(dev\).*closes terminals left by failed runs/],
+  ["0.12.1-am.10", /different scheduler build \(0\.12\.1-am\.10\).*closes terminals/],
+  [SCHEDULER.version, /different scheduler build.*closes terminals/],
+  ["", /different scheduler build\. .*closes terminals/],
+]) {
+  test(`a different hash offers Update when version says ${version || "nothing"}`, async () => {
+    offerFixture({ version });
+    const { draw } = await panel();
+    const n = draw();
+    assert.match(textOf(n.get("scheduler-update")), words);
+    assert.equal(textOf(n.get("update-scheduler")), "Update");
+    assert.ok(!n.has("scheduler-missing"));
+  });
+}
+
+test("a hanging version probe times out and the installed file still gets Update", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "am-hanging-version-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, "herdr-automations");
+  writeFileSync(bin, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
+  let timedOut = false;
+  offerFixture({ bin, versionProbe: ({ timeout }) => new Promise((done) => {
+    assert.equal(timeout, 1500);
+    // The outer bound keeps the fixture safe if a mutant drops the production limit.
+    execFile(bin, ["version"], { timeout: Math.min(timeout || 2500, 2500) }, (err) => {
+      timedOut = err?.killed === true;
+      done(absent);
+    });
+  }) });
+  const { draw } = await panel();
+  assert.equal(timedOut, true);
+  assert.match(textOf(draw().get("scheduler-update")), /different scheduler build/);
+});
+
+test("unsupported platforms and architectures get neither Install nor Update", async () => {
+  const unsupported = [["Windows_NT", "x86_64"], ["FreeBSD", "arm64"], ["Linux", "riscv64"]];
+  for (const [os, machine] of unsupported) {
+    for (const bin of [null, PATH_SCHEDULER]) {
+      offerFixture({ os, machine, bin });
+      const { draw } = await panel();
+      assert.ok(!draw().has("scheduler-missing"));
+      assert.ok(!draw().has("scheduler-update"));
+      assert.ok(!state.calls.some(([cmd]) => ["stat", "sha256sum", "shasum"].includes(cmd)));
+    }
+  }
+});
+
+for (const os of ["Darwin", "Linux"]) {
+  test(`${os}: Update replaces once, checks the service and preserves in-flight runs`, async () => {
+    const f = offerFixture({ os });
+    const { view, cx, draw } = await panel();
+    const command = repairCommand("x86_64", os, { bin: view.bin, stamp: f.stamp() });
+    if (os === "Darwin") {
+      const row = textOf(draw().get("scheduler-update"));
+      assert.match(row, /Restarting the login service can interrupt runs/);
+    }
+    assert.ok(!state.calls.some(([, ...args]) => args[0] === "service"));
+    draw().get("update-scheduler").click({}, cx);
+    draw().get("update-scheduler").click({}, cx);
+    await cx.settle();
+    const commands = state.calls.filter(([c, , s]) => c === "sh" && s !== FIND_SCHEDULER);
+    assert.deepEqual(commands, [["sh", "-c", command]]);
+    assert.deepEqual(state.calls.filter(([, arg]) => arg === "service"), [
+      [view.bin, "service", "status"],
+      ...(os === "Linux" ? [[view.bin, "service", "install"]] : []),
+    ]);
+    assert.ok(!draw().has("scheduler-update"));
+    assert.equal(view.runs[0].status, "running");
+    assert.match(textOf(draw().get("scheduler-handoff")), /restart after runs finish/);
+    f.switchDaemon();
+    await cx.ticks[0](cx);
+    assert.ok(!draw().has("scheduler-handoff"), "the daemon now uses the pinned image");
+    assert.equal(f.hashes(), 2);
+  });
+}
+
+test("a service setup failure is reported separately from a failed download", async () => {
+  offerFixture({ serviceFails: true });
+  let { cx, draw } = await panel();
+  draw().get("update-scheduler").click({}, cx);
+  await cx.settle();
+  assert.match(textOf(draw().get("scheduler-handoff")), /login service could not be set up/);
+  assert.ok(!draw().has("scheduler-update"));
+
+  offerFixture({ installFails: true });
+  ({ cx, draw } = await panel());
+  draw().get("update-scheduler").click({}, cx);
+  await cx.settle();
+  assert.match(textOf(draw().get("automations")), /The scheduler was not updated: curl failed/);
+  assert.ok(draw().has("scheduler-update"));
+  assert.ok(!state.calls.some(([, arg]) => arg === "service"));
+});
+
+test("the shell leaves the old file on a partial download or bad checksum", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "am-update-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const tools = join(dir, "tools"), target = join(dir, "someone's bin");
+  mkdirSync(tools);
+  mkdirSync(target);
+  const bin = join(target, "herdr-automations");
+  const staged = join(dir, "staged-inode");
+  const os = process.platform === "darwin" ? "Darwin" : "Linux";
+  const asset = schedulerAsset("x86_64", os);
+  const good = "fixture download";
+  writeFileSync(bin, "old executable", { mode: 0o755 });
+  writeFileSync(join(tools, "curl"), [
+    "#!/bin/sh",
+    '[ "$1" = "-fsSLo" ] && [ "$2" = herdr-automations ] || exit 99',
+    'printf %s "$PAYLOAD" > "$2"',
+    'ls -i "$2" > "$STAGED"',
+    'exit "$CURL_CODE"',
+  ].join("\n"), { mode: 0o755 });
+  const stamp = execFileSync("stat", [...asset.stat, bin], { encoding: "utf8" }).trim();
+  const command = repairCommand("x86_64", os, { bin, stamp });
+  assert.ok(command.includes(asset.sha256));
+  // Substitute the test payload's digest in the generated command. curl never touches the network.
+  const script = command.replace(asset.sha256, createHash("sha256").update(good).digest("hex"));
+  const run = (PAYLOAD, CURL_CODE) => spawnSync("sh", ["-c", script], {
+    env: { HOME: dir, PATH: `${tools}:/usr/bin:/bin`, PAYLOAD, CURL_CODE, STAGED: staged },
+    encoding: "utf8",
+  });
+  for (const [payload, code] of [[good, "22"], ["bad bytes", "0"]]) {
+    assert.notEqual(run(payload, code).status, 0);
+    assert.equal(readFileSync(bin, "utf8"), "old executable");
+    assert.deepEqual(readdirSync(target), ["herdr-automations"], "no staging files remain");
+  }
+  const success = run(good, "0");
+  assert.equal(success.status, 0, success.stderr);
+  assert.equal(readFileSync(bin, "utf8"), good);
+  const inode = readFileSync(staged, "utf8").trim().split(/\s+/)[0];
+  assert.equal(statSync(bin, { bigint: true }).ino.toString(), inode);
+  assert.deepEqual(readdirSync(target), ["herdr-automations"]);
 });
 
 /** The scheduler on PATH listing `automations`; every put (through `sh -c`) is kept and answers ok. */
 function listing(automations) {
   const puts = [];
   state.exec = async (command, args) => {
+    if (locating(command, args)) return found(PATH_SCHEDULER);
     if (command === "sh") { puts.push({ entry: JSON.parse(args[4]), args: args.slice(5) }); return { code: 0, stdout: "{}", stderr: "" }; }
-    if (command !== "herdr-automations") return { code: 127, stdout: "", stderr: `cannot run ${command}: no such file` };
+    if (command !== PATH_SCHEDULER) return absent;
     if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ automations, invalid: [], scheduler: { pid: 1 }, paused: false }), stderr: "" };
     if (args[0] === "history") return { code: 0, stdout: "[]", stderr: "" };
     return { code: 0, stdout: "0.12.1\n", stderr: "" };
@@ -300,7 +504,9 @@ test("a non-retired automation: no retired pill, its agent picked as before; a n
 // the keys v0.12.1's api.Automation has no field for (close_workspace, session). Only the stub
 // and `sh` (the panel's stdin hand-over) really run; any other program, the real scheduler's
 // bare name included, is refused, so no test can reach a real config.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
+import {
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile, execFileSync } from "node:child_process";
@@ -1443,8 +1649,9 @@ function historyRun(run_id, fields = {}) {
 function historyPanel(automations, history, project = { bots: [] }) {
   const json = (data) => ({ code: 0, stdout: JSON.stringify(data), stderr: "" });
   state.exec = async (bin, args) => {
+    if (locating(bin, args)) return found(PATH_SCHEDULER);
     if (bin === "am" && args[0] === "ls") return json({ projects: [project] });
-    if (bin === "herdr-automations") {
+    if (bin === PATH_SCHEDULER) {
       if (args[0] === "version") return { code: 0, stdout: "0.12.1-am.1\n", stderr: "" };
       if (args[0] === "ls") return json({ automations, scheduler: 1, kinds: ["command"], targets: ["bot", "worker"] });
       if (args[0] === "history") return json(history);

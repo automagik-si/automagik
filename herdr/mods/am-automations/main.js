@@ -13,7 +13,9 @@ import { exec, hc, home, theme, terminals, panes, spaces, run, notify, pickFolde
 import { offeredAgents, RETIRED } from "./agents.js";
 import { addressWarning, argsText, autoArgs, envText, modeOf, parseArgs, parseEnv, splitPermission, templateMode, withoutPermission } from "./modes.js";
 import { RUNS_AS, parseTarget, targetLine, targetWarning } from "./targets.js";
-import { SCHEDULER, repairCommand } from "./scheduler.js";
+import {
+  FIND_SCHEDULER, SCHEDULER, repairCommand, schedulerAsset, updateMessage,
+} from "./scheduler.js";
 
 // The scheduler's release pin and install line live in scheduler.js: pure, so the Node pin check
 // (herdr/scripts/scheduler-pin.mjs) reads the same pins this panel offers.
@@ -34,6 +36,15 @@ const KINDS = [["agent", "Agent prompt"], ["command", "Command (no model)"]];
 const outcome = (r) => r.result || r.error || "";
 /** Our scheduler's `version` output carries "-am." (herdr-automations-v<version>); upstream's never does. */
 const oursVersion = (out) => /-am\./.test(out ?? "");
+const VERSION_TIMEOUT_MS = 1500;
+const PROBE_TIMEOUT_MS = 5000;
+
+async function probe(bin, args, timeout = PROBE_TIMEOUT_MS) {
+  try {
+    const r = await exec(bin, args, { timeout });
+    return r.code === 0 ? r.stdout.trim() : null;
+  } catch { return null; }
+}
 
 const human = (cron) => PRESETS.find(([, c]) => c === cron)?.[0] ?? cron;
 const tilde = (p) => (p && p.startsWith(home()) ? "~" + p.slice(home().length) : p ?? "");
@@ -66,6 +77,8 @@ export default class Automations extends View {
     this.error = null; this.note = null;
     this.known = null; // run ids already seen by this copy, to toast only new failures
     this.missing = null; // the repair command while the scheduler is not installed, else null
+    this.build = null;
+    this.handoff = null;
     this.copied = false;
     this.installing = false; // while the Install button's command runs
     this.handle = cx.focus_handle();
@@ -76,45 +89,68 @@ export default class Automations extends View {
     cx.timer.every(30000, (cx) => this.refresh(cx)); // next-run times and the scheduler's pid
   }
 
-  // The CLI on PATH, else ~/.local/bin (where its install line and the dev symlink put it). Neither:
-  // null, and the panel shows the command that installs it (looked for again on every refresh).
-  async locate() {
-    // Ours carries "-am." in `version` (herdr-automations-v<version>, herdr/scheduler): only our
-    // build's ls --json and put know close_workspace.
-    // put() asks again right before it sends: a repair can replace the binary while we are open.
-    const answers = async (bin) => {
-      try {
-        const r = await exec(bin, ["version"]);
-        if (r.code !== 0) return false;
-        this.schedulerVersion = r.stdout.trim();
-        return true;
-      } catch { return false; }
-    };
-    if (await answers("herdr-automations")) return "herdr-automations";
+  async checkBuild() {
     const local = `${home()}/.local/bin/herdr-automations`;
-    if (await answers(local)) return local;
-    let machine = "", os = "";
-    try { machine = (await exec("uname", ["-m"])).stdout.trim(); } catch {}
-    try { os = (await exec("uname", ["-s"])).stdout.trim(); } catch {}
-    this.missing = repairCommand(machine, os);
-    return null;
+    const [machine, os] = this.platform ??= await Promise.all([
+      probe("uname", ["-m"]), probe("uname", ["-s"]),
+    ]);
+    const asset = schedulerAsset(machine, os);
+    const previous = this.bin;
+    this.bin = await probe("sh", ["-c", FIND_SCHEDULER, "sh", local]);
+    // Keep the CLI usable where there is no POSIX shell.
+    if (!this.bin && !os) {
+      for (const candidate of ["herdr-automations", local]) {
+        if (await probe(candidate, ["version"], VERSION_TIMEOUT_MS) !== null) {
+          this.bin = candidate;
+          break;
+        }
+      }
+    }
+    this.looked = true;
+    if (previous !== this.bin) { this.list = null; this.runs = []; this.copied = false; }
+    this.missing = this.bin ? null : repairCommand(machine, os);
+    if (!this.bin) {
+      this.build = null;
+      this.schedulerVersion = "";
+      return;
+    }
+
+    const stamp = asset && await probe("stat", [...asset.stat, this.bin]);
+    if (stamp && this.build?.bin === this.bin && this.build.stamp === stamp) return;
+    const [version, sum] = await Promise.all([
+      probe(this.bin, ["version"], VERSION_TIMEOUT_MS),
+      stamp && probe(asset.hash[0], [...asset.hash.slice(1), this.bin]),
+    ]);
+    this.schedulerVersion = version ?? "";
+    // GNU sha256sum prefixes a backslash when it has to escape the printed filename.
+    const sha256 = sum?.match(/^\\?([0-9a-f]{64})(?:\s|$)/)?.[1];
+    const command = sha256 && sha256 !== asset.sha256
+      ? repairCommand(machine, os, { bin: this.bin, stamp }) : null;
+    // A failed hash is retried on refresh. Keep even an empty version for a successfully read file.
+    this.build = { bin: this.bin, stamp: sha256 ? stamp : null, version, command };
   }
 
-  async cli(args) {
-    const r = await exec(this.bin, args);
+  async cli(args, timeout) {
+    const r = await exec(this.bin, args, timeout ? { timeout } : undefined);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().replace(/^error: /, ""));
     return r.stdout;
   }
 
   async refresh(cx) {
-    if (!this.bin) {
-      this.bin = await this.locate();
-      if (!this.bin) { this.list = null; this.error = null; cx.notify(); return; }
-      this.missing = null; this.copied = false;
-    }
+    if (this.installing) return;
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = this.readScheduler(cx);
+    try { await this.refreshing; } finally { this.refreshing = null; }
+  }
+
+  async readScheduler(cx) {
+    await this.checkBuild();
+    if (!this.bin) { this.error = null; cx.notify(); return; }
+    cx.notify();
     try {
-      this.list = JSON.parse(await this.cli(["ls", "--json"]));
-      this.runs = JSON.parse(await this.cli(["history", "--json"]));
+      this.list = JSON.parse(await this.cli(["ls", "--json"], PROBE_TIMEOUT_MS));
+      if (this.handoff) await this.checkHandoff(this.list.scheduler);
+      this.runs = JSON.parse(await this.cli(["history", "--json"], PROBE_TIMEOUT_MS));
       // Once, for the template modes the rows show (#498); the form asks again when it opens.
       if (!this.templates) this.templates = await this.loadTemplates();
       this.error = null;
@@ -265,22 +301,53 @@ export default class Automations extends View {
     });
   }
 
-  // The repair action (#220): runs the shown command, and only from a click on Install. It puts the
-  // hash-checked scheduler in ~/.local/bin and starts no service: once the binary answers, the
-  // "Scheduler stopped" banner offers Start. A failure keeps the block and says why.
   installScheduler(cx) {
-    if (this.installing || !this.missing) return;
-    const command = this.missing;
+    const update = this.build?.command ? this.build : null;
+    const command = update?.command ?? this.missing;
+    if (this.installing || !command) return;
     this.installing = true; this.note = null;
     cx.notify();
     cx.spawn(async (cx) => {
+      let replaced = false;
+      const action = update ? "updated" : "installed";
       try {
-        const r = await exec("sh", ["-c", command]);
-        if (r.code !== 0) this.note = `The scheduler was not installed: ${(r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n").pop()}`;
-      } catch (e) { this.note = `The scheduler was not installed: ${String(e.message ?? e)}`; }
-      this.installing = false;
+        await this.refreshing;
+        const r = await exec("sh", ["-c", command], { timeout: 45000 });
+        if (r.code !== 0) {
+          throw new Error((r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n").pop());
+        }
+        replaced = true;
+        this.build = null;
+        if (update) await this.handOff(update.bin, this.platform[1]);
+      } catch (e) {
+        this.note = replaced ? "The scheduler was updated. Its service could not be checked."
+          : `The scheduler was not ${action}: ${String(e.message ?? e)}`;
+      } finally { this.installing = false; }
       await this.refresh(cx);
     });
+  }
+
+  async handOff(bin, os) {
+    const status = await probe(bin, ["service", "status"]);
+    if (/^scheduler running: false$/m.test(status ?? "")) return;
+    const installed = /^service installed: true$/m.test(status ?? "");
+    this.handoff = { bin, os, installed, setupFailed: false };
+    // Linux service install reloads and enables the unit without stopping its running process.
+    // macOS service install boots out the agent. That can end a command or orphan an agent run.
+    // Leave the running daemon to re-exec when idle, and report if the new image isn't visible.
+    if (os === "Linux" && installed) {
+      this.handoff.setupFailed = await probe(bin, ["service", "install"]) === null;
+    }
+  }
+
+  async checkHandoff(pid) {
+    const { bin, os, installed, setupFailed } = this.handoff;
+    if (pid === 0 && !installed && !setupFailed) { this.handoff = null; return; }
+    if (!Number.isSafeInteger(pid) || pid <= 0) return;
+    const current = os === "Linux"
+      ? await probe("test", [bin, "-ef", `/proc/${pid}/exe`])
+      : await probe("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "txt", "-t", "--", bin]);
+    if (current !== null) this.handoff = null;
   }
 
   // hc's templates, or null when hc gave no list: a failure is never kept as an empty list, so
@@ -425,16 +492,11 @@ export default class Automations extends View {
   // Whether the form's agent is the one the entry was saved with (always, for a new entry).
   sameAgent(f) { return !f.original || (!f.template && f.agent === f.savedAgent); }
 
-  // The binary locate() found can be repaired or reinstalled while the panel is open, so put() asks
+  // The binary checkBuild() found can be replaced while the panel is open, so put() asks
   // once more, right before it builds the JSON. A probe that fails or errors reads as upstream
   // (fail closed): close_workspace must never reach upstream's put.
   async probeVersion() {
-    let version = "";
-    try {
-      const r = await exec(this.bin, ["version"]);
-      if (r.code === 0) version = r.stdout.trim();
-    } catch {}
-    this.schedulerVersion = version;
+    this.schedulerVersion = await probe(this.bin, ["version"], VERSION_TIMEOUT_MS) ?? "";
   }
 
   async put(dryRun) {
@@ -519,6 +581,8 @@ export default class Automations extends View {
       .border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .child(this.header(t, cx))
       .when(Boolean(this.missing), (el) => el.child(this.repair(t, cx)))
+      .when(Boolean(this.build?.command), (el) => el.child(this.updateRow(t)))
+      .when(Boolean(this.handoff), (el) => el.child(this.handoffRow(t)))
       .when(Boolean(this.list && !this.list.scheduler), (el) => el.child(this.banner(t, cx)))
       .when(this.list?.backend === "herdr" || this.list?.backend === "", (el) => el.child(this.backendNotice(t)))
       .when(Boolean(this.error || this.note), (el) => el.child(div().px(14).py(6).text_size(12).text_color(t.ansi1).child(this.error || this.note)))
@@ -561,7 +625,8 @@ export default class Automations extends View {
         .child(div().text_size(11).text_color(paused ? t.blocked : t.dim).child(paused ? "All paused" : "Active"))
         .child(this.switch_("pause-all", !paused, t, (cx) => this.act(cx, [paused ? "resume" : "pause", "--all"]))))
       // No scheduler, no form: its preview and Save both need the CLI.
-      .when(!back && !this.missing, (el) => el.child(this.button("new", "+", t, (cx) => this.edit(null, cx), { px: 8 })));
+      .when(!back && Boolean(this.bin), (el) => el.child(
+        this.button("new", "+", t, (cx) => this.edit(null, cx), { px: 8 })));
   }
 
   banner(t, cx) {
@@ -592,6 +657,32 @@ export default class Automations extends View {
       .child(div().text_size(11).text_color(t.dim).child("Install runs it here; or run it in a terminal, and this panel finds it within 30 s."));
   }
 
+  updateRow(t) {
+    return v_flex().id("scheduler-update").px(14).py(8).gap(6).bg(t.blocked + "22")
+      .border_b(1).border_color(t.border)
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).text_size(12).child(updateMessage(this.build.version ?? "")))
+        .child(this.button("update-scheduler", this.installing ? "Updating…" : "Update", t,
+          (cx) => this.installScheduler(cx), { solid: true })))
+      .when(this.platform[1] === "Darwin", (el) => el.child(div().text_size(11).text_color(t.dim)
+        .child("Restarting the login service can interrupt runs."
+          + " This update lets the scheduler switch when idle.")));
+  }
+
+  handoffRow(t) {
+    const { os, installed, setupFailed } = this.handoff;
+    const how = !installed ? "restart the scheduler"
+      : os === "Darwin" ? "run herdr-automations service install"
+      : "run systemctl --user restart herdr-automations.service";
+    const message = setupFailed
+      ? "The scheduler was updated, but its login service could not be set up."
+        + ` After runs finish, ${how}.`
+      : "The scheduler was updated. The switch to the new build could not be confirmed."
+        + ` If it still needs a restart after runs finish, ${how}.`;
+    return div().id("scheduler-handoff").px(14).py(8).text_size(12).bg(t.blocked + "22")
+      .border_b(1).border_color(t.border).child(message);
+  }
+
   dot(a, t) {
     const live = this.liveFor(a.name);
     // A command has no terminal to be live in: its running record is the sign.
@@ -602,7 +693,10 @@ export default class Automations extends View {
   }
 
   renderList(t, cx) {
-    if (!this.list) return div().p(14).text_color(t.dim).child(this.error || this.missing ? "" : "Loading…");
+    if (!this.list) {
+      const message = this.looked && !this.bin ? "The scheduler is unavailable." : "Loading…";
+      return div().p(14).text_color(t.dim).child(this.error || this.missing ? "" : message);
+    }
     const inbox = this.runs.filter((r) => FINISHED.has(r.status) && !r.seen).slice(0, 20);
     const section = (label, n) => h_flex().px(14).pt(12).pb(4).gap(6).items_center().text_size(11).font_semibold().text_color(t.dim)
       .child(label).when(n > 0, (el) => el.child(div().px(5).rounded(4).bg(t.raised).child(String(n))));

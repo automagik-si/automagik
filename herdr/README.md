@@ -183,14 +183,11 @@ warning; the pack is installed all the same, and a rerun retries.
 `--uninstall` otherwise removes the login service when this installer started it, then the binary.
 While a login service you started yourself (Start in the panel, or `service install`) is installed,
 it keeps the binary too and says how to remove both, so no service is left restarting a missing file.
-`am update` updates the pack. The installed scheduler keeps its current version.
-
-- **Installed by the pack installer.** Rerun the [pack installer](#install) to get 0.12.1-am.4.
-- **Installed with the panel's Install button only.** The pack installer leaves that older binary
-  in place. Update the pack first so the panel offers 0.12.1-am.4. After your runs finish, remove
-  only `~/.local/bin/herdr-automations`. Reopen **Automations** and click **Install**, which appears
-  when the panel can no longer find the scheduler. You can also click **Copy** and run the displayed
-  install command in a terminal. If the panel says the scheduler is stopped, click **Start**.
+`am update` updates the pack. On macOS and Linux, **Automations** then offers **Update** if the
+scheduler on disk has a different SHA-256 from the pack's build. The button downloads and verifies
+the pack's build before replacing the scheduler. The running scheduler can switch after its runs
+finish. If the panel still asks for a restart, wait for your runs to finish.
+If the scheduler is missing, use **Install** or copy the command shown in the panel.
 
 With 0.12.1-am.4 and `AFTER A RUN` set to never close, a finished run keeps its terminal until that
 automation's next run starts. The scheduler removes terminals it opened for failed, timed-out or

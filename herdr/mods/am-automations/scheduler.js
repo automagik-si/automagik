@@ -1,8 +1,8 @@
 // The scheduler release this panel installs and drives: our build of the vendored fork
 // (herdr/scheduler/, UPSTREAM.md), not upstream DnzzL's own release. When `herdr-automations` is
-// missing (#220) the panel offers repairCommand() as the install line: Copy copies it, Install runs
-// it, and only a click does. The sha256s are our release's checksums.txt, pinned here (`sha256` the
-// two darwin builds, `linux` the two Linux ones), and herdr/scripts/scheduler-pin.mjs checks all four
+// missing (#220) the panel offers repairCommand() as the install line. The same command replaces a
+// different build on Update. The sha256s are our release's checksums.txt, pinned here (`sha256` the
+// two darwin builds, `linux` the two Linux ones), and herdr/scripts/scheduler-pin.mjs checks them
 // against that release. install.sh reads this file out of the pack tarball it has just verified and
 // installs the same build, so it holds no pin of its own. Pure: no `herdr`, so Node reads the same
 // pins the panel installs. Apache-2.0.
@@ -19,17 +19,75 @@ export const SCHEDULER = Object.freeze({
   }),
 });
 
-/** The command that installs the scheduler to ~/.local/bin, hash-checked, for this machine's
- * `uname -m` and `uname -s` (anything but Linux reads as a Mac; a subshell, so the terminal it is
- * pasted in stays where it was). Its scratch folder is removed whether it worked or not, and the
- * subshell exits with the install's own status. `d=` comes first: a subshell inherits the calling
- * shell's variables, and the cleanup must only ever remove the folder this command made, never a
- * `d` the person's terminal already had when an early step fails. */
-export function repairCommand(machine, os = "Darwin") {
+export function schedulerAsset(machine, os) {
+  const arch = ["x86_64", "amd64"].includes(machine) ? "amd64"
+    : ["arm64", "aarch64"].includes(machine) ? "arm64" : null;
+  if (!arch || !["Linux", "Darwin"].includes(os)) return null;
   const linux = os === "Linux";
-  const arch = machine === "x86_64" || machine === "amd64" ? "amd64" : "arm64";
-  const url = `https://github.com/${SCHEDULER.repo}/releases/download/herdr-automations-v${SCHEDULER.version}/herdr-automations_${linux ? "linux" : "darwin"}_${arch}`;
-  return `(d=; mkdir -p ~/.local/bin && d="$(mktemp -d)" && cd "$d" && curl -fsSLo herdr-automations ${url}`
-    + ` && echo "${(linux ? SCHEDULER.linux : SCHEDULER.sha256)[arch]}  herdr-automations" | ${linux ? "sha256sum -c" : "shasum -a 256 -c"}`
-    + ' && chmod 755 herdr-automations && mv herdr-automations ~/.local/bin/; s=$?; cd /; [ -z "$d" ] || rm -rf "$d"; exit "$s")';
+  return {
+    name: `herdr-automations_${os.toLowerCase()}_${arch}`,
+    sha256: (linux ? SCHEDULER.linux : SCHEDULER.sha256)[arch],
+    hash: linux ? ["sha256sum"] : ["shasum", "-a", "256"],
+    stat: linux ? ["-Lc", "%s %y %i"] : ["-Lf", "%z %.9Fm %i"],
+  };
+}
+
+// Discover the file before asking it for a version. A file that hangs or says nothing still counts.
+export const FIND_SCHEDULER = [
+  'bin=$(command -v herdr-automations 2>/dev/null) || bin=',
+  'if ! { [ -f "$bin" ] && [ -x "$bin" ]; }; then bin=$1; fi',
+  '[ -f "$bin" ] && [ -x "$bin" ] || exit 1',
+  'case $bin in /*) ;; *) bin=$PWD/$bin ;; esac',
+  'realpath "$bin" 2>/dev/null || printf "%s\\n" "$bin"',
+].join("\n");
+
+const quote = (word) => "'" + word.replace(/'/g, "'\\''") + "'";
+
+/** Stage beside the destination so the final move is a rename on the same filesystem. On Update,
+ * check the stamped file again before committing, in case it changed during the download. */
+export function repairCommand(machine, os = "Darwin", { bin, stamp } = {}) {
+  const asset = schedulerAsset(machine, os);
+  if (!asset) return null;
+  const url = `https://github.com/${SCHEDULER.repo}/releases/download/`
+    + `herdr-automations-v${SCHEDULER.version}/${asset.name}`;
+  const target = bin ? quote(bin) : '"$HOME/.local/bin/herdr-automations"';
+  const unchanged = bin
+    ? `[ "$(stat ${asset.stat.map(quote).join(" ")} "$bin")" = ${quote(stamp)} ]`
+      + ' || { echo "The scheduler changed during the update. Try again." >&2; exit 1; }'
+    : '[ ! -e "$bin" ] || { echo "A scheduler is already installed." >&2; exit 1; }';
+  const move = os === "Linux" ? "mv -fT" : "mv -fh";
+  return [
+    `(bin=${target}; dir="\${bin%/*}"`,
+    'if [ -L "$bin" ] || [ -d "$bin" ]; then',
+    '  echo "The scheduler path is a link or directory." >&2; exit 1',
+    'fi',
+    ...(!bin ? ['mkdir -p "$dir" || exit'] : []),
+    'd=$(mktemp -d "$dir/.herdr-automations.XXXXXX") || exit',
+    `trap 'rm -rf "$d"' 0; trap 'exit 1' HUP INT TERM`,
+    'cd "$d" || exit',
+    `curl -fsSLo herdr-automations --max-time 25 ${url} || exit`,
+    `printf '%s  herdr-automations\\n' ${asset.sha256} | ${asset.hash.join(" ")} -c || exit`,
+    'chmod 755 herdr-automations || exit',
+    unchanged,
+    `${move} herdr-automations "$bin")`,
+  ].join("\n");
+}
+
+// Compare upstream X.Y.Z and the fork's X.Y.Z-am.N only. A local label like "dev" has no order.
+function versionParts(version) {
+  const match = /^v?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-am\.(\d{1,9}))?$/.exec(version);
+  return match && match.slice(1).map((part) => Number(part ?? 0));
+}
+
+export function updateMessage(version) {
+  const installed = versionParts(version);
+  const pinned = versionParts(SCHEDULER.version);
+  const first = installed?.findIndex((part, i) => part !== pinned[i]) ?? -1;
+  if (first >= 0 && installed[first] < pinned[first]) {
+    return `This machine has an older scheduler build (${version}).`
+      + ` This pack needs ${SCHEDULER.version}.`;
+  }
+  const reported = installed || version === "dev" ? ` (${version})` : "";
+  return `This machine has a different scheduler build${reported}.`
+    + ` This pack's build (${SCHEDULER.version}) closes terminals left by failed runs.`;
 }

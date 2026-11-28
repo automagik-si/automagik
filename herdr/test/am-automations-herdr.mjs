@@ -5,7 +5,10 @@ export const state = {
   home: "/home/someone", calls: [], runs: [], agents: [], hc: null,
   exec: async () => ({ code: 127, stdout: "", stderr: "no such file" }),
 };
-export async function exec(command, args = []) { state.calls.push([command, ...args]); return state.exec(command, args); }
+export async function exec(command, args = [], options) {
+  state.calls.push([command, ...args]);
+  return state.exec(command, args, options);
+}
 export const home = () => state.home;
 const T = ["background", "border", "foreground", "muted", "dim", "raised", "solid", "solid_foreground", "selected", "accent",
   "input", "hover", "blocked", "working", "idle", "ansi1"];
