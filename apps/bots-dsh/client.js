@@ -50747,7 +50747,7 @@ function MigrationNotices({ useRoster, readRoster: readRoster2, isOwner, after, 
   );
 }
 var MIGRATION_NOTICE_CSS = `
-.bt-migration{position:fixed;inset-inline-end:16px;top:calc(48px + env(safe-area-inset-top,0px));z-index:40;display:grid;gap:8px;width:min(340px,calc(100vw - 32px));max-height:calc(100dvh - 64px);overflow:auto}
+.bt-migration{position:fixed;inset-inline-end:16px;--bt-migration-top:calc(max(72px,var(--dsh-frame-overlay-top,0px)) + env(safe-area-inset-top,0px));top:var(--bt-migration-top);z-index:40;display:grid;gap:8px;width:min(340px,calc(100vw - 32px));max-height:calc(100dvh - var(--bt-migration-top) - 16px - env(safe-area-inset-bottom,0px));overflow:auto}
 .bt-migration-card{display:grid;gap:8px;padding:12px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card);color:var(--bt-ink);font-size:13px;overflow-wrap:anywhere}
 .bt-migration-card p,.bt-migration-card ul{margin:0}
 .bt-migration-card ul{padding-inline-start:20px}
