@@ -317,7 +317,7 @@ test('a readable read-only predecessor fails the run-bound status window and sto
   assert.equal(previous.run, state.runId)
   assert.equal(previous.activationCompare, undefined)
   const events = eventsOf(f)
-  assert.ok(events.some(event => event.event === 'read-only-predecessor' && event.rosterReadable && event.status === 503))
+  assert.ok(events.some(event => event.event === 'read-only-predecessor' && event.rosterReadable && event.code === 'bot/read-only'))
   assert.ok(!events.slice(events.indexOf(previous)).some(event => event.endpoint === 'state'))
 })
 
@@ -492,7 +492,8 @@ async function interruptedCandidate(f, edit = () => {}) {
     updatedAt: new Date().toISOString(), phase: 'switching', reason: null,
   }
   const save = () => writeJsonAtomic(join(f.store, 'state.json'), run, { profileDir: f.profileDir, durable: true })
-  run.journal = planSwitch(f.config, f.staging, run)
+  const { stateFormats } = read(join(f.profileDir, 'node_modules', BOTS, 'src/host/update-contract.json'))
+  run.journal = planSwitch({ ...f.config, stateFormats }, f.staging, run)
   completeSwitch(f.config, f.staging, run, save)
   edit(run)
   save()
@@ -1267,6 +1268,8 @@ test('the frozen 5b supervisor accepts a request with d6\'s unchanged four keys'
   await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', '5b did not accept the request')
   assert.equal(stateOf(f).requestId, click.requestId)
   assert.equal(previousVersion(f), TO)
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
 })
 
 test('a service group cut just after rollback intent recovers the prior current record and profile', async t => {
@@ -1292,6 +1295,7 @@ test('a service group cut just after rollback intent recovers the prior current 
   delete f.env.SUPERVISOR_CUT_AFTER
   const recovered = driver(t, f)
   await until(() => stateOf(f).phase === 'rolledBack', 'next supervisor did not finish rollback')
+  assert.deepEqual(stateOf(f).rollback.data, { restored: false, why: 'same-format', trialKept: false })
   assert.deepEqual(read(join(f.store, 'current.json')), prior)
   assert.equal(previousVersion(f), FROM)
   assert.deepEqual(read(join(f.profileDir, 'package.json')), f.manifest)
@@ -1362,6 +1366,9 @@ test('a genuinely new team can pass health with no team file at the switch', asy
   await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'missing health verdict')
   assert.equal(previousVersion(f), TO)
   assert.deepEqual(read(join(f.store, 'versions', FROM, 'data.json')).files, [])
+  assert.deepEqual(boots(f).map(event => event.activationCompare), [undefined, undefined])
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
 })
 
 test('a retry at the same sequence retains both trial copies and pins the mixed previous set', async t => {

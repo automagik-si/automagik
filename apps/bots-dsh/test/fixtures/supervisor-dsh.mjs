@@ -223,9 +223,10 @@ if (action === 'plugin') {
       const run = live && !terminal ? live.runId : expectedRun ?? null
       if (mode === 'rollback-read-only' && bootsAlready > 1 && payload?.endpoint === 'self-update-status') {
         const document = read(statePath)
-        record({ event: 'read-only-predecessor', rosterReadable: typeof document.version === 'number', status: 503 })
-        res.writeHead(503, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ error: 'no-writable-home' }))
+        const error = { code: 'bot/read-only', message: 'The saved team is read-only.' }
+        record({ event: 'read-only-predecessor', rosterReadable: typeof document.version === 'number', code: error.code })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error }))
         return
       }
       const result = healthReply({
