@@ -224,7 +224,7 @@ env line; pure),
 Programs: `herdr-automations` (the scheduler; `install.sh` installs it and, when you say yes, its
 login service), `hc` templates, `sh`, `uname`, `am` (`ls --json` for a project's bots, on the
 scheduler's side `start` and `worker` for a target), and the agents a run starts (`claude`, `codex`,
-`pi`). Scheduler checks use `stat`, `realpath`, `file`, `test`, Linux `readlink`, and macOS
+`pi`). Scheduler checks use `stat`, `realpath`, `od`, `test`, Linux `readlink`, and macOS
 `ps` and `lsof`. **Install** and **Update** use `curl`, `shasum` or `sha256sum`, `stat`,
 `mkdir`, `mktemp`, `ln`, `rm`, `chmod` and `mv`, plus the shell's `test`, `kill`, `printf`,
 `cd`, `trap` and `exec`.

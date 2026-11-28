@@ -192,6 +192,8 @@ and schedulers in unwritable folders must be updated where they were installed. 
 is missing, use **Install** or copy the command shown in the panel.
 
 Update verifies the download before replacing the file and leaves the login service alone.
+Right after the file is replaced on macOS, a code-signing check can stop the scheduler's first
+start and the login service starts it again within seconds, so “not running” briefly is expected.
 The panel checks the running scheduler each time it refreshes, including after reopening. It
 names a different executable if the scheduler runs from another file. When the running scheduler
 still uses the previous build of the same file, the panel says it switches once no run is busy.

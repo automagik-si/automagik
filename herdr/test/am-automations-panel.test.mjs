@@ -247,9 +247,9 @@ function offerFixture({ os = "Linux", machine = "x86_64", version = "dev", curre
   bin = PATH_SCHEDULER, foundAt = bin, versionProbe, installFails = false,
   installed = true, running = 42, live = true, imagePath = bin, statusPid,
   automations = [], runs = [{ status: "running", run_id: "in-flight", at: new Date(Date.now()) }],
-  writable = true, realHeader = false, realImage = false } = {}) {
+  writable = true, header = os === "Linux" ? " 7f 45 4c 46\n" : " cf fa ed fe\n",
+  realHeader = false, realImage = false } = {}) {
   const asset = schedulerAsset(machine, os);
-  const header = os === "Linux" ? " 7f 45 4c 46\n" : " cf fa ed fe\n";
   let stamp = OLD_STAMP, sum = current ? asset.sha256 : DIFFERENT;
   let loaded = live ? stamp : "c000001 9 123 mtime";
   const f = {
@@ -273,7 +273,7 @@ function offerFixture({ os = "Linux", machine = "x86_64", version = "dev", curre
       return stamp ? found(stamp) : absent;
     }
     if (command === "od" && args.at(-1) === bin) {
-      if (!realHeader) return found(header);
+      if (!realHeader) return header === null ? absent : found(header);
       const r = spawnSync(command, args, { encoding: "utf8" });
       return { code: r.status, stdout: r.stdout, stderr: r.stderr };
     }
@@ -319,6 +319,7 @@ function offerFixture({ os = "Linux", machine = "x86_64", version = "dev", curre
     }));
     if (args[0] === "history") return found(JSON.stringify(runs));
     if (args.join(" ") === "service status") {
+      if (statusPid === null) return absent;
       return found(`service installed: ${installed}\nscheduler running: true (pid ${statusPid ?? running})\n`);
     }
     return absent;
@@ -367,6 +368,24 @@ test("a failed stat or hash warns and retries, and requires an exact 64-hex dige
   await cx.ticks[0](cx);
   assert.ok(draw().has("scheduler-update"));
   assert.ok(!draw().has("scheduler-build-notice"));
+});
+
+test("a vanished scheduler replaces the Update row with repair advice", async () => {
+  const f = offerFixture({ running: 0 });
+  const { cx, draw } = await panel();
+  assert.ok(draw().has("scheduler-update"));
+
+  f.change(null); // The file disappears between discovery and stat.
+  await cx.ticks[0](cx);
+  assert.equal(textOf(draw().get("scheduler-build-notice")),
+    `Could not check the scheduler build at ${PATH_SCHEDULER}.`);
+  assert.ok(!draw().has("scheduler-update"));
+
+  f.move(null);
+  await cx.ticks[0](cx);
+  assert.equal(textOf(draw().get("repair-command")), repairCommand("x86_64", "Linux"));
+  assert.ok(draw().has("scheduler-missing"));
+  assert.ok(!draw().has("scheduler-update") && !draw().has("scheduler-build-notice"));
 });
 
 for (const [version, words] of [
@@ -433,6 +452,33 @@ test("ELF and thin and universal Mach-O headers are recognized without file", as
       assert.ok(!state.calls.some(([cmd]) => cmd === "file"));
     }
   }
+});
+
+test("empty and truncated scheduler headers offer reinstall advice", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "am-short-headers-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, "herdr-automations");
+  for (const bytes of ["", "7f454c"]) {
+    writeFileSync(bin, Buffer.from(bytes, "hex"), { mode: 0o755 });
+    const f = offerFixture({ bin, realHeader: true });
+    const { draw } = await panel();
+    assert.equal(textOf(draw().get("scheduler-build-notice")),
+      `Could not read the scheduler file as a program. Reinstall the scheduler at ${bin}.`);
+    assert.ok(!draw().has("scheduler-update"));
+    assert.equal(f.hashes(), 0);
+  }
+});
+
+test("an unreadable scheduler header has a notice and is probed again", async () => {
+  const f = offerFixture({ header: null });
+  const { cx, draw } = await panel();
+  assert.equal(textOf(draw().get("scheduler-build-notice")),
+    "Could not read the scheduler file as a program."
+      + ` Reinstall the scheduler at ${PATH_SCHEDULER}.`);
+  assert.ok(!draw().has("scheduler-update"));
+  await cx.ticks[0](cx);
+  assert.equal(state.calls.filter(([cmd]) => cmd === "od").length, 2);
+  assert.equal(f.hashes(), 0);
 });
 
 test("a launcher script is managed by another install and gets no Update", async (t) => {
@@ -616,30 +662,65 @@ for (const status of ["running", "scheduled"]) {
   });
 }
 
-test("ten minutes with the same old image gives restart advice even with a recent run", async (t) => {
+for (const [condition, automations] of [
+  ["zero timeout", [{ name: "job", timeout_minutes: 0 }]],
+  ["missing automation", [{ name: "other", timeout_minutes: 1 }]],
+]) {
+  test(`a ${condition} uses the default timeout and margin`, async (t) => {
+    let time = Date.now();
+    t.mock.method(Date, "now", () => time);
+    offerFixture({
+      current: true, live: false, automations,
+      runs: [{ automation: "job", status: "running", at: new Date(time - 60 * 60000) }],
+    });
+    const { cx, draw } = await panel();
+    const row = () => textOf(draw().get("scheduler-handoff"));
+    time += 60000;
+    await cx.ticks[0](cx);
+    assert.match(row(), /switches to the new build/);
+    time += 60000;
+    await cx.ticks[0](cx);
+    assert.match(row(), /switches to the new build/);
+    time += 60000;
+    await cx.ticks[0](cx);
+    assert.match(row(), /After your runs finish, run systemctl/);
+  });
+}
+
+test("the ten-minute restart clock starts over on a new PID", async (t) => {
   let time = Date.now();
   t.mock.method(Date, "now", () => time);
-  offerFixture({ current: true, live: false });
+  const f = offerFixture({ current: true, live: false });
   const { cx, draw } = await panel();
+  const row = () => textOf(draw().get("scheduler-handoff"));
   time += 599999;
   await cx.ticks[0](cx);
-  assert.match(textOf(draw().get("scheduler-handoff")), /switches to the new build/);
+  assert.match(row(), /switches to the new build/);
+  f.changeDaemon(43);
   time++;
   await cx.ticks[0](cx);
-  assert.match(textOf(draw().get("scheduler-handoff")), /After your runs finish, run systemctl/);
+  assert.match(row(), /switches to the new build/);
+  assert.ok(!state.calls.some(([, action, verb]) => action === "service" && verb === "status"));
+  time += 600000;
+  await cx.ticks[0](cx);
+  assert.match(row(), /After your runs finish, run systemctl/);
 });
 
-test("restart advice confirms service status reports the PID whose image was checked", async (t) => {
-  let time = Date.now();
-  t.mock.method(Date, "now", () => time);
-  offerFixture({ current: true, live: false, installed: false, statusPid: 43, runs: [] });
-  const { cx, draw } = await panel();
-  time += 60000;
-  await cx.ticks[0](cx);
-  const row = textOf(draw().get("scheduler-handoff"));
-  assert.match(row, /service status to check it before restarting/);
-  assert.doesNotMatch(row, /kill -TERM|service install/);
-});
+for (const [condition, statusPid] of [["fails", null], ["names another PID", 43]]) {
+  test(`restart advice warns when service status ${condition}`, async (t) => {
+    let time = Date.now();
+    t.mock.method(Date, "now", () => time);
+    offerFixture({ current: true, live: false, installed: false, statusPid, runs: [] });
+    const { cx, draw } = await panel();
+    time += 60000;
+    await cx.ticks[0](cx);
+    const row = textOf(draw().get("scheduler-handoff"));
+    assert.equal(row, `The scheduler is still using the old build. Run '${PATH_SCHEDULER}'`
+      + " service status to check it before restarting."
+      + " Restarting stops running commands and the scheduler loses track"
+      + " of agent runs in progress.");
+  });
+}
 
 test("Linux compares the actual proc executable with the file it replaced", {
   skip: process.platform !== "linux",

@@ -186,9 +186,15 @@ export default class Automations extends View {
     this.build = { bin, found, stamp, version, header };
     if (!asset) return;
     const unchecked = `Could not check the scheduler build at ${bin}.`;
-    if (!resolved || !stamp || header === null) { this.build.notice = unchecked; return; }
+    if (!resolved || !stamp) { this.build.notice = unchecked; return; }
+    const magic = (header ?? "").replace(/\s/g, "");
+    if (magic.length < 8) {
+      this.build.notice = "Could not read the scheduler file as a program."
+        + ` Reinstall the scheduler at ${bin}.`;
+      return;
+    }
     // A "#!" launcher (23 21) and other unrecognized formats belong to their own install.
-    if (!NATIVE_HEADERS.has(header.replace(/\s/g, ""))) {
+    if (!NATIVE_HEADERS.has(magic)) {
       this.build.notice = `The scheduler at ${bin} is managed by another install. Update it there.`;
       return;
     }
@@ -472,9 +478,10 @@ export default class Automations extends View {
           : os === "Darwin"
             ? `run ${quote(bin)} service install.`
             : "run systemctl --user restart herdr-automations.service.";
-        message = `The scheduler is still using the old build. After your runs finish, ${how}`
-          + " Restarting stops running commands and the scheduler loses track of agent runs in progress.";
+        message = `The scheduler is still using the old build. After your runs finish, ${how}`;
       }
+      message += " Restarting stops running commands and the scheduler loses track"
+        + " of agent runs in progress.";
     }
     this.running = { pid, bin, stamp, loaded: image.stamp, since, idleSince, message };
   }
