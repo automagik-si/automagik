@@ -242,11 +242,13 @@ export function install(rt) {
     if (!connectorWritable()) throw refusal('Connectors can be changed after the update commits.')
   }
   const keptSecret = async (name) => { await rt.loadSecrets(); return rt.secretValue(name) !== undefined }
-  const writeSecret = async (name, value, purpose) => {
+  const storeSecret = async (name, value, purpose, beforeWrite) => {
     const kept = await keptSecret(name)
-    requireConnectorWrite()
+    beforeWrite?.()
     await rt.secretEndpoint('secret-set', { name, value, purpose, ...(kept ? {} : { scope: [] }) })
   }
+  const writeSecret = (name, value, purpose, { answered = false } = {}) =>
+    storeSecret(name, value, purpose, answered ? undefined : requireConnectorWrite)
   const dropSecrets = async (id) => {
     await rt.loadSecrets()
     for (const name of [tokenSecretOf(id), refreshSecretOf(id), clientSecretOf(id), keySecretOf(id)]) {
@@ -473,14 +475,17 @@ export function install(rt) {
         if (rt.readOnly() !== undefined || !connectorWritable()) return false
         const tokens = await oauth.refreshTokens(discovery, client, refresh, { scope: saved.oauth.scope })
         const purpose = `${entryFor(id)?.name ?? id} connector`
-        await writeSecret(tokenSecretOf(id), tokens.access_token, purpose)
+        // The provider may have retired the old refresh token. Store its replacement
+        // before the access token, even if a hold started after dispatch.
         if (typeof tokens.refresh_token === 'string' && tokens.refresh_token !== '' && tokens.refresh_token !== refresh) {
-          // Rotation: the old refresh token stays if this write fails.
-          await writeSecret(refreshSecretOf(id), tokens.refresh_token, purpose).catch(() => {})
+          await writeSecret(refreshSecretOf(id), tokens.refresh_token, purpose, { answered: true })
         }
+        await writeSecret(tokenSecretOf(id), tokens.access_token, purpose, { answered: true })
         await saveState(id, {
           client: { ...saved.client, via: clientVia, clientId },
           tokenExpiresAt: Number.isFinite(tokens.expires_in) ? Date.now() + tokens.expires_in * 1000 : undefined,
+        }).catch(error => {
+          if (error.code !== 'bot/refused' || connectorWritable()) throw error
         })
         statuses.delete(id)
         rt.warn('omni-ui: connector %s token refresh succeeded (client: %s)', id, path)
@@ -857,7 +862,7 @@ export function install(rt) {
     },
   }
 
-  const mailApi = installMail(rt, { entries: () => entries().find(e => e.id === 'mail'), offFor, secrets: { writeSecret, value: name => rt.secretValue(name) }, reason })
+  const mailApi = installMail(rt, { entries: () => entries().find(e => e.id === 'mail'), offFor, secrets: { writeSecret: storeSecret, value: name => rt.secretValue(name) }, reason })
   const mailHasAccounts = () => mailApi.hasAccounts()
   rt.mailView = mailApi.mailView
 

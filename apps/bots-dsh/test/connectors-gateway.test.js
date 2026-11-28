@@ -2,12 +2,13 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
+import { mailSecretName } from '../src/host/connectors/mail/presets.js'
 import { createGateway } from '../src/host/connectors/gateway.js'
 import { createRuntime } from '../index.js'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fakeContext } from './fake-ctx.js'
-import { scratch } from './fixtures/w1-format-profile.mjs'
+import { rosterBytes, scratch } from './fixtures/w1-format-profile.mjs'
 
 test('a direct connector mutation cannot create a key or publish a roster during a trial', async t => {
   const home = scratch(t)
@@ -28,10 +29,11 @@ test('a direct connector mutation cannot create a key or publish a roster during
   assert.equal(rt.state.connectors, undefined)
 })
 
-test('an OAuth response arriving after the update holds the host cannot publish credentials', async t => {
-  const home = scratch(t)
+async function refreshAcrossHold(t, failRosterSave = false) {
   const ctx = fakeContext()
   t.after(() => ctx.dispose())
+  const home = scratch(t)
+  writeFileSync(join(home, 'state.json'), rosterBytes(2))
   const rt = createRuntime(ctx, { home, github: false })
   await rt.load()
   rt.state.connectors = { notion: {
@@ -39,14 +41,13 @@ test('an OAuth response arriving after the update holds the host cannot publish 
   } }
   await rt.save({ required: true })
   await rt.secretEndpoint('secret-set', { name: 'CONNECTOR_NOTION_REFRESH', value: 'fixture-old-refresh', scope: [] })
-  const before = readFileSync(rt.statePath)
+  const beforeRoster = JSON.parse(readFileSync(rt.statePath))
   const secretPath = join(home, 'secrets.json')
-  const secretsBefore = readFileSync(secretPath)
   let proof = 'steady'
   rt.stateWriteProof = () => proof
   const posted = Promise.withResolvers()
   const provider = Promise.withResolvers()
-  t.mock.method(globalThis, 'fetch', async input => {
+  const fetch = t.mock.method(globalThis, 'fetch', async input => {
     const url = String(input?.url ?? input)
     if (url === 'https://fixture.test/.well-known/oauth-authorization-server') {
       return Response.json({ issuer: 'https://fixture.test', authorization_endpoint: 'https://fixture.test/auth',
@@ -59,12 +60,76 @@ test('an OAuth response arriving after the update holds the host cannot publish 
   const refresh = rt.connectorsInternals.refreshConnector('notion')
   await Promise.race([posted.promise, refresh.then(() => assert.fail('The token request never started'))])
   proof = 'held'
+  if (failRosterSave) {
+    const save = rt.save.bind(rt)
+    t.mock.method(rt, 'save', (...args) => {
+      if (rt.secretValue('CONNECTOR_NOTION_TOKEN') === 'fixture-new-access') throw new Error('fixture roster unavailable')
+      return save(...args)
+    })
+  }
   provider.resolve(Response.json({ access_token: 'fixture-new-access', refresh_token: 'fixture-new-refresh', token_type: 'Bearer' }))
-  assert.equal(await refresh, false)
-  assert.equal(rt.secretValue('CONNECTOR_NOTION_REFRESH'), 'fixture-old-refresh')
-  assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), undefined)
-  assert.deepEqual(readFileSync(rt.statePath), before)
-  assert.deepEqual(readFileSync(secretPath), secretsBefore)
+  assert.equal(await refresh, !failRosterSave, rt.connectorsInternals.statuses.get('notion')?.error)
+  const secrets = JSON.parse(readFileSync(secretPath)).secrets
+  for (const [name, value] of [['CONNECTOR_NOTION_REFRESH', 'fixture-new-refresh'], ['CONNECTOR_NOTION_TOKEN', 'fixture-new-access']]) {
+    assert.equal(rt.secretValue(name), value)
+    assert.equal(secrets.find(row => row.name === name)?.value, value)
+  }
+  const after = JSON.parse(readFileSync(rt.statePath))
+  assert.deepEqual(after.connectors, beforeRoster.connectors)
+  assert.equal(after.version, beforeRoster.version)
+  assert.equal(after.stateActivations, undefined)
+  assert.equal(existsSync(join(home, 'connector-key')), false)
+  const requests = fetch.mock.callCount()
+  assert.equal(await rt.connectorsInternals.refreshConnector('notion'), false)
+  assert.equal(fetch.mock.callCount(), requests)
+}
+
+test('an admitted OAuth refresh retains the provider response across an update hold', t => refreshAcrossHold(t))
+test('a roster save failure after storing an OAuth response preserves the rotated refresh token', t => refreshAcrossHold(t, true))
+
+test('Gmail refresh retains rotated credentials during an update hold', async t => {
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const home = scratch(t)
+  const seed = JSON.parse(rosterBytes(2))
+  seed.bots.a.sessionId = 'reader-session'
+  writeFileSync(join(home, 'state.json'), JSON.stringify(seed))
+  const address = 'reader@example.test'
+  for (const key of ['AUTOMAGIK_GOOGLE_OAUTH_CLIENT_ID', 'AUTOMAGIK_GOOGLE_OAUTH_CLIENT_SECRET']) {
+    const previous = process.env[key]
+    process.env[key] = 'fixture'
+    t.after(() => {
+      if (previous === undefined) delete process.env[key]
+      else process.env[key] = previous
+    })
+  }
+  const fetch = async (input, options) => {
+    const url = new URL(input?.url ?? input)
+    if (url.hostname === 'accounts.google.com' && url.pathname === '/token') {
+      return Response.json({ access_token: 'new-access', refresh_token: 'new-refresh', token_type: 'Bearer' })
+    }
+    assert.equal(url.hostname, 'gmail.googleapis.com')
+    const token = new Headers(options.headers).get('authorization')
+    return token === 'Bearer new-access' ? Response.json({ messages: [] }) : new Response(null, { status: 401 })
+  }
+  const rt = createRuntime(ctx, { home, github: false, mail: { fetch, connect: async () => ({ close: async () => {} }) } })
+  await rt.load()
+  // Register the mail tools through the normal account route before exercising Gmail.
+  await rt.connectorEndpoint('mail-account-add', { address: 'test@qq.com', password: 'fixture' })
+  rt.state.connectors.mail.accounts.gmail = { id: 'gmail', address, auth: 'google' }
+  for (const suffix of ['TOKEN', 'REFRESH']) {
+    await rt.secretEndpoint('secret-set', { name: mailSecretName(address, suffix), value: 'fixture-old', scope: [] })
+  }
+  rt.stateWriteProof = () => 'held'
+  const search = rt.teamTools.find(tool => tool.name === 'mail_search')
+  const bot = Object.values(rt.state.bots)[0]
+  assert.equal(await search.execute({ account: address }, { agent: { id: bot.sessionId } }), 'No matching mail.')
+  const disk = JSON.parse(readFileSync(join(home, 'secrets.json'))).secrets
+  for (const [suffix, expected] of [['TOKEN', 'new-access'], ['REFRESH', 'new-refresh']]) {
+    const name = mailSecretName(address, suffix)
+    assert.equal(rt.secretValue(name), expected)
+    assert.equal(disk.find(row => row.name === name)?.value, expected)
+  }
 })
 
 for (const refreshing of [false, true]) {
@@ -189,7 +254,9 @@ test('gateway preserves MCP POST headers and bodies and reports expired sessions
 
 test('OAuth refresh defers provider rotation while writes are held, including during discovery', async t => {
   const ctx = fakeContext()
-  const rt = createRuntime(ctx, { home: scratch(t), github: false })
+  const home = scratch(t)
+  writeFileSync(join(home, 'state.json'), rosterBytes(2))
+  const rt = createRuntime(ctx, { home, github: false })
   t.after(() => ctx.dispose())
   await rt.load()
   await rt.loadSecrets()
