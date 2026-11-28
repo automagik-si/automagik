@@ -52,7 +52,7 @@ function fixture(extraRole?: string) {
     'scripts/lane.ts', 'scripts/role-pack.ts', 'scripts/version.ts', 'am/part.json', 'meter/usagemeter/part.json',
     PLUGIN + '/package.json', PLUGIN + '/roles',
     ...['role-catalog.js', 'role-keys.json', 'role-package.js', 'role-tar.js', 'refusal.js', 'bounded-get.js', 'no-runner.js', 'bundled-roles.js', 'bundled-roles.json', 'lane-verify.js'].map(file => PLUGIN + '/src/host/' + file),
-    PLUGIN + '/src/shared/roles.js', PLUGIN + '/src/shared/solver-method.js',
+    PLUGIN + '/src/shared/roles.js', PLUGIN + '/src/shared/solver-method.js', PLUGIN + '/src/shared/windows-names.js',
   ]) {
     mkdirSync(dirname(join(root, file)), { recursive: true });
     cpSync(join(ROOT, file), join(root, file), { recursive: true });

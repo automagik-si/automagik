@@ -150,6 +150,12 @@ shown, only its kind and place.
   changes, the host checks every library skill again at start; one that now blocks is suspended
   (not delivered) and marked in the library and on each Bot that uses it. A Bot-created skill is
   never suspended by a recheck: its new findings show on its library row and it stays delivered.
+- **Checker 3 → 4.** Moving the Windows reserved-name rule into its own fingerprinted file keeps
+  role edits out of the Skills fingerprint. Clean skills with verified reviews stay available.
+  A skill with an accepted gate warning or model review finding is held until its owner opens and
+  confirms it again. The host rechecks the same bytes and reuses the verified review with zero
+  model calls. Reads leave the library bytes alone. On rollback to checker 3, skills confirmed
+  under 4 need confirmation again. Clean reviewed skills and valid checker 3 acceptances carry over.
 - **Existing text skills at the upgrade (decided).** Each capability of kind `skill` saved before
   this RFC is moved once at load: its text is written as `SKILL.md`, hashed and checked. One that
   passes or warns keeps working (a warning is accepted on the person's behalf only for that

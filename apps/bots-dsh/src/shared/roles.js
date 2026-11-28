@@ -1,3 +1,7 @@
+import { isWindowsReservedName } from './windows-names.js'
+
+export { isWindowsReservedName }
+
 export const BUILTIN_ROLES = Object.freeze({
   genie: Object.freeze({ id: 'genie', name: 'Genie', kind: 'genie', tools: Object.freeze(['grant_wish']),
     botChildren: Object.freeze(['genie-wishes']), suggestions: Object.freeze(['genie']) }),
@@ -8,7 +12,6 @@ export const ROLES_OFF_REASON = 'roles-off'
 export const rolesOn = prefs => prefs?.roles !== false
 
 export const RESERVED_ROLE_IDS = Object.freeze(['data'])
-export const isWindowsReservedName = name => /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)
 export const isRoleId = id => typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,40}$/.test(id)
   && !RESERVED_ROLE_IDS.includes(id) && !isWindowsReservedName(id)
 export const isRoleVersion = version => typeof version === 'string' && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(version)
