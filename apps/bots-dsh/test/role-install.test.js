@@ -637,7 +637,10 @@ test('mounted settings discover a missing catalog once, preserve the picker, and
     const [button] = row.props.children
     return [button.props.children[0], button.props['aria-label'], button.props.disabled, row.props.hint]
   })
-  assert.deepEqual(picker(first.picker), [['Genie', 'Attach Genie', true, 'Genie can be given to another Bot after the next Genie update.']])
+  assert.deepEqual(picker(first.picker), [
+    ['Orchestrator', 'Attach Orchestrator', false, undefined],
+    ['Genie', 'Attach Genie', true, 'Genie can be given to another Bot after the next Genie update.'],
+  ])
   assert.deepEqual(picker(settled.picker), picker(first.picker))
   assert.equal(first.attached, undefined)
   assert.equal(settled.attached, undefined)
@@ -1071,7 +1074,8 @@ test('the real Apps and Bot settings surfaces complete the package flow through 
   const settings = () => surfaces.settings({ roster, bot: roster.bots.find(bot => bot.id === BOT.id), actions,
     run: work => { pending.push(work); return work } })
   const first = app()
-  assert.equal(first.roles, undefined, 'discovery starts before the Roles section has rows')
+  assert.match(surfaceText(first.roles), /Orchestrator/)
+  assert.doesNotMatch(surfaceText(first.roles), /Sample role|Community fixture/, 'discovery is still pending for catalog roles')
   await Promise.all(pending.splice(0))
   assert.deepEqual(posted, [['role-catalog', undefined]])
   const open = name => findNode(app().roles, node => node.props?.className === 'bt-app-main'
@@ -1484,7 +1488,8 @@ test('D2S the Solver card keeps recovery usable pending verification and shows t
   const app = roster => surfaces.app({ roster, actions })
   const before = (await f.call('state')).value
   assert.equal(before.roleDetails.solver.installed.sha256, undefined)
-  findNode(app(before).roles, node => node.props?.className === 'bt-app-main').props.onClick()
+  findNode(app(before).roles, node => node.props?.className === 'bt-app-main'
+    && /^solver\b/i.test(surfaceText(node).trim())).props.onClick()
   let recovery
   assert.doesNotThrow(() => { recovery = app(before).roles })
   assert.match(surfaceText(recovery), /Installed SHA-256\s+Details unavailable/)

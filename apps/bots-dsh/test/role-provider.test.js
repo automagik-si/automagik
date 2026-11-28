@@ -8,14 +8,17 @@ import { activationIds, pins, rosterBytes, scratch } from './fixtures/w1-format-
 
 test('a same-ID provider can serve a committed registry pin and never adopts a catalog pin', async t => {
   const home = scratch(t)
-  writeFileSync(join(home, 'state.json'), rosterBytes(4, {
-    roles: [pins.registry], catalogControl: true, stateActivations: [activationIds.registry],
+  const id = 'fixture-provider'
+  const roster = JSON.parse(rosterBytes(4, {
+    roles: [{ ...pins.registry, id }], catalogControl: true, stateActivations: [activationIds.registry],
   }))
+  roster.bots.c.roles = [{ ...pins.catalogOrchestrator, id }]
+  writeFileSync(join(home, 'state.json'), JSON.stringify(roster))
   const ctx = fakeContext()
   const rt = createRuntime(ctx, { home, diagnosticsFile: false, github: false, updateCheck: false })
   t.after(async () => { rt.dispose(); await ctx.dispose() })
   await rt.load()
-  const provider = { id: pins.registry.id, name: 'Orchestrator', tools: ['delegate'], capabilities: ['task-start'], prompt: 'Registry provider prompt.' }
+  const provider = { id, name: 'Fixture provider', tools: ['delegate'], capabilities: ['task-start'], prompt: 'Registry provider prompt.' }
   const dispose = rt.hooks.role({ ...provider, version: '2.0.0' })
   assert.equal(rt.roleRuntime.grantOf('a', 'task-start'), undefined)
   assert.deepEqual(rt.roleRegistry.toolsWithheldFrom(rt.botOf('a')), ['delegate'])

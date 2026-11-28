@@ -72,6 +72,30 @@ test('task grants are separate switches and a route grant can always be cleared'
   assert.deepEqual(calls.map(([id, , capability, on]) => [id, capability, on]), [[bot.id, 'route-policy', false]])
 })
 
+test('Orchestrator grant switches use the registry pin and preserve separate decisions', () => {
+  const pin = { id: 'orchestrator', version: '1.0.0', source: 'registry', attachedAt: 'second' }
+  const record = { ...bot, roles: [{ ...pin, grants: ['task-start'] }] }
+  const runtime = { pin, settings: [], tools: [], capabilities: ['task-start', 'route-policy'] }
+  const roster = {
+    bots: [record],
+    roleProviders: [{ id: pin.id, name: 'Orchestrator', version: pin.version, tools: [] }],
+    roleRuntimeByRole: { [bot.id]: { [pin.id]: runtime } },
+  }
+  const calls = []
+  const actions = { grantRole: (...args) => calls.push(args) }
+  const form = walk(BotSettingsForm({ bot: record, roster, actions, run: value => value }))
+  const card = form.find(node => node.type?.name === 'PackageAttachmentCard')
+  const controls = walk(card.type(card.props)).find(node => node.type?.name === 'RoleControls')
+  const switches = walk(controls.type(controls.props)).filter(node => node.type?.name === 'SwitchRow')
+  const [start, route] = switches.map(node => node.props)
+  assert.equal(start.controlLabel, 'Allow starting tasks (Orchestrator)')
+  assert.equal(start.on, true)
+  assert.equal(route.on, false)
+  assert.equal(route.disabled, false)
+  route.onChange(true)
+  assert.deepEqual(calls, [[bot.id, pin, 'route-policy', true]])
+})
+
 test('stacked settings address each exact attachment, in both pin orders', async () => {
   const { teamActions } = module.exports
   const voice = { id: 'voice-mouth', version: '1.0.0', attachedAt: 'first' }
