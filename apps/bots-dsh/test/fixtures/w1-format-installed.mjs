@@ -7,16 +7,15 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { fakeContext } from '../fake-ctx.js'
-import { activationIds } from './w1-format-profile.mjs'
 import { verifyLane } from '../../src/host/lane-verify.js'
 import { ROLE_KEYS } from '../../src/host/supervisor/release.js'
 import { VENDOR } from '../../src/host/supervisor/stage.js'
 import { prepareStore, writeJsonAtomic } from '../../src/host/supervisor/store.js'
 import { BOTS, read, write } from './supervisor.mjs'
 import { assertCleanCell, assertRefusedCell, assertLegacyCell, assertRollbackBytes, legacyCells, prepareRollback, rollbackCells } from './w1-format-predecessor.mjs'
-import { LEGACY_CONTRACT, pins, readFormatContract, rosterBytes, scratch, sha256 } from './w1-format-profile.mjs'
+import { activationIds, LEGACY_CONTRACT, pins, readFormatContract, rosterBytes, scratch, sha256 } from './w1-format-profile.mjs'
 
 const checkout = fileURLToPath(new URL('../../', import.meta.url))
 const manifest = 'package.json'
@@ -158,16 +157,38 @@ async function writeCandidateTrial(t, candidate, f, rollback, from, to) {
   const original = JSON.parse(rollback.original)
   const source = rosterBytes(from, { roles: [], revision: original.revision, connectors: original.connectors })
   fs.writeFileSync(path, source)
-  const { createRuntime } = await import(pathToFileURL(join(trial.plugin, 'index.js')).href)
-  const ctx = fakeContext()
-  const rt = createRuntime(ctx, { home: trial.botsHome, diagnosticsFile: false, github: false, updateCheck: false })
-  try {
-    await rt.load()
-    // Use two registry attachments so neither collision proof is stubbed.
-    for (const id of ['operator', 'guide']) {
-      rt.hooks.role({ id, name: id, tools: [], capabilities: [] })
-      await rt.attachRole('a', id)
+  const name = 'w1-fixture-provider'
+  const packageDir = join(trial.profileDir, 'node_modules', name)
+  fs.mkdirSync(packageDir)
+  write(join(packageDir, 'package.json'), { name, version: '1.0.0', type: 'module', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } })
+  fs.writeFileSync(join(packageDir, 'cordis.patch.yml'), '- insert:\n    - id: w1-fixture-provider\n      name: w1-fixture-provider\n')
+  fs.writeFileSync(join(packageDir, 'index.js'), `
+    export const name = 'w1-fixture-provider'
+    export const inject = ['omniTeam']
+    export async function apply(ctx) {
+      const rt = ctx.get('omniTeam')
+      await rt.load()
+      for (const id of ['operator', 'guide']) {
+        rt.hooks.role({ id, name: id, tools: [], capabilities: [] })
+        await rt.attachRole('a', id)
+      }
     }
+  `)
+  const pkgPath = join(trial.profileDir, 'package.json')
+  const pkg = read(pkgPath)
+  pkg.dependencies[name] = '1.0.0'
+  pkg.dsh.profile.bundles.push(name)
+  write(pkgPath, pkg)
+  const { startChild, answers } = await import(pathToFileURL(join(trial.plugin, 'src/host/supervisor/child.js')).href)
+  const child = startChild(trial.command, trial.env, () => {})
+  try {
+    assert.equal(await answers(child, { signal: t.signal, timeout: 10_000 }), true, 'Packed candidate DSH serves HTTP')
+    let active = false
+    for (let i = 0; i < 40 && !child.result; i++) {
+      if (read(path).stateActivations?.includes(activationIds.stack)) { active = true; break }
+      await delay(100, undefined, { signal: t.signal })
+    }
+    assert.equal(active, true, 'The fixture provider activated a real stack through the installed plugin')
     const saved = fs.readFileSync(path)
     const state = JSON.parse(saved)
     assert.equal(state.version, to)
@@ -179,11 +200,11 @@ async function writeCandidateTrial(t, candidate, f, rollback, from, to) {
     assert.deepEqual(trial.runtimePins, f.runtimePins)
     rollback.trial = saved
     fs.writeFileSync(rollback.path, saved)
-    t.diagnostic(JSON.stringify({ candidate: candidate.provenance, writer: 'packed host runtime in disposable context',
-      dependencies: trial.dependencyPins, dsh: trial.dshVersion, trial: sha256(saved) }))
+    t.diagnostic(JSON.stringify({ candidate: candidate.provenance, writer: 'packed host in actual DSH process with synthetic provider addon',
+      dependencies: trial.dependencyPins, dsh: trial.dshVersion, runtimePins: trial.runtimePins,
+      addons: [{ name, version: '1.0.0' }], health: 'loopback HTTP answered', trial: sha256(saved) }))
   } finally {
-    rt.dispose()
-    await ctx.dispose()
+    await child.stop()
   }
 }
 

@@ -5,7 +5,7 @@ import {
   chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { createRoleCatalog } from '../apps/bots-dsh/src/host/role-catalog.js';
 import { createRolePackages } from '../apps/bots-dsh/src/host/role-package.js';
@@ -40,7 +40,9 @@ function scratch() {
 function copy(root: string, path: string) {
   const dest = join(root, path);
   mkdirSync(dirname(dest), { recursive: true });
-  cpSync(join(ROOT, path), dest, { recursive: true });
+  // npm excludes dependency trees from the archive. Keep local harness
+  // installs and disposable packages outside the scratch packing fixture.
+  cpSync(join(ROOT, path), dest, { recursive: true, filter: source => basename(source) !== 'node_modules' });
 }
 
 function put(root: string, path: string, bytes: string | Buffer) {

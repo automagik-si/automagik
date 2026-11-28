@@ -66,7 +66,7 @@ test('import refuses an incompatible roster before any destination roster or key
   mkdirSync(source)
   writeFileSync(join(source, 'connector-key'), Buffer.alloc(32, 7), { mode: 0o600 })
   for (const [tag, bytes] of [
-    ['protected', rosterBytes(4, { stateActivations: [activationIds.registry] })],
+    ['unknown-activation', rosterBytes(4, { roles: [pins.registry], stateActivations: ['unknown-role-activation-v1'] })],
     ['preactivation', rosterBytes(2, { roles: [pins.registry] })],
   ]) {
     const path = join(source, 'state.json')
@@ -78,6 +78,27 @@ test('import refuses an incompatible roster before any destination roster or key
     assert.equal(existsSync(join(home, 'connector-key')), false)
     assert.equal(existsSync(join(home, 'state.lock')), false)
   }
+})
+
+test('ordinary import publishes a supported protected roster without changing its pins or stamp', async t => {
+  const root = scratch(t)
+  const from = join(root, 'source')
+  const home = join(root, 'destination')
+  mkdirSync(from)
+  const source = rosterBytes(4, { roles: [pins.registry], stateActivations: [activationIds.registry] })
+  writeFileSync(join(from, 'state.json'), source)
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const rt = createRuntime(ctx, { home, importHome: from })
+  assert.deepEqual(readFileSync(rt.statePath), source)
+  assert.deepEqual(readFileSync(join(from, 'state.json')), source)
+  await rt.load()
+  assert.deepEqual(rt.botOf('a').roles, [pins.registry])
+  assert.equal(await rt.save({ required: true, durable: true }), true)
+  const saved = JSON.parse(readFileSync(rt.statePath))
+  assert.equal(saved.version, 4)
+  assert.deepEqual(saved.stateActivations, [activationIds.registry])
+  assert.deepEqual(saved.bots.a.roles, [pins.registry])
 })
 
 test('the direct role settings writer waits for commit and old settings cannot attach themselves', async t => {
