@@ -75,10 +75,10 @@ test('task grants are separate switches and a route grant can always be cleared'
 test('stacked settings address each exact attachment, in both pin orders', async () => {
   const { teamActions } = module.exports
   const voice = { id: 'voice-mouth', version: '1.0.0', attachedAt: 'first' }
-  const guide = { id: 'guide', version: '1.0.0', attachedAt: 'second', source: 'registry' }
+  const guide = { id: 'orchestrator', version: '1.0.0', attachedAt: 'second', source: 'registry' }
   const runtime = {
     [voice.id]: { pin: voice, settings: [{ key: 'voice', kind: 'voice', label: 'Voice' }], tools: ['speak'], capabilities: ['audio-out'] },
-    [guide.id]: { pin: guide, settings: [], tools: ['guide_tool'], capabilities: ['audio-out', 'task-start'] },
+    [guide.id]: { pin: guide, settings: [], tools: [], capabilities: ['task-start', 'route-policy'] },
   }
   const calls = []
   const actions = teamActions({ after: value => value, call: async (endpoint, payload) => {
@@ -89,7 +89,7 @@ test('stacked settings address each exact attachment, in both pin orders', async
   const host = {
     roleRuntime: { [bot.id]: runtime[voice.id] }, roleRuntimeByRole: { [bot.id]: runtime },
     roles: { [voice.id]: { version: voice.version, status: 'ok' } },
-    roleProviders: [{ id: guide.id, name: 'Guide', version: guide.version, tools: ['guide_tool'] },
+    roleProviders: [{ id: guide.id, name: 'Orchestrator', version: guide.version, tools: [] },
       { id: 'duplicate', name: 'Duplicate', tools: ['speak'] }, { id: 'extra', name: 'Extra', tools: [] }],
   }
   const form = (record, live = host) => walk(BotSettingsForm({ bot: record, roster: { ...live, bots: [record] }, actions, run: value => value }))
@@ -105,13 +105,15 @@ test('stacked settings address each exact attachment, in both pin orders', async
       assert.equal(own.props.runtime, runtime[pin.id])
       const useEffect = react.useEffect
       react.useEffect = (fn, deps) => { if (deps?.includes(pin.attachedAt)) fn() }
-      let speech
-      try { speech = expand(own).find(node => node.props?.label === 'Allow speech') } finally { react.useEffect = useEffect }
-      assert.equal(speech.props.on, pin.id === voice.id)
-      speech.props.onChange(!speech.props.on)
+      const label = pin.id === voice.id ? 'Allow speech' : 'Allow starting tasks'
+      let toggle
+      try { toggle = expand(own).find(node => node.props?.label === label) } finally { react.useEffect = useEffect }
+      assert.equal(toggle.props.on, pin.id === voice.id)
+      if (pin.id === guide.id) assert.equal(toggle.props.controlLabel, 'Allow starting tasks (Orchestrator)')
+      toggle.props.onChange(!toggle.props.on)
       expand(card).find(node => node.props?.children.includes('Detach')).props.onClick()
       if (pin.id === voice.id) assert.deepEqual(calls.shift(), ['role-settings', bot.id, voice, undefined, undefined])
-      assert.deepEqual(calls.shift(), ['role-grant', bot.id, pin, 'audio-out', pin.id !== voice.id])
+      assert.deepEqual(calls.shift(), ['role-grant', bot.id, pin, pin.id === voice.id ? 'audio-out' : 'task-start', pin.id !== voice.id])
       assert.deepEqual(calls.shift(), ['role-detach', bot.id, pin.id, undefined, undefined])
     }
     const picker = expand(tree.find(node => node.type?.name === 'StackedRolePicker'))
@@ -129,7 +131,7 @@ test('stacked settings address each exact attachment, in both pin orders', async
   const stacked = withRoles([guide, voice])
   const missing = { ...host, roleRuntimeByRole: { [bot.id]: { [guide.id]: { pin: guide, status: 'missing' } } } }
   assert.deepEqual(cards(form(stacked, missing)).map(controls), [undefined, undefined], 'a present by-role view cannot fall back to the stale old projection')
-  const stale = { ...host, roleRuntimeByRole: { [bot.id]: { ...runtime, [guide.id]: { ...runtime.guide, pin: { ...guide, attachedAt: 'old' } } } } }
+  const stale = { ...host, roleRuntimeByRole: { [bot.id]: { ...runtime, [guide.id]: { ...runtime[guide.id], pin: { ...guide, attachedAt: 'old' } } } } }
   assert.equal(controls(cards(form(stacked, stale))[0]), undefined)
   const off = cards(form(stacked, { ...host, prefs: { roles: false } }))
   assert.ok(controls(off[0]))

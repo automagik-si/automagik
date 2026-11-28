@@ -6,12 +6,29 @@ import { install } from '../src/host/prompt.js'
 import { install as installNative } from '../src/host/native-tools.js'
 import { install as installToolDeny } from '../src/host/tool-deny.js'
 import { fakeContext } from './fake-ctx.js'
+import { fixture, serviceStub } from './caller-fixture.js'
 
 const BOTS = [
   ['main', { name: 'Omni' }],
   ['worker', { name: 'Dev', instructions: 'Check files.' }],
   ['keeper', { name: 'Omni', kind: 'omni' }],
 ]
+
+test('the Orchestrator prompt follows the live task and result flow only while attached', async t => {
+  const { ctx, rt, start } = fixture(t, { service: serviceStub({ multiuser: false }) })
+  await start()
+  const render = id => ctx.sections.get('bot-identity').text({ agent: { id } })
+  const before = render('b')
+  await rt.attachRole('b', 'orchestrator')
+  const block = render('b').match(/<role-prompt id="orchestrator">([\s\S]+?)<\/role-prompt>/)?.[1]
+  assert.match(block, /review guard is off, use start_task/)
+  assert.match(block, /self-contained instructions/)
+  assert.match(block, /exact provider\/model from list_bot_models/)
+  assert.match(block, /result comes back as a message when the task's first turn ends/)
+  assert.match(block, /Do not wait or poll/)
+  await rt.detachRole('b', 'orchestrator')
+  assert.equal(render('b'), before)
+})
 
 // The prompt section and the hooks other Omni plugins add the Main Bot's rules through.
 function start(config = {}, bots = new Map(BOTS)) {

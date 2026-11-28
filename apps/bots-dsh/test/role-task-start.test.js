@@ -746,10 +746,9 @@ test('D3 final: refused allocation cleanup survives same-team writer adoption', 
   assert.deepEqual(await scopedIds(), baseline)
 })
 
-test('registry grants keep legacy task refusals until the task admission migration', async t => {
+test('Orchestrator grants keep legacy task refusals until the task admission migration', async t => {
   const h = await fixture(t)
-  const declaration = { id: 'operator', name: 'Operator', capabilities: ['task-start', 'route-policy'] }
-  h.rt.hooks.role(declaration)
+  const declaration = h.rt.roleRegistry.of('orchestrator')
   await h.rt.attachRole('solver', declaration.id)
   const legacy = /Only a Main Bot or the Omni Bot starts tasks/
   assert.match(await h.execute('solver'), legacy)
@@ -760,6 +759,10 @@ test('registry grants keep legacy task refusals until the task admission migrati
   assert.match(await h.execute('solver', named), /Naming a model for a task is not allowed/)
   assert.deepEqual(h.created, [])
   assert.deepEqual(h.dispatched, [])
+  for (const id of ['main', 'omni']) {
+    assert.match(await h.execute(id), /^Started task/)
+    assert.match(await h.execute(id, named), /Naming a model for a task is not allowed/)
+  }
   await h.attach('tasker')
   await h.rt.grantRole({ id: 'solver', role: 'tasker', capability: 'task-start', on: true })
   assert.match(await h.execute('solver', named), /Naming a model for a task is not allowed/)

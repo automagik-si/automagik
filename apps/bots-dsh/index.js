@@ -89,6 +89,7 @@ import * as selfUpdate from './src/host/self-update.js'
 import * as selfUpdateCheck from './src/host/self-update-check.js'
 import * as selfUpdateHold from './src/host/self-update-hold.js'
 import { bindRoleSettings } from './src/host/role-settings.js'
+import { installOrchestrator } from './src/host/role-orchestrator.js'
 import * as dshUpdate from './src/host/dsh-update.js'
 import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
@@ -132,7 +133,7 @@ const instanceId = () => process.env.AUTOMAGIK_INSTANCE_ID
 // Upstream's chat-app layer (src/host/im) and its local agents (src/host/local-agents) are carried but not
 // installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
-  diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
+  diagnostics, extend, { install: installOrchestrator }, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
   turns, steer, handoffs, requests, delivery, roster, nativeTools, ownTools, installed, folders, agents, toolDeny, reviewMark, reviewGuard, botSessions, botRunner, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, wakeLog, memory,
   parts, callerAccess, callerView, callerFeed, callerRoutes, fallback, modelState,
