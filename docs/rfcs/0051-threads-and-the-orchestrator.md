@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed (depends on RFC 0050, #2176) |
+| Status | Accepted (2026-11-28, effective on merge under the owner's delegated authority, see Answers) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P) |
 | Created | 2026-11-28 |
@@ -12,10 +12,10 @@ follow up in those Sessions. Bot-to-Bot exchanges can finish without a row of th
 A thread gives the person one place to see the work, respond, and find the result in the
 conversation that started it.
 
-This proposal depends on RFC 0050, *Teams, positions and roles*, which is still in flight.
-It uses 0050's role registry, stacked roles, positions and per-Bot switches. The owner
-accepts this RFC before thread implementation starts. Implementation also waits for
-0050's prerequisite delivery to merge. This PR ships documentation only.
+This RFC uses the role registry, stacked roles, positions and per-Bot switches
+from RFC 0050. Thread implementation starts after this RFC and the prerequisite
+RFC 0050 delivery merge. This RFC ships documentation only.
+[RFC 0050, Teams, positions and roles (#2176)](https://github.com/automagik-si/automagik/pull/2176)
 
 ## The role and its tools
 
@@ -489,16 +489,23 @@ using it on the live team.
 | Tools and alias | Restore the prior host tool set with its matching client. Keep the task lineage and existing compatibility path. Pending W2-only calls stay held while their tool is unavailable. |
 | Client surfaces | Restore a compatible client bundle. It can use the existing task view during a client-only rollback while the host retains thread state and reports. Keep the thread IDs and anchors for a return to the newer client. |
 
-## Decisions
+## Answers (2026-11-28)
 
-The membership ruling requires stopping active delegations when a membership
-or deletion write invalidates admission. Tool, schedule and reporting checks
-enforce revocation independently. This resolves the in-flight cancellation
-question. The RFC remains Proposed pending acceptance.
+The owner's delegate records these answers. Acceptance takes effect when the
+docs PR merges.
+
+1. **Membership revocation.** Stop an active delegation when membership loss or
+   deletion invalidates admission, in the order specified under Membership and
+   deletion. Enforce revocation independently at turn, tool, schedule and report
+   boundaries. A fresh, admitted reopen keeps the saved permission cap.
+2. **Native composer.** Ship the drawer unless Group 5 records live proof that
+   the native tab can retain a root Session and send under the same access and
+   admission rules. The installed bundle probe established the slot wiring in
+   the subagent plugin. Live composition in a bots-dsh tab remains unverified.
 
 ## Links
 
-- [RFC 0050 proposal (#2176)](https://github.com/automagik-si/automagik/pull/2176)
+- [RFC 0050, Teams, positions and roles (#2176)](https://github.com/automagik-si/automagik/pull/2176)
 - [RFC 0037, role capabilities](0037-roles-not-types.md#contracts-introduced)
 - [RFC 0038, authenticated caller principal](0038-cloud-multiuser-caller-principal.md)
 - [RFC 0048, prior Solver and task grant contract](0048-the-solver.md)
