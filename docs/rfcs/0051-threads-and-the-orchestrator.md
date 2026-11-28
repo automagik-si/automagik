@@ -119,6 +119,7 @@ is delivered to that Session only while it can still receive messages. It return
 | `thread/private` | `X is private: it answers only the person.` |
 | `thread/not-installed` | `Not delegated: X is not installed in this DSH (reason).` |
 | `thread/not-in-group` | `In "G" you can delegate only to its members.` |
+| `thread/not-member` | `This delegation is no longer admitted. Check the participants and try again.` |
 | `thread/upstream` | Existing `message_bot` refusal when the target is already waiting for the result of the caller's work. |
 | `thread/depth` | `Threads nest at most 3 deep.` |
 | `thread/model` | Existing `modelRefusal` text, including which models may be named. |
@@ -202,19 +203,42 @@ Session. The member's ordinary chat catalog supplies no replacement.
 
 ### Membership and deletion
 
-Removing the opener or member from the origin group, deleting that group, or
-deleting either Bot holds the delegation and descendants that inherit its binding.
-The host rechecks membership and saved lineage before new turns and tool steps,
-queued or immediate delivery, `message_thread`, a person reopen, and a report or
-wake to the group. Persist the hold before dropping the group Session or other
-live link, so a retained Session, retry or restart cannot bypass it. Keep the
-narrower cap with `capTasks` and use `reapplyTasks` for the bound work. Room and
-Bot deletion keep the existing cap-and-reapply behavior. The delegation keeps
-its origin and member identity. Its result has no private-chat fallback.
+A delegation is admitted while the opening Bot and member both exist, both are
+current members of any recorded origin group and that group still exists, and
+the task lineage and effective ceiling are provable. Apply the same check before
+every turn start, including delivery, reopen, person input, `message_thread` and
+resume. Check every tool call in the Session and its descendants, every schedule
+create, edit and delivery, and every report.
 
-Membership removal already pauses new schedules for the removed member and drops
-its group Session. Hold new work and release of results at admission boundaries.
-Whether the host should immediately cancel work already admitted is open below.
+When a membership or deletion write invalidates admission, take these steps in
+order for each affected delegation:
+
+1. Apply `capTasks` in the same save, before unlinking provenance.
+2. Call `revokeNewSchedules` for the Session IDs whose admission was revoked.
+3. Stop the active turn through the cancellation path used by `rt.stopThread`.
+4. Record `stopped` with reason `thread/not-member`.
+
+The tool guard refuses independently of cancellation. A late or failed cancel
+cannot admit another tool call in the delegation or a descendant. Only
+`delegation` threads get the immediate stop policy. Helpers and wishes keep the
+existing cap-and-continue policy, subject to the admission guard when they
+descend from a delegation. Lowering a permission level saves the narrower cap
+and reapplies it through `reapplyTasks`. Lowering alone leaves the turn running.
+
+A message to a delegation that lacks admission is refused with
+`thread/not-member` for an otherwise authorized caller. It is never queued.
+Re-adding a member leaves old turns, schedules and undelivered work stopped.
+An explicit reopen starts a new round under fresh admission and the saved cap.
+Any result from the revoked round stays in the thread history. It never reaches either
+Bot's own chat or a private forward. An opener still entitled to receive a
+notice at the original destination gets one deduplicated notice with the thread
+name and reason only.
+
+Keep the thread, transcript, written files, `state.tasks` lineage and group
+book intact. The person and chief can read them within their carried
+permissions. The opener can read the thread while its access remains admitted,
+and a member with revoked admission loses `read_thread` and reopen access.
+Existing room archive rules apply on deletion.
 
 ## Thread state and migration
 
@@ -413,7 +437,8 @@ a held Session.
   ambiguous title, or keep a pane open past a membership change. Filter lookup
   and progress by current authority and carried read scope. Authenticate the
   person on every write and enforce the same rules for the native composer
-  and for Open full. Recheck authority at the turn or replay boundary.
+  and for Open full. Recheck authority at the turn, tool, schedule and replay
+  boundaries. Cancellation and authorization are independent.
 - **Reports and reopened rounds.** An old wake intent or exchange may be
   replayed after the origin changes. Recheck origin and membership before
   releasing a result, deduplicate by the original key or exchange, and mark
@@ -425,12 +450,16 @@ a held Session.
 2. Run delegation Sessions as the member and surface Bot DMs. Exercise a wider
    member in a restrictive group, nested work, restart, reopen and ACP replay.
    Lower the room, caller or member bound and then raise it. Remove either
-   participant, delete the room and delete either Bot. Verify that the hold and
-   narrower cap survive restart, that new work and group reports stay held, and
-   that a missing binding prevents a turn or tool step. Exercise failed save and
-   apply before the first brief. Prove the member's prompt, tool switches, schedule
-   restrictions and skill pins still apply after revision, removal and replay.
-   Verify a Bot DM follow-up after close keeps the original ID.
+   participant, delete the room and delete either Bot. Verify the cap, schedule
+   revocation, stop and saved reason in order. Simulate a failed cancel and
+   confirm that tool calls, schedule changes and deliveries, and reports are
+   still refused. Verify the hold across restart, no automatic resume on re-add,
+   and an explicit reopen under the saved cap. Test the original destination's
+   content-free notice and the carried read scope of the person and chief.
+   Exercise a missing binding and failed save or apply before the first brief.
+   Prove the member's prompt, switches, schedule restrictions and skill pins
+   still apply after revision, removal and replay. Verify a Bot DM follow-up
+   after close keeps the original ID.
 3. Add the tools and compatibility alias. Exercise an Orchestrator member with another
    role, a Terminal-off caller delegating to a member versus a helper, role and
    grant loss between queue and delivery, scoped ID and title lookup, and unchanged
@@ -460,15 +489,12 @@ using it on the live team.
 | Tools and alias | Restore the prior host tool set with its matching client. Keep the task lineage and existing compatibility path. Pending W2-only calls stay held while their tool is unavailable. |
 | Client surfaces | Restore a compatible client bundle. It can use the existing task view during a client-only rollback while the host retains thread state and reports. Keep the thread IDs and anchors for a return to the newer client. |
 
-## Open questions
+## Decisions
 
-1. **Must membership loss immediately cancel work that has already passed
-   admission?** Recommended for W2: hold all new steps, sends and reports on
-   revocation, and leave the behavior of already admitted operations to the
-   existing cancellation path. An immediate cancel policy would also signal
-   a running turn or external tool at the time revocation is observed. Fable's
-   decision is pending before final acceptance. The restart and admission
-   hold applies under either answer.
+The membership ruling requires stopping active delegations when a membership
+or deletion write invalidates admission. Tool, schedule and reporting checks
+enforce revocation independently. This resolves the in-flight cancellation
+question. The RFC remains Proposed pending acceptance.
 
 ## Links
 
