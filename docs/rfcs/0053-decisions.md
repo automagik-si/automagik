@@ -1,0 +1,336 @@
+# RFC 0053: Decisions
+
+| Field | Value |
+|---|---|
+| Status | Proposed |
+| Milestone | none |
+| Lanes | Docs only for this RFC. Deliveries use the plugin lane (3.N.P), with desktop deliveries for DSH profile and install wiring. |
+| Created | 2026-11-28 |
+
+## Summary
+
+An owner can turn on **Route messages to who they concern** for a group chat. For a plain
+message, one decision scores which Bots the message concerns. The group calls the selected
+members and shows how it chose them. Explicit mentions work without a decision provider. The
+owner can inspect a result and call a member the decision missed.
+
+Teams give Bots a shared goal and memory and give a named leader responsibility for the
+members' work. The team handle reaches its leader in a group chat. These positions build on
+[one Bot with roles](0037-roles-not-types.md) and depend on the roles and positions delivery.
+Decisions implementation follows the roles and positions, visible threads and Orchestrator,
+and voice deliveries.
+
+## Motivation
+
+Today a plain group message can wake the admin or the whole group, depending on the room
+mode. The sender has to name each relevant Bot to avoid interrupting everyone else. A
+single, inspectable decision lets the sender delegate that choice and correct a missed call.
+
+## Group routing
+
+Only the owner can opt a group in, including through the host API. Existing and new groups
+start with routing off, and a room without `room.route` keeps its existing admin or everyone
+mode. The switch takes effect immediately. When enabled, the group settings show the
+selected data destination or that the provider is unavailable, and disable the mode control.
+Turning routing on with no provider ready asks for confirmation. Turning it off stops new
+routing requests and prevents pending decisions from starting Bot turns.
+
+The host resolves explicit `@name`, `@all`, and `@team` mentions first. A Bot can receive an
+explicit call within the existing group rules even when the provider is down. A team mention
+that cannot reach its leader still counts as an explicit mention. It posts a notice and
+never becomes an implicit model-routed call. System messages and goal and progress posts
+keep their existing dispatch rules. See Q1 for the proposed rule for ordinary Bot posts.
+
+For an eligible plain user message the host calls `decide()` once with the
+`group-routing/1` rubric and one multi-select question, `concerns`. A message concerns a
+member when it asks for their work or answer, or gives them information they need to act
+on. Passing references and small talk are insufficient. The host treats the message and
+context as evidence for this rubric. Provider output can select only eligible current
+group members and grants no tool, role or data permission.
+
+The host sorts candidates at or above `tau` (τ) by decreasing probability and starts up
+to `k` together. A successful decision with no qualifying member leaves the message posted
+with a nobody mark. An unavailable provider or invalid result leaves it posted with a
+failure mark. Both outcomes wake nobody. A decision in progress keeps a live round open.
+When buffered user posts fold into one turn, the last post is the one scored. The host
+rechecks current group membership and the routing switch before calling the selected Bots.
+
+### Marks and the route card
+
+Marks appear next to the message time. Routed members show an avatar, faded below the
+display-only `sure` threshold. While deciding, the mark shows progress. After a result,
+`◌` means nobody was called and `⊘` means routing failed. Q5 proposes how `tau0` (τ₀)
+changes the opacity of `◌`. One combined progress tick reflects the slots, in order of
+precedence: running, failed, needs you, stopped, done. A pass contributes no tick.
+
+The read-only route card shows each candidate's probability against τ, slot status,
+question and member description, provider, model, latency, attempts, and a short failure
+reason when applicable. The card distinguishes uncalibrated results and possible provider
+truncation. **That was for {name}** calls a current member for the original posted message
+and records a positive human judgment. A member who passed has **Call {name} again**.
+Both actions append an overturn to the record. The host checks the caller, room, route and
+current membership before starting a turn. A stale or inaccessible target is refused.
+
+The group book `group-<roomId>` appends UI records with `kind: 'route'` and
+`event: 'decided' | 'slot' | 'overturn'`. A `decided` event links the message sequence
+and optional DSH message id to a decision id, outcome, sanitized rubric and options, scores,
+thresholds and routed member ids. `slot` and `overturn` events carry the route id, member id
+and time, with a status for slot events. Route events stay outside the conversational
+sequence, room log, search, `read_group_chat` and Bot context.
+
+## Decisions service
+
+The Bot team ships the DSH-level `ctx.decisions` service and separately registered adapters as
+`./decisions` and `./decisions-providers`. The service is independent of the Bot host. A
+decision asks typed questions about bounded state and yields probabilities and structured
+outcomes. The first purposes are `group-routing` and the fixed, synthetic `settings-test`.
+`registerPurpose` is available for later consumers. Voice turn-end, voice relevance and
+approval triage require their own RFC amendments.
+
+| Question kind | Input and normalized answer |
+|---|---|
+| `yes-no` | Question id and instructions, with optional yes/no criteria. Returns `p`, the probability of yes. |
+| `choice` | Two to 255 option ids with optional descriptions. Returns the chosen id and a probability per option. |
+| `multi-select` | One to 64 option ids with optional descriptions. Expands to an independent yes/no question per option in the same batch, then returns an id-to-probability map. |
+| `score` | Two to ten ordered rubric levels. Returns a bounded numeric score and a probability per level. The codec accounts for the endpoint's score semantics. |
+
+Every question carries an id and instructions. Every answer repeats its id and kind.
+Choice and score can carry provider confidence separately from probabilities. A request has
+`{ purpose, rubricVersion, state, questions, deadlineMs, signal?, subject? }`. State is text,
+a JSON object or a JSON array. Change the rubric version when the question instructions
+change. `subject: { book, ref }` is a local ledger reference. The deadline covers credential
+lookup, queueing, calls and retry delays, and accepts 50–30,000 ms.
+
+- `register(provider)` and `registerPurpose(spec)` return disposers.
+  `listProviders()`, `snapshot()` and `follow(signal)` expose catalog, readiness and
+  health. `configure(patch)` saves the live `decisions` profile selection, provider
+  configuration and per-purpose settings. `settings(purpose)` reads the resolved settings.
+- `decide(request)` and `test(selection?, signal?)` return a discriminated outcome.
+  Both outcomes carry `decisionId`, `latencyMs` and `attempts`. `ok` carries the provider
+  id, protocol, requested and answered model, typed answers, calibration flag, optional
+  usage and possible truncation. `unavailable` carries a reason and optional provider,
+  model, HTTP status and retry timing. A malformed service request raises a validation
+  error before ledger or network activity. Provider errors return an unavailable outcome
+  without raw response bodies.
+- `label(decisionId, { questionId, option?, value, source, strength })` appends a label.
+  `evaluation(purpose, { sinceMs }?)` returns decision counts, failure reasons, latency,
+  label coverage and the evaluation statistics below.
+
+The owner explicitly selects one provider and one model in **Settings → Decisions**.
+**None** is the initial selection. The catalog's presets describe protocol, endpoint,
+credential reference, model hints, limits and privacy. Merely registering one sends
+nothing. The group switch independently authorizes routing for that group. Settings also
+show key state, test the chosen configuration with synthetic text, and edit purpose
+thresholds. Changing who receives routing data requires an explicit owner selection.
+
+There is no fallback provider, model, word matcher or shadow request. A missing selection,
+unregistered provider, missing model or missing or rejected key stops before a request.
+The service retries only 429 or 529 on the same provider and model, at most three total
+attempts within the original deadline. It honors `Retry-After` when enough time remains,
+and otherwise uses jittered backoff when the header is absent. Each provider has an
+eight-call concurrency cap, a breaker that opens after five consecutive counted failures,
+a 30-second cooldown and a single half-open probe. Auth failures mark the credential
+rejected until the credential changes and leave the breaker alone. Cancellation, timeout,
+busy, quota, refusal and malformed answers are distinct outcomes. A repeated identical
+request is evaluated again. Caching and in-flight deduplication are deferred.
+
+| Purpose | `tau` | `k` | `tau0` | `deadlineMs` | `sure` |
+|---|---:|---:|---:|---:|---:|
+| `group-routing` | 0.5 | 3 | 0.2 | 2500 | 0.8 (Q4) |
+| `settings-test` | 0.5 | 1 | 0.2 | 5000 | 0.8 (Q4) |
+
+### Provider catalog and codecs
+
+These are proposed presets. Model ids are examples of supported selections. The endpoint
+references document wire compatibility. Delivery must establish the applicable model's
+limits with fixtures and distinguish inferred limits from documented ones.
+
+| Preset id | Protocol | Endpoint and model | DSH credential reference |
+|---|---|---|---|
+| `typesafe-jev` | System One | `https://api.typesafe.ai/v1/systemone`, e.g. `jev-latest`. Pin a version to evaluate thresholds against a stable model. [TypeSafe API](https://docs.typesafe.ai/api/system-one) | `TYPESAFE_API_KEY` (Bearer) |
+| `openrouter-s1` | System One | `https://openrouter.ai/api/v1/systemone`, e.g. `typesafe/jev-1.14`. [OpenRouter System One schema](https://openrouter.ai/docs/api/api-reference/systemone/submit-a-system-one-request.md) | `OPENROUTER_API_KEY` (Bearer) |
+| `celeris-s1` | System One | `https://inference.celeris.ai/celeris-1-decision/v1/systemone`, `celeris-1.1-decision`. [Celeris Decisions](https://docs.celeris.ai/decisions.md) | `CELERIS_API_KEY` (Bearer) |
+| `cloudflare-clef` | System One in a Workers AI response envelope | `https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/@cf/cloudflare/clef` or the `clef-flash` model path. The body selects the corresponding `clef` or `clef-flash`. [Clef](https://developers.cloudflare.com/workers-ai/models/clef/), [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/) | `CLOUDFLARE_API_TOKEN` (Bearer). The account id is non-secret configuration. |
+| `gemini-decision` | System One question shape, Gemini input | `https://generativelanguage.googleapis.com/v1beta/decisions`, `gemini-decision-1`. [Gemini Decisions API](https://aistudio.google.com/docs/decisions-api.md) | `GEMINI_API_KEY` (`x-goog-api-key`) |
+| `openai-luna` | OpenAI Decisions | `https://api.openai.com/v1/decisions`, `gpt-6-luna`. [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) | `OPENAI_API_KEY` (Bearer) |
+| `celeris-oai` | OpenAI Decisions | `https://inference.celeris.ai/celeris-1-decision/v1/decisions`, `celeris-1.1-decision`. [Celeris Decisions](https://docs.celeris.ai/decisions.md#openai-decisions-api) | `CELERIS_API_KEY` (Bearer) |
+| `llm-structured` | Structured output | One explicitly selected DSH `provider/model` route, available while `ctx.llm` is present. Returns uncalibrated probabilities. | Selected model route's own credential |
+
+- **System One** encodes `{ model, state, questions }` with a keyed question map of
+  `noul`, `choice` and `score` questions. The codec matches keyed answers and reads `noul`
+  as the yes probability. Gemini uses `input` and the codec accepts its documented
+  0.01–0.99 yes/no range. Cloudflare unwraps the REST `result`, handles REST failure and
+  reports possible truncation when the request approaches the selected model's context
+  limit. The model pages list 65,536 tokens for Clef and 24,576 for Clef-flash.
+- **OpenAI Decisions** encodes a named `questions[]` array of `predicate`, `choice` and
+  `score` items with choices or levels where appropriate. It matches `answers[]` by name
+  and converts probability arrays to keyed maps. OpenAI accepts JSON state as an
+  `input_json` part in a user message. The Celeris adapter uses string `input` and
+  serializes structured state. Celeris support for `input_json` is unverified.
+- **Structured output** uses a dedicated decision request on the selected DSH route, with
+  a bounded state and one typed `answer` output. It runs without group relay context
+  or ordinary Bot tools. The host validates the result using the same rules.
+
+The codecs require one answer per expanded question, a matching kind, known choices and
+complete probability maps. All probabilities must be finite and within the codec's
+documented range. Choice and score distributions must sum to one within 0.02. Independent
+multi-select probabilities have no sum constraint. A refusal, missing or extra answer,
+or invalid probability fails the whole decision. Provider options and returned model or
+usage values are normalized before appearing in the UI or ledger.
+
+### Credentials and what leaves the machine
+
+Keys resolve for the selected request through `ctx.credentials`. Only the owner can
+set or unset a known writable reference. The settings API returns key state such as
+configured, writable, source and masked display. Credential values are write-only at
+that boundary and never appear in decision payloads, logs, ledger, errors or UI responses.
+The selected provider receives its key in the authentication header. Q2 covers reusing
+an existing Models reference.
+
+Automatic routing sends only the rubric and candidate options, the current group name,
+the latest message (up to 4,000 characters), up to eight preceding lines from that
+group (up to 400 characters each, with speakers), candidate member cards, and
+attachment counts. The Bot host redacts credential-shaped strings across outgoing text
+before capping fields. The service caps serialized state at 16,000 characters. Files,
+filenames, attachment links and contents, image readings, audio, tool input and output,
+other chats, Bot instructions, memory and stored secrets are excluded. Credential
+redaction matches known shapes. The remaining free text may still contain sensitive
+information.
+
+Member cards contain name, title, public roles and coarse work state such as idle,
+working or waiting for approval. Q3 proposes an optional public, user-written
+`bot.handles` line of at most 140 characters. An absent field contributes no text.
+Private Bots contribute name and title only. Task names, other group names, paths, and
+quoted work updates are excluded from the work state. The local book reference and
+credential reference stay on the host.
+
+| Recipient of routing input | Documented data handling |
+|---|---|
+| TypeSafe directly | TypeSafe says it does not train Jev on customer inputs or outputs. It offers opt-in zero data retention (ZDR) and publishes no fixed standard retention period. [TypeSafe data handling](https://help.typesafe.ai/articles/5974925716) |
+| OpenRouter and TypeSafe upstream | The proposed preset pins the TypeSafe upstream, disables provider fallback with `allow_fallbacks: false`, and requests `zdr: true` and `data_collection: 'deny'` on System One. Delivery verifies the request and verifies that account settings permit only the named, eligible recipient, including exclusion of Safety Retention endpoints. When the restriction cannot be established, the preset stays unavailable. OpenRouter's own logging settings and terms also apply. [System One schema](https://openrouter.ai/docs/api/api-reference/systemone/submit-a-system-one-request.md), [ZDR and Safety Retention](https://openrouter.ai/docs/guides/features/zdr), [OpenRouter terms](https://openrouter.ai/terms/) |
+| Celeris directly, either codec | Celeris documents keeping request and billing metadata and sampling prompts and responses for troubleshooting and model improvement after removing detected personal information. It offers a Console opt-out for sampling. A Decisions-specific retention period and a ZDR guarantee are unknown. [Celeris data handling](https://docs.celeris.ai/security) |
+| Cloudflare Workers AI directly | Cloudflare documents ZDR for standard stateless inference and no training on customer content, subject to the documented exceptions and metadata policy. The proposed preset uses Workers AI directly. [Cloudflare data usage](https://developers.cloudflare.com/workers-ai/platform/data-usage/) |
+| Google Gemini API directly | General Gemini API terms distinguish unpaid and paid use and include regional exceptions. Paid content is excluded from product improvement and may be logged for a limited safety period. Decisions-specific retention and ZDR are unverified. [Gemini API terms](https://aistudio.google.com/docs/terms) |
+| OpenAI directly | OpenAI documents ZDR eligibility for Decisions and excludes API content from training by default, with an opt-in to share. Eligibility and active data controls depend on the customer. [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions#data-handling), [OpenAI API data controls](https://developers.openai.com/api/docs/guides/your-data) |
+| Selected DSH model route | The selected route and its intermediaries receive the decision input. Data terms depend on that route. A route is eligible only if it can dispatch to the selected destination without model or provider fallback. |
+
+### Calibration
+
+The local append-only ledger lives at
+`<AUTOMAGIK_HOME>/decisions/ledger/<YYYY-MM>.jsonl`. Versioned decision records store ids,
+timestamps, provider and model, rubric version, sizes, a SHA-256 digest of the capped
+request, normalized scores, latency, attempts and failure codes. Labels link a decision,
+question and optional option id to a boolean value and its provenance. Raw state,
+instructions, message excerpts, keys and provider bodies stay out of the ledger. The
+90-day retention policy drops a monthly file when all its records are past retention.
+Pruning runs at startup and daily. Group-book route cards are separate local UI records.
+
+An explicit person-supplied judgment is a hard label (`user` or `overturn`), positive or
+negative as recorded. Overturns that call a missed member are positive only. An answer
+or `[PASS]` is a behavioral observation (`answered` or `passed`, soft). An unlabeled
+candidate stays unlabeled. An answer or a pass cannot supply either class of human judgment.
+
+Evaluation reports hard and soft coverage separately, with decision counts, failure
+reasons and p50/p95 latency. Reliability bins and Brier score against human judgments
+are calculated per purpose, provider, answered model and rubric version. Behavioral
+summaries are shown separately. Empty data shows counts without a score. Samples
+from the synthetic Settings test are excluded from routing evaluation. A candidate τ
+can be suggested by F1 only after the implementation's documented sufficiency criteria
+are met for **both** positive and negative human judgments in the evaluated cohort.
+If there are only positive overturns, or too few judgments of either kind, the suggestion
+is absent. The owner edits settings manually to change a threshold.
+
+## Teams and positions
+
+A team is a named set of Bots. `state.teams` is keyed by team id. Its records carry
+`{ id, name, handle, leaderId, members, notice?, goal?, pastGoals?, createdAt, createdBy }`.
+A named leader is a current member. With `leaderId: null`, the instance chief of staff
+acts as leader. Leadership is a position. Attached product roles and the group's admin
+position keep their own capabilities. A missing teams record reads as empty. A group
+can optionally belong to a team through `room.teamId`.
+
+Team handles use lowercase letters, digits and hyphens, start with a letter or digit and
+are at most 31 characters. Handles are unique against other teams, Bot names and reserved
+mentions. Saved posts retain team ids. The host, mention picker and rendered bubble use
+the same mention parser, which preserves code, links and references as literal text.
+`@team` in a group reaches the named leader, or the chief if the team has no named
+leader, only when that Bot is a member of the group. Otherwise the team mention calls
+nobody and posts one notice. Other valid mentions in the same message are handled normally.
+
+The owner and chief can create or delete a team and change its name, handle or leader.
+The chief or current leader can maintain the team's membership, notice, goal and memory.
+Members can read the goal and team memory. A chief or the relevant leader can create a
+team-owned group. Settings → Teams and the sidebar's Teams block expose teams, leaders,
+membership, groups, goals and memory. The owner uses the protected Settings routes.
+Bots exercise their powers through the host tools and current position checks.
+
+A leader assigns and follows up through `@name` and `message_bot`. Anyone who can send a
+team mention can ask the leader to take the assignment. A leader can use `stop_bot` for
+**any work of a current member of any team they lead**, including work for another team
+when the Bot is a member of both. The host checks current leadership and membership at
+each action. A former leader or a leader whose target left the team loses that grant
+immediately, unless another current team relationship independently grants it.
+
+| Host tool | Input and effect |
+|---|---|
+| `create_team` | `{ name, handle?, leader?, members?, notice? }` creates a team under the chief's authority. |
+| `update_team` | `{ team, name?, handle?, leader?, add_members?, remove_members?, notice? }` resolves the target by id, name or handle and checks authority for each field. |
+| `delete_team` | `{ team }` resolves the target under the chief's authority. Groups keep their history, `room.teamId` clears, and team memory is archived. |
+| `create_group` | The existing input gains optional `team` for the chief or that team's leader. |
+| `group_goal` | `{ group?, team?, action, … }` requires exactly one target. Team goals reuse the existing goal ledger and archive. |
+| `remember` | Adds scope `team:<handle>`, resolving to `{ kind: 'teamOf', teamId }` and `teams/<safeId>` under the memory root. The instance `team` scope and folder stay available. |
+
+## Contracts introduced
+
+The host derives authority from the caller. The Decisions settings endpoints are
+owner-scoped. Configuration changes, writes, tests and evaluation requests are refused
+for read-only callers. Route card reads respect room access. Overturns are owner-only.
+
+| Channel route or view | Input and result |
+|---|---|
+| `decisions-catalog` | Reads `{ snapshot, shared }`. The snapshot has provider and key metadata, selection, purpose settings, health and readiness. |
+| `decisions-configure` | `{ providerId?, model?, providerConfig?, purposes? }` → `{ snapshot }`. A null selection clears it. |
+| `decisions-key` | `{ ref, value? }` → `{ key }` metadata. Omitted `value` unsets the reference. |
+| `decisions-test` | `{ providerId?, model? }` → typed outcome for the canned test. Explicit selection is required. |
+| `decisions-eval` | `{ purpose, sinceMs? }` → the purpose's evaluation with cohort coverage and optional suggestion. |
+| `update-room` | Extends the room update with `{ id, route?: boolean, teamId?: string \| null }`. The owner sets routing and room ownership through Settings. |
+| `route-card` | `{ roomId, routeId }` → authorized route detail and member slot status. |
+| `route-overturn` | `{ roomId, routeId, botId }` → confirmation after the user action is admitted and queued. |
+| Live `routes` | Per room, compact marks keyed by message sequence and mapped from DSH message ids. Keeps the last 50 marks per room and fetches card detail on demand. |
+| `create-team`, `update-team`, `delete-team` | Owner Settings writes. Create takes `{ name, handle?, leader?, members?, notice? }`, update takes `{ id, ...patch }`, and delete takes `{ id }`. The roster's `teams` view supplies team records with leader and member names and group ids. |
+
+## Open questions
+
+All five recommendations are provisional pending design review and owner sign-off.
+
+1. **Q1. Which members can a Bot's ordinary post call in a routed group?** Recommend
+   explicit mentions only. Without a valid explicit mention the post calls nobody.
+2. **Q2. Should Decisions reuse the credential reference already used in Models?**
+   Recommend reusing the same reference where it matches, with a visible **Shared with
+   Models** note so the owner knows that setting, rotating or removing it affects both.
+3. **Q3. How should the member card describe what a Bot handles?** Recommend a public,
+   user-written, optional one-line `handles` field of at most 140 characters. Omit the
+   line when the user leaves the field empty.
+4. **Q4. When should a routed avatar appear at full opacity?** Recommend `sure = 0.8`
+   by default, editable in Settings. This affects presentation only.
+5. **Q5. What should τ₀ mean when nobody is called?** Recommend solid `◌` when every
+   score is below τ₀, and faded `◌` when at least one is in [τ₀, τ). Both mean no
+   member was called and neither changes selection.
+
+## Proposed deliveries and acceptance
+
+Implementation requires owner acceptance of this RFC and the prerequisite deliveries.
+Hold routing behind its per-group switch throughout delivery. DSH profile and package
+install changes use the desktop lane. The remaining implementation uses the plugin lane.
+
+| Delivery and lane | Acceptance | Rollback |
+|---|---|---|
+| 1. Decision contracts, purposes and ledger · plugin | Fixtures prove state and keys stay out of ledger rows, expired months are pruned, and behavioral-only, sparse or one-class evidence yields no threshold suggestion. A sufficient two-class human fixture produces statistics and a suggestion without applying it. | Stop ledger writes. Saved local rows remain subject to the retention policy when the service next runs. |
+| 2. Decisions service and profile wiring · desktop | Fake providers prove that unset, failing and disposed selections never send to a second provider, that identical requests call twice, and that queueing, retries, cancellation and the breaker observe the service limits. | Remove the service profile entry and stop new decisions. Prior network requests have already crossed the boundary. |
+| 3. Provider adapters and profile wiring · desktop | Each codec encodes and decodes first-party fixtures and rejects refusals, wrong kinds, missing or extra answers and invalid probabilities. Check Gemini's range, Cloudflare truncation, fixed recipients, credential headers and absence of credentials in errors. | Remove the adapter entry. Registered selections become unavailable and previous provider requests remain subject to their terms. |
+| 4. Decisions settings · plugin | Prove explicit selection, owner-only writes, write-only keys, synthetic test and per-purpose settings. Check that an evaluation result cannot apply its suggestion. | Remove the Settings surface. The saved choice and credentials can be managed before rollback. |
+| 5. Routing host · plugin | Test owner opt-in, zero decisions for explicit mentions, one decision for eligible plain messages, bounded redacted egress, no wake on failure or no match, and no wake after opt-out or membership removal. Prove route events stay out of Bot context and answers and passes stay in the behavioral data. | Disable routing per group or revert dispatch to the room's existing mode. Posted chat history and past requests persist. |
+| 6. Routing marks, card and group switch · plugin | Verify both main and mid-round views, slot ticks, view-only cards and an overturn that calls a current member and records a human judgment. Check zh and pt-BR strings and rebuilt bundles. | Turn off routing before reverting the Settings and marks UI. Stored route records and calls already made persist. |
+| 7. Team state, tools, goals and memory · plugin | Prove any-work stops for current members, including a dual member working for another team. Repeat from an existing Session after member removal and leader replacement, with and without an independent remaining grant. Verify team memory access and deletion that retains group history, clears ownership and archives memory. | Remove team tool grants. Saved team goals, memory and group history remain on disk. |
+| 8. Team mentions · plugin | Verify leader and chief resolution, an unreachable leader, handle collisions, stored team ids, and agreement between the host and the client. | Remove team mention dispatch. Saved posts remain readable. |
+| 9. Teams settings and sidebar · plugin | Verify the owner can manage teams, attach groups and reach the team goal and memory from Settings. Check the sidebar, zh and pt-BR strings and rebuilt bundles. | Remove the Teams UI. The host retains team records and their access rules. |
