@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { canonicalDigest, capState, estimateTokens } from '../src/decisions/egress.js'
-import { createLedger } from '../src/decisions/ledger.js'
+import { createLedger } from '../src/decisions/decision-history.js'
 import { PURPOSES } from '../src/decisions/purposes.js'
 import { validatePurposeSettings, validateRequest } from '../src/decisions/validate.js'
 
