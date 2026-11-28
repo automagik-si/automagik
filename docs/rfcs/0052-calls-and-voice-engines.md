@@ -21,7 +21,7 @@ The browser's voice chat and the urs plugin provide separate paths for talking t
 
 ### Voice and the call
 
-- Keep role id `voice-mouth` and display it as **Voice**. The proposed bots-dsh registry role declares `engine: { transport: 'unix', path: '~/.soundbar/automagik-call.sock', protocol: 'automagik-call/1' }` and `capabilities: ['call-engine']`. The planned RFC 0050 adds `call-engine` to RFC 0037 contract 8.
+- Keep role id `voice-mouth` and display it as **Voice**. The proposed bots-dsh registry role declares `engine: { transport: 'unix', path: '~/.soundbar/automagik-call.sock', protocol: 'automagik-call/1' }` and `capabilities: ['call-engine']`. RFC 0050 adds `call-engine` to RFC 0037 contract 8.
 - A Bot is eligible when its current registry Voice attachment has the owner's per-Bot `call-engine` grant. The grant is absent by default and belongs to Voice's own attachment. The host checks that attachment and grant on each operation. The client reads `roleRuntimeByRole[botId]['voice-mouth']`. Keep `roleRuntime[botId]` as the legacy first-package view for existing clients. That projection cannot establish Voice eligibility. The `prefs.roles` switch gates catalog pins only.
 - The only call setting is **Answers soundbar calls** (`answers-soundbar`, a team-scoped boolean toggle, default off). The host refuses a second enabled Bot for the team and names the current one. The value is advertised in `hello` only. Incoming soundbar calls and the wake word are deferred.
 - Show the call button in the eligible Bot's own chat. It becomes the native red hang-up during the call. The right-pane Voice tab shows both waveforms, streaming text from both sides, handoffs linked to their thread, past calls and an opt-in Debug view. One active call row sits below the Bot in the left menu. Deliver the tab and gated button before retiring generic browser voice chat. Keep catalog-only playback for eligible unconverted Voice pins. Keep dictation and move the composer's Enter-to-send ref off `.bt-voice` to an element that always renders.
@@ -43,7 +43,7 @@ The host sends as the person through the existing user-prompt path, with `reques
 
 For example, select `A`, accept `h-1`, select `B`, then accept `h-2`. `A` appears only in the first message and `B` only in the second. A selection made after `h-1` is accepted never edits that message. Pending IDs are memory only. They survive `reseed` and clear on call end, grant revocation or Voice detachment.
 
-Open one `call-handoff` thread on call start using the planned RFC 0051 thread record in `state.threads`. Its id is `call:<callId>`, its Session and parent Session are the Bot's own chat, and its parent Bot and sole initial member are that Bot. Anchor it to the call and attach each successful handoff by its request ID, with the brief as progress. An Orchestrator can delegate from the handoff through its usual tools. End the call thread with the call. The thread reporter skips this kind so the Bot's chat turn cannot send a `thread-done` report back to itself.
+Open one `call-handoff` thread on call start using the RFC 0051 thread record in `state.threads`. This kind uses a call-specific ID, `call:<callId>`, as an exception to the root Session ID rule. Each call gets a distinct thread even when calls share the same chat. Its Session and parent Session are the Bot's own chat, and its parent Bot and sole initial member are that Bot. Anchor it to the call and attach each successful handoff by its request ID, with the brief as progress. An Orchestrator can delegate from the handoff through its usual tools. End the call thread with the call. The thread reporter skips this kind so the Bot's chat turn cannot send a `thread-done` report back to itself.
 
 ## Contracts introduced
 
@@ -185,5 +185,5 @@ These decisions are recorded under the owner's delegated authority and take effe
 ## Links
 
 - [RFC 0037, One Bot; roles make the difference](0037-roles-not-types.md), especially contract 8.
-- Planned RFC 0050, *Teams, positions and roles*, supplies the registry and capability amendment. Planned RFC 0051, *Threads and the Orchestrator*, supplies the thread record and reserved `call-handoff` kind. Both are design dependencies pending approval and delivery.
+- [RFC 0050](0050-teams-positions-roles.md), *Teams, positions and roles*, supplies the registry and capability amendment. [RFC 0051](0051-threads-and-the-orchestrator.md), *Threads and the Orchestrator*, supplies the thread record and reserved `call-handoff` kind. Both RFCs are accepted. Runtime integration depends on their implementation.
 - W3 design decisions 13–19 and acceptance checks (`old #5.1`) carry forward the host-owned call and engine (`old #7.2`), the browser cutover (`old #8.2`), voice continuity (`old #31.1` and `old #33.1`) and the live voice and echo-cancellation choices (`old #4.1`–`#4.3`).
