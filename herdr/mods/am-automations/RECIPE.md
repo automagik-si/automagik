@@ -129,8 +129,19 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   successful run" or "Close the run's tab after a successful run". The switch starts on for
   a new automation (D2) and uses the saved value from `ls --json` when editing. Switching it off
   sends `close_workspace: never`. With 0.12.1-am.4 a finished run then keeps its terminal until
-  that automation's next run starts. The scheduler removes failed, timed-out or stuck runs'
-  terminals and saves the reason and last screen lines in `history --json`.
+  that automation's next run starts. The scheduler removes terminals it opened for failed,
+  timed-out or stuck runs. A bot keeps its own terminal, and the last tab of a shared space stays
+  open.
+
+  **When you update to 0.12.1-am.4.** Read any old run terminals you care about before updating.
+  Before each automation's first new run, the scheduler tries to close all the terminals it can
+  identify from that automation's earlier runs at once, including any you chose never to close.
+  On a Mac, the installer's login service restart can stop the scheduler from tracking an
+  unfinished agent run. The agent can keep working in its terminal until the automation runs
+  again, when the scheduler tries to close it.
+  Your worktrees and their files stay on disk. The panel shows the failure reason. For the reason
+  and any saved screen lines from a removed terminal, run `herdr-automations history --json`.
+
   The panel knows our build by its `version` output containing
   `-am.`; with an upstream `herdr-automations` the switch is replaced by one line saying our build
   is needed, and the key is never sent, so a hand-written `close_workspace` (and `session`) survives

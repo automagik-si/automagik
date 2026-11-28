@@ -158,7 +158,7 @@ version.
 
 The Automations panel (`am-automations`) drives `herdr-automations`, the scheduler that fires the
 automations (our build of the vendored fork in `scheduler/`, released as
-`herdr-automations-v<version>`). The installer puts the build the pack pins
+`herdr-automations-v<version>`). The pack pins 0.12.1-am.4. The installer puts that build
 (`mods/am-automations/scheduler.js`, read from the pack tarball it has just checked) in
 `~/.local/bin/herdr-automations`, for macOS and Linux on arm64 and x86_64: downloaded, checked
 against the pinned sha256, run once (`version` must be exactly the pinned one), then renamed into
@@ -172,7 +172,9 @@ For its own binary it then sets things up. A machine with no `automations.yaml` 
 `backend: hc`, so runs open in the Herdr app; an existing file is never edited, and neither it nor
 the run history is ever removed. It asks before starting the scheduler's login service
 (`herdr-automations service install`, for your user only; `--yes` says yes, no terminal says
-no), and restarts that service without asking only when it started it and the binary was replaced.
+no). When it replaces the binary for a service it set up, it runs the service setup again without
+asking. On a Mac, that stops and starts the service. On Linux, the running scheduler switches to
+the new build after its current runs finish.
 Last, the runtime check: it asks the scheduler `ls --json` and says whether Automations is ready
 (the scheduler runs and the backend is the app's) or what is missing. A failure anywhere here is a
 warning; the pack is installed all the same, and a rerun retries.
@@ -181,12 +183,27 @@ warning; the pack is installed all the same, and a rerun retries.
 `--uninstall` otherwise removes the login service when this installer started it, then the binary.
 While a login service you started yourself (Start in the panel, or `service install`) is installed,
 it keeps the binary too and says how to remove both, so no service is left restarting a missing file.
-`am update` (the pack's own updater) leaves the scheduler as installed. The panel shows the
-command and an Install button when the binary is missing.
+`am update` updates the pack. The installed scheduler keeps its current version.
+
+- **Installed by the pack installer.** Rerun the [pack installer](#install) to get 0.12.1-am.4.
+- **Installed with the panel's Install button only.** The pack installer leaves that older binary
+  in place. Update the pack first so the panel offers 0.12.1-am.4. After your runs finish, remove
+  only `~/.local/bin/herdr-automations`. Reopen **Automations** and click **Install**, which appears
+  when the panel can no longer find the scheduler. You can also click **Copy** and run the displayed
+  install command in a terminal. If the panel says the scheduler is stopped, click **Start**.
 
 With 0.12.1-am.4 and `AFTER A RUN` set to never close, a finished run keeps its terminal until that
-automation's next run starts. The scheduler removes failed, timed-out or stuck runs' terminals
-and saves the reason and last screen lines in `herdr-automations history --json`.
+automation's next run starts. The scheduler removes terminals it opened for failed, timed-out or
+stuck runs. A bot keeps its own terminal, and the last tab of a shared space stays open.
+
+**When you update to 0.12.1-am.4.** Read any old run terminals you care about before updating.
+Before each automation's first new run, the scheduler tries to close all the terminals it can
+identify from that automation's earlier runs at once, including any you chose never to close.
+On a Mac, the installer's login service restart can stop the scheduler from tracking an unfinished
+agent run. The agent can keep working in its terminal until the automation runs again, when the
+scheduler tries to close it.
+Your worktrees and their files stay on disk. The panel shows the failure reason. For the reason
+and any saved screen lines from a removed terminal, run `herdr-automations history --json`.
 
 ### DSH as a Herdr agent (dsh-TUI)
 

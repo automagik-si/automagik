@@ -1203,7 +1203,8 @@ sched_setup() {
     return 0
   fi
   if [ "$spid" != 0 ]; then
-    [ "$SCHED_NEW" = 0 ] || say "Automations: a scheduler is already running (pid $spid), not started by this installer; restart it to run the new build."
+    [ "$SCHED_NEW" = 0 ] || say "Automations: a scheduler is already running (pid $spid). \
+If it was using the binary just replaced, it switches to the new build after its runs finish."
     return 0
   fi
   bounded 15 "$TMP/sched-status" "$SCHED" service status || :
