@@ -99,7 +99,8 @@ const recoveryFields = ({ bots, works }) => JSON.stringify({
 export function install(rt, { contract = updateContract } = {}) {
   const { ctx, home, statePath } = rt
   const sidecarAllowed = (predecessor = false, proof = rt.stateWriteProof?.()) => proof === undefined || proof === 'steady'
-    || (predecessor && proof === 'returned' && teamRead && teamPresentAtLoad === true
+    || (predecessor && proof === 'returned' && teamRead
+      && (teamPresentAtLoad === true || (sameGeneration(bootstrapGeneration) && unconfirmedState === undefined))
       && committedActivations.length === 0 && teamCurrent() && rt.holdsLock())
   const credentials = connectorState(home, protectedState => sidecarAllowed(!protectedState) && rt.ownsLockForPendingWrite())
   let committedActivations = []
@@ -133,6 +134,8 @@ export function install(rt, { contract = updateContract } = {}) {
   // Whether `state` is the team as its file has it (teamLoaded).
   let teamRead = false
   let teamPresentAtLoad = null
+  // Health reports presence at load. A first publication proves ownership only for its own generation.
+  let bootstrapGeneration
   // Preserve ENOENT as evidence until the supervisor decides the trial.
   const missingTeamHeld = () => teamPresentAtLoad === false && (rt.teamImportPending?.() === true
     || (process.env.AUTOMAGIK_SUPERVISOR_RUN
@@ -1143,6 +1146,7 @@ export function install(rt, { contract = updateContract } = {}) {
       const generation = admitted ?? rt.teamGeneration()
       const activating = requested.some(id => !committedActivations.includes(id))
       const strict = requested.length > 0 || committedActivations.length > 0
+      const bootstrap = !strict && teamPresentAtLoad === false && teamRead && seen === '' && !lockBroken
       const temp = strict ? `${statePath}.${randomUUID()}.tmp` : `${statePath}.${process.pid}.tmp`
       let flush = durable
       let renamed = false
@@ -1224,6 +1228,7 @@ export function install(rt, { contract = updateContract } = {}) {
           // Keep our published stamp even if directory sync later fails or
           // another file has already replaced the one we published.
           seen = nextStamp
+          if (bootstrap) bootstrapGeneration = generation
         } finally {
           publishing = undefined
         }

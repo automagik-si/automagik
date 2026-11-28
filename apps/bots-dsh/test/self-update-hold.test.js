@@ -203,6 +203,17 @@ for (const candidate of [false, true]) {
         assert.equal(existsSync(importing.statePath), false)
         assert.deepEqual(readFileSync(join(importHome, 'state.json')), bytes)
       } finally { importing.dispose(); await ctx.dispose() }
+
+      const freshCtx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+      const fresh = createRuntime(freshCtx, { home: botsHome, github: false })
+      try {
+        await fresh.load()
+        assert.equal(fresh.stateWriteProof(), 'returned')
+        await fresh.save({ required: true, durable: true })
+        assert.equal(fresh.teamHealth().present, false)
+        await fresh.connectorEndpoint('connector-connect', { id: 'notion', token: 'fixture-fresh-token' })
+        assert.equal(fresh.secretValue('CONNECTOR_NOTION_TOKEN'), 'fixture-fresh-token')
+      } finally { fresh.dispose(); await freshCtx.dispose() }
     }
     const source = JSON.parse(rosterBytes(2, { roles: [pins.voice] }))
     source.connectors = { fixture: { custom: { name: 'Fake', command: 'fixture-never-exec', env: { TOKEN: 'fixture-only-credential' } } } }

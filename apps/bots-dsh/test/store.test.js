@@ -231,6 +231,42 @@ test('stale queued permission copies cannot replay across an activation', async 
   assert.equal(decoded(statePath).prefs.permission, undefined)
 })
 
+test('a returned predecessor can use its own first saved legacy roster', async t => {
+  const { rt, statePath, home } = runtime(t)
+  let proof = 'held'
+  rt.stateWriteProof = () => proof
+  await rt.load()
+  assert.equal(fs.existsSync(statePath), false)
+  proof = 'returned'
+  const canWrite = () => rt.sidecarWritable({ predecessor: true })
+  // Before the first publication there is only an empty team in memory.
+  assert.equal(canWrite(), false)
+  if (process.platform !== 'win32') {
+    const restore = patch('open', original => async (path, ...args) => {
+      const handle = await original(path, ...args)
+      if (path === home) handle.sync = async () => { throw new Error('injected sync failure') }
+      return handle
+    })
+    try {
+      await assert.rejects(rt.save({ required: true, durable: true }), /injected sync failure/)
+      assert.equal(canWrite(), false)
+    } finally { restore() }
+  }
+  await rt.save({ required: true, durable: true })
+  assert.equal(fs.existsSync(statePath), true)
+  assert.equal(rt.teamHealth().present, false)
+  assert.equal(canWrite(), true)
+  assert.equal(rt.sidecarWritable(), false)
+  proof = 'held'
+  assert.equal(canWrite(), false)
+  proof = 'returned'
+  fs.renameSync(statePath, statePath + '.original')
+  fs.writeFileSync(statePath, rosterBytes(2))
+  assert.equal(canWrite(), false)
+  await rt.refresh()
+  assert.equal(canWrite(), false)
+})
+
 test('a deferred migration recomputes once against the team the matching healthy verdict leaves', async t => {
   const { rt, statePath } = runtime(t, rosterBytes(2).toString(), installProtected)
   let proof = 'held'
