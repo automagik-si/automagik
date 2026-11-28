@@ -2,7 +2,7 @@ import { createElement as h } from 'react'
 import { SKILLS_PANEL, SkillsScreen } from './skills-screen.js'
 import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
-import { bootView, checkViewer, isRetired, onRetire, requestViewer, revalidateViewerOnRefusal, startViewer } from './viewer.js'
+import { bootView, checkViewer, isRetired, mountedViewer, onRetire, requestViewer, revalidateViewerOnRefusal, startViewer } from './viewer.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
@@ -116,6 +116,7 @@ import { ReadScopeControl } from './read-scope.js'
 import { installSelfUpdate } from './self-update.js'
 import { installPeopleCard } from './bot-settings.js'
 import * as gatedShared from './gated-shared.js'
+import { MIGRATION_NOTICE_CSS, MigrationNotices } from './migration-notice.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
@@ -1103,6 +1104,11 @@ function applyOwner(ctx, { gated = false } = {}) {
     })
   }
   const face = () => ({ actions, hooks: { roster, ui, activity, work, memoryNews, registry, turnClock, live, computer, cards, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } })
+  const migrationFace = () => ({
+    actions, hooks: { roster }, readRoster: roster.getSnapshot,
+    isOwner: () => !gated || mountedViewer()?.role === 'owner',
+    after,
+  })
   const openingFace = () => ({ ...face(), openingSessions: ctx.sessions })
   const ownerViewer = gated ? requestViewer('whoami') : undefined
   const updateQueue = async (sessionId, itemId, action) => {
@@ -1353,6 +1359,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => installCompiledStyles(USAGE_CSS, 'usage'),
     () => installCompiledStyles(SCHEDULE_CSS, 'schedules'),
     () => installCompiledStyles(FEEDBACK_CSS, 'feedback'),
+    () => installCompiledStyles(MIGRATION_NOTICE_CSS, 'migration-notice'),
     () => installCompiledStyles(ABOUT_CSS, 'about'),
     () => installCompiledStyles(MEMBER_CSS, 'members'),
     () => installCompiledStyles(GOAL_CSS, 'goal'),
@@ -1429,6 +1436,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => shadow('shell.overlay', { id: 'bot-computer', order: 40, inject: face }, ComputerIndicator),
     () => shadow('shell.overlay', { id: 'bot', order: 50, inject: face }, Overlays),
     () => shadow('shell.overlay', { id: 'bot-signin', order: 55, inject: face }, DeepSeekSignIn),
+    () => shadow('shell.overlay', { id: 'bot-migration', order: 58, inject: migrationFace }, MigrationNotices),
     () => shadow('shell.overlay', { id: 'bot-toast', order: 60, inject: face }, ErrorToast),
   ]
   // DSH draws the user's own messages itself here (no projectUserText), so each one gets the

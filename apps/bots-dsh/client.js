@@ -616,6 +616,14 @@ function avatarProblem(identity, avatar, stored, solver = isSolverLooks(identity
 var NAMESPACE = "omni-ui";
 var ZH2 = {
   ...guardGroupZh,
+  "Bot team update": "Bot 团队更新",
+  "{bot} · {capabilities}": "{bot}：{capabilities}",
+  "Open Role settings for {name}": "打开 {name} 的角色设置",
+  "Choose the chief of staff again": "重新选择首席",
+  "Chief of staff": "首席",
+  "Save chief of staff": "保存首席选择",
+  "Could not save the chief of staff.": "无法保存首席选择。",
+  "The recovery choices changed. Choose a Bot again.": "恢复选项已更改。请重新选择一个 Bot。",
   [SOLVER_ONLY]: "只有 Solver 才能使用 Solver 角色。请选择其他角色。",
   [SOLVER_WEARS]: "Solver 只能使用 Solver 角色。请从这些角色中选择一个。",
   [SOLVER_BY_PERSON]: "只有本人才能把 Bot 设为 Solver。",
@@ -7245,10 +7253,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h108, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h108 / 2}" width="${w}" height="${h108}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h108 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h108 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h108, tilt]) => `<ellipse cx="${cx}" cy="${cy + h108 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h108, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h108 / 2}" width="${w}" height="${h108}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h108, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h108 * 0.14}Q0 ${-h108 * 0.42} ${w * 0.62} ${h108 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h109, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h109 / 2}" width="${w}" height="${h109}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h109 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h109 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h109, tilt]) => `<ellipse cx="${cx}" cy="${cy + h109 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h109, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h109 / 2}" width="${w}" height="${h109}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h109, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h109 * 0.14}Q0 ${-h109 * 0.42} ${w * 0.62} ${h109 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -7376,12 +7384,12 @@ function liveSprings(apply2) {
     const dt = Math.min(0.5, Math.max(1e-3, (now - last) / 1e3));
     last = now;
     const steps = Math.ceil(dt * 240);
-    const h108 = dt / steps;
+    const h109 = dt / steps;
     let moving = false;
     for (const [key, value] of values) {
       for (let index = 0; index < steps; index += 1) {
-        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h108;
-        value.x += value.v * h108;
+        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h109;
+        value.x += value.v * h109;
       }
       if (Math.abs(value.x - value.to) < 0.05 && Math.abs(value.v) < 1) {
         value.x = value.to;
@@ -50639,8 +50647,108 @@ __export(gated_shared_exports, {
   themeCss: () => themeCss
 });
 
-// src/client/index.js
+// src/client/migration-notice.js
 var import_react113 = require("react");
+var isText = (value) => typeof value === "string" && value.trim() !== "";
+var namedBot = (bot) => isText(bot?.id) && isText(bot.name);
+function migrationView(roster, owner) {
+  if (!owner || roster?.ready !== true) return { notices: [] };
+  const notices = Array.isArray(roster.migrationNotices) ? roster.migrationNotices.filter((notice) => isText(notice?.id) && isText(notice.reason)) : [];
+  const recovery = isText(roster.chiefRecovery?.reason) ? roster.chiefRecovery : void 0;
+  const choices = Array.isArray(recovery?.choices) ? recovery.choices.filter(namedBot) : [];
+  return { notices, recovery, choices, readOnly: roster.readOnly };
+}
+function MigrationNotice({ notice, openRoleSettings }) {
+  const affected = Array.isArray(notice.affected) ? notice.affected.filter(namedBot) : [];
+  const target = notice.action?.kind === "role-settings" && affected.find((bot) => bot.id === notice.action.botId);
+  return (0, import_react113.createElement)(
+    "section",
+    { className: "bt-migration-card", "aria-label": t("Bot team update") },
+    (0, import_react113.createElement)("p", null, hostText(notice.reason)),
+    affected.length === 0 ? null : (0, import_react113.createElement)("ul", null, affected.map((bot) => {
+      const capabilities = Array.isArray(bot.capabilities) ? bot.capabilities.filter(isText).map(hostText) : [];
+      return (0, import_react113.createElement)("li", { key: bot.id }, capabilities.length === 0 ? bot.name : t("{bot} · {capabilities}", { bot: bot.name, capabilities: capabilities.join(", ") }));
+    })),
+    target ? (0, import_react113.createElement)(
+      "button",
+      { type: "button", className: "bt-soft bt-soft-sm", onClick: () => openRoleSettings(notice.id, target.id) },
+      t("Open Role settings for {name}", { name: target.name })
+    ) : null
+  );
+}
+function ChiefRecovery({ recovery, choices, readOnly, setChief }) {
+  const [selected, select] = (0, import_react113.useState)("");
+  const [pending, setPending] = (0, import_react113.useState)(false);
+  const [error, setError] = (0, import_react113.useState)("");
+  const inFlight = (0, import_react113.useRef)(false);
+  const id = choices.some((bot) => bot.id === selected) ? selected : "";
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!id || readOnly || inFlight.current) return;
+    inFlight.current = true;
+    setPending(true);
+    setError("");
+    try {
+      await setChief(id);
+    } catch (failure) {
+      setError(failure?.message || t("Could not save the chief of staff."));
+    } finally {
+      inFlight.current = false;
+      setPending(false);
+    }
+  };
+  return (0, import_react113.createElement)(
+    "section",
+    { className: "bt-migration-card", "aria-label": t("Choose the chief of staff again") },
+    (0, import_react113.createElement)("strong", { role: "status" }, t("Choose the chief of staff again")),
+    (0, import_react113.createElement)("p", null, hostText(recovery.reason)),
+    isText(readOnly) ? (0, import_react113.createElement)("p", null, hostText(readOnly)) : null,
+    choices.length === 0 ? null : (0, import_react113.createElement)(
+      "form",
+      { onSubmit: submit },
+      (0, import_react113.createElement)("select", {
+        className: "bt-select",
+        "aria-label": t("Chief of staff"),
+        value: id,
+        disabled: pending || Boolean(readOnly),
+        onChange: (event) => select(event.target.value)
+      }, (0, import_react113.createElement)("option", { value: "" }, t("Choose a Bot…")), choices.map((bot) => (0, import_react113.createElement)("option", { key: bot.id, value: bot.id }, bot.name))),
+      (0, import_react113.createElement)("button", { type: "submit", className: "bt-soft bt-soft-sm", disabled: pending || Boolean(readOnly) || !id }, t("Save chief of staff"))
+    ),
+    error ? (0, import_react113.createElement)("p", { role: "alert" }, error) : null
+  );
+}
+function MigrationNotices({ useRoster, readRoster: readRoster2, isOwner, after, actions }) {
+  const roster = useRoster((value) => value);
+  const { notices, recovery, choices, readOnly } = migrationView(roster, isOwner());
+  if (notices.length === 0 && recovery === void 0) return null;
+  const current = () => migrationView(readRoster2(), isOwner());
+  return (0, import_react113.createElement)(
+    "div",
+    { className: "bt-migration" },
+    recovery === void 0 ? null : (0, import_react113.createElement)(ChiefRecovery, { recovery, choices, readOnly, setChief: async (id) => {
+      const next = current();
+      if (next.readOnly || !next.choices?.some((bot) => bot.id === id)) throw new Error(t("The recovery choices changed. Choose a Bot again."));
+      await after(call("set-chief", { id }));
+    } }),
+    notices.map((notice) => (0, import_react113.createElement)(MigrationNotice, { key: notice.id, notice, openRoleSettings: (id, botId) => {
+      const action = current().notices.find((entry) => entry.id === id)?.action;
+      if (action?.kind === "role-settings" && action.botId === botId) actions.openSettings("bots", botId);
+    } }))
+  );
+}
+var MIGRATION_NOTICE_CSS = `
+.bt-migration{position:fixed;inset-inline-end:16px;top:calc(48px + env(safe-area-inset-top,0px));z-index:40;display:grid;gap:8px;width:min(340px,calc(100vw - 32px));max-height:calc(100dvh - 64px);overflow:auto}
+.bt-migration-card{display:grid;gap:8px;padding:12px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card);color:var(--bt-ink);font-size:13px;overflow-wrap:anywhere}
+.bt-migration-card p,.bt-migration-card ul{margin:0}
+.bt-migration-card ul{padding-inline-start:20px}
+.bt-migration-card form{display:grid;gap:8px}
+.bt-migration-card button{justify-self:start}
+.bt-migration-card [role=alert]{color:var(--bt-danger)}
+`;
+
+// src/client/index.js
+var import_react114 = require("react");
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
 var LIVE_OWN = /* @__PURE__ */ new Set(["revision", "unchanged", "activity", "work", "memoryNews", "memoryReviews", "liveKey", "computerLive"]);
 var ROOM_RAIL = "div:has(+ div > div > [data-chat-flow]) > nav";
@@ -50697,7 +50805,7 @@ function OpeningAwareHeader(props) {
     const { [opened]: _opening, ...turns } = state2[id];
     return select({ ...state2, [id]: turns });
   });
-  return (0, import_react113.createElement)(HeaderPill, { ...props, useSessions: useVisibleSessions, useTurnClock: useVisibleClock });
+  return (0, import_react114.createElement)(HeaderPill, { ...props, useSessions: useVisibleSessions, useTurnClock: useVisibleClock });
 }
 var currentFace = null;
 var omni = Object.freeze({
@@ -51636,6 +51744,13 @@ function applyOwner(ctx, { gated = false } = {}) {
     });
   }
   const face = () => ({ actions, hooks: { roster, ui: ui2, activity, work, memoryNews, registry: registry2, turnClock, live, computer, cards: cards2, heldCards, browserPages, browserTabs, browserHolds, surface, update, frame, panel: ctx.layout.panelInfo } });
+  const migrationFace = () => ({
+    actions,
+    hooks: { roster },
+    readRoster: roster.getSnapshot,
+    isOwner: () => !gated || mountedViewer()?.role === "owner",
+    after
+  });
   const openingFace = () => ({ ...face(), openingSessions: ctx.sessions });
   const ownerViewer = gated ? requestViewer("whoami") : void 0;
   const updateQueue = async (sessionId, itemId, action) => {
@@ -51873,6 +51988,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => installCompiledStyles(USAGE_CSS, "usage"),
     () => installCompiledStyles(SCHEDULE_CSS, "schedules"),
     () => installCompiledStyles(FEEDBACK_CSS, "feedback"),
+    () => installCompiledStyles(MIGRATION_NOTICE_CSS, "migration-notice"),
     () => installCompiledStyles(ABOUT_CSS, "about"),
     () => installCompiledStyles(MEMBER_CSS, "members"),
     () => installCompiledStyles(GOAL_CSS, "goal"),
@@ -51952,6 +52068,7 @@ function applyOwner(ctx, { gated = false } = {}) {
     () => shadow("shell.overlay", { id: "bot-computer", order: 40, inject: face }, ComputerIndicator),
     () => shadow("shell.overlay", { id: "bot", order: 50, inject: face }, Overlays),
     () => shadow("shell.overlay", { id: "bot-signin", order: 55, inject: face }, DeepSeekSignIn),
+    () => shadow("shell.overlay", { id: "bot-migration", order: 58, inject: migrationFace }, MigrationNotices),
     () => shadow("shell.overlay", { id: "bot-toast", order: 60, inject: face }, ErrorToast)
   ];
   const installUserTimes = () => {
