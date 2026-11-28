@@ -38,11 +38,29 @@ test('bound write proof follows replay snapshots and the matching durable health
   assert.equal(proof({ compare: true }), 'compare')
   assert.equal(stateWriteProof({ ...team, statePath: path + '.other' }, env)({ compare: true }), 'held')
   assert.equal(stateWriteProof(team, { ...env, [ACTIVATION_COMPARE]: 'prior-boot:' + run.runId })({ compare: true }), 'held')
-  const stale = stateWriteProof(team, { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined })
-  write(join(store, 'supervisor.json'), { bootId: 'stale-boot', runId: run.runId, version: 1 })
-  assert.equal(stale({ legacyBootstrap: true }), 'held')
-  assert.equal(stale(), 'held')
+  const noRunEnv = { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined, [ACTIVATION_COMPARE]: undefined }
+  for (const [bootId, runId] of [['stale-boot', run.runId], [run.bootId, null], [run.bootId, 'previous-run']]) {
+    const stale = stateWriteProof(team, noRunEnv)
+    write(join(store, 'supervisor.json'), { bootId, runId, version: 1 })
+    assert.equal(stale({ legacyBootstrap: true }), 'held')
+    assert.equal(stale(), 'held')
+    assert.equal(stale({ compare: true }), 'held')
+    write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: run.runId, version: 1 })
+    runStatus('rolledBack', 'health-failed')
+    assert.equal(stale(), 'held')
+    assert.equal(stateWriteProof(team, noRunEnv)(), 'returned')
+    runStatus('health', null)
+  }
+  const lateAnnouncement = stateWriteProof(team, noRunEnv)
+  write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: null, version: 1 })
+  runStatus('checking', null)
+  assert.equal(lateAnnouncement({ legacyBootstrap: true }), 'held')
+  runStatus('health', null)
+  assert.equal(lateAnnouncement(), 'held')
   write(join(store, 'supervisor.json'), { bootId: run.bootId, runId: run.runId, version: 1 })
+  runStatus('rolledBack', 'health-failed')
+  assert.equal(lateAnnouncement(), 'held')
+  runStatus('health', null)
   const lagging = stateWriteProof(team, { ...env, AUTOMAGIK_SUPERVISOR_RUN: undefined })
   assert.equal(lagging({ compare: true }), 'held')
   assert.equal(lagging({ legacyBootstrap: true }), 'held')
@@ -98,6 +116,9 @@ test('steady host resumes sidecar writes when an update is refused before stoppi
   assert.equal(proof(), 'steady')
   // A child started for the run cannot use this refusal as proof of a committed candidate.
   assert.equal(stateWriteProof(team, { ...supervisor, AUTOMAGIK_SUPERVISOR_RUN: runId })(), 'returned')
+  phase('health', null)
+  announce(null)
+  assert.equal(proof(), 'held')
 })
 
 test('a committed host still writes role settings after a later run refuses without restarting', async t => {

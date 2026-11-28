@@ -14,6 +14,9 @@ import { validJournal } from './supervisor/switch.js'
 export { REASON_CODES } from './supervisor/records.js'
 export { prepareStore, storeDirOf, usableStore, writeJsonAtomic } from './supervisor/store.js'
 
+const trialPhases = new Set(['restarting', 'health'])
+const servingPhases = new Set(['checking', 'downloading', 'verifying', 'staging', 'notUpdated'])
+
 export function readCheckRecord(profileDir) {
   const checkStore = () => usableStore(profileDir)
   return readJson(checkStore, checkStore(), 'check.json', fs)
@@ -83,19 +86,24 @@ export function stateWriteProof(rt, env = { ...process.env }) {
     const { bootId } = supervisor
     const bootIds = bootIdsOf(records, bootId)
     const announcement = supervisorStateOf(records.supervisorRecord, bootIds)
-    if (announcement?.bootId !== bootId) {
-      // A same-boot active record is enough to keep a 5b roster absent.
-      // It cannot authorize a write without the matching announcement.
-      if (!steady && bootRun === undefined) {
-        const pending = runOf(records.runRecord, bootIds)
-        if (pending?.bootId === bootId && (RUNNING.has(pending.phase) || pending.phase === 'manualRecovery')) bootRun = pending.runId
+    // The run record may be saved before the announcement. A same-boot
+    // active record can hold bootstrap but cannot itself authorize a write.
+    if (announcement?.bootId !== bootId || announcement.runId !== records.runRecord?.runId) {
+      const pending = runOf(records.runRecord, bootIds)
+      if (pending?.bootId === bootId && (RUNNING.has(pending.phase) || pending.phase === 'manualRecovery')) {
+        if (!steady && bootRun === undefined) bootRun = pending.runId
+        if (pending.runId === bootRun) {
+          candidate ||= trialPhases.has(pending.phase)
+          return 'held'
+        }
+        if (!servingPhases.has(pending.phase)) return 'held'
       }
-      return withoutLiveRun()
     }
+    if (announcement?.bootId !== bootId) return withoutLiveRun()
     // A 5b child can bind to the announcement before its run record is readable.
     if (!steady && bootRun === undefined && announcement.runId !== null) bootRun = announcement.runId
     const { current, run, problem } = stateOf(records, bootId, bootIds)
-    const inTrial = ['restarting', 'health'].includes(run?.phase)
+    const inTrial = trialPhases.has(run?.phase)
     if (inTrial && run.runId === bootRun) candidate = true
     if (problem) return withoutLiveRun()
     if (announcement.runId === null && bootRun === undefined) {
@@ -105,7 +113,7 @@ export function stateWriteProof(rt, env = { ...process.env }) {
     if (run === null) return withoutLiveRun()
     const bound = run.runId === bootRun
     // An early refusal leaves the original child in place with its team unchanged.
-    if (steady && !bound && ['checking', 'downloading', 'verifying', 'staging', 'notUpdated'].includes(run.phase)
+    if (steady && !bound && servingPhases.has(run.phase)
       && (!committed || current?.live?.version === committed.version && current.live.sequence === committed.sequence)) return 'steady'
     const sameHome = rt.statePath === join(teamHomeOf(env), 'state.json')
     if (bound && sameHome && run.phase === 'healthy' && run.reason === 'health-check-finished'
