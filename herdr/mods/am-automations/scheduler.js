@@ -28,7 +28,7 @@ export function schedulerAsset(machine, os) {
     name: `herdr-automations_${os.toLowerCase()}_${arch}`,
     sha256: (linux ? SCHEDULER.linux : SCHEDULER.sha256)[arch],
     hash: linux ? ["sha256sum"] : ["shasum", "-a", "256"],
-    stat: linux ? ["-Lc", "%s %y %i"] : ["-Lf", "%z %.9Fm %i"],
+    stat: linux ? ["-Lc", "%d %i %s %y"] : ["-Lf", "%Xd %i %z %.9Fm"],
   };
 }
 
@@ -38,10 +38,11 @@ export const FIND_SCHEDULER = [
   'if ! { [ -f "$bin" ] && [ -x "$bin" ]; }; then bin=$1; fi',
   '[ -f "$bin" ] && [ -x "$bin" ] || exit 1',
   'case $bin in /*) ;; *) bin=$PWD/$bin ;; esac',
-  'realpath "$bin" 2>/dev/null || printf "%s\\n" "$bin"',
+  'resolved=$(realpath "$bin" 2>/dev/null) || resolved=',
+  'printf "%s\\0%s" "$bin" "$resolved"',
 ].join("\n");
 
-const quote = (word) => "'" + word.replace(/'/g, "'\\''") + "'";
+export const quote = (word) => "'" + word.replace(/'/g, "'\\''") + "'";
 
 /** Stage beside the destination so the final move is a rename on the same filesystem. On Update,
  * check the stamped file again before committing, in case it changed during the download. */
@@ -56,21 +57,46 @@ export function repairCommand(machine, os = "Darwin", { bin, stamp } = {}) {
       + ' || { echo "The scheduler changed during the update. Try again." >&2; exit 1; }'
     : '[ ! -e "$bin" ] || { echo "A scheduler is already installed." >&2; exit 1; }';
   const move = os === "Linux" ? "mv -fT" : "mv -fh";
-  return [
-    `(bin=${target}; dir="\${bin%/*}"`,
-    'if [ -L "$bin" ] || [ -d "$bin" ]; then',
-    '  echo "The scheduler path is a link or directory." >&2; exit 1',
-    'fi',
-    ...(!bin ? ['mkdir -p "$dir" || exit'] : []),
-    'd=$(mktemp -d "$dir/.herdr-automations.XXXXXX") || exit',
-    `trap 'rm -rf "$d"' 0; trap 'exit 1' HUP INT TERM`,
-    'cd "$d" || exit',
-    `curl -fsSLo herdr-automations --max-time 25 ${url} || exit`,
-    `printf '%s  herdr-automations\\n' ${asset.sha256} | ${asset.hash.join(" ")} -c || exit`,
-    'chmod 755 herdr-automations || exit',
+  const script = [
+    `bin=${target}; dir="\${bin%/*}"`,
+    'plain_target() {',
+    '  if [ -L "$bin" ] || [ -d "$bin" ]; then',
+    '    echo "The scheduler path is a link or directory." >&2; exit 1',
+    '  fi',
+    '}',
+    'plain_target',
     unchanged,
-    `${move} herdr-automations "$bin")`,
+    ...(!bin ? ['mkdir -p "$dir" || exit'] : []),
+    // A killed command may leave its private directory or the staged file. A PID in the name
+    // lets a new invocation leave concurrent updates alone.
+    'prefix=$dir/.herdr-automations-update.',
+    'for old in "$prefix"*.?????? "$prefix"*.??????.bin; do',
+    '  [ ! -L "$old" ] && [ -O "$old" ] || continue',
+    '  owner=${old##*/.herdr-automations-update.}; owner=${owner%%.*}',
+    '  case $owner in ""|0*|*[!0-9]*) continue ;; esac',
+    '  kill -0 "$owner" 2>/dev/null || rm -rf "$old"',
+    'done',
+    'd=$(mktemp -d "$dir/.herdr-automations-update.$$.XXXXXX") || exit',
+    'staged=$d.bin',
+    'linked=',
+    `trap 'rm -rf "$d"; [ -z "$linked" ] || rm -f "$staged"' 0`,
+    `trap 'exit 1' HUP INT TERM`,
+    '(',
+    '  cd "$d" || exit',
+    `  curl -fsSLo herdr-automations --max-time 25 ${url} || exit`,
+    `  printf '%s  herdr-automations\\n' ${asset.sha256} | ${asset.hash.join(" ")} -c || exit`,
+    ') || exit',
+    // Use a sibling hard link so the private directory can be removed before the monitored
+    // process execs mv. A killed downloader has no path to the final rename.
+    'ln "$d/herdr-automations" "$staged" || exit',
+    'linked=1',
+    'rm -rf "$d" || exit',
+    'chmod 755 "$staged" || exit',
+    'plain_target',
+    unchanged,
+    `exec ${move} "$staged" "$bin"`,
   ].join("\n");
+  return `sh -c ${quote(script)}`;
 }
 
 // Compare upstream X.Y.Z and the fork's X.Y.Z-am.N only. A local label like "dev" has no order.
@@ -87,7 +113,11 @@ export function updateMessage(version) {
     return `This machine has an older scheduler build (${version}).`
       + ` This pack needs ${SCHEDULER.version}.`;
   }
+  if (first >= 0) {
+    return `This machine has a newer scheduler build (${version}).`
+      + ` Update replaces it with this pack's build (${SCHEDULER.version}).`;
+  }
   const reported = installed || version === "dev" ? ` (${version})` : "";
   return `This machine has a different scheduler build${reported}.`
-    + ` This pack's build (${SCHEDULER.version}) closes terminals left by failed runs.`;
+    + ` Update installs this pack's build (${SCHEDULER.version}).`;
 }

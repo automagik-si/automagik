@@ -19,9 +19,9 @@ sources from our catalog and paths, plus the marketplace (`m`) and the review be
 
 Every mod brings its own `RECIPE.md`, `LICENSE` and keys.
 
-On macOS and Linux, **Automations** offers **Install** when the scheduler is missing and
-**Update** when its SHA-256 differs from the pack's build. Both check the download before
-putting it in place. The panel tells you if the running scheduler still needs a restart.
+On macOS and Linux, **Automations** offers **Install** for a missing scheduler and **Update**
+for a binary that differs from the pack's build and is replaceable. Both check the download.
+Each refresh checks the running scheduler's file and says if it needs a restart.
 
 ## How it behaves
 

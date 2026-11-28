@@ -6,7 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { registerHooks } from "node:module";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, readdirSync } from "node:fs";
 
 const here = (f) => new URL(f, import.meta.url).href;
@@ -55,15 +56,14 @@ async function panel() {
   return { view, cx, draw: () => { index(view.render(cx)); return nodes; } };
 }
 
-test("the repair command: our pinned release for this Mac's arch, hash-checked, into ~/.local/bin", () => {
+test("the repair command pins each release asset and checks it before replacing the file", () => {
   const release = "/automagik-si/automagik/releases/download/herdr-automations-v0.12.1-am.4";
   const arm = repairCommand("arm64");
   assert.ok(arm.includes(`${release}/herdr-automations_darwin_arm64 || exit`));
   assert.ok(arm.includes(`${SCHEDULER.sha256.arm64} | shasum -a 256 -c || exit`));
-  assert.match(arm, /shasum -a 256 -c \|\| exit\nchmod 755/);
-  assert.ok(arm.endsWith('mv -fh herdr-automations "$bin")'));
+  assert.ok(arm.endsWith('exec mv -fh "$staged" "$bin"\''));
   assert.ok(arm.includes('bin="$HOME/.local/bin/herdr-automations"'));
-  assert.ok(arm.includes('mktemp -d "$dir/.herdr-automations.XXXXXX"'));
+  assert.ok(arm.includes('mktemp -d "$dir/.herdr-automations-update.$$.XXXXXX"'));
   const intel = repairCommand("x86_64");
   assert.match(intel, /herdr-automations-v[^/]+\/herdr-automations_darwin_amd64 /);
   assert.ok(intel.includes(SCHEDULER.sha256.amd64));
@@ -77,10 +77,8 @@ test("the repair command: our pinned release for this Mac's arch, hash-checked, 
   assert.equal(repairCommand("arm64", "Darwin"), arm, "a Mac is the default");
 });
 
-// The command is pasted into the person's own terminal, and a ( … ) subshell inherits that shell's
-// variables. Run for real, in a scratch home where ~/.local/bin cannot be made (.local is a file),
-// with `d` already naming a folder: the cleanup must not touch it. Nothing is downloaded: mkdir
-// fails first, so curl never runs.
+// Run the pasted command in a scratch home where ~/.local/bin cannot be made. Cleanup must never
+// touch a folder from the caller's environment.
 test("the repair command never removes a folder it did not make: a preset d survives a failing mkdir", () => {
   const scratch = mkdtempSync(join(tmpdir(), "am-repair-"));
   try {
@@ -176,7 +174,7 @@ test("Install runs the shown command once; the panel then finds the scheduler an
   assert.equal(textOf(draw().get("install-repair")), "Installing…");
   draw().get("install-repair").click({}, cx); // a second click while it runs starts nothing
   await cx.settle();
-  assert.deepEqual(shell, [["-c", repairCommand("x86_64", "Linux")]], "exactly the shown command, once");
+  assert.deepEqual(shell, [["-c", `exec ${repairCommand("x86_64", "Linux")}`]]);
   assert.equal(view.bin, local);
   const after = draw();
   assert.ok(!after.has("scheduler-missing"), "the repair block is gone");
@@ -239,95 +237,202 @@ test("on PATH: the panel uses the resolved executable and checks the platform on
   assert.deepEqual(state.calls.filter(([c]) => c === "uname"), [["uname", "-m"], ["uname", "-s"]]);
 });
 
+const OLD_STAMP = "c000001 10 123 mtime";
+const NEW_STAMP = "c000001 20 456 new-mtime";
+const DIFFERENT = "a".repeat(64);
+
 function offerFixture({ os = "Linux", machine = "x86_64", version = "dev", current = false,
-  bin = PATH_SCHEDULER, versionProbe, installFails = false, serviceFails = false } = {}) {
+  bin = PATH_SCHEDULER, foundAt = bin, versionProbe, installFails = false,
+  installed = true, busy = true, running = 42, live = true, imagePath = bin,
+  writable = true, kind, realImage = false } = {}) {
   const asset = schedulerAsset(machine, os);
-  const different = "a".repeat(64);
-  let stamp = "123 mtime inode", sum = current ? asset.sha256 : different;
-  let live = false;
-  const history = [{ status: "running", run_id: "in-flight", automation: "nightly" }];
+  const binary = os === "Linux" ? "ELF 64-bit LSB executable" : "Mach-O 64-bit executable";
+  let stamp = OLD_STAMP, sum = current ? asset.sha256 : DIFFERENT;
+  let loaded = live ? stamp : "c000001 9 123 mtime";
+  const f = {
+    stamp: () => stamp,
+    change: (next, hash = DIFFERENT) => { stamp = next; sum = hash; },
+    move: (path) => { bin = foundAt = path; },
+    switchDaemon: () => { loaded = stamp; },
+    changeDaemon: (pid) => { running = pid; },
+    idle: () => { busy = false; },
+    hashes: () => state.calls.filter(([cmd]) => cmd === asset?.hash[0]).length,
+    lookup: null,
+    update: null,
+  };
   state.exec = async (command, args, options) => {
-    if (locating(command, args)) return bin ? found(bin) : absent;
+    if (locating(command, args)) {
+      await f.lookup;
+      return bin ? found(bin === foundAt ? bin : `${foundAt}\0${bin}`) : absent;
+    }
     if (command === "uname") return found(args[0] === "-m" ? machine : os);
-    if (command === "stat") return found(stamp);
-    if (command === asset?.hash[0]) return found(`${sum}  ${bin}\n`);
+    if (!realImage && command === "stat" && args.at(-1) === bin) {
+      return stamp ? found(stamp) : absent;
+    }
+    if (command === "file" && args[0] === "-b" && args[1] === bin) {
+      return found(kind ?? binary);
+    }
+    if (command === asset?.hash[0] && args.at(-1) === bin) {
+      return sum ? found(`${sum}  ${bin}\n`) : absent;
+    }
+    if (command === "test" && ["-w", "-x"].includes(args[0])) {
+      return writable ? found("") : absent;
+    }
     if (command === "sh") {
+      assert.equal(options?.timeout, 45000, "the app bounds the replacement to 45 seconds");
+      await f.update;
       if (installFails) return { ...absent, stderr: "curl failed" };
-      stamp = "456 new-mtime new-inode";
+      stamp = NEW_STAMP;
       sum = asset.sha256;
       return found("");
     }
-    if (command === "test" || command === "/usr/sbin/lsof") return live ? found("42") : absent;
+    if (realImage && (command === "stat" || command === "readlink")) {
+      const r = spawnSync(command, args, { encoding: "utf8" });
+      return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+    }
+    const proc = `/proc/${running}/exe`;
+    if (command === "stat" && args.join(" ") === [...asset.stat, proc].join(" ")) {
+      return found(loaded);
+    }
+    if (command === "readlink" && args[0] === proc) {
+      return found(imagePath + (loaded !== stamp && imagePath === bin ? " (deleted)" : ""));
+    }
+    if (command === "/bin/ps"
+        && args.join(" ") === `-ww -p ${running} -o comm=`) return found(imagePath);
+    if (command === "realpath" && args[0] === imagePath) return found(imagePath);
+    if (command === "/usr/sbin/lsof"
+        && args.join(" ") === `-a -p ${running} -d txt -F fDin`) {
+      const [dev, ino] = loaded.split(" ");
+      return found(`p${running}\nftxt\nD0x1\ni2\nn/usr/lib/dyld\n`
+        + `ftxt\nD0x0${dev}\ni${ino}\nn${imagePath}\n`);
+    }
     if (command !== bin) return absent;
     if (args[0] === "version") return versionProbe ? versionProbe(options) : found(version);
     if (args[0] === "ls") return found(JSON.stringify({
-      automations: [], invalid: [], scheduler: 42, backend: "hc",
+      automations: [], invalid: [], scheduler: running, backend: "hc",
     }));
-    if (args[0] === "history") return found(JSON.stringify(history));
-    if (args.join(" ") === "service status") {
-      return found("service installed: true\nscheduler running: true (pid 42)\n");
+    if (args[0] === "history") {
+      const history = busy ? [{ status: "running", run_id: "in-flight" }] : [];
+      return found(JSON.stringify(history));
     }
-    if (args.join(" ") === "service install") return serviceFails ? absent : found("Installed");
+    if (args.join(" ") === "service status") {
+      return found(`service installed: ${installed}\nscheduler running: true (pid ${running})\n`);
+    }
     return absent;
   };
-  return {
-    stamp: () => stamp,
-    change: (next, hash = different) => { stamp = next; sum = hash; },
-    switchDaemon: () => { live = true; },
-    hashes: () => state.calls.filter(([cmd]) => cmd === asset?.hash[0]).length,
-  };
+  return f;
 }
 
-test("the pinned hash hides Update and the stamp caches hashes across refreshes", async () => {
+test("the hash cache changes with path, inode, size and mtime", async () => {
   const f = offerFixture({ current: true });
   const { cx, draw } = await panel();
   assert.ok(!draw().has("scheduler-update"));
   for (let i = 0; i < 4; i++) draw();
   await Promise.all([cx.ticks[0](cx), cx.ticks[0](cx)]);
   assert.equal(f.hashes(), 1, "the same file is hashed only once");
-  f.change("123 changed-mtime inode");
+  for (const [stamp, key] of [
+    ["c000001 11 123 mtime", "inode"],
+    ["c000001 11 124 mtime", "size"],
+    ["c000001 11 124 changed-mtime", "mtime"],
+  ]) {
+    const before = f.hashes();
+    f.change(stamp);
+    await cx.ticks[0](cx);
+    assert.equal(f.hashes(), before + 1, `a changed ${key} triggers another hash`);
+    assert.ok(draw().has("scheduler-update"));
+  }
+  f.move("/another/bin/herdr-automations");
   await cx.ticks[0](cx);
-  assert.ok(draw().has("scheduler-update"), "a changed mtime triggers another hash");
-  f.change("124 changed-mtime inode", SCHEDULER.linux.amd64);
+  assert.equal(f.hashes(), 5, "a changed path with the same stamp triggers another hash");
+});
+
+test("a failed stat or hash warns and retries, and requires an exact 64-hex digest", async () => {
+  const f = offerFixture({ running: 0 });
+  f.change(null);
+  const { cx, draw } = await panel();
+  for (const hash of [undefined, null, "a".repeat(63), "a".repeat(65), "g".repeat(64)]) {
+    if (hash !== undefined) {
+      f.change(OLD_STAMP, hash);
+      await cx.ticks[0](cx);
+    }
+    const notice = textOf(draw().get("scheduler-build-notice"));
+    assert.match(notice, /Could not check the scheduler build/);
+    assert.ok(!draw().has("scheduler-update"));
+  }
+  assert.equal(f.hashes(), 4, "every failed hash is attempted again with the same stamp");
+  f.change(OLD_STAMP, DIFFERENT);
   await cx.ticks[0](cx);
-  assert.ok(!draw().has("scheduler-update"), "a changed size triggers another hash");
-  assert.equal(f.hashes(), 3);
+  assert.ok(draw().has("scheduler-update"));
+  assert.ok(!draw().has("scheduler-build-notice"));
 });
 
 for (const [version, words] of [
   ["0.12.1-am.3", /older scheduler build \(0\.12\.1-am\.3\)/],
-  ["dev", /different scheduler build \(dev\).*closes terminals left by failed runs/],
-  ["0.12.1-am.10", /different scheduler build \(0\.12\.1-am\.10\).*closes terminals/],
-  [SCHEDULER.version, /different scheduler build.*closes terminals/],
-  ["", /different scheduler build\. .*closes terminals/],
+  ["dev", /different scheduler build \(dev\).*Update installs/],
+  ["0.12.1-am.10", /newer scheduler build \(0\.12\.1-am\.10\).*Update replaces/],
+  [SCHEDULER.version, /different scheduler build.*Update installs/],
+  ["", /different scheduler build\. .*Update installs/],
 ]) {
   test(`a different hash offers Update when version says ${version || "nothing"}`, async () => {
     offerFixture({ version });
     const { draw } = await panel();
     const n = draw();
     assert.match(textOf(n.get("scheduler-update")), words);
+    assert.ok(textOf(n.get("scheduler-update")).includes(`Update replaces ${PATH_SCHEDULER}.`));
     assert.equal(textOf(n.get("update-scheduler")), "Update");
     assert.ok(!n.has("scheduler-missing"));
   });
 }
 
-test("a hanging version probe times out and the installed file still gets Update", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "am-hanging-version-"));
+test("the update row names the link target and a protected folder gives its location", async () => {
+  const bin = "/other/scheduler";
+  offerFixture({ bin, foundAt: PATH_SCHEDULER });
+  const linked = await panel();
+  assert.ok(textOf(linked.draw().get("scheduler-update"))
+    .includes(`Update replaces ${bin}, the file that ${PATH_SCHEDULER} points to.`));
+
+  offerFixture({ bin, writable: false });
+  const protectedPanel = await panel();
+  const row = textOf(protectedPanel.draw().get("scheduler-build-notice"));
+  assert.ok(row.includes(`The scheduler lives at ${bin}.`));
+  assert.match(row, /Update the scheduler where it was installed/);
+  assert.ok(!protectedPanel.draw().has("scheduler-update"));
+});
+
+test("a launcher script is managed by another install and gets no Update", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "am-launcher-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, "herdr-automations");
-  writeFileSync(bin, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
-  let timedOut = false;
-  offerFixture({ bin, versionProbe: ({ timeout }) => new Promise((done) => {
+  writeFileSync(bin, '#!/bin/sh\nexec "/another/install/herdr-automations" "$@"\n',
+    { mode: 0o755 });
+  const kind = execFileSync("file", ["-b", bin], { encoding: "utf8" }).trim();
+  const f = offerFixture({ bin, kind });
+  const { draw } = await panel();
+  assert.match(textOf(draw().get("scheduler-build-notice")), /managed by another install/);
+  assert.ok(!draw().has("scheduler-update"));
+  assert.equal(f.hashes(), 0, "no need to hash a launcher");
+});
+
+test("a timed-out version probe retries while the successful hash stays cached", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "am-hanging-version-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const hang = join(dir, "hang.cjs");
+  writeFileSync(hang, "setInterval(() => {}, 1000);\n");
+  let timedOut = false, attempts = 0;
+  const f = offerFixture({ versionProbe: ({ timeout }) => new Promise((done) => {
     assert.equal(timeout, 1500);
-    // The outer bound keeps the fixture safe if a mutant drops the production limit.
-    execFile(bin, ["version"], { timeout: Math.min(timeout || 2500, 2500) }, (err) => {
+    if (++attempts > 1) { done(found(SCHEDULER.version)); return; }
+    execFile(process.execPath, [hang], { timeout: Math.min(timeout || 2500, 2500) }, (err) => {
       timedOut = err?.killed === true;
       done(absent);
     });
   }) });
-  const { draw } = await panel();
+  const { cx, draw } = await panel();
   assert.equal(timedOut, true);
   assert.match(textOf(draw().get("scheduler-update")), /different scheduler build/);
+  await cx.ticks[0](cx);
+  assert.equal(attempts, 2);
+  assert.equal(f.hashes(), 1);
 });
 
 test("unsupported platforms and architectures get neither Install nor Update", async () => {
@@ -344,44 +449,100 @@ test("unsupported platforms and architectures get neither Install nor Update", a
 });
 
 for (const os of ["Darwin", "Linux"]) {
-  test(`${os}: Update replaces once, checks the service and preserves in-flight runs`, async () => {
+  test(`${os}: Update waits for the running image even after reopening the panel`, async () => {
     const f = offerFixture({ os });
     const { view, cx, draw } = await panel();
     const command = repairCommand("x86_64", os, { bin: view.bin, stamp: f.stamp() });
-    if (os === "Darwin") {
-      const row = textOf(draw().get("scheduler-update"));
-      assert.match(row, /Restarting the login service can interrupt runs/);
-    }
-    assert.ok(!state.calls.some(([, ...args]) => args[0] === "service"));
     draw().get("update-scheduler").click({}, cx);
     draw().get("update-scheduler").click({}, cx);
     await cx.settle();
-    const commands = state.calls.filter(([c, , s]) => c === "sh" && s !== FIND_SCHEDULER);
-    assert.deepEqual(commands, [["sh", "-c", command]]);
-    assert.deepEqual(state.calls.filter(([, arg]) => arg === "service"), [
-      [view.bin, "service", "status"],
-      ...(os === "Linux" ? [[view.bin, "service", "install"]] : []),
-    ]);
-    assert.ok(!draw().has("scheduler-update"));
+    const commands = state.calls.filter(([c, , script]) => c === "sh" && script !== FIND_SCHEDULER);
+    assert.deepEqual(commands, [["sh", "-c", `exec ${command}`]]);
+    assert.ok(!state.calls.some(([, arg]) => arg === "service"));
     assert.equal(view.runs[0].status, "running");
-    assert.match(textOf(draw().get("scheduler-handoff")), /restart after runs finish/);
-    f.switchDaemon();
-    await cx.ticks[0](cx);
-    assert.ok(!draw().has("scheduler-handoff"), "the daemon now uses the pinned image");
-    assert.equal(f.hashes(), 2);
+    assert.ok(!draw().has("scheduler-update"));
+
+    const reopened = await panel();
+    assert.equal(textOf(reopened.draw().get("scheduler-handoff")),
+      "The scheduler switches to the new build when no run is busy.");
+    f.switchDaemon(); // exec changes the image while keeping PID 42 and the same on-disk file.
+    await reopened.cx.ticks[0](reopened.cx);
+    assert.ok(!reopened.draw().has("scheduler-handoff"));
+    assert.equal(f.hashes(), 1, "refresh checks the image without hashing the executable again");
+  });
+
+  test(`${os}: a daemon using a different executable has its own row`, async () => {
+    const imagePath = "/other/bin/scheduler";
+    offerFixture({ os, current: true, imagePath });
+    const { draw } = await panel();
+    const text = textOf(draw().get("scheduler-handoff"));
+    assert.ok(text.includes(`The running scheduler uses a different file (${imagePath}).`));
+    assert.ok(text.includes(`This panel checks ${PATH_SCHEDULER}.`));
+    assert.doesNotMatch(text, /restart|when no run is busy/);
+    assert.ok(!draw().has("scheduler-update"));
   });
 }
 
-test("a service setup failure is reported separately from a failed download", async () => {
-  offerFixture({ serviceFails: true });
-  let { cx, draw } = await panel();
-  draw().get("update-scheduler").click({}, cx);
-  await cx.settle();
-  assert.match(textOf(draw().get("scheduler-handoff")), /login service could not be set up/);
-  assert.ok(!draw().has("scheduler-update"));
+for (const [label, os, installed, command] of [
+  ["macOS login service", "Darwin", true, `'${PATH_SCHEDULER}' service install`],
+  ["Linux login service", "Linux", true, "systemctl --user restart herdr-automations.service"],
+  ["manual daemon", "Linux", false, `kill -TERM 43. Once it stops, run '${PATH_SCHEDULER}' daemon`],
+]) {
+  test(`${label}: show a restart command only after the same old image stays idle`, async (t) => {
+    let time = Date.now();
+    t.mock.method(Date, "now", () => time);
+    const f = offerFixture({ os, current: true, live: false, installed });
+    const { cx, draw } = await panel();
+    const row = () => textOf(draw().get("scheduler-handoff"));
+    const tick = async (ms) => { time += ms; await cx.ticks[0](cx); };
+    await tick(90000);
+    assert.match(row(), /switches to the new build/, "a busy run prevents a restart hint");
+    f.idle();
+    await tick(0);
+    await tick(59999);
+    assert.match(row(), /switches to the new build/);
+    f.changeDaemon(43);
+    await tick(1);
+    assert.match(row(), /switches to the new build/, "a new PID resets the waiting time");
+    f.change(NEW_STAMP, schedulerAsset("x86_64", os).sha256);
+    await tick(59999);
+    assert.match(row(), /switches to the new build/, "a new file resets the waiting time");
+    await tick(60000);
+    assert.ok(row().includes(command), row());
+    assert.ok(!state.calls.some(([, action, verb]) => action === "service" && verb !== "status"));
+  });
+}
 
+test("Linux compares the actual proc executable with the file it replaced", {
+  skip: process.platform !== "linux",
+}, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "am-running-image-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(realpathSync(dir), "herdr-automations");
+  copyFileSync("/bin/sh", bin);
+  const timestamp = new Date("2026-01-01T00:00:00Z");
+  utimesSync(bin, timestamp, timestamp);
+  const daemon = spawn(bin, ["-c", "printf ready; read line"], { cwd: dir });
+  const closed = once(daemon, "close");
+  t.after(async () => { daemon.kill(); await closed; });
+  await once(daemon.stdout, "data");
+
+  const f = offerFixture({ bin, current: true, running: daemon.pid, realImage: true });
+  const { cx, draw } = await panel();
+  assert.equal(draw().has("scheduler-handoff"), false,
+    `the running and installed inode match: ${textOf(draw().get("scheduler-handoff"))}`);
+  copyFileSync(bin, bin + ".next");
+  utimesSync(bin + ".next", timestamp, timestamp);
+  renameSync(bin + ".next", bin);
+  await cx.ticks[0](cx);
+  assert.match(textOf(draw().get("scheduler-handoff")), /switches to the new build/);
+  assert.ok(!draw().has("scheduler-update"), "the disk already contains the pinned hash");
+  assert.equal(f.hashes(), 2, "an inode change alone invalidates the hash");
+});
+
+test("a failed download leaves the Update row and says why", async () => {
   offerFixture({ installFails: true });
-  ({ cx, draw } = await panel());
+  const { cx, draw } = await panel();
   draw().get("update-scheduler").click({}, cx);
   await cx.settle();
   assert.match(textOf(draw().get("automations")), /The scheduler was not updated: curl failed/);
@@ -389,7 +550,58 @@ test("a service setup failure is reported separately from a failed download", as
   assert.ok(!state.calls.some(([, arg]) => arg === "service"));
 });
 
-test("the shell leaves the old file on a partial download or bad checksum", (t) => {
+test("Update waits for a refresh and excludes refreshes during the 45-second install", async () => {
+  const f = offerFixture();
+  const { cx, draw } = await panel();
+  const { promise: refresh, resolve: finishRefresh } = Promise.withResolvers();
+  const { promise: update, resolve: finishUpdate } = Promise.withResolvers();
+  const prior = state.calls.length;
+  f.lookup = refresh;
+  f.update = update;
+  const reading = cx.ticks[0](cx);
+  draw().get("update-scheduler").click({}, cx);
+  await new Promise(setImmediate);
+  const replaces = () => state.calls.slice(prior)
+    .filter(([cmd, , script]) => cmd === "sh" && script !== FIND_SCHEDULER);
+  assert.equal(replaces().length, 0, "the pending read must finish before Update runs");
+  finishRefresh();
+  await reading;
+  await new Promise(setImmediate);
+  try {
+    assert.equal(replaces().length, 1);
+    const calls = state.calls.length;
+    await cx.ticks[0](cx);
+    assert.equal(state.calls.length, calls, "the timer cannot read during replacement");
+  } finally {
+    finishUpdate();
+    await cx.settle();
+  }
+  assert.ok(!draw().has("scheduler-update"), "Update refreshes once it finishes");
+});
+
+test("PATH wins over local bin and discovery resolves the actual link target", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "am-find-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pathDir = join(realpathSync(dir), "path");
+  const bin = join(pathDir, "herdr-automations"), target = join(pathDir, "actual");
+  const local = join(dir, ".local", "bin", "herdr-automations");
+  mkdirSync(pathDir);
+  mkdirSync(join(dir, ".local/bin"), { recursive: true });
+  for (const path of [target, local]) writeFileSync(path, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  symlinkSync(target, bin);
+  const find = () => spawnSync("sh", ["-c", FIND_SCHEDULER, "sh", local], {
+    env: { HOME: dir, PATH: `${pathDir}:/usr/bin:/bin` }, encoding: "utf8",
+  });
+  let r = find();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, `${bin}\0${target}`);
+  unlinkSync(bin);
+  r = find();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, `${local}\0${realpathSync(local)}`);
+});
+
+function shellFixture(t) {
   const dir = mkdtempSync(join(tmpdir(), "am-update-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const tools = join(dir, "tools"), target = join(dir, "someone's bin");
@@ -404,31 +616,119 @@ test("the shell leaves the old file on a partial download or bad checksum", (t) 
   writeFileSync(join(tools, "curl"), [
     "#!/bin/sh",
     '[ "$1" = "-fsSLo" ] && [ "$2" = herdr-automations ] || exit 99',
+    '[ "$3" = "--max-time" ] && [ "$4" = 25 ] || exit 98',
     'printf %s "$PAYLOAD" > "$2"',
     'ls -i "$2" > "$STAGED"',
+    'if [ "$CHANGE" = yes ]; then printf changed > "$BIN"; fi',
+    'if [ "$WAIT" = yes ]; then',
+    '  printf "ready\n"',
+    '  for n in 1 2 3 4 5; do',
+    '    [ ! -e "$GO" ] || break',
+    '    sleep 1',
+    '  done',
+    'fi',
     'exit "$CURL_CODE"',
   ].join("\n"), { mode: 0o755 });
   const stamp = execFileSync("stat", [...asset.stat, bin], { encoding: "utf8" }).trim();
-  const command = repairCommand("x86_64", os, { bin, stamp });
-  assert.ok(command.includes(asset.sha256));
-  // Substitute the test payload's digest in the generated command. curl never touches the network.
-  const script = command.replace(asset.sha256, createHash("sha256").update(good).digest("hex"));
-  const run = (PAYLOAD, CURL_CODE) => spawnSync("sh", ["-c", script], {
-    env: { HOME: dir, PATH: `${tools}:/usr/bin:/bin`, PAYLOAD, CURL_CODE, STAGED: staged },
-    encoding: "utf8",
+  const fixtureScript = (options) => {
+    const command = repairCommand("x86_64", os, options);
+    assert.ok(command.includes(asset.sha256));
+    return command.replace(asset.sha256, createHash("sha256").update(good).digest("hex"));
+  };
+  const script = fixtureScript({ bin, stamp });
+  const env = {
+    HOME: dir, PATH: `${tools}:/usr/bin:/bin`, PAYLOAD: good, CURL_CODE: "0",
+    STAGED: staged, BIN: bin, GO: join(dir, "continue"),
+  };
+  const run = (more = {}, command = script) => spawnSync("sh", ["-c", command], {
+    env: { ...env, ...more }, encoding: "utf8",
   });
-  for (const [payload, code] of [[good, "22"], ["bad bytes", "0"]]) {
-    assert.notEqual(run(payload, code).status, 0);
+  return { dir, bin, target, staged, good, script, env, run, fixtureScript, stamp };
+}
+
+test("the shell bounds curl, preserves the old file on failure and renames the inode", (t) => {
+  const { bin, target, staged, good, run } = shellFixture(t);
+  for (const tweak of [{ CURL_CODE: "22" }, { PAYLOAD: "bad bytes" }]) {
+    assert.notEqual(run(tweak).status, 0);
     assert.equal(readFileSync(bin, "utf8"), "old executable");
     assert.deepEqual(readdirSync(target), ["herdr-automations"], "no staging files remain");
   }
-  const success = run(good, "0");
+  const success = run();
   assert.equal(success.status, 0, success.stderr);
   assert.equal(readFileSync(bin, "utf8"), good);
   const inode = readFileSync(staged, "utf8").trim().split(/\s+/)[0];
   assert.equal(statSync(bin, { bigint: true }).ino.toString(), inode);
   assert.deepEqual(readdirSync(target), ["herdr-automations"]);
 });
+
+test("the shell rechecks the unchanged destination after downloading", (t) => {
+  const { bin, target, run } = shellFixture(t);
+  const r = run({ CHANGE: "yes" });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /scheduler changed during the update/);
+  assert.equal(readFileSync(bin, "utf8"), "changed");
+  assert.deepEqual(readdirSync(target), ["herdr-automations"]);
+});
+
+test("the shell refuses link, directory and already-installed destinations", (t) => {
+  const { dir, bin, target, run, fixtureScript } = shellFixture(t);
+  const other = join(dir, "other");
+  mkdirSync(other);
+  const original = join(other, "original");
+  renameSync(bin, original);
+  symlinkSync(original, bin);
+  let r = run();
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /link or directory/);
+  assert.equal(readlinkSync(bin), original);
+  assert.equal(readFileSync(original, "utf8"), "old executable");
+  unlinkSync(bin);
+
+  symlinkSync(other, bin);
+  r = run();
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /link or directory/);
+  assert.equal(readlinkSync(bin), other);
+  assert.deepEqual(readdirSync(other), ["original"]);
+  unlinkSync(bin); // Node 24.9.0 rmSync tries to remove the link as a directory on this case.
+  mkdirSync(bin);
+  r = run();
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /link or directory/);
+  assert.deepEqual(readdirSync(bin), []);
+
+  const local = join(dir, ".local/bin/herdr-automations");
+  mkdirSync(join(dir, ".local/bin"), { recursive: true });
+  writeFileSync(local, "installed", { mode: 0o755 });
+  r = run({}, fixtureScript());
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /scheduler is already installed/);
+  assert.equal(readFileSync(local, "utf8"), "installed");
+  assert.deepEqual(readdirSync(target), ["herdr-automations"]);
+});
+
+test("killing the monitored shell during download cannot replace the file, and a retry cleans up",
+  { timeout: 12000 }, async (t) => {
+    const { bin, target, script, env, run } = shellFixture(t);
+    const child = spawn("sh", ["-c", `exec ${script}`], { env: { ...env, WAIT: "yes" } });
+    const exited = once(child, "exit"), closed = once(child, "close");
+    t.after(() => { child.kill("SIGKILL"); });
+    const [output] = await once(child.stdout, "data");
+    assert.equal(output.toString(), "ready\n");
+    child.kill("SIGKILL");
+    assert.deepEqual(await exited, [null, "SIGKILL"]);
+    writeFileSync(env.GO, "");
+    // Let the orphaned downloader finish before checking the destination and retrying.
+    await closed;
+    assert.equal(readFileSync(bin, "utf8"), "old executable");
+    const active = `.herdr-automations-update.${process.pid}.active`;
+    mkdirSync(join(target, active));
+    const leftovers = readdirSync(target);
+    assert.ok(leftovers.some((file) => file.startsWith(`.herdr-automations-update.${child.pid}.`)));
+    const retry = run();
+    assert.equal(retry.status, 0, retry.stderr);
+    assert.deepEqual(readdirSync(target).sort(), [active, "herdr-automations"]);
+  });
 
 /** The scheduler on PATH listing `automations`; every put (through `sh -c`) is kept and answers ok. */
 function listing(automations) {
@@ -505,7 +805,8 @@ test("a non-retired automation: no retired pill, its agent picked as before; a n
 // and `sh` (the panel's stdin hand-over) really run; any other program, the real scheduler's
 // bare name included, is refused, so no test can reach a real config.
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync,
+  chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync,
+  renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -568,7 +869,9 @@ function stubScheduler(automations, { version = "0.12.1", commands = false, targ
   mkdirSync(join(dir, ".local/bin"), { recursive: true });
   mkdirSync(join(dir, ".config/herdr-automations"), { recursive: true });
   const bin = join(dir, ".local/bin/herdr-automations");
-  writeFileSync(bin, `#!${process.execPath}\n${STUB}`);
+  const stub = join(dir, "scheduler.cjs");
+  writeFileSync(stub, STUB);
+  writeFileSync(bin, `#!/bin/sh\nexec "${process.execPath}" "$STUB_HOME/scheduler.cjs" "$@"\n`);
   chmodSync(bin, 0o755);
   const yaml = join(dir, ".config/herdr-automations/automations.yaml");
   writeFileSync(yaml, JSON.stringify(automations, null, 2));

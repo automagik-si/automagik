@@ -12,8 +12,9 @@ pins (#220); the pack's own updater does not.
 **Mods** panel, find *Automagik Automations* and switch it on; the footer's **Automations** tab then
 appears. Without the scheduler the panel says what is missing and shows the command that installs
 it (the pinned release, hash-checked, into `~/.local/bin`), with **Copy** and **Install**. On macOS
-and Linux, **Update** replaces a scheduler whose SHA-256 differs from the pack's build. An
-install that already has the mod keeps its state through updates, on or off (`OFF_BY_DEFAULT` in
+and Linux, **Update** replaces a writable scheduler binary whose SHA-256 differs from the pack's
+build. The row names the file and explains when it is the target of a link.
+An install that already has the mod keeps its state through updates, on or off (`OFF_BY_DEFAULT` in
 `am-sidebar/release.js`; `am install herdr.am-automations` also switches it on).
 
 Our fork of `DnzzL/herdr-automations` (MIT, kept verbatim in `LICENSE-upstream`, credited in
@@ -75,14 +76,25 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
 ## How it behaves
 
 - **Finding the scheduler**. The panel checks PATH, then `~/.local/bin/herdr-automations`. It
-  looks again on refresh and hashes the file when its size, modification time or inode changes.
-  `scheduler.js` pins the hash for each supported system and architecture. A short `version`
-  probe explains the difference and still supplies the version used by the editing form.
+  resolves links and caches a successful hash by path, device, inode, size and modification time.
+  Stat or hash failures get a row and are tried again on refresh. A short `version` probe supplies
+  the wording and editing options, and is retried on failure. An executable launcher script gets
+  a row saying that another install manages it. An unwritable folder gets a row naming the file
+  and telling you to update it where it was installed.
 - **Install and Update**. Both verify the download in a scratch directory beside the destination
-  and move it into place in one rename. A failed download or checksum leaves the old file in place.
-  On Linux, Update runs `service install` for the running login service. On macOS, a forced
-  restart can interrupt runs, so Update lets the running daemon switch builds when idle.
-  The panel says when it cannot confirm the switch and gives restart instructions.
+  and put it in place in one rename after rechecking the destination. Install requires an empty
+  destination. Update checks that the file is unchanged during the download and can replace a
+  newer build with the pinned one. The download has 25 seconds and the panel allows 45 seconds
+  for the whole command. A later attempt cleans up its own scratch entries from dead commands.
+  Update leaves the login service alone.
+- **Running scheduler**. Each refresh checks the path and file identity of the running scheduler
+  without hashing it. The row names a different executable, reports when the check fails, or
+  says the scheduler switches when no run is busy if it still uses the old file. The row clears
+  when the running image matches, even if its PID stays the same. After a minute with no busy
+  runs observed and the same old image still running, it checks for a login service and can show
+  a restart command. On macOS it shows the scheduler's `service install` command. On Linux it
+  shows the command to restart the existing systemd unit. For a manually started daemon it shows
+  how to stop its process and start the scheduler by path.
 - **Readiness**: `ls --json` answering is the check. No scheduler pid: the "Scheduler stopped"
   banner with **Start**. `backend: herdr` (or none in the file): a line saying runs open in the
   Herdr TUI, not in this app, naming the `automations.yaml` to set `backend: hc` in; the panel
@@ -207,7 +219,10 @@ env line; pure),
 Programs: `herdr-automations` (the scheduler; `install.sh` installs it and, when you say yes, its
 login service), `hc` templates, `sh`, `uname`, `am` (`ls --json` for a project's bots, on the
 scheduler's side `start` and `worker` for a target), and the agents a run starts (`claude`, `codex`,
-`pi`); **Install** and **Update** use `curl`, `shasum` or `sha256sum`, `chmod` and `mv`.
+`pi`). Scheduler checks use `stat`, `realpath`, `file`, `test`, Linux `readlink`, and macOS
+`ps` and `lsof`. **Install** and **Update** use `curl`, `shasum` or `sha256sum`, `stat`,
+`mkdir`, `mktemp`, `ln`, `rm`, `chmod` and `mv`, plus the shell's `test`, `kill`, `printf`,
+`cd`, `trap` and `exec`.
 
 ## Watch out
 
