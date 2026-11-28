@@ -8,7 +8,8 @@ childProcess.execFile = function (program, args, opts, callback) {
   if (program !== "/bin/ps") return execFile(program, args, opts, callback);
   assert.deepEqual(args, ["-axww", "-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "command="]);
   const token = JSON.parse(process.argv[1])[3];
-  const rows = process.env.HC_FAKE_REPORT_PROCESSES.replaceAll("<token>", token);
+  const rows = process.env.HC_FAKE_REPORT_PROCESSES.replaceAll("<token>", token)
+    .replaceAll("<helper>", String(process.pid));
   queueMicrotask(() => callback(null, rows, ""));
 };
 syncBuiltinESMExports();

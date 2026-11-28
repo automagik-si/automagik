@@ -2255,12 +2255,13 @@ system temp folder or the worker's worktree. Run `am worker done --report <file>
 worktree. Add `--state blocked` to report a blocker from a worktree with uncommitted changes.
 am replaces the worker's report under `${AM_HOME:-~/.automagik}/projects/<project>/reports/`.
 A private `project.json` records the full project key. A basename collision adds a 12-digit
-hash suffix to the project folder. The local core starts the detached helper, which expires
-Markdown reports older than 30 days and sends the task lead one `[am] worker …` notice.
-Read the named report and check the worker in am before acting on a notice. The worker sees
-the hand-over receipt before the helper ends its pane. The existing sweep handles worktree
-cleanup. The per-pane hc proxy does not allow the core to start the outside report helper.
-Workers behind it leave their report for their bot and use the bot's `am worker kill` route.
+hash suffix to the project folder. The local core's helper checks that the caller is running
+under the worker pane and that the core's launch and attach ledgers identify it as a worker.
+It removes Markdown reports older than 30 days when saving a new report. The lead receives
+one notice starting with `[am] worker …`. Read the named report and check the worker in am
+before acting on the notice. The worker sees the hand-over receipt before the helper ends its
+pane. The existing sweep handles worktree cleanup. Workers behind the per-pane hc proxy or
+on a linked machine leave their report for their bot, who can use `am worker kill`.
 
 `hc kill` is for the seat of a project's main bot only (`kind: "main"` in `bots.json`). Every
 other bot, a member that leads a squad included, ends a worker it started with:

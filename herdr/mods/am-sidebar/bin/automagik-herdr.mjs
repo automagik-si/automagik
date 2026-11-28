@@ -11853,10 +11853,10 @@ async function makeBranchWorktree(place, base, key, warnings) {
 }
 
 /** `path` is still a folder and one of `key`'s worktrees (git worktree list); false when git can't say. */
-async function stillWorktree(path, key) {
+async function stillWorktree(path, key, runGit = git) {
   const real = realDir(path);
   if (!real || !isDir(real)) return false;
-  const listed = await git(["worktree", "list", "--porcelain"], key);
+  const listed = await runGit(["worktree", "list", "--porcelain"], key);
   return listed !== null && parseWorktrees(listed).some((w) => (realDir(w.path) ?? w.path) === real);
 }
 
@@ -12952,9 +12952,19 @@ function insideHerdrFiles(file) {
 const reportInputError = () => new CliError(
   "Use a readable .md file up to 64 KiB inside the worktree or the system temp folder.", 2);
 
-async function checkWorkerReportStatus(worktree, state) {
+// The outside helper reads worker repositories with the core's permissions.
+const workerReportGitConfig = [
+  ["core.fsmonitor", "false"], ["core.hooksPath", "/dev/null"],
+  ["diff.external", ""], ["credential.helper", ""],
+];
+const workerReportGit = (args, cwd) => git([
+  "--no-pager", ...workerReportGitConfig.flatMap(([key, value]) => ["-c", `${key}=${value}`]),
+  ...args,
+], cwd);
+
+async function checkWorkerReportStatus(worktree, state, runGit = git) {
   // Git status may refresh its index unless told to keep this check read-only.
-  const status = await git(["--no-optional-locks", "status", "--porcelain"], worktree);
+  const status = await runGit(["--no-optional-locks", "status", "--porcelain"], worktree);
   if (status === null) throw new CliError("Couldn't read git status. Nothing was ended.");
   if (status !== "" && state !== "blocked") {
     throw new CliError("The worktree has uncommitted changes. Commit or discard them, move any "
@@ -12988,9 +12998,9 @@ function readWorkerReport(file, worktree) {
 async function untrackedWorkerReport(source, worktree) {
   if (!insideReportRoot(source, worktree) || insideHerdrFiles(source)
       || realDir(dirname(source)) !== dirname(source)) return false;
-  const repo = await git(["rev-parse", "--show-toplevel"], dirname(source));
+  const repo = await workerReportGit(["rev-parse", "--show-toplevel"], dirname(source));
   if (!repo || realDir(repo.trimEnd()) !== worktree) return false;
-  const tracked = await git(
+  const tracked = await workerReportGit(
     ["--literal-pathspecs", "ls-files", "--cached", "--", source], worktree);
   return tracked === "";
 }
@@ -13028,8 +13038,14 @@ function workerWakeLine({ worker, state, branch, pr, report, summary }) {
 async function workerReportPr(branch, worktree) {
   const gh = programPath("gh");
   if (!gh) return null;
+  // Apply the same overrides to Git subprocesses started by gh.
+  const env = { ...process.env, GIT_PAGER: "cat", GIT_CONFIG_COUNT: workerReportGitConfig.length };
+  workerReportGitConfig.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
   const result = await runProgram(gh, ["pr", "view", "--json", "number", "--", branch],
-    { cwd: worktree, timeout: GH_TIMEOUT, killSignal: "SIGKILL" });
+    { cwd: worktree, env, timeout: GH_TIMEOUT, killSignal: "SIGKILL" });
   const pr = result.code === 0 && terminalReply(result)?.number;
   return Number.isSafeInteger(pr) && pr > 0 ? pr : null;
 }
@@ -13078,7 +13094,7 @@ async function finishWorkerReport(core, address, created, request, accept, say) 
     const { row } = context;
     const { state, source, identity } = request;
     const worktree = realDir(row.worktree);
-    if (!worktree || !await stillWorktree(worktree, row.project)) {
+    if (!worktree || !await stillWorktree(worktree, row.project, workerReportGit)) {
       throw new CliError("Couldn't verify the worker's worktree. Nothing was ended.");
     }
     const contents = Buffer.from(request.contents, "base64");
@@ -13086,7 +13102,7 @@ async function finishWorkerReport(core, address, created, request, accept, say) 
         || typeof source !== "string" || !isAbsolute(source) || extname(source) !== ".md") {
       throw reportInputError();
     }
-    await checkWorkerReportStatus(worktree, state);
+    await checkWorkerReportStatus(worktree, state, workerReportGit);
     if (typeof name !== "string" || !/^[a-zA-Z0-9_-]{1,32}$/.test(name)
         || context.pane.name !== name) {
       throw new CliError("Couldn't verify the worker's report filename. Nothing was ended.");
@@ -13152,7 +13168,8 @@ async function finishWorkerReport(core, address, created, request, accept, say) 
   } finally { stop(); dropLock(lock, token); }
 }
 
-async function workerCallerProven(terminalPid, token) {
+export async function workerCallerProven(terminalPid, token, helperPid) {
+  if (terminalPid === 1 || terminalPid === helperPid) return false;
   // Both Linux and macOS ps support these columns. Use the host's ps with untruncated argv.
   const columns = ["-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "command="];
   const result = await runProgram("/bin/ps", ["-axww", ...columns], { timeout: 5000 });
@@ -13167,7 +13184,7 @@ async function workerCallerProven(terminalPid, token) {
     if (row[4].trimEnd().split(/\s+/).at(-1) === token) candidates.push(pid);
   }
   if (!parents.has(terminalPid)) return false;
-  return candidates.some((pid) => {
+  const hasTerminalAncestor = (pid) => {
     const seen = new Set([pid]);
     let parent = parents.get(pid);
     while (parent && !seen.has(parent)) {
@@ -13176,7 +13193,8 @@ async function workerCallerProven(terminalPid, token) {
       parent = parents.get(parent);
     }
     return false;
-  });
+  };
+  return !hasTerminalAncestor(helperPid) && candidates.some(hasTerminalAncestor);
 }
 
 async function proveWorkerCaller(core, terminal, created, token) {
@@ -13187,7 +13205,7 @@ async function proveWorkerCaller(core, terminal, created, token) {
   discoveredCoreSocket = pinnedCoreSocket = route.socket;
   const pane = await workerDoneLivePane(terminal, created);
   if (!Number.isSafeInteger(pane.pid) || pane.pid <= 0
-      || !await workerCallerProven(pane.pid, token)) throw workerDoneRefusal();
+      || !await workerCallerProven(pane.pid, token, process.pid)) throw workerDoneRefusal();
 }
 
 /** Spawned by the core, detached from both its exec request and the worker's terminal. */
@@ -13259,7 +13277,7 @@ async function workerRetirementSocket(core, pane, callerToken) {
   const code = `import { startWorkerRetirement } from ${JSON.stringify(import.meta.url)};
     await startWorkerRetirement(...JSON.parse(process.argv[1]));`;
   const result = await hcReal(["exec", "--json", "--timeout", "15", "--",
-    "node", "--input-type=module", "-e", code,
+    process.execPath, "--input-type=module", "-e", code,
     JSON.stringify([core, pane.address, pane.created_ms, callerToken])], { timeout: 20_000 });
   const launch = decodeExec(result, 15);
   const ready = launch.code === 0 && terminalReply(launch);

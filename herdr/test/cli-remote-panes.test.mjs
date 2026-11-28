@@ -673,6 +673,23 @@ test("linked worker scope: launch uses the linked project's git state and code s
   }
 });
 
+test("am worker leaves the report command out of a linked worker's brief", (t) => {
+  const s = scene(t);
+  packAt(vmApp(s));
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t",
+    "commit", "-qm", "initial", "--allow-empty"], { cwd: s.project });
+  const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  const from = `vm/${start.json().terminal}`;
+  const result = s.cli(["worker", "linked task", "--branch", "fix/report", "--agent", "claude",
+    "--json"], { HC_TERMINAL_ID: from });
+  assert.equal(result.code, 0, result.err);
+  const launch = s.calls().find((args) =>
+    args[0] === "run" && args[args.indexOf("--parent") + 1] === from);
+  assert.match(launch?.at(-1) ?? "", /Before you report done: commit or discard/);
+  assert.doesNotMatch(launch.at(-1), /am worker done/);
+});
+
 test("start --machine of a Claude bot: the briefing file and the per-turn hook in that project, both pointing at vm's app home", (t) => {
   const s = scene(t);
   packAt(vmApp(s));

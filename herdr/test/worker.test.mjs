@@ -5,6 +5,7 @@ import { startFakeCore as startStatusCore } from "./fake-core.mjs";
 import net from "node:net";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
+import { once } from "node:events";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -32,11 +33,13 @@ import { fixturePaneEdit } from "./fixture-pane-edit.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { chosenHomeWords } from "../mods/am-sidebar/agentHome.js";
 import { envWords } from "../mods/am-sidebar/logins.js";
+import { workerCallerProven } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
 import { assertScratchProject, scratchProject, scratchRoot, shortSocketDir }
   from "./scratch-project.mjs";
 const createHashOf = (text) => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
+const FAKE_REPORT_PS = new URL("./worker-report-processes.mjs", import.meta.url).href;
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
 const FAKE_APP = new URL("./fake-herdr-app.mjs", import.meta.url).pathname;
 const ID = { main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc", stray: "b-zzzzzzzzzz" };
@@ -722,7 +725,7 @@ function doneScene(t) {
     HC_FAKE_LOG: s.env.HC_FAKE_LOG, HERDR_APP_HOME: s.app, AM_HOME: amHome,
     AUTOMAGIK_HERDR_TEST_ROOTS: s.env.AUTOMAGIK_HERDR_TEST_ROOTS,
     GIT_CEILING_DIRECTORIES: s.root,
-    NODE_OPTIONS: "--import=" + new URL("./worker-report-processes.mjs", import.meta.url).href,
+    NODE_OPTIONS: "--import=" + FAKE_REPORT_PS,
     HC_FAKE_REPORT_PROCESSES: [
       "7001 1 Ss worker shell", "7002 7001 S node am worker done",
       "7003 7002 S node -e process.stdin.resume() <token>",
@@ -748,18 +751,22 @@ function doneScene(t) {
 }
 
 // Talk to the outside helper directly so the CLI's input checks can't mask a missing guard.
-function reportHelper(t, s) {
+function startReportHelper(s, callerToken = randomUUID()) {
   const code = `import { startWorkerRetirement } from ${JSON.stringify(CLI)};
     await startWorkerRetirement(...JSON.parse(process.argv[1]));`;
-  const identity = ["fakecore0000", s.terminal, s.pane().created_ms, randomUUID()];
+  const identity = ["fakecore0000", s.terminal, s.pane().created_ms, callerToken];
   const args = ["exec", "--json", "--timeout", "15", "--",
-    "node", "--input-type=module", "-e", code, JSON.stringify(identity)];
+    process.execPath, "--input-type=module", "-e", code, JSON.stringify(identity)];
   const child = spawnSync(join(s.root, "bin", "hc"), args,
     { env: s.env, cwd: s.root, encoding: "utf8", timeout: 20_000 });
   assert.equal(child.status, 0, child.stderr);
   const result = JSON.parse(child.stdout);
   assert.equal(result.code, 0, Buffer.from(result.stderr, "base64").toString());
-  const ready = JSON.parse(Buffer.from(result.stdout, "base64").toString());
+  return JSON.parse(Buffer.from(result.stdout, "base64").toString());
+}
+
+function reportHelper(t, s) {
+  const ready = startReportHelper(s);
   assert.equal(ready.host, "127.0.0.1", ready.error);
   const connect = () => {
     const socket = net.createConnection(ready.port, ready.host);
@@ -821,6 +828,19 @@ test("worker report helper refuses a dirty worktree", async (t) => {
   assert.match((await handover.read())?.error ?? "", /uncommitted changes.*--state blocked/);
   assert.equal(existsSync(s.report), false);
   assert.deepEqual(s.retirement(), []);
+});
+
+test("worker report helper ignores the repository's fsmonitor program", async (t) => {
+  const s = doneScene(t);
+  const hit = join(s.root, "fsmonitor-ran");
+  const hook = join(s.root, "fsmonitor");
+  exe(hook, `#!/bin/sh\n: > "${hit}"\n`);
+  git(s.project, "config", "core.fsmonitor", hook);
+  const handover = await reportHelper(t, s).submit();
+  assert.equal((await handover.read())?.data?.report, s.report);
+  handover.send({ retire: false });
+  assert.deepEqual(await handover.read(), { warnings: [] });
+  assert.equal(existsSync(hit), false, "the helper must not run the configured fsmonitor");
 });
 
 test("worker report helper waits for acknowledgement before killing", async (t) => {
@@ -886,6 +906,7 @@ test("worker done requires its exact token in a live descendant's last argument"
   s.helperEnv({ HC_FAKE_REPORT_PROCESSES: [
     "7001 1 Ss worker shell", "7002 7001 S node x<token>",
     "7003 7001 Z node <token>", "7004 1 S node <token>",
+    "7005 7001 S node <token> another-word",
   ].join("\n") });
   const refused = s.done();
   assert.equal(refused.code, 2, refused.err);
@@ -893,6 +914,61 @@ test("worker done requires its exact token in a live descendant's last argument"
   assert.equal(existsSync(s.reports), false);
   assert.deepEqual(s.retirement(), []);
 });
+
+test("worker report helper refuses a caller token with the wrong shape", (t) => {
+  const s = doneScene(t);
+  const reply = startReportHelper(s, "not-a-uuid");
+  assert.equal(reply.code, 2);
+  assert.match(reply.error, /^Only a verified am worker/);
+});
+
+test("worker caller proof stops at a cycle in the parent walk", () => {
+  const code = `import { workerCallerProven } from ${JSON.stringify(CLI)};
+    const token = JSON.parse(process.argv[1])[3];
+    console.log(await workerCallerProven(7001, token, process.pid));`;
+  const result = execFileSync(process.execPath, [
+    "--import", FAKE_REPORT_PS, "--input-type=module", "-e", code,
+    JSON.stringify([null, null, null, randomUUID()]),
+  ], {
+    env: { ...process.env, HC_FAKE_REPORT_PROCESSES: [
+      "7001 1 Ss worker shell", "7002 7003 S node <token>", "7003 7002 S shell",
+    ].join("\n") },
+    encoding: "utf8", timeout: 5000, killSignal: "SIGKILL",
+  });
+  assert.equal(result.trim(), "false");
+});
+
+for (const [name, pid, processes] of [
+  ["pid 1", 1, "1 0 Ss init\n7002 1 S node <token>"],
+  ["a core ancestor", 7001, [
+    "7001 1 Ss core", "7002 7001 S node <token>",
+    "7003 7001 S starter", "<helper> 7003 S helper",
+  ].join("\n")],
+]) {
+  test(`worker done refuses a pane reporting ${name}`, (t) => {
+    const s = doneScene(t);
+    s.patch({ pid });
+    s.helperEnv({ HC_FAKE_REPORT_PROCESSES: processes });
+    const refused = s.done();
+    assert.equal(refused.code, 2, refused.err);
+    assert.match(refused.err, /^am: Only a verified am worker/);
+    assert.deepEqual(s.retirement(), []);
+  });
+}
+
+test("worker caller proof uses real ps to find its descendant (skips only without /bin/ps)",
+  { skip: !existsSync("/bin/ps") }, async (t) => {
+    const token = randomUUID();
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()", token],
+      { stdio: ["pipe", "ignore", "ignore"] });
+    const unrelated = spawn(process.execPath, ["-e", "process.stdin.resume()"],
+      { stdio: ["pipe", "ignore", "ignore"] });
+    t.after(() => { child.kill(); unrelated.kill(); });
+    await Promise.all([once(child, "spawn"), once(unrelated, "spawn")]);
+    const helperPid = process.ppid;
+    assert.equal(await workerCallerProven(process.pid, token, helperPid), true);
+    assert.equal(await workerCallerProven(unrelated.pid, token, helperPid), false);
+  });
 
 test("worker done ignores K2 when the caller puts a planted gh first on PATH", (t) => {
   const s = doneScene(t);
@@ -966,6 +1042,9 @@ test("worker done uses the core login's default app home and AM_HOME", (t) => {
 
 test("worker done hands off app-home writes and reports acceptance before kill", async (t) => {
   const s = doneScene(t);
+  // Include Git and the fixture tools only. The core has no node on PATH.
+  symlinkSync(gitBin, join(s.root, "bin", "git"));
+  s.helperEnv({ PATH: join(s.root, "bin") });
   const ack = join(s.root, "receipt");
   // Keep the permission restriction on the worker CLI, as Codex confines its shell.
   // The fake local core exec launches its own process without those permissions.
@@ -1005,7 +1084,7 @@ exec "${process.execPath}" "${FAKE_HC}" "$@"
   assert.equal(s.pane(), undefined);
   const coreExec = s.calls().find((call) => call[0] === "exec");
   assert.deepEqual(coreExec.slice(0, -2),
-    ["exec", "--json", "--timeout", "15", "--", "node", "--input-type=module", "-e"]);
+    ["exec", "--json", "--timeout", "15", "--", process.execPath, "--input-type=module", "-e"]);
   assert.equal(coreExec.length, 10);
   assert.match(coreExec.at(-2), /startWorkerRetirement/);
   const [core, terminal, created, token] = JSON.parse(coreExec.at(-1));
@@ -1070,6 +1149,14 @@ test("worker done refuses a worker that the attach ledger binds as a bot", (t) =
   assert.deepEqual(s.retirement(), []);
 });
 
+test("worker report helper requires the core's attach ledger", (t) => {
+  const s = doneScene(t);
+  rmSync(join(s.app, "automagik-herdr", "attach.jsonl"));
+  const reply = startReportHelper(s);
+  assert.equal(reply.code, 2);
+  assert.match(reply.error, /core's Herdr app home has no readable attach ledger/);
+});
+
 test("worker done refuses a pane whose cwd differs from the ledger worktree", (t) => {
   const s = doneScene(t);
   s.patch({ cwd: s.project });
@@ -1103,7 +1190,9 @@ test("worker done leaves the input and pane when the outside worktree check refu
   const source = join(s.worktree, "input.md");
   writeFileSync(source, "# Keep me\n");
   exe(join(s.root, "bin/git"), `#!/bin/sh
-if [ "$1 $2" = "worktree list" ]; then printf 'worktree %s\n' "${s.project}"; exit 0; fi
+case " $* " in
+  *" worktree list --porcelain "*) printf 'worktree %s\n' "${s.project}"; exit 0 ;;
+esac
 exec "${gitBin}" "$@"
 `);
   const r = s.done(source, { state: "blocked" });
