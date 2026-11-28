@@ -8,7 +8,11 @@ import { test } from "node:test";
 import { once } from "node:events";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
+  readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -1315,7 +1319,7 @@ test("worker done leaves Herdr's managed files alone", (t) => {
   assert.equal(managed.code, 1, managed.err);
   assert.match(managed.err, /outside Herdr's managed folders/);
   assert.equal(existsSync(join(projectHome, "project.json")), false);
-  rmSync(layouts);
+  unlinkSync(layouts);
 
   symlinkSync(s.worktree, layouts);
   const source = join(s.worktree, "report.md");
