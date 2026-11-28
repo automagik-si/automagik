@@ -1148,7 +1148,7 @@ export function install(rt, { contract = updateContract } = {}) {
       const strict = requested.length > 0 || committedActivations.length > 0
       const bootstrap = !strict && teamPresentAtLoad === false && teamRead && seen === '' && !lockBroken
       const temp = strict ? `${statePath}.${randomUUID()}.tmp` : `${statePath}.${process.pid}.tmp`
-      let flush = durable
+      let flush = durable || bootstrap
       let renamed = false
       let confirmed = false
       try {

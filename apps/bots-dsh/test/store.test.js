@@ -241,18 +241,32 @@ test('a returned predecessor can use its own first saved legacy roster', async t
   const canWrite = () => rt.sidecarWritable({ predecessor: true })
   // Before the first publication there is only an empty team in memory.
   assert.equal(canWrite(), false)
-  if (process.platform !== 'win32') {
-    const restore = patch('open', original => async (path, ...args) => {
-      const handle = await original(path, ...args)
-      if (path === home) handle.sync = async () => { throw new Error('injected sync failure') }
-      return handle
-    })
-    try {
-      await assert.rejects(rt.save({ required: true, durable: true }), /injected sync failure/)
+  const syncs = []
+  let failDirectorySync = process.platform !== 'win32'
+  const restore = patch('open', original => async (path, ...args) => {
+    const handle = await original(path, ...args)
+    const sync = handle.sync.bind(handle)
+    handle.sync = async () => {
       assert.equal(canWrite(), false)
-    } finally { restore() }
-  }
-  await rt.save({ required: true, durable: true })
+      const directory = path === home
+      if (!directory) assert.ok(path.startsWith(statePath + '.'))
+      syncs.push(directory ? 'directory' : 'file')
+      if (directory && failDirectorySync) throw new Error('injected sync failure')
+      return sync()
+    }
+    return handle
+  })
+  try {
+    if (failDirectorySync) {
+      await assert.rejects(rt.save(), /injected sync failure/)
+      assert.deepEqual(syncs, ['file', 'directory'])
+      assert.equal(canWrite(), false)
+      failDirectorySync = false
+      syncs.length = 0
+    }
+    await rt.save()
+    assert.deepEqual(syncs, process.platform === 'win32' ? ['file'] : ['file', 'directory'])
+  } finally { restore() }
   assert.equal(fs.existsSync(statePath), true)
   assert.equal(rt.teamHealth().present, false)
   assert.equal(canWrite(), true)
@@ -264,6 +278,8 @@ test('a returned predecessor can use its own first saved legacy roster', async t
   fs.writeFileSync(statePath, rosterBytes(2))
   assert.equal(canWrite(), false)
   await rt.refresh()
+  assert.equal(canWrite(), false)
+  await rt.save({ required: true })
   assert.equal(canWrite(), false)
 })
 

@@ -209,7 +209,7 @@ for (const candidate of [false, true]) {
       try {
         await fresh.load()
         assert.equal(fresh.stateWriteProof(), 'returned')
-        await fresh.save({ required: true, durable: true })
+        await fresh.save()
         assert.equal(fresh.teamHealth().present, false)
         await fresh.connectorEndpoint('connector-connect', { id: 'notion', token: 'fixture-fresh-token' })
         assert.equal(fresh.secretValue('CONNECTOR_NOTION_TOKEN'), 'fixture-fresh-token')
