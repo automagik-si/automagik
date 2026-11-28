@@ -138,7 +138,7 @@ export function connectorState(home, mayCreateKey) {
       if (key !== undefined) return
       key = readConnectorKey(path)
       if (key.missing && initializeKey && keyIds.size === 0) {
-        if (!mayCreateKey()) {
+        if (!mayCreateKey(protectedState)) {
           keyDeferred = true
           return
         }

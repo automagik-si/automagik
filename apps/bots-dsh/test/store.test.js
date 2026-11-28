@@ -241,7 +241,10 @@ test('a deferred migration recomputes once against the team the matching healthy
   const source = fs.readFileSync(statePath)
   assert.equal(await rt.commitStateActivation([activationIds.registry], propose, { retry: true, afterWrite }), false)
   assert.equal(propose.mock.callCount(), 0)
-  assert.ok(rt.teamHealth())
+  assert.equal(rt.holdsLock(), true)
+  assert.equal(rt.readOnly(), undefined)
+  assert.deepEqual(rt.teamHealth(), { present: true, revision: JSON.parse(source).revision, bots: 2 })
+  assert.deepEqual(rt.botOf('a').roles, [pins.solver])
   proof = 'returned'
   await rt.committedUpdate()
   assert.deepEqual(fs.readFileSync(statePath), source)

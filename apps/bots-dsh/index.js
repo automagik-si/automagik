@@ -4,7 +4,7 @@
 // types. That home is $AUTOMAGIK_BOTS_HOME, else $AUTOMAGIK_HOME/bots (~/.automagik/bots),
 // never under DSH_HOME: installed into someone's own DSH, the team keeps its files apart from
 // DSH's and from other plugins'.
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import fs, { cpSync, existsSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { selectorRoutePolicy } from './src/shared/routes.js'
@@ -271,12 +271,34 @@ function importTeam(home, from, warn, ownsLock) {
   } })
 
   const publishState = (checkKey = () => {}) => {
-    copySkills?.()
+    if (copySkills) {
+      checkSource()
+      copySkills()
+    }
     checkSource()
     checkKey()
     try {
       if (copySkills || !sourceKey.missing || document.version >= 4) publishHostFile(destinationState, stateBytes)
-      else writeBytesAtomic(destinationState, stateBytes, { durable: process.platform !== 'win32' })
+      else {
+        // An ordinary import also works on volumes without hard links. Copy the
+        // validated bytes exclusively so a newly arrived roster wins the race.
+        const staged = join(home, `.write-${randomUUID()}.tmp`)
+        const fd = fs.openSync(staged, 'wx', 0o600)
+        try {
+          try { fs.writeFileSync(fd, stateBytes) } finally { fs.closeSync(fd) }
+          checkSource()
+          fs.copyFileSync(staged, destinationState, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE)
+          const published = fs.openSync(destinationState, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+          try {
+            const stat = fs.fstatSync(published)
+            if (!ownsLock() || !stat.isFile() || stat.size !== stateBytes.length || !fs.readFileSync(published).equals(stateBytes)) {
+              throw new Error('The Bot team changed during import.')
+            }
+            fs.fsyncSync(published)
+          } finally { fs.closeSync(published) }
+          syncDirectorySync(home)
+        } finally { fs.rmSync(staged, { force: true }) }
+      }
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error
       return false
@@ -345,7 +367,7 @@ export function createRuntime(ctx, config = {}) {
   rt.teamImportPending = () => pendingImport
   rt.importTeam = owns => {
     if (!pendingImport || rt.stateWriteProof() !== 'steady') return false
-    const imported = importTeam(home, from, message => ctx.logger.warn(message), owns)
+    const imported = importTeam(home, from, message => ctx.logger.warn(message), () => owns() && rt.stateWriteProof() === 'steady')
     pendingImport = false
     if (imported) ctx.logger.warn('omni-ui: copied the team from %s into %s', config.importHome, home)
     return imported

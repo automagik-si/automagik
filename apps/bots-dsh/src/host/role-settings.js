@@ -32,7 +32,7 @@ export function createRoleSettings(home, fs = disk) {
     if (!hosts) return
     const rt = [...hosts].find(host => host.hasCommittedRole(botId, roleId))
     if (!rt) throw refusal("This Bot's role changed. Try again.")
-    if (write && !rt.sidecarWritable()) throw refusal('Role settings can be changed after the update commits.')
+    if (write && !rt.sidecarWritable({ predecessor: true })) throw refusal('Role settings can be changed after the update commits.')
   }
   async function folder(botId, roleId, create, check) {
     if (!isAbsolute(home) || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,127}$/.test(botId)

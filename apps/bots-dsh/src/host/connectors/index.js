@@ -237,8 +237,9 @@ export function install(rt) {
 
   // --- secrets ----------------------------------------------------------
 
+  const connectorWritable = () => rt.sidecarWritable?.({ predecessor: true }) !== false
   const requireConnectorWrite = () => {
-    if (rt.sidecarWritable?.() === false) throw refusal('Connectors can be changed after the update commits.')
+    if (!connectorWritable()) throw refusal('Connectors can be changed after the update commits.')
   }
   const keptSecret = async (name) => { await rt.loadSecrets(); return rt.secretValue(name) !== undefined }
   const writeSecret = async (name, value, purpose) => {
@@ -425,8 +426,7 @@ export function install(rt) {
       if (insecure(remote)) throw refusal('Connector addresses must start with https://')
       const discovery = await oauth.discover(remote)
       if (discovery.metadata === undefined) throw refusal('This service does not publish OAuth sign-in metadata')
-      state.connectors = { ...(state.connectors ?? {}), [id]: { ...state.connectors?.[id], oauth: { authorizationServerUrl: discovery.authorizationServerUrl, resource: discovery.resource, scope: discovery.scope } } }
-      await rt.save()
+      await saveState(id, { oauth: { authorizationServerUrl: discovery.authorizationServerUrl, resource: discovery.resource, scope: discovery.scope } })
       await startBrowserFlow(id, entry, { discovery })
     } catch (error) {
       await endPending(id)
@@ -440,7 +440,7 @@ export function install(rt) {
     const job = (async () => {
       const saved = state.connectors?.[id]
       const readOnly = rt.readOnly()
-      if (readOnly !== undefined) {
+      if (readOnly !== undefined || !connectorWritable()) {
         await rt.loadSecrets()
         return false
       }
@@ -470,6 +470,7 @@ export function install(rt) {
         }
         const secret = rt.secretValue(clientSecretOf(id))
         const client = { client_id: clientId, ...(secret !== undefined ? { client_secret: secret } : {}) }
+        if (rt.readOnly() !== undefined || !connectorWritable()) return false
         const tokens = await oauth.refreshTokens(discovery, client, refresh, { scope: saved.oauth.scope })
         const purpose = `${entryFor(id)?.name ?? id} connector`
         await writeSecret(tokenSecretOf(id), tokens.access_token, purpose)
@@ -676,6 +677,7 @@ export function install(rt) {
 
   const endpoints = {
     async 'connector-connect'(body) {
+      requireConnectorWrite()
       const entry = known(body.id)
       if (entry.auth.kind === 'none') {
         await saveState(entry.id, { connectedAt: Date.now() })
@@ -715,12 +717,9 @@ export function install(rt) {
       const entry = known(body.id)
       await endPending(entry.id)
       await dropSecrets(entry.id)
-      if (entry.custom !== undefined) {
+      if (entry.custom !== undefined || state.connectors?.[entry.id] !== undefined) {
         const remove = team => { delete team.connectors?.[entry.id] }
         await rt.saveCopy(remove, { beforeCommit: requireConnectorWrite, afterWrite: () => remove(state) })
-      } else if (state.connectors?.[entry.id] !== undefined) {
-        delete state.connectors[entry.id]
-        await rt.save()
       }
       gateways.gw?.forget(entry.id)
       await sync()

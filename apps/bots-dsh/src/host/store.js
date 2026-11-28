@@ -98,8 +98,10 @@ const recoveryFields = ({ bots, works }) => JSON.stringify({
 
 export function install(rt, { contract = updateContract } = {}) {
   const { ctx, home, statePath } = rt
-  const sidecarAllowed = () => rt.stateWriteProof === undefined || rt.stateWriteProof() === 'steady'
-  const credentials = connectorState(home, () => sidecarAllowed() && rt.ownsLockForPendingWrite())
+  const sidecarAllowed = (predecessor = false, proof = rt.stateWriteProof?.()) => proof === undefined || proof === 'steady'
+    || (predecessor && proof === 'returned' && teamRead && teamPresentAtLoad === true
+      && committedActivations.length === 0 && teamCurrent() && rt.holdsLock())
+  const credentials = connectorState(home, protectedState => sidecarAllowed(!protectedState) && rt.ownsLockForPendingWrite())
   let committedActivations = []
   let activationEpoch = 0
   let activationFence = false
@@ -114,9 +116,9 @@ export function install(rt, { contract = updateContract } = {}) {
   const pinsIn = ({ bots } = {}) => new Map(Object.entries(bots ?? {}).map(([id, bot]) => [
     id, JSON.stringify(bot?.roles ?? []),
   ]))
-  rt.sidecarWritable = ({ legacy = false } = {}) => {
+  rt.sidecarWritable = ({ legacy = false, predecessor = false } = {}) => {
     const proof = rt.stateWriteProof?.()
-    return proof === undefined || proof === 'steady'
+    return sidecarAllowed(predecessor, proof)
       || (legacy && (proof === 'returned' || committedActivations.length === 0 && teamRead))
   }
   rt.hasCommittedRole = (botId, roleId) => {

@@ -169,6 +169,79 @@ test('a committed host still writes role settings after a later run refuses with
   assert.deepEqual(await settings.read('a', pins.voice.id, spec), { voice: 'still serving' })
 })
 
+for (const candidate of [false, true]) {
+  test(`a ${candidate ? 'rolled-back candidate cannot change' : 'returned predecessor can change'} legacy sidecars`, async t => {
+    const { profileDir, store, botsHome } = fixture(t)
+    const bootId = 'return-boot'
+    const runId = 'return-run'
+    for (const [name, value] of Object.entries({ AUTOMAGIK_BOTS_HOME: botsHome, AUTOMAGIK_SUPERVISOR_BOOT: bootId,
+      AUTOMAGIK_SUPERVISOR_VERSION: '3.178.8', AUTOMAGIK_SUPERVISOR_RUN: runId })) {
+      const original = process.env[name]
+      process.env[name] = value
+      t.after(() => { if (original === undefined) delete process.env[name]; else process.env[name] = original })
+    }
+    const phase = (phase, reason) => write(join(store, 'state.json'), { version: 1, bootId, runId, phase, reason,
+      from: '3.178.8', to: '3.178.9', startedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() })
+    write(join(store, 'supervisor.json'), { version: 1, bootId, runId })
+    phase(candidate ? 'health' : 'rolledBack', candidate ? null : 'health-failed')
+    const source = JSON.parse(rosterBytes(2, { roles: [pins.voice] }))
+    source.connectors = { fixture: { custom: { name: 'Fake', command: 'fixture-never-exec', env: { TOKEN: 'fixture-only-credential' } } } }
+    write(join(botsHome, 'state.json'), source)
+    const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+    let route
+    const register = ctx.connection.fetch.register
+    ctx.connection.fetch.register = options => {
+      if (options.path === '/api/omni-ui' && options.methods.includes('POST')) route = options
+      return register(options)
+    }
+    const rt = createRuntime(ctx, { home: botsHome, github: false })
+    t.after(async () => { rt.dispose(); await ctx.dispose() })
+    await rt.load()
+    if (candidate) {
+      assert.equal(rt.stateWriteProof(), 'held')
+      assert.equal(rt.holdsLock(), true)
+      const response = await route.fetch(new Request('http://127.0.0.1/api/omni-ui', {
+        method: 'POST', body: JSON.stringify({ endpoint: 'state', payload: { health: true } }),
+      }))
+      assert.deepEqual(await response.json(), { ok: true, value: { present: true, revision: source.revision, bots: 2 } })
+    }
+    phase('rolledBack', 'health-failed')
+    assert.equal(rt.stateWriteProof(), candidate ? 'held' : 'returned')
+    const key = join(botsHome, 'connector-key')
+    const settings = createRoleSettings(botsHome)
+    const spec = [{ key: 'voice', kind: 'voice' }]
+    const setVoice = () => settings.write('a', pins.voice.id, spec, { voice: 'returned voice' }, () => {})
+    const setConnector = () => rt.connectorEndpoint('connector-set', { id: 'fixture', readOnly: true })
+    const token = 'fixture-only-notion-token'
+    const connect = () => rt.connectorEndpoint('connector-connect', { id: 'notion', token })
+    assert.equal(rt.holdsLock(), true)
+    assert.equal(rt.teamHealth().present, true)
+    assert.equal(fs.existsSync(key), false)
+    if (candidate) {
+      await assert.rejects(setVoice(), /after the update commits/)
+      await assert.rejects(setConnector(), /after the update commits/)
+      await assert.rejects(connect(), /after the update commits/)
+      assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), undefined)
+      await rt.save({ required: true })
+      assert.equal(JSON.parse(fs.readFileSync(rt.statePath)).version, 2)
+      assert.equal(fs.existsSync(key), false)
+      assert.deepEqual(await settings.read('a', pins.voice.id, spec), { voice: '' })
+    } else {
+      assert.deepEqual(await setVoice(), { voice: 'returned voice' })
+      await setConnector()
+      await connect()
+      assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), token)
+      assert.match(fs.readFileSync(join(botsHome, 'secrets.json'), 'utf8'), /CONNECTOR_NOTION_TOKEN/)
+      const saved = JSON.parse(fs.readFileSync(rt.statePath))
+      assert.equal(saved.version, 3)
+      assert.equal(saved.connectors.fixture.readOnly, true)
+      assert.equal(saved.connectors.fixture.custom.env.TOKEN.enc, 'v1')
+      assert.equal(fs.existsSync(key), true)
+      assert.equal(rt.stateWriteProof({ compare: true }), 'returned')
+    }
+  })
+}
+
 const bootId = 'd5b-fixture-boot'
 const verdict = (phase, requestId = 'new-request') => ({ runId: 'live-run', phase, requestId, updatedAt: new Date(0).toISOString() })
 const tickPromises = () => new Promise(resolve => setImmediate(resolve))

@@ -17,12 +17,54 @@ test('a direct connector mutation cannot create a key or publish a roster during
   await rt.load()
   const before = readFileSync(rt.statePath)
   rt.stateWriteProof = () => 'held'
+  const fetch = t.mock.method(globalThis, 'fetch', () => assert.fail('Held connector sign-in reached OAuth discovery'))
   await assert.rejects(rt.connectorEndpoint('connector-add', {
     name: 'Fixture', command: 'fixture-never-exec', env: { TOKEN: 'fixture-credential-value' },
   }), /after the update commits/)
+  await assert.rejects(rt.connectorEndpoint('connector-connect', { id: 'notion' }), /after the update commits/)
+  assert.equal(fetch.mock.callCount(), 0)
   assert.equal(existsSync(join(home, 'connector-key')), false)
   assert.deepEqual(readFileSync(rt.statePath), before)
   assert.equal(rt.state.connectors, undefined)
+})
+
+test('an OAuth response arriving after the update holds the host cannot publish credentials', async t => {
+  const home = scratch(t)
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const rt = createRuntime(ctx, { home, github: false })
+  await rt.load()
+  rt.state.connectors = { notion: {
+    oauth: { authorizationServerUrl: 'https://fixture.test' }, client: { via: 'manual', clientId: 'fake-client' },
+  } }
+  await rt.save({ required: true })
+  await rt.secretEndpoint('secret-set', { name: 'CONNECTOR_NOTION_REFRESH', value: 'fixture-old-refresh', scope: [] })
+  const before = readFileSync(rt.statePath)
+  const secretPath = join(home, 'secrets.json')
+  const secretsBefore = readFileSync(secretPath)
+  let proof = 'steady'
+  rt.stateWriteProof = () => proof
+  const posted = Promise.withResolvers()
+  const provider = Promise.withResolvers()
+  t.mock.method(globalThis, 'fetch', async input => {
+    const url = String(input?.url ?? input)
+    if (url === 'https://fixture.test/.well-known/oauth-authorization-server') {
+      return Response.json({ issuer: 'https://fixture.test', authorization_endpoint: 'https://fixture.test/auth',
+        token_endpoint: 'https://fixture.test/token', response_types_supported: ['code'] })
+    }
+    assert.equal(url, 'https://fixture.test/token')
+    posted.resolve()
+    return provider.promise
+  })
+  const refresh = rt.connectorsInternals.refreshConnector('notion')
+  await Promise.race([posted.promise, refresh.then(() => assert.fail('The token request never started'))])
+  proof = 'held'
+  provider.resolve(Response.json({ access_token: 'fixture-new-access', refresh_token: 'fixture-new-refresh', token_type: 'Bearer' }))
+  assert.equal(await refresh, false)
+  assert.equal(rt.secretValue('CONNECTOR_NOTION_REFRESH'), 'fixture-old-refresh')
+  assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), undefined)
+  assert.deepEqual(readFileSync(rt.statePath), before)
+  assert.deepEqual(readFileSync(secretPath), secretsBefore)
 })
 
 for (const refreshing of [false, true]) {
@@ -143,4 +185,33 @@ test('gateway preserves MCP POST headers and bodies and reports expired sessions
   assert.equal(refreshes, 0)
   assert.match(JSON.stringify(logs), /notion.*POST.*404/)
   assert.equal(JSON.stringify(logs).includes('private-'), false)
+})
+
+test('OAuth refresh defers provider rotation while writes are held, including during discovery', async t => {
+  const ctx = fakeContext()
+  const rt = createRuntime(ctx, { home: scratch(t), github: false })
+  t.after(() => ctx.dispose())
+  await rt.load()
+  await rt.loadSecrets()
+  await rt.secretEndpoint('secret-set', { name: 'CONNECTOR_NOTION_REFRESH', value: 'fixture-original', scope: [] })
+  rt.state.connectors = { notion: { oauth: { authorizationServerUrl: 'https://as.test' }, client: { via: 'manual', clientId: 'fixture' } } }
+  let held = true
+  rt.stateWriteProof = () => held ? 'held' : 'steady'
+  const requests = []
+  t.mock.method(globalThis, 'fetch', async url => {
+    const address = String(url?.url ?? url)
+    requests.push(address)
+    held = true
+    return Response.json(address.endsWith('/token')
+      ? { access_token: 'fixture-access', refresh_token: 'fixture-rotated', token_type: 'Bearer' }
+      : { issuer: 'https://as.test', authorization_endpoint: 'https://as.test/auth', token_endpoint: 'https://as.test/token',
+          response_types_supported: ['code'] })
+  })
+  assert.equal(await rt.connectorsInternals.refreshConnector('notion'), false)
+  assert.deepEqual(requests, [])
+  held = false
+  assert.equal(await rt.connectorsInternals.refreshConnector('notion'), false)
+  assert.ok(requests.some(address => address.includes('well-known')))
+  assert.equal(requests.includes('https://as.test/token'), false)
+  assert.equal(rt.secretValue('CONNECTOR_NOTION_REFRESH'), 'fixture-original')
 })

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import fs, { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -564,4 +564,33 @@ test('config.browser turns Bot browsers off even in the Desktop profile', (t) =>
   const { stop } = start(TEAM, { config: { browser: false }, services: { profileContext: { name: 'desktop' } } })
   t.after(stop)
   assert.ok(!rt.teamTools.some(d => d.name === 'read_browser'))
+})
+
+test('ordinary import preserves a roster created at publication', async t => {
+  const root = scratch(t)
+  const source = join(root, 'source')
+  const home = join(root, 'destination')
+  mkdirSync(source)
+  const input = rosterBytes(2)
+  const winner = rosterBytes(2, { revision: 23 })
+  writeFileSync(join(source, 'state.json'), input)
+  const destination = join(home, 'state.json')
+  let injected = false
+  for (const operation of ['renameSync', 'copyFileSync']) {
+    const original = fs[operation]
+    t.mock.method(fs, operation, (from, to, ...options) => {
+      if (to === destination && !injected) {
+        writeFileSync(destination, winner, { flag: 'wx' })
+        injected = true
+      }
+      return original(from, to, ...options)
+    })
+  }
+  const ctx = fakeContext()
+  t.after(() => ctx.dispose())
+  const rt = createRuntime(ctx, { home, importHome: source, github: false })
+  assert.equal(injected, true)
+  assert.deepEqual(readFileSync(rt.statePath), winner)
+  assert.deepEqual(readFileSync(join(source, 'state.json')), input)
+  assert.deepEqual(globSync('.write-*.tmp', { cwd: home }), [])
 })
