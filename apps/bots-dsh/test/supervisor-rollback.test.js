@@ -421,6 +421,30 @@ for (const [field, value, result] of [
   })
 }
 
+for (const loss of ['missing file', 'regressed revision', 'teamMissing flag']) {
+  test('rollback without captured reads preserves the lost roster: ' + loss, async t => {
+    const f = prepare(t, { teamMissing: loss === 'missing file' })
+    const path = join(f.kept, 'data.json')
+    const index = read(path)
+    delete index.files[0].reads
+    write(path, index)
+    if (loss === 'regressed revision') write(f.path, { ...trialTeam, revision: originalTeam.revision - 1 })
+    if (loss === 'teamMissing flag') {
+      f.run.rollback.teamMissing = true
+      persist(f, f.state, f.run)
+    }
+    const liveBytes = () => fs.existsSync(f.path) ? fs.readFileSync(f.path) : null
+    const before = liveBytes()
+    const start = t.mock.fn()
+    const { run } = await rollback(f, { start })
+    assert.equal(start.mock.callCount(), 0)
+    assert.equal(run.phase, 'manualRecovery')
+    assert.deepEqual(run.rollback.data, { restored: false, why: 'unknown', trialKept: false })
+    assert.equal(run.journal.restore, undefined)
+    assert.deepEqual(liveBytes(), before)
+  })
+}
+
 test('a historical index without a digest still allows a compatible legacy trial', async t => {
   const f = prepare(t)
   const path = join(f.kept, 'data.json')
