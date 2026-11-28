@@ -83,7 +83,15 @@ export function stateWriteProof(rt, env = { ...process.env }) {
     const { bootId } = supervisor
     const bootIds = bootIdsOf(records, bootId)
     const announcement = supervisorStateOf(records.supervisorRecord, bootIds)
-    if (announcement?.bootId !== bootId) return withoutLiveRun()
+    if (announcement?.bootId !== bootId) {
+      // A same-boot active record is enough to keep a 5b roster absent.
+      // It cannot authorize a write without the matching announcement.
+      if (!steady && bootRun === undefined) {
+        const pending = runOf(records.runRecord, bootIds)
+        if (pending?.bootId === bootId && (RUNNING.has(pending.phase) || pending.phase === 'manualRecovery')) bootRun = pending.runId
+      }
+      return withoutLiveRun()
+    }
     // A 5b child can bind to the announcement before its run record is readable.
     if (!steady && bootRun === undefined && announcement.runId !== null) bootRun = announcement.runId
     const { current, run, problem } = stateOf(records, bootId, bootIds)
