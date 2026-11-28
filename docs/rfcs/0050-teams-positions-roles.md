@@ -130,7 +130,7 @@ model, permission, folder, look, channels or memory.
 | Core role | Contract |
 |---|---|
 | Orchestrator | bots-dsh registers `orchestrator` with `task-start`, `route-policy` and an empty tool list in W1. Its prompt leads the conversation, assigns work to a fitting member or helper, follows up, checks results and reports. The W1 prompt uses the existing `start_task` and result callback. Group 6 registers the provider while legacy admission still works. Group 6B switches to committed `task-start` grants after conversion, with `route-policy` also required for a named model. Existing task, shell and caller checks still apply. W2 adds `delegate`, thread tools and their prompt. |
-| Omni | Omni's plugins provide Omni channel tools, subscriptions and canvas access through the role. On the certified path, `hasRole` replaces Main or crew-kind tests. The holder follows the owner's switches. On a new link, attach Omni only to the selected Bot after the owner explicitly confirms its switch settings. Preserve other Bots' roles and settings, including the chief's. Channel grants still require their own admission. |
+| Omni | Omni's plugins provide Omni channel tools, subscriptions and canvas access through the role. On the certified path, `hasRole` replaces Main or crew-kind tests. The holder follows the owner's switches. On a new link, show all three switches for the selected Bot, with Terminal and Files initially off. Attach Omni and apply the selected settings only when the owner confirms. Cancelling preserves its existing settings. Preserve other Bots' roles and settings, including the chief's. Channel grants still require their own admission. |
 | Genie | Genie's official plugin provides `grant_wish`, wish rows and role rules. Wishes, Sessions and stored looks stay with the Bot. Keep the old Genie exclusivity check only for the legacy carrier while compatibility is needed. An explicit legacy detach stays detached when the provider registers. |
 | Voice | W1 keeps the existing `voice-mouth` package pins, `speak`, settings and grants functional, including beside new attachments. W3 supplies the registry Voice implementation and upgrades each pin with owner consent, preserving the public `voice-mouth` ID. When `prefs.roles` is false, the existing catalog pin remains inert and the conversion refuses until the owner enables catalog roles. A registered Voice attachment uses its own `call-engine` grant for calls. An existing `audio-out` grant does not grant `call-engine`. The proof of all four real providers on one Bot belongs to W3. |
 
@@ -242,8 +242,9 @@ seat `kind: "main"` retain their meanings.
   commit an enforceable state. An owner retry reads the current saved restrictions and completes only when all
   required entries can be represented. The released legacy Omni strip list can leave image reads visible. W1's
   Files-off setting covers image reads as well and can narrow that access. Owner-written image denials stay in
-  force. A role pin recorded before registration may be shown as missing and cannot activate grants until its
-  provider and enforcement are ready.
+  force. Show an existing pin whose provider is unavailable as missing and withhold its grants. During
+  migration, write a new attachment only when a shipped provider or compatible host adapter can serve it
+  under the committed policy. Otherwise retain the compatible legacy entry and recheck on registration.
 - **Provider handoff.** New Omni channels and canvas use `rt.omniRolePolicyReady(botId)` to check a compatible
   registered provider and current committed host policy for that Bot. It is independent of role membership and
   false at startup until proven, or after authority is lost. A certified Bot without Omni receives no legacy
@@ -354,8 +355,8 @@ combinations pass. The Omni RFC 0001 amendment travels with Group 15's Omni PR a
 The owner's delegate agreed to the following answers, effective with this RFC.
 
 1. Solver-only characters become ordinary characters. Stored avatar selections keep their art.
-2. A later Omni link attaches the role only to the selected Bot after the owner confirms the switches. The
-   chief and other Bots keep their roles.
+2. A later Omni link shows Terminal and Files initially off and attaches the role only to the selected
+   Bot after the owner confirms the three switches. The chief and other Bots keep their roles.
 3. A responsible member can delete a group after explicit confirmation. Ordinary members do not gain deletion
    authority.
 4. A private Bot cannot join or lead a team, and a team member or leader cannot become private until the
