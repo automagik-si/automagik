@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { apply as registerDshScheduleTools } from '@deepseek-ai/dsh-tool-schedule'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { install as installSchedules, reminderText } from '../src/host/schedules.js'
@@ -275,8 +276,9 @@ test('Pocket task rename refuses a code before editing the scheduler', async t =
     catalog: async () => [entry],
     async edit(request, _actor, signal) {
       signal.throwIfAborted()
+      assert.equal(request.expectedUpdatedAt, null)
       edits.push(request)
-      entry = { ...entry, ...request.patch }
+      entry = { ...entry, ...request.patch, updatedAt: '2030-01-01T00:00:00.000Z' }
       return entry
     },
   }
@@ -303,6 +305,7 @@ test('Pocket task rename refuses a code before editing the scheduler', async t =
   assert.deepEqual(edits, [])
   assert.equal((await rename('Planning')).state, 'saved')
   assert.deepEqual(edits.map(edit => edit.patch), [{ title: 'Planning' }])
+  assert.equal(entry.updatedAt, '2030-01-01T00:00:00.000Z')
 })
 
 test('tasks are created on the Bot’s current part, listed by Bot, and deleted', async (t) => {
@@ -522,7 +525,8 @@ test('restricting a Bot pauses the fresh-Session tasks its Sessions armed', asyn
     title: 'Once', prompt: 'Check', timing: { kind: 'every', every_seconds: 3600 },
     target: { kind: 'session', sessionId: 'fresh-1' },
   }, 'w2')
-  // An unrestricted Bot keeps its fresh-Session task, whatever the sweep sees.
+  // The new scope waits for proof, but the inherited restricted scope still pauses during a hold.
+  rt.stateWriteProof = () => 'held'
   await rt.revokeNewSchedules()
   assert.equal(schedule.tasks.get(fresh.id).status, 'active')
   // The user's settings restrict it: its fresh-Session tasks pause, the bound one stays.
@@ -600,8 +604,8 @@ test('a pause that the schedule service refuses blocks unlineaged deliveries', a
   schedule.edit = edit
   await rt.revokeNewSchedules()
   assert.equal(schedule.tasks.get(armed.id).status, 'paused')
-  assert.equal(await guard('fresh-1', async () => { nexted += 1; return 'live' }), 'live')
-  assert.equal(nexted, 1)
+  await assert.rejects(() => guard('fresh-1', async () => { nexted += 1 }), /blocked until its task can be paused/)
+  assert.equal(nexted, 0)
 })
 
 test('a restart with the deny list already set pauses the armed fresh-Session task', async (t) => {
@@ -674,16 +678,8 @@ test('a read-only host neither pauses nor vouches for unlineaged deliveries', as
     await new Promise(resolve => setTimeout(resolve, 5))
   }
   assert.equal(schedule.tasks.get(armed.id).status, 'paused')
-  // The guard opens once the check that pause kicked off has finished.
-  let ran
-  for (let index = 0; index < 100 && ran === undefined; index += 1) {
-    try {
-      ran = await guard('fresh-2', async () => 'ran')
-    } catch {
-      await new Promise(resolve => setTimeout(resolve, 5))
-    }
-  }
-  assert.equal(ran, 'ran')
+  // Run-now on the paused row is still subject to the managed policy.
+  await assert.rejects(() => guard('fresh-1', async () => 'ran'), /blocked until its task can be paused/)
 })
 
 test('the attach-time check runs before the team loads without an error', async (t) => {
@@ -775,7 +771,7 @@ test('clearing the deny list releases a stuck pause and asks DSH to drive again'
   const schedule = scheduleService()
   const drives = []
   schedule.runtime = { requestDrive: () => drives.push(1) }
-  const { ctx, home, rt } = setup({ schedule })
+  const { ctx, home, rt } = setup({ schedule }, { ...TEAM, bots: { ...TEAM.bots, w1: { ...TEAM.bots.w1, kind: 'dsh' } } })
   t.after(async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
@@ -836,7 +832,7 @@ test('the 15 s retry tick pauses a stuck task and releases its deliveries', asyn
   await settle(() => drive.schedule.tasks.get(armed.id).status === 'paused')
   assert.equal(drive.schedule.tasks.get(armed.id).status, 'paused')
   assert.equal(drive.drives.length, before + 1)
-  assert.equal(await guard('fresh-1', async () => 'ran'), 'ran')
+  await assert.rejects(() => guard('fresh-1', async () => 'ran'), /blocked until its task can be paused/)
   // The tick that saw the queue clear stops the timer: no further drives.
   t.mock.timers.tick(15_000)
   t.mock.timers.tick(15_000)
@@ -916,7 +912,9 @@ const NATIVE_TEAM = {
 
 async function nativeSetup(t, schedule = scheduleService(), services = {}) {
   const sandboxPolicy = { defaultMode: 'workspace-write', resolve: () => ({ mode: 'workspace-write' }) }
-  const { ctx, home, rt, call } = setup({ schedule, sandboxPolicy, ...services }, NATIVE_TEAM)
+  const team = structuredClone(NATIVE_TEAM)
+  for (const bot of Object.values(team.bots)) bot.kind = 'dsh'
+  const { ctx, home, rt, call } = setup({ schedule, sandboxPolicy, ...services }, team)
   t.after(async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
@@ -942,7 +940,7 @@ test('S-a each firing of a recurring new task is a new Session: two Bots behind 
   }
   schedule.tasks.delete(other.id)
   assert.equal(await drive('fresh-3'), 'w1')
-  assert.equal(rt.nativeToolsFor('fresh-3'), true)
+  assert.equal(rt.nativeToolsFor('fresh-3'), false)
   assert.deepEqual(rt.scheduledNativeSessions('w1'), ['fresh-3'])
 })
 
@@ -951,7 +949,7 @@ test('S-b only one Bot behind the new tasks: the firing follows that Bot, and it
   await freshTask(schedule, 'w2')
   await freshTask(schedule, 'w1', 'From an earlier part')
   assert.equal(await drive('fresh-1'), 'w1')
-  assert.equal(rt.nativeToolsFor('fresh-1'), true)
+  assert.equal(rt.nativeToolsFor('fresh-1'), false)
   delete rt.botOf('w1').nativeTools
   assert.equal(rt.scheduledNativeOwner('fresh-1'), 'w1')
   assert.equal(rt.nativeToolsFor('fresh-1'), false)
@@ -969,7 +967,7 @@ test('S-c one task with two Bots has no owner; the destination and unknown Sessi
   // A past part of the Bot speaks for it.
   schedule.tasks.get(both.id).involvedSessionIds = ['w1']
   assert.equal(await drive('fresh-3'), 'w1')
-  assert.equal(rt.nativeToolsFor('fresh-3'), true)
+  assert.equal(rt.nativeToolsFor('fresh-3'), false)
   // A deleted Bot's Sessions do not vote: the task follows the one Bot left.
   ctx.workspaceRegistry = { archiveSession: async () => {} }
   const deleted = await call('delete-bot', { id: 'w1' })
@@ -1003,8 +1001,7 @@ test('S-e a failed lookup or a task with no Bot leaves no owner, and the deliver
   schedule.tasks.delete(anonymous.id)
   const catalog = schedule.catalog
   schedule.catalog = async () => { throw new Error('store unavailable') }
-  assert.equal(await drive('fresh-2'), undefined)
-  assert.ok(warns.some(([format, id]) => /native tools stay off in scheduled Session/.test(format) && id === 'fresh-2'))
+  await assert.rejects(drive('fresh-2'), /blocked until its task can be paused/)
   schedule.catalog = catalog
   const [mine] = [...schedule.tasks.values()]
   mine.involvedSessionIds = ['w2', 'boom']
@@ -1013,7 +1010,7 @@ test('S-e a failed lookup or a task with no Bot leaves no owner, and the deliver
     if (id === 'boom') throw new Error('lineage unavailable')
     return selfOf(id)
   }
-  assert.equal(await drive('fresh-3'), undefined)
+  await assert.rejects(drive('fresh-3'), /blocked until its task can be paused/)
   rt.selfOf = selfOf
   assert.equal(await drive('fresh-4'), 'w1')
   // A subagent child whose durable header cannot be read may be another Bot's: no owner.
@@ -1126,4 +1123,147 @@ test('deleting a Bot ends the native processes of its fresh scheduled Sessions',
   assert.ok(ended.includes('fresh-1'))
   assert.equal(rt.scheduledNativeOwner('fresh-1'), undefined)
   assert.equal(rt.nativeToolsFor('fresh-1'), false)
+})
+
+test('managed partial edit binds the verified target to the row revision', async t => {
+  const schedule = scheduleService()
+  const { ctx, home, rt } = setup({ schedule })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  await rt.load()
+
+  const row = await schedule.create({
+    title: 'Planning', prompt: 'Summarize the plan',
+    timing: { kind: 'every', every_seconds: 60 },
+    target: { kind: 'session', sessionId: 'w2' },
+  }, 'w2')
+  row.updatedAt = '2030-01-01T00:00:00.000Z'
+  const exec = { name: 'schedule_edit', agent: { id: 'w2' },
+    arguments: { id: row.id, action: 'update', title: 'Review' } }
+  const policy = rt.sessionPolicyOf('w2', exec.agent)
+  await rt.assertScheduleToolTarget(exec, policy)
+  assert.equal(exec.arguments.expectedUpdatedAt, row.updatedAt)
+
+  // Dispatch through the installed tool definition, with a synthetic store
+  // implementing the DSH scheduler's nullable timestamp precondition.
+  const registered = new Map()
+  const toolCtx = {
+    inject: (_names, apply) => apply(toolCtx),
+    systemPrompt: { section() {}, getSectionOrder: () => 0 },
+    tools: { register: def => registered.set(def.name, def) },
+    schedule: {
+      deliveryLimits: () => ({ newSessionIntervalSeconds: 60 }),
+      async edit({ expectedUpdatedAt, patch }) {
+        if ((row.updatedAt ?? null) !== expectedUpdatedAt) return { code: 'schedule_conflict' }
+        row.title = patch.title
+        return { code: 'updated' }
+      },
+    },
+  }
+  registerDshScheduleTools(toolCtx)
+  const edit = args => registered.get('schedule_edit').execute(args, {
+    agent: { options: {}, session: { id: 'w2', header: {} } },
+  })
+  assert.deepEqual(await edit(exec.arguments), { code: 'updated' })
+  assert.equal(row.title, 'Review')
+  const second = { ...exec, arguments: { id: row.id, action: 'update', title: 'Later' } }
+  await rt.assertScheduleToolTarget(second, policy)
+  row.updatedAt = '2030-01-01T00:00:01.000Z'
+  assert.deepEqual(await edit(second.arguments), { code: 'schedule_conflict' })
+  assert.equal(row.title, 'Review')
+  await assert.rejects(rt.assertScheduleToolTarget(second, policy), { code: 'schedule_conflict' })
+  assert.equal(second.arguments.expectedUpdatedAt, '2030-01-01T00:00:00.000Z')
+  delete row.updatedAt
+  const legacy = { ...exec, arguments: { id: row.id, action: 'update', title: 'Legacy' } }
+  await assert.rejects(rt.assertScheduleToolTarget(legacy, policy), /without a change stamp/)
+  assert.equal(legacy.arguments.expectedUpdatedAt, undefined)
+  assert.equal(row.title, 'Review')
+})
+
+test('a committed lineage policy holds and pauses a managed all-on Bot’s armed fresh schedule', async t => {
+  const schedule = scheduleService()
+  const team = structuredClone(TEAM)
+  team.bots.w1.shell = true
+  team.bots.w1.computer = { level: 'foreground' }
+  const { ctx, home, rt } = setup({ schedule }, team)
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  await rt.load()
+  const row = await schedule.create({
+    title: 'Planning', prompt: 'Summarize the plan',
+    timing: { kind: 'every', every_seconds: 60 },
+    target: { kind: 'new_once', sessionId: 'reserved' },
+  }, 'w2')
+  assert.equal(row.status, 'active')
+  const before = readFileSync(join(home, 'state.json'))
+  rt.sidecarWritable = () => false
+  for (const proof of ['held', 'compare', 'returned']) {
+    rt.stateWriteProof = () => proof
+    await rt.revokeNewSchedules()
+    assert.deepEqual(readFileSync(join(home, 'state.json')), before)
+    assert.equal(row.status, 'active')
+  }
+  rt.stateWriteProof = () => 'steady'
+  rt.sidecarWritable = () => true
+  await assert.rejects(rt.assertScheduleToolTarget(
+    { name: 'schedule_create', agent: { id: 'w2' }, arguments: { target: 'new_once' } },
+    rt.sessionPolicyOf('w2')), /verified Sessions/)
+  const guard = ctx.listeners.get('schedule/resolve-agent')[0]
+  let delivered = false
+  await assert.rejects(() => guard('reserved', async () => { delivered = true }), /blocked until its task can be paused/)
+  assert.equal(delivered, false)
+  await rt.revokeNewSchedules()
+  assert.equal(row.status, 'paused')
+})
+
+test('committed schedule policy rejects cross-Bot delivery and preserves native and standalone targets', async t => {
+  const schedule = scheduleService()
+  const team = structuredClone(TEAM)
+  team.bots.m1.kind = 'dsh'
+  const { ctx, home, rt } = setup({ schedule }, team)
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  await rt.load()
+  const create = (actor, target) => schedule.create({
+    title: 'Planning', prompt: 'Summarize the plan',
+    timing: { kind: 'every', every_seconds: 60 }, target,
+  }, actor)
+  const crossBot = await create('w2', { kind: 'session', sessionId: 'm1' })
+  const native = await create('m1', { kind: 'new_once', sessionId: 'native-1' })
+  const standalone = await create('person', { kind: 'new_once', sessionId: 'standalone-1' })
+  const guard = ctx.listeners.get('schedule/resolve-agent')[0]
+  await assert.rejects(() => guard('m1', async () => 'delivered'), /blocked until its task can be paused/)
+  await rt.revokeNewSchedules()
+  assert.equal(crossBot.status, 'paused')
+  assert.equal(native.status, 'active')
+  assert.equal(standalone.status, 'active')
+  for (const id of ['m1', 'person']) {
+    const agent = { id, session: { id, header: { id, delegationDepth: 0 } } }
+    const exec = { name: 'schedule_create', agent, arguments: { target: 'new_once' } }
+    const policy = rt.sessionPolicyOf(id, agent)
+    assert.notEqual(policy.state, 'unavailable')
+    await rt.assertScheduleToolTarget(exec, policy)
+  }
+})
+
+test('a conflicting durable Session header cannot erase a managed schedule owner', async t => {
+  const schedule = scheduleService()
+  const { ctx, home, rt } = setup({ schedule })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true }) })
+  ctx.sessions = { get: id => id === 'w2' ? { id, header: { id, delegationDepth: 0 } } : undefined }
+  let conflict = false
+  ctx.provide('sessionPersistence', { async stat(id) {
+    if (id !== 'w2') return undefined
+    const header = conflict
+      ? { id, origin: 'subagent', parentSession: 'm1', delegationDepth: 1 }
+      : { id, delegationDepth: 0 }
+    return { header }
+  } })
+  await rt.load()
+  await schedule.create({
+    title: 'Planning', prompt: 'Summarize the plan',
+    timing: { kind: 'every', every_seconds: 60 },
+    target: { kind: 'session', sessionId: 'w2' },
+  }, 'w2')
+  const guard = ctx.listeners.get('schedule/resolve-agent')[0]
+  assert.equal(await guard('w2', async () => 'delivered'), 'delivered')
+  conflict = true
+  await assert.rejects(() => guard('w2', async () => 'delivered'), /blocked until its task can be paused/)
 })

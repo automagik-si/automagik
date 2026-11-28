@@ -815,17 +815,22 @@ export function install(rt) {
     return Object.values(grants).find(grant => grantRecord(grant) && normName(grant.name) === wanted)
   }
   const recordGrant = async (bot, app) => {
-    bot.computer ??= {}
-    bot.computer.apps = {
-      ...bot.computer.apps,
+    const previous = bot.computer
+    const next = bot.computer = { ...previous, apps: {
+      ...previous?.apps,
       [grantKeyOf(app)]: {
         name: app.name,
         ...(app.id !== undefined ? { id: app.id } : {}),
         ...(app.path !== undefined ? { path: app.path } : {}),
         grantedAt: Date.now(),
       },
+    } }
+    try { await rt.save({ required: true, durable: true }) }
+    catch (error) {
+      if (bot.computer === next) bot.computer = previous
+      for (const agent of service('agents')?.list?.() ?? []) applyComputer(agent)
+      throw refusal('The app grant was not saved. Try again.', { cause: error })
     }
-    await rt.save()
   }
   // A check stays cancellable while the card is open and while an answer is saved.
   const checkAccess = async (bot, sessionId, kind, app, signal, run) => {
@@ -1301,17 +1306,23 @@ export function install(rt) {
     const bot = rt.botOf(botId)
     if (bot === undefined) throw refusal('Unknown Bot')
     if (!LEVELS.includes(level)) throw refusal(`Level must be one of ${LEVELS.join(', ')}`)
-    bot.computer ??= {}
-    // A Bot with no level of its own is off (levelOf), so every other level is written.
-    if (level === 'off') delete bot.computer.level
-    else bot.computer.level = level
+    const previous = bot.computer
+    const narrowing = LEVELS.indexOf(level) <= LEVELS.indexOf(levelOf(bot))
+    const next = bot.computer = { ...previous }
+    if (level === 'off') delete next.level
+    else next.level = level
     abortCalls(bot.id, call => !levelAllows(level, call.kind))
     if (level === 'off') {
       leases.releaseBot(bot.id)
       settleControl(bot.id)
     }
-    await rt.save()
-    for (const agent of service('agents')?.list?.() ?? []) applyComputer(agent)
+    try { await rt.save({ required: true, durable: true }) }
+    catch (error) {
+      if (!narrowing && bot.computer === next) bot.computer = previous
+      throw refusal('The Computer use setting was not saved. Try again.', { cause: error })
+    } finally {
+      for (const agent of service('agents')?.list?.() ?? []) applyComputer(agent)
+    }
     return true
   }
   const revokeApp = async (botId, appKey) => {
@@ -1376,21 +1387,26 @@ export function install(rt) {
         }
       }
     }
-    if (removed) await rt.save()
-    // The provider's CuaApplicationId is an opaque hash, so a bundle id cannot be
-    // revoked directly; and its per-agent session grants cannot be addressed at
-    // all — the guard above is what enforces a revoke. What applications() can
-    // reach is the provider's saved/session-wide decision records, matched by
-    // executable path (or by name when the record carries no path).
-    if (access !== undefined && typeof access.applications === 'function' && typeof access.revoke === 'function') {
-      try {
-        const state = await access.applications()
-        const wantedPath = grant?.path ?? recorded?.path
-        for (const entry of [...(state?.allowedApps ?? []), ...(state?.blockedApps ?? [])]) {
-          const match = wantedPath !== undefined ? entry.executablePath === wantedPath : normName(entry.name) === wanted
-          if (match && typeof entry.id === 'string') await access.revoke(entry.id).catch(() => {})
-        }
-      } catch (error) { rt.warn('omni-ui: revoking %s in the provider failed: %s', wanted, error) }
+    try {
+      await rt.save({ required: true, durable: true })
+    } catch (error) {
+      throw refusal('The app access was stopped here, but the revocation was not saved. Try again.', { cause: error })
+    } finally {
+      // The provider's CuaApplicationId is an opaque hash, so a bundle id cannot be
+      // revoked directly; and its per-agent session grants cannot be addressed at
+      // all — the guard above is what enforces a revoke. What applications() can
+      // reach is the provider's saved/session-wide decision records, matched by
+      // executable path (or by name when the record carries no path).
+      if (access !== undefined && typeof access.applications === 'function' && typeof access.revoke === 'function') {
+        try {
+          const state = await access.applications()
+          const wantedPath = grant?.path ?? recorded?.path
+          for (const entry of [...(state?.allowedApps ?? []), ...(state?.blockedApps ?? [])]) {
+            const match = wantedPath !== undefined ? entry.executablePath === wantedPath : normName(entry.name) === wanted
+            if (match && typeof entry.id === 'string') await access.revoke(entry.id).catch(() => {})
+          }
+        } catch (error) { rt.warn('omni-ui: revoking %s in the provider failed: %s', wanted, error) }
+      }
     }
     return true
   }

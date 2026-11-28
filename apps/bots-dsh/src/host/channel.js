@@ -1,4 +1,5 @@
 // Client channel: the team view the browser renders, and the POST /api/omni-ui endpoints.
+import { FILE_TOOLS, filesMirrorState, switchesOf } from '../shared/computer-settings.js'
 import { randomUUID } from 'node:crypto'
 import { createSpaceReads } from './agent-space.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -41,6 +42,9 @@ const publicBot = bot => {
   return view
 }
 
+// The pinned Omni provider trims these Files tools; the rest still depend on
+// host restrictions, including an owner's full Files-off switch.
+const LEGACY_OMNI_FILE_TRIM = new Set(['read', 'write', 'edit', 'glob', 'grep'])
 const STAGED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const STAGED_MS = 30 * 60_000
 const VOICE_ACTIONS = new Set(['voice-pane', 'voice-wait', 'voice-spoken'])
@@ -122,7 +126,7 @@ export function install(rt) {
   const ok = value => ({ ok: true, value })
   const okBot = bot => {
     const { reviewTrack, ...view } = publicBot(bot)
-    return ok(view)
+    return ok({ ...view, effectiveSwitches: rt.effectiveBotSwitches(bot) })
   }
   const fail = (message, code = 'bot/error', reason) => ({
     ok: false,
@@ -268,7 +272,7 @@ export function install(rt) {
       const nativeToolsBlock = rt.nativeToolsBlock(bot)
       const agyNotes = antigravityNotes(bot, nativeToolsBlock)
       return {
-        ...bot, ...(rt.installationOf?.(bot) ?? { installed: true }), sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
+        ...bot, effectiveSwitches: rt.effectiveBotSwitches(bot), ...(rt.installationOf?.(bot) ?? { installed: true }), sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
         ...(source.waitingRole?.id === SOLVER_ROLE_ID ? { canCancelSolverWait: true } : {}),
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
         ...rt.permissionFallbackOf('bot', bot),
@@ -407,16 +411,38 @@ export function install(rt) {
     // File checks may change a record's status without a state write.
     roles,
   })
-  const omniLinked = () => {
+  const readOmniLink = () => {
     const channels = ctx.get?.('omniChannels')
     if (channels === undefined || channels === null) return false
     try {
       return Boolean(channels.omniNamed?.() ?? channels.config?.omni?.url)
     } catch {
-      return false
+      return undefined
     }
   }
+  const omniLinked = () => readOmniLink() === true
   rt.omniLinked = omniLinked
+  rt.omniRolePolicyReady = id => rt.state.positions === 1 && rt.botOf(id) !== undefined
+    && rt.state.stateActivations?.includes('w1-positions-v1') === true
+    && rt.roleRegistry?.of('omni') !== undefined && rt.teamAvailable?.() === true
+    && (rt.stateWriteProof?.() ?? 'steady') === 'steady'
+  const legacyOperator = id => {
+    const bot = rt.botOf(id)
+    return bot !== undefined && (rt.isMain(id) || bot.kind === 'omni') && !rt.omniRolePolicyReady(id)
+  }
+  rt.omniPolicyUnavailable = id => legacyOperator(id) && readOmniLink() === undefined
+  rt.legacyOmniRestrictions = id => legacyOperator(id)
+    && (omniLinked() || typeof rt.config?.omni?.url === 'string' || existsSync(join(rt.home, 'omni.json')))
+  rt.effectiveBotSwitches = bot => {
+    const switches = switchesOf(bot)
+    if (filesMirrorState(bot) === 'stale') switches.filesDiagnostic = 'Files denial provenance is stale. Review the Advanced denied tools list.'
+    if (rt.omniPolicyUnavailable(bot.id)) return { ...switches, terminal: 'unknown', files: 'unknown' }
+    if (!rt.legacyOmniRestrictions(bot.id)) return switches
+    const denied = new Set(Array.isArray(bot.denyTools) ? bot.denyTools : [])
+    const partial = switches.files && FILE_TOOLS.some(name => !LEGACY_OMNI_FILE_TRIM.has(name) && !denied.has(name))
+    return { ...switches, terminal: false, files: partial ? 'partial' : false,
+      ...(partial ? { filesHeldByOmni: [...LEGACY_OMNI_FILE_TRIM] } : {}) }
+  }
   // The live fields' sources are spread across the host with no single change
   // counter, so the serialized answer itself is the detector: a poll whose `live`
   // still names it gets only the key back, not the fields again. The key carries
@@ -900,6 +926,10 @@ export function install(rt) {
           return ok({ state: rt.shareState(id) ?? null, people: peopleOf(bot, { main: rt.isMain(id) }) })
         }
         case 'update-bot':
+          if (caller?.role !== undefined && caller.role !== 'owner'
+            && ['switches', 'shell', 'denyTools', 'computer', 'apps'].some(key => Object.hasOwn(body, key))) {
+            throw refusal('Only the owner can change Bot switches.')
+          }
           if (Object.hasOwn(body, 'people')) {
             await rt.load()
             return ok(await rt.setPeople(String(body.id ?? ''), body.people, { expect: body.expect }))
@@ -1550,6 +1580,10 @@ export function install(rt) {
             }
           }
           if (endpoint.startsWith('computer-')) {
+            if (caller?.role !== undefined && caller.role !== 'owner'
+              && ['computer-set-level', 'computer-revoke-app', 'computer-set-enabled'].includes(endpoint)) {
+              throw refusal('Only the owner can change Bot computer settings.')
+            }
             await rt.load()
             return ok(await rt.computerEndpoint(endpoint.slice('computer-'.length), body))
           }

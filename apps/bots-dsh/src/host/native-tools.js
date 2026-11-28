@@ -7,6 +7,7 @@ import { effectiveMarkOf, NATIVE_AGENTS, nativeToolsOn, restrictedBot } from '..
 
 export const NATIVE_OFF_TEXT = 'Native tools were turned off for this Bot, so this answer stopped. Send your message again.'
 export const NATIVE_TOOLS_BLOCK_TEXT = Object.freeze({
+  'team-unavailable': 'The Bot team could not confirm its current settings.',
   multiuser: 'Native tools are not offered in a multi-user workspace yet.',
   unoffered: "Native tools are not offered for this Bot's agent.",
   'model-kept': "This model can't turn its native tools off.",
@@ -118,11 +119,15 @@ export function install(rt) {
   }
 
   function policyBlock(bot) {
+    if (bot.id !== undefined && (rt.omniPolicyUnavailable?.(bot.id)
+      || rt.teamAvailable?.() === false)) return 'team-unavailable'
     retireRemovedLocks()
     if (effectiveMarkOf(bot) === 'acp-antigravity' && !argsSwitchOffered('acp-antigravity')) return 'unoffered'
     if (multiuserMode() || callerService(ctx)) return 'multiuser'
     if (modelKept(bot)) return 'model-kept'
-    if (bot.kind !== undefined || (rt.isMain(bot.id) && rt.omniLinked?.())) return 'managed'
+    const omniPolicyReady = rt.omniRolePolicyReady?.(bot.id) === true
+    if ((bot.kind !== undefined && (bot.kind !== 'omni' || !omniPolicyReady))
+      || (!omniPolicyReady && rt.isMain(bot.id) && rt.omniLinked?.())) return 'managed'
     // Until the upgrade has run, a Bot in the removed lock keeps it, as before.
     if (rt.state?.nativeToolsLocksRetired !== true) {
       try {
@@ -130,11 +135,12 @@ export function install(rt) {
         if (lock !== undefined) return lock
       } catch { return 'shared' }
     }
-    if (restrictedBot(bot)) return 'restricted'
+    if (restrictedBot(bot) || rt.legacyOmniRestrictions?.(bot.id)) return 'restricted'
   }
 
   function nativeToolsBlock(bot) {
-    return policyBlock(bot) ?? sandboxBlock(bot)
+    const block = policyBlock(bot)
+    return block === 'team-unavailable' ? 'level-unknown' : block ?? sandboxBlock(bot)
   }
 
   // The block a Bot the person makes now on `model` reads right after it is made (the New
@@ -274,6 +280,8 @@ export function install(rt) {
   Object.assign(rt, {
     setNativeTools, endNativeTools, endNativeSession, nativeToolsBlock, nativeToolsEligible,
     nativeToolsBotOn, nativeToolsNewBotBlock,
+    nativeModelKeepsTools: bot => modelKept(bot)
+      || (effectiveMarkOf(bot) === 'acp-antigravity' && !argsSwitchOffered('acp-antigravity')),
     nativeToolsFor: sessionId =>
       nativeToolsEligible(sessionId) && nativeToolsOn(sessionBot(sessionId)),
   })

@@ -1,4 +1,5 @@
 import { grantModelFields, withGrantHold } from './grants.js'
+import { carryFilesMirror, filesDenyMirror, filesMirrorState, switchPatch, switchesOf } from '../shared/computer-settings.js'
 import { markOf } from '../shared/permission-levels.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
 // Roster: creating, changing, and deleting Bots and group chats, the Main Bot role, and
@@ -20,7 +21,7 @@ import { nameProblem } from '../shared/mentions.js'
 import { contextPatch } from '../shared/context-policy.js'
 import { commandCapableAgent, crossesHarness, shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import { cleanPetId, shippedPet } from './pets.js'
-import { cleanDenyTools, cleanShell } from './tool-deny.js'
+import { cleanDenyTools, cleanShell, DENY_MAX } from './tool-deny.js'
 import { peopleOf } from './people.js'
 import { OWN_TOOLS_CREATE_TEXT, OWN_TOOLS_MODEL_TEXT, addsAcpToolDeny, deniesAcpTool } from '../shared/own-tools.js'
 import { avatarProblem, isSolverLooks } from '../shared/solver-look-policy.js'
@@ -525,8 +526,11 @@ export function install(rt) {
       throw refusal(`${cleanName} has no shell, so it cannot run on ${String(modelRef).split('/')[0]}, `
         + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
     }
-    const carried = Array.isArray(creator?.denyTools) ? creator.denyTools : []
+    const copied = rt.botOf(copyOf)
+    const source = creator ?? (filesMirrorState(copied) === 'on' ? undefined : copied)
+    const carried = Array.isArray(source?.denyTools) ? source.denyTools : []
     const denied = carried.length === 0 ? denyTools : cleanDenyTools([...new Set([...carried, ...(denyTools ?? [])])])
+    const filesMirror = carryFilesMirror(source, denied, denyTools)
     // A Bot that denies acp_tool cannot start on a model that runs its own tools (#2026), the
     // team default included. A list carried from the creator says so in the refusal.
     if (modelRef) {
@@ -599,6 +603,7 @@ export function install(rt) {
         shell: !shellOff,
         // The tools this Bot never gets, enforced on every Session it speaks from.
         ...(denied ? { denyTools: denied } : {}),
+        ...(filesMirror ? { filesMirror } : {}),
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
         // The Bot that reviews a Solver's work (the New Solver dialog's choice). Cosmetic: only
         // the "unreviewed" mark reads it (review-mark.js); it grants and refuses nothing.
@@ -969,7 +974,77 @@ export function install(rt) {
     return model || setup ? withModelChange(id, run, speed || setup || options?.admit !== undefined) : run()
   }
 
+  async function updateBotSwitches(bot, patch, actorId) {
+    if (actorId !== undefined) throw refusal('Only the owner can change Bot switches.')
+    if (Object.keys(patch).some(key => !['id', 'switches', 'shell', 'computer', 'apps', 'denyTools'].includes(key))) {
+      throw refusal('Change Bot switches separately from other settings.')
+    }
+    const settings = switchPatch(patch)
+    const replacement = cleanDenyTools(patch.denyTools)
+    const files = settings.files ?? switchesOf(bot).files
+    const mirrors = settings.files !== undefined || replacement !== undefined
+      ? filesDenyMirror(bot, files, replacement, DENY_MAX) : undefined
+    const previous = [bot.shell, bot.filesMirror, bot.denyTools, bot.computer]
+    const check = () => {
+      const live = rt.botOf(bot.id)
+      if (live !== bot || [bot.shell, bot.filesMirror, bot.denyTools, bot.computer]
+        .some((value, index) => value !== previous[index])) throw refusal('The Bot settings changed. Try again.')
+      if (settings.shell === false && shellHoldModelOf({ ...bot, shell: false }) !== undefined) {
+        throw refusal('This route keeps its own command tools. Pick a model that uses DeepSeek Harness tools first.')
+      }
+      if (settings.files === false && rt.nativeModelKeepsTools?.(bot)) {
+        throw refusal('This route keeps its own file tools. Pick a model that uses DeepSeek Harness tools first.')
+      }
+      if ((settings.shell === true || settings.files === true) && rt.omniPolicyUnavailable?.(bot.id)) {
+        throw refusal('The Bot team could not confirm Omni linkage.')
+      }
+      if ((settings.shell === true || settings.files === true)
+        && rt.legacyOmniRestrictions?.(bot.id)) {
+        throw refusal(settings.files === true
+          ? 'The installed Omni plugin holds read, write, edit, glob and grep for this Bot.'
+          : 'The installed Omni plugin holds bash for this Bot.')
+      }
+      if (replacement !== undefined) rt.assertOwnToolsDeny?.(bot, { next: mirrors.denyTools })
+    }
+    check()
+    if (replacement?.length) await rt.assertDenyTools(rt.chatOf(bot.id), replacement)
+    const change = target => {
+      if (settings.shell !== undefined) target.shell = settings.shell
+      if (mirrors) {
+        if (mirrors.denyTools.length) target.denyTools = [...mirrors.denyTools]
+        else delete target.denyTools
+        if (mirrors.filesMirror !== undefined) target.filesMirror = structuredClone(mirrors.filesMirror)
+        else delete target.filesMirror
+        target.permissionRev = (Number.isInteger(target.permissionRev) ? target.permissionRev : 0) + 1
+      }
+      if (settings.level !== undefined || settings.apps !== undefined) {
+        target.computer = { ...target.computer }
+        if (settings.level === 'off') delete target.computer.level
+        else if (settings.level !== undefined) target.computer.level = settings.level
+        if (settings.apps !== undefined) target.computer.apps = structuredClone(settings.apps)
+      }
+    }
+    if (!Object.keys(settings).length && replacement === undefined) return bot
+    await rt.saveCopy(copy => change(copy.bots[bot.id]),
+      { durable: true, beforeCommit: check, afterWrite: () => {
+        change(bot)
+        if (mirrors) rt.dropGrantsForBot?.(bot.id)
+      } })
+    if (bot.nativeTools === true) rt.endNativeTools?.(bot)
+    await rt.applyToolDeny?.(bot)
+    if (mirrors && bot.permissionAuto) rt.endAuto?.(bot)
+    rt.reapplyToolMasks?.()
+    try { await rt.revokeNewSchedules?.(bot.id) }
+    catch (error) { rt.warn('ds-bot: the fresh-Session tasks of %s were not paused: %s', bot.name, error) }
+    return bot
+  }
+
   function updateBotRecord(id, patch, actorId, fromSessionId, options) {
+    const bot = rt.botOf(id)
+    if (bot && ['switches', 'computer', 'apps'].some(key => Object.hasOwn(patch, key))) {
+      return withGrantHold(rt, { botId: id }, () => [bot.permissionRev, bot.shell, bot.filesMirror, bot.denyTools, bot.computer],
+        () => updateBotSwitches(bot, patch, actorId))
+    }
     const policyFields = Object.keys(contextPatch(patch))
     const fields = ['model', 'effort', 'permission', 'denyTools', 'shell', 'browserGrants',
       'workDir', ...policyFields]
@@ -1022,6 +1097,10 @@ export function install(rt) {
     if (patch.denyTools !== undefined && actorId !== undefined) {
       throw refusal(`Only the user can set what ${bot.name} may use`)
     }
+    if (patch.shell === true && rt.omniPolicyUnavailable?.(id)) throw refusal('The Bot team could not confirm Omni linkage.')
+    if (patch.shell === true && rt.legacyOmniRestrictions?.(id)) {
+      throw refusal('The installed Omni plugin keeps Terminal off for this Bot.')
+    }
     if (patch.shell !== undefined && actorId !== undefined) {
       throw refusal(`Only the user can give ${bot.name} a shell or take it away`)
     }
@@ -1037,7 +1116,10 @@ export function install(rt) {
     const browserGrants = patch.browserGrants === undefined ? undefined : cleanBrowserGrants(patch.browserGrants)
     // The tool deny list is checked with the rest, before anything is written: a name this
     // DSH does not serve refuses the update, so a typo cannot quietly weaken the list.
-    const denyTools = cleanDenyTools(patch.denyTools)
+    const explicitDeny = cleanDenyTools(patch.denyTools)
+    const mirrorEdit = explicitDeny !== undefined && filesMirrorState(bot) === 'off'
+      ? filesDenyMirror(bot, false, explicitDeny, DENY_MAX) : undefined
+    const denyTools = mirrorEdit?.denyTools ?? explicitDeny
     // The shell capability, checked with the rest: a value that is not true or false
     // refuses the update before anything is written.
     const shell = cleanShell(patch.shell)
@@ -1163,7 +1245,7 @@ export function install(rt) {
       return bot
     }
     // Deny-list validation can open the Session; only do it after crossing eligibility.
-    if (denyTools !== undefined && denyTools !== null) await rt.assertDenyTools(rt.chatOf(bot.id), denyTools)
+    if (explicitDeny !== undefined && explicitDeny !== null) await rt.assertDenyTools(rt.chatOf(bot.id), explicitDeny)
     // A new level resolves against the model the Bot will run on: the new one, the
     // model it keeps, or — the model cleared — the one it last ran on.
     const effortRef = modelRef === undefined ? bot.model ?? bot.appliedModel : modelRef ?? bot.appliedModel
@@ -1221,6 +1303,8 @@ export function install(rt) {
     const roleBefore = bot.role
     const instructionsBefore = bot.instructions
     let unapplied
+    let denyBefore
+    let mirrorBefore
     const putDeny = (list) => {
       if (list === undefined || list === null) delete bot.denyTools
       else bot.denyTools = list
@@ -1230,7 +1314,8 @@ export function install(rt) {
     if (modelChanged) settle(id, 1)
     try {
       if (modelChanged) await switchModel(bot, patch, modelRef, effortId, modelEntry, advanceModelRev, checkSolverChange)
-      const denyBefore = Object.hasOwn(bot, 'denyTools') ? bot.denyTools : undefined
+      denyBefore = bot.denyTools
+      mirrorBefore = bot.filesMirror
       if (denyTools !== undefined) {
         // Checked against the live model and way back, then written, with no await between.
         try {
@@ -1240,6 +1325,8 @@ export function install(rt) {
           throw error
         }
         putDeny(denyTools)
+        if (mirrorEdit) bot.filesMirror = mirrorEdit.filesMirror
+        else delete bot.filesMirror
       }
       try {
         if (nextName !== undefined) {
@@ -1330,13 +1417,18 @@ export function install(rt) {
     }
     if (modelEntry === undefined) advanceModelRev()
     try {
-      await rt.save({ required: shell !== undefined || admit !== undefined })
+      const toolSettingsChanged = shell !== undefined || denyTools !== undefined
+      await rt.save({ required: toolSettingsChanged || admit !== undefined, durable: toolSettingsChanged })
     } catch (error) {
       if (shell !== undefined) {
         if (shellBefore === undefined) delete bot.shell
         else bot.shell = shellBefore
         if (holdBefore === undefined) delete bot.shellHeld
         else bot.shellHeld = holdBefore
+      }
+      if (denyTools !== undefined && bot.denyTools === (denyTools ?? undefined)) {
+        putDeny(denyBefore)
+        if (mirrorBefore !== undefined) bot.filesMirror = mirrorBefore
       }
       throw error
     }
