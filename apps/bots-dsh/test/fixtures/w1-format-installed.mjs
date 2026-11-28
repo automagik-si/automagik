@@ -9,7 +9,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { verifyLane } from '../../src/host/lane-verify.js'
+import { compareVersions, verifyLane } from '../../src/host/lane-verify.js'
 import { ROLE_KEYS } from '../../src/host/supervisor/release.js'
 import { VENDOR } from '../../src/host/supervisor/stage.js'
 import { prepareStore, writeJsonAtomic } from '../../src/host/supervisor/store.js'
@@ -27,11 +27,18 @@ const dsh = join(harness, '@deepseek-ai/dsh')
 const web = '@deepseek-ai/dsh-web-app'
 const base = '@deepseek-ai/dsh-base'
 
-const guardedF = {
-  version: '3.178.9',
-  commit: 'ba2883ab1d4ab15f23bf3821567d854d529e98d8',
-  hash: 'd275d5c364662ec56c66a6847ff0890277d1f41f61e363a303271e39dace1ae5',
-}
+const guardedPredecessors = new Map([
+  ['3.178.9', {
+    classification: 'guarded-f',
+    commit: 'ba2883ab1d4ab15f23bf3821567d854d529e98d8',
+    hash: 'd275d5c364662ec56c66a6847ff0890277d1f41f61e363a303271e39dace1ae5',
+  }],
+  ['3.178.11', {
+    classification: 'guarded-skills-v4',
+    commit: '1c4b5bcc7e8a007233d1217f837bc376bdd393db',
+    hash: '886ebc74ea192bacd654f819a884d1f4831fa177f6bfa74b0687fd3a9d90b23d',
+  }],
+])
 const historical = new Map([
   ['3.178.5', 'bf4337a2426da90f29be9ce6361477213641a284'],
   ['3.178.8', 'd0fe59de8bd5b29ef712675ae7cdaaaf7308dd8e'],
@@ -54,8 +61,9 @@ function verifyArtifact({ tarball, lane, supervisor, commit, hash }) {
   assert.equal(sha256(bytes), hash)
   assert.equal('sha512-' + createHash('sha512').update(bytes).digest('base64'), row.integrity)
   assert.equal(supervisor.endsWith('/' + main), true, 'Expected the supplied supervisor/main.js')
-  const classification = release.version === guardedF.version && commit === guardedF.commit && hash === guardedF.hash
-    ? 'guarded-f' : historical.get(release.version) === commit ? 'historical-pre-f' : undefined
+  const guarded = guardedPredecessors.get(release.version)
+  const classification = guarded?.commit === commit && guarded.hash === hash
+    ? guarded.classification : historical.get(release.version) === commit ? 'historical-pre-f' : undefined
   assert.ok(classification, 'No approved predecessor class for this signed version and commit')
   return {
     bytes, supervisor: dirname(dirname(supervisor)),
@@ -212,6 +220,9 @@ async function writeCandidateTrial(t, candidate, f, rollback, from, to) {
 async function replayInstalled(t, artifact, from, to, { guarded = false, held = false, candidate } = {}) {
   const f = profileFor(t, artifact)
   const supervisor = installedSupervisor(f, artifact)
+  if (candidate && compareVersions(candidate.provenance.version, f.version) > 0) {
+    f.candidateVersion = candidate.provenance.version
+  }
   const rollback = await prepareRollback(t, f.plugin, from, to, f, guarded ? {
     switchTimeBytes: rosterBytes(from, { roles: held ? [pins.solver, pins.voice] : [pins.solver], revision: 42 }),
     trialRoles: to >= 4 ? [pins.solver, pins.registry] : [pins.solver],
@@ -268,13 +279,20 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     && Boolean(candidatePath) === Boolean(candidateCommit),
     'Usage: w1-format-installed.mjs <bots.tgz> <lane.json> <supervisor/main.js> <commit> <sha256> [candidate.tgz candidate-commit]')
   const artifact = verifyArtifact({ tarball: resolve(tarball), lane: resolve(lane), supervisor: resolve(supervisor), commit, hash })
-  const guarded = artifact.provenance.classification === 'guarded-f'
+  const guarded = guardedPredecessors.has(artifact.provenance.version)
   let candidate
   if (candidatePath) {
     assert.ok(guarded)
     assert.match(candidateCommit, /^[a-f0-9]{40}$/)
     const bytes = fs.readFileSync(candidatePath)
-    candidate = { candidate: true, bytes, provenance: { version: artifact.provenance.version,
+    const { name, version } = JSON.parse(execFileSync('/usr/bin/tar', [
+      '-xzOf', resolve(candidatePath), 'package/package.json',
+    ], { timeout: 10_000 }))
+    assert.equal(name, BOTS)
+    assert.equal(typeof version, 'string')
+    const order = compareVersions(version, artifact.provenance.version)
+    assert.ok(Number.isFinite(order) && order >= 0, 'The candidate must be the same version or newer than the predecessor')
+    candidate = { candidate: true, bytes, provenance: { version,
       commit: candidateCommit, tarballSha256: sha256(bytes) } }
   }
   test('verified installed predecessor store and role writer', async t => {
@@ -291,7 +309,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   for (const [from, to] of rollbackCells) {
     test('installed predecessor rollback with roster ' + from + ' → ' + to, { timeout: 45_000 },
       t => replayInstalled(t, artifact, from, to, { guarded, candidate }))
-    if (guarded && to >= 4) test('guarded F restores held roster ' + from + ' → ' + to, { timeout: 45_000 },
+    if (guarded && to >= 4) test('guarded predecessor restores held roster ' + from + ' → ' + to, { timeout: 45_000 },
       t => replayInstalled(t, artifact, from, to, { guarded, held: true, candidate }))
   }
 }
