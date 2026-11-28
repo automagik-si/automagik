@@ -261,7 +261,7 @@ export function createRolePackages(rt, catalog, {
     }
   }
   const requireSidecarWrite = () => {
-    if (rt.sidecarWritable?.() === false) throw refusal('Role packages can be removed after the update commits.')
+    if (rt.sidecarWritable?.({ predecessor: true }) === false) throw refusal('Role packages can be removed after the update commits.')
   }
   const attachable = (id, record, entry) => isPackageRoleId(id) && (verified.has(record)
     || (record.source !== 'bundled' && entry?.display.installable === true && entry.display.version === record.version

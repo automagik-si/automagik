@@ -76,6 +76,7 @@ export function stateWriteProof(rt, env = { ...process.env }) {
   let bootRun = announced
   let steady = false
   let committed
+  let returnedCurrent
   let candidate = announced !== undefined && env[ACTIVATION_COMPARE] === `${supervisor?.bootId}:${announced}`
   return ({ compare = false, legacyBootstrap = false } = {}) => {
     if (supervisor === null) return announced ? 'held' : 'steady'
@@ -96,7 +97,10 @@ export function stateWriteProof(rt, env = { ...process.env }) {
           candidate ||= trialPhases.has(pending.phase)
           return 'held'
         }
-        if (!servingPhases.has(pending.phase)) return 'held'
+        if (!servingPhases.has(pending.phase)) {
+          returnedCurrent = undefined
+          return 'held'
+        }
       }
     }
     if (announcement?.bootId !== bootId) return withoutLiveRun()
@@ -116,6 +120,12 @@ export function stateWriteProof(rt, env = { ...process.env }) {
     if (steady && !bound && servingPhases.has(run.phase)
       && (!committed || current?.live?.version === committed.version && current.live.sequence === committed.sequence)) return 'steady'
     const sameHome = rt.statePath === join(teamHomeOf(env), 'state.json')
+    if (!bound && returnedCurrent !== undefined) {
+      if (!sameHome || !servingPhases.has(run.phase)
+        || current?.live?.version !== returnedCurrent?.version || current?.live?.sequence !== returnedCurrent?.sequence) {
+        returnedCurrent = undefined
+      } else return 'returned'
+    }
     if (bound && sameHome && run.phase === 'healthy' && run.reason === 'health-check-finished'
       && current?.live?.version === run.to && current.live.sequence === records.runRecord.sequence) {
       committed = current.live
@@ -128,7 +138,11 @@ export function stateWriteProof(rt, env = { ...process.env }) {
       return RUNNING.has(run.phase) || run.phase === 'manualRecovery' ? 'held' : 'steady'
     }
     if (!bound || !sameHome) return 'held'
-    if (run.phase === 'rolledBack' || run.phase === 'notUpdated') return candidate ? 'held' : 'returned'
+    if (run.phase === 'rolledBack' || run.phase === 'notUpdated') {
+      if (candidate) return 'held'
+      returnedCurrent = current?.live ?? null
+      return 'returned'
+    }
     if (!compare || !inTrial
       || env[ACTIVATION_COMPARE] !== `${bootId}:${bootRun}` || announced !== bootRun) return 'held'
     try {

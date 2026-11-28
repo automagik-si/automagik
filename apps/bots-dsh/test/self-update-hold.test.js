@@ -182,11 +182,35 @@ for (const candidate of [false, true]) {
     }
     const phase = (phase, reason) => write(join(store, 'state.json'), { version: 1, bootId, runId, phase, reason,
       from: '3.178.8', to: '3.178.9', startedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() })
+    const current = sequence => write(join(store, 'current.json'), { version: 1,
+      live: { version: '3.178.8', sequence }, kept: null, lastSequence: sequence })
+    current(27)
     write(join(store, 'supervisor.json'), { version: 1, bootId, runId })
     phase(candidate ? 'health' : 'rolledBack', candidate ? null : 'health-failed')
+    if (!candidate) {
+      rmSync(join(botsHome, 'state.json'))
+      const importHome = join(botsHome, '..', 'import-source')
+      mkdirSync(importHome)
+      const bytes = rosterBytes(2)
+      fs.writeFileSync(join(importHome, 'state.json'), bytes)
+      const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
+      const importing = createRuntime(ctx, { home: botsHome, importHome, github: false })
+      try {
+        assert.equal(importing.stateWriteProof(), 'returned')
+        await importing.load()
+        await importing.committedUpdate()
+        assert.equal(importing.teamImportPending(), true)
+        assert.equal(existsSync(importing.statePath), false)
+        assert.deepEqual(readFileSync(join(importHome, 'state.json')), bytes)
+      } finally { importing.dispose(); await ctx.dispose() }
+    }
     const source = JSON.parse(rosterBytes(2, { roles: [pins.voice] }))
     source.connectors = { fixture: { custom: { name: 'Fake', command: 'fixture-never-exec', env: { TOKEN: 'fixture-only-credential' } } } }
+    source.roles = Object.fromEntries([pins.solver, pins.voice].map(({ id, version }) => [id, { id, version, sha256: '0'.repeat(64) }]))
     write(join(botsHome, 'state.json'), source)
+    const packageDir = join(botsHome, 'roles', pins.solver.id, pins.solver.version)
+    mkdirSync(packageDir, { recursive: true })
+    fs.writeFileSync(join(packageDir, 'prompt.md'), 'Detached local fixture role')
     const ctx = fakeContext({ services: { profileContext: { dir: profileDir } } })
     let route
     const register = ctx.connection.fetch.register
@@ -214,6 +238,7 @@ for (const candidate of [false, true]) {
     const setConnector = () => rt.connectorEndpoint('connector-set', { id: 'fixture', readOnly: true })
     const token = 'fixture-only-notion-token'
     const connect = () => rt.connectorEndpoint('connector-connect', { id: 'notion', token })
+    const uninstall = () => rt.uninstallRole(pins.solver.id)
     assert.equal(rt.holdsLock(), true)
     assert.equal(rt.teamHealth().present, true)
     assert.equal(fs.existsSync(key), false)
@@ -221,6 +246,9 @@ for (const candidate of [false, true]) {
       await assert.rejects(setVoice(), /after the update commits/)
       await assert.rejects(setConnector(), /after the update commits/)
       await assert.rejects(connect(), /after the update commits/)
+      await assert.rejects(uninstall(), /after the update commits/)
+      assert.equal(existsSync(packageDir), true)
+      assert.deepEqual(JSON.parse(readFileSync(rt.statePath)).roles, source.roles)
       assert.equal(rt.secretValue('CONNECTOR_NOTION_TOKEN'), undefined)
       await rt.save({ required: true })
       assert.equal(JSON.parse(fs.readFileSync(rt.statePath)).version, 2)
@@ -238,6 +266,35 @@ for (const candidate of [false, true]) {
       assert.equal(saved.connectors.fixture.custom.env.TOKEN.enc, 'v1')
       assert.equal(fs.existsSync(key), true)
       assert.equal(rt.stateWriteProof({ compare: true }), 'returned')
+      await assert.rejects(rt.uninstallRole(pins.voice.id), /Detach this role from every Bot/)
+      const otherHome = stateWriteProof({ ...rt, statePath: rt.statePath + '.custom' })
+      assert.equal(otherHome(), 'held')
+      const changedCurrent = stateWriteProof(rt)
+      assert.equal(changedCurrent(), 'returned')
+      const later = 'second-owner-check'
+      const laterPhase = (phase, reason) => {
+        write(join(store, 'state.json'), { version: 1, bootId, runId: later, phase, reason,
+          from: '3.178.8', to: '3.178.9', startedAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() })
+        write(join(store, 'supervisor.json'), { version: 1, bootId, runId: later })
+      }
+      laterPhase('checking', null)
+      assert.deepEqual(await setVoice(), { voice: 'returned voice' })
+      laterPhase('notUpdated', 'not-newer')
+      assert.equal(rt.stateWriteProof(), 'returned')
+      assert.deepEqual(await setVoice(), { voice: 'returned voice' })
+      assert.deepEqual(await uninstall(), { removed: true })
+      assert.equal(existsSync(packageDir), false)
+      assert.equal(JSON.parse(readFileSync(rt.statePath)).roles[pins.solver.id], undefined)
+      assert.deepEqual(JSON.parse(readFileSync(rt.statePath)).roles[pins.voice.id], source.roles[pins.voice.id])
+      assert.equal(otherHome(), 'held')
+      laterPhase('health', null)
+      await assert.rejects(setVoice(), /after the update commits/)
+      laterPhase('notUpdated', 'not-newer')
+      await assert.rejects(setVoice(), /after the update commits/)
+      current(28)
+      assert.equal(changedCurrent(), 'held')
+      current(27)
+      assert.equal(changedCurrent(), 'held')
     }
   })
 }
