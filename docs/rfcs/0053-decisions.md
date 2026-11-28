@@ -15,10 +15,12 @@ members and shows how it chose them. Explicit mentions work without a decision p
 owner can inspect a result and call a member the decision missed.
 
 Teams give Bots a shared goal and memory and give a named leader responsibility for the
-members' work. The team handle reaches its leader in a group chat. These positions build on
-[one Bot with roles](0037-roles-not-types.md) and depend on the roles and positions delivery.
-Decisions implementation follows the roles and positions, visible threads and Orchestrator,
-and voice deliveries.
+members' work. The team handle reaches its leader in a group chat. The team record and
+positions come from [RFC 0050](https://github.com/automagik-dev/automagik/pull/2176).
+[RFC 0051](https://github.com/automagik-dev/automagik/pull/2175) covers visible threads and
+Orchestrator. [RFC 0052](https://github.com/automagik-dev/automagik/pull/2174) covers voice.
+These proposals are the integration sequence. The Decisions contracts, service and adapters
+can be written in isolation once this RFC is accepted.
 
 ## Motivation
 
@@ -39,7 +41,9 @@ The host resolves explicit `@name`, `@all`, and `@team` mentions first. A Bot ca
 explicit call within the existing group rules even when the provider is down. A team mention
 that cannot reach its leader still counts as an explicit mention. It posts a notice and
 never becomes an implicit model-routed call. System messages and goal and progress posts
-keep their existing dispatch rules. See Q1 for the proposed rule for ordinary Bot posts.
+keep their existing dispatch rules. An ordinary Bot post in a routed group calls only
+named recipients, including a reachable `@team` representative. An ordinary Bot post
+cannot broadcast to `@all`.
 
 For an eligible plain user message the host calls `decide()` once with the
 `group-routing/1` rubric and one multi-select question, `concerns`. A message concerns a
@@ -67,8 +71,9 @@ The read-only route card shows each candidate's probability against τ, slot sta
 question and member description, provider, model, latency, attempts, and a short failure
 reason when applicable. The card distinguishes uncalibrated results and possible provider
 truncation. **That was for {name}** calls a current member for the original posted message
-and records a positive human judgment. A member who passed has **Call {name} again**.
-Both actions append an overturn to the record. The host checks the caller, room, route and
+and supplies a positive human judgment when that member has a recorded score. A member
+who passed has **Call {name} again**. Both actions append an overturn to the record. An
+unscored correction can still call a member. The host checks the caller, room, route and
 current membership before starting a turn. A stale or inaccessible target is refused.
 
 The group book `group-<roomId>` appends UI records with `kind: 'route'` and
@@ -112,9 +117,10 @@ lookup, queueing, calls and retry delays, and accepts 50–30,000 ms.
   model, HTTP status and retry timing. A malformed service request raises a validation
   error before ledger or network activity. Provider errors return an unavailable outcome
   without raw response bodies.
-- `label(decisionId, { questionId, option?, value, source, strength })` appends a label.
+- `recordExposure(decisionId, { questionId, option })` appends a confirmed router start
+  for a scored recipient. `label(decisionId, label: DecisionLabel)` appends a typed label.
   `evaluation(purpose, { sinceMs }?)` returns decision counts, failure reasons, latency,
-  label coverage and the evaluation statistics below.
+  label coverage and the cohort statistics below.
 
 The owner explicitly selects one provider and one model in **Settings → Decisions**.
 **None** is the initial selection. The catalog's presets describe protocol, endpoint,
@@ -122,6 +128,8 @@ credential reference, model hints, limits and privacy. Merely registering one se
 nothing. The group switch independently authorizes routing for that group. Settings also
 show key state, test the chosen configuration with synthetic text, and edit purpose
 thresholds. Changing who receives routing data requires an explicit owner selection.
+The selection identifies the recipient and the applicable terms. If terms are unknown
+or unverified, the owner acknowledges that before confirming the selection.
 
 There is no fallback provider, model, word matcher or shadow request. A missing selection,
 unregistered provider, missing model or missing or rejected key stops before a request.
@@ -133,11 +141,6 @@ a 30-second cooldown and a single half-open probe. Auth failures mark the creden
 rejected until the credential changes and leave the breaker alone. Cancellation, timeout,
 busy, quota, refusal and malformed answers are distinct outcomes. A repeated identical
 request is evaluated again. Caching and in-flight deduplication are deferred.
-
-| Purpose | `tau` | `k` | `tau0` | `deadlineMs` | `sure` |
-|---|---:|---:|---:|---:|---:|
-| `group-routing` | 0.5 | 3 | 0.2 | 2500 | 0.8 (Q4) |
-| `settings-test` | 0.5 | 1 | 0.2 | 5000 | 0.8 (Q4) |
 
 ### Provider catalog and codecs
 
@@ -184,8 +187,9 @@ Keys resolve for the selected request through `ctx.credentials`. Only the owner 
 set or unset a known writable reference. The settings API returns key state such as
 configured, writable, source and masked display. Credential values are write-only at
 that boundary and never appear in decision payloads, logs, ledger, errors or UI responses.
-The selected provider receives its key in the authentication header. Q2 covers reusing
-an existing Models reference.
+The selected provider receives its key in the authentication header. If Decisions and
+Models use the same credential reference, Settings names both consumers next to the
+shared key and shows that rotation or removal affects both.
 
 Automatic routing sends only the rubric and candidate options, the current group name,
 the latest message (up to 4,000 characters), up to eight preceding lines from that
@@ -197,12 +201,15 @@ other chats, Bot instructions, memory and stored secrets are excluded. Credentia
 redaction matches known shapes. The remaining free text may still contain sensitive
 information.
 
-Member cards contain name, title, public roles and coarse work state such as idle,
-working or waiting for approval. Q3 proposes an optional public, user-written
-`bot.handles` line of at most 140 characters. An absent field contributes no text.
-Private Bots contribute name and title only. Task names, other group names, paths, and
-quoted work updates are excluded from the work state. The local book reference and
-credential reference stay on the host.
+The outgoing and saved member card uses a closed field list. A non-private Bot supplies
+its display name, display title, bare availability (`idle` or `working`), and an optional
+public `bot.handles` line written and saved by the owner. `working` means the room's members can
+already see the Bot working in a turn in this room or in a thread started here. Work
+in the Bot's own chat, another room or team, or a call contributes no availability
+signal. If there is no visible work, the value is `idle`. A private Bot supplies its
+display name and title only. Q3 proposes a limit of 140 characters and omits blank
+handles. Role lists, task and other group names, paths and work updates stay outside
+the card. The local book reference and credential reference stay on the host.
 
 | Recipient of routing input | Documented data handling |
 |---|---|
@@ -219,40 +226,58 @@ credential reference stay on the host.
 The local append-only ledger lives at
 `<AUTOMAGIK_HOME>/decisions/ledger/<YYYY-MM>.jsonl`. Versioned decision records store ids,
 timestamps, provider and model, rubric version, sizes, a SHA-256 digest of the capped
-request, normalized scores, latency, attempts and failure codes. Labels link a decision,
-question and optional option id to a boolean value and its provenance. Raw state,
+request, normalized scores, latency, attempts and failure codes. Label and exposure
+records link a decision and question to an option where applicable. Raw state,
 instructions, message excerpts, keys and provider bodies stay out of the ledger. The
 90-day retention policy drops a monthly file when all its records are past retention.
 Pruning runs at startup and daily. Group-book route cards are separate local UI records.
 
-An explicit person-supplied judgment is a hard label (`user` or `overturn`), positive or
-negative as recorded. Overturns that call a missed member are positive only. An answer
-or `[PASS]` is a behavioral observation (`answered` or `passed`, soft). An unlabeled
-candidate stays unlabeled. An answer or a pass cannot supply either class of human judgment.
+`DecisionLabel` combines `{ questionId, option? }` with one of these typed variants.
+The service rejects any other combination and the host checks who supplied the label.
 
-Evaluation reports hard and soft coverage separately, with decision counts, failure
-reasons and p50/p95 latency. Reliability bins and Brier score against human judgments
-are calculated per purpose, provider, answered model and rubric version. Behavioral
-summaries are shown separately. Empty data shows counts without a score. Samples
-from the synthetic Settings test are excluded from routing evaluation. A candidate τ
-can be suggested by F1 only after the implementation's documented sufficiency criteria
-are met for **both** positive and negative human judgments in the evaluated cohort.
-If there are only positive overturns, or too few judgments of either kind, the suggestion
-is absent. The owner edits settings manually to change a threshold.
+| `source` | `value` | `strength` | Admission |
+|---|---|---|---|
+| `overturn` | `true` | `hard` | Owner-authorized correction with a score for the member. |
+| `user` | `true` or `false` | `hard` | Reserved for an explicit RFC-approved human action. This proposal defers that action and its write route. |
+| `answered` | `true` | `soft` | Bot answer from a confirmed scored router start. |
+| `passed` | `false` | `soft` | Bot pass from a confirmed scored router start. |
+
+Scored exposure requires the router to actually start a recipient with a recorded score.
+A planned call, an explicit mention and a call started by an overturn contribute no
+router exposure. Unscored corrections still carry out the routing action and stay
+outside calibration. Silence, passes and someone else's overturn supply no human negative.
+
+Evaluation joins scores, labels and confirmed exposures on the decision, question and
+option ids. Count each key once per population using its latest valid label. Partition
+by purpose, provider, answered model and rubric version. Human coverage is the number
+of scored options with explicit human judgments divided by all scored options. Behavior
+coverage is the number of exposed options with an answer or pass divided by all scored
+options the router actually started. Report both denominators, distinct decisions with
+human judgments, distinct exposed decisions, distinct decisions with observations,
+unlabeled counts, decision failures and p50/p95 latency. Missing,
+expired and unscored records contribute no inferred judgments. The synthetic Settings
+test is excluded from routing evaluation.
+
+Reliability bins and Brier use only scored human judgments from a cohort with both
+human signs. Until both signs exist, report counts and coverage. Suggest τ and its F1
+only when that same cohort meets the documented sample sufficiency criteria for
+**both** signs. Since the current user action supplies only positives, it cannot produce
+a suggestion by itself. The owner edits settings manually to change a threshold.
 
 ## Teams and positions
 
-A team is a named set of Bots. `state.teams` is keyed by team id. Its records carry
-`{ id, name, handle, leaderId, members, notice?, goal?, pastGoals?, createdAt, createdBy }`.
-A named leader is a current member. With `leaderId: null`, the instance chief of staff
-acts as leader. Leadership is a position. Attached product roles and the group's admin
-position keep their own capabilities. A missing teams record reads as empty. A group
-can optionally belong to a team through `room.teamId`.
+A team is a named set of Bots. RFC 0050 owns the `state.teams` record and validation,
+including stable `t-<uuid>` ids, the
+40-character name limit, handle rules and the 2,000-character notice limit. A missing
+teams record reads as empty. A group can optionally belong to a team through
+`room.teamId`. A named leader must be a current member. When that member is removed
+from the team or the Bot is deleted, the same state update clears `leaderId` to null
+unless it appoints another eligible member. Null resolves to the current chief of staff.
+Leadership is a position with powers independent of attached product roles and group
+administration.
 
-Team handles use lowercase letters, digits and hyphens, start with a letter or digit and
-are at most 31 characters. Handles are unique against other teams, Bot names and reserved
-mentions. Saved posts retain team ids. The host, mention picker and rendered bubble use
-the same mention parser, which preserves code, links and references as literal text.
+Saved posts retain team ids. The host, mention picker and rendered bubble use the same
+mention parser, which preserves code, links and references as literal text.
 `@team` in a group reaches the named leader, or the chief if the team has no named
 leader, only when that Bot is a member of the group. Otherwise the team mention calls
 nobody and posts one notice. Other valid mentions in the same message are handled normally.
@@ -270,6 +295,13 @@ team mention can ask the leader to take the assignment. A leader can use `stop_b
 when the Bot is a member of both. The host checks current leadership and membership at
 each action. A former leader or a leader whose target left the team loses that grant
 immediately, unless another current team relationship independently grants it.
+Read access is checked independently for every affected Session. If any stopped work
+is outside the leader's read scope, return only **Stopped N items of {name}**. Titles,
+ids, room names, transcripts and follow-up replies from unreadable work stay outside
+the result and follow-up path. Apply the same read checks to errors and asynchronous
+acknowledgments. The stopped work's own place and the member receive a notice naming
+who stopped it. `list_threads` follows RFC 0051's read scope and omits work the leader
+cannot read.
 
 | Host tool | Input and effect |
 |---|---|
@@ -301,36 +333,66 @@ for read-only callers. Route card reads respect room access. Overturns are owner
 
 ## Open questions
 
-All five recommendations are provisional pending design review and owner sign-off.
+Status stays Proposed pending owner acceptance. Fable concurred on the named-only Bot
+post rule, shared credential notice, owner-saved handles, `sure` and the τ₀ mark.
+The remaining numeric defaults and the feedback and team authority choices below
+await rulings.
 
 1. **Q1. Which members can a Bot's ordinary post call in a routed group?** Recommend
-   explicit mentions only. Without a valid explicit mention the post calls nobody.
+   named recipients only. Without a named recipient the post calls nobody.
 2. **Q2. Should Decisions reuse the credential reference already used in Models?**
    Recommend reusing the same reference where it matches, with a visible **Shared with
-   Models** note so the owner knows that setting, rotating or removing it affects both.
+   Models** note naming Models and Decisions. Setting, rotating or removing it affects both.
 3. **Q3. How should the member card describe what a Bot handles?** Recommend a public,
-   user-written, optional one-line `handles` field of at most 140 characters. Omit the
-   line when the user leaves the field empty.
-4. **Q4. When should a routed avatar appear at full opacity?** Recommend `sure = 0.8`
-   by default, editable in Settings. This affects presentation only.
+   owner-saved, optional one-line `handles` field of at most 140 characters. Omit the
+   line when the user leaves the field empty. A Bot write needs a separate authorization
+   decision and has no route in this proposal.
+4. **Q4. What numeric purpose defaults should Settings offer?** Recommend the values in
+   the table below as review inputs. Fable concurred on `sure = 0.8` for avatar opacity.
+   The other values await rulings. Test fixtures carry their own values.
 5. **Q5. What should τ₀ mean when nobody is called?** Recommend solid `◌` when every
    score is below τ₀, and faded `◌` when at least one is in [τ₀, τ). Both mean no
    member was called and neither changes selection.
 
+| Purpose | Proposed `tau` | Proposed `k` | Proposed `tau0` | Proposed `deadlineMs` | Proposed `sure` |
+|---|---:|---:|---:|---:|---:|
+| `group-routing` | 0.5 | 3 | 0.2 | 2500 | 0.8 |
+| `settings-test` | 0.5 | 1 | 0.2 | 5000 | 0.8 |
+
+- **Negative human feedback.** Recommend deferring a negative-label action and
+  its write authority. `route-overturn` supplies the positive path for a scored member.
+  Calibration may report coverage while the cohort lacks qualifying judgments of both signs.
+- **Group deletion (RFC 0050 Q3).** Should the responsible group member be allowed
+  to delete their group, or should deletion be reserved for the owner, chief and
+  relevant leader? Recommend allowing the responsible member, as RFC 0050 proposes.
+  Keep current group deletion admission until the question is resolved. Team deletion
+  keeps its groups and confers no separate group deletion authority.
+- **Private team members (RFC 0050 Q4).** Recommend excluding private Bots from both
+  team membership and leadership. Supporting them would require deciding who can see
+  membership and when a team mention can reach them. Resolve this before team admission ships.
+
 ## Proposed deliveries and acceptance
 
-Implementation requires owner acceptance of this RFC and the prerequisite deliveries.
-Hold routing behind its per-group switch throughout delivery. DSH profile and package
-install changes use the desktop lane. The remaining implementation uses the plugin lane.
+Owner acceptance gates implementation. After acceptance, author deliveries 1–3 in
+isolated worktrees while the prerequisite RFCs advance. Contracts and ledger feed the service.
+Adapters can use the reviewed service interface before its integration. Sequence the
+two desktop install-field changes in delivery order and keep any earlier merge inert.
+Integrate Settings and the shared host and client changes in deliveries 4–9 on the
+merged RFC 0050–0052 bases, with voice delivery clear. The voice dependency is shared
+files and bundles. Team deliveries depend on RFC 0050's chief, positions and
+`state.teams`. Keep user-visible releases in prerequisite order and hold routing behind
+its per-group switch throughout. Run the integrated lane gates and installed acceptance
+checks on the combined head. DSH profile and package install changes use the desktop
+lane. The remaining implementation uses the plugin lane.
 
 | Delivery and lane | Acceptance | Rollback |
 |---|---|---|
-| 1. Decision contracts, purposes and ledger · plugin | Fixtures prove state and keys stay out of ledger rows, expired months are pruned, and behavioral-only, sparse or one-class evidence yields no threshold suggestion. A sufficient two-class human fixture produces statistics and a suggestion without applying it. | Stop ledger writes. Saved local rows remain subject to the retention policy when the service next runs. |
+| 1. Decision contracts, purposes and ledger · plugin | Fixtures prove state and keys stay out of ledger rows, expired months are pruned, and invalid labels fail admission. Verify exact denominators, latest valid labels, scored starts and unscored corrections. One-class samples show coverage only. Sufficient two-class human fixtures show metrics and a suggestion for that cohort without applying it. | Stop ledger writes. Saved local rows remain subject to the retention policy when the service next runs. |
 | 2. Decisions service and profile wiring · desktop | Fake providers prove that unset, failing and disposed selections never send to a second provider, that identical requests call twice, and that queueing, retries, cancellation and the breaker observe the service limits. | Remove the service profile entry and stop new decisions. Prior network requests have already crossed the boundary. |
 | 3. Provider adapters and profile wiring · desktop | Each codec encodes and decodes first-party fixtures and rejects refusals, wrong kinds, missing or extra answers and invalid probabilities. Check Gemini's range, Cloudflare truncation, fixed recipients, credential headers and absence of credentials in errors. | Remove the adapter entry. Registered selections become unavailable and previous provider requests remain subject to their terms. |
-| 4. Decisions settings · plugin | Prove explicit selection, owner-only writes, write-only keys, synthetic test and per-purpose settings. Check that an evaluation result cannot apply its suggestion. | Remove the Settings surface. The saved choice and credentials can be managed before rollback. |
-| 5. Routing host · plugin | Test owner opt-in, zero decisions for explicit mentions, one decision for eligible plain messages, bounded redacted egress, no wake on failure or no match, and no wake after opt-out or membership removal. Prove route events stay out of Bot context and answers and passes stay in the behavioral data. | Disable routing per group or revert dispatch to the room's existing mode. Posted chat history and past requests persist. |
-| 6. Routing marks, card and group switch · plugin | Verify both main and mid-round views, slot ticks, view-only cards and an overturn that calls a current member and records a human judgment. Check zh and pt-BR strings and rebuilt bundles. | Turn off routing before reverting the Settings and marks UI. Stored route records and calls already made persist. |
-| 7. Team state, tools, goals and memory · plugin | Prove any-work stops for current members, including a dual member working for another team. Repeat from an existing Session after member removal and leader replacement, with and without an independent remaining grant. Verify team memory access and deletion that retains group history, clears ownership and archives memory. | Remove team tool grants. Saved team goals, memory and group history remain on disk. |
+| 4. Decisions settings · plugin | Prove explicit selection, acknowledgment of unknown terms, owner-only writes, write-only keys, synthetic test and per-purpose settings. Check that an evaluation result cannot apply its suggestion. | Remove the Settings surface. The saved choice and credentials can be managed before rollback. |
+| 5. Routing host · plugin | Test owner opt-in, zero decisions for explicit mentions, one decision for eligible plain messages, and no wake on failure, no match, opt-out or membership removal. Test the serialized card allowlist and show that visible room work changes availability while hidden threads, other rooms and calls cannot. Prove route events stay out of Bot context and only scored router starts admit behavioral labels. | Disable routing per group or revert dispatch to the room's existing mode. Posted chat history and past requests persist. |
+| 6. Routing marks, card and group switch · plugin | Verify main and mid-round views, slot ticks, view-only cards and a scored overturn that calls a current member and records a positive human judgment. An unscored correction calls the member without adding a calibration sample. Check zh and pt-BR strings and rebuilt bundles. | Turn off routing before reverting the Settings and marks UI. Stored route records and calls already made persist. |
+| 7. Team state, tools, goals and memory · plugin | In `team-powers`, stop a dual member's other-team work and check the count-only result, follow-up read scope and notices. Verify `list_threads` hides the unreadable work. Repeat after member removal, leader replacement and deletion, with and without an independent grant. Verify chief resolution, the approved group-delete and private-Bot rules, and team deletion preserving groups while clearing ownership and archiving memory. | Remove team tool grants. Saved team goals, memory and group history remain on disk. |
 | 8. Team mentions · plugin | Verify leader and chief resolution, an unreachable leader, handle collisions, stored team ids, and agreement between the host and the client. | Remove team mention dispatch. Saved posts remain readable. |
 | 9. Teams settings and sidebar · plugin | Verify the owner can manage teams, attach groups and reach the team goal and memory from Settings. Check the sidebar, zh and pt-BR strings and rebuilt bundles. | Remove the Teams UI. The host retains team records and their access rules. |
