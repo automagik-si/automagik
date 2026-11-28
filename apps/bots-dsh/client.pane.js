@@ -9296,6 +9296,14 @@ function avatarProblem(identity, avatar, stored, solver = isSolverLooks(identity
 var NAMESPACE = "omni-ui";
 var ZH2 = {
   ...guardGroupZh,
+  "Bot team update": "Bot 团队更新",
+  "{bot} · {capabilities}": "{bot}：{capabilities}",
+  "Open Role settings for {name}": "打开 {name} 的角色设置",
+  "Choose the chief of staff again": "重新选择首席",
+  "Chief of staff": "首席",
+  "Save chief of staff": "保存首席选择",
+  "Could not save the chief of staff.": "无法保存首席选择。",
+  "The recovery choices changed. Choose a Bot again.": "恢复选项已更改。请重新选择一个 Bot。",
   [SOLVER_ONLY]: "只有 Solver 才能使用 Solver 角色。请选择其他角色。",
   [SOLVER_WEARS]: "Solver 只能使用 Solver 角色。请从这些角色中选择一个。",
   [SOLVER_BY_PERSON]: "只有本人才能把 Bot 设为 Solver。",

@@ -8,14 +8,14 @@
 // pins the panel installs. Apache-2.0.
 export const SCHEDULER = Object.freeze({
   repo: "automagik-si/automagik",
-  version: "0.12.1-am.3",
+  version: "0.12.1-am.4",
   sha256: Object.freeze({
-    arm64: "bbfadb3fe520a326647c8a7be3e13dfc7df905d3d04763b2f02e023c198ef214",
-    amd64: "2e41b077e798310976a464bd4369adbea2a141f1f4ce4d3e83a4c3642935cfd0",
+    arm64: "56570b51550845a0f8eb1895da7bf852d9a6b85d8948d98c94f2f49297658f95",
+    amd64: "b347506618b1010f172f59a2946701628d81bd2fbbdfb6511ebab1dc8e658030",
   }),
   linux: Object.freeze({
-    arm64: "6d29683be59cbde54b9dbe934f10f83467e9ff695fce46bd17f6444212a69622",
-    amd64: "2262dfab7599d658f080c0d739c215a84f3f880103ea5d1f5b5fcfec1f365821",
+    arm64: "6226114232b5453e95d8ab6ed8169cccfd1e1dea0750f9a9690b7bd0b0a012bf",
+    amd64: "aa7439f54aed2ab7c691f9f51b991072553756ca04fa1f844f9b4d36f48e4d9a",
   }),
 });
 

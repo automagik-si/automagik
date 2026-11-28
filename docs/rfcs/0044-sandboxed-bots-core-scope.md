@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (2026-11-20, approved by the owner's delegate: Q1-Q5, Q7 and Q8 answered with this RFC's recommendations; Q6 answered, then amended on 2026-11-21 (see "Q6 amended" under the answers); delivery 1 approved ahead of the answers as the fix of today's defect; deliveries 1 and 2 and the §F interim merged (#1959, #1993, #2032); the herdr-core work is parked; #631 closed with the §F interim's native macOS proof, and deliveries 3-9 tracked in 'Status of deliveries 3-9') |
+| Status | Accepted (2026-11-20, approved by the owner's delegate: Q1-Q5, Q7 and Q8 answered with this RFC's recommendations; Q6 answered, then amended on 2026-11-21 (see "Q6 amended" under the answers); delivery 1 approved ahead of the answers as the fix of today's defect; deliveries 1 and 2 and the §F interim merged (#1959, #1993, #2032); the herdr-core work is parked; #631 closed with the §F interim's native macOS proof, and deliveries 3-9 tracked in 'Status of deliveries 3-9') · Amended by [RFC 0050](0050-teams-positions-roles.md) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none for this RFC (docs only). Deliveries: herdr (3.N.P), with am's byte copies when a shared file changes; `apps/dsh-sandbox/` ships only through its byte-equal copy in the pack, never alone (`scripts/lane.ts:148-151`); herdr-core for the upstream request; owner steps for enablement |
 | Created | 2026-11-20 |
@@ -447,3 +447,10 @@ runbook's answer stays to start that Bot on its own computer (`hcProxy.md`, "Rol
   (dialogs not reported as blocked).
 - Code: `herdr/mods/am-sidebar/hcProxy.md`, `hcProxy.mjs`, `hcGuard.mjs`, `hcPane.mjs`, `approved.js`,
   `apps/dsh-sandbox/`.
+
+## Amendment: sandbox canary eligibility (2026-11-28, #2176)
+
+Q3 and its answer originally exclude “the main Bot” from the member canary. Under [RFC 0050](0050-teams-positions-roles.md),
+the designated canary must be a member Bot and cannot be the chief of staff or a captain.
+The dsh-tui helper, selected worker home restrictions and separate approval for expansion
+still apply. A Bot's role attachments do not alter this admission check.

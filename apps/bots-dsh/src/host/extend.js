@@ -12,6 +12,8 @@
 //   live(fn)                       fields merged into every state answer (no revision)
 //   mainRules(fn, { order })       a part of the Main Bot's rules, text or nothing, inside
 //                                  the bot-identity section (prompt.js)
+//   rules(scope, fn, { order })   a rule for a Bot with the given position and/or role;
+//                                  fn(botId, sessionId) returns text or nothing
 //   botModels(kind, source)        the model menu of the Bots of one kind, owned by the
 //                                  plugin that hosts them (host-models.js has the shape)
 //   genui.publish(batchId, row)    one row of a live kit card, merged into the slice every
@@ -25,9 +27,11 @@
 // register through `windowEndpoint`, which is not on `rt`: only those get the route's proof of
 // the desktop window (desktop-window.js). An endpoint added through `rt.hooks` never does.
 import { isPromise } from 'node:util/types'
+import { OMNI_KIND } from './roster.js'
 
 const registrars = new WeakMap()
 const windowEntries = new WeakSet()
+const legacyMainOrOmni = Symbol('legacy Main or Omni')
 export const isWindowEndpoint = entry => typeof entry === 'object' && entry !== null && windowEntries.has(entry)
 export function windowEndpoint(rt, name, fn, { read = false } = {}) {
   const register = registrars.get(rt)
@@ -52,6 +56,20 @@ export function install(rt) {
       if (at !== -1) list.splice(at, 1)
     }
   }
+  const addRule = (scope, fn, order) => {
+    const dispose = add(rules, { scope, fn, order })
+    rules.sort((a, b) => a.order - b.order)
+    return dispose
+  }
+  const collectRules = (matches, botId, sessionId) => rules.filter(matches).map(({ scope, fn }) => {
+    try {
+      if (scope === legacyMainOrOmni) return fn(botId)
+      return fn(botId, sessionId)
+    } catch (error) {
+      rt.warn?.(scope === legacyMainOrOmni ? 'ds-bot: a Main Bot rule failed: %s' : 'ds-bot: a Bot rule failed: %s', error?.message ?? error)
+      return ''
+    }
+  }).filter(text => typeof text === 'string' && text !== '')
   // Views and lives merge in the order they were added; a hook that fails leaves its
   // fields out rather than the whole answer.
   const merged = list => Object.assign({}, ...list.map((fn) => {
@@ -106,10 +124,14 @@ export function install(rt) {
       return () => { dispose(); sessionOwnersRevision += 1 }
     },
     live: fn => add(lives, fn),
-    mainRules(fn, { order = 0 } = {}) {
-      const dispose = add(rules, { fn, order })
-      rules.sort((a, b) => a.order - b.order)
-      return dispose
+    mainRules: (fn, { order = 0 } = {}) => addRule(legacyMainOrOmni, fn, order),
+    rules(scope, fn, { order = 0 } = {}) {
+      if (!scope || typeof scope !== 'object' || Array.isArray(scope)
+        || Object.keys(scope).some(key => key !== 'position' && key !== 'role')) throw new Error('ds-bot: unknown rule selector')
+      const { position, role } = scope
+      if (position !== undefined && position !== 'chief') throw new Error(`ds-bot: unknown rule position ${position}`)
+      if (role !== undefined && (typeof role !== 'string' || role === '')) throw new Error('ds-bot: a rule role needs an id')
+      return addRule({ position, role }, fn, order)
     },
     botModels(kind, source) {
       if (typeof kind !== 'string' || kind === '') throw new Error('ds-bot: a model menu needs a Bot kind')
@@ -169,15 +191,17 @@ export function install(rt) {
     live: () => merged(lives),
     // The plugin that owns the model menu of a Bot kind, if one does.
     botModelsOf: kind => (typeof kind === 'string' ? botModels.get(kind) : undefined),
-    // The parts for one Main Bot, in order; empty ones are left out.
-    // One plugin's failing rule leaves the others, and the prompt, standing.
-    rules: self => rules.map((rule) => {
-      try {
-        return rule.fn(self)
-      } catch (error) {
-        rt.warn?.('ds-bot: a Main Bot rule failed: %s', error?.message ?? error)
-        return ''
-      }
-    }).filter(text => typeof text === 'string' && text !== ''),
+    // The prompt still selects legacy Main and Omni Bots before calling this reader.
+    rules: self => collectRules(({ scope }) => scope === legacyMainOrOmni, self),
+    rulesFor(botId, sessionId) {
+      const bot = rt.botOf?.(botId)
+      if (!bot) return []
+      return collectRules(({ scope }) => {
+        if (scope === legacyMainOrOmni) return rt.isMain?.(botId) === true || bot.kind === OMNI_KIND
+        // The position and role readers can arrive after the hook registration.
+        return (scope.position === undefined || rt.isChief?.(botId) === true)
+          && (scope.role === undefined || rt.hasRole?.(botId, scope.role) === true)
+      }, botId, sessionId)
+    },
   }
 }
