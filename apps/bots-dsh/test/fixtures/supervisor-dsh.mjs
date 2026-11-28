@@ -91,6 +91,7 @@ if (action === 'plugin') {
   const bootsAlready = fs.existsSync(join(root, 'events.jsonl'))
     ? fs.readFileSync(join(root, 'events.jsonl'), 'utf8').split('\n').filter(line => line.includes('"event":"boot"')).length : 0
   record({ event: 'boot', args, home, boot: process.env.AUTOMAGIK_SUPERVISOR_BOOT, version: process.env.AUTOMAGIK_SUPERVISOR_VERSION,
+    run: process.env.AUTOMAGIK_SUPERVISOR_RUN, activationCompare: process.env.AUTOMAGIK_SUPERVISOR_ACTIVATION_COMPARE,
     listenerUnknown: process.env.AUTOMAGIK_SUPERVISOR_LISTENER_UNKNOWN === '1' ? '1' : undefined })
   if (process.env.AUTOMAGIK_SUPERVISOR_BOOT && process.env.SUPERVISOR_EXPECT_ROLLBACK) {
     assert.equal(process.env.AUTOMAGIK_SUPERVISOR_ROLLBACK, process.env.AUTOMAGIK_SUPERVISOR_BOOT)
@@ -141,7 +142,7 @@ if (action === 'plugin') {
     write(path, manifest)
   }
   if (candidate && mode === 'trial-compatibility-edit') write(join(profile, 'compatibility.json'), { version: 1, changed: true })
-  if ((mode === 'trial-exit' || mode === 'rollback-unhealthy' || mode === 'trial-empty-team-exit') && candidate) {
+  if (['trial-exit', 'rollback-unhealthy', 'rollback-read-only', 'trial-empty-team-exit'].includes(mode) && candidate) {
     process.exitCode = 19
   } else if (mode === 'bare-announces') {
     fs.writeSync(1, 'dsh web: https://example.invalid/?to')
@@ -220,6 +221,14 @@ if (action === 'plugin') {
       const terminal = ['healthy', 'rolledBack', 'notUpdated'].includes(live?.phase)
       if (terminal && live.runId === expectedRun) expectedRun = undefined
       const run = live && !terminal ? live.runId : expectedRun ?? null
+      if (mode === 'rollback-read-only' && bootsAlready > 1 && payload?.endpoint === 'self-update-status') {
+        const document = read(statePath)
+        const error = { code: 'bot/read-only', message: 'The saved team is read-only.' }
+        record({ event: 'read-only-predecessor', rosterReadable: typeof document.version === 'number', code: error.code })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error }))
+        return
+      }
       const result = healthReply({
         url, headers: req.headers, payload, plugins, run, present: rosterPresent, unauthorizedBody,
         legacy: !fs.existsSync(join(profile, 'node_modules/@automagik/bots-dsh/src/host/update-contract.json')),
@@ -254,6 +263,9 @@ if (action === 'plugin') {
     for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
       process.on(sig, () => {
         record({ event: 'stop', signal: sig })
+        if (mode === 'contract-change-on-stop' && bootsAlready === 0) {
+          fs.appendFileSync(join(profile, 'node_modules/@automagik/bots-dsh/src/host/update-contract.json'), '\n')
+        }
         server.close()
       })
     }

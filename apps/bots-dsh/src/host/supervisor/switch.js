@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
+import { activationIds } from '../state-format.js'
 import { isId } from './records.js'
 import { isLaneVersion, PLUGINS } from './release.js'
 import { ARCHIVE, equalFile, laneEntries, lockPins, PROFILE_INPUTS, sourceMatches, VENDOR, withLaneEntries } from './stage.js'
@@ -28,7 +29,7 @@ export const DATA_FILES = Object.freeze([Object.freeze({
   snapshot: 'bots-state.json',
 })])
 
-function snapshot(kept, env, reads) {
+function snapshot(kept, env, reads, activations) {
   const data = directory(join(kept, 'data'))
   const files = []
   for (const { path, snapshot } of DATA_FILES) {
@@ -40,12 +41,13 @@ function snapshot(kept, env, reads) {
     if (!document || typeof document !== 'object' || Array.isArray(document)
       || !Number.isSafeInteger(format) || format < 0) throw new Error('Invalid Bots state format')
     writeBytesAtomic(join(data, snapshot), bytes, { durable: true })
-    files.push({ path: source, snapshot, format, ...(reads ? { reads } : {}) })
+    files.push({ path: source, snapshot, format, ...(reads ? { reads } : {}),
+      ...(activations === undefined ? {} : { activations }), sha256: digest(bytes) })
   }
   writeBytesAtomic(join(kept, 'data.json'), jsonBytes({ version: 1, files }), { durable: true })
 }
 
-export function planSwitch(config, staging, run) {
+export function planSwitch(config, staging, run, contract) {
   const { store, profileDir, env } = config
   // A disappeared input counts as a change even when it was mandatory during staging.
   try {
@@ -80,7 +82,9 @@ export function planSwitch(config, staging, run) {
   writeBytesAtomic(join(kept, 'entries.json'), jsonBytes({ version: 1, dependencies: entries }), { durable: true })
   const candidateManifest = jsonBytes(withLaneEntries(before, laneEntries(after, names)))
   writeBytesAtomic(join(staging.source, 'candidate.json'), candidateManifest, { durable: true })
-  snapshot(kept, env, config.stateFormats)
+  const activations = contract?.activations === undefined ? undefined : activationIds(contract.activations)
+  if (activations === null) throw new Error('Invalid predecessor activation list')
+  snapshot(kept, env, contract?.stateFormats ?? config.stateFormats, activations)
   for (const file of [MANIFEST, LOCKFILE]) {
     syncFile(join(staging.source, file))
     syncFile(join(profileDir, file))

@@ -72,13 +72,43 @@ test('a cut after every rename can be completed or undone from the persisted jou
           assert.equal(fs.readFileSync(join(f.profileDir, 'vendor/owner.tgz'), 'utf8'), 'owner archive')
           assert.deepEqual(read(join(kept, 'data/bots-state.json')), { version: 2, note: 'preserve me' })
           assert.deepEqual(read(join(kept, 'data.json')), {
-            version: 1, files: [{ path: join(f.botsHome, 'state.json'), snapshot: 'bots-state.json', format: 2 }],
+            version: 1, files: [{ path: join(f.botsHome, 'state.json'), snapshot: 'bots-state.json', format: 2,
+              sha256: digest(fs.readFileSync(join(f.botsHome, 'state.json'))) }],
           })
         }
       })
     }
   }
 })
+
+for (const { label, document, format, reads, activations, captured, noRunId, reinstall } of [
+  { label: 'legacy index without run ID or capabilities', document: {}, format: 0, noRunId: true },
+  { label: 'three-argument legacy reads', document: { version: 2 }, format: 2, reads: [0, 1, 2, 3] },
+  { label: 'captured legacy contract', document: { version: 3 }, format: 3, captured: { stateFormats: [0, 1, 2, 3] } },
+  { label: 'captured empty allowlist', document: { version: 2 }, format: 2, captured: { stateFormats: [0, 1, 2, 3], activations: [] }, activations: [] },
+  { label: 'captured protected contract on reinstall', document: { version: 4, stateActivations: ['alpha'] }, format: 4,
+    captured: { stateFormats: [0, 1, 2, 3, 4, 5], activations: ['zeta', 'alpha'] }, activations: ['alpha', 'zeta'], reinstall: true },
+  { label: 'absent roster', captured: { stateFormats: [0, 1, 2, 3] } },
+]) {
+  test('the v1 switch index records ' + label, t => {
+    const { config, run, staging, botsHome, store } = prepared(t)
+    const path = join(botsHome, 'state.json')
+    if (document) write(path, document)
+    else fs.unlinkSync(path)
+    config.stateFormats = reads
+    if (noRunId) delete run.runId
+    if (reinstall) Object.assign(run, { to: run.from, reinstall: true })
+    const journal = captured ? planSwitch(config, staging, run, captured) : planSwitch(config, staging, run)
+    const kept = join(store, journal.keep)
+    const bytes = document ? fs.readFileSync(path) : undefined
+    assert.deepEqual(read(join(kept, 'data.json')), { version: 1, files: document ? [{
+      path, snapshot: 'bots-state.json', format, sha256: digest(bytes),
+      ...(captured || reads ? { reads: captured?.stateFormats ?? reads } : {}),
+      ...(activations === undefined ? {} : { activations }),
+    }] : [] })
+    if (document) assert.deepEqual(fs.readFileSync(join(kept, 'data/bots-state.json')), bytes)
+  })
+}
 
 test('candidate inputs allow DSH metadata reconciliation and reject installer changes', t => {
   const { config, staging, run, profileDir } = prepared(t)

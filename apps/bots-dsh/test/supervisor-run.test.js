@@ -260,7 +260,9 @@ for (const [mode, phase, reason] of [
         assert.deepEqual(fs.readdirSync(join(f.profileDir, VENDOR)), [basename(f.archive)])
         assert.equal(fs.readFileSync(join(f.profileDir, 'vendor/owner.tgz'), 'utf8'), 'owner archive')
         assert.equal(eventsOf(f).filter(event => event.event === 'install' && event.live).length, 1)
-        assert.deepEqual(boots(f)[1], boots(f)[0])
+        const { run, ...giveBackBoot } = boots(f)[1]
+        assert.equal(run, stateOf(f).runId)
+        assert.deepEqual(giveBackBoot, boots(f)[0])
         assert.equal(fs.existsSync(join(f.profileDir, 'node_modules/invalid-link')), false)
         assert.ok(eventsOf(f).some(event => event.event === 'probe'))
       }
@@ -294,6 +296,42 @@ test('manual recovery keeps the snapshot when the renamed-back child also fails'
   assert.equal((await next.exit).code, 1)
   assert.equal(boots(f).length, 3)
   assert.equal(stateOf(f).bootId, supervisorOf(f).bootId)
+})
+
+test('a readable read-only predecessor fails the run-bound status window and stops', async t => {
+  const f = fixture(t, { mode: 'rollback-read-only' })
+  f.healthTimeout = { first: 1400, second: 700 }
+  f.env.AUTOMAGIK_SUPERVISOR_ACTIVATION_COMPARE = 'inherited:comparison'
+  const running = driver(t, f)
+  await until(() => announced(running), 'initial child did not start')
+  request(f)
+  assert.equal((await running.exit).code, 1)
+  const state = stateOf(f)
+  assert.equal(state.phase, 'manualRecovery')
+  assert.equal(state.rollback.previousFailed, 'plugins')
+  assert.equal(state.rollback.starts, 1)
+  assert.deepEqual(state.rollback.data, { restored: false, why: 'same-format', trialKept: false })
+  const [steady, candidate, previous] = boots(f)
+  assert.equal(steady.activationCompare, undefined)
+  assert.equal(candidate.activationCompare, `${candidate.boot}:${state.runId}`)
+  assert.equal(previous.run, state.runId)
+  assert.equal(previous.activationCompare, undefined)
+  const events = eventsOf(f)
+  assert.ok(events.some(event => event.event === 'read-only-predecessor' && event.rosterReadable && event.code === 'bot/read-only'))
+  assert.ok(!events.slice(events.indexOf(previous)).some(event => event.endpoint === 'state'))
+})
+
+test('a changed predecessor contract at child stop refuses the switch', async t => {
+  const f = fixture(t, { mode: 'contract-change-on-stop' })
+  const running = driver(t, f)
+  await until(() => announced(running), 'initial child did not start')
+  request(f)
+  const state = await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'notUpdated' && stateOf(f),
+    'the changed contract did not give work back')
+  assert.equal(state.reason, 'switch-refused')
+  assert.equal(state.journal, undefined)
+  assert.deepEqual(boots(f).map(event => event.activationCompare), [undefined, undefined])
+  assert.equal(previousVersion(f), FROM)
 })
 
 for (const move of ['keep-lockfile', 'install-modules']) {
@@ -454,7 +492,8 @@ async function interruptedCandidate(f, edit = () => {}) {
     updatedAt: new Date().toISOString(), phase: 'switching', reason: null,
   }
   const save = () => writeJsonAtomic(join(f.store, 'state.json'), run, { profileDir: f.profileDir, durable: true })
-  run.journal = planSwitch(f.config, f.staging, run)
+  const { stateFormats } = read(join(f.profileDir, 'node_modules', BOTS, 'src/host/update-contract.json'))
+  run.journal = planSwitch({ ...f.config, stateFormats }, f.staging, run)
   completeSwitch(f.config, f.staging, run, save)
   edit(run)
   save()
@@ -1229,6 +1268,8 @@ test('the frozen 5b supervisor accepts a request with d6\'s unchanged four keys'
   await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', '5b did not accept the request')
   assert.equal(stateOf(f).requestId, click.requestId)
   assert.equal(previousVersion(f), TO)
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
 })
 
 test('a service group cut just after rollback intent recovers the prior current record and profile', async t => {
@@ -1254,6 +1295,7 @@ test('a service group cut just after rollback intent recovers the prior current 
   delete f.env.SUPERVISOR_CUT_AFTER
   const recovered = driver(t, f)
   await until(() => stateOf(f).phase === 'rolledBack', 'next supervisor did not finish rollback')
+  assert.deepEqual(stateOf(f).rollback.data, { restored: false, why: 'same-format', trialKept: false })
   assert.deepEqual(read(join(f.store, 'current.json')), prior)
   assert.equal(previousVersion(f), FROM)
   assert.deepEqual(read(join(f.profileDir, 'package.json')), f.manifest)
@@ -1324,6 +1366,9 @@ test('a genuinely new team can pass health with no team file at the switch', asy
   await until(() => fs.existsSync(join(f.store, 'state.json')) && stateOf(f).phase === 'healthy', 'missing health verdict')
   assert.equal(previousVersion(f), TO)
   assert.deepEqual(read(join(f.store, 'versions', FROM, 'data.json')).files, [])
+  assert.deepEqual(boots(f).map(event => event.activationCompare), [undefined, undefined])
+  running.child.kill('SIGTERM')
+  assert.equal((await running.exit).code, 0)
 })
 
 test('a retry at the same sequence retains both trial copies and pins the mixed previous set', async t => {
