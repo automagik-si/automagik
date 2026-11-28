@@ -192,6 +192,31 @@ it keeps the binary too and says how to remove both, so no service is left resta
   when the panel can no longer find the scheduler. You can also click **Copy** and run the displayed
   install command in a terminal. If the panel says the scheduler is stopped, click **Start**.
 
+#### Watch a project's pull requests, CI and seats
+
+`am watch --pass --project DIR` replaces the periodic agent that checks a project's pull
+requests, default-branch CI and Herdr seats. The first pass records what it sees silently.
+Later passes send the project's main bot one message when there are changes. If the bot is
+waiting on a dialog, watch keeps the notices for a later pass. A worker whose pull request
+has ended can be retired when its worktree is clean and its pane is idle.
+
+Add this [command automation](scheduler/README.md#run-a-plain-command) to the existing
+`automations.yaml` and replace `/path/to/project` with the project's checkout. The scheduler
+uses its own PATH to find `am` and the signed-in `gh` or `glab`.
+
+```yaml
+automations:
+  - name: project-watch
+    cron: "*/5 * * * *"
+    command:
+      argv: ["am", "watch", "--pass", "--project", "/path/to/project"]
+    timeout_minutes: 4
+```
+
+Use `am watch follow 123 --project DIR` to include another pull request by number and
+`am watch unfollow 123 --project DIR` to remove it from that list. Use `--dry-run --json`
+with `--pass` to inspect a sweep without saving state, sending a notice or retiring a pane.
+
 With 0.12.1-am.4 and `AFTER A RUN` set to never close, a finished run keeps its terminal until that
 automation's next run starts. The scheduler removes terminals it opened for failed, timed-out or
 stuck runs. A bot keeps its own terminal, and the last tab of a shared space stays open.
