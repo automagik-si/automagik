@@ -11,9 +11,10 @@ pins (#220); the pack's own updater does not.
 `<app home>/mods-disabled/am-automations`, where Herdr does not load it. To turn it on, open the
 **Mods** panel, find *Automagik Automations* and switch it on; the footer's **Automations** tab then
 appears. Without the scheduler the panel says what is missing and shows the command that installs
-it (the pinned release, hash-checked, into `~/.local/bin`), with **Copy** and **Install**; only a
-click on Install runs it. An
-install that already has the mod keeps its state through updates, on or off (`OFF_BY_DEFAULT` in
+it (the pinned release, hash-checked, into `~/.local/bin`), with **Copy** and **Install**. On macOS
+and Linux, **Update** replaces a writable scheduler binary whose SHA-256 differs from the pack's
+build. The row names the file and explains when it is the target of a link.
+An install that already has the mod keeps its state through updates, on or off (`OFF_BY_DEFAULT` in
 `am-sidebar/release.js`; `am install herdr.am-automations` also switches it on).
 
 Our fork of `DnzzL/herdr-automations` (MIT, kept verbatim in `LICENSE-upstream`, credited in
@@ -74,17 +75,31 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
 
 ## How it behaves
 
-- **Finding the scheduler**: `herdr-automations version` on PATH, then
-  `~/.local/bin/herdr-automations`; the answer also says whether it is ours (`-am.` in the version).
-  Neither answers: the repair block shows `repairCommand()` for this machine's `uname -m` and
-  `uname -s` (`SCHEDULER` in `scheduler.js` pins our `herdr-automations-v<version>` release and its
-  four sha256s, two darwin and two Linux, from its `checksums.txt`, checked by
-  `herdr/scripts/scheduler-pin.mjs`; `install.sh` installs the same build from the same pins), and
-  every 30 s refresh looks again, so a scheduler installed meanwhile is picked up. Copy writes the
-  command to the clipboard; **Install** runs exactly that command (`sh -c`), once per click (it
-  removes its own scratch folder, worked or not), and a
-  failure keeps the block and says why. Nothing runs without a click, and the panel never installs
-  a login service by itself (only **Start**, pressed by you, runs `service install`).
+- **Finding the scheduler**. The panel checks PATH, then `~/.local/bin/herdr-automations`. It
+  resolves links and caches a successful hash by path, device, inode, size and modification time.
+  Stat, file header or hash failures get a row and are tried again on refresh. A short `version`
+  probe supplies the wording and editing options, and is retried on failure. The panel recognizes
+  ELF and Mach-O headers, including universal Mach-O. An executable launcher script gets a row
+  saying that another install manages it. An unwritable folder gets a row naming the file and
+  telling you to update it where it was installed.
+- **Install and Update**. Both verify the download in a scratch directory beside the destination
+  and put it in place in one rename after rechecking the destination. Install requires an empty
+  destination. If a dangling link blocks it, move the link aside and retry. Update checks that the
+  file is unchanged during the download and can replace a newer build with the pinned one. The
+  download has 25 seconds and the panel allows 45 seconds for the whole command. A later attempt
+  cleans up its own scratch entries from dead commands. Update leaves the login service alone.
+- **Running scheduler**. Each refresh checks the path and file identity of the running scheduler
+  without hashing it. The row names a different executable, reports when the check fails, or
+  says the scheduler switches when no run is busy if it still uses the old file. The row clears
+  when the running image matches, even if its PID stays the same. A running or scheduled record
+  counts as busy only within its automation's timeout plus two minutes. The timeout defaults to
+  60 minutes if the automation is gone or has no timeout, so a record left running by a cut-off
+  run stops delaying the advice. After a minute with no busy runs observed, or ten minutes with
+  the same old image still running, the panel checks service status. When it confirms the PID,
+  it shows `service install` for a macOS login service or the systemd restart command for Linux.
+  Without a login service, it shows how to stop the process and either start it the way it was
+  launched or install a login service. A daemon started in a terminal stops when that terminal
+  closes. Restarting stops running commands and the scheduler loses track of agent runs in progress.
 - **Readiness**: `ls --json` answering is the check. No scheduler pid: the "Scheduler stopped"
   banner with **Start**. `backend: herdr` (or none in the file): a line saying runs open in the
   Herdr TUI, not in this app, naming the `automations.yaml` to set `backend: hc` in; the panel
@@ -209,15 +224,16 @@ env line; pure),
 Programs: `herdr-automations` (the scheduler; `install.sh` installs it and, when you say yes, its
 login service), `hc` templates, `sh`, `uname`, `am` (`ls --json` for a project's bots, on the
 scheduler's side `start` and `worker` for a target), and the agents a run starts (`claude`, `codex`,
-`pi`); **Install** runs the repair command's `curl`, `shasum` or `sha256sum`, `chmod` and `mv`.
+`pi`). Scheduler checks use `stat`, `realpath`, `od`, `test`, Linux `readlink`, and macOS
+`ps` and `lsof`. **Install** and **Update** use `curl`, `shasum` or `sha256sum`, `stat`,
+`mkdir`, `mktemp`, `ln`, `rm`, `chmod` and `mv`, plus the shell's `test`, `kill`, `printf`,
+`cd`, `trap` and `exec`.
 
 ## Watch out
 
-- **It runs programs**: `herdr-automations` on every action, `hc templates` for the form,
-  `am ls --json --project` for a project's bots when a target is chosen, and it starts agents. It reaches no network and writes no file itself, except when you click
-  **Install**: that one command downloads the pinned scheduler from this repository's release and
-  writes `~/.local/bin/herdr-automations` once its sha256 matches. `exec`'s 30 s limit applies to
-  it: on a slow link it fails and says so, and the copied command in a terminal has no limit.
+- **It runs programs**. The panel calls `herdr-automations` on every action, `hc templates` for
+  the form and `am ls --json --project` when a target is chosen. **Install** and **Update**
+  download the pinned release. The download has a 25-second limit and the panel reports failures.
 - **A command automation runs a program as you** (#938): the scheduler starts it on its schedule
   with your network and files, no sandbox, and its result line is pasted into the named bot's
   terminal. Whoever can write `automations.yaml` (this form included) decides what runs.

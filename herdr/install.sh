@@ -1101,7 +1101,7 @@ install_scheduler() {
     # them there) is adopted: recorded, nothing replaced, so a later pin reaches it. Anything else
     # is the person's own and stays.
     if [ "$(sha_of "$SCHED")" = "$ssum" ]; then
-      if sched_record "$swant" "$ssum" ""; then
+      if sched_record "$swant" "$ssum" "$(sched_get service)"; then
         say "herdr-automations $swant: already installed ($SCHED), exactly the build the pack pins; this installer keeps it up to date from now on."
       else
         say "Automations scheduler: left $SCHED as it is (the pinned build; its record, $SCHED_RECORD, could not be written)."

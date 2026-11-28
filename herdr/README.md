@@ -165,8 +165,10 @@ against the pinned sha256, run once (`version` must be exactly the pinned one), 
 place. It keeps its own record (`<app home>/automagik-herdr/scheduler`) and replaces or removes
 only the binary it wrote, while it is still those bytes: one on your PATH somewhere else, a link, or
 a file you installed yourself (upstream's build, a dev build) is left as it is and only checked.
-The one exception: a file there that is exactly the pinned build (what the panel's repair command
-installs) is adopted, recorded without being replaced, so later pins reach it.
+The installer also adopts a file there that exactly matches the current pin. It records the file
+without replacing it and keeps any recorded ownership of the login service. If the pin has
+already moved past a build the panel installed, the installer needs a matching record to
+recognize that build as its own.
 
 For its own binary it then sets things up. A machine with no `automations.yaml` gets one saying
 `backend: hc`, so runs open in the Herdr app; an existing file is never edited, and neither it nor
@@ -183,14 +185,23 @@ warning; the pack is installed all the same, and a rerun retries.
 `--uninstall` otherwise removes the login service when this installer started it, then the binary.
 While a login service you started yourself (Start in the panel, or `service install`) is installed,
 it keeps the binary too and says how to remove both, so no service is left restarting a missing file.
-`am update` updates the pack. The installed scheduler keeps its current version.
+`am update` updates the pack. On macOS and Linux, **Automations** offers **Update** when a
+writable scheduler binary differs from the pack's pinned build, even if the installed build is
+newer. The row names the file it will replace, including the target of a link. Launcher scripts
+and schedulers in unwritable folders must be updated where they were installed. If the scheduler
+is missing, use **Install** or copy the command shown in the panel.
 
-- **Installed by the pack installer.** Rerun the [pack installer](#install) to get 0.12.1-am.4.
-- **Installed with the panel's Install button only.** The pack installer leaves that older binary
-  in place. Update the pack first so the panel offers 0.12.1-am.4. After your runs finish, remove
-  only `~/.local/bin/herdr-automations`. Reopen **Automations** and click **Install**, which appears
-  when the panel can no longer find the scheduler. You can also click **Copy** and run the displayed
-  install command in a terminal. If the panel says the scheduler is stopped, click **Start**.
+Update verifies the download before replacing the file and leaves the login service alone.
+Right after the file is replaced on macOS, a code-signing check can stop the scheduler's first
+start and the login service starts it again within seconds, so “not running” briefly is expected.
+The panel checks the running scheduler each time it refreshes, including after reopening. It
+names a different executable if the scheduler runs from another file. When the running scheduler
+still uses the previous build of the same file, the panel says it switches once no run is busy.
+A record left running by a cut-off run stops counting as busy once its timeout and a two-minute
+margin pass. If the panel sees the same old image for a minute with no busy runs, or for ten
+minutes regardless of run history, it checks the scheduler's status and can show the restart
+command for your setup. Restarting stops running commands and the scheduler loses track of agent
+runs in progress.
 
 With 0.12.1-am.4 and `AFTER A RUN` set to never close, a finished run keeps its terminal until that
 automation's next run starts. The scheduler removes terminals it opened for failed, timed-out or

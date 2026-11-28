@@ -3787,6 +3787,36 @@ test("#220: a recordless binary that is exactly the pinned build is adopted with
   assert.equal(sha(schedBin(s)), next.sums.darwin_arm64);
 });
 
+test("#220: adopting a panel update keeps ownership of the existing login service", (t) => {
+  const s = scratch(t);
+  s.publishScheduler();
+  s.publish("9.9.0");
+  const first = s.run("--yes", "--no-usagemeter");
+  assert.equal(first.code, 0, first.err);
+  assert.match(readFileSync(schedRecord(s), "utf8"), /\nservice=installed\n$/);
+
+  const version = "0.12.9-am.8", asset = "herdr-automations_darwin_arm64";
+  const next = s.publishScheduler({ version });
+  s.publish("9.9.1");
+  const staged = `${schedBin(s)}.panel`;
+  cpSync(join(s.root, "release", "download", `herdr-automations-v${version}`, asset), staged);
+  chmodSync(staged, 0o755);
+  execFileSync("mv", [staged, schedBin(s)]);
+  const inode = lstatSync(schedBin(s)).ino;
+  const adopt = s.run("--no-usagemeter");
+  assert.equal(adopt.code, 0, adopt.err);
+  assert.match(adopt.out, /exactly the build the pack pins/);
+  assert.equal(lstatSync(schedBin(s)).ino, inode);
+  assert.equal(s.schedulerBuilds().length, 1);
+  const record = `version=${version}\nsha256=${next.sums.darwin_arm64}\nservice=installed\n`;
+  assert.equal(readFileSync(schedRecord(s), "utf8"), record);
+
+  const uninstall = s.run("--uninstall");
+  assert.equal(uninstall.code, 0, uninstall.err);
+  assert.match(uninstall.out, /Removed the automations scheduler's login service/);
+  assert.equal(existsSync(schedBin(s)), false);
+});
+
 test("#220: --no-scheduler installs the pack and never downloads, configures or starts the scheduler", (t) => {
   const s = scratch(t);
   s.publishScheduler();
