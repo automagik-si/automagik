@@ -94,6 +94,10 @@
       "to": "am/bin/state.mjs"
     },
     {
+      "from": "herdr/mods/am-sidebar/bin/watch-forge.mjs",
+      "to": "am/bin/watch-forge.mjs"
+    },
+    {
       "from": "herdr/mods/am-sidebar/briefing.mjs",
       "to": "am/briefing.mjs"
     },

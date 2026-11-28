@@ -50,6 +50,10 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, keptLaunch, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
+import {
+  WATCH_RATE_HOLD, watchApi, watchBranch, watchBuildFailed, watchNumber, watchPullRequests,
+  watchRepository, watchRuns, watchSha,
+} from "./watch-forge.mjs";
 import { screenLines } from "../dialog.js";
 import { automaticDelivery, hasRateLimitHold } from "../delivery.mjs";
 export { hasRateLimitHold } from "../delivery.mjs";
@@ -1082,16 +1086,23 @@ class LockHeld extends Error {}
 // (15 s each) never reads as stale; a holder that dies stops touching it (#225, #223).
 const LOCK_REFRESH = Math.max(10, Math.floor(LOCK_STALE / 3));
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const stale = (path) => { try { return Date.now() - statSync(path).mtimeMs > LOCK_STALE; } catch { return false; } };
+const stale = (path, maxFuture = Infinity) => {
+  try {
+    const age = Date.now() - statSync(path).mtimeMs;
+    return age > LOCK_STALE || age < -maxFuture;
+  } catch { return false; }
+};
 
 // A stale lock is moved aside first, so of two waiters only one takes it. Aside, it is checked
 // again: a lock made fresh in between goes back (by link, which never replaces a newer one).
-function takeOverStale(lock) {
-  if (!stale(lock)) return;
+function takeOverStale(lock, maxFuture) {
+  if (!stale(lock, maxFuture)) return false;
   const aside = `${lock}.${process.pid}`;
-  try { renameSync(lock, aside); } catch { return; } // another waiter moved it first
-  if (!stale(aside)) { try { linkSync(aside, lock); } catch { /* a newer lock is there */ } }
+  try { renameSync(lock, aside); } catch { return false; } // another waiter moved it first
+  const expired = stale(aside, maxFuture);
+  if (!expired) { try { linkSync(aside, lock); } catch { /* a newer lock is there */ } }
   try { unlinkSync(aside); } catch { /* gone already */ }
+  return expired;
 }
 
 /**
@@ -1116,7 +1127,11 @@ function tryLock(lock, w) {
   try { writeFileSync(lock, w.token, { flag: "wx" }); return true; } catch (e) {
     if (e?.code !== "EEXIST") throw e;
   }
-  takeOverStale(lock);
+  if (takeOverStale(lock, w.maxFuture)) {
+    try { writeFileSync(lock, w.token, { flag: "wx" }); return true; } catch (e) {
+      if (e?.code !== "EEXIST") throw e;
+    }
+  }
   if (Date.now() > w.start + w.wait) {
     const who = lockHolder(lock);
     throw new LockHeld(`${w.what ? `${w.what} (${lock})` : lock} is held by another am${who ? ` (${who})` : ""}`
@@ -1143,8 +1158,9 @@ function takeLock(lock, wait = LOCK_WAIT, what = null) {
  * this CLI already holds (a task's name lock while it waits for its worktree's, #552) keeps
  * being refreshed and never goes stale under a long wait.
  */
-async function takeLockAsync(lock, wait = LOCK_WAIT, what = null) {
+async function takeLockAsync(lock, wait = LOCK_WAIT, what = null, maxFuture = Infinity) {
   const w = waiter(wait, what);
+  w.maxFuture = maxFuture;
   while (!tryLock(lock, w)) await new Promise((resolve) => setTimeout(resolve, retryIn()));
   return w.token;
 }
@@ -1172,8 +1188,8 @@ function keepFresh(lock, token) {
  * `wait` ms for it without holding the event loop (takeLockAsync), a long wait named as
  * `what` on stderr.
  */
-async function withLockAsync(lock, fn, { wait = LOCK_WAIT, what = null } = {}) {
-  const token = await takeLockAsync(lock, wait, what);
+async function withLockAsync(lock, fn, { wait = LOCK_WAIT, what = null, maxFuture } = {}) {
+  const token = await takeLockAsync(lock, wait, what, maxFuture);
   const stop = keepFresh(lock, token);
   try { return await fn(); } finally { stop(); dropLock(lock, token); }
 }
@@ -2153,6 +2169,7 @@ function writeAgySettingsFile(settings, bot) {
 // ---- arguments ----
 
 const OPTIONS = {
+  pass: { type: "boolean" },
   json: { type: "boolean" }, all: { type: "boolean" }, help: { type: "boolean", short: "h" }, version: { type: "boolean" },
   project: { type: "string" }, "app-home": { type: "boolean" }, name: { type: "string" }, agent: { type: "string" }, kind: { type: "string" },
   role: { type: "string" }, instructions: { type: "string" }, "instructions-file": { type: "string" },
@@ -2302,6 +2319,10 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 macOS: a launchd agent in your own ~/Library/LaunchAgents,
                                 written and left for launchd to load at your next login).
                                 install.sh asks before it installs it.
+  watch --pass [--project DIR] [--dry-run] [--json]
+                                Sweep pull requests, default-branch CI and seats without a model.
+  watch follow <n> | watch unfollow <n>  [--project DIR] [--json]
+                                Add or remove a pull request by number.
   rate-limit [--all] [--dry-run] [--json]
                                 Park seats waiting on the Claude Code rate-limit dialog. An
                                 attention item names the original pane for the person to resume.
@@ -12134,7 +12155,7 @@ const firstLine = (r) => (r.stderr || r.stdout || `exit ${r.code}`).trim().split
 
 /** The forge tool a project's remote names, or the one installed (gh first) when the host is unknown. */
 const forgeByProject = new Map();
-async function forgeOn(cwd) {
+async function projectForge(cwd) {
   const project = resolvePath(cwd);
   if (forgeByProject.has(project)) return forgeByProject.get(project);
   const remote = (await git(["remote", "get-url", "origin"], project))?.trim()
@@ -12146,9 +12167,12 @@ async function forgeOn(cwd) {
   const tool = named ?? (forgeHost(remote)
     ? (programPath("glab") ? "glab" : programPath("gh") ? "gh" : null)
     : (programPath("gh") ? "gh" : programPath("glab") ? "glab" : null));
-  forgeByProject.set(project, tool);
-  return tool;
+  const route = { tool, remote };
+  forgeByProject.set(project, route);
+  return route;
 }
+
+const forgeOn = async (cwd) => (await projectForge(cwd)).tool;
 
 /** The states both forges' list calls use, as the cleanup and its rows read them (gh's words). */
 const FORGE_STATES = { open: "OPEN", opened: "OPEN", merged: "MERGED", closed: "CLOSED", locked: "OPEN" };
@@ -12762,9 +12786,20 @@ async function cmdWorkerKill(opts, panes) {
   if (pane.includes("/")) throw new CliError(`worker kill ends a worker on this computer only; ${pane} names another machine. Nothing was ended.`);
   const { me, bot } = await callingBot(opts);
   const self = me.address ?? process.env.HC_TERMINAL_ID;
+  const result = await killWorker(pane, { bot, self, view: await attachView() });
+  const { address, state, branch } = result;
+  if (!result.ended) {
+    return opts.json ? { terminal: address, ended: false, state }
+      : `${address} has already ended (${state}).`;
+  }
+  return opts.json ? { terminal: address, ended: true, branch }
+    : `${address} ended (${bot.name}'s worker${branch ? ` on ${branch}` : ""}).`;
+}
+
+/** Shared worker kill authorization, generation checks and retirement. */
+async function killWorker(pane, { bot, self, view, beforeKill, say }) {
   const target = await hcGet(pane);
   const address = target ? (target.address ?? pane) : pane;
-  const view = await attachView();
   const bound = target ? Boolean(view.byTerminal.get(address)?.binding?.bot) : false;
   const why = workerKillRefusal({ target: target ? { ...target, address } : null, botId: bot.id, self, bound });
   if (why) throw new CliError(`${why === "that isn't a terminal hc knows" ? `${pane} isn't a terminal hc knows` : why}. Nothing was ended.`);
@@ -12798,13 +12833,17 @@ async function cmdWorkerKill(opts, panes) {
     if (changed) throw new CliError(`${changed}. Nothing was ended.`);
   }
   if (current.state !== "live") {
-    return opts.json ? { terminal: address, ended: false, state: current.state } : `${address} has already ended (${current.state}).`;
+    return { address, ended: false, state: current.state };
   }
   // The real hc (in a sandbox, the proxy's socket, which ends only the caller's own worker):
   // the pane's guard refuses a member's own `hc kill`, and this verb is the checked way around it.
-  const r = await hcKill(address, { before: current, kind: "worker", core: view.core, children });
+  if (beforeKill) await beforeKill(current, children);
+  const r = await hcKill(address, {
+    before: current, kind: "worker", core: view.core, children, say,
+  });
   if (r.code !== 0) throw new CliError(`hc kill ${address} failed: ${hcSaid((r.stderr || r.stdout).trim())}`);
-  return opts.json ? { terminal: address, ended: true, branch: target.labels?.branch ?? null } : `${address} ended (${bot.name}'s worker${target.labels?.branch ? ` on ${target.labels.branch}` : ""}).`;
+  return { address, ended: true, confirmed: Boolean(r.endedPane),
+    branch: target.labels?.branch ?? null };
 }
 
 const WORKER_REPORT_BYTES = 64 * 1024;
@@ -12887,15 +12926,16 @@ function ensureWorkerReportDir(dir) {
   }
 }
 
-function workerReportProject(dir, project, name, source) {
+function claimWorkerProject(dir, project, { name, source, create }) {
   if (insideHerdrFiles(dir)) throw new Error("Reports belong outside Herdr's managed folders.");
-  ensureWorkerReportDir(dir);
+  if (create) ensureWorkerReportDir(dir);
   const marker = join(dir, "project.json");
   const key = readWorkerProjectMarker(marker);
   if (key !== null && key !== project) return false;
-  const path = join(dir, "reports", `${name}.md`);
-  if (source === path) throw new CliError("Use a report file outside its save destination.", 2);
-  if (key === project) return true;
+  if (source && source === join(dir, "reports", `${name}.md`)) {
+    throw new CliError("Use a report file outside its save destination.", 2);
+  }
+  if (key === project || !create) return true;
 
   const temp = `${marker}.${randomUUID()}.tmp`;
   try {
@@ -12909,7 +12949,7 @@ function workerReportProject(dir, project, name, source) {
   return readWorkerProjectMarker(marker) === project;
 }
 
-function workerReportsDir(project, name, source) {
+function workerProjectHome(project, options = { create: true }) {
   const slug = basename(project).replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 64) || "project";
   const state = resolvePath(process.env.AM_HOME || join(home(), ".automagik"));
   const canonical = realPathPrefix(state);
@@ -12919,16 +12959,20 @@ function workerReportsDir(project, name, source) {
   }
   if (canonical !== state) throw new Error("AM_HOME contains a symlink.");
   const projects = join(state, "projects");
-  ensureWorkerReportDir(projects);
+  if (options.create) ensureWorkerReportDir(projects);
   let projectHome = join(projects, slug);
-  if (!workerReportProject(projectHome, project, name, source)) {
+  if (!claimWorkerProject(projectHome, project, options)) {
     const digest = createHash("sha256").update(project).digest("hex").slice(0, 12);
     projectHome = join(projects, `${slug}-${digest}`);
-    if (!workerReportProject(projectHome, project, name, source)) {
+    if (!claimWorkerProject(projectHome, project, options)) {
       throw new Error("Project report folders collide.");
     }
   }
-  const reports = join(projectHome, "reports");
+  return projectHome;
+}
+
+function workerReportsDir(project, name, source) {
+  const reports = join(workerProjectHome(project, { name, source, create: true }), "reports");
   if (insideHerdrFiles(reports)) throw new Error("Reports belong outside Herdr's managed folders.");
   ensureWorkerReportDir(reports);
   return reports;
@@ -13050,6 +13094,9 @@ async function workerReportPr(branch, worktree) {
   return Number.isSafeInteger(pr) && pr > 0 ? pr : null;
 }
 
+const sendWorkerNotice = (terminal, line) =>
+  hcReal(["send", terminal, line, "--json"], { timeout: 65_000 });
+
 async function workerReportLead({ row, bindings, pane }, core) {
   const bot = row.lead && !String(row.lead).startsWith("session-") ? row.lead : row.botId;
   const binding = heldIn(bindings, bot);
@@ -13142,7 +13189,7 @@ async function finishWorkerReport(core, address, created, request, accept, say) 
       });
       if (record.error) throw new Error(`Couldn't record the report in ${LEDGER_FILE}.`);
       if (attempted) {
-        told = await hcReal(["send", lead, line, "--json"], { timeout: 65_000 })
+        told = await sendWorkerNotice(lead, line)
           .then((result) => result.code === 0, () => false);
       }
     }
@@ -13166,6 +13213,544 @@ async function finishWorkerReport(core, address, created, request, accept, say) 
     if (!saved) throw error;
     throw new CliError(`Report saved at ${saved}. ${error.message}`);
   } finally { stop(); dropLock(lock, token); }
+}
+
+// ---- am watch: a local, read-only forge sweep and checked worker retirement ----
+
+const WATCH_WEEK = 7 * 24 * 60 * 60_000;
+const WATCH_BYTES = 2 * 1024 * 1024;
+const WATCH_FOLLOW = 100;
+const WATCH_PENDING = 1024;
+const WATCH_LINE = 240;
+const WATCH_MESSAGE = 8000;
+const WATCH_ATTEMPTS = 6;
+const WATCH_PRS = 320;
+const WATCH_PANES = 1024;
+const WATCH_OPTIONS = new Set(["pass", "dry-run", "project", "json"]);
+const WATCH_USAGE = "Use am watch --pass or am watch follow|unfollow <number>.";
+const watchState = () => ({ version: 1, followed: [], pending: [], prs: {}, workers: {},
+  blocked: [], runs: {}, prsSeenAt: 0, seatsSeen: false, runsSeen: false, rateLimitUntil: 0 });
+
+const watchTime = (value) => Number.isSafeInteger(value) && value >= 0;
+const watchString = (value, limit) => typeof value === "string" && value.length <= limit;
+const watchArray = (value, limit, valid) =>
+  Array.isArray(value) && value.length <= limit && value.every(valid);
+const watchObject = (value) => value && typeof value === "object" && !Array.isArray(value);
+const watchEntries = (value, limit, valid) => watchObject(value)
+  && Object.keys(value).length <= limit
+  && Object.entries(value).every(([key, entry]) => valid(key, entry));
+const watchOptional = (value, valid) => value == null || valid(value);
+const watchBool = (value) => typeof value === "boolean";
+const watchHashes = (value, limit) => watchArray(value, limit,
+  (id) => typeof id === "string" && /^[a-f0-9]{16}$/.test(id));
+const watchMark = (value) =>
+  watchObject(value) && watchTime(value.time) && watchHashes(value.seen, 30);
+const watchSeat = (value) =>
+  watchString(value, 128) && /^t[0-9a-z]+:\d+$/.test(value);
+const WATCH_KEEP = ["kept (head differs)", "kept (head unverified)"];
+const WATCH_WORKER_STATES = ["blocked", "ended", "working", "kept", ...WATCH_KEEP,
+  "dirty", "idle", "removed", "baseline"];
+
+function validWatchState(state) {
+  return watchObject(state) && state.version === 1
+    && watchArray(state.followed, WATCH_FOLLOW, watchNumber)
+    && watchArray(state.pending, WATCH_PENDING, (line) => watchString(line, WATCH_LINE))
+    && watchEntries(state.prs, WATCH_PRS, (key, pr) =>
+      /^[1-9]\d{0,9}$/.test(key) && watchNumber(Number(key)) && watchObject(pr)
+      && ["OPEN", "CLOSED", "MERGED"].includes(pr.state)
+      && watchTime(pr.closed) && watchTime(pr.seenAt)
+      && watchOptional(pr.sha, watchSha)
+      && watchOptional(pr.checks, (value) => ["pending", "red", "green"].includes(value))
+      && watchOptional(pr.merge, (value) => ["mergeable", "conflicting"].includes(value))
+      && watchMark(pr.reviews) && watchMark(pr.comments)
+      && watchOptional(pr.approvals, (value) => watchHashes(value, 40))
+      && watchOptional(pr.unfollowed, watchBool))
+    && watchEntries(state.workers, WATCH_PANES, (key, value) => {
+      const [core, seat, extra] = key.split("/");
+      const [n, prState, status, tail] = watchString(value, 80) ? value.split(":") : [];
+      return extra === undefined && core && watchString(core, 128) && watchSeat(seat)
+        && tail === undefined && /^[1-9]\d{0,9}$/.test(n) && watchNumber(Number(n))
+        && ["CLOSED", "MERGED"].includes(prState) && WATCH_WORKER_STATES.includes(status);
+    })
+    && watchEntries(state.runs, 20, (key, value) =>
+      /^\d{1,16}:\d{1,16}$/.test(key) && value === true)
+    && watchArray(state.blocked, WATCH_PANES, watchSeat)
+    && watchTime(state.prsSeenAt) && watchTime(state.rateLimitUntil)
+    && watchBool(state.seatsSeen) && watchBool(state.runsSeen)
+    && watchOptional(state.seatCore, (value) => watchString(value, 128))
+    && watchOptional(state.repository, (value) => watchString(value, 1286))
+    && watchOptional(state.branch, watchBranch)
+    && watchOptional(state.noRemote, watchBool)
+    && watchOptional(state.delivery, (value) => watchObject(value)
+      && Number.isSafeInteger(value.count) && value.count > 0 && value.count <= state.pending.length
+      && Number.isSafeInteger(value.attempts)
+      && value.attempts > 0 && value.attempts <= WATCH_ATTEMPTS);
+}
+
+function readWatchState(file, warnings, dry) {
+  const info = lstatSync(file, { throwIfNoEntry: false });
+  if (!info) return watchState();
+  if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0) {
+    throw new CliError("Couldn't verify private watch state.");
+  }
+  try {
+    const state = JSON.parse(readBoundedFile(file, WATCH_BYTES, { noFollow: true }));
+    if (validWatchState(state)) return state;
+  } catch (error) {
+    if (!(error instanceof SyntaxError) && error.code !== "INVALID_BOUNDED_FILE") throw error;
+  }
+  if (dry) warnings.push("Watch found corrupt state.");
+  else {
+    const stamp = new Date().toISOString().replaceAll(":", "-");
+    const aside = `${file}.corrupt-${stamp}-${randomUUID()}`;
+    renameSync(file, aside);
+    chmodSync(aside, 0o600);
+    warnings.push(`Watch moved corrupt state to ${basename(aside)}.`);
+  }
+  return watchState();
+}
+
+export function saveWatchState(file, state) {
+  const text = JSON.stringify(state) + "\n";
+  if (Buffer.byteLength(text) > WATCH_BYTES) {
+    throw new CliError("Watch state exceeds its size limit.");
+  }
+  writePrivateStateFile(file, text);
+}
+
+const cleanWatchLine = (text) => cutNotice(workerReportText(text), WATCH_LINE);
+export function watchLine(...fields) {
+  const line = `[am] watch ${fields.filter(Boolean).join(" ")}`;
+  return cleanWatchLine(line);
+}
+
+// The queue is local state. Only watch's fact vocabulary goes back into a terminal.
+const WATCH_LINK = / https:\/\/[a-zA-Z0-9_.\/-]+$/;
+const WATCH_PR_FACT = /^(?:head [a-f0-9]{8}|checks (?:red|green)|conflicting|closed|merged)$/;
+
+function watchFact(line) {
+  if (/^\[am\] watch pane t[0-9a-z]+ blocked$/.test(line)) return true;
+  const link = WATCH_LINK.exec(line);
+  if (!link) return false;
+  const fact = line.slice(0, link.index);
+  const pr = /^\[am\] watch PR #(\d+) (.*)$/.exec(fact);
+  if (pr) return watchNumber(Number(pr[1]))
+    && (WATCH_PR_FACT.test(pr[2]) || /^(?:review|comment) \d+$/.test(pr[2]));
+  const worker = /^\[am\] watch worker t[0-9a-z]+ #(\d+) (?:merged|closed) (.*)$/.exec(fact);
+  if (worker) return watchNumber(Number(worker[1])) && WATCH_WORKER_STATES.includes(worker[2]);
+  return /^\[am\] watch CI #\d+ red$/.test(fact);
+}
+
+const watchPrLink = (repo, number) =>
+  `${repo.base}/${repo.github ? "pull" : "-/merge_requests"}/${number}`;
+const watchRunLink = (repo, id) =>
+  `${repo.base}/${repo.github ? "actions/runs" : "-/pipelines"}/${id}`;
+
+function watchActivity(items, previous, since) {
+  let time = previous?.time ?? since;
+  const seen = new Set(previous?.seen);
+  let count = 0;
+  for (const item of [...items].sort((a, b) => a.time - b.time)) {
+    if (item.time < time) continue;
+    const id = createHash("sha256").update(item.id).digest("hex").slice(0, 16);
+    if (item.time === time && seen.has(id)) continue;
+    if (item.time > time) seen.clear();
+    seen.add(id);
+    time = item.time;
+    count++;
+  }
+  return { mark: { time, seen: [...seen].slice(-30) }, count };
+}
+
+function watchPrChanges(state, repo, prs, now, add) {
+  for (const pr of prs) {
+    const old = state.prs[pr.number];
+    if (pr.state !== "OPEN" && pr.closed && now - pr.closed >= WATCH_WEEK) continue;
+    // Start from the last good read for a new PR, and from its own activity watermark thereafter.
+    const reviews = watchActivity(pr.reviews, old?.reviews, state.prsSeenAt);
+    const comments = watchActivity(pr.comments, old?.comments, state.prsSeenAt);
+    const approvals = pr.approvals.map((id) =>
+      createHash("sha256").update(id).digest("hex").slice(0, 16));
+    const reviewCount = reviews.count + (old ? approvals.filter((id) =>
+      !old.approvals?.includes(id)).length : 0);
+    const line = (...fields) => add(watchLine("PR", `#${pr.number}`, ...fields,
+      watchPrLink(repo, pr.number)));
+    if (state.prsSeenAt) {
+      if (pr.sha && pr.sha !== old?.sha) line("head", pr.sha.slice(0, 8));
+      if (["red", "green"].includes(pr.checks)
+          && (pr.checks !== old?.checks || pr.sha !== old?.sha)) {
+        line("checks", pr.checks);
+      }
+      if (pr.merge === "conflicting" && old?.merge === "mergeable") line("conflicting");
+      if (reviewCount) line("review", reviewCount);
+      if (comments.count) line("comment", comments.count);
+      if (pr.state !== "OPEN" && (old ? old.state !== pr.state : pr.closed > state.prsSeenAt)) {
+        line(pr.state.toLowerCase());
+      }
+    }
+    state.prs[pr.number] = { state: pr.state, closed: pr.state === "OPEN" ? 0 : pr.closed
+      || old?.closed || now, sha: pr.sha ?? old?.sha,
+    checks: pr.checks ?? old?.checks, merge: pr.merge ?? old?.merge,
+    reviews: reviews.mark, comments: comments.mark, approvals: pr.full ? approvals : old?.approvals,
+    seenAt: now };
+  }
+  const observed = new Set(prs.map(({ number }) => String(number)));
+  for (const [number, pr] of Object.entries(state.prs)) {
+    if (pr.state === "OPEN" && !observed.has(number)) delete state.prs[number];
+  }
+  state.prsSeenAt = now;
+}
+
+async function watchCiChanges(state, repo, api, runs, now, add, out) {
+  const next = {};
+  const workflows = new Map();
+  for (const run of runs) {
+    if (!workflows.has(run.workflow)) workflows.set(run.workflow, { green: false, red: false });
+    const workflow = workflows.get(run.workflow);
+    if (run.result === "green") workflow.green = true;
+    if (run.result !== "red") continue;
+    const qualifies = !workflow.green && (workflow.red || now - run.created > 2 * 60 * 60_000);
+    workflow.red = true;
+    if (state.runs[run.key]) next[run.key] = true;
+    if (!qualifies || next[run.key]) continue;
+    if (state.runsSeen) {
+      const failed = await watchBuildFailed(repo, api, run);
+      if (failed === null) {
+        if (state.rateLimitUntil <= now) out.forgeUnavailable = true;
+        continue;
+      }
+      if (failed) add(watchLine("CI", `#${run.id}`, "red", watchRunLink(repo, run.id)));
+    }
+    next[run.key] = true;
+  }
+  state.runs = next;
+  state.runsSeen = true;
+}
+
+/** Local bindings are read from disk every time. A clone may have the same bot IDs. */
+async function watchBinding(bot, project, core, path) {
+  const binding = heldIn(foldAttach(readAttachFile(path) ?? []), bot.id);
+  if (binding?.core !== core || !isHcTerminalId(binding.terminal)
+      || (binding.project && binding.project !== project)) return null;
+  const pane = await retirementGet(binding.terminal).catch(() => null);
+  if (!sameLivePane(pane, binding.terminal, binding.created_ms)
+      || (!binding.project && (!isAbsolute(pane.cwd ?? "") || await keyOf(pane.cwd) !== project))) {
+    return null;
+  }
+  return binding;
+}
+
+async function watchBlocked(state, { terms, project, core, byTerminal }, add) {
+  if (!terms) return;
+  const blocked = [];
+  const before = new Set(state.seatCore === core ? state.blocked : []);
+  for (const listed of terms) {
+    if (listed.state !== "live" || !paneIsBlocked(listed) || !isHcTerminalId(listed.address)) {
+      continue;
+    }
+    const pane = await retirementGet(listed.address).catch(() => null);
+    if (!pane) {
+      const known = state.blocked.find((id) => id.startsWith(`${listed.address}:`));
+      if (known && before.has(known)) blocked.push(known);
+      continue;
+    }
+    if (pane.address !== listed.address || pane.state !== "live" || !paneIsBlocked(pane)
+        || !Number.isSafeInteger(pane.created_ms)) continue;
+    const bound = byTerminal.get(pane.address)?.binding;
+    const folder = bound?.created_ms === pane.created_ms && bound.project;
+    if ((folder || (isAbsolute(pane.cwd ?? "") && await keyOf(pane.cwd))) !== project) continue;
+    const identity = `${pane.address}:${pane.created_ms}`;
+    blocked.push(identity);
+    if (state.seatsSeen && !before.has(identity)) {
+      add(watchLine("pane", pane.address, "blocked"));
+    }
+  }
+  state.blocked = blocked.slice(-WATCH_PANES);
+  state.seatsSeen = true;
+  state.seatCore = core;
+}
+
+async function watchWorktree(row, pane, sha) {
+  const dir = row.worktree;
+  if (!isAbsolute(dir ?? "") || dir === row.project || nativeDir(dir) !== dir
+      || pane.cwd !== dir || !await stillWorktree(dir, row.project, workerReportGit)) return "kept";
+  const branch = await workerReportGit(["symbolic-ref", "--quiet", "--short", "HEAD"], dir);
+  if (branch?.trim() !== row.branch) return "kept";
+  const status = await workerReportGit(["--no-optional-locks", "status", "--porcelain"], dir);
+  if (status === null) return "kept";
+  if (status) return "dirty";
+  const head = (await workerReportGit(["rev-parse", "--verify", "HEAD"], dir))?.trim();
+  if (!watchSha(sha) || !watchSha(head)) return "kept (head unverified)";
+  return head === sha ? null : "kept (head differs)";
+}
+
+function workerPaneState(pane) {
+  if (paneIsBlocked(pane)) return "blocked";
+  if (pane.state === "finished") return "ended";
+  const status = pane.status?.state;
+  return status === "working" ? status : pane.state === "live" && status === "idle" ? null : "kept";
+}
+
+async function watchRetire(row, pane, project, view, dry, sha) {
+  const status = workerPaneState(pane);
+  if (status) return status;
+  const worktree = await watchWorktree(row, pane, sha);
+  if (worktree) return worktree;
+  const bot = project.file.bots.find(({ id, planned }) => id === row.botId && !planned);
+  const owner = bot && await watchBinding(bot, project.key, view.core, view.path);
+  if (!owner) return "kept";
+  if (dry) {
+    const bound = view.byTerminal.get(pane.address)?.binding?.created_ms === pane.created_ms;
+    return workerKillRefusal({ target: pane, botId: bot.id, self: owner.terminal, bound })
+      ? "kept" : "idle";
+  }
+  try {
+    const result = await killWorker(pane.address, {
+      bot, self: owner.terminal, view, say: () => {},
+      async beforeKill(current, children) {
+        const problem = workerPaneState(current) || await watchWorktree(row, current, sha);
+        if (problem) throw new CliError("Worker changed.", 1, { watchState: problem });
+        if (children.length || heldTarget(realHcPath(), { get: current, address: current.address },
+          localHcEnv()) || await freshCoreId() !== view.core) throw new CliError("Worker held.");
+        const fresh = await retirementGet(current.address);
+        if (!sameLivePane(fresh, current.address, row.created_ms) || fresh.cwd !== row.worktree
+            || workerKillRefusal({ target: fresh, botId: bot.id, self: owner.terminal })) {
+          throw new CliError("Worker changed.");
+        }
+        const changed = workerPaneState(fresh);
+        if (changed) throw new CliError("Worker changed.", 1, { watchState: changed });
+      },
+    });
+    if (!result.ended) return "ended";
+    if (!result.confirmed) return "kept";
+    const after = await retirementGet(row.terminal).catch(() => undefined);
+    return after === null || (after && after.created_ms !== row.created_ms) ? "removed" : "ended";
+  } catch (error) { return error.detail?.watchState ?? "kept"; }
+}
+
+async function watchWorkers(state, repo, prs, workers, project, view, terms, baseline, dry, add) {
+  const latest = new Map();
+  for (const pr of prs) {
+    if (!pr.match) continue;
+    const old = latest.get(pr.branch);
+    if (!old || pr.state === "OPEN" || (old.state !== "OPEN" && pr.number > old.number)) {
+      latest.set(pr.branch, pr);
+    }
+  }
+  const listed = new Set(terms.map((pane) => pane.address));
+  const next = {};
+  for (const row of workers) {
+    const id = `${view.core}/${row.terminal}:${row.created_ms}`;
+    const pr = latest.get(row.branch);
+    const begun = Date.parse(row.at) || row.created_ms;
+    if (!listed.has(row.terminal) || !pr || pr.state === "OPEN" || !pr.closed
+        || pr.closed < begun) continue;
+    const pane = await retirementGet(row.terminal).catch(() => null);
+    if (!pane && state.workers[id]) next[id] = state.workers[id];
+    if (pane?.address !== row.terminal || pane.created_ms !== row.created_ms
+        || pane.labels?.[WORKER_OF_LABEL] !== row.botId) continue;
+    const status = baseline ? "baseline" : await watchRetire(row, pane, project, view, dry, pr.sha);
+    const value = `${pr.number}:${pr.state}:${status}`;
+    next[id] = value;
+    if (state.workers[id] !== value && status !== "baseline") {
+      add(watchLine("worker", row.terminal, `#${pr.number}`, pr.state.toLowerCase(),
+        status, watchPrLink(repo, pr.number)));
+    }
+  }
+  state.workers = Object.fromEntries(Object.entries(next).slice(-WATCH_PANES));
+}
+
+async function deliverWatch(file, state, out, project, main, view) {
+  const dropBatch = (count) => {
+    state.pending.splice(0, count);
+    delete state.delivery;
+  };
+  const abandon = (count) => {
+    dropBatch(count);
+    saveWatchState(file, state);
+    out.warnings.push("Watch dropped a batch after six unconfirmed delivery attempts.");
+  };
+  const previous = state.delivery;
+  if (previous?.attempts === WATCH_ATTEMPTS) return abandon(previous.count);
+  const binding = await watchBinding(main, project, view.core, view.path);
+  if (!binding) return;
+  // Delivery resolves the roster again and checks the current generation and screen.
+  const current = loadProject(project).file.bots.find((bot) => bot.kind === "main" && !bot.planned);
+  if (current?.id !== main.id || await freshCoreId() !== view.core) return;
+  const ready = await deliveryStatus(binding.terminal, hcReal, binding).catch(() => null);
+  if (!ready || ready.held) return;
+  const currentBinding = heldIn(foldAttach(readAttachFile(view.path) ?? []), main.id);
+  if (!currentBinding || attachKey(currentBinding) !== attachKey(binding)
+      || currentBinding.project !== binding.project) return;
+  let length = 0;
+  let count = 0;
+  const batch = [];
+  for (const pending of state.pending.slice(0, previous?.count)) {
+    const line = cleanWatchLine(pending);
+    if (!watchFact(line)) { count++; continue; }
+    length += line.length + 1;
+    if (length > WATCH_MESSAGE) break;
+    count++;
+    batch.push(line);
+  }
+  if (!batch.length) {
+    dropBatch(count);
+    saveWatchState(file, state);
+    return;
+  }
+  // Persist the attempt and its batch boundary before handing text to hc.
+  // An ambiguous reply leaves the facts queued, even when another sweep adds new facts.
+  state.delivery = { count, attempts: (previous?.attempts ?? 0) + 1 };
+  saveWatchState(file, state);
+  const result = await sendWorkerNotice(binding.terminal, batch.join("\n")).catch(() => null);
+  if (result?.code === 0) {
+    out.sent = true;
+    dropBatch(count);
+  } else if (result && ["blocked", "not_found", "finished"].includes(hcErrorKind(result))) {
+    if (previous) state.delivery = previous;
+    else delete state.delivery;
+  } else {
+    out.deliveryUnconfirmed = true;
+    if (state.delivery.attempts === WATCH_ATTEMPTS) return abandon(count);
+    out.warnings.push("Watch delivery was unconfirmed.");
+  }
+  saveWatchState(file, state);
+}
+
+async function watchPass(file, state, project, main, dry, warnings) {
+  const now = Date.now();
+  const before = JSON.stringify(state);
+  const out = { forgeCalls: 0, sent: false, lines: [], warnings };
+  const add = (line) => out.lines.push(line);
+  const core = await pinIdentityCore().then(() => coreId()).catch(() => null);
+  const path = attachPath(appHome());
+  const byTerminal = new Map();
+  if (core) for (const binding of foldAttach(readAttachFile(path) ?? []).byBot.values()) {
+    if (binding.core === core) byTerminal.set(binding.terminal, { binding });
+  }
+  const terms = core && await hcTerminals(true).catch(() => null);
+  const ledger = workerLedgerRows().filter((row) => row.project === project.key);
+  const workers = ledger.filter((row) => core && row.core === core && row.kind === "worker"
+    && row.event === "start" && typeof row.branch === "string" && launchKey(row)
+    && isHcTerminalId(row.terminal));
+  const view = { core, path, byTerminal };
+  await watchBlocked(state, { terms, project: project.key, core, byTerminal }, add);
+  const { tool, remote } = await projectForge(project.key);
+  const repo = watchRepository(tool, remote);
+  const forge = tool && programPath(tool);
+  if (state.rateLimitUntil > now + WATCH_RATE_HOLD) state.rateLimitUntil = 0;
+  const hasHost = Boolean(forgeHost(remote));
+  if (hasHost) delete state.noRemote;
+  if (repo && forge) {
+    if (state.repository !== repo.base) Object.assign(state, {
+      repository: repo.base, prs: {}, prsSeenAt: 0, runs: {}, runsSeen: false, rateLimitUntil: 0,
+      branch: null, workers: {},
+    });
+    const api = watchApi(repo, (args) => runProgram(forge, args, {
+      cwd: project.key, timeout: GH_TIMEOUT, killSignal: "SIGKILL",
+      env: { ...process.env, GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0" },
+    }), state, now, out);
+    const baseline = !state.prsSeenAt;
+    const tracked = Object.entries(state.prs)
+      .filter(([, pr]) => pr.state === "OPEN" && !pr.unfollowed).map(([n]) => Number(n));
+    const workerBranches = prBranches(ledger, now);
+    const branches = new Set(workerBranches.map(({ branch }) => branch));
+    const active = new Set((terms || []).map((pane) => pane.address));
+    const recent = new Set(workerBranches.filter(({ last }) => now - last < WATCH_WEEK)
+      .map(({ branch }) => branch));
+    for (const worker of workers) if (active.has(worker.terminal)) recent.add(worker.branch);
+    const sample = await watchPullRequests(repo, api, normalizedPr, {
+      branches, recent, tracked, followed: state.followed, branch: state.branch,
+    });
+    if (sample) {
+      watchPrChanges(state, repo, sample.prs, now, add);
+      if (state.branch !== sample.branch) {
+        state.runs = {};
+        state.runsSeen = false;
+      }
+      state.branch = sample.branch ?? null;
+      const runs = await watchRuns(repo, api, sample);
+      if (runs) await watchCiChanges(state, repo, api, runs, now, add, out);
+      else if (state.rateLimitUntil <= now) out.forgeUnavailable = true;
+      if (terms) await watchWorkers(state, repo, sample.prs, workers, project, view, terms,
+        baseline, dry, add);
+    } else if (state.rateLimitUntil <= now) out.forgeUnavailable = true;
+  } else if (hasHost) out.forgeUnavailable = true;
+  else if (!state.noRemote) {
+    warnings.push("Watch found no forge remote.");
+    state.noRemote = true;
+  }
+  if (out.forgeUnavailable) warnings.push("Watch could not read the forge.");
+  else if (out.forgeBackoff) warnings.push("Watch paused forge reads after a rate limit.");
+  const prs = Object.entries(state.prs)
+    .filter(([, pr]) => !pr.closed || now - pr.closed < WATCH_WEEK);
+  prs.sort(([, a], [, b]) => b.seenAt - a.seenAt);
+  state.prs = Object.fromEntries(prs.slice(0, WATCH_PRS));
+  state.pending.push(...out.lines);
+  out.dropped = Math.max(0, state.pending.length - WATCH_PENDING);
+  state.pending.splice(WATCH_PENDING);
+  if (!dry) {
+    if (before !== JSON.stringify(state) || !existsSync(file)) saveWatchState(file, state);
+    if (state.pending.length && core) {
+      await deliverWatch(file, state, out, project.key, main, view);
+    }
+  }
+  out.pending = state.pending.length;
+  if (state.rateLimitUntil > now) out.rateLimited = true;
+  return out;
+}
+
+async function cmdWatch(opts, rest) {
+  const [op, number] = rest;
+  const pass = opts.pass === true;
+  const dry = opts["dry-run"] === true;
+  const n = Number(number);
+  if (Object.keys(opts).some((key) => !WATCH_OPTIONS.has(key))
+      || (pass ? rest.length : !["follow", "unfollow"].includes(op) || rest.length !== 2
+        || dry || !/^[1-9]\d*$/.test(number) || !watchNumber(n))) {
+    throw new CliError(WATCH_USAGE, 2);
+  }
+  const project = loadProject(await commandKeyOf(opts));
+  const main = project.file.bots.find((bot) => bot.kind === "main" && !bot.planned);
+  if (!main) return opts.json ? { skipped: "no-main", forgeCalls: 0, sent: false, lines: [] } : "";
+  const projectHome = workerProjectHome(project.key, { create: !dry });
+  const dir = join(projectHome, "state");
+  for (const path of [projectHome, dir]) {
+    const info = lstatSync(path, { throwIfNoEntry: false });
+    if (info && (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077))) {
+      throw new CliError("Couldn't verify private watch folder.");
+    }
+  }
+  if (!dry) ensureWorkerReportDir(dir);
+  const file = join(dir, "watch.json");
+  const run = async () => {
+    const warnings = [];
+    const state = readWatchState(file, warnings, dry);
+    if (pass) {
+      const result = await watchPass(file, state, project, main, dry, warnings);
+      if (opts.json) return result;
+      const lines = dry ? result.lines : result.sent ? ["Watch notified the lead."] : [];
+      return [...warnings, ...lines].join("\n");
+    }
+    const followed = new Set(state.followed);
+    if (op === "follow") followed.add(n);
+    else if (followed.delete(n) && state.prs[n]) state.prs[n].unfollowed = true;
+    if (followed.size > WATCH_FOLLOW) {
+      throw new CliError(`Watch can follow up to ${WATCH_FOLLOW} PRs.`);
+    }
+    state.followed = [...followed].sort((a, b) => a - b);
+    saveWatchState(file, state);
+    return opts.json ? { followed: state.followed, ...(warnings.length ? { warnings } : {}) }
+      : [...warnings, `PR #${n} ${op === "follow" ? "followed" : "unfollowed"}.`].join("\n");
+  };
+  if (dry) return run();
+  try {
+    return await withLockAsync(`${file}.lock`, run,
+      { wait: pass ? 0 : LOCK_WAIT, what: "this watch", maxFuture: 60_000 });
+  } catch (error) {
+    if (!pass || !(error instanceof LockHeld)) throw error;
+    return opts.json ? { skipped: "locked", forgeCalls: 0, sent: false, lines: [] } : "";
+  }
 }
 
 export async function workerCallerProven(terminalPid, token, helperPid) {
@@ -16544,7 +17129,8 @@ function cmdLoginEnv(opts, rest) {
 
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
-  tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, skill: cmdSkill, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
+  tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, watch: cmdWatch, skill: cmdSkill,
+  reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
   proxy: cmdProxy, "launch-path": cmdLaunchPath, accounts: cmdAccounts, revive: cmdRevive, "rate-limit": cmdRateLimit, "delivery-status": cmdDeliveryStatus, holders: cmdHolders, login: cmdLogin, "login-env": cmdLoginEnv };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
@@ -16605,7 +17191,12 @@ async function dispatch(argv, io) {
       return refusal.code;
     }
   }
-  const preview = opts["dry-run"] && (command === "rate-limit" || (command === "restart" && opts.due));
+  if (opts.pass !== undefined && command !== "watch") {
+    report(["--pass goes with am watch only."]);
+    return 2;
+  }
+  const preview = opts["dry-run"] && (["rate-limit", "watch"].includes(command)
+    || (command === "restart" && opts.due));
   const linkedInstall = command === "machines" && rest[0] === "install";
   // #1208: --agent-home starts one new worker (am worker "<task>") on a chosen login folder, and
   // --worker-agent-home is a create or edit field. Anywhere else (help, worker kill, any other
@@ -16632,7 +17223,8 @@ async function dispatch(argv, io) {
     // The accounts read is read-only on every machine (RFC 0043), so it repairs nothing either;
     // nor does the reader's read-only login --check (#1509), nor a linked machine's install (#206).
     // A caller's linked launch may be refused, including after automatic holder selection.
-    if (!preview && !callerAction && !endingWorker && command !== "accounts" && command !== "proxy"
+    if (!preview && !callerAction && !endingWorker
+        && !["accounts", "proxy", "watch"].includes(command)
         && (command !== "login" || !opts.check))
       io.repairCliLinks?.();
   }
