@@ -181,8 +181,12 @@ warning; the pack is installed all the same, and a rerun retries.
 `--uninstall` otherwise removes the login service when this installer started it, then the binary.
 While a login service you started yourself (Start in the panel, or `service install`) is installed,
 it keeps the binary too and says how to remove both, so no service is left restarting a missing file.
-`am update` (the pack's own updater) has no scheduler step yet: after it, or wherever
-the binary is missing, the panel shows the command that installs it, with an Install button.
+`am update` (the pack's own updater) leaves the scheduler as installed. The panel shows the
+command and an Install button when the binary is missing.
+
+With 0.12.1-am.4 and `AFTER A RUN` set to never close, a finished run keeps its terminal until that
+automation's next run starts. The scheduler removes failed, timed-out or stuck runs' terminals
+and saves the reason and last screen lines in `herdr-automations history --json`.
 
 ### DSH as a Herdr agent (dsh-TUI)
 
@@ -502,13 +506,13 @@ attention item and first deadline. A later sweep reattaches the watcher. Canceli
 entry closes its attention item. An already queued restart keeps its operation, and a handoff
 continues after recovery with the same ask and response file. The updated Herdr automations scheduler checks `am delivery-status` before sending
 to a target or a notification recipient and preserves each automation's `enabled` setting.
-The pinned scheduler release (0.12.1-am.3) has that check; an older installed scheduler needs the update.
+The pack pins 0.12.1-am.4. The scheduler has checked delivery status since 0.12.1-am.3.
 
 **Wake a bot every day.** Set `am edit <bot> --wake daily@09:30`, or add the same flag to
 `am create`. Clear it with `am edit <bot> --no-wake`. The owning machine's local time applies,
 including for a linked project named with `--machine M --project DIR`. Its scheduler must
 be running, with backend `hc` and bot targets (`herdr-automations` 0.12.1-am.2 or later; the
-pack pins 0.12.1-am.3). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
+pack pins 0.12.1-am.4). A bot seen busy or blocked when the run starts is skipped. If a dialog opens
 just before the send, hc refuses to type into it and the failed run shows the reason.
 A new wake starts at its next occurrence. An already registered wake missed while the
 scheduler was stopped can catch up once on startup within 1380 elapsed minutes (23 hours).

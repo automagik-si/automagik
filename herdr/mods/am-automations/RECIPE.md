@@ -111,9 +111,9 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   #501). A sent key with an empty value is removed, a key not sent is kept. So `agent_args` always
   goes, `[]` for none (leaving it out would keep the old flags after `Agent default`), and the form
   still sends back `catch_up_minutes`, `disabled` (a paused entry stays paused) and `workflow`.
-- **A new automation by `put` alone gets the form's flags** (#938), from 0.12.1-am.2, the pinned
-  release (`scheduler.js`), on: a scheduler still at 0.12.1-am.1 does not have it, so there a bot
-  must send `agent_args` itself or its Codex run stays sandboxed. From 0.12.1-am.2 on, `put`
+- **A new automation by `put` alone gets the form's flags** (#938), since 0.12.1-am.2.
+  On 0.12.1-am.1 a bot must send `agent_args` itself or its Codex run stays sandboxed.
+  From 0.12.1-am.2 on, `put`
   applies the automatic mode (`AUTO_ARGS` in `modes.js`; `config.DefaultAgentArgs` in the scheduler) to a new
   automation whose request has no `agent_args` key, so one a bot writes runs with the access the
   same one made here has. The form always sends the key, so nothing changes for it. The two tables
@@ -128,7 +128,10 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   the check (scheduler ADR 0012, since 0.12.1-am.2). The form says "Close the space after a
   successful run" or "Close the run's tab after a successful run". The switch starts on for
   a new automation (D2) and uses the saved value from `ls --json` when editing. Switching it off
-  sends `close_workspace: never`. The panel knows our build by its `version` output containing
+  sends `close_workspace: never`. With 0.12.1-am.4 a finished run then keeps its terminal until
+  that automation's next run starts. The scheduler removes failed, timed-out or stuck runs'
+  terminals and saves the reason and last screen lines in `history --json`.
+  The panel knows our build by its `version` output containing
   `-am.`; with an upstream `herdr-automations` the switch is replaced by one line saying our build
   is needed, and the key is never sent, so a hand-written `close_workspace` (and `session`) survives
   an edit there. Hand-writing it in `automations.yaml` still works: `on-success` or `never`.
@@ -153,11 +156,10 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   the run is `done` when the bot takes it. `worker:<id>` starts `am worker "<prompt>" --worktree
   <dir> --project <repo>` with `HC_TERMINAL_ID` set to the bot's pane, so the worker inherits the
   bot's worker launch and permissions, then waits for its turn and ends it through the checked
-  `am worker kill <pane> --json` once the turn has finished (a worker still mid-turn at the
-  timeout is refused by that verb and stays, logged; the finished terminal stays as the run's
-  address, so the history still points at where it ran). A bot that is gone from the roster,
-  planned, on another machine, or unreachable is a
-  `failed` run whose line names it; it never falls back to a fresh agent. `target_when_busy: skip`
+  `am worker kill <pane> --json` once the turn has finished. On failure or timeout, the scheduler
+  removes the worker it started after saving the reason and last screen lines. A bot that is gone
+  from the roster, planned, on another machine, or unreachable is a `failed` run whose line names
+  it; it never falls back to a fresh agent. `target_when_busy: skip`
   records a busy bot's run `skipped`, keeping the pane and target it resolved. Our build names
   `targets` in `ls --json` only when its backend can run one (`hc`, or `auto`); without it the form
   offers no runs-as. An older build has no `Target` field, so its `ls` cannot show a hand-written
@@ -208,8 +210,8 @@ scheduler's side `start` and `worker` for a target), and the agents a run starts
 - **A command automation runs a program as you** (#938): the scheduler starts it on its schedule
   with your network and files, no sandbox, and its result line is pasted into the named bot's
   terminal. Whoever can write `automations.yaml` (this form included) decides what runs.
-- Command automations need the pinned scheduler release (`SCHEDULER`, `0.12.1-am.3`; commands since 0.12.1-am.2); the
-  form offers the kind once a build that names it is installed (0.12.1-am.1 does not run commands).
+- The pack pins `0.12.1-am.4` in `SCHEDULER`. Command automations have been available since
+  0.12.1-am.2. The form offers the kind once a build that names it is installed.
 - Without the scheduler binary the panel shows the repair block instead of the list. `install.sh`
   provisions it (#220); shipping it as an RFC 0012 part (installed by `am install` and the pack's
   updater) comes later. A new scheduler release means updating `SCHEDULER` (version and all four

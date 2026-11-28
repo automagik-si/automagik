@@ -50,8 +50,9 @@ async function panel() {
 }
 
 test("the repair command: our pinned release for this Mac's arch, hash-checked, into ~/.local/bin", () => {
+  const release = "/automagik-si/automagik/releases/download/herdr-automations-v0.12.1-am.4";
   const arm = repairCommand("arm64");
-  assert.match(arm, /\/automagik-si\/automagik\/releases\/download\/herdr-automations-v0\.12\.1-am\.3\/herdr-automations_darwin_arm64 /);
+  assert.ok(arm.includes(`${release}/herdr-automations_darwin_arm64 `));
   assert.ok(arm.includes(`echo "${SCHEDULER.sha256.arm64}  herdr-automations" | shasum -a 256 -c`));
   assert.match(arm, /shasum -a 256 -c && chmod 755 herdr-automations && mv herdr-automations ~\/\.local\/bin\/; s=\$\?; /, "moved in only once the hash matches");
   // Its scratch folder goes whether it worked or not, and the subshell keeps the install's status.
@@ -63,7 +64,7 @@ test("the repair command: our pinned release for this Mac's arch, hash-checked, 
   assert.doesNotMatch(arm + intel, /service install|launchctl|LaunchAgents/, "it installs the program, never a login service");
   // A Linux Herdr gets the Linux build, checked with sha256sum (no shasum there).
   const linux = repairCommand("x86_64", "Linux"), linuxArm = repairCommand("aarch64", "Linux");
-  assert.match(linux, /herdr-automations-v0\.12\.1-am\.3\/herdr-automations_linux_amd64 /);
+  assert.ok(linux.includes(`${release}/herdr-automations_linux_amd64 `));
   assert.ok(linux.includes(`echo "${SCHEDULER.linux.amd64}  herdr-automations" | sha256sum -c && chmod 755`));
   assert.match(linuxArm, /herdr-automations_linux_arm64 /);
   assert.ok(linuxArm.includes(SCHEDULER.linux.arm64));
@@ -99,7 +100,7 @@ test("the repair command never removes a folder it did not make: a preset d surv
 // so nothing merges with the repair command pointing at placeholder hashes.
 test("the scheduler pin is a real release hash, never the PENDING-SHA256 placeholder", () => {
   assert.equal(SCHEDULER.repo, "automagik-si/automagik");
-  assert.equal(SCHEDULER.version, "0.12.1-am.3");
+  assert.equal(SCHEDULER.version, "0.12.1-am.4");
   for (const arch of ["arm64", "amd64"]) {
     assert.notEqual(SCHEDULER.sha256[arch], "PENDING-SHA256", `${arch}: paste the release's checksums.txt sha256`);
     assert.match(SCHEDULER.sha256[arch], /^[0-9a-f]{64}$/, `${arch}: a sha256`);
@@ -155,7 +156,7 @@ test("Install runs the shown command once; the panel then finds the scheduler an
     if (command !== local || !installed) return { code: 127, stdout: "", stderr: `cannot run ${command}: no such file` };
     if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ automations: [], invalid: [], scheduler: 0, backend: "hc", paused: false }), stderr: "" };
     if (args[0] === "history") return { code: 0, stdout: "[]", stderr: "" };
-    return { code: 0, stdout: "0.12.1-am.3\n", stderr: "" };
+    return { code: 0, stdout: "0.12.1-am.4\n", stderr: "" };
   };
   const { view, cx, draw } = await panel();
   const n = draw();
@@ -199,7 +200,7 @@ test("backend herdr, or none named: the panel says runs open in the TUI and name
       if (command !== "herdr-automations") return { code: 127, stdout: "", stderr: "no such file" };
       if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ automations: [], invalid: [], scheduler: 7, backend, paused: false }), stderr: "" };
       if (args[0] === "history") return { code: 0, stdout: "[]", stderr: "" };
-      return { code: 0, stdout: "0.12.1-am.3\n", stderr: "" };
+      return { code: 0, stdout: "0.12.1-am.4\n", stderr: "" };
     };
   };
   serve("herdr");
@@ -618,7 +619,8 @@ test("upstream: an existing space needs our build to close the run's tab, and pu
     await cx.settle();
     const n = draw();
     assert.ok(!n.has("f-close"), "no switch for an upstream binary");
-    assert.match(textOf(n.get("f-close-upstream")), /Our scheduler build \(0\.12\.1-am\.3\) is needed/);
+    assert.match(textOf(n.get("f-close-upstream")),
+      /Our scheduler build \(0\.12\.1-am\.4\) is needed/);
     assert.match(textOf(n.get("f-close-upstream")), /close the run's tab/);
     view.form.prompt.type("p, said again", cx);
     await saveIt(view, cx);

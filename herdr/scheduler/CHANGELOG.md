@@ -2,7 +2,7 @@
 
 What changed for someone using the plugin. Dates are release dates.
 
-## Unreleased (the fork's next `-am` build)
+## v0.12.1-am.4 — 2026-11-28
 
 - Failed, timed-out and blocked runs save their reason and terminal output in
   history before the scheduler removes their terminal. The next occurrence
