@@ -86,8 +86,9 @@ export interface DecisionProviderView extends DecisionProviderInfo {
 export interface DecisionSnapshot { readonly providers: readonly DecisionProviderView[]; readonly selection: DecisionSelection
   readonly purposes: readonly (PurposeSpec & { readonly settings: PurposeSettings })[]
   readonly ready: boolean; readonly notReady?: 'no-provider' | 'provider-gone' | 'no-model' | 'no-key' | 'auth' }
-type DecisionLabelKey = { readonly questionId: QuestionId; readonly option?: string }
-export type DecisionLabel = DecisionLabelKey & (
+export type DecisionKey = { readonly questionId: QuestionId; readonly option?: string }
+export interface DecisionJudgment extends DecisionKey { readonly value: boolean | null }
+export type DecisionLabel = DecisionKey & (
   | { readonly value: true; readonly source: 'overturn'; readonly strength: 'hard' }
   | { readonly value: boolean; readonly source: 'user'; readonly strength: 'hard' } // owner-only route-judge
   | { readonly value: true; readonly source: 'answered'; readonly strength: 'soft' }
@@ -121,8 +122,9 @@ export interface Decisions {
   settings(purpose: DecisionPurpose): PurposeSettings
   decide(request: DecisionRequest): Promise<DecisionOutcome>
   test(selection?: Partial<DecisionSelection>, signal?: AbortSignal): Promise<DecisionOutcome>
-  recordExposure(decisionId: string, key: { questionId: QuestionId; option: string }): Promise<void>
-  label(decisionId: string, label: DecisionLabel): Promise<void>
+  recordExposure(decisionId: string, key: { questionId: QuestionId; option: string }): Promise<boolean>
+  label(decisionId: string, label: DecisionLabel): Promise<boolean>
+  judgments(decisionId: string): Promise<readonly DecisionJudgment[] | undefined>
   evaluation(purpose: DecisionPurpose, options?: { sinceMs?: number }): Promise<DecisionEvaluation>
 }
 

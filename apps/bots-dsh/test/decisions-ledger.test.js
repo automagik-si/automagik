@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -161,6 +161,8 @@ test('confirmed exposure and latest hard labels have independent denominators an
   ledger.appendDecision(request(['a', 'b', 'c', 'd']), outcome('a', { a: 0.2, b: 0.7, c: 0.9 }))
   ledger.appendDecision(request(), outcome('empty', {}, { answers: [] }))
   ledger.appendDecision(request(), outcome('untouched', { a: 0.6, b: 0.2 }))
+  const judgments = (...values) => ['a', 'b', 'c'].map((option, i) => ({ ...key(option), value: values[i] }))
+  assert.deepEqual(ledger.judgments('a'), judgments(null, null, null))
   assert.equal(ledger.label('a', bot('a', true)), false)
   assert.equal(ledger.recordExposure('a', key('d')), false)
   assert.equal(ledger.recordExposure('empty', key('a')), false)
@@ -173,6 +175,7 @@ test('confirmed exposure and latest hard labels have independent denominators an
   ledger.label('a', bot('a', false))
   ledger.label('a', bot('a', true))
   ledger.label('a', bot('b', false))
+  assert.deepEqual(ledger.judgments('a'), judgments(null, null, null))
   const behavior = { decisions: 1, exposedDecisions: 2, exposedOptions: 3, answered: 1, passed: 1 }
   assert.deepEqual(stats().behavior, behavior)
   assert.equal(stats().scoredDecisions, 2)
@@ -199,6 +202,7 @@ test('confirmed exposure and latest hard labels have independent denominators an
 
   f.setTime(today + 1000)
   ledger.label('a', overturn('a'))
+  assert.deepEqual(ledger.judgments('a'), judgments(true, true, false))
   check([2, 1, 1], [1, 1, 0], (0.64 + 0.09 + 0.81) / 3)
   ledger.label('a', overturn('c'))
   assert.equal(ledger.label('a', bot('c', true)), false)
@@ -209,10 +213,51 @@ test('confirmed exposure and latest hard labels have independent denominators an
   f.setTime(today + 500)
   ledger.label('a', judge('b', false))
   f.setTime(today + 1000)
+  assert.deepEqual(ledger.judgments('a'), judgments(true, false, true))
   check([2, 1, 1], [1, 0, 1], (0.64 + 0.49 + 0.01) / 3)
   assert.equal(f.records().filter(row => row.strength === 'hard').length, 6)
   f.reopen()
   assert.equal(f.ledger.evaluation(purpose).cohorts[0].human.negative, 1)
+})
+
+test('write admission appends one record on success and leaves the ledger unchanged on refusal', t => {
+  const f = fixture(t, today - 91 * day)
+  const { ledger } = f
+  ledger.appendDecision(request(), outcome('expired', { a: 0.2 }))
+  f.setTime(today)
+  ledger.appendDecision(request(), outcome('scored', { a: 0.2 }))
+  ledger.appendDecision(request(), outcome('unavailable', {}, { status: 'unavailable', reason: 'no-provider' }))
+  assert.deepEqual(ledger.judgments('unavailable'), [])
+  assert.equal(ledger.judgments('missing'), undefined)
+  assert.equal(ledger.judgments('expired'), undefined)
+  const before = f.bytes()
+  for (const [id, option] of [['missing', 'a'], ['expired', 'a'], ['unavailable', 'a'], ['scored', 'b']]) {
+    assert.equal(ledger.recordExposure(id, key(option)), false)
+    assert.equal(ledger.label(id, judge(option, false)), false)
+  }
+  assert.equal(ledger.label('scored', bot('a', true)), false)
+  assert.throws(() => ledger.label('scored', { ...overturn('a'), value: false }), TypeError)
+  assert.equal(f.bytes(), before)
+
+  const records = f.records()
+  assert.equal(ledger.recordExposure('scored', key('a')), true)
+  const meta = { v: 1, at: today, decisionId: 'scored' }
+  records.push({ ...meta, kind: 'exposed', ...key('a') })
+  assert.deepEqual(f.records(), records)
+  for (const label of [bot('a', true), judge('a', false)]) {
+    assert.equal(ledger.label('scored', label), true)
+    records.push({ ...meta, kind: 'label', ...label })
+    assert.deepEqual(f.records(), records)
+  }
+})
+
+test('admitted writes propagate append I/O errors', t => {
+  const f = fixture(t)
+  f.ledger.appendDecision(request(), outcome('scored', { a: 0.2 }))
+  f.setTime(Date.UTC(2026, 11, 1))
+  mkdirSync(join(f.dir, '2026-12.jsonl'))
+  assert.throws(() => f.ledger.recordExposure('scored', key('a')), { code: 'EISDIR' })
+  assert.throws(() => f.ledger.label('scored', judge('a', false)), { code: 'EISDIR' })
 })
 
 const sides = [0.2, 0.1, 0.5, 0.8]
@@ -263,13 +308,20 @@ test('cohorts never pool and evaluation windows narrow the exact 90-day retentio
   f.setTime(today - 90 * day)
   addSamples(ledger, [5, 5, 15, 15], 30, { prefix: 'edge' })
   f.setTime(today)
+  const snapshot = () => f.files().map(file => [file, readFileSync(join(f.dir, file))])
+  assert.deepEqual(f.files(), ['2026-07.jsonl', '2026-08.jsonl'])
+  const before = snapshot()
+  assert.equal(ledger.judgments('prune'), undefined)
+  assert.equal(ledger.judgments('one-ms-expired'), undefined)
+  assert.ok(ledger.judgments('edge-0').length > 0)
+  assert.deepEqual(snapshot(), before)
   const original = ledger.evaluation(purpose)
+  assert.deepEqual(f.files(), ['2026-08.jsonl'])
   assert.equal(original.total, 30)
   assert.equal(original.cohorts[0].suggestion.n, 40)
   assert.deepEqual(ledger.evaluation(purpose, { sinceMs: today - 90 * day + 1 }).cohorts, [])
   assert.equal(ledger.evaluation(purpose, { sinceMs: today - 120 * day }).total, 30)
   assert.equal(ledger.recordExposure('one-ms-expired', key('a')), false)
-  assert.deepEqual(f.files(), ['2026-08.jsonl'])
 
   for (const identity of [
     { prefix: 'base' }, { prefix: 'provider', outcome: { providerId: 'different' } },
@@ -279,6 +331,7 @@ test('cohorts never pool and evaluation windows narrow the exact 90-day retentio
   ledger.appendDecision(request([], { purpose: 'settings-test', rubricVersion: 'settings-test/1',
     questions: [{ id: 'test', kind: 'yes-no', instructions: 'synthetic' }] }),
   outcome('test', {}, { answers: [{ id: 'test', kind: 'yes-no', p: 0.8 }] }))
+  assert.deepEqual(ledger.judgments('test'), [{ questionId: 'test', value: null }])
   const narrowed = ledger.evaluation(purpose, { sinceMs: today })
   assert.equal(narrowed.total, 60)
   assert.deepEqual(narrowed.cohorts.map(c => [c.providerId, c.answeredModel, c.rubricVersion]), [

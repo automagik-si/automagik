@@ -177,7 +177,6 @@ export function createLedger(home, { now = Date.now, purposes, dir = join(home, 
   }
 
   function read(at, sinceMs) {
-    prune(at)
     const from = Math.max(at - RETENTION, sinceMs ?? -Infinity)
     const decisions = new Map()
     for (const file of monthlyFiles()) {
@@ -259,6 +258,7 @@ export function createLedger(home, { now = Date.now, purposes, dir = join(home, 
     },
     recordExposure(decisionId, { questionId, option }) {
       const at = now()
+      prune(at)
       const entry = read(at).get(decisionId)
       const key = scoreKey({ questionId, option })
       if (typeof option !== 'string' || !entry?.scores.has(key)) return false
@@ -268,11 +268,22 @@ export function createLedger(home, { now = Date.now, purposes, dir = join(home, 
     label(decisionId, { questionId, option, source, strength, value }) {
       if (!labelStrength({ source, strength, value })) throw new TypeError('Invalid decision label')
       const at = now()
+      prune(at)
       const entry = read(at).get(decisionId)
       const key = scoreKey({ questionId, option })
       if (!entry?.scores.has(key) || (strength === 'soft' && !entry.exposed.has(key))) return false
       append(at, { kind: 'label', decisionId, questionId, option, source, strength, value })
       return true
+    },
+    /** @returns {readonly import('./types.js').DecisionJudgment[] | undefined} */
+    judgments(decisionId) {
+      const entry = read(now()).get(decisionId)
+      if (!entry) return undefined
+      return Array.from(entry.scores.keys(), key => {
+        const [questionId, option] = JSON.parse(key)
+        const value = entry.hard.get(key) ?? null
+        return option === null ? { questionId, value } : { questionId, option, value }
+      })
     },
     evaluation(purpose, { sinceMs, tau } = {}) {
       tau ??= (purposes ?? PURPOSES).find(spec => spec.id === purpose)?.defaults.tau
@@ -283,7 +294,9 @@ export function createLedger(home, { now = Date.now, purposes, dir = join(home, 
       const unavailable = {}
       const cohorts = new Map()
       let ok = 0
-      for (const entry of read(now(), sinceMs).values()) {
+      const at = now()
+      prune(at)
+      for (const entry of read(at, sinceMs).values()) {
         const { record } = entry
         if (record.purpose !== purpose) continue
         latencies.push(record.latencyMs)
