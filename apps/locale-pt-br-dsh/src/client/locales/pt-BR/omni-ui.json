@@ -1,4 +1,12 @@
 {
+  "Bot team update": "Atualização da equipe de Bots",
+  "{bot} · {capabilities}": "{bot}: {capabilities}",
+  "Open Role settings for {name}": "Abrir as configurações de função de {name}",
+  "Choose the chief of staff again": "Escolher o chefe de equipe novamente",
+  "Chief of staff": "Chefe de equipe",
+  "Save chief of staff": "Salvar chefe de equipe",
+  "Could not save the chief of staff.": "Não foi possível salvar o chefe de equipe.",
+  "The recovery choices changed. Choose a Bot again.": "As opções de recuperação mudaram. Escolha um Bot novamente.",
   "Automatic": "Automático",
   "Only when I call": "Só quando eu chamar",
   "New skill mode": "Modo da nova skill",
