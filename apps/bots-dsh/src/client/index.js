@@ -20,7 +20,7 @@ import { LAMP_CSS } from './lamp.js'
 import { isHex, inkText, paintCss } from './inks.js'
 import { CHARACTERS, DEFAULT_MASK, MAIN_LOOK, SHAPES, markupCache, maskOf } from './characters.js'
 import { createSource, EMPTY_ROSTER, indexRoster, isAgentSession } from './sources.js'
-import { teamActions } from './team-actions.js'
+import { clientRoles, ownRole, roleContributions, roleContributionVisible, teamActions } from './team-actions.js'
 import { createDraftSweep, liveSessionIds, unarchivedSessionIds } from './draft-sweep.js'
 import { themeCss, shellTokens, registry, registerShape, registerTheme, allThemes, layoutOf, widthOf, flatWidthOf } from './themes.js'
 import { markConversation } from './stage.js'
@@ -185,14 +185,24 @@ function OpeningAwareHeader(props) {
 // bundle through `dsh.client.external`). They share this module instance: one interface
 // dictionary, one roster, and the registries of extend.js.
 let currentFace = null
+const roleToolCards = Object.freeze({
+  ...toolCards,
+  register: (names, render, options) => toolCards.register(names, typeof render === 'function' ? props => {
+    const bot = ownRole(props.roster?.byId, props.sessionId)
+    return roleContributionVisible('toolCards', props.tool, bot, props.roster) ? render(props) : null
+  } : render, options),
+})
+// Transcript cells already subscribe to the tool card source. Role contributions can
+// arrive or dispose independently of an outlet's renderer.
+roleContributions.source.subscribe(() => toolCards.source.set(cards => [...cards]))
 export const omni = Object.freeze({
   // The host's POST /api/omni-ui, which their own host halves extend.
   call,
   // Copy in this plugin's namespace; addStrings brings a plugin's Chinese copy.
   t, addStrings, hostText, language, dateLocale,
   // The Bot surface: what runs while it is up, and what draws in its places.
-  onShell, toolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools,
-  botSettings, officialInstall, chatSuggestions, registerComposerPack, setCanvasRenderer,
+  onShell, toolCards: roleToolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools,
+  botSettings, officialInstall, chatSuggestions, registerComposerPack, setCanvasRenderer, roles: clientRoles,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
   // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's

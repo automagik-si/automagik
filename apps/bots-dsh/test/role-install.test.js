@@ -585,8 +585,11 @@ async function loadSettings() {
     const tree = render('form', () => module.exports.BotSettingsForm({ bot: BOT, roster, actions, run }))
     const packages = findNode(tree, node => node.type?.name === 'RolePackagesCard')
     const card = packages && render('roles', () => packages.type(packages.props))
-    const picker = findNode(tree, node => node.type?.name === 'Segmented' && node.props.label === 'Role')
-    return { card, picker }
+    const stack = findNode(tree, node => node.type?.name === 'StackedRolePicker')
+    const picker = stack && render('picker', () => stack.type(stack.props))
+    const attached = findNode(tree, node => node.type?.name === 'PackageAttachmentCard'
+      || (node.type?.name === 'Card' && node.props.title === 'Role'))
+    return { card, picker, attached }
   }
 }
 
@@ -630,8 +633,14 @@ test('mounted settings discover a missing catalog once, preserve the picker, and
   assert.equal((await f.disk()).revision, revision)
   const settled = settings(roster, actions, run)
   assert.equal(settled.card, null)
-  const picker = value => Array.from(value.props.children, button => [button.props.children[0], button.props['aria-pressed'], button.props.disabled])
+  const picker = value => Array.from(value.props.children, row => {
+    const [button] = row.props.children
+    return [button.props.children[0], button.props['aria-label'], button.props.disabled, row.props.hint]
+  })
+  assert.deepEqual(picker(first.picker), [['Genie', 'Attach Genie', true, 'Genie can be given to another Bot after the next Genie update.']])
   assert.deepEqual(picker(settled.picker), picker(first.picker))
+  assert.equal(first.attached, undefined)
+  assert.equal(settled.attached, undefined)
   assert.deepEqual(ownerCalls, ['role-catalog'])
   assert.deepEqual(f.fetches, [INDEX])
 })
@@ -1085,8 +1094,8 @@ test('the real Apps and Bot settings surfaces complete the package flow through 
   await install()
   assert.equal(posted.at(-1)[0], 'role-install')
   assert.ok(findNode(app().page, node => node.props?.role === 'status' && surfaceText(node).includes('futureField')))
-  const picker = findNode(settings().form, node => node.props?.role === 'group' && node.props['aria-label'] === 'Role')
-  surfaceButton(picker, 'Sample role').props.onClick()
+  const picker = findNode(settings().form, node => node.type?.name === 'StackedRolePicker')
+  surfaceButton(picker.type(picker.props), 'Sample role').props.onClick()
   await Promise.all(pending.splice(0))
   assert.deepEqual(posted.at(-1), ['role-attach', { id: BOT.id, role: ID }])
   const attached = settings()
@@ -1103,7 +1112,7 @@ test('the real Apps and Bot settings surfaces complete the package flow through 
   assert.equal(surfaceButton(app().roles, 'Uninstall').props.disabled, true)
   surfaceButton(attached.card, 'Detach').props.onClick()
   await Promise.all(pending.splice(0))
-  assert.deepEqual(posted.at(-1), ['role-detach', { id: BOT.id }])
+  assert.deepEqual(posted.at(-1), ['role-detach', { id: BOT.id, role: ID }])
   assert.equal(settings().card, undefined)
   await surfaceButton(app().roles, 'Uninstall').props.onClick()
   assert.equal(posted.at(-1)[0], 'role-uninstall')
@@ -1983,6 +1992,51 @@ test('D2S Details sends None for an unpinned waiter, including with roles turned
     assert.deepEqual(stored.roles, [])
     if (roles) assert.deepEqual(await detachFrom(f), { ok: true, value: [] })
   })
+})
+
+test('D2S canceling a Solver wait from Settings keeps every saved role pin', async t => {
+  const voice = { id: 'voice-mouth', version: VERSION, attachedAt: '2026-11-20', grants: ['audio-out'] }
+  const guide = { id: 'guide', source: 'registry', version: VERSION, attachedAt: '2026-11-21', grants: ['task-start'] }
+  const surfaces = await mountRoleSurfaces()
+  for (const roles of [true, false]) {
+    for (const pins of [[voice], [guide], [voice, guide], [guide, voice]]) {
+      await t.test(`roles=${roles}, ${pins.map(pin => pin.id).join(' + ')}`, async t => {
+        const activations = [activationIds.registry, ...(pins.length > 1 ? [activationIds.stack] : [])]
+        const waiter = { ...BOT, roles: pins, waitingRole: waitFor(BOT.instructions, BOT.role) }
+        const f = await fixture(t, { offline: true, roleDeps: {}, extra: {
+          ...(pins.includes(guide) ? { version: 4, stateActivations: activations } : { version: 2 }),
+          bots: { [BOT.id]: waiter }, prefs: { roles },
+        } })
+        f.rt.hooks.role({ id: guide.id, name: 'Guide', capabilities: ['task-start'] })
+        const roster = (await f.call('state')).value
+        const shown = roster.bots.find(bot => bot.id === BOT.id)
+        assert.equal(shown.canCancelSolverWait, true)
+        assert.deepEqual(shown.roles, pins)
+        const posted = []
+        const operations = []
+        const actions = teamActions({ after: work => work, async call(endpoint, payload) {
+          posted.push([endpoint, payload])
+          const reply = await f.call(endpoint, payload)
+          assert.equal(reply.ok, true, reply.error?.message)
+          return reply.value
+        } })
+        actions.roleCatalog = undefined
+        actions.refreshModels = undefined
+        const { form } = surfaces.settings({ roster, bot: shown, actions, run: work => operations.push(work) })
+        surfaceButton(form, 'None').props.onClick()
+        await Promise.all(operations)
+        assert.deepEqual(posted, [['role-detach', { id: BOT.id, role: 'solver' }]])
+        const stored = (await f.disk()).bots[BOT.id]
+        assert.equal(stored.waitingRole, undefined)
+        assert.equal(stored.instructions, BOT.instructions)
+        assert.deepEqual(stored.roles, pins)
+        const refreshed = (await f.call('state')).value
+        assert.equal(refreshed.bots.find(bot => bot.id === BOT.id).canCancelSolverWait, undefined)
+        for (const pin of pins) assert.deepEqual(refreshed.roleRuntimeByRole[BOT.id][pin.id].pin,
+          roster.roleRuntimeByRole[BOT.id][pin.id].pin)
+      })
+    }
+  }
 })
 
 test('D2 manual attachment preserves an edit already present at Phase B', async t => {

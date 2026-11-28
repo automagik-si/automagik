@@ -4,7 +4,7 @@ import { chatSuggestions, useEntries } from './extend.js'
 import * as icons from './icons.js'
 import { HEADER } from './text.js'
 import { t } from './i18n.js'
-import { roleOutletVisible } from '../shared/roles.js'
+import { roleContributions, roleContributionVisible } from './team-actions.js'
 
 // -------------------------------------------------------------------------
 // What an empty chat offers: up to three chips above the composer, each filling it with a
@@ -46,10 +46,10 @@ export function personWrote(outline, hiddenTurns = []) {
 }
 
 /** The chips for a Bot: the plugins' first, then the team's, three at most. */
-export function suggestionsFor(entries, context) {
+export function suggestionsFor(entries, context, definitions) {
   const items = []
   for (const entry of entries) {
-    if (!roleOutletVisible('suggestions', entry.id, context.bot, context.roster)) continue
+    if (!roleContributionVisible('suggestions', entry.id, context.bot, context.roster, definitions)) continue
     try {
       if (entry.when && !entry.when(context)) continue
       for (const item of entry.items(context) ?? []) if (item?.label && item?.text) items.push({ ...item, key: `${entry.id}:${item.id ?? item.label}` })
@@ -77,11 +77,12 @@ export function SuggestionDock({ sessionId, input, session, useRoster, useSessio
   const outline = list => list.projectionsBySession?.[part]?.values?.turnOutline ?? list.byId?.[part]?.projectionValues?.turnOutline
   const wrote = useSessions ? useSessions(list => personWrote(outline(list), roster?.exchangeTurns?.[part] ?? [])) : true
   const entries = useEntries(chatSuggestions)
+  const definitions = useEntries(roleContributions)
   const [images, setImages] = useState(false)
   // Asked when the chat opens, so a chat opened after signing in offers drawing.
   useEffect(() => { void imageAccess().then(setImages) }, [sessionId])
   if (!bot || wrote || session?.running || (input?.draft ?? '').trim() !== '') return null
-  const items = suggestionsFor(entries, { bot, roster, images })
+  const items = suggestionsFor(entries, { bot, roster, images }, definitions)
   if (items.length === 0) return null
   return h('div', { className: 'bt-suggest', role: 'group', 'aria-label': t('Suggestions') },
     items.map(item => h('button', { key: item.key, type: 'button', className: 'bt-suggest-chip', onClick: () => fillComposer(item.text) },

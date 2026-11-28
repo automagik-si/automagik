@@ -7,6 +7,8 @@ import assert from 'node:assert/strict'
 import { omniKeys } from '../scripts/copy-check.mjs'
 import { loadDictionaries } from '../scripts/dictionaries.mjs'
 import { MACHINE_MESSAGES as machine } from '../../bots-dsh/src/shared/machine-reservations.js'
+import { fakeCtx, fakeLocale } from './fake-locale.js'
+import { loadClient } from './load-client.js'
 
 // What the pack translates today: 2647 keys, 2581 translated and 66 left in English on purpose
 // (the brand and code-like strings the README lists). A release may not drop far below that.
@@ -69,4 +71,19 @@ test('the PT-BR pack includes all four Solver look refusals', async () => {
     assert.ok(keys.has(key), key)
     assert.equal(pack[key], text)
   }
+})
+
+test('the published locale bundle serves role actions and clash details under DSH Portuguese', () => {
+  const locale = fakeLocale({ languages: ['pt-BR'], portuguese: true })
+  const ctx = fakeCtx(locale)
+  loadClient().exports.apply(ctx)
+  try {
+    const roleCopy = locale.bind('omni-ui')
+    assert.equal(locale.getLocale().active, 'pt')
+    assert.equal(roleCopy('Add a role'), 'Adicionar uma função')
+    assert.equal(roleCopy('Attach {name}', { name: 'Voice / Mouth' }), 'Adicionar Voice / Mouth')
+    assert.equal(roleCopy('Detach {name}', { name: 'Voice / Mouth' }), 'Remover Voice / Mouth')
+    assert.equal(roleCopy('Tool {tool} is already supplied by {name}.', { tool: 'speak', name: 'Voice / Mouth' }),
+      'A ferramenta speak já é fornecida por Voice / Mouth.')
+  } finally { ctx.dispose() }
 })

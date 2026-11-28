@@ -7,6 +7,7 @@ import { clayArtOf, faceAt, faceOf } from './clay-art.js'
 import { PetSprite, useDrowsy } from './pet.js'
 import { bakedPet, canBake } from './pet-bake.js'
 import { GENIE_AURORA, genieTint } from './genie-tint.js'
+import { clientRoles } from './team-actions.js'
 
 export { colorOf } from './characters.js'
 export { lookOf }
@@ -113,13 +114,19 @@ export function useBaked(wanted) {
 
 export function BotMark(props) {
   const look = props.look ?? lookOf(props.bot)
+  // Keep the carrier's look and the owner's saved look. A new Genie holder can
+  // wear the shipped figure when the mark has no custom look of its own.
+  const bot = props.bot
+  const genie = bot?.kind === 'genie' || (!props.look && !bot?.avatar?.shape && bot?.kind !== 'unfold'
+    && clientRoles.hasRole(props.roster, bot?.id, 'genie'))
+  const markBot = genie && bot.kind !== 'genie' ? { ...bot, kind: 'genie' } : bot
   const size = props.size ?? 36
-  const wants = petOf(props.bot, look, { live: props.live === true, size })
+  const wants = petOf(markBot, look, { live: props.live === true, size })
   const baked = useBaked(wants?.bake)
   const pet = wants?.served ? servedPet(wants.served) : baked
   // A Genie wears its own color: its art turned from violet (genie-tint.js).
-  const tint = props.bot?.kind === 'genie' && !look.image && !look.pet ? genieTint(props.bot.color) : undefined
-  return pet ? h(PetMark, { ...props, look, size, pet, tint }) : h(DrawnMark, { ...props, look, size, tint })
+  const tint = genie && !look.image && !look.pet ? genieTint(bot.color) : undefined
+  return pet ? h(PetMark, { ...props, look, size, pet, tint }) : h(DrawnMark, { ...props, bot: markBot, look, size, tint })
 }
 
 // A mark that wears a pet: the pet plays the Bot's state; a poke waves, then it goes back.
@@ -224,12 +231,12 @@ export function Crown() {
 }
 
 // `crown`: the team's first Main Bot, which wears the crown in place of the Main Bot star.
-export function BotAvatar({ bot, look, size, state = 'idle', count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
+export function BotAvatar({ bot, roster, look, size, state = 'idle', count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state)
   if (bot === undefined) return h(BotMark, { size })
   const badgeKind = !badge ? null : state === 'not-installed' ? 'missing' : state === 'alert' ? 'alert' : WORK.includes(state) ? 'working' : admin ? 'admin' : main && !crown ? 'main' : null
   return h('span', { className: 'bt-mark', style: { width: size, height: size, '--bt-size': `${size}px` } },
-    h(BotMark, { bot, look, size, state: settled ? 'done' : state, live, gaze, pokeable }),
+    h(BotMark, { bot, roster, look, size, state: settled ? 'done' : state, live, gaze, pokeable }),
     crown ? h(Crown) : null,
     badgeKind === 'working' ? h('span', { className: 'bt-badge bt-badge-working', 'aria-label': t('Working'), role: 'img' }) : null,
     badgeKind === 'missing' ? h('span', { className: 'bt-badge bt-badge-missing', 'aria-label': t('Not installed'), role: 'img' },

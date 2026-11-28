@@ -1470,13 +1470,17 @@ for (const [first, granted] of [['operator', ID], ['operator', 'operator'], [ID,
     }
     await h.ok('role-grant', { id: FIRST, role: granted, capability: 'audio-out', on: true })
     const card = await mountRoleSettings(t, h, FIRST)
-    const checked = () => card.document.querySelector('[role="switch"][aria-label="Allow speech"]').getAttribute('aria-checked')
+    const speechSwitch = name => [...card.document.querySelectorAll('.bt-set-section')]
+      .find(section => section.querySelector('.bt-bs-label')?.textContent === name)?.querySelector('[role="switch"]')
+    const checked = name => speechSwitch(name)?.getAttribute('aria-checked')
     const hasSpeech = role => h.rt.botOf(FIRST).roles.find(pin => pin.id === role).grants.includes('audio-out')
-    assert.equal(checked(), String(granted === ID))
-    await card.click('Allow speech')
+    assert.equal(checked('Voice / Mouth'), String(granted === ID))
+    assert.equal(checked('Operator'), String(granted === 'operator'))
+    speechSwitch('Voice / Mouth').click()
     await until(() => hasSpeech(ID) === (granted !== ID))
     await card.refresh()
-    assert.equal(checked(), String(granted !== ID))
+    assert.equal(checked('Voice / Mouth'), String(granted !== ID))
+    assert.equal(checked('Operator'), String(granted === 'operator'))
     assert.equal(hasSpeech('operator'), granted === 'operator')
   })
 }
